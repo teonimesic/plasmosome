@@ -29,8 +29,14 @@ one of them verifies claims by breaking things rather than reading.
 
 ## Style
 
-No inline `//` comments. Documentation is `///` on public items: what a caller must pass, what
-it gets back, what it must not do. If deleting a doc block costs a caller nothing, delete it.
+**Writing.** The first three paragraphs of any document should explain almost everything: what it
+is, why it exists, how to use it. Lead with the point; details come after. Use plain English —
+short sentences, concrete nouns, no clever words. Write for a good engineer who is new here and
+should not have to pause over a sentence.
+
+**Code.** No inline `//` comments. Documentation is `///` on public items: what a caller must
+pass, what it gets back, what it must not do. If deleting a doc block costs a caller nothing,
+delete it.
 
 ## The gate
 
