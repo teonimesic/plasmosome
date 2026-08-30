@@ -1,0 +1,53 @@
+# CodeRabbit configuration for Plasmosome.
+# Schema: https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+#
+# WHAT THIS REPOSITORY IS, because it decides the settings below. Plasmosome is a security
+# kernel: it grants and revokes operating-system capabilities for AI agents. Two consequences
+# a default review configuration gets wrong:
+#
+#   1. A "simplification" that widens a capability is a vulnerability, not a cleanup. Revocation
+#      paths, deny floors, and reap-on-drop logic are deliberately explicit.
+#   2. The architectural rules in `crates/plasmosome-freeze-checks` are load-bearing: the
+#      controller must never gain a dependency on virtualization code. A suggestion to "just
+#      import it" is always wrong.
+
+language: en-US
+early_access: false
+
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+
+  path_instructions:
+    - path: "crates/plasmosome-membrane/**"
+      instructions: |
+        This crate supervises child processes (VMMs, brokers). Every spawn path must be
+        reaped — an orphaned child holding stale capability state is the bug class this
+        crate exists to prevent. Flag any fork/spawn without a corresponding reap, any
+        signal sent to a pid that could have been reaped (pid reuse), and any readiness
+        check based on file existence rather than an answered query.
+    - path: "crates/plasmosome-ledger/**"
+      instructions: |
+        Typed reversibility: every effect records its inverse and detach replays them LIFO.
+        Flag anything that records an effect without an inverse, or that makes replay
+        order-dependent in a way the type system does not enforce.
+    - path: "crates/plasmosome-freeze-checks/**"
+      instructions: |
+        These tests encode architectural rules. Do not suggest relaxing them; if a rule
+        blocks a change, the change is wrong.
+    - path: "**/*.rs"
+      instructions: |
+        House style: no inline `//` comments. Documentation is `///` contract docs on public
+        items only, stating what a caller must pass, what it gets back, and what it must not
+        do. Flag added inline comments; do not ask for comments to be added.
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+chat:
+  auto_reply: true

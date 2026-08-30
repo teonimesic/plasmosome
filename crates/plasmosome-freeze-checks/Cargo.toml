@@ -1,0 +1,12 @@
+[package]
+name = "plasmosome-freeze-checks"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+plasmosome-backend = { workspace = true }
+plasmosome-ledger = { workspace = true }
+plasmosome-core = { workspace = true }

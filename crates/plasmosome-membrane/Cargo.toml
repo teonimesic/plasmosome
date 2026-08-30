@@ -1,0 +1,21 @@
+[package]
+name = "plasmosome-membrane"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lib]
+name = "plasmosome_membrane"
+path = "src/lib.rs"
+
+[[bin]]
+name = "membraned"
+path = "src/main.rs"

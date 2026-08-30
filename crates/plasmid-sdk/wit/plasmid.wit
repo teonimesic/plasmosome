@@ -1,0 +1,7 @@
+package plasmosome:plasmid@0.1.0;
+
+/// PLACEHOLDER — the plasmid WIT world is NOT frozen. Names are reserved so
+/// nothing else claims them; every import/export below is expected to change
+/// when the SDK design lands. Do not build a plasmid against this world.
+world plasmid {
+}

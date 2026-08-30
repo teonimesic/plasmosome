@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/plasmosome-backend",
+    "crates/plasmosome-ledger",
+    "crates/plasmosome-core",
+    "crates/plasmosome-membrane",
+    "crates/plasmid-sdk",
+    "crates/plasmosome-freeze-checks",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+proptest = "1"
+tempfile = "3"
+libc = "0.2"
+
+plasmosome-backend = { path = "crates/plasmosome-backend" }
+plasmosome-ledger = { path = "crates/plasmosome-ledger" }
+plasmosome-core = { path = "crates/plasmosome-core" }
+plasmosome-freeze-checks = { path = "crates/plasmosome-freeze-checks" }
