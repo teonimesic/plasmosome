@@ -20,10 +20,10 @@ every grant records how to undo it.
 
 | Skill | Use it when |
 | --- | --- |
-| `.agents/skills/build-slice` | Starting a piece of work, or briefing another agent |
+| `.agents/skills/planning-work` | Starting a piece of work, or briefing another agent |
 | `.agents/skills/pr-review` | Opening a PR, addressing review feedback, or merging |
 
-Short version: work moves in narrow slices; the strongest model plans and the next one executes;
+Short version: work moves in small, finishable pieces; the strongest model plans and the next one executes;
 `main` is protected and every change arrives by pull request; two reviewers look at each PR and
 one of them verifies claims by breaking things rather than reading.
 

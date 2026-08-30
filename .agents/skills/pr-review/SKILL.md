@@ -7,7 +7,7 @@ description: How a change reaches main — PR-only workflow, review rounds by di
 
 `main` is branch-protected: direct pushes are rejected for everyone. There is no local-merge path.
 
-1. Branch → push → open the PR. One slice per PR.
+1. Branch → push → open the PR. One unit of work per PR.
 2. Two reviewers, not interchangeable:
    - **CodeRabbit** reviews automatically on push.
    - **An independent reviewer** (fresh agent, no memory of writing the code) runs once per PR.
@@ -43,7 +43,7 @@ been accumulating. Read the files the diff touches in full and report:
 - **Complexity worth flagging**: functions doing several jobs, deep nesting, branching a reader
   must simulate to follow. Say what the simplification would be, not just that it is complex.
 
-Report these separately from blocking findings and mark them as such: they inform the next slice
+Report these separately from blocking findings and mark them as such: they inform the next piece of work
 rather than holding this PR. Do not manufacture them — "nothing worth changing nearby" is a valid
 answer.
 
