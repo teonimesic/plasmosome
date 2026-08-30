@@ -47,6 +47,21 @@ Report these separately from blocking findings and mark them as such: they infor
 rather than holding this PR. Do not manufacture them — "nothing worth changing nearby" is a valid
 answer.
 
+## What the change should have carried with it
+
+Code is not the only thing a change can leave stale. Check, and say plainly when something is
+missing:
+
+- **Architectural decisions.** If the change alters how a boundary works, what a component owns,
+  or a rule someone will otherwise re-litigate, it needs a written decision — what was chosen,
+  what was rejected, and why. A decision made in a diff and nowhere else gets undone by the next
+  person who has the original idea.
+- **Intent and specs.** Does the affected crate's `AGENTS.md` still describe how the thing works?
+  Does a contract doc still match the code? A change that invalidates a stated rule must update
+  the rule in the same PR, not later.
+- **Changelog**, where the change is user-visible: a new capability, a changed default, a removed
+  or renamed surface. Internal refactors need none.
+
 ## A review must not accept
 
 - A test that cannot fail against the bug it names. Verify by breaking the implementation in a
