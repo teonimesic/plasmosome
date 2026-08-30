@@ -129,6 +129,14 @@ impl VmmChild {
     }
 }
 
+#[cfg(test)]
+static INTERRUPTED_REAPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+fn interrupted_reaps() -> usize {
+    INTERRUPTED_REAPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Drop for VmmChild {
     fn drop(&mut self) {
         if self.terminal.is_some() {
@@ -145,6 +153,8 @@ impl Drop for VmmChild {
             if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
                 return;
             }
+            #[cfg(test)]
+            INTERRUPTED_REAPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -305,12 +315,15 @@ mod tests {
 #[cfg(test)]
 mod signal_pressure {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    static SIGNALLED: AtomicBool = AtomicBool::new(false);
+    const CHILDREN: usize = 64;
+
+    static DELIVERED: AtomicUsize = AtomicUsize::new(0);
 
     extern "C" fn note_signal(_sig: libc::c_int) {
-        SIGNALLED.store(true, Ordering::Relaxed);
+        DELIVERED.fetch_add(1, Ordering::Relaxed);
     }
 
     struct SleepForever;
@@ -323,33 +336,103 @@ mod signal_pressure {
         }
     }
 
-    /// Installs a handler without `SA_RESTART`, so a signal arriving inside a blocking
-    /// `waitpid` makes it fail with `EINTR` rather than resuming it. This is the pressure
-    /// that a single-shot reap loses children under.
-    fn install_interrupting_handler() {
-        unsafe {
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = note_signal as *const () as usize;
-            action.sa_flags = 0;
-            libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut());
+    struct InterruptingHandler {
+        previous: libc::sigaction,
+    }
+
+    impl InterruptingHandler {
+        fn install() -> InterruptingHandler {
+            let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+            let installed = unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                libc::sigemptyset(&mut action.sa_mask);
+                action.sa_sigaction = note_signal as *const () as usize;
+                action.sa_flags = 0;
+                libc::sigaction(libc::SIGUSR1, &action, &mut previous)
+            };
+            assert_eq!(
+                installed, 0,
+                "a SIGUSR1 handler that does not restart syscalls must install"
+            );
+            InterruptingHandler { previous }
+        }
+    }
+
+    impl Drop for InterruptingHandler {
+        fn drop(&mut self) {
+            unsafe { libc::sigaction(libc::SIGUSR1, &self.previous, std::ptr::null_mut()) };
+        }
+    }
+
+    struct SignalStorm {
+        armed: Arc<AtomicBool>,
+        running: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl SignalStorm {
+        fn aimed_at_this_thread() -> SignalStorm {
+            let target = unsafe { libc::pthread_self() } as usize;
+            let armed = Arc::new(AtomicBool::new(false));
+            let running = Arc::new(AtomicBool::new(true));
+            let thread = std::thread::spawn({
+                let armed = Arc::clone(&armed);
+                let running = Arc::clone(&running);
+                move || {
+                    while running.load(Ordering::Relaxed) {
+                        if armed.load(Ordering::Relaxed) {
+                            unsafe { libc::pthread_kill(target as libc::pthread_t, libc::SIGUSR1) };
+                        }
+                        std::thread::yield_now();
+                    }
+                }
+            });
+            SignalStorm {
+                armed,
+                running,
+                thread: Some(thread),
+            }
+        }
+
+        fn burst(&self) -> Burst<'_> {
+            self.armed.store(true, Ordering::Relaxed);
+            Burst(&self.armed)
+        }
+    }
+
+    impl Drop for SignalStorm {
+        fn drop(&mut self) {
+            self.armed.store(false, Ordering::Relaxed);
+            self.running.store(false, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    struct Burst<'a>(&'a AtomicBool);
+
+    impl Drop for Burst<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Relaxed);
         }
     }
 
     #[test]
-    fn dropping_under_signal_pressure_still_reaps_every_child() {
-        install_interrupting_handler();
-        let self_pid = unsafe { libc::getpid() };
-        let mut pids = Vec::new();
+    fn a_reap_interrupted_by_a_signal_still_leaves_no_orphan() {
+        let _handler = InterruptingHandler::install();
+        let storm = SignalStorm::aimed_at_this_thread();
+        let signals_before = DELIVERED.load(Ordering::Relaxed);
+        let interruptions_before = interrupted_reaps();
 
-        for _ in 0..64 {
-            let child = VmmChild::spawn(SleepForever).expect("fork");
-            pids.push(child.pid());
-            unsafe { libc::kill(self_pid, libc::SIGUSR1) };
-            drop(child);
-        }
-
-        for pid in pids {
-            let mut status = 0;
+        for _ in 0..CHILDREN {
+            let child = VmmChild::spawn(SleepForever).expect("fork succeeds");
+            let pid = child.pid();
+            {
+                let _burst = storm.burst();
+                drop(child);
+            }
+            let mut status: libc::c_int = 0;
             let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
             let errno = std::io::Error::last_os_error().raw_os_error();
             assert!(
@@ -357,5 +440,14 @@ mod signal_pressure {
                 "pid {pid} survived a drop taken under signal pressure"
             );
         }
+
+        drop(storm);
+        let signals = DELIVERED.load(Ordering::Relaxed) - signals_before;
+        let interruptions = interrupted_reaps() - interruptions_before;
+        assert!(signals > 0, "no SIGUSR1 reached the dropping thread");
+        assert!(
+            interruptions > 0,
+            "{signals} signals reached the dropping thread but none landed inside a blocking reap, so the EINTR retry was never exercised and this test proves nothing"
+        );
     }
 }
