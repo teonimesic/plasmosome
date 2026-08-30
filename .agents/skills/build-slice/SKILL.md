@@ -12,6 +12,12 @@ exactly; if the plan contradicts reality, stop and report rather than improvise.
 
 **One slice per agent, per branch, per PR.** A slice is one finishable capability.
 
+**One worktree per agent.** Agents never share a checkout: `git worktree add ../wt-<slice> -b
+<branch>`. Two agents in one clone will switch branches under each other and commit to the wrong
+one. Never run `git reset --hard`, force-push, or branch-switch a checkout you did not create —
+if you find your commit on the wrong branch, cherry-pick it where it belongs and leave the other
+branch alone.
+
 A brief contains:
 - One deliverable in a sentence, and an explicit list of what is out of scope.
 - The exact files to read, and an instruction not to explore beyond them.
