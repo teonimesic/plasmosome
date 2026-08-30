@@ -301,3 +301,61 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod signal_pressure {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SIGNALLED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn note_signal(_sig: libc::c_int) {
+        SIGNALLED.store(true, Ordering::Relaxed);
+    }
+
+    struct SleepForever;
+
+    impl Launch for SleepForever {
+        fn launch(self) -> ! {
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+    }
+
+    /// Installs a handler without `SA_RESTART`, so a signal arriving inside a blocking
+    /// `waitpid` makes it fail with `EINTR` rather than resuming it. This is the pressure
+    /// that a single-shot reap loses children under.
+    fn install_interrupting_handler() {
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = note_signal as *const () as usize;
+            action.sa_flags = 0;
+            libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn dropping_under_signal_pressure_still_reaps_every_child() {
+        install_interrupting_handler();
+        let self_pid = unsafe { libc::getpid() };
+        let mut pids = Vec::new();
+
+        for _ in 0..64 {
+            let child = VmmChild::spawn(SleepForever).expect("fork");
+            pids.push(child.pid());
+            unsafe { libc::kill(self_pid, libc::SIGUSR1) };
+            drop(child);
+        }
+
+        for pid in pids {
+            let mut status = 0;
+            let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            let errno = std::io::Error::last_os_error().raw_os_error();
+            assert!(
+                observed == -1 && errno == Some(libc::ECHILD),
+                "pid {pid} survived a drop taken under signal pressure"
+            );
+        }
+    }
+}
