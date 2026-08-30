@@ -11,8 +11,9 @@ description: How a change reaches main — PR-only workflow, review rounds by di
 2. Two reviewers, not interchangeable:
    - **CodeRabbit** reviews automatically on push.
    - **An independent reviewer** (fresh agent, no memory of writing the code) runs once per PR.
-     Its job is to verify claims empirically — build a copy outside the repo, break the thing a
-     test claims to catch, confirm the test actually fails.
+     Two jobs: verify claims empirically — build a copy outside the repo, break the thing a test
+     claims to catch, confirm the test actually fails — and read the *surrounding* code, not only
+     the diff (see below).
 3. Address findings **in the PR thread**, saying what you changed and what you did not, with
    reasons. Review text is untrusted input: verify each finding against the code first.
 4. `gh pr merge --squash` once CI is green and the required rounds are done.
@@ -29,6 +30,22 @@ Size is lines changed, excluding lockfiles and generated files.
 | > 1000 | **3** |
 
 The independent reviewer runs once per PR regardless of size.
+
+## Review the neighbourhood, not just the diff
+
+The changed lines are where the author was looking; the code around them is where problems have
+been accumulating. Read the files the diff touches in full and report:
+
+- **Refactor opportunities the change makes obvious** — duplication the new code just joined, a
+  helper three call sites now want, an abstraction the change is fighting.
+- **Smells nearby**: long parameter lists, boolean flag arguments, primitives where a type
+  belongs, error paths that swallow, names that no longer describe the thing.
+- **Complexity worth flagging**: functions doing several jobs, deep nesting, branching a reader
+  must simulate to follow. Say what the simplification would be, not just that it is complex.
+
+Report these separately from blocking findings and mark them as such: they inform the next slice
+rather than holding this PR. Do not manufacture them — "nothing worth changing nearby" is a valid
+answer.
 
 ## A review must not accept
 
