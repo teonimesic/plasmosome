@@ -7,6 +7,12 @@ pub trait Launch {
     /// Runs inside the forked child and must never return. The parent is
     /// multi-threaded under the test harness, so an implementation may only
     /// use async-signal-safe calls: `libc::_exit`, `libc::pause`, raw syscalls.
+    ///
+    /// An implementation must also never panic. Unwinding in the forked child
+    /// of a multi-threaded parent runs the panic hook, which allocates and
+    /// locks stderr; if another thread held that lock at fork time the child
+    /// deadlocks. A panic that escapes is contained by exiting the child with
+    /// code 70 instead.
     fn launch(self) -> !;
 }
 
@@ -14,8 +20,15 @@ pub trait Launch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmmState {
     Running,
-    Exited { code: i32 },
-    Signaled { signal: i32 },
+    Exited {
+        code: i32,
+    },
+    Signaled {
+        signal: i32,
+    },
+    /// The child was reaped by something outside this handle; its exit status
+    /// is unknowable.
+    Lost,
 }
 
 /// Why a VMM child could not be forked.
@@ -35,7 +48,8 @@ impl std::fmt::Display for SpawnError {
 impl std::error::Error for SpawnError {}
 
 /// An owned VMM child process. Dropping it kills and reaps the child, so a
-/// dropped handle never leaves an orphan behind.
+/// dropped handle never leaves an orphan behind. The guarantee holds only if
+/// the handle is dropped: `mem::forget` leaks a running child.
 pub struct VmmChild {
     pid: libc::pid_t,
     terminal: Option<VmmState>,
@@ -50,6 +64,7 @@ impl VmmChild {
             return Err(SpawnError::ForkFailed(std::io::Error::last_os_error()));
         }
         if pid == 0 {
+            let _guard = ExitOnUnwind;
             launcher.launch()
         }
         Ok(VmmChild {
@@ -58,7 +73,9 @@ impl VmmChild {
         })
     }
 
-    /// The child's process id.
+    /// The child's process id. Once a terminal state has been observed the pid
+    /// is invalid and may already have been reused by an unrelated process, so
+    /// a caller must not signal or wait on it.
     pub fn pid(&self) -> i32 {
         self.pid
     }
@@ -72,12 +89,18 @@ impl VmmChild {
         }
         let mut status: libc::c_int = 0;
         let reaped = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
-        if reaped == 0 {
-            return VmmState::Running;
+        if reaped == self.pid {
+            let Some(terminal) = decode(status) else {
+                return VmmState::Running;
+            };
+            self.terminal = Some(terminal);
+            return terminal;
         }
-        let terminal = decode(status);
-        self.terminal = Some(terminal);
-        terminal
+        if reaped == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+            self.terminal = Some(VmmState::Lost);
+            return VmmState::Lost;
+        }
+        VmmState::Running
     }
 
     /// Polls until the child is terminal or `deadline` elapses, returning the
@@ -113,24 +136,39 @@ impl Drop for VmmChild {
         }
         unsafe { libc::kill(self.pid, libc::SIGKILL) };
         let mut status: libc::c_int = 0;
-        if unsafe { libc::waitpid(self.pid, &mut status, 0) } == self.pid {
-            self.terminal = Some(decode(status));
+        loop {
+            let reaped = unsafe { libc::waitpid(self.pid, &mut status, 0) };
+            if reaped == self.pid {
+                self.terminal = decode(status);
+                return;
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                return;
+            }
         }
     }
 }
 
-fn decode(status: libc::c_int) -> VmmState {
+fn decode(status: libc::c_int) -> Option<VmmState> {
     if libc::WIFEXITED(status) {
-        return VmmState::Exited {
+        return Some(VmmState::Exited {
             code: libc::WEXITSTATUS(status),
-        };
+        });
     }
     if libc::WIFSIGNALED(status) {
-        return VmmState::Signaled {
+        return Some(VmmState::Signaled {
             signal: libc::WTERMSIG(status),
-        };
+        });
     }
-    VmmState::Running
+    None
+}
+
+struct ExitOnUnwind;
+
+impl Drop for ExitOnUnwind {
+    fn drop(&mut self) {
+        unsafe { libc::_exit(70) }
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +192,14 @@ mod tests {
             loop {
                 unsafe { libc::pause() };
             }
+        }
+    }
+
+    struct PanicOnLaunch;
+
+    impl Launch for PanicOnLaunch {
+        fn launch(self) -> ! {
+            panic!("a launcher that breaks its no-panic contract")
         }
     }
 
@@ -197,6 +243,48 @@ mod tests {
         assert_eq!(child.wait_terminal(DEADLINE), VmmState::Exited { code: 0 });
         child.kill().expect("killing a reaped child is a no-op");
         assert_eq!(child.state(), VmmState::Exited { code: 0 });
+    }
+
+    #[test]
+    fn a_panicking_launcher_does_not_escape_the_child() {
+        let mut child = VmmChild::spawn(PanicOnLaunch).expect("fork succeeds");
+        assert_eq!(child.wait_terminal(DEADLINE), VmmState::Exited { code: 70 });
+    }
+
+    #[test]
+    fn kill_then_immediate_drop_leaves_no_orphan() {
+        let mut child = VmmChild::spawn(SleepForever).expect("fork succeeds");
+        let pid = child.pid();
+        child.kill().expect("signalling a live child succeeds");
+        drop(child);
+        let mut status: libc::c_int = 0;
+        let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        assert_eq!(
+            reaped, -1,
+            "drop after kill must leave no reapable child behind"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn drop_of_an_exited_but_unreaped_child_is_clean() {
+        let child = VmmChild::spawn(ExitWith(3)).expect("fork succeeds");
+        let pid = child.pid();
+        std::thread::sleep(Duration::from_millis(200));
+        drop(child);
+        let mut status: libc::c_int = 0;
+        let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        assert_eq!(
+            reaped, -1,
+            "dropping an exited but unreaped child must reap it"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
     }
 
     #[test]
