@@ -331,10 +331,10 @@ impl EnforcementBackend for DefectiveBackend {
         }
         let (class, key) = (removal.class(), removal.key());
         if self.mirrors_its_ledger() {
-            let recorded = self
-                .applied
-                .iter()
-                .position(|op| op.object().class == class && op.object().key == key);
+            let recorded = self.applied.iter().position(|op| {
+                let applied = op.object();
+                applied.class == class && applied.key == key && applied.owner == *owner
+            });
             return match recorded {
                 Some(index) => {
                     self.applied.remove(index);
