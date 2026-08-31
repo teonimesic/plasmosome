@@ -1,7 +1,7 @@
 ---
 id: 021
 title: A revoke takes whichever owner sorts first, not the one it was for
-status: in_progress
+status: in_review
 priority: 2
 specs: []
 intents: []
@@ -18,7 +18,7 @@ done_when: >-
   revoking one plasmid's grant takes that plasmid's object and leaves every other holder of the
   same key standing, proven by a test that fails against the unfixed removal; and the removal path
   from a backend revoke and from a ledger replay both carry the owner rather than resolving it.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/34
 evidence:
 ---
 
