@@ -28,6 +28,13 @@ every grant records how to undo it.
 Read the one that covers what you are about to do. The rules live there, not here — this table
 is an index, and a second copy of a rule is a copy that will disagree.
 
+**A new rule arrives with evidence.** Before a rule is added to this file or to a skill, run the
+task twice — once with the rule appended to the prompt, once without, at least eight runs each —
+and score a mechanical outcome on the code produced. Report the rule text, the task, the runs per
+arm, the scored outcome, and the verdict. Score behavior, never the presence of a word. A rule
+without evidence is not rejected; it is not yet decided. See
+[`docs/decisions/001-instruction-rules-measured.md`](docs/decisions/001-instruction-rules-measured.md).
+
 **What earns a place in a skill:** a rule that changes what the next agent does, and will again.
 Not a one-off — a migration you just ran, a path that moved, a bug you just fixed. Those belong
 in the PR and the git log. If it cannot happen twice, it is not a skill.
