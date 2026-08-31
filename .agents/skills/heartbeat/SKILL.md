@@ -71,22 +71,20 @@ because people believe it.
 in draft that no task implements, and an intent with no spec at all.
 
 ```shell
-grep -l '^status: draft' docs/specs/*.md
+for f in docs/specs/*.md; do
+  grep -q '^status: draft' "$f" || continue
+  id=$(sed -n 's/^id: *//p' "$f" | head -1)
+  grep -lq "^specs:.*\b$id\b" tasks/*.md 2>/dev/null || echo "spec $id: draft, no task implements it"
+done
+
+for f in docs/intents/*.md; do
+  id=$(sed -n 's/^id: *//p' "$f" | head -1)
+  grep -lq "^intents:.*\b$id\b" docs/specs/*.md 2>/dev/null || echo "intent $id: no spec written"
+done
 ```
 
-For each draft spec id, an empty result here means nothing is implementing it:
-
-```shell
-grep -l '^specs:.*\b002\b' tasks/*.md
-```
-
-And for each intent id, an empty result here means no spec was ever written:
-
-```shell
-grep -l '^intents:.*\b003\b' docs/specs/*.md
-```
-
-Either way, decide out loud: plan it, or say why not.
+Both loops derive the ids from the files, so a record numbered anything is covered. Silence means
+nothing is pending. For anything they print, decide out loud: plan it, or say why not.
 
 **5. Pick.** Look at `planned` before `todo`: a `planned` task already has a plan someone wrote,
 so it is ready to hand to an executor, while a `todo` still needs planning. Within each, take the
