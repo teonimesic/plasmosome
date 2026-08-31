@@ -24,9 +24,9 @@ The easy path must not close the deep one. Someone technically minded who wants 
 craft the perfect plasmid has to be able to, and the existence of a generated path must never be
 the reason they cannot.
 
-There is already a line in this repository saying that plasmid authors build against a stability
-boundary rather than against the kernel. This is the goal that line serves. What sits underneath
-it is still to be designed.
+There is already a line in this repository telling plasmid authors to build against a stability
+boundary rather than against the kernel. This is the goal that line serves. Nothing behind it is
+designed yet.
 
 ## Outcome
 
