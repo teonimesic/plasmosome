@@ -284,9 +284,11 @@ pub fn apply_and_removal_reach_the_universe<B: EnforcementBackend>(make: impl Fn
             object.describe(),
             applied.owner_of(object.class, &object.key)
         );
-        backend.apply_removal(removal).unwrap_or_else(|error| {
-            panic!("removing the applied {} failed: {error}", object.describe())
-        });
+        backend
+            .apply_removal(removal, &object.owner)
+            .unwrap_or_else(|error| {
+                panic!("removing the applied {} failed: {error}", object.describe())
+            });
         let removed = backend.snapshot_os_state();
         assert!(
             !removed.contains(object.class, &object.key),

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::backend::{
     BackendError, Capability, DrainSpec, EnforcementBackend, Grant, Handle, LedgerEntry,
 };
-use crate::universe::{OsObject, OsState, UniverseClass, UniverseOp, UniverseRemoval};
+use crate::universe::{OsObject, OsState, PluginId, UniverseClass, UniverseOp, UniverseRemoval};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Leaf {
@@ -131,16 +131,20 @@ impl EnforcementBackend for CompositeBackend {
         self.leaf_for(&capability_of_op(&op)).apply(op)
     }
 
-    fn apply_removal(&mut self, removal: UniverseRemoval) -> Result<(), BackendError> {
-        let mut last = self.network.apply_removal(removal.clone());
+    fn apply_removal(
+        &mut self,
+        removal: UniverseRemoval,
+        owner: &PluginId,
+    ) -> Result<(), BackendError> {
+        let mut last = self.network.apply_removal(removal.clone(), owner);
         if last.is_ok() {
             return Ok(());
         }
-        last = self.filesystem.apply_removal(removal.clone());
+        last = self.filesystem.apply_removal(removal.clone(), owner);
         if last.is_ok() {
             return Ok(());
         }
-        self.broker.apply_removal(removal)
+        self.broker.apply_removal(removal, owner)
     }
 
     fn plant(&mut self, object: OsObject) {

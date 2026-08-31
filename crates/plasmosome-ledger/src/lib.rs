@@ -360,11 +360,11 @@ fn replay(
                     backend.revoke(*handle, drain)?;
                 }
                 InverseVia::Universe(removal) => {
-                    backend.apply_removal(removal.clone())?;
+                    backend.apply_removal(removal.clone(), plugin)?;
                 }
             },
             Reversibility::Compensating(compensation) => {
-                backend.apply_removal(compensation.witness.clone())?;
+                backend.apply_removal(compensation.witness.clone(), plugin)?;
             }
             Reversibility::Delayed(outbox) => {
                 if outbox.published {

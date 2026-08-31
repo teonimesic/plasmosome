@@ -187,31 +187,38 @@ impl DefectiveBackend {
                 Ok(())
             }
             Defect::ForcedRevokeKeepsHandleAlive if policy == RevokePolicy::Force => {
-                let _ = self.apply_removal(removal_of(&entry.capability));
+                let _ = self.apply_removal(removal_of(&entry.capability), &entry.plugin);
                 Ok(())
             }
-            Defect::RevokeTakesLastOfClass => self.take_the_last_of_class(&entry.capability),
-            _ => self.apply_removal(removal_of(&entry.capability)),
+            Defect::RevokeTakesLastOfClass => {
+                self.take_the_last_of_class(&entry.capability, &entry.plugin)
+            }
+            _ => self.apply_removal(removal_of(&entry.capability), &entry.plugin),
         }
     }
 
-    fn take_the_last_of_class(&mut self, capability: &Capability) -> Result<(), BackendError> {
+    fn take_the_last_of_class(
+        &mut self,
+        capability: &Capability,
+        owner: &PluginId,
+    ) -> Result<(), BackendError> {
         let removal = removal_of(capability);
         let class = removal.class();
         let last = self
             .state
             .objects()
             .filter(|held| held.class == class)
-            .map(|held| held.key.clone())
+            .map(|held| (held.key.clone(), held.owner.clone()))
             .last();
         match last {
-            Some(key) => {
-                self.state.remove(class, &key);
+            Some((key, held_by)) => {
+                self.state.remove(class, &key, &held_by);
                 Ok(())
             }
             None => Err(BackendError::UnknownObject {
                 class: class.as_str(),
                 key: removal.key(),
+                owner: owner.clone(),
             }),
         }
     }
@@ -314,7 +321,11 @@ impl EnforcementBackend for DefectiveBackend {
         Ok(())
     }
 
-    fn apply_removal(&mut self, removal: UniverseRemoval) -> Result<(), BackendError> {
+    fn apply_removal(
+        &mut self,
+        removal: UniverseRemoval,
+        owner: &PluginId,
+    ) -> Result<(), BackendError> {
         if self.defect == Defect::RemovalIsANoOp {
             return Ok(());
         }
@@ -332,6 +343,7 @@ impl EnforcementBackend for DefectiveBackend {
                 None => Err(BackendError::UnknownObject {
                     class: class.as_str(),
                     key,
+                    owner: owner.clone(),
                 }),
             };
         }
@@ -341,31 +353,33 @@ impl EnforcementBackend for DefectiveBackend {
             _ => false,
         };
         if nukes_the_class {
-            let doomed: Vec<String> = self
+            let doomed: Vec<(String, PluginId)> = self
                 .state
                 .objects()
                 .filter(|held| held.class == class)
-                .map(|held| held.key.clone())
+                .map(|held| (held.key.clone(), held.owner.clone()))
                 .collect();
             let struck = doomed.len();
-            for doomed_key in doomed {
-                self.state.remove(class, &doomed_key);
+            for (doomed_key, held_by) in doomed {
+                self.state.remove(class, &doomed_key, &held_by);
             }
             return if struck == 0 {
                 Err(BackendError::UnknownObject {
                     class: class.as_str(),
                     key,
+                    owner: owner.clone(),
                 })
             } else {
                 Ok(())
             };
         }
         self.state
-            .remove(class, &key)
+            .remove(class, &key, owner)
             .map(|_| ())
             .ok_or(BackendError::UnknownObject {
                 class: class.as_str(),
                 key,
+                owner: owner.clone(),
             })
     }
 
