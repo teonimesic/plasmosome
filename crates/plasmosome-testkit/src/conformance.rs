@@ -310,7 +310,10 @@ pub fn apply_and_removal_reach_the_universe<B: EnforcementBackend>(make: impl Fn
 /// resumed replay into a revoke of whichever live grant now holds it. Two freed
 /// handles are what an ordinary free list needs before it starts reusing, and a
 /// forced revoke that withdraws the object without retiring the handle leaves
-/// the same number pointing at nothing.
+/// the same number pointing at nothing. The two are probed most recently
+/// revoked first, the order a replay resuming over a detach walks them in, so a
+/// free list that reused the older number is caught with the newer one still
+/// answering as it should.
 pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> B) {
     for drain in [DrainSpec::graceful(DRAIN), DrainSpec::forcing()] {
         let mut backend = make();
@@ -331,7 +334,7 @@ pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn(
             spent.push((entry, object));
         }
         let later_entry = backend.grant(later);
-        for (entry, object) in spent {
+        for (entry, object) in spent.into_iter().rev() {
             match backend.revoke(entry.handle, drain) {
                 Err(BackendError::UnknownHandle { handle }) => assert_eq!(
                     handle, entry.handle,
