@@ -44,6 +44,20 @@ of the declaring file cannot see it — the rule reports the declaration and fai
 is closed rather than documented as a limit: `out_of_line_modules` answers it, and the rule asks
 before it scans.
 
+## Why the publish rule counts members instead of naming them
+
+`no_workspace_crate_is_publishable_to_a_registry` checks every package `cargo metadata --no-deps`
+reports, then compares only the *number* of them against the members the workspace manifest lists.
+The count is there so a metadata read that silently returned fewer crates cannot let the rule
+claim it saw them all.
+
+Do not upgrade that to a name-by-name comparison. `workspace_members()` derives names from the
+member *paths*, and Cargo does not require a member's directory to be named after its package, so
+comparing names asserts a layout convention this repository has never stated — inside a rule about
+publishing, where a reader would not look for one. Comparing counts keeps the coverage guarantee
+and asserts nothing about layout. If the directory-naming convention is ever worth enforcing, it
+earns its own named rule and a stated intent, not a silent clause in this one.
+
 ## Testing
 
 `cargo test -p plasmosome-freeze-checks`.

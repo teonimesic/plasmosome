@@ -187,6 +187,51 @@ fn testkit_is_dev_only() {
 }
 
 #[test]
+fn no_workspace_crate_is_publishable_to_a_registry() {
+    let output = cargo()
+        .args(["metadata", "--locked", "--no-deps", "--format-version", "1"])
+        .output()
+        .expect("cargo metadata runs");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("cargo metadata emits JSON");
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata reports the workspace packages");
+
+    let mut reported = Vec::new();
+    for package in packages {
+        let name = package["name"]
+            .as_str()
+            .expect("a package has a name")
+            .to_string();
+        let registries = package["publish"].as_array().unwrap_or_else(|| {
+            panic!(
+                "`{name}` leaves `publish` unset, so `cargo publish` would claim the name on crates.io permanently and irreversibly; nothing here is released yet, so its manifest must say `publish = false`"
+            )
+        });
+        assert!(
+            registries.is_empty(),
+            "`{name}` may be published to {registries:?}; releasing a crate from this workspace is a deliberate act that changes this rule first"
+        );
+        reported.push(name);
+    }
+
+    reported.sort();
+    let listed = workspace_members().len();
+    assert_eq!(
+        reported.len(),
+        listed,
+        "the workspace manifest lists {listed} members but `cargo metadata` reported {}, so this rule cannot claim to have checked them all; it checked {reported:?}",
+        reported.len()
+    );
+}
+
+#[test]
 fn controller_wire_state_shares_no_memory_across_the_seam() {
     let wire_sources = [
         "crates/plasmosome-core/src/state.rs",
