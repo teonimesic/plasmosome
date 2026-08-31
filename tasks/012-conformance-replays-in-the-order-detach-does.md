@@ -1,7 +1,7 @@
 ---
 id: 012
 title: A backend can pass all eight clauses and still leak three capabilities on detach
-status: planned
+status: in_progress
 priority: 2
 specs: [003]
 intents: []
