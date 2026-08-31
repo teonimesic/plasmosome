@@ -275,7 +275,7 @@ STOP when done. Do not start the daemon, another verb, or the membrane client.
 With `serve_connection` returning `Ok(())` without reading, and `Controller::handle`
 refusing every method, `cargo test -p plasmosome-core` reported:
 
-```
+```text
 test result: FAILED. 63 passed; 10 failed; 0 ignored; 0 measured; 0 filtered out
 failures:
     control::tests::a_json_line_that_is_not_the_envelope_is_invalid_request
@@ -299,7 +299,7 @@ landed.
 **1. Swap the integers for codes 100 and 101 in the `ErrorCode` serializer** —
 `every_application_error_serializes_its_code_and_structured_fields`:
 
-```
+```text
 the code on the wire for {"candidates":["cell-1","cell-2"],"code":101,
 "message":"the target is ambiguous: 2 candidates match"}
   left: Some(Number(101))
@@ -309,13 +309,13 @@ the code on the wire for {"candidates":["cell-1","cell-2"],"code":101,
 **2. Map unknown integers to `InvalidRequest` in the deserializer** —
 `an_unknown_error_code_does_not_deserialize`:
 
-```
+```text
 code 111 is outside the closed table and must not deserialize, got Ok(InvalidRequest)
 ```
 
 **3. Hardcode id `0` in every reply** — `every_reply_echoes_the_request_id_verbatim`:
 
-```
+```text
 the ids that came back: [Object {"id": Number(0), "result": Object {}},
                          Object {"id": Number(0), "result": Object {}}]
   left: [Number(0), Number(0)]
@@ -324,7 +324,7 @@ the ids that came back: [Object {"id": Number(0), "result": Object {}},
 
 **4. Collect all replies and write them reversed** — `replies_come_back_in_request_order`:
 
-```
+```text
 replies arrive in request order: [ ... id 4, id 3, id Null, id 1 ... ]
   left: [Number(4), Number(3), Null, Number(1)]
  right: [Number(1), Null, Number(3), Number(4)]
@@ -333,7 +333,7 @@ replies arrive in request order: [ ... id 4, id 3, id Null, id 1 ... ]
 **5. Map a params failure to `method_not_found`** —
 `status_params_that_do_not_parse_are_invalid_params`:
 
-```
+```text
 a served method with params that do not parse is not a missing method:
 {"error":{"code":-32601,"message":"`plasmosome.status` is not a method this controller
 serves"},"id":1}
@@ -344,14 +344,14 @@ serves"},"id":1}
 **6. Default a missing `params` to an empty object** (`#[serde(default)]` on
 `Request::params`) — `a_json_line_that_is_not_the_envelope_is_invalid_request`:
 
-```
+```text
 reply {"id":2,"result":{}} carries no error code
 ```
 
 **7. Ignore the `name` param and always answer own status** —
 `status_for_a_name_this_controller_is_not_is_unknown_target`:
 
-```
+```text
 reply {"id":3,"result":{"cells":[...],"controller":{"ledger_generation":4,"uptime_ms":1},
 "name":"work","ready":true,"state":"running"}} carries no error code
 ```
@@ -360,7 +360,7 @@ reply {"id":3,"result":{"cells":[...],"controller":{"ledger_generation":4,"uptim
 (`type ControllerGuard = std::sync::Mutex<u8>;`) —
 `controller_wire_state_shares_no_memory_across_the_seam`:
 
-```
+```text
 86 §4 rule 2 broken: `crates/plasmosome-core/src/protocol.rs` uses `Mutex`;
 controller⇄supervisor state moves only as serde types, never as shared memory
 ```
@@ -402,7 +402,7 @@ anything that is not a JSON object with `-32600` and a `null` id, then continues
 ladder. `a_json_line_that_is_not_the_envelope_is_invalid_request` gained the array line, and
 failed against the old loop:
 
-```
+```text
 reply {"id":1,"result":{}} carries no error code
 ```
 
@@ -414,7 +414,7 @@ an error and never both", tested by
 `Response` now has a hand-written `Deserialize` that refuses both-present and neither-present.
 Serialization is untouched. The test gained the reading side, and failed against the derive:
 
-```
+```text
 a reply carrying a result and an error at once is not a reply this protocol defines:
 {"id":7,"result":{"ready":true},"error":{"code":101,"message":"gone"}}
 ```
@@ -426,7 +426,7 @@ and reply ids are now `Box<serde_json::value::RawValue>`, which keeps the token;
 loop has no envelope to take an id from it emits the literal `null`. New test
 `an_id_a_json_number_cannot_hold_comes_back_unchanged`, failing against `Value`:
 
-```
+```text
 every reply carries back the id token its request sent:
 ["{\"id\":null,\"error\":{\"code\":-32700,…}}", "{\"id\":1.2345678901234568e+29,…}",
  "{\"id\":100.0,…}", "{\"id\":1.0,…}", …]
@@ -441,7 +441,7 @@ crate, unused on this path, and a later verb resolves this name into a filesyste
 name is `-32602`. New test `a_status_name_that_is_not_an_instance_name_is_invalid_params`,
 failing against the string comparison:
 
-```
+```text
 `../..` is not an instance name, and a later verb resolves this name into a path:
 {"error":{"code":101,"message":"`plasmosome ../..` is not a target this controller knows",
 "target":"plasmosome ../.."},"id":1}
@@ -454,7 +454,7 @@ failing against the string comparison:
 checks the count before any indexing; mutating the loop to write only its first reply shows
 what a reader now gets:
 
-```
+```text
 the script asked for 5 replies and the loop wrote 1:
 ["{\"id\":null,\"error\":{\"code\":-32600,\"message\":\"missing field `id` …\"}}"]
   left: 1

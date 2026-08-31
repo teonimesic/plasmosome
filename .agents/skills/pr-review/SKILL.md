@@ -78,11 +78,8 @@ behind a `<details>` fold.** It is proof for a reviewer who wants it, not the bo
 
 **Keep it short — around four short paragraphs above the fold.** Two sentences on the problem, a
 paragraph on what changes, one on what is missing, and a sentence each on any choice a reviewer
-would otherwise puzzle over. **A PR that is too long is a PR no one reads**, and a description
-nobody finishes is worth the same as no description. If it has grown past that, cut it; moving
-prose behind the fold to look shorter cheats the reader you were writing for. What goes first is
-the second example, the sentence defending a choice nobody would question, and every clause you
-wrote because it was true rather than because it was needed.
+would otherwise puzzle over. **A PR that is too long is a PR no one reads.** If it has grown past
+that, cut it — moving prose behind the fold to look shorter cheats the reader.
 
 (CodeRabbit appends its own summary to the body. That is not yours and does not count.)
 

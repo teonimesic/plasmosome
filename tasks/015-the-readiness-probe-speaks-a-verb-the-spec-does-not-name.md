@@ -11,7 +11,7 @@ refs:
     docs/specs/001-control-protocol.md,
   ]
 done_when: >-
-  the request readiness::probe sends names a verb the spec defines, or the spec
+  readiness::probe sends a verb the spec defines, or the spec
   names the verb the probe sends, and a test asserts the two agree rather than
   leaving it to a reader.
 pr:
