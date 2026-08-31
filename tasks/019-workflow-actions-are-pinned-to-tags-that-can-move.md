@@ -1,7 +1,7 @@
 ---
 id: 019
 title: ci.yml runs actions from tags anyone upstream can move
-status: in_progress
+status: in_review
 priority: 2
 specs: []
 intents: []
@@ -9,7 +9,7 @@ refs: [.github/workflows/ci.yml, .github/workflows/audit.yml]
 done_when: >-
   every action in every workflow is pinned, GitHub-authored ones included, to a full commit SHA, and
   a documented way exists to update them together.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/20
 evidence:
 ---
 
