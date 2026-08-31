@@ -68,7 +68,7 @@ Read `docs/specs/010-holding-the-crates-io-names.md`,
 
 | Test | What it proves |
 | --- | --- |
-| `only_the_held_names_are_publishable_to_a_registry` | Exactly `plasmosome` and `plasmid` may reach a registry, and only `crates-io`; every other member is refused; an unset `publish` is fatal for any member; and an allowlist entry naming no member fails |
+| `only_the_held_names_are_publishable_to_a_registry` | Only `plasmosome` and `plasmid` reach a registry, and only `crates-io`; every other member is refused; an unset `publish` is fatal for any member; an allowlist entry naming no member fails |
 
 `cargo metadata` cannot tell an unset `publish` from `publish = true` — it reports `null` for both
 — so a held name carries an explicit registry list rather than an absent field, and the unset case

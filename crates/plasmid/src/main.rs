@@ -1,8 +1,8 @@
 use std::process::ExitCode;
 
-const RESERVED: &str = "plasmid new: reserved — the plasmid-sdk WIT world is not frozen yet \
-(91 plan step 1 freezes the control protocol and manifest grammar; the SDK surface is a \
-deferred design). See p1/crates/plasmid-sdk/src/lib.rs.";
+const RESERVED: &str = "plasmid new: reserved — the plasmid-sdk interface a scaffold would \
+generate against is not frozen yet, so there is no shape to write. Follow \
+https://github.com/teonimesic/plasmosome for when it is.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

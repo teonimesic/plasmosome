@@ -8,9 +8,9 @@ reserved — it refuses and exits 2 rather than scaffolding anything. The verbs 
 and detach a plasmid against a running kernel come later.
 
 It is a client, not a library. The contract a plasmid is written against is
-[`plasmid-sdk`](../plasmid-sdk); nothing built against that crate depends on this one, which is
-why the two are separate packages rather than a library and a binary sharing one dependency
-table.
+[`plasmid-sdk`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid-sdk); nothing
+built against that crate depends on this one, which is why the two are separate packages rather
+than a library and a binary sharing one dependency table.
 
 ## Status
 
@@ -22,7 +22,7 @@ not knowing it.
 
 ```console
 $ plasmid new my-thing
-plasmid new: reserved — the plasmid-sdk WIT world is not frozen yet ...
+plasmid new: reserved — the plasmid-sdk interface a scaffold would generate against ...
 $ echo $?
 2
 ```
