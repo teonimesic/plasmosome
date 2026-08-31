@@ -14,10 +14,11 @@ table.
 
 ## Status
 
-Reserved, and on no registry yet — the package carries `publish = false`, so the way to get the
-binary is `cargo install --path crates/plasmid` from a checkout. `plasmid new` refuses to run
-because the SDK interface it would generate against is deliberately undesigned. The refusal is the
-feature: a scaffold that guesses the shape is worse than one that is honest about not knowing it.
+Version `0.0.0`, which is the whole promise: the name is held and nothing about the command line
+is settled yet. Installing it gives you a real binary whose only verb refuses. `plasmid new` will
+not run because the SDK interface it would generate against is deliberately undesigned, and that
+refusal is the feature — a scaffold that guesses the shape is worse than one that is honest about
+not knowing it.
 
 ```console
 $ plasmid new my-thing

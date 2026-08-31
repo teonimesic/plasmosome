@@ -188,6 +188,10 @@ fn testkit_is_dev_only() {
 
 const STABILITY_BOUNDARY: &str = "plasmid-sdk";
 
+const HELD_NAMES: &[&str] = &["plasmosome", "plasmid"];
+
+const HELD_REGISTRIES: &[&str] = &["crates-io"];
+
 fn workspace_packages() -> Vec<serde_json::Value> {
     let output = cargo()
         .args(["metadata", "--locked", "--no-deps", "--format-version", "1"])
@@ -233,23 +237,41 @@ fn package_name(package: &serde_json::Value) -> String {
 }
 
 #[test]
-fn no_workspace_crate_is_publishable_to_a_registry() {
+fn only_the_held_names_are_publishable_to_a_registry() {
     let mut reported = Vec::new();
     for package in workspace_packages() {
         let name = package_name(&package);
         let registries = package["publish"].as_array().unwrap_or_else(|| {
             panic!(
-                "`{name}` leaves `publish` unset, so `cargo publish` would claim the name on crates.io permanently and irreversibly; nothing here is released yet, so its manifest must say `publish = false`"
+                "`{name}` leaves `publish` unset, and `cargo metadata` reports an unset field and `publish = true` identically as null, so this rule cannot tell the two apart; every member of this workspace says where it may go explicitly — `publish = false`, or `publish = {HELD_REGISTRIES:?}` for a name this project holds"
             )
         });
-        assert!(
-            registries.is_empty(),
-            "`{name}` may be published to {registries:?}; releasing a crate from this workspace is a deliberate act that changes this rule first"
-        );
+        let registries: Vec<&str> = registries
+            .iter()
+            .map(|registry| registry.as_str().expect("a registry name is a string"))
+            .collect();
+        if HELD_NAMES.contains(&name.as_str()) {
+            assert_eq!(
+                registries, HELD_REGISTRIES,
+                "`{name}` is a name this project holds on crates.io, so it carries `publish = {HELD_REGISTRIES:?}` and reaches that registry and no other; it currently says {registries:?}, and giving up a public name claim is a deliberate edit of `HELD_NAMES` rather than a manifest quietly closing itself"
+            );
+        } else {
+            assert!(
+                registries.is_empty(),
+                "`{name}` may be published to {registries:?}; only {HELD_NAMES:?} are claimed on a registry, and releasing anything else from this workspace is a deliberate act that names it here first"
+            );
+        }
         reported.push(name);
     }
 
     reported.sort();
+    for held in HELD_NAMES {
+        assert!(
+            reported.iter().any(|name| name.as_str() == *held),
+            "`{held}` is on the publish allowlist and is not a package in this workspace; the counts below still agree without it, so an entry naming a crate that was renamed or removed would sit here unnoticed and hand its exemption to whatever takes the name next — it reported {reported:?}"
+        );
+    }
+
     let listed = workspace_members().len();
     assert_eq!(
         reported.len(),

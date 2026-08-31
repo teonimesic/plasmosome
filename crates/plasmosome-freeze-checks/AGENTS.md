@@ -46,7 +46,7 @@ before it scans.
 
 ## Why the publish rule counts members instead of naming them
 
-`no_workspace_crate_is_publishable_to_a_registry` checks every package `cargo metadata --no-deps`
+`only_the_held_names_are_publishable_to_a_registry` checks every package `cargo metadata --no-deps`
 reports, then compares only the *number* of them against the members the workspace manifest lists.
 The count is there so a metadata read that silently returned fewer crates cannot let the rule
 claim it saw them all.
@@ -57,6 +57,13 @@ comparing names asserts a layout convention this repository has never stated —
 publishing, where a reader would not look for one. Comparing counts keeps the coverage guarantee
 and asserts nothing about layout. If the directory-naming convention is ever worth enforcing, it
 earns its own named rule and a stated intent, not a silent clause in this one.
+
+The publish allowlist is the one place that rule compares names, and both sides of that comparison
+come from `cargo metadata`: `HELD_NAMES` is checked against the package names metadata reported,
+never against the member paths, so it still asserts nothing about layout. The check is there
+because the count agrees with itself whether or not the list is honest — an entry naming a crate
+that was renamed or deleted is invisible to everything else the rule does, and it would hand its
+publish exemption to whatever takes that name next.
 
 ## Testing
 

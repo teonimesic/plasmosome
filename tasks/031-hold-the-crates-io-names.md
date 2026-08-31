@@ -1,7 +1,7 @@
 ---
 id: 031
 title: Hold the crates.io names plasmosome and plasmid
-status: planned
+status: in_progress
 priority: 2
 specs: [010]
 intents: [013]

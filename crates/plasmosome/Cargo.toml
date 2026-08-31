@@ -1,14 +1,11 @@
 [package]
-name = "plasmid"
+name = "plasmosome"
 version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The command line for authoring plasmids, the capability modules of the Plasmosome kernel."
+description = "A composable, OS-enforced capability kernel for AI agents. This version is an empty placeholder holding the name."
 repository = "https://github.com/teonimesic/plasmosome"
 readme = "README.md"
 publish = ["crates-io"]
 exclude = ["AGENTS.md", "CLAUDE.md"]
-
-[dev-dependencies]
-tempfile = { workspace = true }
