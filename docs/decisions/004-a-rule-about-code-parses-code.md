@@ -75,3 +75,13 @@ The remaining miss is real and named: a lock re-exported under a local name by a
 imported here, is not found. Closing it is name resolution and needs a compiler. Anyone extending
 this rule should widen the construct list rather than reach for a regex, and anyone tempted to trust
 its green on the alias case should read the test that pins the limit.
+
+That miss has a second side, accepted with it. Because a name is matched on its spelling, an
+identifier that is one of the construct words but means something else — an enum variant
+`SyncPoint::Barrier`, a grid `Cell`, a file-local rename onto `Weak` — is reported as a use it is
+not. It is one limit, not two: an identifier this rule cannot resolve is either missed or
+over-reported, and the choice of which is the only freedom a parser has. This rule over-reports,
+because a false positive argues with a person who can narrow the construct list, while a false
+negative is a green that gets believed. Neither side is closed by a longer list; both close only
+with name resolution. A wire file that must carry such a word narrows the list, and both sides are
+pinned by a test.

@@ -228,3 +228,72 @@ pub struct ControllerState {
 fn a_file_that_is_not_rust_is_reported_as_a_parse_error_rather_than_scanned() {
     assert!(shared_memory_uses("this is not rust {{{").is_err());
 }
+
+#[test]
+fn an_attribute_argument_naming_a_lock_is_a_use() {
+    let source = r#"
+#[wraps(std::sync::Mutex<u32>)]
+pub struct ControllerState;
+"#;
+    assert!(
+        constructs(source).contains(&"Mutex".to_string()),
+        "an attribute's argument tokens are a macro body like any other, got {:?}",
+        constructs(source)
+    );
+}
+
+#[test]
+fn an_ordinary_derive_is_not_a_use() {
+    let source = r#"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ControllerState {
+    pub name: String,
+}
+"#;
+    assert_eq!(rendered(source), Vec::<String>::new());
+}
+
+#[test]
+fn an_extern_crate_supplying_shared_memory_is_a_use() {
+    let source = r#"
+extern crate dashmap;
+"#;
+    assert_eq!(constructs(source), vec!["dashmap".to_string()]);
+}
+
+#[test]
+fn a_name_that_is_a_construct_word_but_means_something_else_is_over_reported() {
+    let variant = r#"
+pub enum SyncPoint {
+    Barrier,
+}
+
+pub fn reached() -> SyncPoint {
+    SyncPoint::Barrier
+}
+"#;
+    let shadowed = r#"
+use crate::registry::Handle as Weak;
+
+pub struct ControllerState {
+    pub handle: Weak,
+}
+"#;
+    assert_eq!(
+        rendered(variant),
+        vec!["`Barrier` in `reached`".to_string()],
+        "this is the documented limit read from its over-reporting side: `Barrier` here is an enum \
+         variant, not `std::sync::Barrier`, and nothing in this file says which. Deciding that is \
+         the same name resolution the cross-file alias miss needs a compiler for. Declaring the \
+         variant is not itself a use — only naming it in a path is — so if this assertion ever \
+         fails the rule has learned to resolve names and both the module documentation and the \
+         crate AGENTS.md must say so."
+    );
+    assert!(
+        constructs(shadowed).contains(&"Weak".to_string()),
+        "a file-local rename of an unrelated type onto a construct word is over-reported for the \
+         same reason, got {:?}",
+        constructs(shadowed)
+    );
+}

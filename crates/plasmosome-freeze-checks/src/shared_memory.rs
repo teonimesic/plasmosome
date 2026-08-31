@@ -87,14 +87,22 @@ impl fmt::Display for SharedMemoryUse {
 /// Reads `source` as Rust and returns every shared-memory construct it uses, in the order found.
 ///
 /// The caller must pass the whole text of one Rust file. Only positions where Rust means a path, a
-/// type, an import, a macro or a `static` are inspected, so a comment, a doc block, a test name or
-/// a string literal that names a lock is not a use and is not returned. Identifiers are compared
-/// whole: `CellRecord` is not `Cell`.
+/// type, an import, an attribute or macro argument, or a `static` are inspected, so a comment, a
+/// doc block, a test name or a string literal that names a lock is not a use and is not returned.
+/// Identifiers are compared whole: `CellRecord` is not `Cell`.
 ///
 /// Aliases the file declares itself are followed — `use std::sync::Mutex as Guard;` and
 /// `type Guard = Mutex<u32>;` both make a later `Guard<u32>` a use. An alias declared in another
 /// file or another crate is **not** followed and will not be returned: deciding what an imported
 /// name resolves to is name resolution, which needs the compiler, not a parser.
+///
+/// A name is matched on its spelling alone, so an identifier that is one of these words but means
+/// something else — an enum variant `SyncPoint::Barrier`, a grid `Cell`, a file-local
+/// `use crate::registry::Handle as Weak;` — is returned as a use it is not. Telling those apart is
+/// the same name resolution the paragraph above needs a compiler for, so the two limits are one
+/// limit read from its two sides: an unresolvable name is either missed or over-reported, and this
+/// rule chooses to over-report. Narrow the construct list if a wire file has to carry such a
+/// word; do not reach for a regex.
 ///
 /// Returns the parse error when `source` is not valid Rust.
 pub fn shared_memory_uses(source: &str) -> Result<Vec<SharedMemoryUse>, syn::Error> {
@@ -288,6 +296,16 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         visit::visit_macro(self, node);
         self.note_tokens(&node.tokens);
+    }
+
+    fn visit_meta_list(&mut self, node: &'ast syn::MetaList) {
+        visit::visit_meta_list(self, node);
+        self.note_tokens(&node.tokens);
+    }
+
+    fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+        self.note(&node.ident.to_string());
+        visit::visit_item_extern_crate(self, node);
     }
 }
 

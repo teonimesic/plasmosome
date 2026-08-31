@@ -30,6 +30,14 @@ pinned by `an_alias_declared_in_another_file_is_missed_because_that_needs_name_r
 `tests/shared_memory_reads_rust.rs`. If that test ever fails, the limit has been closed and this
 section is stale. Widen the construct list to catch more; do not reach back for a regex.
 
+The same limit has a second side. A name is matched on its spelling, so an identifier that is one
+of the construct words but means something else — an enum variant `SyncPoint::Barrier`, a grid
+`Cell`, a file-local `use crate::registry::Handle as Weak;` — is reported as a use it is not. An
+unresolvable name is either missed or over-reported, and this rule chooses to over-report: a wire
+file that has to carry such a word narrows the construct list. That choice is pinned by
+`a_name_that_is_a_construct_word_but_means_something_else_is_over_reported`. None of the seven wire
+files carries such a word today.
+
 ## Testing
 
 `cargo test -p plasmosome-freeze-checks`.
