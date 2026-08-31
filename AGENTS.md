@@ -31,6 +31,10 @@ model available plans; the next one down executes. `main` is protected, so every
 by pull request. Two reviewers read each PR, and one of them checks claims by breaking things
 rather than by reading.
 
+**What earns a place in a skill:** a rule that changes what the next agent does, and will again.
+Not a one-off — a migration you just ran, a path that moved, a bug you just fixed. Those belong
+in the PR and the git log. If it cannot happen twice, it is not a skill.
+
 ## Style
 
 **Writing.** The first three paragraphs of any document should explain almost everything: what it
