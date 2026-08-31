@@ -37,7 +37,7 @@ test binary it runs**, and that value always reflects the invocation rather than
 assert the resolved root holds the workspace `Cargo.toml` so a stale build fails by naming
 staleness instead of a missing file.
 
-```
+```text
 compile-time: …/attribution-guard-nonterminal/crates/plasmosome-freeze-checks
 runtime     : Ok("…/attribution-guard-nonterminal/crates/plasmosome-freeze-checks")
 ```

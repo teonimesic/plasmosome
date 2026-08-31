@@ -7,8 +7,9 @@ specs: []
 intents: []
 refs: [.agents/skills/tasks/SKILL.md]
 done_when: >-
-  `.agents/skills/tasks` states a spec threshold that the last ten merged pull requests would
-  each have satisfied, or names the exception that lets them not.
+  `.agents/skills/tasks` states a spec threshold that pull requests #17, #18, #24, #26 and #35
+  would each have satisfied, or that names the exception under which they did not, and an audit
+  of every pull request merged since recorded in this task's notes finds none that contradicts it.
 ---
 
 ## Why

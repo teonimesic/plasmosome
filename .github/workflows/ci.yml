@@ -47,8 +47,10 @@ jobs:
 
       # On a push there is no base ref, and `origin/main..HEAD` is then an empty range the guard
       # clears without reading a commit. A squash merge composes a message GitHub never showed the
-      # pull request, so the commit landing on main is exactly the one worth reading.
+      # pull request, so the commit landing on main is exactly the one worth reading. A ref being
+      # created reports forty zeroes as its previous tip, which resolves to nothing, so that case
+      # reads the whole history the push brought with it.
       - name: attribution guard
         env:
-          RANGE: ${{ github.base_ref && format('origin/{0}..HEAD', github.base_ref) || format('{0}..{1}', github.event.before, github.sha) }}
+          RANGE: ${{ github.base_ref && format('origin/{0}..HEAD', github.base_ref) || (github.event.before == '0000000000000000000000000000000000000000' && github.sha || format('{0}..{1}', github.event.before, github.sha)) }}
         run: ./.githooks/attribution-guard "$RANGE"
