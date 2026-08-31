@@ -7,21 +7,22 @@
 # Fails closed: anything it cannot read is a refusal, never a pass.
 set -uo pipefail
 
-range="${1:-}"
-if [ -z "$range" ]; then
-  if git rev-parse --verify --quiet origin/main >/dev/null; then
-    range="origin/main..HEAD"
-  else
-    range="HEAD"
-  fi
+# Takes rev-list arguments as separate words, so a caller can pass a range, or a tip plus
+# `--not --remotes` for a branch the remote has never seen.
+if [ "$#" -gt 0 ]; then
+  revs=("$@")
+elif git rev-parse --verify --quiet origin/main >/dev/null; then
+  revs=("origin/main..HEAD")
+else
+  revs=("HEAD")
 fi
 
 vendors='claude|anthropic|gpt|openai|copilot|codex|gemini|llama|mistral'
 
 # `%(trailers:...)` uses git's own trailer parser, so body prose that merely quotes a trailer
 # is not a match — only a real trailer block is.
-if ! commits=$(git log --format='%H' "$range" 2>&1); then
-  echo "attribution-guard: cannot read the range '$range':"
+if ! commits=$(git log --format='%H' "${revs[@]}" 2>&1); then
+  echo "attribution-guard: cannot read the range '${revs[*]}':"
   echo "$commits"
   echo "Refusing rather than passing: a range this guard cannot read is a range it cannot clear."
   exit 1
