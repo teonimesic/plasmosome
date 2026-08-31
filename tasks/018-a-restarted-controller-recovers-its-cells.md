@@ -3,11 +3,12 @@ id: 018
 title: A restarted controller recovers the cells it left running
 status: todo
 priority: 1
-specs: [001]
+specs: [001, 008]
 intents: []
 refs:
   [
     docs/decisions/002-a-log-per-cell-not-a-database.md,
+    docs/specs/008-cell-recovery-contract.md,
     crates/plasmosome-ledger/src/lib.rs,
     crates/plasmosome-core/src/reconciler.rs,
     crates/plasmosome-core/src/state.rs,
@@ -49,6 +50,11 @@ only the plugin and its effects today, and `ControllerState` has no generation f
 what the quarantine report actually says. None of those is a design choice with rejected
 alternatives, so none belongs in the decision; they are the contract a stranger would need to
 build against.
+
+That spec is written:
+[`docs/specs/008-cell-recovery-contract.md`](../docs/specs/008-cell-recovery-contract.md). It
+decides all three, and it is `draft` until the owner reads it; this task may not be claimed
+before it is `accepted`.
 
 ## Plan
 
