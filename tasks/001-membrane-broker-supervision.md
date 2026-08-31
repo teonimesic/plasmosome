@@ -1,7 +1,7 @@
 ---
 id: 001
 title: The membrane supervises its cell's brokers
-status: planned
+status: in_progress
 priority: 1
 specs: [001]
 intents: []
