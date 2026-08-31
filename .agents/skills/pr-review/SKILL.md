@@ -78,6 +78,17 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    rate-limited green ships a change nobody reviewed, and neither the check state nor an empty
    thread list will ever say so.
 
+   **The dangerous moment for a rate-limited green is the push you just made, not a quiet PR.**
+   It arrives on a new head seconds after you act, which is exactly when a wait is primed to
+   accept it as the fresh review it was waiting for — the check went from absent to green, on the
+   commit you just pushed, in about the time a real review takes. A PR sitting untouched will not
+   produce one. So the moment to read the description most carefully is the moment you are most
+   convinced the review just happened.
+
+   The budget is **repo-wide, not per-PR** — roughly ten reviews an hour across everything — so
+   the cause is usually somewhere else: another agent's pushes, or your own earlier rounds. Being
+   the only one pushing right now is not evidence that there is budget left.
+
    Nothing announces that the findings have stopped. **Wait for quiet instead**: track the newest
    timestamp across the three places CodeRabbit writes, and treat the queue as clear only once it
    has not moved for five minutes.
@@ -114,9 +125,10 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    **Every way out of that loop except reaching five is a refusal, so it returns non-zero.** A
    version that merely `break`s tells the caller nothing, and the next step in the routine is the
    merge — an abandoned wait then reads exactly like a completed one. Step 6 runs only when this
-   returns zero, which is why the invocation ends in `false` rather than a bare `echo`: a
-   diagnostic that succeeds hands a zero status back to whatever gates on it, and re-opens the
-   same hole one level up.
+   returns zero. That is also why the invocation ends in `false` rather than a bare `echo`: a
+   diagnostic command succeeds, so `wait_for_quiet "$PR" || echo "..."` reports success to
+   whatever gates on it, and the refusal the function just made is thrown away by the line that
+   reports it.
 
    Four details in that loop are the difference between it working and it lying to you. **A failed
    poll is not quiet** — `gh api --jq` prints its error body to stdout, so without the explicit
@@ -175,7 +187,18 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    status reads `Review completed` rather than `Review rate limited`, the review queue has been
    quiet for five minutes (step 4), and every review thread is resolved — `main` requires
    conversation resolution, so an open thread is what holds
-   a merge. Resolving a thread by disagreeing with it is allowed; merging on a disagreement you
+   a merge.
+
+   **Re-read the head immediately before merging, and abort if it moved.** `gh pr merge` merges
+   whatever the head is now, not the commit you checked. Anything that captures a SHA, waits, and
+   then merges — a script, or you across two steps — can validate one commit and ship another.
+   It happened on the PR that added this section: a wait captured a head, confirmed its
+   `Review completed`, and merged nine minutes later onto a newer head whose only status was
+   `Review rate limited`, putting four unreviewed lines on `main`.
+
+   ```shell
+   [ "$(gh pr view "$PR" --json headRefOid --jq .headRefOid)" = "$HEAD" ] || echo "head moved"
+   ``` Resolving a thread by disagreeing with it is allowed; merging on a disagreement you
    did not write down in the thread is not.
 7. Delete the branch and remove your worktree — `git worktree remove .worktrees/<branch>`, then
    `git worktree prune`. A worktree left behind pins a merged branch, so the next person cannot
