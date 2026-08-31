@@ -1,7 +1,7 @@
 ---
 id: 015
 title: The readiness probe sends a verb the control protocol does not define
-status: todo
+status: planned
 priority: 2
 specs: [001]
 intents: []
@@ -38,5 +38,23 @@ whether it is serving.
 Found while planning task 014, by reading the spec and the code side by side.
 
 ## Plan
+
+**Deliverable:** `readiness::probe` asks for a verb `docs/specs/001-control-protocol.md` defines,
+and a test fails if the two stop agreeing. Out of scope: writing the membrane's server side, and
+any other verb.
+
+**Decide which way to reconcile before changing anything.** Every verb in the spec is namespaced
+(`cell.status`, `plasmosome.status`), so a bare `status` is the outlier — but check §4 for what it
+names the membrane's own verb and follow the spec rather than guessing a pattern. If §4 does not
+name one, that is a spec gap: stop and report it rather than inventing a verb and calling the task
+done.
+
+The test must compare the probe's request against the spec, not against a copy of itself. A test
+asserting the probe sends what the probe sends is the failure mode this repo has hit four times.
+Read the verb out of the spec file, or name the source of truth in one place both use.
+
+**Watch it fail first:** revert the verb to `status`, run the test, record the output.
+
+**Done when:** `done_when` holds, and the gate in root `AGENTS.md` is green.
 
 ## Notes
