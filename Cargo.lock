@@ -173,6 +173,7 @@ dependencies = [
  "proc-macro2",
  "serde",
  "syn 2.0.119",
+ "tempfile",
 ]
 
 [[package]]

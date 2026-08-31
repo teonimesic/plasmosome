@@ -17,10 +17,89 @@ else
   revs=("HEAD")
 fi
 
-vendors='claude|anthropic|gpt|openai|copilot|codex|gemini|llama|mistral'
+# Matched against a trailer's value, so it must not hold a string a person could carry. `devin`
+# and `sonnet` are left out for that reason and reached through their vendor domains instead:
+# refusing a contributor for their own name is a refusal they cannot act on.
+vendors='claude|anthropic|gpt|openai|copilot|codex|gemini|llama|mistral|cursor|cognition\.ai|grok|x\.ai'
 
-# `%(trailers:...)` uses git's own trailer parser, so body prose that merely quotes a trailer
-# is not a match — only a real trailer block is.
+# Nominates text worth parsing. Deliberately unanchored: it may only ever over-nominate, because
+# a paragraph it skips is a paragraph nothing else looks at.
+nominate='(co-authored-by|signed-off-by)[[:space:]]*:'
+
+# Reads a trailer off a line git's parser has already produced, where the key starts the line.
+attribution='^[[:space:]]*(co-authored-by|signed-off-by)[[:space:]]*:'
+
+offences=()
+
+# Answers whether $2 matches $1, and exits the guard if grep could not decide.
+#
+# `grep -q` exits 0 for a match and 1 for no match; anything higher is a failure to read. Treating
+# that as "no match" is how a guard reports clean because its own tooling broke.
+matches() {
+  local pattern=$1 text=$2 status
+  printf '%s' "$text" | grep -qiE "$pattern"
+  status=$?
+  case $status in
+    0) return 0 ;;
+    1) return 1 ;;
+    *)
+      echo "attribution-guard: grep exited $status matching '$pattern'"
+      echo "Refusing rather than passing: a check this guard cannot run is a check it cannot clear."
+      exit 1
+      ;;
+  esac
+}
+
+# Adds every attribution trailer in the paragraph on $1 that names a model.
+#
+# A squash merge concatenates the messages it squashes, which leaves the trailers of every commit
+# but the last one sitting mid-body. Git's trailer parser reads only the closing paragraph, so it
+# does not see them, and a commit shaped that way used to pass. Every paragraph is offered to that
+# parser here, not just the last.
+#
+# The grep only nominates a paragraph; git's parser is what decides. That is the difference
+# between this and scanning the raw message, which flagged bodies that merely quoted a trailer.
+record_model_trailers() {
+  local paragraph=$1 parsed line value
+  matches "$nominate" "$paragraph" || return 0
+  if ! parsed=$(printf 'x\n\n%s' "$paragraph" | git interpret-trailers --parse 2>&1); then
+    echo "attribution-guard: cannot parse the trailers of a commit message:"
+    echo "$parsed"
+    echo "Refusing rather than passing: a message this guard cannot parse is a message it cannot clear."
+    exit 1
+  fi
+  while IFS= read -r line; do
+    matches "$attribution" "$line" || continue
+    value=${line#*:}
+    if matches "$vendors" "$value"; then
+      offences+=("$line")
+    fi
+  done <<< "$parsed"
+}
+
+# Splits the message on $1 into paragraphs and offers each to `record_model_trailers`.
+#
+# A paragraph ends at any line holding no non-whitespace, not only at an empty one. Git reads a
+# break that way too, and a message written on Windows separates its paragraphs with a line that
+# still holds a carriage return. Splitting only on an empty line collapsed such a message into one
+# paragraph, which git then read as prose, so a mid-body trailer in it went unseen.
+record_model_trailers_in_message() {
+  local message=$1 line paragraph=''
+  matches "$nominate" "$message" || return 0
+  while IFS= read -r line; do
+    line=${line%$'\r'}
+    case $line in
+      *[![:space:]]*)
+        paragraph+="$line"$'\n'
+        continue
+        ;;
+    esac
+    record_model_trailers "$paragraph"
+    paragraph=''
+  done <<< "$message"
+  record_model_trailers "$paragraph"
+}
+
 if ! commits=$(git log --format='%H' "${revs[@]}" 2>&1); then
   echo "attribution-guard: cannot read the range '${revs[*]}':"
   echo "$commits"
@@ -30,18 +109,17 @@ fi
 
 status=0
 for sha in $commits; do
-  if ! trailers=$(git show -s --format='%(trailers:key=Co-authored-by,valueonly)%(trailers:key=Signed-off-by,valueonly)' "$sha" 2>&1); then
-    echo "attribution-guard: cannot read trailers of $sha:"
-    echo "$trailers"
+  if ! message=$(git show -s --format='%B' "$sha" 2>&1); then
+    echo "attribution-guard: cannot read the message of $sha:"
+    echo "$message"
     exit 1
   fi
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    if printf '%s' "$line" | grep -qiE "$vendors"; then
-      echo "attribution-guard: ${sha:0:9} credits a model as an author: $line"
-      status=1
-    fi
-  done <<< "$trailers"
+  offences=()
+  record_model_trailers_in_message "$message"
+  for offence in "${offences[@]+"${offences[@]}"}"; do
+    echo "attribution-guard: ${sha:0:9} credits a model as an author: $offence"
+    status=1
+  done
 done
 
 if [ "$status" -ne 0 ]; then

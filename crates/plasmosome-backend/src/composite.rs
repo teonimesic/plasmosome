@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::backend::{
     BackendError, Capability, DrainSpec, EnforcementBackend, Grant, Handle, LedgerEntry,
 };
-use crate::universe::{OsObject, OsState, UniverseClass, UniverseOp, UniverseRemoval};
+use crate::universe::{OsObject, OsState, PluginId, UniverseClass, UniverseOp, UniverseRemoval};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Leaf {
@@ -57,6 +57,14 @@ impl CompositeBackend {
             Capability::ProxyMap { .. } | Capability::UdsSocket { .. } => self.network.as_mut(),
             Capability::SessionFile { .. } | Capability::Mount { .. } => self.filesystem.as_mut(),
             Capability::Broker { .. } => self.broker.as_mut(),
+        }
+    }
+
+    fn leaf_for_class(&mut self, class: UniverseClass) -> &mut dyn EnforcementBackend {
+        match class {
+            UniverseClass::ProxyMap | UniverseClass::UdsPath => self.network.as_mut(),
+            UniverseClass::SessionFile | UniverseClass::Mount => self.filesystem.as_mut(),
+            UniverseClass::BrokerPid => self.broker.as_mut(),
         }
     }
 
@@ -131,24 +139,17 @@ impl EnforcementBackend for CompositeBackend {
         self.leaf_for(&capability_of_op(&op)).apply(op)
     }
 
-    fn apply_removal(&mut self, removal: UniverseRemoval) -> Result<(), BackendError> {
-        let mut last = self.network.apply_removal(removal.clone());
-        if last.is_ok() {
-            return Ok(());
-        }
-        last = self.filesystem.apply_removal(removal.clone());
-        if last.is_ok() {
-            return Ok(());
-        }
-        self.broker.apply_removal(removal)
+    fn apply_removal(
+        &mut self,
+        removal: UniverseRemoval,
+        owner: &PluginId,
+    ) -> Result<(), BackendError> {
+        self.leaf_for_class(removal.class())
+            .apply_removal(removal, owner)
     }
 
     fn plant(&mut self, object: OsObject) {
-        match object.class {
-            UniverseClass::ProxyMap | UniverseClass::UdsPath => self.network.plant(object),
-            UniverseClass::SessionFile | UniverseClass::Mount => self.filesystem.plant(object),
-            UniverseClass::BrokerPid => self.broker.plant(object),
-        }
+        self.leaf_for_class(object.class).plant(object)
     }
 }
 
@@ -214,6 +215,100 @@ mod tests {
         );
         assert_eq!(composite.leaf_snapshot(Leaf::Network).len(), 0);
         assert_eq!(composite.leaf_snapshot(Leaf::Filesystem).len(), 1);
+    }
+
+    #[test]
+    fn a_revoke_through_the_composite_spares_the_other_plasmid_on_that_host() {
+        let mut composite = CompositeBackend::new(fake(), fake(), fake());
+        let proxy = |who: &str, route: &str| Grant {
+            plugin: PluginId::from(who),
+            capability: Capability::ProxyMap {
+                host: "api.github.com".to_string(),
+                route: route.to_string(),
+            },
+            kind: GrantKind::Hot,
+        };
+        composite.grant(proxy("audit", "audit-proxy:8080"));
+        let deploy = composite.grant(proxy("deploy", "deploy-proxy:9090"));
+
+        composite
+            .revoke(deploy.handle, DrainSpec::forcing())
+            .expect("deploy's own grant is revocable through the composite");
+
+        let held = composite.snapshot_os_state();
+        let owners: Vec<&str> = held.objects().map(|o| o.owner.as_str()).collect();
+        assert_eq!(
+            owners,
+            vec!["audit"],
+            "revoking deploy's proxy map must leave audit's standing and take deploy's"
+        );
+    }
+
+    #[test]
+    fn a_removal_driven_through_the_composite_spares_the_other_holder() {
+        let mut composite = CompositeBackend::new(fake(), fake(), fake());
+        for who in ["audit", "deploy"] {
+            composite
+                .apply(UniverseOp::SetProxyMap {
+                    host: "api.github.com".to_string(),
+                    route: format!("{who}-proxy"),
+                    owner: PluginId::from(who),
+                })
+                .expect("the network leaf accepts a proxy map");
+        }
+
+        composite
+            .apply_removal(
+                UniverseRemoval::RemoveProxyMap {
+                    host: "api.github.com".to_string(),
+                },
+                &PluginId::from("deploy"),
+            )
+            .expect("deploy holds a proxy map for that host");
+
+        let held = composite.snapshot_os_state();
+        let owners: Vec<&str> = held.objects().map(|o| o.owner.as_str()).collect();
+        assert_eq!(
+            owners,
+            vec!["audit"],
+            "a removal must take the owner it names and leave the other holder standing"
+        );
+    }
+
+    #[test]
+    fn a_removal_for_a_class_its_leaf_cannot_serve_reports_that_leafs_answer() {
+        let mut composite = CompositeBackend::new(fake(), fake(), fake());
+        composite
+            .apply(UniverseOp::WriteSessionFile {
+                path: "skills/pr.md".to_string(),
+                owner: PluginId::from("github-pr"),
+            })
+            .expect("the filesystem leaf accepts a session file");
+
+        let error = composite
+            .apply_removal(
+                UniverseRemoval::RemoveProxyMap {
+                    host: "api.github.com".to_string(),
+                },
+                &PluginId::from("github-pr"),
+            )
+            .expect_err("no proxy map was ever applied");
+
+        assert!(
+            matches!(
+                error,
+                BackendError::UnknownObject {
+                    class: "proxy-map",
+                    ..
+                }
+            ),
+            "a removal is answered by the leaf that owns its class, not by whichever leaf tried last: {error}"
+        );
+        assert_eq!(
+            composite.leaf_snapshot(Leaf::Filesystem).len(),
+            1,
+            "a failed proxy-map removal must not reach the filesystem leaf"
+        );
     }
 
     #[test]

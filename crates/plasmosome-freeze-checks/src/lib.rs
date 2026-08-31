@@ -1,4 +1,5 @@
-//! The 86 §4 must-not-bake-in rules as always-on tests — see `tests/`.
+//! The 86 §4 must-not-bake-in rules as always-on tests, and the repository-wide checks that have
+//! nowhere else to run — see `tests/`.
 //!
 //! The controller-side crates (`plasmosome-core`, `plasmosome-backend`,
 //! `plasmosome-ledger`) stay free of VMM/netstack/membrane dependencies
@@ -14,6 +15,12 @@
 //! (entitlement only on the HVF-entering process) binds when the macOS
 //! signing step returns. They are recorded as open enforcement points, not
 //! satisfied here.
+//!
+//! Alongside them sit checks that are not architectural rules but have the
+//! same shape — a property of the repository that must keep holding, checkable
+//! on every run. Skill discoverability and the commit guards under `.githooks`
+//! are here because this is where checks-as-tests live, and because putting
+//! them here costs no new CI step.
 
 use std::path::{Path, PathBuf};
 

@@ -4,7 +4,7 @@ use crate::backend::{
     BackendError, Capability, DrainSpec, EnforcementBackend, Grant, Handle, LedgerEntry,
     RevokePolicy,
 };
-use crate::universe::{OsObject, OsState, UniverseOp, UniverseRemoval};
+use crate::universe::{OsObject, OsState, PluginId, UniverseOp, UniverseRemoval};
 
 #[derive(Debug, Default)]
 pub struct FakeBackend {
@@ -111,7 +111,7 @@ impl EnforcementBackend for FakeBackend {
             });
         }
         let removal = removal_of(&entry);
-        self.apply_removal(removal)?;
+        self.apply_removal(removal, &entry.plugin)?;
         self.grants.remove(&handle.raw());
         self.stuck_handles.remove(&handle.raw());
         self.revocations.push(handle);
@@ -132,14 +132,19 @@ impl EnforcementBackend for FakeBackend {
         Ok(())
     }
 
-    fn apply_removal(&mut self, removal: UniverseRemoval) -> Result<(), BackendError> {
+    fn apply_removal(
+        &mut self,
+        removal: UniverseRemoval,
+        owner: &PluginId,
+    ) -> Result<(), BackendError> {
         let (class, key) = (removal.class(), removal.key());
         self.state
-            .remove(class, &key)
+            .remove(class, &key, owner)
             .map(|_| ())
             .ok_or_else(|| BackendError::UnknownObject {
                 class: class.as_str(),
                 key,
+                owner: owner.clone(),
             })
     }
 
@@ -166,7 +171,7 @@ fn removal_of(entry: &LedgerEntry) -> UniverseRemoval {
 mod tests {
     use super::*;
     use crate::backend::GrantKind;
-    use crate::universe::{PluginId, UniverseClass};
+    use crate::universe::UniverseClass;
     use std::time::Duration;
 
     fn grant(plugin: &str, capability: Capability) -> Grant {
@@ -198,6 +203,35 @@ mod tests {
                 .as_ref()
                 .map(PluginId::as_str),
             Some("network")
+        );
+    }
+
+    #[test]
+    fn a_revoke_takes_the_object_its_own_grant_created() {
+        let mut backend = FakeBackend::new();
+        backend.grant(grant(
+            "audit",
+            Capability::ProxyMap {
+                host: "api.github.com".to_string(),
+                route: "audit-proxy:8080".to_string(),
+            },
+        ));
+        let deploy = backend.grant(grant(
+            "deploy",
+            Capability::ProxyMap {
+                host: "api.github.com".to_string(),
+                route: "deploy-proxy:9090".to_string(),
+            },
+        ));
+        backend
+            .revoke(deploy.handle, DrainSpec::forcing())
+            .expect("deploy's own grant is revocable");
+        let state = backend.snapshot_os_state();
+        let owners: Vec<&str> = state.objects().map(|o| o.owner.as_str()).collect();
+        assert_eq!(
+            owners,
+            vec!["audit"],
+            "revoking deploy's proxy map must leave audit's standing and take deploy's"
         );
     }
 
@@ -382,18 +416,51 @@ mod tests {
                 .contains(UniverseClass::SessionFile, "session/skills/pr.md")
         );
         backend
-            .apply_removal(UniverseRemoval::RemoveSessionFile {
-                path: "skills/pr.md".to_string(),
-            })
+            .apply_removal(
+                UniverseRemoval::RemoveSessionFile {
+                    path: "skills/pr.md".to_string(),
+                },
+                &PluginId::from("github-pr"),
+            )
             .unwrap();
         assert!(backend.snapshot_os_state().is_empty());
+    }
+
+    #[test]
+    fn a_removal_names_the_asking_plasmid_and_never_claims_the_key_is_free() {
+        let mut backend = FakeBackend::new();
+        backend.plant(OsObject {
+            class: UniverseClass::BrokerPid,
+            key: "broker/1234".to_string(),
+            owner: PluginId::from("audit"),
+        });
+        let held_by_another = backend
+            .apply_removal(
+                UniverseRemoval::KillBroker { pid: 1234 },
+                &PluginId::from("network"),
+            )
+            .unwrap_err();
+        assert_eq!(
+            held_by_another.to_string(),
+            "`network` holds no broker-pid object `broker/1234`",
+            "the error says what is true of the asking plasmid, never that the object is absent"
+        );
+        assert!(
+            backend
+                .snapshot_os_state()
+                .contains(UniverseClass::BrokerPid, "broker/1234"),
+            "a refused removal must leave the other plasmid's object where it was"
+        );
     }
 
     #[test]
     fn removing_an_absent_object_is_a_named_error() {
         let mut backend = FakeBackend::new();
         let err = backend
-            .apply_removal(UniverseRemoval::KillBroker { pid: 1234 })
+            .apply_removal(
+                UniverseRemoval::KillBroker { pid: 1234 },
+                &PluginId::from("network"),
+            )
             .unwrap_err();
         assert!(matches!(
             err,

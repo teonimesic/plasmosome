@@ -181,6 +181,13 @@ fight, and whichever merges second pays for it. `refs:` is the first thing to co
 what an executor must *read*, so it neither proves a collision nor rules one out — read the
 `## Plan` for what the work will actually change.
 
+**Review throughput is the real ceiling, not agent count.** The review budget is repo-wide —
+roughly ten an hour across every PR — so three agents pushing hard exhaust it for everyone, and
+the next PR to land gets a green that reviewed nothing. Count the reviews already spent this hour
+before dispatching a third, and prefer one agent on a large piece of work to three on small ones
+when the window is nearly gone. Four authors dispatched into an exhausted window produce four
+unreviewed merges, not four reviewed ones.
+
 If the queue does not hold three that clear that bar, dispatch what it does hold and say so in the
 report. Do not manufacture overlapping work to reach the number, and name which constraint bound:
 an empty queue and a queue where everything collides with something running need different fixes.

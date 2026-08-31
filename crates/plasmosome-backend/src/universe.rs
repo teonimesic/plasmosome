@@ -83,12 +83,20 @@ impl OsState {
         self.objects.insert(object)
     }
 
-    pub fn remove(&mut self, class: UniverseClass, key: &str) -> Option<OsObject> {
-        let owner = self.owner_of(class, key)?;
+    /// Takes the object `owner` holds at `class` and `key`, if there is one.
+    /// A key may be held by several owners at once; this takes only the named
+    /// owner's, and answers `None` when that owner holds nothing there — even
+    /// where another owner does.
+    pub fn remove(
+        &mut self,
+        class: UniverseClass,
+        key: &str,
+        owner: &PluginId,
+    ) -> Option<OsObject> {
         self.objects.take(&OsObject {
             class,
             key: key.to_string(),
-            owner,
+            owner: owner.clone(),
         })
     }
 
@@ -388,14 +396,64 @@ mod tests {
     fn removal_takes_the_whole_attributed_object() {
         let mut state = OsState::new();
         state.insert(object(UniverseClass::BrokerPid, "broker/4242", "network"));
-        let removed = state.remove(UniverseClass::BrokerPid, "broker/4242");
+        let removed = state.remove(
+            UniverseClass::BrokerPid,
+            "broker/4242",
+            &PluginId::from("network"),
+        );
         assert_eq!(removed.unwrap().owner, PluginId::from("network"));
         assert!(state.is_empty());
         assert!(
             state
-                .remove(UniverseClass::BrokerPid, "broker/4242")
+                .remove(
+                    UniverseClass::BrokerPid,
+                    "broker/4242",
+                    &PluginId::from("network")
+                )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn removal_takes_the_named_owners_object_and_leaves_the_other_holders_alone() {
+        for (asked_for, left_standing) in [("deploy", "audit"), ("audit", "deploy")] {
+            let mut state = OsState::new();
+            for owner in ["audit", "deploy"] {
+                state.insert(object(UniverseClass::ProxyMap, "api.github.com", owner));
+            }
+            let taken = state.remove(
+                UniverseClass::ProxyMap,
+                "api.github.com",
+                &PluginId::from(asked_for),
+            );
+            assert_eq!(
+                taken.map(|o| o.owner),
+                Some(PluginId::from(asked_for)),
+                "a removal must take the owner it named, asked for {asked_for}"
+            );
+            let left: Vec<&str> = state.objects().map(|o| o.owner.as_str()).collect();
+            assert_eq!(
+                left,
+                vec![left_standing],
+                "a removal must leave every other holder of that key standing, asked for {asked_for}"
+            );
+        }
+    }
+
+    #[test]
+    fn removing_a_key_held_only_by_another_owner_takes_nothing() {
+        let mut state = OsState::new();
+        state.insert(object(UniverseClass::ProxyMap, "api.github.com", "audit"));
+        assert!(
+            state
+                .remove(
+                    UniverseClass::ProxyMap,
+                    "api.github.com",
+                    &PluginId::from("deploy")
+                )
+                .is_none()
+        );
+        assert_eq!(state.len(), 1);
     }
 
     #[test]

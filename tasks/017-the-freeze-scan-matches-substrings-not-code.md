@@ -189,7 +189,7 @@ left as the record of what was true at the time.
 ### Gate
 
 ```text
-cargo test --workspace                                  237 passed, 0 failed; 25 tests in
+cargo test --workspace                                  258 passed, 0 failed; 25 tests in
                                                         shared_memory_reads_rust.rs
 cargo clippy --workspace --all-targets -- -D warnings   clean
 cargo fmt --all -- --check                              clean
