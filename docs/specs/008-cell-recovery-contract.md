@@ -2,7 +2,7 @@
 id: 008
 title: The per-cell ledger path, the durable ledger generation, and the quarantine report
 status: draft
-intents: []
+intents: [003]
 ---
 
 ## Behavior
@@ -356,6 +356,12 @@ rather than vanishing into an adopted history.
 
 ## Out of scope
 
+- **Bringing the cells back.** Everything this spec produces is an account: `desired`,
+  `expected`, `drift`, `unmatched`, `quarantined`. Nothing in it re-establishes a
+  capability or re-owns a cell, and no caller of the `ReconcilePlan` it feeds exists yet.
+  Intent 003 asks for the cells that were running to be brought back; this spec is the
+  durable record that makes doing so possible, not the doing of it. Whether it is extended
+  or a later spec covers the remainder is open.
 - Surfacing quarantine over the control protocol. Spec 001's cell states and error codes
   are closed sets with no slot for it; adding one is a change to that contract and needs
   its own spec.
