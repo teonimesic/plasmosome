@@ -86,9 +86,9 @@ the line, is what keeps the two id namespaces apart and stops a search matching 
 
 Copy the skeleton, do not retype it:
 
-```
+```shell
 cp docs/templates/task.md tasks/004-my-slug.md
-```
+```shell
 
 `docs/templates/` holds `intent.md`, `spec.md`, `task.md` and `decision.md`. Fields marked
 optional, and sections you have nothing to put in, are left blank. A blank section is better than
@@ -139,7 +139,7 @@ out instead.
 
 ## Finding things
 
-```
+```shell
 grep -l '^status: todo' tasks/*.md
 grep -l '^status: planned' tasks/*.md
 grep -l '^priority: 1' tasks/*.md
@@ -147,7 +147,7 @@ grep -l '^specs:.*\b001\b' tasks/*.md
 grep -l '^intents:.*\b003\b' docs/specs/*.md
 grep -l '^intents:.*\b003\b' tasks/*.md
 grep -h '^title:' /dev/null $(grep -l '^status: todo' tasks/*.md)
-```
+```shell
 
 ## Checking whether a task is really done
 
@@ -158,9 +158,9 @@ that way.
 
 Ask GitHub instead:
 
-```
+```shell
 gh pr view <number> --json state,mergeCommit
-```
+```shell
 
 `state: MERGED` with a merge commit is the proof. Put that commit hash, or the PR URL, in
 `evidence:`.

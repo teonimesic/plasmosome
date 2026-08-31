@@ -7,5 +7,7 @@ Write one whenever a change settles a question someone will otherwise re-open: h
 works, what a component owns, why the obvious approach was not taken. A decision made in a diff
 and nowhere else gets undone by the next person who has the same idea.
 
-A decision is never edited. When it stops holding, write a new one and mark the old one
-`superseded` — the reasoning that was true at the time is the point of keeping it.
+A decision's reasoning is never edited — the argument that was true at the time is the point of
+keeping it. When one stops holding, write a new one and change exactly one line in the old file:
+its `status` to `superseded`, naming the decision that replaced it. That status line is the only
+part that may change after the file lands.

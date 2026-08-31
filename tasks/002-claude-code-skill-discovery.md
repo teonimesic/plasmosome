@@ -7,9 +7,11 @@ specs: []
 intents: []
 refs: []
 done_when: >-
-  .claude/skills/planning-work, .claude/skills/pr-review and .claude/skills/tasks
-  are committed as symlinks (git mode 120000) pointing at ../../.agents/skills/<name>,
-  a fresh clone resolves all three, and Claude Code lists all three skills.
+  every skill under .agents/skills/ — planning-work, pr-review, tasks and heartbeat —
+  has a committed symlink at .claude/skills/<name> (git mode 120000) pointing at
+  ../../.agents/skills/<name>, a fresh clone resolves all of them, and Claude Code
+  lists all of them. A skill added later without its symlink is the failure this
+  guards against.
 pr:
 evidence:
 ---
