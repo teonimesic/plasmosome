@@ -1,7 +1,7 @@
 ---
 id: 019
 title: ci.yml runs actions from tags anyone upstream can move
-status: todo
+status: in_review
 priority: 2
 specs: []
 intents: []
@@ -9,7 +9,7 @@ refs: [.github/workflows/ci.yml, .github/workflows/audit.yml]
 done_when: >-
   every action in every workflow is pinned, GitHub-authored ones included, to a full commit SHA, and
   a documented way exists to update them together.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/20
 evidence:
 ---
 
@@ -34,5 +34,29 @@ what version it is, and nothing updates them. Dependabot handles pinned actions 
 answer, but adopting it is a decision, not a detail.
 
 ## Plan
+
+**Deliverable:** every `uses:` in every workflow names a full commit SHA, with the version it
+corresponds to beside it, and a documented way to move them forward. Out of scope: changing what
+any workflow does, and adding a new one.
+
+Pin the three in `.github/workflows/ci.yml` — `actions/checkout`, `dtolnay/rust-toolchain`,
+`Swatinem/rust-cache` — to the SHAs their current tags point at today. `audit.yml` is already
+pinned; check it still matches. Put the human-readable version in a trailing comment on each line
+(`# v5`), because a SHA alone tells a reader nothing about what they are running.
+
+`dtolnay/rust-toolchain` needs `toolchain: stable` stated explicitly once pinned: the SHA no
+longer carries what the `@stable` ref implied.
+
+**Then answer the cost, which is the part that makes this stick.** A pinned action never updates
+itself, so without a mechanism this trades a moving target for a stale one. Add
+`.github/dependabot.yml` with the `github-actions` ecosystem on a weekly schedule. Say in the PR
+that this is the tradeoff being accepted: bumps arrive as reviewable pull requests instead of
+silently.
+
+**Verify rather than assume.** Resolve each SHA with `gh api` and show the command output in the
+PR. A SHA copied from memory or a search result is exactly the supply-chain hole this closes.
+
+**Done when:** `done_when` holds for every workflow, both files parse, and the gate in root
+`AGENTS.md` is green.
 
 ## Notes

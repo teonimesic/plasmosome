@@ -1,0 +1,15 @@
+# A pinned action never updates itself. Without this file, pinning every `uses:` to a commit
+# SHA would trade a moving target for a stale one: a published fix would sit upstream with
+# nothing here noticing. Dependabot opens a pull request when a pinned action moves, so a bump
+# is something a person reads and the `ci` gate runs against, rather than something that
+# happens between two runs with no commit saying so.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
