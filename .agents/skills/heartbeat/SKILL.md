@@ -96,7 +96,7 @@ Then read the chain the other way, for work nothing asked for:
 grep -l '^specs: \[\]' tasks/*.md
 grep -l '^intents: \[\]' tasks/*.md
 grep -l '^intents: \[\]' docs/specs/*.md
-grep -l '^status: draft' docs/intents/*.md
+grep -l '^status: draft$' docs/intents/*.md
 ```
 
 These are not planner dispatches. A task naming no spec may not be planned and so may not be
@@ -113,7 +113,7 @@ so say out loud which of them a person still has to see. A draft already answere
 non-blank `outcome:` and is not one of them:
 
 ```shell
-grep -l '^status: draft' docs/intents/*.md | while read f; do
+grep -l '^status: draft$' docs/intents/*.md | while read f; do
   grep -q '^outcome: .' "$f" || echo "$f"
 done
 ```
@@ -123,7 +123,7 @@ finds a *violation*. This one reads two layers against each other, and it is the
 that can catch the gate being broken rather than unmet:
 
 ```shell
-for f in $(grep -l '^status: accepted' docs/specs/*.md); do
+for f in $(grep -l '^status: accepted$' docs/specs/*.md); do
   ids=$(sed -n 's/^intents: \[\(.*\)\]/\1/p' "$f" | tr -d ' ' | tr ',' ' ')
   if [ -z "$ids" ]; then
     [ "$f" = "docs/specs/001-control-protocol.md" ] || echo "$f: accepted, names no intent"
@@ -132,7 +132,7 @@ for f in $(grep -l '^status: accepted' docs/specs/*.md); do
   for i in $ids; do
     n=$(grep -l "^id: $i\$" docs/intents/*.md 2>/dev/null | head -1)
     [ -n "$n" ] || { echo "$f: names intent $i, which does not exist"; continue; }
-    grep -q '^status: approved' "$n" || echo "$f: names intent $i, which is not approved"
+    grep -q '^status: approved$' "$n" || echo "$f: names intent $i, which is not approved"
   done
 done
 ```

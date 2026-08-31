@@ -89,9 +89,10 @@ is harder to write untruthfully there, only because it is read.
 
 **The residual risk is now a stated price rather than a gap, and a smaller one than the instruction
 alone would leave.** An agent that lies about carrying an approval can start a chain of specs and
-tasks under a goal the owner never asked for. But the lie has to survive a pull request the owner
-never took out of draft, which anyone can see and which the owner is the one watching for. Where it
-does survive, it runs until the owner reads their own folder — bounded, because the specs and tasks
+tasks under a goal the owner never asked for. The draft state does not stop that — an agent can
+mark its own pull request ready, so the waiting state makes the claim **visible**, never blocked.
+What it buys is that the approval arrives somewhere the owner is already watching. Where the lie
+survives that, it runs until the owner reads their own folder — bounded, because the specs and tasks
 beneath it are each a pull request, and detectable by the one person who can tell. The
 pull-request record does not narrow it either: the same actor writes the file line, the commit and
 the review.

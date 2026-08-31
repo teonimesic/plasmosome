@@ -329,7 +329,7 @@ grep -l '^intents:.*\b003\b' tasks/*.md
 grep -l '^specs: \[\]' tasks/*.md
 grep -l '^intents: \[\]' tasks/*.md
 grep -l '^intents: \[\]' docs/specs/*.md
-grep -l '^status: draft' docs/intents/*.md
+grep -l '^status: draft$' docs/intents/*.md
 grep -h '^title:' /dev/null $(grep -l '^status: todo' tasks/*.md)
 ```
 
@@ -340,7 +340,7 @@ somebody asked, and a draft nobody has been shown is the same as one nobody wrot
 settled carry a non-blank `outcome:` and are not waiting on anybody:
 
 ```shell
-grep -l '^status: draft' docs/intents/*.md | while read f; do
+grep -l '^status: draft$' docs/intents/*.md | while read f; do
   grep -q '^outcome: .' "$f" || echo "$f"
 done
 ```

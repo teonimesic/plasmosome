@@ -9,7 +9,9 @@ that intent reads `status: approved`. Writing it before then is fine and is mean
 `accepted` keeps its place whether or not that field is filled in.
 
 A spec's status flips to `accepted` in the last commit before its pull request merges, so `main`
-never holds a spec whose status lies. The planner who wrote the spec is who accepts it; what that
+never holds a spec whose status lies — **unless the intent it names is still `draft`, in which case
+it merges as a `draft` spec and a later one-line pull request flips it once that intent is
+approved.** The planner who wrote the spec is who accepts it; what that
 flip waits on is the owner approving the intent above it, not a second reading of the spec. No task
 may be claimed until it names a spec and that spec is `accepted`, which is how one approval reaches
 every task under it without the owner reading a single one.
