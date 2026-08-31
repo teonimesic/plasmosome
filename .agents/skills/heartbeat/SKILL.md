@@ -173,8 +173,10 @@ each preserved here as possibly-live and then left out of the count, which would
 agent on top of work nobody could see. You can tell this is still happening if a heartbeat ever
 dispatches while a row sits in `SETTLE`.
 
-**6. Agents running.** Dispatching is the one thing only the orchestrator does, so it is the
-constraint on how much work is ever in flight. **Three running in parallel is the standing goal.**
+**6. Agents running.** Dispatching **work** is the one thing only the orchestrator does, so it is
+the constraint on how much work is ever in flight. An author spawning its own independent reviewer
+is not that — a reviewer owns no task, no worktree row and no review budget, so it never counts
+here. **Three running in parallel is the standing goal.**
 
 **Count step 5's `LIVE` bucket.** Nothing else: do not re-list the worktrees, do not count task
 files, and do not re-derive liveness from the states — step 5 already decided that, and deciding it

@@ -329,8 +329,8 @@ Size is lines changed, excluding lockfiles and generated files.
 | 100–1000 | **2** |
 | > 1000 | **3** |
 
-The independent reviewer runs at least once per PR. Size never adds a pass; a rewrite beyond what
-the review asked for does — step 6.
+The independent reviewer is separate from the rounds above and runs at least once per PR. Diff
+size never adds an independent pass; a rewrite beyond what that review asked for does — step 6.
 
 ## Review the neighbourhood, not just the diff
 
