@@ -108,10 +108,12 @@ where the question is "is this right", which a reviewer answers on the pull requ
 ### What predates the rule
 
 `main` already holds tasks and specs that name nothing above them. They were filed correctly under
-the rule in force at the time, and **this one does not reach back**: they stay valid, they stay
-merged, and nothing about them has to be fixed before a change touching them can land. What the
-gates bind is what may be **started** — an unmapped task cannot be planned, so it waits rather than
-counting as a defect. The greps under "Finding things" are that waiting list, not a list of faults.
+the rule in force at the time, and **this one does not reach back**: they stay valid and they stay
+merged. **Editing such a file is not gated on backfilling it** — a status flip, a correction, a
+rewritten `## Why` can land as it stands, and a change elsewhere does not stall because a task file
+it touches is unmapped. What *is* gated is the work the task describes: an unmapped task cannot be
+planned, so it waits rather than counting as a defect. The greps under "Finding things" are that
+waiting list, not a list of faults.
 
 Two shapes that look like breakage and are not. An **accepted spec with an empty `intents:`** keeps
 its place; only a spec being written has to name one. And a **task whose chain closes one layer up**
@@ -127,9 +129,13 @@ is not a prompt to write an intent that would make it wanted. An intent written 
 already filed turns the owner's gate into a rubber stamp, and that gate is the only thing between
 the queue and everything anybody has ever noticed.
 
-There are two honest endings for such a task. Put the question to the owner in your own words and
-let them say whether an intent covers it. Or drop it, and write down why. Filing it and letting it
-wait is neither.
+There are two honest endings for a task you are filing **now**. Put the question to the owner in
+your own words and let them say whether an intent covers it. Or drop it, and write down why. Filing
+it and letting it wait is neither, and it is how a queue fills with work nobody chose.
+
+The legacy files above are not this. They are already filed, and mapping or dropping them is the
+backfill rather than a fresh filing — which is why they may sit on the waiting list while a new one
+may not be put there.
 
 ### A review finding that maps to nothing
 
