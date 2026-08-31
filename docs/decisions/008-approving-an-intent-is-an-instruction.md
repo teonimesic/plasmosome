@@ -60,6 +60,13 @@ risk justifies.
 different place, and it would put every intent — drafts included — behind a second actor, which
 defeats the reason drafts were allowed at all.
 
+**Recording provenance in the file — `approved_by:`, `relayed_by:`.** It makes the claim specific
+without making it checkable: an agent willing to write `status: approved` writes a name under it
+just as easily, and no search, hook or reviewer gets stronger for it. Every intent would pay
+ceremony for a more detailed version of the same untruth. Asking for the provenance in the pull
+request instead costs one sentence and puts it where a reviewer is already reading — not because it
+is harder to write untruthfully there, only because it is read.
+
 ## Consequences
 
 **The residual risk is now a stated price rather than a gap.** An agent that lies about carrying an

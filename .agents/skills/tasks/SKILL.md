@@ -91,14 +91,9 @@ Both gates are on what may be **started**, not on what may be written down:
   commitment, not thought.
 
 The two layers work the same way because their statuses mean the same thing. `draft` is a proposal
-on the record; `approved` and `accepted` are what may be built on. **An intent's `status:` is
-`draft` or `approved`, and approval originates with the owner** — an agent may draft one, may
-transcribe one the owner dictates word for word, and may record an approval it is carrying,
-including one relayed to it by another agent rather than heard from the owner directly. What it may
-never do is fake one: originate an approval, read one into silence, or approve its own draft on its
-own judgement. **The line is origin, not identity** — never who typed it, always whether the owner
-actually approved it. Nothing mechanical separates a relayed approval from an invented one, so
-`docs/intents/README.md` says what carries the weight instead.
+on the record; `approved` and `accepted` are what may be built on. Who may move an intent to
+`approved` — the owner, relayed or direct, never an agent on its own judgement — is stated in
+`AGENTS.md` and in `docs/intents/README.md`, and not restated here.
 
 **Why the owner's gate sits at approval and not somewhere cheaper.** An approved intent may spin up
 a great many specs, and each of those spawns tasks. Approval is the point where a single decision
@@ -106,9 +101,9 @@ multiplies into a lot of work, so it is the point a person has to hold. Drafting
 approving commits a queue. Apply that reasoning to a case not written down here by asking whether
 the step turns one yes into work nobody has counted.
 
-**What working ahead costs.** A draft spec whose intent is later rejected does not survive. That is
-the accepted price of not idling, not a failure by whoever wrote it, and it is why speculative specs
-stay `draft` where they are cheap to throw away.
+**What working ahead costs.** A draft spec whose intent is later refused does not survive. That is
+the price of not idling, not a failure by whoever wrote it, and it is why a speculative spec stays
+`draft`, where it is cheap to throw away.
 
 **The second gate binds a spec being accepted, not one already accepted.** A spec that is already
 `accepted` stays usable, and a task naming it may be planned, whether or not anything above it is
@@ -278,10 +273,10 @@ filler, because filler reads as something that was considered.
 
 A few field values worth stating outright:
 
-- Intent `status:` is `draft` or `approved`. Approval originates with the owner; an agent records
-  one it is carrying and never invents one. Its `outcome:` is
-  blank while the intent is open and non-blank once it is settled, which is what tells a refused
-  draft from a forgotten one.
+- Intent `status:` is `draft` or `approved` — there is no `superseded`, so a withdrawn approval is
+  unrepresentable and nothing has needed it. Approval originates with the owner; an agent records
+  one it is carrying and never invents one. `outcome:` is blank while the intent is open and
+  non-blank once settled, which is what tells a refused draft from a forgotten one.
 - Spec `status:` is `draft`, `accepted` or `superseded`.
 - Task `refs:` is the files the executor must read. `pr:` and `evidence:` stay empty until the
   work reaches review and then merges.
@@ -351,15 +346,13 @@ grep -l '^status: draft' docs/intents/*.md | while read f; do
 done
 ```
 
-**None of these finds a violation.** Every one of them reads a single layer and reports what is
-*missing*, so a file that is well-formed and wrong — an intent an agent approved on its own
-judgement, an accepted spec whose intent is still `draft`, an `intents: [099]` pointing at nothing
-— matches none of them. Two of those three the cross-layer loop in `.agents/skills/heartbeat` step
-4 does catch, by reading the layers against each other. **The first one nothing can catch**, and
-that is structural rather than an oversight: an approval an agent was handed and an approval an
-agent made up are the same line of text. Everything past the loop is the pull request — `main` is
-protected, so a person or a reviewing agent looking at the diff is where these gates are actually
-enforced. Read a clean grep as "nothing is waiting", never as "nothing is wrong".
+**None of these finds a violation.** Each reads one layer and reports what is *missing*, so a file
+that is well-formed and wrong matches none of them. The cross-layer loop in
+`.agents/skills/heartbeat` step 4 catches an accepted spec whose intent is still `draft` and an
+`intents: [099]` pointing at nothing. Nothing catches an intent an agent approved on its own
+judgement, by decision rather than by oversight —
+`docs/decisions/008-approving-an-intent-is-an-instruction.md` says why and what it costs. Read a
+clean grep as "nothing is waiting", never as "nothing is wrong".
 
 ## Checking whether a task is really done
 
@@ -399,9 +392,8 @@ An intent reaches `main` the same way and earlier still, in a PR of its own. App
 one-line edit, `status: draft` to `status: approved`, and it travels through a PR like everything
 else — an agent may carry that edit on the owner's word, whether it heard it directly or had it
 relayed, exactly as it may transcribe the intent itself. It may never originate it. **That PR says
-where the approval came from** — the only place the provenance is recorded, and the reason no field
-in the file tries to. It is read rather than searched; that is its whole advantage, and
-`docs/intents/README.md` says why it is not a stronger one than that.
+where the approval came from**, which is the only place the provenance is recorded and the reason
+no field in the file tries to.
 
 Work whose spec already exists skips step 1 and is one PR, which is what most work should look
 like. Trivial work skips the task as well.

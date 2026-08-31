@@ -377,3 +377,6 @@ missing:
   copy outside the repo; report the observed result either way.
 - A green that was not run.
 - A finding acted on without checking it against the code.
+- An intent moved to `status: approved` in the same change as the work it authorizes, or in a PR
+  that does not say where the owner's approval came from. Nothing mechanical checks either — see
+  `docs/decisions/008-approving-an-intent-is-an-instruction.md`.

@@ -105,13 +105,11 @@ owner, or to recommend dropping it. The specs the third line prints are a weaker
 accepted spec with no intent still works, and the line is there so the backfill stays visible
 rather than to stop anything.
 
-**A draft intent is how you raise the gap, not how you close it.** Writing one is allowed, and it
-is the honest way to put an unmapped task to the owner — a proposal in `docs/intents/` outlives the
-session, which one in a pull request body does not. Approval is the owner's to give, so a draft you
-wrote unblocks nothing until it actually arrives — relayed to you or heard directly, but never
-assumed from a silence. The fourth line is that queue: every draft is a question
-somebody asked, and one the owner has never been shown is the same as one nobody wrote. Say out
-loud which of them a person still has to see. A draft that has already been answered carries a
+**A draft intent is how you raise the gap, not how you close it.** Writing one is the honest way to
+put an unmapped task to the owner, and a proposal in `docs/intents/` outlives the session where one
+in a pull request body does not. It unblocks nothing until the approval actually arrives. The
+fourth line is that queue — a draft the owner has never been shown is the same as one nobody wrote,
+so say out loud which of them a person still has to see. A draft already answered carries a
 non-blank `outcome:` and is not one of them:
 
 ```shell
