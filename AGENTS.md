@@ -35,6 +35,11 @@ arm, the scored outcome, and the verdict. Score behavior, never the presence of 
 without evidence is not rejected; it is not yet decided. See
 [`docs/decisions/001-instruction-rules-measured.md`](docs/decisions/001-instruction-rules-measured.md).
 
+**What that requirement binds.** It binds a rule about **what an agent writes** — those produce
+code, so running the task twice scores them. A rule about **who does what** produces no code to
+score, and the method cannot reach it. Such a rule lands on its reasoning instead, and must name
+the failure it prevents concretely enough that someone can tell whether it stopped happening.
+
 **What earns a place in a skill:** a rule that changes what the next agent does, and will again.
 Not a one-off — a migration you just ran, a path that moved, a bug you just fixed. Those belong
 in the PR and the git log. If it cannot happen twice, it is not a skill.

@@ -163,6 +163,11 @@ If the queue does not hold three that clear that bar, dispatch what it does hold
 report. Do not manufacture overlapping work to reach the number, and name which constraint bound:
 an empty queue and a queue where everything collides with something running need different fixes.
 
+**The failure this prevents, concretely.** One agent running while the queue held unblocked tasks
+touching different files — capacity sitting idle with nothing technical in the way. You can tell
+whether this step is working by whether a heartbeat ever ends with one agent live and two
+dispatchable tasks left untaken.
+
 **7. Pick.** Look at `planned` before `todo`: a `planned` task already has a plan someone wrote,
 so it is ready to hand to an executor, while a `todo` still needs planning. Within each, take the
 lowest `priority:` number, not the newest one — as many as step 6 said you were short.

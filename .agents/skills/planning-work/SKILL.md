@@ -64,6 +64,12 @@ too small to seem worth handing back, and grows from there. You can see the one 
 you cannot see the four that never started. Measured end to end, work reaches `main` more slowly,
 not faster.
 
+**The failure this prevents, concretely.** A PR sat blocked on two unanswered review threads with
+no agent on it, while the orchestrator that would have dispatched one was busy writing a change of
+its own. Nothing was stuck for a technical reason and nothing reported it; a person asked, and that
+is how it surfaced. You can tell whether this rule is working: an open PR with unanswered threads
+and nobody assigned to it should not survive a heartbeat.
+
 ## Handing work over
 
 **The planner's output is a file, not a message.** A plan is written into `tasks/NNN-slug.md`
