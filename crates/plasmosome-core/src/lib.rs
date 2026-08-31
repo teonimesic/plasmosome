@@ -26,7 +26,7 @@ pub mod session_log;
 pub mod state;
 pub mod version;
 
-pub use control::{Controller, Handler, serve_connection};
+pub use control::{Controller, Handler, MAX_LINE_BYTES, serve_connection};
 pub use gatekeeper::Gatekeeper;
 pub use lifecycle::{PluginState, StateError};
 pub use manifest::{ManifestError, PlasmidManifest};

@@ -1,15 +1,27 @@
+#![expect(
+    clippy::result_large_err,
+    reason = "a WireError carries the whole protocol table's structured fields by value; every error path in this module is a reply about to be written, not a hot loop"
+)]
+
 use std::collections::BTreeMap;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
+use std::panic::AssertUnwindSafe;
 use std::time::Instant;
 
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
 use crate::protocol::{
-    CellStatusEntry, ControllerInfo, InstanceState, Request, Response, StatusParams, StatusResult,
-    WireError, null_id,
+    CellStatusEntry, ControllerInfo, ErrorCode, InstanceState, Request, Response, StatusParams,
+    StatusResult, WireError, null_id,
 };
 use crate::state::{CellRecord, ControllerState, InstanceName, PlasmidRecord};
+
+/// The most bytes one request line may carry before its terminating newline.
+///
+/// A connection that sends more than this without a newline is answered
+/// `-32600` once and then closed; nothing past the cap is read.
+pub const MAX_LINE_BYTES: usize = 1 << 20;
 
 /// What serves one verb.
 ///
@@ -17,67 +29,141 @@ use crate::state::{CellRecord, ControllerState, InstanceName, PlasmidRecord};
 /// protocol table names. A method the implementor does not serve is
 /// `WireError::method_not_found`; params that do not parse are
 /// `WireError::invalid_params`.
+///
+/// The connection loop owns `-32700` and `-32600`: only it sees the frame, so
+/// only it may answer about one. An implementor must never return either; one
+/// that does is answered `-32603` in its place and keeps serving. An
+/// implementor that panics is answered `-32603`, and the connection ends.
 pub trait Handler {
-    #[expect(
-        clippy::result_large_err,
-        reason = "a WireError carries the whole protocol table's structured fields by value; every error path here is a reply about to be written, not a hot loop"
-    )]
     fn handle(&mut self, method: &str, params: &Map<String, Value>) -> Result<Value, WireError>;
 }
 
 /// Serve one ndjson connection: read a request per line, write a reply per
 /// line in the same order, flushing each one.
 ///
-/// A line that fails to parse is answered and the conversation continues.
-/// Returns at end of input, or with the first write or read failure.
+/// A line that fails to parse — including one that is not UTF-8 — is answered
+/// and the conversation continues. A line longer than `MAX_LINE_BYTES` is
+/// answered `-32600` under a `null` id and the connection then closes. A
+/// handler panic is answered `-32603`, and the panic then resumes on this
+/// thread. Returns at end of input, or with the first read or write failure.
 pub fn serve_connection<R: BufRead, W: Write, H: Handler>(
-    reader: R,
+    mut reader: R,
     mut writer: W,
     handler: &mut H,
 ) -> std::io::Result<()> {
-    for line in reader.lines() {
-        let response = answer(&line?, handler);
-        let encoded = serde_json::to_string(&response).map_err(std::io::Error::other)?;
-        writer.write_all(encoded.as_bytes())?;
-        writer.write_all(b"\n")?;
-        writer.flush()?;
+    let mut buffer: Vec<u8> = Vec::new();
+    loop {
+        buffer.clear();
+        let taken = (&mut reader)
+            .take(MAX_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut buffer)?;
+        if taken == 0 {
+            return Ok(());
+        }
+        if !buffer.ends_with(b"\n") && buffer.len() > MAX_LINE_BYTES {
+            write_reply(
+                &mut writer,
+                &Response::Failure {
+                    id: null_id(),
+                    error: WireError::line_too_long(MAX_LINE_BYTES),
+                },
+            )?;
+            return Ok(());
+        }
+        if buffer.last() == Some(&b'\n') {
+            buffer.pop();
+        }
+        if buffer.last() == Some(&b'\r') {
+            buffer.pop();
+        }
+        let Ok(line) = std::str::from_utf8(&buffer) else {
+            write_reply(
+                &mut writer,
+                &Response::Failure {
+                    id: null_id(),
+                    error: WireError::parse_error(),
+                },
+            )?;
+            continue;
+        };
+        let answered = answer(line, handler);
+        write_reply(&mut writer, &answered.response)?;
+        if let Some(payload) = answered.panic {
+            std::panic::resume_unwind(payload);
+        }
     }
-    Ok(())
 }
 
-fn answer<H: Handler>(line: &str, handler: &mut H) -> Response {
+fn write_reply<W: Write>(writer: &mut W, response: &Response) -> std::io::Result<()> {
+    let encoded = serde_json::to_string(response).map_err(std::io::Error::other)?;
+    writer.write_all(encoded.as_bytes())?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
+
+struct Answered {
+    response: Response,
+    panic: Option<Box<dyn std::any::Any + Send>>,
+}
+
+impl Answered {
+    fn reply(response: Response) -> Answered {
+        Answered {
+            response,
+            panic: None,
+        }
+    }
+}
+
+fn guard_loop_owned_codes(error: WireError) -> WireError {
+    match error.code() {
+        ErrorCode::ParseError | ErrorCode::InvalidRequest => WireError::internal(),
+        _ => error,
+    }
+}
+
+fn answer<H: Handler>(line: &str, handler: &mut H) -> Answered {
     if serde_json::from_str::<&RawValue>(line).is_err() {
-        return Response::Failure {
+        return Answered::reply(Response::Failure {
             id: null_id(),
             error: WireError::parse_error(),
-        };
+        });
     }
     let Ok(fields) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(line) else {
-        return Response::Failure {
+        return Answered::reply(Response::Failure {
             id: null_id(),
             error: WireError::invalid_request(
                 "a control request is a JSON object with `id`, `method` and `params`".to_string(),
             ),
-        };
+        });
     };
     let id = fields.get("id").cloned().unwrap_or_else(null_id);
     let request = match serde_json::from_str::<Request>(line) {
         Ok(request) => request,
         Err(error) => {
-            return Response::Failure {
+            return Answered::reply(Response::Failure {
                 id,
                 error: WireError::invalid_request(error.to_string()),
-            };
+            });
         }
     };
-    match handler.handle(&request.method, &request.params) {
-        Ok(result) => Response::Success {
+    match std::panic::catch_unwind(AssertUnwindSafe(|| {
+        handler.handle(&request.method, &request.params)
+    })) {
+        Ok(Ok(result)) => Answered::reply(Response::Success {
             id: request.id,
             result,
-        },
-        Err(error) => Response::Failure {
+        }),
+        Ok(Err(error)) => Answered::reply(Response::Failure {
             id: request.id,
-            error,
+            error: guard_loop_owned_codes(error),
+        }),
+        Err(payload) => Answered {
+            response: Response::Failure {
+                id: request.id,
+                error: WireError::internal(),
+            },
+            panic: Some(payload),
         },
     }
 }
@@ -165,6 +251,7 @@ mod tests {
     use std::io::{BufReader, Read};
     use std::net::Shutdown;
     use std::os::unix::net::{UnixListener, UnixStream};
+    use std::panic::AssertUnwindSafe;
     use std::thread;
 
     struct Echo;
@@ -182,9 +269,40 @@ mod tests {
         }
     }
 
-    fn reply_lines<H: Handler>(script: &str, expected: usize, handler: &mut H) -> Vec<String> {
+    struct Panicking;
+
+    impl Handler for Panicking {
+        fn handle(
+            &mut self,
+            method: &str,
+            params: &Map<String, Value>,
+        ) -> Result<Value, WireError> {
+            assert_ne!(
+                method, "boom",
+                "the handler for `boom` fails while answering"
+            );
+            Ok(Value::Object(params.clone()))
+        }
+    }
+
+    struct Lying;
+
+    impl Handler for Lying {
+        fn handle(
+            &mut self,
+            method: &str,
+            params: &Map<String, Value>,
+        ) -> Result<Value, WireError> {
+            if method == "lie" {
+                return Err(WireError::parse_error());
+            }
+            Ok(Value::Object(params.clone()))
+        }
+    }
+
+    fn reply_lines_of<H: Handler>(script: &[u8], expected: usize, handler: &mut H) -> Vec<String> {
         let mut written: Vec<u8> = Vec::new();
-        serve_connection(script.as_bytes(), &mut written, handler)
+        serve_connection(script, &mut written, handler)
             .expect("the loop serves the scripted lines to a writer that cannot fail");
         let replies = String::from_utf8(written).expect("every reply is utf-8");
         let lines: Vec<String> = replies.lines().map(str::to_string).collect();
@@ -197,14 +315,30 @@ mod tests {
         lines
     }
 
-    fn converse<H: Handler>(script: &str, expected: usize, handler: &mut H) -> Vec<Value> {
-        reply_lines(script, expected, handler)
+    fn reply_lines<H: Handler>(script: &str, expected: usize, handler: &mut H) -> Vec<String> {
+        reply_lines_of(script.as_bytes(), expected, handler)
+    }
+
+    fn parse_replies(lines: &[String]) -> Vec<Value> {
+        lines
             .iter()
             .map(|line| {
                 serde_json::from_str::<Value>(line)
                     .unwrap_or_else(|error| panic!("reply `{line}` is not one JSON line: {error}"))
             })
             .collect()
+    }
+
+    fn converse_of<H: Handler>(script: &[u8], expected: usize, handler: &mut H) -> Vec<Value> {
+        parse_replies(&reply_lines_of(script, expected, handler))
+    }
+
+    fn converse<H: Handler>(script: &str, expected: usize, handler: &mut H) -> Vec<Value> {
+        converse_of(script.as_bytes(), expected, handler)
+    }
+
+    fn echoed(fields: &str) -> Value {
+        serde_json::from_str::<Value>(fields).expect("the expected echo parses")
     }
 
     fn id_token(line: &str) -> String {
@@ -538,6 +672,198 @@ mod tests {
                 replies[0]
             );
         }
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_is_answered_parse_error_and_the_loop_keeps_serving() {
+        let mut script: Vec<u8> = Vec::new();
+        script.extend_from_slice(b"{\"id\":1,\"method\":\"echo\",\"params\":{}}\n");
+        script.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
+        script.push(b'\n');
+        script
+            .extend_from_slice(b"{\"id\":3,\"method\":\"echo\",\"params\":{\"still\":\"here\"}}\n");
+        let replies = converse_of(&script, 3, &mut Echo);
+        assert_eq!(
+            code_of(&replies[1]),
+            ErrorCode::ParseError.as_i64(),
+            "JSON is UTF-8, so bytes that are not text are not JSON: {}",
+            replies[1]
+        );
+        assert_eq!(
+            replies[1].get("id"),
+            Some(&Value::Null),
+            "an id read out of bytes the loop refused to trust is not an id: {}",
+            replies[1]
+        );
+        assert_eq!(
+            replies[2].get("result"),
+            Some(&echoed("{\"still\":\"here\"}")),
+            "the request after a non-text line is served: {}",
+            replies[2]
+        );
+    }
+
+    #[test]
+    fn a_line_past_the_cap_is_refused_and_the_connection_ends() {
+        let mut script: Vec<u8> = vec![b'a'; MAX_LINE_BYTES + 1];
+        script.push(b'\n');
+        script.extend_from_slice(b"{\"id\":2,\"method\":\"echo\",\"params\":{}}\n");
+        let replies = converse_of(&script, 1, &mut Echo);
+        assert_eq!(
+            code_of(&replies[0]),
+            ErrorCode::InvalidRequest.as_i64(),
+            "a line past the cap is refused, not parsed: {}",
+            replies[0]
+        );
+        assert_eq!(
+            replies[0].get("id"),
+            Some(&Value::Null),
+            "the loop never read an envelope to take an id from: {}",
+            replies[0]
+        );
+    }
+
+    #[test]
+    fn a_line_exactly_at_the_cap_is_served() {
+        let request = "{\"id\":1,\"method\":\"echo\",\"params\":{}}";
+        let mut line = request.to_string();
+        line.push_str(&" ".repeat(MAX_LINE_BYTES - request.len()));
+        assert_eq!(
+            line.len(),
+            MAX_LINE_BYTES,
+            "the test line is exactly the cap, or it proves nothing about the boundary"
+        );
+        let mut script = line.into_bytes();
+        script.push(b'\n');
+        let replies = converse_of(&script, 1, &mut Echo);
+        assert_eq!(
+            replies[0].get("result"),
+            Some(&echoed("{}")),
+            "a line of exactly the cap fits under it: {}",
+            replies[0]
+        );
+    }
+
+    #[test]
+    fn a_final_line_without_a_newline_is_still_answered() {
+        let script = concat!(
+            "{\"id\":1,\"method\":\"echo\",\"params\":{}}\n",
+            "{\"id\":2,\"method\":\"echo\",\"params\":{\"last\":true}}",
+        );
+        let replies = converse(script, 2, &mut Echo);
+        assert_eq!(
+            replies[1].get("result"),
+            Some(&echoed("{\"last\":true}")),
+            "a client that hangs up without a trailing newline is still answered: {}",
+            replies[1]
+        );
+    }
+
+    #[test]
+    fn a_panicking_handler_is_answered_internal_before_the_panic_resumes() {
+        let script = concat!(
+            "{\"id\":1,\"method\":\"boom\",\"params\":{}}\n",
+            "{\"id\":2,\"method\":\"echo\",\"params\":{}}\n",
+        );
+        let mut written: Vec<u8> = Vec::new();
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            serve_connection(script.as_bytes(), &mut written, &mut Panicking)
+        }));
+        assert!(
+            outcome.is_err(),
+            "the panic resumes, so the process above the connection still sees it"
+        );
+        let replies = String::from_utf8(written).expect("every reply is utf-8");
+        let lines: Vec<String> = replies.lines().map(str::to_string).collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "the panicking request is answered and nothing after it is served: {lines:?}"
+        );
+        let reply = parse_replies(&lines).remove(0);
+        assert_eq!(
+            code_of(&reply),
+            ErrorCode::Internal.as_i64(),
+            "a handler that failed while answering is the controller failing: {reply}"
+        );
+        assert_eq!(
+            reply.get("id"),
+            Some(&Value::from(1)),
+            "the answer carries the id of the request that caused it: {reply}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_handler_still_answers_the_client_over_a_real_socket() {
+        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let socket = directory.path().join("control.uds");
+        let listener =
+            UnixListener::bind(&socket).expect("the controller binds its control socket");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener
+                .accept()
+                .expect("the controller accepts its one client");
+            let reader = BufReader::new(
+                stream
+                    .try_clone()
+                    .expect("the connection clones for reading"),
+            );
+            serve_connection(reader, stream, &mut Panicking)
+        });
+
+        let mut client = UnixStream::connect(&socket).expect("the client reaches the socket");
+        client
+            .write_all(b"{\"id\":1,\"method\":\"boom\",\"params\":{}}\n")
+            .expect("the client writes its request line");
+        client.flush().expect("the client flushes its request");
+        let mut answered = String::new();
+        BufReader::new(client.try_clone().expect("the client clones for reading"))
+            .read_to_string(&mut answered)
+            .expect("the client reads until the controller hangs up");
+
+        let lines: Vec<String> = answered.lines().map(str::to_string).collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "the client reads a whole reply line and then end of input: {lines:?}"
+        );
+        let reply = parse_replies(&lines).remove(0);
+        assert_eq!(
+            code_of(&reply),
+            ErrorCode::Internal.as_i64(),
+            "the client is answered rather than left with a dead socket: {reply}"
+        );
+        assert!(
+            server.join().is_err(),
+            "the panic resumes on the serving thread, so whoever spawned it still owns the failure"
+        );
+    }
+
+    #[test]
+    fn a_handler_returning_a_loop_owned_code_is_answered_internal_and_the_loop_keeps_serving() {
+        let script = concat!(
+            "{\"id\":1,\"method\":\"lie\",\"params\":{}}\n",
+            "{\"id\":2,\"method\":\"echo\",\"params\":{\"still\":\"here\"}}\n",
+        );
+        let replies = converse(script, 2, &mut Lying);
+        assert_eq!(
+            code_of(&replies[0]),
+            ErrorCode::Internal.as_i64(),
+            "only the loop saw the frame, so only the loop may answer about it: {}",
+            replies[0]
+        );
+        assert_eq!(
+            replies[0].get("id"),
+            Some(&Value::from(1)),
+            "the replacement answers the request that was asked: {}",
+            replies[0]
+        );
+        assert_eq!(
+            replies[1].get("result"),
+            Some(&echoed("{\"still\":\"here\"}")),
+            "a handler that returned normally is wrong about the protocol, not broken: {}",
+            replies[1]
+        );
     }
 
     #[test]

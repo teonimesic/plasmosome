@@ -1,7 +1,7 @@
 ---
 id: 016
 title: The control loop needs a daemon to own its edges
-status: planned
+status: in_progress
 priority: 2
 specs: [001]
 intents: []
@@ -376,3 +376,198 @@ STOP when done. Do not start the daemon binary, the accept loop, or any new verb
 
 ## Notes
 
+
+### The `-32603` test edit, sequenced first, passed before and after
+
+Decision 3's first step — swapping `-32603` for `-32604` on the unknown side of
+`an_unknown_error_code_does_not_deserialize` — passed against the pre-task code, exactly as the
+plan predicted, since `-32604` is outside the table either way:
+
+```text
+test protocol::tests::an_unknown_error_code_does_not_deserialize ... ok
+```
+
+The other half of that edit — asserting `-32603` reads back as `ErrorCode::Internal` — cannot be
+written before the variant exists, so it does not compile rather than failing. **Six of the nine
+tests in the plan's table could be seen red, not seven.** Two are marked *(passes before)* by the
+plan; this is the third that cannot start red, and mutation 9 below is what holds it honest.
+
+### Six tests seen failing before the loop was rewritten
+
+With `MAX_LINE_BYTES`, `ErrorCode::Internal`, `WireError::internal()` and
+`WireError::line_too_long()` in place as stubs, and the loop still `reader.lines()`:
+
+```text
+test result: FAILED. 77 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out
+
+failures:
+    control::tests::a_handler_returning_a_loop_owned_code_is_answered_internal_and_the_loop_keeps_serving
+    control::tests::a_line_past_the_cap_is_refused_and_the_connection_ends
+    control::tests::a_line_that_is_not_utf8_is_answered_parse_error_and_the_loop_keeps_serving
+    control::tests::a_panicking_handler_is_answered_internal_before_the_panic_resumes
+    control::tests::a_panicking_handler_still_answers_the_client_over_a_real_socket
+    protocol::tests::a_cell_with_no_genome_omits_the_key_in_both_directions
+```
+
+The one that shows the pre-task behaviour most plainly is the non-UTF-8 line: `lines()` turned it
+into a transport failure, so the loop returned an error instead of an answer.
+
+```text
+the loop serves the scripted lines to a writer that cannot fail:
+Error { kind: InvalidData, message: "stream did not contain valid UTF-8" }
+```
+
+```text
+only the loop saw the frame, so only the loop may answer about it:
+{"error":{"code":-32700,"message":"the line is not JSON"},"id":1}
+  left: -32700
+ right: -32603
+```
+
+```text
+the script asked for 1 replies and the loop wrote 2:
+["{\"id\":null,\"error\":{\"code\":-32700,\"message\":\"the line is not JSON\"}}",
+ "{\"id\":2,\"result\":{}}"]
+```
+
+```text
+the panicking request is answered and nothing after it is served: []
+  left: 0
+ right: 1
+```
+
+```text
+a reply field with nothing in it is omitted, never sent as null:
+{"genome":null,"id":"cell-2","plasmids":[],"state":"draining"}
+  left: Some(Null)
+ right: None
+```
+
+`a_line_exactly_at_the_cap_is_served` and `a_final_line_without_a_newline_is_still_answered`
+passed against `lines()` by construction, as the plan said they would. All 83 pass after the
+rewrite.
+
+### The nine mutations, each applied, run, observed, and reverted
+
+**1. Return an `InvalidData` io error from the UTF-8 failure arm** —
+`a_line_that_is_not_utf8_is_answered_parse_error_and_the_loop_keeps_serving`:
+
+```text
+the loop serves the scripted lines to a writer that cannot fail:
+Custom { kind: InvalidData, error: "stream did not contain valid UTF-8" }
+```
+
+**2. Remove the `take` limit so `read_until` is unbounded** —
+`a_line_past_the_cap_is_refused_and_the_connection_ends`:
+
+```text
+the script asked for 1 replies and the loop wrote 2:
+["{\"id\":null,\"error\":{\"code\":-32700,\"message\":\"the line is not JSON\"}}",
+ "{\"id\":2,\"result\":{}}"]
+  left: 2
+ right: 1
+```
+
+**3. Lower the take limit to `MAX_LINE_BYTES`** — `a_line_exactly_at_the_cap_is_served`. The
+off-by-one splits the line in two: the cap-length content is served, then its orphaned newline is
+answered as an empty line.
+
+```text
+the script asked for 1 replies and the loop wrote 2:
+["{\"id\":1,\"result\":{}}",
+ "{\"id\":null,\"error\":{\"code\":-32700,\"message\":\"the line is not JSON\"}}"]
+  left: 2
+ right: 1
+```
+
+**4. Serve only buffers that end in `b'\n'`** — `a_final_line_without_a_newline_is_still_answered`:
+
+```text
+the script asked for 2 replies and the loop wrote 1: ["{\"id\":1,\"result\":{}}"]
+  left: 1
+ right: 2
+```
+
+**5. Delete the `catch_unwind`, call the handler directly** —
+`a_panicking_handler_is_answered_internal_before_the_panic_resumes`:
+
+```text
+the panicking request is answered and nothing after it is served: []
+  left: 0
+ right: 1
+```
+
+**6. `resume_unwind` before writing the reply** —
+`a_panicking_handler_still_answers_the_client_over_a_real_socket`. This is the mutation the
+in-memory test cannot catch: reply-before-close is only observable to a client on the other end
+of a socket.
+
+```text
+the client reads a whole reply line and then end of input: []
+  left: 0
+ right: 1
+```
+
+**7. Delete the guard, return the handler's error unchanged** —
+`a_handler_returning_a_loop_owned_code_is_answered_internal_and_the_loop_keeps_serving`:
+
+```text
+only the loop saw the frame, so only the loop may answer about it:
+{"error":{"code":-32700,"message":"the line is not JSON"},"id":1}
+  left: -32700
+ right: -32603
+```
+
+**8. Remove the `skip_serializing_if` attribute** —
+`a_cell_with_no_genome_omits_the_key_in_both_directions`:
+
+```text
+a reply field with nothing in it is omitted, never sent as null:
+{"genome":null,"id":"cell-2","plasmids":[],"state":"draining"}
+  left: Some(Null)
+ right: None
+```
+
+**9. Remove `-32603` from `ErrorCode::from_i64`** — `an_unknown_error_code_does_not_deserialize`.
+This is the guard that earns the test edit no initial red could:
+
+```text
+-32603 is in the table: Error("-32603 is not a control protocol error code", line: 0, column: 0)
+```
+
+### Where the plan met the compiler
+
+**`result_large_err` fired on the `catch_unwind` closure, as the plan warned.** The closure returns
+the handler's `Result<Value, WireError>`, and the 384-byte `WireError` trips the lint at a second
+site:
+
+```text
+error: the `Err`-variant returned from this closure is very large
+   --> crates/plasmosome-core/src/control.rs:149:53
+    = note: `-D clippy::result-large-err` implied by `-D warnings`
+```
+
+Following the plan's instruction to widen the existing `#[expect]`'s placement rather than add an
+`allow`: the expectation moved off `Handler::handle` to a module-level `#![expect(...)]` at the top
+of `control.rs`, with its reason generalized from "every error path here" to "every error path in
+this module". One expectation, one reason, both sites covered — rather than a second attribute
+repeating the first. Nothing else in the module returns a `Result<_, WireError>`, so the wider
+placement suppresses nothing a narrower pair would not have.
+
+**A byte-script test helper.** `reply_lines` took `&str`, which cannot express a `\xFF` line.
+It now delegates to `reply_lines_of(&[u8], …)`, and `converse` to `converse_of`; every existing
+call site is unchanged. `parse_replies` was split out because the two panic tests need to read the
+writer's bytes themselves — the helpers assert a reply count, and a panic test has to inspect the
+buffer that survived the unwind.
+
+**The in-memory panic test holds the writer across the unwind.** `serve_connection` takes the
+writer by value, so a `Vec<u8>` moved into `catch_unwind` would be lost with the panic. The test
+passes `&mut written` inside `AssertUnwindSafe` and reads the buffer after the catch, which is
+what makes "exactly one reply was written before the panic resumed" observable at all.
+
+### What the daemon unit still inherits
+
+Unchanged from the plan's out-of-scope list, and restated in decision 005 so it is not rediscovered:
+an unterminated line **under** the cap still parks its connection until the client hangs up. The
+cap cannot end it — nothing has exceeded anything — and only a daemon-level read or idle timeout
+can. That, and whether connections are served one at a time or concurrently, stay open.

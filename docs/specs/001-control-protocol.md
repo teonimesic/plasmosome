@@ -31,6 +31,18 @@ Framing is **ndjson**: one JSON request per line, one JSON response per line, in
 per connection. This is the house protocol (`ak-policy` control RPC): the same shape the
 brokers already speak, and the same shape the session log is written in.
 
+**Connection edges.**
+
+- A request line is at most 1,048,576 bytes before its terminating newline. A longer line is
+  answered `-32600` under a `null` id, and the connection then closes.
+- A line that is not UTF-8 is not JSON: it is answered `-32700` under a `null` id, and the
+  conversation continues.
+- A request the controller fails on internally — a crash while answering — is answered
+  `-32603`, and the connection then closes. A reply carrying `-32700` or `-32600` always comes
+  from the connection loop itself, never from a verb implementation.
+- A response field with nothing in it is omitted, never sent as `null`. A cell with no genome
+  has no `genome` key (§3.3, §3.6).
+
 Request envelope:
 
 ```json
@@ -58,7 +70,8 @@ Every error carries a **closed integer `code`** (below), a human `message`, and 
 failure is about *selection* or *resolution* — structured extra fields (`candidates`,
 `resolutions`, …). A client must never parse `message` to branch; the code and fields are the
 contract. Protocol-level failures reuse the JSON-RPC reserve: `-32700` parse error, `-32600`
-invalid request, `-32601` method not found, `-32602` invalid params.
+invalid request, `-32601` method not found, `-32602` invalid params, `-32603` internal error —
+the controller, not the request, failed.
 
 Application error codes (closed set; additions are a contract change):
 
