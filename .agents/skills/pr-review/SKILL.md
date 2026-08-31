@@ -24,21 +24,21 @@ description: How a change reaches main — PR-only workflow, review rounds by di
      `## Acceptance` list of the spec its `specs:` field names, and say line by line which are
      met.
 
-     **Run it on a different model** — `model: "fable"` on the Agent tool. Many agents on the
-     same model, reading the same context, agree with each other reliably and at scale; a review
-     that only confirms the author's reasoning looks like diligence and is not evidence.
-     Same-model reviews here have found real defects, so the point is not that they are
-     worthless — it is that they cannot count as this pass.
+     **Run it on a model different from the author's** — that is the rule, and `model: "fable"`
+     on the Agent tool is how it is met today. Many agents on one model, reading one context,
+     agree with each other reliably, so a review that only confirms the author's reasoning looks
+     like diligence and is not evidence. Same-model reviews here have found real defects; the
+     point is not that they are worthless but that they cannot count as this pass. Note the trap
+     in the letter of it: if your own session runs on Fable, spawning Fable complies and reads
+     nothing the author did not already think.
 
-     **A dispatched agent has no Agent tool and cannot spawn its own reviewer.** Stop and ask the
-     orchestrator to spawn it. Do not skip the step and do not run one yourself on your own
-     model: every independent review this repository has had ran on the author's model, and
-     nothing reported it.
+     **If you cannot spawn one, stop and ask the orchestrator.** An agent dispatched to author a
+     PR usually has no Agent tool. Do not skip the step, and do not review your own PR yourself.
 
-     **The reviewer's output goes on the PR as an issue comment**, not only into chat — what was
-     examined, what was found, what the author changed, and what was declined with the reasoning.
-     Six of roughly twenty PRs did that, and a review that caught two decision records
-     contradicting each other exists nowhere on GitHub.
+     **The output goes on the PR as an issue comment**, not only into chat, opening with
+     `Model: <name>` and saying what was examined, what was found, what the author changed, and
+     what was declined with the reasoning. A review that lives only in a session cannot be cited
+     or audited, and its model cannot be checked.
 4. **Watch for the review rather than waiting for it.** CodeRabbit posts minutes after a push,
    and again after every later push, so an agent that checks once and stops has stalled. Poll
    until the review lands and the thread count stops moving:
@@ -240,12 +240,13 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    `.agents/skills/tasks` says why, under "A review finding that maps to nothing" — the short
    version is that filing was how the queue came to grow with the amount of reviewing rather than
    with what the product needed.
-6. `gh pr merge --squash` once CI is green, the required rounds are done, the head's `CodeRabbit`
-   status reads `Review completed` rather than `Review rate limited`, the review queue has been
-   quiet for five minutes (step 4), and every review thread is resolved — `main` requires
-   conversation resolution, so an open thread is what holds a merge. Resolving a thread by
-   disagreeing with it is allowed; merging on a disagreement you did not write down in the thread
-   is not.
+6. `gh pr merge --squash` once CI is green, the required rounds are done, **the independent
+   review is on the PR as an issue comment naming a model different from yours** (step 3), the
+   head's `CodeRabbit` status reads `Review completed` rather than `Review rate limited`, the
+   review queue has been quiet for five minutes (step 4), and every review thread is resolved —
+   `main` requires conversation resolution, so an open thread is what holds a merge. Resolving
+   a thread by disagreeing with it is allowed; merging on a disagreement you did not write down
+   in the thread is not.
 
    **Merge the commit you validated, not whatever the head is by then.** `gh pr merge` takes the
    current head, so anything that checks a SHA and merges afterwards — a script, or you across two
