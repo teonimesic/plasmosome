@@ -41,6 +41,11 @@ use, and to `cargo`, whose workspace members are explicit paths. They are **not*
 plain `grep -r` or `find` from the repo root: those walk every worktree and report the same file
 many times. Search with `git grep` or `rg`.
 
+**Brief the executor on the problem, not only the plan.** A plan that arrives as a list of files
+and assertions produces a change that works and a description nobody can read, because the person
+who wrote it was never told what it was for. Give them the intent in a sentence, and say the PR
+description has to lead with it — `.agents/skills/pr-review` says how.
+
 Honesty outranks finishing: never report a green you did not run; time-box a blocker, then
 document it and move on rather than weakening a test; if a test passes both before and after the
 fix, say so.

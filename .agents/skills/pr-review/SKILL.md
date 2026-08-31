@@ -56,6 +56,39 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    `main`; the branch tip never does, so "is the branch merged" is not a check that works — see
    `.agents/skills/tasks`.
 
+## Writing the description
+
+**Someone who has never seen this code must finish the first paragraph knowing what problem it
+solves.** Not what you built — what was wrong before, and what a person can do now that they
+could not do yesterday.
+
+Write it in this order, and stop when you run out of things a reader needs:
+
+1. **The problem.** What was missing or broken, in the language of someone using Plasmosome, not
+   someone editing it. If you cannot say it without naming a module, you have not found it yet.
+2. **What changes for them.** The new capability, described from outside. Real examples of what
+   goes in and comes back beat any description of the code that does it.
+3. **What it deliberately does not do.** The next reader's first question is always "so is X done
+   now?" Answer it before they ask, and say where the rest lives.
+4. **Why the shape is what it is** — but only where a reviewer would otherwise be puzzled by a
+   choice, and only in a sentence or two each.
+
+Then, and only then, the evidence: the tests, the mutations you watched fail, the gate. **Put it
+behind a `<details>` fold.** It is proof for a reviewer who wants it, not the body of the message.
+
+Two failure modes, both common here:
+
+- **A description that is all "how".** Fifteen headings of implementation, and a reader who
+  finishes it still cannot say what problem was solved. Test yourself: delete every sentence that
+  names a type, a file or a function. If nothing meaningful is left, start again.
+- **A description that restates the plan.** The task file already says what the plan was. Quoting
+  `done_when` and pasting the test table tells a reviewer nothing they cannot read there, and it
+  buries the one thing only you can write: why this was worth doing.
+
+The intent that started the work is usually two or three files away by the time a PR opens. Go
+back and read it. If the change no longer serves it, that is worth knowing before review, not
+after.
+
 ## Rounds by diff size
 
 A round = reviewed → addressed → (beyond the first) re-triggered with `@coderabbitai review`.

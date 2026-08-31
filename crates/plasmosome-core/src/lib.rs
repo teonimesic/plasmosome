@@ -42,3 +42,4 @@ pub use version::{
     Candidate, ConflictPolicy, Provision, Requirement, SelectionError, Version, VersionReq,
     select_version,
 };
+mod rawprobe;
