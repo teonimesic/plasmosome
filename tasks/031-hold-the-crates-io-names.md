@@ -1,7 +1,7 @@
 ---
 id: 031
 title: Hold the crates.io names plasmosome and plasmid
-status: in_progress
+status: in_review
 priority: 2
 specs: [010]
 intents: [013]
@@ -25,7 +25,7 @@ done_when: >-
   test named `no_workspace_crate_is_publishable_to_a_registry` remains; every
   mutation in spec 010's `## Acceptance` list makes that rule fail and name the
   package or entry it is about; and the gate in the root `AGENTS.md` is green.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/58
 evidence:
 ---
 
