@@ -1,7 +1,7 @@
 ---
 id: 001
 title: The membrane supervises its cell's brokers
-status: in_progress
+status: in_review
 priority: 1
 specs: [001]
 intents: []
@@ -19,7 +19,7 @@ done_when: >-
   once every broker answers its own control socket, reports a broker that stops
   answering rather than staying ready, and leaves no broker process behind when
   the supervisor is dropped — the last proven by a raw waitpid returning ECHILD.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/13
 evidence:
 ---
 
