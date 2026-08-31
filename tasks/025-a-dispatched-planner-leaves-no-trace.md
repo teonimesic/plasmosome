@@ -12,13 +12,17 @@ refs:
     .agents/skills/tasks/SKILL.md,
   ]
 done_when: >-
-  a planner dispatched by step 4 is recorded where the next heartbeat will read
-  it, before that planner has pushed anything. Two heartbeats run back to back
-  over the same draft spec or unspecced intent dispatch one planner between them,
-  not two, and the second says which record told it to skip. The same record, or
-  another named in the same place, is what stops two agents claiming one
-  `NNN` — the numbering check in `.agents/skills/tasks` reads the remote and
-  cannot see a claim that has not been pushed.
+  a planner dispatched by step 4 is recorded before it has pushed anything,
+  somewhere an agent in a different checkout can read — an unpushed branch does
+  not count, which is the whole defect. Two heartbeats run back to back over the
+  same draft spec or unspecced intent dispatch one planner between them, not two,
+  and the second says which record told it to skip. A record whose planner died
+  before it pushed does not silence that item for ever: the written procedure says
+  how such a record is recognised and retried, and says it in a way a third
+  heartbeat can follow. The same record, or another named in the same place, is
+  what stops two agents claiming one `NNN` — the numbering check in
+  `.agents/skills/tasks` reads the remote and cannot see a claim that has not been
+  pushed.
 pr:
 evidence:
 ---

@@ -31,7 +31,7 @@ apart, so a PR can satisfy the whole procedure with its final commit unread.
 
 It has already happened twice, on the merged heads of PR #1 and PR #26:
 
-```
+```shell
 gh api repos/teonimesic/plasmosome/commits/<head-sha>/status \
   --jq '.statuses[] | select(.context=="CodeRabbit") | .description'
 ```

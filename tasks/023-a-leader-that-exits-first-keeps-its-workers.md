@@ -11,11 +11,14 @@ done_when: >-
   drop is the first thing to observe the exit, and when `state()` or
   `wait_terminal` observed it earlier — with a test for each that is watched
   failing against today's code. The path where a *competing reaper* took the exit
-  status is settled either way: the group is signalled and the residual hazard is
-  named, or it is not and the reason is written down with what was measured. A
-  child that cannot put itself in its own process group is not handed back as a
-  running child; that one is checked by reading `spawn`, since `setsid` failure
-  cannot be forced. `VmmChild`'s doc and
+  status ends in one of exactly two states, chosen and written down: the group is
+  signalled, and the reused-pgid hazard below is prevented by a check that the
+  group is still ours — not merely noted; or it is not signalled, and the reason
+  says what was measured. Either way the residual hazard is answered rather than
+  left to "there was nothing to recover". A child whose `setsid` fails does not go
+  on to run the launcher; that is about what the child does, not what `spawn`
+  returns, which cannot know — `spawn` returns as soon as `fork` does, and the
+  `setsid` failure it would report has not happened yet. `VmmChild`'s doc and
   `a_second_reaper_leaves_the_childs_workers_running` say the same thing as the
   code when this is done.
 pr:
@@ -39,7 +42,7 @@ Reproduced against `main` at `faaae5a`, in a copy of `vmm.rs` outside the repo, 
 `ForkAWorker` launcher set to exit after forking and the worker's end of a pipe as the liveness
 witness. Both fail:
 
-```
+```text
 worker 77440 outlived the handle: the leader exited on its own, drop reaped it and
              returned without a group kill
 worker 77593 outlived the handle after state() observed the leader's exit
@@ -65,7 +68,7 @@ asked for the opposite on PR #21, and the reason given for refusing it does not 
 that matters. POSIX reserves a pid while a process group still has that pid as its group id, so
 while there are workers left to recover, the group is still ours. Measured:
 
-```
+```text
 leader=60713 worker=60714 worker_pgid=60713 kill(-60713)=0 worker_died=true
 ```
 
@@ -74,17 +77,24 @@ An independent reviewer reached the same result from the other side: 433,910 seq
 200s swept the pid space four times without ever handing out the reaped leader's pid, while its
 immediate neighbour came round repeatedly.
 
-What survives of the original worry is narrower: once the last worker exits the group's lifetime
-ends, the pid becomes reusable, and a process that then takes it *and* makes itself a group leader
-re-creates the group. In that case there is nothing left to recover anyway. Task 013's notes
+What survives of the original worry is narrower, and it is a hazard in its own right rather than a
+cost of doing nothing: once the last worker exits the group's lifetime ends, the pid becomes
+reusable, and a process that then takes it *and* makes itself a group leader re-creates group `P`.
+A signal sent then reaches a stranger. That there was nothing left to recover does not excuse it —
+the harm is the signal, not the miss — so signalling this path means first establishing that the
+group is still ours, and refusing when that cannot be established. Task 013's notes
 raised this as an open question and asked that the POSIX guarantee be verified before anyone acted
 on it. It is verified. Settling it is part of this task — including the doc and the test, which
 currently assert the leak as intended behaviour.
 
 **`setsid` is unchecked, and it is the same guarantee.** `spawn` calls `libc::setsid()` and
-discards the result. If it ever fails the child stays in the parent's process group, every later
-`kill(-self.pid, ...)` silently finds nothing, and `spawn` still hands back a handle that claims
-to own a group. It is close to unreachable — a freshly forked child is not a group leader unless
+discards the result. If it ever fails the child stays in the parent's process group and every
+later `kill(-self.pid, ...)` silently finds nothing, while the handle claims to own a group. The
+parent cannot be the one to notice: `spawn` returns as soon as `fork` returns, before the child
+has reached `setsid` at all, so making the handle report the failure would need a handshake this
+type does not have and does not need. The child is where it is answerable — it can refuse to run
+the launcher, which the parent then observes as an exited child through the machinery that already
+exists. It is close to unreachable — a freshly forked child is not a group leader unless
 pid reuse landed exactly on the parent's group id — but the failure is silent and the guarantee
 is the one thing this type sells. It belongs here because it is the other half of the same
 sentence: the group has to be established, and it has to be killed.
