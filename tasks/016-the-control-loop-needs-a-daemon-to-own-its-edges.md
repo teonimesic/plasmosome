@@ -498,9 +498,10 @@ the panicking request is answered and nothing after it is served: []
 ```
 
 **6. `resume_unwind` before writing the reply** —
-`a_panicking_handler_still_answers_the_client_over_a_real_socket`. This is the mutation the
-in-memory test cannot catch: reply-before-close is only observable to a client on the other end
-of a socket.
+`a_panicking_handler_still_answers_the_client_over_a_real_socket`. The in-memory panic test
+catches this one too (see the review round below, which corrected an earlier claim here that it
+could not); the socket test still earns its place by proving the bytes reach a real peer before
+EOF and that `join()` carries the panic.
 
 ```text
 the client reads a whole reply line and then end of input: []
@@ -571,3 +572,102 @@ Unchanged from the plan's out-of-scope list, and restated in decision 005 so it 
 an unterminated line **under** the cap still parks its connection until the client hangs up. The
 cap cannot end it — nothing has exceeded anything — and only a daemon-level read or idle timeout
 can. That, and whether connections are served one at a time or concurrently, stay open.
+
+### Independent review round: three blocking findings, all real
+
+An independent reviewer read the code and the spec against the diff, reproduced all nine
+mutations, and ran the gate in its own copy. Every finding below was checked against the code
+before it was acted on.
+
+**1. The panic payload was dropped when the reply write failed.** The plan's mechanism is
+`write_reply(...)?` and then the resume, so a client that hung up between framing its request and
+receiving its answer (EPIPE — the ordinary case for a client that gave up) made `?` return first
+and the payload drop. The caller then got a plain io error and no signal at all that its handler
+is poisoned, while still holding the `&mut H` it passed in. That contradicted three things this
+change wrote down in the same diff: `serve_connection`'s own doc, spec 001 §1, and decision 005's
+"the process above still sees the panic", which is also the entire justification offered for
+`AssertUnwindSafe` being honest.
+
+The write result is now held and the panic resumes before it is propagated:
+
+```rust
+let written = write_reply(&mut writer, &answered.response);
+if let Some(payload) = answered.panic {
+    std::panic::resume_unwind(payload);
+}
+written?;
+```
+
+New test `a_panic_resumes_even_when_the_reply_cannot_be_written` drives the loop with a writer
+that always returns `BrokenPipe`. Against the plan's original ordering it fails:
+
+```text
+a client that hung up before its answer landed must not cost the process above the panic
+```
+
+**2. `-32603` and `-32600` each cover a closing case and a continuing case, with identical
+bytes.** The panic reply and the replaced loop-owned-code reply are the same line; so are the
+over-cap reply and the "JSON but not an envelope" reply. Only one of each pair closes the
+connection, and §1 forbids branching on `message` — so §1's "answered `-32603`, and the
+connection then closes" described a protocol a client cannot actually implement. §1 now states
+the guard case explicitly and says outright that a reply never announces closure: end of input is
+the only signal. A structured marker was not added — the plan specifies no fields for
+`internal()` and `line_too_long()`, and no reserve code has ever carried any.
+
+**3. Decision 005 claimed relayed errors travel verbatim while the guard rewrites them.** §3.6
+relays the membrane's answers verbatim, but `guard_loop_owned_codes` applies to every error a
+handler returns, relayed ones included. Both cannot be true, and `docs/decisions/README.md`
+forbids editing a decision's reasoning after it lands — so it was fixed before landing. The
+record now says which wins: a framing complaint from the membrane's connection is not one about
+this connection, so it becomes `-32603` here, and a verb needing to report the membrane's framing
+failure carries it in its result rather than as its error.
+
+Also corrected in decision 005's Consequences: the over-cap refusal returns `Ok(())`, the same
+value as a clean hangup, which the daemon will want to tell apart; and this crate now requires
+unwinding, since `panic = "abort"` would void the whole panic contract without failing a test.
+Nothing in the workspace sets it today.
+
+### The carriage-return strip is not observable, and the test says only what it can prove
+
+Added `a_crlf_line_is_served_and_its_carriage_return_counts_against_the_cap` after the reviewer
+noted `\r` had no coverage in any position. Deleting the `\r` strip **does not** make it fail:
+
+```text
+test result: ok. 1 passed; 0 failed
+```
+
+serde_json treats a carriage return as whitespace, so a trailing `\r` parses either way — the
+strip is parity with `lines()` and changes nothing a client can see. What the test does guard is
+the *ordering*: the strip happens after the cap is counted, so a `\r` costs a client one byte of
+budget. Moving the strip above the cap check fails it:
+
+```text
+the cap counts every byte before the newline, the carriage return included
+  left: 2
+ right: 1
+```
+
+### Findings not acted on, and why
+
+- **Other `Option` wire fields still serialize as `null`** — `CellRecord::genome` (`state.rs`),
+  `DesiredCell::genome` (`reconciler.rs`), `DetachReport::forced` (`plasmosome-ledger`),
+  `StatusParams::name`. §1's rule is scoped to a *response* field, and none of these is one:
+  two are controller state, one is a request. The rule as written is true of what it covers, and
+  these files are outside the plan's "files to change, and nothing else". Worth its own task.
+- **No socket test for the over-cap path.** The plan's test table assigns a socket to the panic
+  edge only, on the grounds that every other edge is a pure function of bytes in and bytes out.
+  The reviewer's point stands that the over-cap peer is the one actively writing when the server
+  stops reading. Left for the daemon unit, which owns the accept loop that would host it.
+- **The module-level `#![expect(clippy::result_large_err)]` could be two narrower `#[expect]`s.**
+  Demonstrated to work by the reviewer. The plan names the wider placement explicitly, and the
+  cost is a lint suppressed for future functions in one module. Kept as planned; the PR body's
+  claim that nothing else in the module returns `Result<_, WireError>` was wrong, though —
+  `Controller::handle` does, and is exempt only because clippy skips trait-impl methods.
+- **`WireError::line_too_long(cap: usize)` has one possible argument**, and the `default` on
+  `CellStatusEntry::genome` is redundant with derived deserialization. Both are the plan's
+  verbatim signatures, and the plan gives a reason for the second.
+- **The "Connection edges" block sits before the envelope and forward-references its codes.**
+  The plan places it after the framing paragraph, where it is a statement about framing. Kept.
+
+`Panicking` now uses `panic!` rather than `assert_ne!`, so the two panic tests stop printing
+what looks like a broken assertion into every run.

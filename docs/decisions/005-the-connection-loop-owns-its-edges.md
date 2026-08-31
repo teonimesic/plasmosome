@@ -46,6 +46,12 @@ handler that returns one is wrong about the protocol, not broken — it returned
 state is coherent and the conversation continues. `-32601` and `-32602` stay handler-owned: the
 loop cannot know which methods a handler serves.
 
+The guard applies to every error a verb returns, including one the verb read off another wire,
+and that is where §3.6's "relay the membrane's answers verbatim" stops. A framing complaint from
+the membrane's connection is not a framing complaint about this one, so it becomes `-32603`
+here. A verb that needs to report the membrane's own framing failure carries it in its result,
+not as its error.
+
 **A line that is not UTF-8 is answered `-32700` and the conversation continues.** JSON is UTF-8 by
 definition, so "the line is not JSON" is the truthful answer with no new code. The id is `null`:
 an id read out of bytes the loop refused to trust is not an id. The bytes are never decoded
@@ -75,9 +81,10 @@ as an attack, and it withholds the answer the client is owed for a line it frame
 
 **A type split so a handler cannot express the loop-owned codes.** Two error types and a changed
 `Handler` signature, with a `Box::new` at fifteen construction sites — and it would not close the
-hole. The freeze checks hold `WireError` to serde in both directions, so a relayed error (§3.6
-relays the membrane's answers verbatim) can always carry any code. A runtime guard at the single
-point where a handler's answer enters the wire is the whole fix.
+hole. The freeze checks hold `WireError` to serde in both directions, so an error a verb read off
+another wire deserializes into that same type carrying any code in the table: a type a handler
+cannot *construct* with `-32700` is still one it can *parse* one into. A runtime guard at the
+single point where a handler's answer enters the wire is the whole fix.
 
 **`"genome": null`.** A second convention sitting next to `WireError`'s omit-when-absent, for no
 gain a client can use.
@@ -98,6 +105,22 @@ and then nothing holds that connection until it hangs up; the cap cannot end it,
 has exceeded anything. Only a daemon-level read or idle timeout can, and there is none. That, and
 whether connections are served one at a time or concurrently, stay open for the daemon unit on
 purpose — they are properties of a process, and no process exists yet to own them.
+
+**A reply does not say whether the connection is about to close.** Both `-32603` cases — the
+panic and the replaced loop-owned code — put identical bytes on the wire, and so do both
+`-32600` cases; the message is prose a client must not branch on. Closure is observed as end of
+input, and spec 001 §1 now says that rather than letting a client read it off the code. Giving
+the closing cases a structured marker was left out deliberately: like every other reserve code,
+`internal()` and `line_too_long()` carry no fields.
+
+**`serve_connection` returns `Ok(())` for an over-cap refusal** — the same value as a client that
+hung up cleanly. Nothing consumes the difference yet, but the daemon that will wants to log and
+count a connection it closed itself separately from one the peer closed, and that will need a
+return shape carrying which happened.
+
+**This crate now requires unwinding.** `catch_unwind` is what turns a handler panic into an
+answer, so a profile built with `panic = "abort"` voids every promise above without failing a
+single test. Nothing in the workspace sets it today.
 
 The five answers above are now properties of `serve_connection` itself, so every future daemon
 connection inherits them without deciding anything.

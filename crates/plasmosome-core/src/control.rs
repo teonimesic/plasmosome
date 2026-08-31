@@ -45,7 +45,8 @@ pub trait Handler {
 /// and the conversation continues. A line longer than `MAX_LINE_BYTES` is
 /// answered `-32600` under a `null` id and the connection then closes. A
 /// handler panic is answered `-32603`, and the panic then resumes on this
-/// thread. Returns at end of input, or with the first read or write failure.
+/// thread whether or not that reply reached the client. Returns at end of
+/// input, or with the first read or write failure.
 pub fn serve_connection<R: BufRead, W: Write, H: Handler>(
     mut reader: R,
     mut writer: W,
@@ -87,10 +88,11 @@ pub fn serve_connection<R: BufRead, W: Write, H: Handler>(
             continue;
         };
         let answered = answer(line, handler);
-        write_reply(&mut writer, &answered.response)?;
+        let written = write_reply(&mut writer, &answered.response);
         if let Some(payload) = answered.panic {
             std::panic::resume_unwind(payload);
         }
+        written?;
     }
 }
 
@@ -277,11 +279,25 @@ mod tests {
             method: &str,
             params: &Map<String, Value>,
         ) -> Result<Value, WireError> {
-            assert_ne!(
-                method, "boom",
-                "the handler for `boom` fails while answering"
-            );
+            if method == "boom" {
+                panic!("the handler for `boom` fails while answering");
+            }
             Ok(Value::Object(params.clone()))
+        }
+    }
+
+    struct BrokenPipe;
+
+    impl Write for BrokenPipe {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the client hung up",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 
@@ -790,6 +806,52 @@ mod tests {
             reply.get("id"),
             Some(&Value::from(1)),
             "the answer carries the id of the request that caused it: {reply}"
+        );
+    }
+
+    #[test]
+    fn a_panic_resumes_even_when_the_reply_cannot_be_written() {
+        let script = "{\"id\":1,\"method\":\"boom\",\"params\":{}}\n";
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            serve_connection(script.as_bytes(), BrokenPipe, &mut Panicking)
+        }));
+        assert!(
+            outcome.is_err(),
+            "a client that hung up before its answer landed must not cost the process above the panic"
+        );
+    }
+
+    #[test]
+    fn a_crlf_line_is_served_and_its_carriage_return_counts_against_the_cap() {
+        let replies = converse(
+            "{\"id\":1,\"method\":\"echo\",\"params\":{\"crlf\":true}}\r\n",
+            1,
+            &mut Echo,
+        );
+        assert_eq!(
+            replies[0].get("result"),
+            Some(&echoed("{\"crlf\":true}")),
+            "a client that ends its lines with CRLF is served: {}",
+            replies[0]
+        );
+
+        let request = "{\"id\":1,\"method\":\"echo\",\"params\":{}}";
+        let mut line = request.to_string();
+        line.push_str(&" ".repeat(MAX_LINE_BYTES - request.len()));
+        line.push('\r');
+        assert_eq!(
+            line.len(),
+            MAX_LINE_BYTES + 1,
+            "this line is one byte past the cap, and that byte is the carriage return"
+        );
+        let mut script = line.into_bytes();
+        script.push(b'\n');
+        let replies = converse_of(&script, 1, &mut Echo);
+        assert_eq!(
+            code_of(&replies[0]),
+            ErrorCode::InvalidRequest.as_i64(),
+            "the cap counts every byte before the newline, the carriage return included: {}",
+            replies[0]
         );
     }
 
