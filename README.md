@@ -62,3 +62,7 @@ Rust stable, edition 2024. macOS (Apple Silicon) is the first target; Linux foll
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Author
+
+Written by Stefano Benatti ([@teonimesic](https://github.com/teonimesic)).
