@@ -94,9 +94,12 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    twice for the same diff, and in an exhausted window the second payment may not be there to
    make. Get the branch up to date first, then spend the review on the head you will merge.
 
-   A rebase that changes nothing need not cost a review — CodeRabbit re-stamps an existing
-   completed review onto the new head, same Run ID, when the diff is unchanged. **Verify that
-   rather than assuming it**, or a re-stamp becomes another pass that never happened:
+   A rebase that changes nothing may not cost a review: CodeRabbit is said to re-stamp an existing
+   completed review onto the new head when the diff is unchanged. **That is unconfirmed here** —
+   across every review this repository has received, each Run ID appears on exactly one head, so
+   we have never seen it happen. Treat it as something to check, never to count on. If a new head
+   reports `Review completed` without a review of its own, confirm the diff really is unchanged
+   before letting it stand for the old one:
 
    ```shell
    diff <(git diff <old-base>..<old-head>) <(git diff <new-base>..<new-head>)
