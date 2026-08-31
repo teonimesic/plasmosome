@@ -174,19 +174,29 @@ fn testkit_is_dev_only() {
         if member == TESTKIT {
             continue;
         }
-        let manifest = std::fs::read_to_string(
-            workspace_root()
-                .join("crates")
-                .join(&member)
-                .join("Cargo.toml"),
-        )
-        .expect("the crate manifest is readable");
-        for section in ["[dependencies]", "[build-dependencies]"] {
-            assert!(
-                !declared_in(&manifest, section).iter().any(|d| d == TESTKIT),
-                "`{member}` names `{TESTKIT}` in `{section}`; the testkit is test support and reaches a kernel crate only through `[dev-dependencies]`, or it ships"
-            );
-        }
+        let output = cargo()
+            .args([
+                "tree",
+                "--locked",
+                "-p",
+                &member,
+                "--edges",
+                "normal,build",
+                "--prefix",
+                "none",
+            ])
+            .output()
+            .expect("cargo tree runs");
+        assert!(
+            output.status.success(),
+            "cargo tree -p {member} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let graph = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !graph.lines().any(|line| line.starts_with(TESTKIT)),
+            "`{member}` has a non-dev dependency path to `{TESTKIT}`; the testkit is test support and reaches a kernel crate only through `[dev-dependencies]`, or it ships"
+        );
     }
 }
 

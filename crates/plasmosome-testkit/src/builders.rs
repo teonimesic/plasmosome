@@ -33,11 +33,6 @@ impl ManifestBuilder {
         }
     }
 
-    pub fn version(mut self, version: &str) -> ManifestBuilder {
-        self.version = version.to_string();
-        self
-    }
-
     /// Adds a tool the plasmid provides, in the order tools are declared.
     pub fn tool(mut self, tool: &str) -> ManifestBuilder {
         self.tools.push(tool.to_string());
@@ -105,10 +100,6 @@ impl GrantSequence {
     /// Appends a capability fixed for the life of the cell's generation.
     pub fn generation_bound(self, capability: Capability) -> GrantSequence {
         self.push(capability, GrantKind::GenerationBound)
-    }
-
-    pub fn plugin(&self) -> &PluginId {
-        &self.plugin
     }
 
     pub fn into_grants(self) -> Vec<Grant> {

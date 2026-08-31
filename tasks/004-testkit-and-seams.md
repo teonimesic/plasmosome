@@ -118,3 +118,28 @@ STOP when done — do not start the next piece of work.
   fake's mapping is private. `conformance::materialized` states that mapping independently, over
   the public `UniverseOp::object()`. Two copies is the point: the suite is a statement of the
   contract, the fake is one implementation of it.
+- **What proves LIFO replay, exactly.** In `tests/attach_detach_residue.rs` the only thing that
+  proves replay ran last effect first is the ordered-string assertion on `report.replayed`.
+  Nothing structural depends on the order: `OsState` is a flat `BTreeSet<OsObject>` with no
+  containment semantics, so the `Mount` at `/workspace` and the `UdsPath` at
+  `/workspace/run/egressd.uds` are unrelated entries in different classes, and FIFO replay leaves
+  exactly the same empty state. Reversing replay to FIFO fails that one assertion and nothing
+  else; relaxing it to an order-blind comparison makes FIFO pass. The fake does not model path
+  nesting, and a reader of this test should not assume it does.
+- **The conformance suite was pointed at a second backend and found a real bug.**
+  `tests/composite_backend_conformance.rs` runs the same five clauses against `CompositeBackend`
+  over three fake leaves. Two pass; three fail, because `CompositeBackend::grant` overwrites the
+  handle its leaf issued with the composite's own counter and `revoke` forwards that composite
+  handle back down to the leaf. The three are `#[ignore]`d with that defect named. The fix is
+  task 008 and is deliberately not in this PR — no clause was weakened to make them pass.
+- **The suite has gaps of its own**, recorded as task 009: handle uniqueness is not a clause,
+  `apply` and `apply_removal` are never called, and revoking an already-revoked handle is not a
+  clause. A backend with any of those three defects is certified conformant today.
+- **`testkit_is_dev_only` walks `cargo tree`, not the manifest text.** Parsing `[dependencies]`
+  by exact header match missed two forms that produce a genuine non-dev dependency: a
+  `[dependencies.plasmosome-testkit]` table, and a `[target.'cfg(unix)'.dependencies]` section.
+  Both were confirmed to slip past the old rule and to fire the new one. The rule now matches the
+  idiom `controller_crates_have_no_dependency_path_to_a_vmm_or_netstack_crate` already used.
+  `declared_in` stays, because the fork/socketpair rule still uses it.
+- **`ManifestBuilder::version` and `GrantSequence::plugin` were deleted.** Both had zero callers,
+  which the crate's own "builders carry only what a test in this repository uses" rule forbids.

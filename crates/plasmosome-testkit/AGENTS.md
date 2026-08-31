@@ -63,9 +63,16 @@ mocks it in the test.
   to add a clock trait — not before.
 - **Builders carry only what a test in this repository uses.** A helper written for a caller that
   does not exist is a guess about the next test.
+- **The fake does not model path containment.** `OsState` is a flat set of objects in five
+  classes. A mount at `/workspace` and a socket at `/workspace/run/egressd.uds` are unrelated
+  entries; nothing in the fake knows one sits inside the other. So in
+  `tests/attach_detach_residue.rs`, LIFO replay order is proved by the explicit ordered-string
+  assertion on `report.replayed` and by nothing else — replaying FIFO leaves the same empty
+  state and fails only that one assertion. Do not delete or relax it into an order-blind
+  comparison; it is the whole proof.
 
 ## Testing
 
-`cargo test -p plasmosome-testkit`. That runs the conformance suite against `FakeBackend` and the
-cross-crate scenarios. A new backend proves itself by calling the same `conformance::` functions
-with its own constructor.
+`cargo test -p plasmosome-testkit`. That runs the conformance suite against `FakeBackend` and
+`CompositeBackend`, plus the cross-crate scenarios. A new backend proves itself by calling the
+same `conformance::` functions with its own constructor, in its own `tests/` file.

@@ -5,8 +5,13 @@ scenarios that cross crate boundaries.
 
 Two things live here that cannot live anywhere else. The first is the **conformance suite** — the
 behavioral clauses of the `EnforcementBackend` contract, written once as functions generic over
-the trait. `FakeBackend` passes them today; every real backend passes the same functions
-unchanged. That is what makes the fake a model of enforcement rather than a hope about it.
+the trait. Every backend is held to the same functions, unchanged; a backend that fails one is
+the thing that is wrong. That is what makes the fake a model of enforcement rather than a hope
+about it.
+
+`FakeBackend` passes all five. `CompositeBackend` over three fake leaves passes two and fails
+three, because it loses the handle its leaf issued — the failing three are `#[ignore]`d in
+`tests/composite_backend_conformance.rs` and task 008 fixes the backend, not the clauses.
 
 The second is the **integration layer**. A unit test exercises one crate. These exercise core,
 backend and ledger together through their public APIs, with the outside world replaced only at
