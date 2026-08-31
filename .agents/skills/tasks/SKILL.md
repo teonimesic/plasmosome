@@ -57,9 +57,14 @@ Until then, do not create either file. A second copy of the vision would contrad
 | Behavior an existing intent wants and no spec yet describes | that intent | a new one | yes |
 | Anything no existing spec and no existing intent reaches | the owner writes one, or the work does not happen | a new one | yes |
 
-There is no line count in that table any more. Size stopped being the question the moment every
-task needed a spec: a 400-line change to code spec 003 already governs needs no new document, and
-a 30-line change to something nothing describes needs the same two links as a large one. The old
+**The line count that decided whether work needed a spec is gone; the one in the first row is not
+the same rule.** It bounds the trivial exemption from above and does nothing else — it says when a
+change is too small to be worth writing down, never when one is big enough to need a spec. Read the
+other way it would be a bypass, and an unbounded "trivial" is a worse one: without a ceiling, a
+500-line change touching no contract and finished in an afternoon would qualify. Size stopped being
+the question everywhere above that row: a 400-line change to code spec 003 already governs needs no
+new document, and a 30-line change to something nothing describes needs the same two links as a
+large one. The old
 threshold also could not be cited in review: four merged pull requests crossed it and none had a
 spec — two of them (126 and 218 lines) had no task either, and two (103 and 167) had a task and no
 spec. Every change that did name a spec was one the plan had already routed through one, so the

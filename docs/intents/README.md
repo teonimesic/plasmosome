@@ -11,6 +11,7 @@ intent is one the owner asked for — that is the whole of the owner's approval 
 nothing provisional belongs in this folder. A proposal for an intent goes in a pull request body
 or a report, where it is plainly someone asking rather than the owner deciding.
 
-Every spec names one of these in its `intents:` field and may not be planned until it does. Work
-that maps to no intent here is not work that needs an intent written for it; it is work that has
-not been asked for. See `.agents/skills/tasks`.
+Every **new** spec names one of these in its `intents:` field and may not be planned until it
+does. A spec that is already `accepted` stays usable either way, so no finished work is stranded
+behind an intent only the owner can write. Work that maps to no intent here is not work that needs
+an intent written for it; it is work that has not been asked for. See `.agents/skills/tasks`.

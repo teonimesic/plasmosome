@@ -99,9 +99,10 @@ grep -l '^intents: \[\]' docs/specs/*.md
 ```
 
 These are not planner dispatches. A task naming no spec may not be planned and so may not be
-started, and a spec naming no intent may not be planned either — so for each one the answer is to
-map it to something that already exists, to put the question to the owner in your own words, or to
-recommend dropping it. **Never close the gap by writing an intent yourself**; that is the one move
+started — so the answer is to map it to a spec that already exists, to put the question to the
+owner in your own words, or to recommend dropping it. The specs the third line prints are a
+weaker signal: an accepted spec with no intent still works, and the line is there so the backfill
+stays visible rather than to stop anything. **Never close the gap by writing an intent yourself**; that is the one move
 `.agents/skills/tasks` rules out, because an intent written to justify a filed task approves the
 work on the owner's behalf.
 

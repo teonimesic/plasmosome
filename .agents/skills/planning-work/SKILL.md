@@ -74,9 +74,10 @@ and nobody assigned to it should not survive a heartbeat.
 
 **The planner's output is a file, not a message.** A plan is written into `tasks/NNN-slug.md`
 with `status: planned`, which the task cannot reach until its `specs:` field names an accepted
-spec in `docs/specs/` and that spec names an approved intent. Usually both already exist and the
-planner's job is to say which — writing a new spec is the exception, and a new intent is the
-owner's to write or the work does not happen. A brief that exists only in a chat window cannot be
+spec in `docs/specs/`. Where that spec is one you are writing, it names an approved intent first;
+an already-accepted spec is usable as it stands. Usually both already exist and the planner's job
+is to say which — writing a new spec is the exception, and a new intent is the owner's to write or
+the work does not happen. A brief that exists only in a chat window cannot be
 picked up tomorrow by a different agent. See `.agents/skills/tasks` for the formats and the two
 gates.
 

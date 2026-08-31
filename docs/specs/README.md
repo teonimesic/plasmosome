@@ -3,9 +3,10 @@
 One file per spec, named `NNN-slug.md`. A spec says how something must behave, precisely enough
 that a stranger could build it and know when to stop. Copy `docs/templates/spec.md`.
 
-Every spec names an approved intent in its `intents:` field, and may not be planned until it
-does. An intent on `main` is approved; the owner writes it. That is where the owner's gate sits —
-a spec is accepted by the planner who wrote it, not by the owner.
+Every **new** spec names an approved intent in its `intents:` field, and may not be planned until
+it does; a spec already `accepted` keeps its place whether or not that field is filled in. An
+intent on `main` is approved; the owner writes it. That is where the owner's gate sits — a spec is
+accepted by the planner who wrote it, not by the owner.
 
 A spec's status flips to `accepted` in the last commit before its pull request merges, so `main`
 never holds a spec whose status lies. No task may be claimed until the spec it names is
