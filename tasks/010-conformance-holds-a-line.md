@@ -1,7 +1,7 @@
 ---
 id: 010
 title: Close the six backends that still walk through all eight clauses
-status: planned
+status: in_progress
 priority: 1
 specs: [003]
 intents: []

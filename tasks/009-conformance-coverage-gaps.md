@@ -1,7 +1,7 @@
 ---
 id: 009
 title: Close the three gaps a broken backend can walk through the conformance suite
-status: in_review
+status: done
 priority: 2
 specs: [003]
 intents: []
@@ -21,7 +21,9 @@ done_when: >-
   against a backend carrying that defect before it is shown passing against
   FakeBackend.
 pr: https://github.com/teonimesic/plasmosome/pull/10
-evidence:
+evidence: >-
+  squash commit f42c797 on main; the conformance suite carries eight clauses, each
+  shown failing against a backend carrying its defect
 ---
 
 ## Why
