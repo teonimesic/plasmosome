@@ -105,6 +105,21 @@ tasks and a search over specs return the same answer, not as a second gate to cl
 The gate sits where the question is "is this wanted", which only the owner can answer, and not
 where the question is "is this right", which a reviewer answers on the pull request.
 
+### What predates the rule
+
+`main` already holds tasks and specs that name nothing above them. They were filed correctly under
+the rule in force at the time, and **this one does not reach back**: they stay valid, they stay
+merged, and nothing about them has to be fixed before a change touching them can land. What the
+gates bind is what may be **started** — an unmapped task cannot be planned, so it waits rather than
+counting as a defect. The greps under "Finding things" are that waiting list, not a list of faults.
+
+Two shapes that look like breakage and are not. An **accepted spec with an empty `intents:`** keeps
+its place; only a spec being written has to name one. And a **task whose chain closes one layer up**
+is mapped even while its own `intents:` is blank — if the task names a spec and that spec names an
+intent, the link is sound and the blank field is a missing copy, not a missing link. The copy exists
+so a search over tasks and a search over specs return the same answer; filling it in is bookkeeping,
+and the greps print those tasks until someone does.
+
 ### What the gates refuse
 
 **A task that maps to no spec and to no plausible intent is evidence the work is not wanted.** It

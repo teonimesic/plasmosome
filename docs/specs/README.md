@@ -9,8 +9,12 @@ intent on `main` is approved; the owner writes it. That is where the owner's gat
 accepted by the planner who wrote it, not by the owner.
 
 A spec's status flips to `accepted` in the last commit before its pull request merges, so `main`
-never holds a spec whose status lies. No task may be claimed until the spec it names is
-`accepted`, and every task names one. See `.agents/skills/tasks`.
+never holds a spec whose status lies. No task may be claimed until it names a spec and that spec is
+`accepted`.
+
+That binds what is claimed, not what is already here. Tasks and specs filed before this rule name
+nothing above them in some cases, and they are not retroactively wrong — they wait to be mapped
+instead of being started. See `.agents/skills/tasks`.
 
 Numbers are permanent and never reused, so the sequence has gaps where a spec was withdrawn.
 There is no `002`: it was written, then withdrawn and rewritten as
