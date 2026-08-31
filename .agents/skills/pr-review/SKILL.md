@@ -83,11 +83,11 @@ that, cut it — moving prose behind the fold to look shorter cheats the reader.
 
 **Nothing internal in the opening sentence.** No "decision 002", no "spec 001 §3.3", no "task
 018", no rule or section number. Name the thing that is wrong in the world; cite the artifact
-further down, or leave it out. Headings carry the same trap and must read to an outsider — "What
-it settles" settles nothing for someone outside this repository. A PR written after this rule
-landed opened with *"Decision 002 settled that a restarted controller recovers its cells from
-per-cell ledgers, and deliberately left three things unanswered"*. A reader who has not read
-decision 002 learns nothing from the one sentence you can be certain they read.
+further down, or leave it out. Headings carry the same trap and must make sense to an outsider —
+"What it settles" settles nothing for someone outside this repository. The failure reads like this:
+*"Decision 002 settled that a restarted controller recovers its cells from per-cell ledgers, and
+deliberately left three things unanswered"*. Someone who has not read decision 002 learns nothing
+from the one sentence you can be certain they read.
 
 (CodeRabbit appends its own summary to the body. That is not yours and does not count.)
 

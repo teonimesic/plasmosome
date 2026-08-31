@@ -14,15 +14,16 @@ exactly; if the plan contradicts reality, stop and report rather than improvise.
 
 ## Who does the work
 
-The agent that dispatches other agents does not write the change. It plans, dispatches, decides,
-and watches. It does not write product code, tests, PR descriptions, or specs. Planner and
-orchestrator are separate roles too: where a spec is needed, the orchestrator dispatches a planner
-agent, and that agent writes it.
+The agent that dispatches other agents does not write the change. It dispatches, decides, and
+watches. It does not write product code, tests, PR descriptions, specs, or plans. Planner and
+orchestrator are separate roles: where a spec or a plan is needed, the orchestrator dispatches a
+planner agent, and that agent writes it.
 
 **Three roles, and the orchestrator is only one of them.** The **author** owns its PR from opening
-to merged — writes it, answers the findings, resolves the threads, and merges it. Not "hands it
-back once it is clean": merges it. **Reviewers** exist to contradict it and find what is wrong with
-it. That is the whole job; they do not fix and they do not merge. The **orchestrator** dispatches,
+through merging — writes it, answers the findings, resolves the threads, and merges it. Not "hands
+it back once it is clean": merges it. **Reviewers** exist to contradict it and find what is wrong
+with it. That is the whole job; they do not fix and they do not merge. The **orchestrator**
+dispatches,
 watches for work that has stalled, and puts in front of a person anything needing a decision or an
 action only a person can take.
 
@@ -43,20 +44,25 @@ comes next, what is in scope and what is not, which of two designs to take, when
 decision record rather than a spec, and what has to go to a person because no agent may settle it.
 That is the whole job, and it is enough of one.
 
-There is one exception, and it is the only one: reconciling a task file's `status:` and `evidence:`.
-Everything that appears in a diff, every PR thread, and the merge itself belong to the author.
-Anything under `crates/` or `docs/` belongs to a dispatched agent — the decision record included,
-the spec included.
+**The orchestrator writes nothing that ships.** Every file a change touches belongs to a dispatched
+agent — under `crates/`, under `docs/`, under `.agents/`, anywhere — and so do the PR that
+carries it, its threads, and its merge. The decision record included, the spec included.
+
+The one thing it edits itself is a claim in `tasks/` whose own author is gone: the `status:`, the
+`evidence:`, and the `## Notes` line recording what established the truth. An author still closes
+its own task, the way `.agents/skills/pr-review` describes; this is for the abandoned ones nobody
+is left to close. That edit reaches `main` on a branch through a PR like everything else, and the
+orchestrator authors that one — it is the single exception, and stretching it is how the drift
+below starts.
 
 **An orchestrator that merges is the single gate the whole queue waits at.** Every finished PR sits
 there until one agent gets round to it, and nothing a second party brings to the merge was missing:
 the author has the context and the PR already open.
 
-It starts with a review finding too small to seem worth handing back, and grows from there. The
-drift feels faster because you can see the one change moving and cannot see the four that never
-started: dispatching is the one thing only the orchestrator does, so every minute it spends
-authoring is a minute no new work begins. Measured end to end, work reaches `main` more slowly, not
-faster.
+Doing it yourself feels faster, and that is why the drift happens: it starts with a review finding
+too small to seem worth handing back, and grows from there. You can see the one change moving and
+you cannot see the four that never started. Measured end to end, work reaches `main` more slowly,
+not faster.
 
 ## Handing work over
 
