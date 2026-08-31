@@ -11,7 +11,7 @@ composable, so an agent can use it directly.
 Today the kernel is only reachable from code. Everything it can do — bring a cell up, attach a
 plasmid, take one away, ask a cell what it is holding right now — sits behind a library, so the
 only things that exercise it are its own tests. I want to drive it myself from a terminal, and I
-want an agent to drive it without me.
+want an agent to drive it directly.
 
 An agent is a first-class user of this thing, not an afterthought behind an interface built for a
 person. I do not want a human command line now and something bolted on for agents later. One set
@@ -25,7 +25,7 @@ recombine. The same smallness is what lets anyone assemble something the command
 never thought of.
 
 What I get out of it: the kernel stops being something only its author can reach, and becomes
-something an agent operates unattended, one step at a time.
+something an agent operates directly, one step at a time.
 
 ## Outcome
 
