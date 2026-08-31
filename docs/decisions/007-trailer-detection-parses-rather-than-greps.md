@@ -1,5 +1,5 @@
 ---
-id: 004
+id: 007
 title: A commit guard decides trailer-versus-prose with git's parser, never with a text search
 date: 2026-08-31
 status: accepted
