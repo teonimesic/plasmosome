@@ -222,6 +222,7 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    ```shell
    gh pr merge "$PR" --squash --match-head-commit "$HEAD"
    ```
+
 7. Delete the branch and remove your worktree — `git worktree remove .worktrees/<branch>`, then
    `git worktree prune`. A worktree left behind pins a merged branch, so the next person cannot
    delete it and `git branch -D` fails with "used by worktree".
