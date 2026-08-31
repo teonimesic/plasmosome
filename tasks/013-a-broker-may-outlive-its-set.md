@@ -12,8 +12,8 @@ refs:
     crates/plasmosome-membrane/AGENTS.md,
   ]
 done_when: >-
-  status answers within one deadline for a set of any size; a production Probe
-  has a caller; and either drop's no-signal-after-external-reap path gains a
+  status answers within one deadline for a set of any size; the Probe seam has two real
+  adapters or one fewer unused one; and either drop's no-signal-after-external-reap path gains a
   witness, or this task records that it cannot have one and why.
 pr: https://github.com/teonimesic/plasmosome/pull/21
 evidence:
@@ -82,6 +82,17 @@ and leave the constraint documented. Do not invent a test that passes either way
 **Done when:** `done_when` holds, and the gate in root `AGENTS.md` is green.
 
 ## Notes
+
+**2026-08-31, on the `done_when` wording.** It asked for "a production Probe has a caller". The
+executor deleted `ControlSocket` instead, and flagged the tension rather than rewording the
+criterion to match what it did — the right call, since quietly editing a criterion to fit the work
+is how a task closes without doing what it said.
+
+Resolved in favour of the deletion. The only caller `ControlSocket` could have is `membraned`'s
+supervision loop, which this task puts out of scope, so "give it a caller" was unreachable without
+inventing one. Keeping a production adapter nothing constructs leaves the seam hypothetical under
+the two-adapter rule; deleting it is the honest state until a real broker exists, and
+`readiness::probe` stays public so nothing is lost.
 
 All three items are closed. Item 3 turned out to have a witness after all — the open question in
 `## Why` is answered, not recorded as unanswerable.
