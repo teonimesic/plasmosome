@@ -61,16 +61,22 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    CodeRabbit starting there is no `CodeRabbit` context at all, so a poll for "not pending" reads
    clear before anything has run.
 
-   **A green can also mean it reviewed nothing.** Two of that PR's six greens carried the
-   description `Review rate limited`. The state is `success` either way, so read the description,
-   not just the state — a rate-limited pass needs re-triggering, and no amount of waiting turns it
-   into a review.
+   **A green has three meanings, and one of them is "no review happened."** The `CodeRabbit`
+   context reports `success` whether it reviewed and found nothing, reviewed and posted findings,
+   or never ran at all — two of that PR's six greens carried the description `Review rate
+   limited`. Only the description tells them apart:
 
    ```shell
    gh api repos/teonimesic/plasmosome/commits/<sha>/status \
      --jq '.statuses[] | select(.context=="CodeRabbit")
            | "\(.updated_at) \(.state) \(.description)"'
    ```
+
+   `Review completed` is the only one that is a review. **`Review rate limited` is not a pass and
+   will not become one** — waiting is pointless, because nothing more is coming. Re-trigger with
+   `@coderabbitai review` and wait for a `Review completed` on the current head. Merging on a
+   rate-limited green ships a change nobody reviewed, and neither the check state nor an empty
+   thread list will ever say so.
 
    Nothing announces that the findings have stopped. **Wait for quiet instead**: track the newest
    timestamp across the three places CodeRabbit writes, and treat the queue as clear only once it
@@ -111,9 +117,11 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    because CodeRabbit edits its walkthrough comment in place; on PR #26 that comment was created at
    15:03:47 and last edited at 15:45:35, which `created_at` would never show.
 
-   Five minutes is the worst measured gap plus a margin, from one PR. It is not validated, and the
-   3m03s it is built on is a single clean observation — if a review ever lands after a longer
-   silence, raise the number rather than trusting it.
+   Five minutes is the worst measured gap plus a margin, from one PR, and it is not validated.
+   Only two of that PR's six greens have a tail with no later push and no re-trigger inside it: the
+   `Review completed` one gave 3m03s, the `Review rate limited` one gave 0m57s. So the number rests
+   on a single real review, and rate-limited passes shorten that sample rather than stretch it. If
+   a review ever lands after a longer silence, raise the number rather than trusting it.
 
    **The failure this prevents, concretely.** Merging on a green that two more findings then arrive
    behind. You can tell it is still happening if a review ever lands on a PR after it merged.
@@ -135,8 +143,9 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    The one exception is argued, never asserted: a finding needing a decision the author cannot
    make, or belonging to a unit this PR is explicitly not building. File it **and** say in the
    thread what is missing and who has to supply it. "Good point, filed" is not that.
-6. `gh pr merge --squash` once CI is green, the required rounds are done, the review queue has
-   been quiet for five minutes (step 4), and every review thread is resolved — `main` requires
+6. `gh pr merge --squash` once CI is green, the required rounds are done, the head's `CodeRabbit`
+   status reads `Review completed` rather than `Review rate limited`, the review queue has been
+   quiet for five minutes (step 4), and every review thread is resolved — `main` requires
    conversation resolution, so an open thread is what holds
    a merge. Resolving a thread by disagreeing with it is allowed; merging on a disagreement you
    did not write down in the thread is not.
