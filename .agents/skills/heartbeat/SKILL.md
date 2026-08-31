@@ -110,7 +110,41 @@ is the honest way to put an unmapped task to the owner — a proposal in `docs/i
 session, which one in a pull request body does not. Approving it is the owner's alone, so a draft
 you wrote unblocks nothing until they act. The fourth line is that queue: every draft is a question
 somebody asked, and one the owner has never been shown is the same as one nobody wrote. Say out
-loud which of them a person still has to see.
+loud which of them a person still has to see. A draft that has already been answered carries a
+non-blank `outcome:` and is not one of them:
+
+```shell
+grep -l '^status: draft' docs/intents/*.md | while read f; do
+  grep -q '^outcome: .' "$f" || echo "$f"
+done
+```
+
+Every grep so far reads one layer at a time, so all of them find *waiting* work and none of them
+finds a *violation*. This one reads two layers against each other, and it is the only check here
+that can catch the gate being broken rather than unmet:
+
+```shell
+for f in $(grep -l '^status: accepted' docs/specs/*.md); do
+  ids=$(sed -n 's/^intents: \[\(.*\)\]/\1/p' "$f" | tr -d ' ' | tr ',' ' ')
+  if [ -z "$ids" ]; then
+    [ "$f" = "docs/specs/001-control-protocol.md" ] || echo "$f: accepted, names no intent"
+    continue
+  fi
+  for i in $ids; do
+    n=$(grep -l "^id: $i\$" docs/intents/*.md 2>/dev/null | head -1)
+    [ -n "$n" ] || { echo "$f: names intent $i, which does not exist"; continue; }
+    grep -q '^status: approved' "$n" || echo "$f: names intent $i, which is not approved"
+  done
+done
+```
+
+It prints three different faults with one loop: an accepted spec whose intent is still `draft`, an
+accepted spec naming an id no intent file has, and a **new** accepted spec with no intent at all.
+Ids are resolved by reading each intent's `id:` rather than by globbing the filename, so a missing
+intent is reported instead of aborting the loop. The last fault needs the one name hardcoded,
+because `docs/specs/001-control-protocol.md` is the whole of the amnesty — see "What predates the
+rule" in `.agents/skills/tasks`. Anything else that line prints is a spec that skipped the gate.
+Silence is the only passing answer: unlike the lists above, output here is a fault, not a queue.
 
 The first two lists shrinking over sessions is the signal that the queue is being fed by the plan.
 Both growing is the signal it is being fed by the review process instead.

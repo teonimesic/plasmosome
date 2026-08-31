@@ -4,6 +4,7 @@ title: Instructions for agents that measurably improve the code they write
 status: approved
 date: 2026-08-30
 originator: Stefano
+outcome:
 ---
 
 Almost all the code in this repository is written by agents, and the only lever on its quality is

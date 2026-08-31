@@ -137,10 +137,18 @@ terms this keeps coming out ambiguous between the file and the work, and "a stat
 is exactly the sentence that lets `status: planned` through the gate this section exists to hold.
 The greps under "Finding things" are the waiting list that gate creates, not a list of faults.
 
+**The amnesty is a closed set, and it is one file.** `docs/specs/001-control-protocol.md` is the
+only spec that is `accepted` and names no intent, so any *other* accepted spec with an empty
+`intents:` is a spec that skipped the gate rather than one that predates it. Naming the set is what
+makes that difference visible: an unbounded "it predates the rule" is a permanent excuse, because
+nothing distinguishes an old file from a new one claiming to be old. The heartbeat's cross-layer
+loop hardcodes that one name for the same reason.
+
 Two shapes that look like breakage and are not. An **accepted spec with an empty `intents:`** keeps
-its place; only a spec being written has to name one. And a **task whose chain closes one layer up**
-is mapped even while its own `intents:` is blank — if the task names a spec and that spec names an
-intent, the link is sound and the blank field is a missing copy, not a missing link. The copy exists
+its place if it is that one file; only a spec being written has to name one. And a **task whose
+chain closes one layer up** is mapped even while its own `intents:` is blank — if the task names a
+spec and that spec names an intent, the link is sound and the blank field is a missing copy, not a
+missing link. The copy exists
 so a search over tasks and a search over specs return the same answer; filling it in is bookkeeping,
 and the greps print those tasks until someone does.
 
@@ -174,6 +182,11 @@ to a spec.** A finding against behavior some spec requires is an ordinary task: 
 and joins the queue. A finding against something no spec covers has exactly two endings — fixed
 here, or dropped with the reasoning written in the thread. There is no third one, and "file it and
 move on" was the third one.
+
+**Drafting an intent is not a third ending.** Where the finding is not a defect at all but a goal
+nobody has written down, the draft *is* the "dropped with the reasoning written down" ending, put
+where the owner will see it rather than only in a thread. It starts nothing: the finding is still
+not a task, and does not become one until the owner approves and a spec names it.
 
 This half is what makes the chain worth having. Without it the rule adds bookkeeping to a queue
 that keeps growing at the same rate, because every change produces a review, every review produces
@@ -259,7 +272,9 @@ filler, because filler reads as something that was considered.
 
 A few field values worth stating outright:
 
-- Intent `status:` is `draft` or `approved`. Only the owner sets `approved`.
+- Intent `status:` is `draft` or `approved`. Only the owner sets `approved`. Its `outcome:` is
+  blank while the intent is open and non-blank once it is settled, which is what tells a refused
+  draft from a forgotten one.
 - Spec `status:` is `draft`, `accepted` or `superseded`.
 - Task `refs:` is the files the executor must read. `pr:` and `evidence:` stay empty until the
   work reaches review and then merges.
@@ -320,7 +335,22 @@ grep -h '^title:' /dev/null $(grep -l '^status: todo' tasks/*.md)
 Three of those are the gates read backwards: tasks that may not be planned yet, tasks whose spec
 names no intent, and specs that cannot be accepted because they name none. All three should be
 getting shorter. The fourth is the queue in front of the owner — every draft intent is a question
-somebody asked, and a draft nobody has been shown is the same as one nobody wrote.
+somebody asked, and a draft nobody has been shown is the same as one nobody wrote. Drafts already
+settled carry a non-blank `outcome:` and are not waiting on anybody:
+
+```shell
+grep -l '^status: draft' docs/intents/*.md | while read f; do
+  grep -q '^outcome: .' "$f" || echo "$f"
+done
+```
+
+**None of these finds a violation.** Every one of them reads a single layer and reports what is
+*missing*, so a file that is well-formed and wrong — an intent an agent approved for itself, an
+accepted spec whose intent is still `draft`, an `intents: [099]` pointing at nothing — matches none
+of them. The one check that reads two layers against each other is the cross-layer loop in
+`.agents/skills/heartbeat` step 4, and everything past that is the pull request: `main` is
+protected, so a person or a reviewing agent looking at the diff is where these gates are actually
+enforced. Read a clean grep as "nothing is waiting", never as "nothing is wrong".
 
 ## Checking whether a task is really done
 

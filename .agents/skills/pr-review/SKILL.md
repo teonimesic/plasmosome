@@ -247,6 +247,11 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    `.agents/skills/tasks` says why, under "A review finding that maps to nothing" — the short
    version is that filing was how the queue came to grow with the amount of reviewing rather than
    with what the product needed.
+
+   **Where the finding is not a defect but a goal nobody has written down**, the reasoning can go
+   into a `draft` intent instead of only into the thread. That is still the drop: nothing is
+   started, and it becomes work only if the owner approves it and a spec names it. It is not a
+   route to filing the task anyway.
 6. `gh pr merge --squash` once CI is green, the required rounds are done, **the independent
    review is on the PR as an issue comment opening with the literal `Model:` marker and the head
    it read, with nothing changed since that head beyond what that review asked for** (step 3; for

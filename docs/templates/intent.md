@@ -4,6 +4,7 @@ title: short name for the thing wanted
 status: draft
 date: YYYY-MM-DD
 originator: who asked for it
+outcome:
 ---
 
 What you want, and what made you want it — your own words, unedited.
@@ -16,4 +17,6 @@ an approved intent may be committed to — see `docs/intents/README.md`.
 
 ## Outcome
 
-(optional, filled in later) What was built, or why nothing was.
+(optional, filled in later) What was built, or why nothing was. When you write this, put a word in
+the `outcome:` field too — that line is blank while the intent is open and non-blank once it is
+settled, and it is the only part of the answer a search can see.
