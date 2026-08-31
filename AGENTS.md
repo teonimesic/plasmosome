@@ -46,9 +46,18 @@ is, why it exists, how to use it. Lead with the point; details come after. Use p
 short sentences, concrete nouns, no clever words. Write for a good engineer who is new here and
 should not have to pause over a sentence.
 
+Some words are worth naming because they keep coming back. Do not write **load-bearing**,
+**byte-identical**, or **slice** — the first two sound precise and say little, and the third
+means four different things depending on who is reading. Say what you actually mean: what breaks
+if it changes, what exactly is equal, what the unit of work is.
+
 **Code.** No inline `//` comments. Documentation is `///` on public items: what a caller must
 pass, what it gets back, what it must not do. If deleting a doc block costs a caller nothing,
 delete it.
+
+**Seams.** Accept dependencies, do not create them. If a test has to drive the real operating
+system to observe a behavior, the seam is in the wrong place. The brake on this: two adapters
+means a real seam, one means a hypothetical one — do not abstract until something second exists.
 
 ## The gate
 
