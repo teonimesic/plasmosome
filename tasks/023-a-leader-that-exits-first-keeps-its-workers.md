@@ -18,7 +18,9 @@ done_when: >-
   left to "there was nothing to recover". A child whose `setsid` fails does not go
   on to run the launcher; that is about what the child does, not what `spawn`
   returns, which cannot know — `spawn` returns as soon as `fork` does, and the
-  `setsid` failure it would report has not happened yet. `VmmChild`'s doc and
+  `setsid` failure it would report has not happened yet — and that clause is
+  defensive, not reproducible: POSIX makes it unreachable, so it is checked by
+  reading `spawn` and no test is claimed for it. `VmmChild`'s doc and
   `a_second_reaper_leaves_the_childs_workers_running` say the same thing as the
   code when this is done.
 pr:
@@ -94,10 +96,18 @@ parent cannot be the one to notice: `spawn` returns as soon as `fork` returns, b
 has reached `setsid` at all, so making the handle report the failure would need a handshake this
 type does not have and does not need. The child is where it is answerable — it can refuse to run
 the launcher, which the parent then observes as an exited child through the machinery that already
-exists. It is close to unreachable — a freshly forked child is not a group leader unless
-pid reuse landed exactly on the parent's group id — but the failure is silent and the guarantee
-is the one thing this type sells. It belongs here because it is the other half of the same
-sentence: the group has to be established, and it has to be killed.
+exists.
+
+**This half is defensive, and the task should not pretend otherwise.** `setsid` fails with `EPERM`
+only for a caller that is already a process group leader, and POSIX requires `fork` to give the
+child a pid that matches no active process group id — so on a conforming implementation the child
+cannot be a group leader and this call cannot fail that way. There is no reachable path here to
+demonstrate, and no test will be watched failing against it. What is left is worth the three
+lines anyway: a discarded return on the call that establishes the group means that if the
+assumption ever stops holding — a non-conforming platform, or a future `spawn` that puts the child
+in a group before `setsid` — the guarantee this type sells fails silently and nothing says so.
+Handle it as the other half of the same sentence: the group has to be established, and it has to
+be killed. Rank it accordingly against the two halves above, which are reproducible today.
 
 **Where it came from.** CodeRabbit raised the drop half twice on PR #13, the `setsid` half once,
 and the competing-reaper branch on PR #21 — all as "outside diff range" comments in the review
