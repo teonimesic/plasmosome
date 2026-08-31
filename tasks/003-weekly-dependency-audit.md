@@ -1,7 +1,7 @@
 ---
 id: 003
 title: Weekly cargo audit workflow
-status: in_progress
+status: in_review
 priority: 3
 specs: []
 intents: []
@@ -10,7 +10,7 @@ done_when: >-
   A workflow runs cargo audit on a weekly schedule and on any pull request that
   changes Cargo.lock, fails the job when a dependency has an open RustSec
   advisory, and has completed one green scheduled run.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/17
 evidence:
 ---
 
