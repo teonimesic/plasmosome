@@ -1,11 +1,13 @@
+use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::time::Instant;
 
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
 use crate::protocol::{
     CellStatusEntry, ControllerInfo, InstanceState, Request, Response, StatusParams, StatusResult,
-    WireError,
+    WireError, null_id,
 };
 use crate::state::{CellRecord, ControllerState, InstanceName, PlasmidRecord};
 
@@ -44,14 +46,22 @@ pub fn serve_connection<R: BufRead, W: Write, H: Handler>(
 }
 
 fn answer<H: Handler>(line: &str, handler: &mut H) -> Response {
-    let Ok(value) = serde_json::from_str::<Value>(line) else {
+    if serde_json::from_str::<&RawValue>(line).is_err() {
         return Response::Failure {
-            id: Value::Null,
+            id: null_id(),
             error: WireError::parse_error(),
         };
+    }
+    let Ok(fields) = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(line) else {
+        return Response::Failure {
+            id: null_id(),
+            error: WireError::invalid_request(
+                "a control request is a JSON object with `id`, `method` and `params`".to_string(),
+            ),
+        };
     };
-    let id = value.get("id").cloned().unwrap_or(Value::Null);
-    let request = match serde_json::from_value::<Request>(value) {
+    let id = fields.get("id").cloned().unwrap_or_else(null_id);
+    let request = match serde_json::from_str::<Request>(line) {
         Ok(request) => request,
         Err(error) => {
             return Response::Failure {
@@ -135,10 +145,12 @@ impl Handler for Controller {
         }
         let params = serde_json::from_value::<StatusParams>(Value::Object(params.clone()))
             .map_err(|error| WireError::invalid_params(error.to_string()))?;
-        if let Some(name) = params.name
-            && name != self.name.as_str()
-        {
-            return Err(WireError::unknown_target(format!("plasmosome {name}")));
+        if let Some(name) = params.name {
+            let name = InstanceName::parse(&name)
+                .map_err(|error| WireError::invalid_params(error.to_string()))?;
+            if name != self.name {
+                return Err(WireError::unknown_target(format!("plasmosome {name}")));
+            }
         }
         Ok(serde_json::to_value(self.status())
             .expect("a status result is serde data with string keys"))
@@ -170,18 +182,39 @@ mod tests {
         }
     }
 
-    fn converse<H: Handler>(script: &str, handler: &mut H) -> Vec<Value> {
+    fn reply_lines<H: Handler>(script: &str, expected: usize, handler: &mut H) -> Vec<String> {
         let mut written: Vec<u8> = Vec::new();
         serve_connection(script.as_bytes(), &mut written, handler)
             .expect("the loop serves the scripted lines to a writer that cannot fail");
         let replies = String::from_utf8(written).expect("every reply is utf-8");
-        replies
-            .lines()
+        let lines: Vec<String> = replies.lines().map(str::to_string).collect();
+        assert_eq!(
+            lines.len(),
+            expected,
+            "the script asked for {expected} replies and the loop wrote {}: {lines:?}",
+            lines.len()
+        );
+        lines
+    }
+
+    fn converse<H: Handler>(script: &str, expected: usize, handler: &mut H) -> Vec<Value> {
+        reply_lines(script, expected, handler)
+            .iter()
             .map(|line| {
                 serde_json::from_str::<Value>(line)
                     .unwrap_or_else(|error| panic!("reply `{line}` is not one JSON line: {error}"))
             })
             .collect()
+    }
+
+    fn id_token(line: &str) -> String {
+        let fields = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(line)
+            .unwrap_or_else(|error| panic!("reply `{line}` is not a JSON object: {error}"));
+        fields
+            .get("id")
+            .unwrap_or_else(|| panic!("reply `{line}` carries no id"))
+            .get()
+            .to_string()
     }
 
     fn code_of(reply: &Value) -> i64 {
@@ -229,8 +262,7 @@ mod tests {
 
     #[test]
     fn a_line_that_is_not_json_gets_parse_error_with_null_id() {
-        let replies = converse("this is not json\n", &mut Echo);
-        assert_eq!(replies.len(), 1, "one line in, one line out: {replies:?}");
+        let replies = converse("this is not json\n", 1, &mut Echo);
         assert_eq!(
             code_of(&replies[0]),
             ErrorCode::ParseError.as_i64(),
@@ -252,14 +284,15 @@ mod tests {
             "{\"id\":1,\"params\":{}}\n",
             "{\"id\":2,\"method\":\"echo\"}\n",
             "{\"id\":3,\"method\":\"echo\",\"params\":[]}\n",
+            "[1,\"echo\",{}]\n",
         );
-        let replies = converse(script, &mut Echo);
-        assert_eq!(replies.len(), 4, "four lines in, four out: {replies:?}");
+        let replies = converse(script, 5, &mut Echo);
         for (reply, missing) in replies.iter().zip([
             "an envelope with no id",
             "an envelope with no method",
             "an envelope with no params",
             "an envelope whose params are not an object",
+            "a JSON array, which is not an envelope this protocol defines",
         ]) {
             assert_eq!(
                 code_of(reply),
@@ -272,7 +305,13 @@ mod tests {
                 .iter()
                 .map(|reply| reply.get("id").cloned().unwrap_or(Value::Null))
                 .collect::<Vec<Value>>(),
-            vec![Value::Null, Value::from(1), Value::from(2), Value::from(3)],
+            vec![
+                Value::Null,
+                Value::from(1),
+                Value::from(2),
+                Value::from(3),
+                Value::Null,
+            ],
             "an invalid request echoes the id when the object carried one: {replies:?}"
         );
     }
@@ -281,6 +320,7 @@ mod tests {
     fn an_unknown_method_is_method_not_found() {
         let replies = converse(
             "{\"id\":1,\"method\":\"plasmosome.fly\",\"params\":{}}\n",
+            1,
             &mut Echo,
         );
         assert_eq!(
@@ -295,6 +335,7 @@ mod tests {
     fn status_params_that_do_not_parse_are_invalid_params() {
         let replies = converse(
             "{\"id\":1,\"method\":\"plasmosome.status\",\"params\":{\"name\":42}}\n",
+            1,
             &mut controller(),
         );
         assert_eq!(
@@ -311,7 +352,7 @@ mod tests {
             "{\"id\":\"abc\",\"method\":\"echo\",\"params\":{}}\n",
             "{\"id\":{\"trace\":\"x-9\"},\"method\":\"echo\",\"params\":{}}\n",
         );
-        let replies = converse(script, &mut Echo);
+        let replies = converse(script, 2, &mut Echo);
         assert_eq!(
             replies
                 .iter()
@@ -333,7 +374,7 @@ mod tests {
             "{\"id\":3,\"method\":\"nope\",\"params\":{}}\n",
             "{\"id\":4,\"method\":\"echo\",\"params\":{}}\n",
         );
-        let replies = converse(script, &mut Echo);
+        let replies = converse(script, 4, &mut Echo);
         assert_eq!(
             replies
                 .iter()
@@ -350,12 +391,7 @@ mod tests {
             "{ not json at all\n",
             "{\"id\":2,\"method\":\"echo\",\"params\":{\"still\":\"here\"}}\n",
         );
-        let replies = converse(script, &mut Echo);
-        assert_eq!(
-            replies.len(),
-            2,
-            "a bad line is answered and the conversation continues: {replies:?}"
-        );
+        let replies = converse(script, 2, &mut Echo);
         assert_eq!(
             replies[1].get("result"),
             Some(&serde_json::from_str::<Value>("{\"still\":\"here\"}").expect("the echo parses")),
@@ -368,6 +404,7 @@ mod tests {
     fn status_reports_the_instance_its_cells_and_their_mock_labels() {
         let replies = converse(
             "{\"id\":3,\"method\":\"plasmosome.status\",\"params\":{\"name\":\"work\"}}\n",
+            1,
             &mut controller(),
         );
         let result = replies[0]
@@ -432,6 +469,7 @@ mod tests {
     fn status_for_a_name_this_controller_is_not_is_unknown_target() {
         let replies = converse(
             "{\"id\":3,\"method\":\"plasmosome.status\",\"params\":{\"name\":\"other\"}}\n",
+            1,
             &mut controller(),
         );
         assert_eq!(
@@ -455,6 +493,51 @@ mod tests {
             "an unknown target is never answered with this controller's own status: {}",
             replies[0]
         );
+    }
+
+    #[test]
+    fn an_id_a_json_number_cannot_hold_comes_back_unchanged() {
+        let ids = [
+            "1e400",
+            "123456789012345678901234567890",
+            "1e2",
+            "1.0000000000000000000000001",
+            "18446744073709551615",
+            "\"abc\"",
+            "{\"trace\":\"x-9\"}",
+            "[1,2,3]",
+        ];
+        let script: String = ids
+            .iter()
+            .map(|id| format!("{{\"id\":{id},\"method\":\"echo\",\"params\":{{}}}}\n"))
+            .collect();
+        let lines = reply_lines(&script, ids.len(), &mut Echo);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| id_token(line))
+                .collect::<Vec<String>>(),
+            ids.iter()
+                .map(|id| (*id).to_string())
+                .collect::<Vec<String>>(),
+            "every reply carries back the id token its request sent: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_status_name_that_is_not_an_instance_name_is_invalid_params() {
+        for name in ["../..", "", "work/../other", ".."] {
+            let script = format!(
+                "{{\"id\":1,\"method\":\"plasmosome.status\",\"params\":{{\"name\":\"{name}\"}}}}\n"
+            );
+            let replies = converse(&script, 1, &mut controller());
+            assert_eq!(
+                code_of(&replies[0]),
+                ErrorCode::InvalidParams.as_i64(),
+                "`{name}` is not an instance name, and a later verb resolves this name into a path: {}",
+                replies[0]
+            );
+        }
     }
 
     #[test]

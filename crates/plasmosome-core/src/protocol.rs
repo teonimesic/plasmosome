@@ -1,31 +1,132 @@
+use serde::de::{Error as _, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
 use crate::state::{CellId, CellStatus, GenomeName, MockMode};
 
 /// One control request as it arrives on the wire.
 ///
-/// `params` is never omitted: a verb that takes nothing is still sent an empty
-/// object, and a line without it is an invalid request rather than an empty one.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `id` is the token the client sent, kept as it arrived: an id is any JSON
+/// value, and a number that does not fit an `f64` must still come back the way
+/// it was written. `params` is never omitted: a verb that takes nothing is
+/// still sent an empty object, and a line without it is an invalid request
+/// rather than an empty one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
-    pub id: Value,
+    pub id: Box<RawValue>,
     pub method: String,
     pub params: Map<String, Value>,
 }
 
+impl PartialEq for Request {
+    fn eq(&self, other: &Request) -> bool {
+        self.id.get() == other.id.get()
+            && self.method == other.method
+            && self.params == other.params
+    }
+}
+
 /// One control reply, carrying a result or an error and never both.
 ///
-/// `id` is the requesting line's id, echoed unchanged.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `id` is the requesting line's id, echoed unchanged. Reading a reply that
+/// carries both a result and an error, or neither, fails: a client that
+/// accepted one would be reading a protocol this one does not define.
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 #[expect(
     clippy::large_enum_variant,
-    reason = "a WireError is one flat struct with an Option per field in the protocol table; boxing it here would buy a smaller enum at the cost of the shape the table freezes"
+    reason = "boxing the error would change the variant's and Handler::handle's signatures and force a Box::new at the fifteen construction sites, for a type meant to read as the protocol table it mirrors"
 )]
 pub enum Response {
-    Success { id: Value, result: Value },
-    Failure { id: Value, error: WireError },
+    Success { id: Box<RawValue>, result: Value },
+    Failure { id: Box<RawValue>, error: WireError },
+}
+
+impl PartialEq for Response {
+    fn eq(&self, other: &Response) -> bool {
+        match (self, other) {
+            (
+                Response::Success { id, result },
+                Response::Success {
+                    id: other_id,
+                    result: other_result,
+                },
+            ) => id.get() == other_id.get() && result == other_result,
+            (
+                Response::Failure { id, error },
+                Response::Failure {
+                    id: other_id,
+                    error: other_error,
+                },
+            ) => id.get() == other_id.get() && error == other_error,
+            _ => false,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Response {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Response, D::Error> {
+        deserializer.deserialize_map(ResponseVisitor)
+    }
+}
+
+struct ResponseVisitor;
+
+impl<'de> Visitor<'de> for ResponseVisitor {
+    type Value = Response;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a control reply: an id, and either a result or an error")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Response, A::Error> {
+        let mut id: Option<Box<RawValue>> = None;
+        let mut result: Option<Value> = None;
+        let mut error: Option<WireError> = None;
+        while let Some(key) = entries.next_key::<String>()? {
+            match key.as_str() {
+                "id" => {
+                    if id.is_some() {
+                        return Err(A::Error::duplicate_field("id"));
+                    }
+                    id = Some(entries.next_value()?);
+                }
+                "result" => {
+                    if result.is_some() {
+                        return Err(A::Error::duplicate_field("result"));
+                    }
+                    result = Some(entries.next_value()?);
+                }
+                "error" => {
+                    if error.is_some() {
+                        return Err(A::Error::duplicate_field("error"));
+                    }
+                    error = Some(entries.next_value()?);
+                }
+                _ => {
+                    entries.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        let id = id.ok_or_else(|| A::Error::missing_field("id"))?;
+        match (result, error) {
+            (Some(result), None) => Ok(Response::Success { id, result }),
+            (None, Some(error)) => Ok(Response::Failure { id, error }),
+            (Some(_), Some(_)) => Err(A::Error::custom(
+                "a control reply carries a result or an error, this one carries both",
+            )),
+            (None, None) => Err(A::Error::custom(
+                "a control reply carries a result or an error, this one carries neither",
+            )),
+        }
+    }
+}
+
+/// The id a reply carries when the line it answers had no envelope to take one
+/// from: the literal `null` token.
+pub fn null_id() -> Box<RawValue> {
+    RawValue::from_string("null".to_string()).expect("`null` is a JSON value")
 }
 
 /// The closed set of control protocol error codes: the four JSON-RPC reserve
@@ -383,6 +484,10 @@ mod tests {
     use super::*;
     use crate::state::PlasmidRecord;
 
+    fn raw_id(token: &str) -> Box<RawValue> {
+        RawValue::from_string(token.to_string()).expect("the test id is a JSON value")
+    }
+
     fn wire_fields(error: &WireError) -> Vec<String> {
         let value = serde_json::to_value(error).expect("a wire error serializes");
         let Value::Object(map) = value else {
@@ -503,7 +608,7 @@ mod tests {
     #[test]
     fn a_response_carries_result_or_error_never_both() {
         let success = Response::Success {
-            id: Value::from(7),
+            id: raw_id("7"),
             result: serde_json::from_str("{\"ready\":true}").expect("the result parses"),
         };
         let encoded = serde_json::to_value(&success).expect("a success response serializes");
@@ -519,7 +624,7 @@ mod tests {
         );
 
         let failure = Response::Failure {
-            id: Value::from(7),
+            id: raw_id("7"),
             error: WireError::unknown_target("plasmosome work".to_string()),
         };
         let encoded = serde_json::to_value(&failure).expect("a failure response serializes");
@@ -539,6 +644,28 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<Response>(encoded).expect("a failure response round-trips"),
             failure
+        );
+
+        let both =
+            "{\"id\":7,\"result\":{\"ready\":true},\"error\":{\"code\":101,\"message\":\"gone\"}}";
+        assert!(
+            serde_json::from_str::<Response>(both).is_err(),
+            "a reply carrying a result and an error at once is not a reply this protocol defines: {both}"
+        );
+        let neither = "{\"id\":7}";
+        assert!(
+            serde_json::from_str::<Response>(neither).is_err(),
+            "a reply carrying neither a result nor an error is not a reply this protocol defines: {neither}"
+        );
+        let only_result = "{\"id\":7,\"result\":{\"ready\":true}}";
+        assert!(
+            serde_json::from_str::<Response>(only_result).is_ok(),
+            "a reply carrying only a result reads as a success: {only_result}"
+        );
+        let only_error = "{\"id\":7,\"error\":{\"code\":101,\"message\":\"gone\"}}";
+        assert!(
+            serde_json::from_str::<Response>(only_error).is_ok(),
+            "a reply carrying only an error reads as a failure: {only_error}"
         );
     }
 

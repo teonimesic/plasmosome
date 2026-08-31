@@ -388,3 +388,108 @@ freeze check, which holds every wire type to serde in both directions — will s
 JSON object carrying a known code and no fields. That is the reading path, for a client
 parsing whatever a server sent; the producing path has one constructor per code and no
 other door.
+
+### Review round: three places the wire did not match spec 001 §1
+
+An independent reviewer read the code against the spec rather than against the plan. Each
+finding below was contradicted by a doc comment or a test name already in the PR, which is
+what made it blocking. All four new or extended tests were written first and watched failing.
+
+**1. A JSON array was accepted as an envelope.** serde's derive fills a struct from a
+positional sequence, so `[1,"echo",{}]` deserialized into `Request` and was answered with a
+success. §1 freezes the envelope as an object with three named keys. The loop now refuses
+anything that is not a JSON object with `-32600` and a `null` id, then continues the existing
+ladder. `a_json_line_that_is_not_the_envelope_is_invalid_request` gained the array line, and
+failed against the old loop:
+
+```
+reply {"id":1,"result":{}} carries no error code
+```
+
+**2. A reply carrying both a result and an error read as a success.** `#[serde(untagged)]`
+tries `Success` first and stops, so `{"id":7,"result":{…},"error":{…}}` parsed as a success
+and the error was dropped in silence — under a type whose own doc says "carrying a result or
+an error and never both", tested by
+`a_response_carries_result_or_error_never_both`, which only asserted the writing side.
+`Response` now has a hand-written `Deserialize` that refuses both-present and neither-present.
+Serialization is untouched. The test gained the reading side, and failed against the derive:
+
+```
+a reply carrying a result and an error at once is not a reply this protocol defines:
+{"id":7,"result":{"ready":true},"error":{"code":101,"message":"gone"}}
+```
+
+**3. The id was not echoed as it arrived.** §1 says the id is echoed verbatim and is any JSON
+value. `serde_json::Value` narrows numbers, so a client's id came back changed — and `1e400`
+came back `null`, which under this loop's own convention means "there was no id". The request
+and reply ids are now `Box<serde_json::value::RawValue>`, which keeps the token; where the
+loop has no envelope to take an id from it emits the literal `null`. New test
+`an_id_a_json_number_cannot_hold_comes_back_unchanged`, failing against `Value`:
+
+```
+every reply carries back the id token its request sent:
+["{\"id\":null,\"error\":{\"code\":-32700,…}}", "{\"id\":1.2345678901234568e+29,…}",
+ "{\"id\":100.0,…}", "{\"id\":1.0,…}", …]
+  left: ["null", "1.2345678901234568e+29", "100.0", "1.0", "18446744073709551615", …]
+ right: ["1e400", "123456789012345678901234567890", "1e2",
+         "1.0000000000000000000000001", "18446744073709551615", …]
+```
+
+**4. The wire `name` was compared as a raw string.** `InstanceName::parse` sits in the same
+crate, unused on this path, and a later verb resolves this name into a filesystem path — so
+`../..` reaching a path join is much cheaper to prevent now than to find later. An unparseable
+name is `-32602`. New test `a_status_name_that_is_not_an_instance_name_is_invalid_params`,
+failing against the string comparison:
+
+```
+`../..` is not an instance name, and a later verb resolves this name into a path:
+{"error":{"code":101,"message":"`plasmosome ../..` is not a target this controller knows",
+"target":"plasmosome ../.."},"id":1}
+  left: 101
+ right: -32602
+```
+
+**The reply-collecting helper now asserts its count first.** Three tests failed with
+`index out of bounds` at `replies[0]` before reaching their own assertion. `reply_lines`
+checks the count before any indexing; mutating the loop to write only its first reply shows
+what a reader now gets:
+
+```
+the script asked for 5 replies and the loop wrote 1:
+["{\"id\":null,\"error\":{\"code\":-32600,\"message\":\"missing field `id` …\"}}"]
+  left: 1
+ right: 5
+```
+
+**The `large_enum_variant` reason was untrue.** It claimed boxing would cost "the shape the
+table freezes"; `Box<WireError>` serializes identically. The reason now names the real cost:
+two changed signatures and a `Box::new` at fifteen construction sites, for a type meant to
+read as the protocol table it mirrors.
+
+### Where this round's plan met reality
+
+**The id fix and the object check cannot both go through `serde_json::Value`.** The review
+asked for the line to be parsed to a `Value` first, the non-objects refused, and the envelope
+then read with `from_value::<Request>`. That cannot preserve an id `Value` will not hold:
+`serde_json::from_str::<Value>("{\"id\":1e400}")` fails outright with `number out of range`,
+and `to_value` on a kept raw id fails the same way. So the ladder reads the line three times
+instead: once as `&RawValue` (is it JSON at all — `-32700` if not), once as a
+`BTreeMap<String, Box<RawValue>>` (is it an object, and what is its raw `id` — `-32600` if
+not), and once as `Request`. Every refusal the review asked for is where it asked for it; only
+the mechanism differs.
+
+Two edges move as a result, both toward the more accurate code. A line that is valid JSON but
+not an object, and a line whose `params` hold a number `f64` cannot represent, now answer
+`-32600` (JSON, but not an envelope) where they used to answer `-32700` (not JSON).
+
+**`envelope_fields` as a helper returning `Result<_, WireError>` trips `result_large_err`.**
+The ladder is inlined in `answer` instead, rather than adding a third `#[expect]` for a
+384-byte error that was never going to be returned from a hot loop.
+
+**`RawValue` has no `PartialEq`.** `Request` and `Response` keep theirs, hand-written,
+comparing the id as the token it is.
+
+**A scratch file reached the branch.** Commit `cd81518` — a docs commit made outside this
+worktree while this work was in progress — swept in `crates/plasmosome-core/src/rawprobe.rs`,
+its `mod rawprobe;` line, and the `raw_value` feature edit. The probe file and its module line
+are deleted here. The feature edit stays: it is what finding 3 needs.
