@@ -45,6 +45,7 @@ reversibility ledger, and the enforcement-backend seam are landing here first.
 | `plasmosome-membrane` | The per-cell supervisor: owns the cell's VMM, network path, and broker processes — the selective barrier around a cell |
 | `plasmosome-ledger` | Typed reversibility: every effect records its inverse; detach replays them, and the result is verified |
 | `plasmosome-backend` | The enforcement seam: one interface, with a fake in-memory backend for tests and real OS backends behind it |
+| `plasmid` | The plasmid author's command line — a client of the control socket, never something a plasmid depends on |
 | `plasmid-sdk` | The stability boundary for plasmid authors — build against this, not against the kernel |
 | `plasmosome-freeze-checks` | Architectural rules as tests: the controller may never acquire a dependency on virtualization code |
 | `plasmosome-testkit` | Test support: builders, the backend conformance suite, and the cross-crate scenarios — never shipped |
