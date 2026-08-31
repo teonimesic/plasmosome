@@ -14,7 +14,8 @@ the session does, and the next agent starts from nothing.
 
 The order is not arbitrary: finish what is already in flight before starting anything new. Steps
 1 and 2 close out work that is one reply away from merging; step 3 makes the queue trustworthy
-again; step 4 finds work that was described and then quietly dropped; only then do you pick.
+again; step 4 finds work that was described and then quietly dropped; step 5 says how many agents
+should be running before you choose anything; only then do you pick.
 The formats and the layers those files use are in `.agents/skills/tasks`.
 
 
@@ -86,7 +87,31 @@ done
 Both loops derive the ids from the files, so a record numbered anything is covered. Silence means
 nothing is pending. For anything they print, decide out loud: plan it, or say why not.
 
-**5. Pick.** Look at `planned` before `todo`: a `planned` task already has a plan someone wrote,
+**5. Agents running.** The orchestrator is the only thing that can review, decide and merge, so it
+is the constraint on everything else. What reaches `main` is limited by how much is in flight, and
+one agent at a time means the queue moves at the speed of one agent. **Three running in parallel is
+the standing goal.** Fewer than three is a problem to fix here, not a state to note and move past.
+
+```shell
+git worktree list
+grep -l '^status: in_progress' tasks/*.md
+```
+
+Count what is actually running before picking anything. A worktree with a live agent in it is the
+count; `status: in_progress` is a line someone wrote, so check it against the worktrees rather than
+believing it. However many short of three you are is how many tasks you dispatch in the next step,
+taken from the unblocked work the queue already holds.
+
+**Disjointness is the constraint, not a nicety.** Two agents editing the same file produce two PRs
+that fight, and whichever merges second pays for it. Compare the `refs:` of the candidates and take
+ones that do not overlap — with each other, and with what is already running. The floor is three
+disjoint tasks, never three tasks.
+
+If the queue does not hold three unblocked disjoint tasks, say so plainly in the report and dispatch
+what it does hold. Do not manufacture overlapping work to reach the number. Coming up short is a
+real signal: either the queue needs filing, or something is blocking more than it should.
+
+**6. Pick.** Look at `planned` before `todo`: a `planned` task already has a plan someone wrote,
 so it is ready to hand to an executor, while a `todo` still needs planning. Within each, take the
 lowest `priority:` number, not the newest one.
 
@@ -98,10 +123,10 @@ grep -l '^status: todo' tasks/*.md
 Step 3 puts released claims back to `planned`, so this is also how abandoned work returns to
 circulation.
 
-**6. File.** Anything you learned this session that must outlive it becomes a task file before
+**7. File.** Anything you learned this session that must outlive it becomes a task file before
 the session ends.
 
-**7. Clean up.** Remove the worktrees of branches that have merged, and prune. A worktree left
+**8. Clean up.** Remove the worktrees of branches that have merged, and prune. A worktree left
 behind pins its branch and blocks the next person from deleting it.
 
 ```shell

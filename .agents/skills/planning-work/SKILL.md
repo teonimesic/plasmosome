@@ -16,6 +16,8 @@ exactly; if the plan contradicts reality, stop and report rather than improvise.
 
 The agent that dispatches other agents does not write the change. It plans, dispatches, reviews,
 decides, and drives merges. It does not write product code, tests, PR descriptions, or specs.
+Planner and orchestrator are separate roles: where a spec is needed, the orchestrator dispatches a
+planner agent, and that agent writes it.
 
 **Review findings go back to the agent that wrote the change.** That agent still holds the
 context — why the code is shaped the way it is, what it already tried and dropped. Resume it
