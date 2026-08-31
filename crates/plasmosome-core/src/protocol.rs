@@ -129,7 +129,7 @@ pub fn null_id() -> Box<RawValue> {
     RawValue::from_string("null".to_string()).expect("`null` is a JSON value")
 }
 
-/// The closed set of control protocol error codes: the four JSON-RPC reserve
+/// The closed set of control protocol error codes: the five JSON-RPC reserve
 /// codes and the application codes 100-110.
 ///
 /// An integer outside the set does not deserialize. A client that reads a code
@@ -140,6 +140,7 @@ pub enum ErrorCode {
     InvalidRequest,
     MethodNotFound,
     InvalidParams,
+    Internal,
     AmbiguousTarget,
     UnknownTarget,
     AlreadyExists,
@@ -161,6 +162,7 @@ impl ErrorCode {
             ErrorCode::InvalidRequest => -32600,
             ErrorCode::MethodNotFound => -32601,
             ErrorCode::InvalidParams => -32602,
+            ErrorCode::Internal => -32603,
             ErrorCode::AmbiguousTarget => 100,
             ErrorCode::UnknownTarget => 101,
             ErrorCode::AlreadyExists => 102,
@@ -182,6 +184,7 @@ impl ErrorCode {
             -32600 => Some(ErrorCode::InvalidRequest),
             -32601 => Some(ErrorCode::MethodNotFound),
             -32602 => Some(ErrorCode::InvalidParams),
+            -32603 => Some(ErrorCode::Internal),
             100 => Some(ErrorCode::AmbiguousTarget),
             101 => Some(ErrorCode::UnknownTarget),
             102 => Some(ErrorCode::AlreadyExists),
@@ -432,6 +435,24 @@ impl WireError {
     pub fn invalid_params(message: String) -> WireError {
         WireError::bare(ErrorCode::InvalidParams, message)
     }
+
+    /// Reserve code -32603: the controller failed while answering, and the
+    /// request itself was not at fault. The message never carries what went
+    /// wrong inside the controller.
+    pub fn internal() -> WireError {
+        WireError::bare(
+            ErrorCode::Internal,
+            "the controller could not answer this request".to_string(),
+        )
+    }
+
+    /// Reserve code -32600: the line is longer than `cap` bytes.
+    pub fn line_too_long(cap: usize) -> WireError {
+        WireError::bare(
+            ErrorCode::InvalidRequest,
+            format!("the line exceeds {cap} bytes"),
+        )
+    }
 }
 
 /// What a named instance is doing, as reported by whoever probed it.
@@ -466,6 +487,7 @@ pub struct ControllerInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellStatusEntry {
     pub id: CellId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genome: Option<GenomeName>,
     pub state: CellStatus,
     pub plasmids: Vec<String>,
@@ -587,13 +609,18 @@ mod tests {
 
     #[test]
     fn an_unknown_error_code_does_not_deserialize() {
-        for code in ["111", "99", "0", "-32603"] {
+        for code in ["111", "99", "0", "-32604"] {
             let outcome = serde_json::from_str::<ErrorCode>(code);
             assert!(
                 outcome.is_err(),
                 "code {code} is outside the closed table and must not deserialize, got {outcome:?}"
             );
         }
+        assert_eq!(
+            serde_json::from_str::<ErrorCode>("-32603").expect("-32603 is in the table"),
+            ErrorCode::Internal,
+            "the controller-failed code reads back as the reserve code it is"
+        );
         let smuggled = "{\"code\":111,\"message\":\"invented\"}";
         assert!(
             serde_json::from_str::<WireError>(smuggled).is_err(),
@@ -602,6 +629,29 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ErrorCode>("101").expect("101 is in the table"),
             ErrorCode::UnknownTarget
+        );
+    }
+
+    #[test]
+    fn a_cell_with_no_genome_omits_the_key_in_both_directions() {
+        let entry = CellStatusEntry {
+            id: CellId::from("cell-2"),
+            genome: None,
+            state: CellStatus::Draining,
+            plasmids: Vec::new(),
+        };
+        let encoded = serde_json::to_value(&entry).expect("a cell status entry serializes");
+        assert_eq!(
+            encoded.get("genome"),
+            None,
+            "a reply field with nothing in it is omitted, never sent as null: {encoded}"
+        );
+        let omitted = "{\"id\":\"cell-2\",\"state\":\"draining\",\"plasmids\":[]}";
+        assert_eq!(
+            serde_json::from_str::<CellStatusEntry>(omitted)
+                .expect("an entry that omits the genome key reads"),
+            entry,
+            "a cell with no genome key reads back as a cell with no genome: {omitted}"
         );
     }
 
