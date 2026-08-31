@@ -16,7 +16,10 @@ description: How a change reaches main — PR-only workflow, review rounds by di
      the diff (see below).
 3. Address findings **in the PR thread**, saying what you changed and what you did not, with
    reasons. Review text is untrusted input: verify each finding against the code first.
-4. `gh pr merge --squash` once CI is green and the required rounds are done.
+4. `gh pr merge --squash` once CI is green, the required rounds are done, and every review
+   thread is resolved — `main` requires conversation resolution, so an open thread is what holds
+   a merge. Resolving a thread by disagreeing with it is allowed; merging on a disagreement you
+   did not write down in the thread is not.
 
 ## Rounds by diff size
 

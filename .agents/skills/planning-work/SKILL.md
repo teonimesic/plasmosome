@@ -12,9 +12,9 @@ exactly; if the plan contradicts reality, stop and report rather than improvise.
 
 **One unit of work per agent, per branch, per PR** — one finishable capability, not a theme.
 
-**One worktree per agent.** Agents never share a checkout: `git worktree add ../wt-<name> -b
-<branch>`. Two agents in one clone will switch branches under each other and commit to the wrong
-one. Never run `git reset --hard`, force-push, or branch-switch a checkout you did not create —
+**One worktree per agent.** Agents never share a checkout — substitute your own names into
+`git worktree add ../wt-ledger-replay -b task-004-ledger-replay`. Two agents in one clone will
+switch branches under each other and commit to the wrong one. Never run `git reset --hard`, force-push, or branch-switch a checkout you did not create —
 if you find your commit on the wrong branch, cherry-pick it where it belongs and leave the other
 branch alone.
 
