@@ -24,21 +24,27 @@ description: How a change reaches main — PR-only workflow, review rounds by di
      `## Acceptance` list of the spec its `specs:` field names, and say line by line which are
      met.
 
-     **Run it on a model different from the author's** — that is the rule, and `model: "fable"`
-     on the Agent tool is how it is met today. Many agents on one model, reading one context,
-     agree with each other reliably, so a review that only confirms the author's reasoning looks
-     like diligence and is not evidence. Same-model reviews here have found real defects; the
-     point is not that they are worthless but that they cannot count as this pass. Note the trap
-     in the letter of it: if your own session runs on Fable, spawning Fable complies and reads
-     nothing the author did not already think.
+     **Run it on a top-tier model.** This is the one step whose whole job is to disagree, so it
+     is where capability matters most. Reaching for a smaller model because the review is "just a
+     check" is the specific mistake: a weak reviewer produces agreeable text and no findings,
+     which reads exactly like a clean pass.
+
+     **A different model family would be better, and is not available here** — the models on
+     offer are all one family, so name that limit rather than counting two different model names
+     as independence achieved. The proxy we can actually apply is a model different from the
+     author's, today `model: "fable"` on the Agent tool. Many agents on one model, reading one
+     context, agree with each other reliably, so a review that only confirms the author's
+     reasoning looks like diligence and is not evidence — and if your own session runs on Fable,
+     spawning Fable satisfies the words while reading nothing new. A same-model review still
+     finds real defects; it just cannot be counted as this pass.
 
      **If you cannot spawn one, stop and ask the orchestrator.** An agent dispatched to author a
      PR usually has no Agent tool. Do not skip the step, and do not review your own PR yourself.
 
      **The output goes on the PR as an issue comment**, not only into chat, opening with
      `Model: <name>` and saying what was examined, what was found, what the author changed, and
-     what was declined with the reasoning. A review that lives only in a session cannot be cited
-     or audited, and its model cannot be checked.
+     what was declined with the reasoning. Naming the model is what makes a weak-model review
+     visible afterwards instead of indistinguishable from a strong one.
 4. **Watch for the review rather than waiting for it.** CodeRabbit posts minutes after a push,
    and again after every later push, so an agent that checks once and stops has stalled. Poll
    until the review lands and the thread count stops moving:
@@ -241,7 +247,7 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    version is that filing was how the queue came to grow with the amount of reviewing rather than
    with what the product needed.
 6. `gh pr merge --squash` once CI is green, the required rounds are done, **the independent
-   review is on the PR as an issue comment naming a model different from yours** (step 3), the
+   review is on the PR as an issue comment naming the model that ran it** (step 3), the
    head's `CodeRabbit` status reads `Review completed` rather than `Review rate limited`, the
    review queue has been quiet for five minutes (step 4), and every review thread is resolved —
    `main` requires conversation resolution, so an open thread is what holds a merge. Resolving
