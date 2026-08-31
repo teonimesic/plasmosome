@@ -58,6 +58,13 @@ impl std::error::Error for SpawnError {}
 /// recorded as `Lost` — neither is signalled, so a reused pid never receives a
 /// signal meant for a dead child.
 ///
+/// **This handle must be the only reaper of its child.** A competing
+/// `waitpid(-1)` or `SIGCHLD` handler in the same process can reap between the
+/// check and the signal, and the freed pid may be reused before the signal
+/// lands. There is no portable way to close that window — `pidfd` is Linux-only
+/// and this crate targets macOS first — so the constraint is stated rather than
+/// defended in code.
+///
 /// The guarantee holds only if the handle is dropped: `mem::forget` leaks a
 /// running child.
 pub struct VmmChild {
@@ -133,6 +140,7 @@ impl VmmChild {
         if self.terminal.is_some() {
             return Ok(());
         }
+        unsafe { libc::kill(-self.pid, libc::SIGKILL) };
         if unsafe { libc::kill(self.pid, libc::SIGKILL) } == -1 {
             return Err(std::io::Error::last_os_error());
         }
@@ -225,6 +233,9 @@ mod tests {
                 loop {
                     unsafe { libc::pause() };
                 }
+            }
+            if worker < 0 {
+                unsafe { libc::_exit(71) }
             }
             let bytes = (worker as i32).to_ne_bytes();
             unsafe { libc::write(self.0, bytes.as_ptr() as *const libc::c_void, 4) };
@@ -340,12 +351,10 @@ mod tests {
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
-    #[test]
-    fn dropping_a_child_kills_the_workers_it_forked() {
+    fn spawn_with_worker() -> (VmmChild, i32) {
         let mut fds = [0; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "a pipe opens");
         let (read_end, write_end) = (fds[0], fds[1]);
-
         let child = VmmChild::spawn(ForkAWorkerThenSleep(write_end)).expect("fork succeeds");
         unsafe { libc::close(write_end) };
         let mut buf = [0u8; 4];
@@ -353,10 +362,14 @@ mod tests {
         unsafe { libc::close(read_end) };
         assert_eq!(read, 4, "the child reports the worker it forked");
         let worker = i32::from_ne_bytes(buf);
-        assert!(alive(worker), "the worker is running before the drop");
+        assert!(
+            worker > 0,
+            "the reported worker pid must be a real process, got {worker}"
+        );
+        (child, worker)
+    }
 
-        drop(child);
-
+    fn assert_dies(worker: i32, context: &str) {
         for _ in 0..200 {
             if !alive(worker) {
                 return;
@@ -364,7 +377,32 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         unsafe { libc::kill(worker, libc::SIGKILL) };
-        panic!("worker {worker} outlived the child that forked it");
+        panic!("worker {worker} outlived {context}");
+    }
+
+    #[test]
+    fn killing_a_child_kills_the_workers_it_forked() {
+        let (mut child, worker) = spawn_with_worker();
+        assert!(alive(worker), "the worker is running before the kill");
+
+        child.kill().expect("the child is signalled");
+        assert_eq!(
+            child.wait_terminal(Duration::from_secs(5)),
+            VmmState::Signaled { signal: 9 }
+        );
+        drop(child);
+
+        assert_dies(worker, "an explicit kill of the child that forked it");
+    }
+
+    #[test]
+    fn dropping_a_child_kills_the_workers_it_forked() {
+        let (child, worker) = spawn_with_worker();
+        assert!(alive(worker), "the worker is running before the drop");
+
+        drop(child);
+
+        assert_dies(worker, "the child that forked it");
     }
 
     #[test]

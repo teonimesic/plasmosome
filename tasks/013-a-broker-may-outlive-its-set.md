@@ -39,6 +39,14 @@ test written for it did exactly that and was replaced. What has a witness is `st
 to be reused by an unrelated process, which cannot be forced deterministically. Either find an
 observation, or write down that there is none.
 
+**The check-then-signal window cannot be closed portably.** Drop asks whether the child is gone
+before signalling, but a competing `waitpid(-1)` or `SIGCHLD` handler in the same process can reap
+between the check and the signal, and the freed pid may be reused before it lands. `pidfd_open`
+plus `pidfd_send_signal` closes it on Linux; macOS has no equivalent, and this crate targets macOS
+first. The constraint — this handle must be the only reaper of its child — is stated in
+`VmmChild`'s doc. It needs enforcing when `membraned` grows a real supervision loop, because that
+is exactly where a `waitpid(-1)` reaper appears.
+
 **`status` gives each broker the full deadline**, so a set of N brokers can take N times it —
 measured at 302ms for one broker and 1.85s for six — while the membrane must answer
 `membrane.status` inside its own budget. Probing concurrently, or spending one budget across the
