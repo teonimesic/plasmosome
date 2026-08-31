@@ -1,7 +1,7 @@
 ---
 id: 017
 title: The freeze scan matches substrings, not code
-status: in_progress
+status: in_review
 priority: 2
 specs: []
 intents: []
@@ -14,7 +14,7 @@ done_when: >-
   the shared-memory check reads Rust rather than whole-file text: a doc comment
   or a string naming a forbidden type does not fail the build, and a use of one
   under a different spelling does. Both directions have a test.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/28
 evidence:
 ---
 
