@@ -82,3 +82,90 @@ and leave the constraint documented. Do not invent a test that passes either way
 **Done when:** `done_when` holds, and the gate in root `AGENTS.md` is green.
 
 ## Notes
+
+All three items are closed. Item 3 turned out to have a witness after all — the open question in
+`## Why` is answered, not recorded as unanswerable.
+
+### 1. One deadline for the set
+
+`status` now starts a clock and hands each probe `deadline - elapsed`, so a set of any size answers
+within one budget. A broker the budget never reached comes back as a new `SetStatus::DeadlineSpent`
+carrying `unreached` (the broker never asked) and `asked` (the brokers that spent the budget, in
+order — its last entry is the one that ran the clock out). Neither `DeadlineSpent` nor `Empty` is
+ready.
+
+Two tests, both watched failing against the old per-broker deadline:
+
+- `one_deadline_covers_the_whole_set_however_many_brokers_it_has` — eight brokers, a probe costing
+  90ms each, a 200ms budget. Failed with
+  `each probe must be given what is left of the set's budget, but the deadlines handed out were
+  [200ms, 200ms, 200ms, 200ms, 200ms, 200ms, 200ms, 200ms]`. The elapsed-time assertion behind it
+  discriminates too: the old code took 720ms of a 200ms budget (the suite ran in 0.77s against
+  0.32s now), which is the same multiplication `## Why` measured at 302ms for one broker and 1.85s
+  for six.
+- `a_broker_the_budget_never_reached_is_named_with_the_ones_that_spent_it` — a probe that overruns
+  the deadline it is given spends the whole budget on the first broker. Failed with
+  `a set with a broker that was never asked cannot be ready`, because the old code went on to ask
+  all three and answered `Ready`.
+
+The first assertion is deterministic rather than timing-dependent: it reads the deadlines the
+prober was actually handed, which are all equal under the old code and strictly decreasing under
+the new one.
+
+### 2. `ControlSocket` — deleted
+
+Deleted, not wired up. The only caller it could have is `membraned`'s supervision loop, and the
+plan puts the daemon out of scope, so "give it a caller" was not reachable inside this task without
+inventing one. Leaving it would have kept a production adapter that nothing constructs, which by
+the two-adapter rule in the root `AGENTS.md` makes the `Probe` seam hypothetical: the only
+implementor in use was the test double. `readiness::probe` stays public, so whoever writes the
+supervision loop restores the adapter in five lines against a seam that has by then earned itself.
+
+This is the second of the two branches the plan authorised. `done_when` is worded for the first
+only ("a production Probe has a caller") and should be read as satisfied by the plan's alternative
+rather than by the letter — flagging it here rather than editing `done_when` to match what I did.
+
+### 3. The no-signal-after-external-reap path — witnessed
+
+`## Why` said this path could not be observed without forcing pid reuse. It can. Signalling a freed
+pid is a harmless `ESRCH`, so nothing about the *pid* discriminates — but the child's **process
+group** does. `VmmChild::spawn` calls `setsid`, so a worker the child forks joins the child's group,
+and drop's signal is a group kill. Give that worker a pipe to hold open, let a competing reaper take
+the child's exit status, then drop the handle: the pipe staying open is proof that no group kill was
+sent. `poll` on the read end answers in one call and is immune to the zombie window that makes
+`kill(pid, 0)` ambiguous.
+
+`a_second_reaper_leaves_the_childs_workers_running` is that test. Mutation watched: adding
+`libc::kill(-self.pid, libc::SIGKILL)` to drop's `ECHILD` branch turns it red with
+`worker 68447 was signalled after a competing reaper had already taken the child's exit status, so
+drop reached a pid it no longer owns`. Both directions are witnessed — the pipe stays open while
+the worker lives, and hangs up when it dies — so the test cannot pass either way.
+
+The test asserts a leak, which is uncomfortable in a repository whose first rule is that nothing
+outlives its owner unnoticed. That is the point: the cost of a second reaper is now noticed, and
+`VmmChild`'s doc says it, where before the doc claimed a dropped handle leaves neither the child nor
+its workers behind without qualification.
+
+**Open question, deliberately not acted on.** The mutation that turns the test red may be the
+correct behaviour. POSIX reserves a pid against reuse for as long as a process group with that pid
+as its group id still exists, so `kill(-pid, SIGKILL)` after an external reap either finds our own
+group or returns `ESRCH` — it cannot reach an unrelated process while the group has members. If that
+holds, drop could send the group kill on the `ECHILD` path and keep refusing only the bare
+`kill(pid, SIGKILL)`, recovering the workers without taking the pid-reuse hazard. It is out of this
+task's plan, which says to leave the constraint documented, and the POSIX guarantee should be
+verified before anyone acts on it.
+
+### The check-then-signal race itself
+
+Still unwitnessed, and still unclosable portably. What this task witnesses is the *ordering* case —
+a reaper that wins before drop looks. The *interleaving* case, where the reap lands between drop's
+check and its signal, needs the freed pid to be reused by an unrelated process inside that window,
+which is not forcible on macOS. `pidfd_open` plus `pidfd_send_signal` closes it on Linux; there is
+no macOS equivalent. The constraint stays stated on `VmmChild` and needs enforcing when `membraned`
+grows a supervision loop, because that is where a `waitpid(-1)` reaper appears.
+
+### Gate
+
+`cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check` and `./.githooks/provenance-guard` all green. `ps -eo pid,ppid` after
+the runs shows nothing reparented to init from this workspace.
