@@ -29,14 +29,13 @@ description: How a change reaches main — PR-only workflow, review rounds by di
      check" is the specific mistake: a weak reviewer produces agreeable text and no findings,
      which reads exactly like a clean pass.
 
-     **A different model family would be better, and is not available here** — the models on
-     offer are all one family, so name that limit rather than counting two different model names
-     as independence achieved. The proxy we can actually apply is a model different from the
-     author's, today `model: "fable"` on the Agent tool. Many agents on one model, reading one
-     context, agree with each other reliably, so a review that only confirms the author's
-     reasoning looks like diligence and is not evidence — and if your own session runs on Fable,
-     spawning Fable satisfies the words while reading nothing new. A same-model review still
-     finds real defects; it just cannot be counted as this pass.
+     **A different model family would be better, and is not available here** — every model on
+     offer is a Claude one, so name that limit rather than counting two different model names as
+     independence achieved. The proxy we can actually apply is a model different from the
+     author's: two agents on one model correlate, so a review that only confirms the author's
+     reasoning looks like diligence and is not evidence. Today that means `model: "fable"` on the
+     Agent tool, or `opus` where the author was Fable — the difference is the point, not the
+     name. A same-model review still finds real defects; it just cannot be counted as this pass.
 
      **If you can spawn the reviewer, do; if you cannot, ask the orchestrator.** Whether a
      dispatched agent has the Agent tool varies by how it was dispatched, so check what you have
@@ -44,9 +43,9 @@ description: How a change reaches main — PR-only workflow, review rounds by di
      your own PR on your own model.
 
      **The output goes on the PR as an issue comment**, not only into chat, opening with
-     `Model: <name>` and saying what was examined, what was found, what the author changed, and
-     what was declined with the reasoning. Naming the model is what makes a weak-model review
-     visible afterwards instead of indistinguishable from a strong one.
+     `Model: <name>` and the head SHA it read, then saying what was examined, what was found,
+     what the author changed, and what was declined with the reasoning. Naming the model is what
+     makes a weak-model review visible afterwards instead of indistinguishable from a strong one.
 4. **Watch for the review rather than waiting for it.** CodeRabbit posts minutes after a push,
    and again after every later push, so an agent that checks once and stops has stalled. Poll
    until the review lands and the thread count stops moving:
@@ -249,7 +248,8 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    version is that filing was how the queue came to grow with the amount of reviewing rather than
    with what the product needed.
 6. `gh pr merge --squash` once CI is green, the required rounds are done, **the independent
-   review is on the PR as an issue comment naming the model that ran it** (step 3), the
+   review is on the PR as an issue comment naming the model and the head it read, with nothing
+   material changed since that head** (step 3), the
    head's `CodeRabbit` status reads `Review completed` rather than `Review rate limited`, the
    review queue has been quiet for five minutes (step 4), and every review thread is resolved —
    `main` requires conversation resolution, so an open thread is what holds a merge. Resolving
@@ -329,7 +329,8 @@ Size is lines changed, excluding lockfiles and generated files.
 | 100–1000 | **2** |
 | > 1000 | **3** |
 
-The independent reviewer runs once per PR regardless of size.
+The independent reviewer runs once per PR regardless of size. Size never adds a pass; a rewrite
+that changes what it read does — step 6.
 
 ## Review the neighbourhood, not just the diff
 
