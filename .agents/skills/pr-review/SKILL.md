@@ -76,39 +76,15 @@ Write it in this order, and stop when you run out of things a reader needs:
 Then, and only then, the evidence: the tests, the mutations you watched fail, the gate. **Put it
 behind a `<details>` fold.** It is proof for a reviewer who wants it, not the body of the message.
 
-**Two hundred words above the fold. Count them.**
+**Keep it short — around four short paragraphs above the fold.** Two sentences on the problem, a
+paragraph on what changes, one on what is missing, and a sentence each on any choice a reviewer
+would otherwise puzzle over. **A PR that is too long is a PR no one reads**, and a description
+nobody finishes is worth the same as no description. If it has grown past that, cut it; moving
+prose behind the fold to look shorter cheats the reader you were writing for. What goes first is
+the second example, the sentence defending a choice nobody would question, and every clause you
+wrote because it was true rather than because it was needed.
 
-```shell
-gh pr view <number> --json body --jq .body \
-  | sed '/<!-- This is an auto-generated comment: release notes/,$d' \
-  | sed '/<details>/,$d' | wc -w
-```
-
-CodeRabbit appends its own summary to the body, so count without it — otherwise you end up cutting
-your own writing to make room for a bot's.
-
-That is about two sentences on the problem, a short paragraph on what changes, one on what is
-missing, and a sentence each on any choice a reviewer would otherwise puzzle over. It is not much,
-and that is the point: **a PR that is too long is a PR no one reads**, and a description nobody
-finishes is worth the same as no description.
-
-**Over the limit, cut — do not fold.** Moving prose behind the fold to pass the count cheats the
-reader you were writing for. What goes first is the second example, the sentence defending a
-choice nobody would question, and every clause you wrote because it was true rather than because
-it was needed.
-
-Two failure modes, both common here:
-
-- **A description that is all "how".** Fifteen headings of implementation, and a reader who
-  finishes it still cannot say what problem was solved. Test yourself: delete every sentence that
-  names a type, a file or a function. If nothing meaningful is left, start again.
-- **A description that restates the plan.** The task file already says what the plan was. Quoting
-  `done_when` and pasting the test table tells a reviewer nothing they cannot read there, and it
-  buries the one thing only you can write: why this was worth doing.
-
-The intent that started the work is usually two or three files away by the time a PR opens. Go
-back and read it. If the change no longer serves it, that is worth knowing before review, not
-after.
+(CodeRabbit appends its own summary to the body. That is not yours and does not count.)
 
 ## Rounds by diff size
 
