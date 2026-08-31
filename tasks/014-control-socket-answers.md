@@ -1,7 +1,7 @@
 ---
 id: 014
 title: The controller answers its control socket
-status: in_progress
+status: in_review
 priority: 1
 specs: [001]
 intents: []
@@ -26,7 +26,7 @@ done_when: >-
   error code 100-110 has a typed constructor whose serialization carries
   exactly the structured fields in §1's table, and an unknown code does not
   deserialize. The freeze checks cover the new wire module and its types.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/14
 evidence:
 ---
 
