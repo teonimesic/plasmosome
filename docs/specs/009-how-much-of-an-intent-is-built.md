@@ -152,6 +152,18 @@ business. An earlier draft of this spec had that fault and it was wrong twice ov
 value alone with no landed-work condition, and it left a truthful shape — a draft intent over work
 that already exists — with no legal value at all.
 
+**Silence needs a floor, because silence is the passing answer.** The check reads relative paths in
+the working tree, so a run started from the wrong directory finds no intent files, prints nothing,
+and is indistinguishable from a clean tree. That is the same shape as a review status that reads
+green because no review ran. So **an empty input set is a fault, never a pass**: finding no intent
+file carrying an `id:` is reported and the run refuses, rather than passing quietly. One condition
+buys the difference between "nothing is wrong" and "nothing was read", and without it every other
+guarantee here is conditional on a fact nobody checked.
+
+This is the whole of the provenance question the check can answer on its own. It names its inputs,
+and it refuses when they are absent. It cannot tell which *repository* it is standing in, and it
+does not try — that is a property of how it is invoked, not of what it reads.
+
 **What it must not flag, stated because it is the tempting check and it is wrong.** Open tasks
 beneath an intent marked `served: substantially` are not a contradiction. Substantial is not
 exhausted, no intent is expected to be exhausted, and a check that treated leftover work as a fault
@@ -213,6 +225,9 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
 - **A spec naming an intent id that no intent file carries does not abort the check**; the intents
   that do exist are still validated. Ids are resolved by reading each file's `id:`, never by
   globbing a filename.
+- **An empty input set is a fault.** If no file in `docs/intents/` carries an `id:`, the check
+  reports that and refuses rather than printing nothing, so a run in the wrong working directory
+  cannot be read as a clean tree.
 - **Callers may rely on** the check being a floor and not a proof: silence means no intent makes a
   claim the tree flatly contradicts, never that any intent's coverage is accurate.
 - **A pull request changing `served:` or `## What is served` stays a draft** until the owner takes
@@ -251,10 +266,17 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
   and at `served: substantially` prints nothing. A check walking only the spec leg gets both
   backwards, which is what this bullet is for.
 - The check says nothing about `docs/intents/README.md`, which carries no `id:`.
+- Run from a directory with no `docs/intents/`, and from one where `docs/intents/` holds only files
+  without an `id:`, the check prints **its own** refusal and exits non-zero — verified in both
+  shapes and under both shells, because a silent pass there is indistinguishable from a clean tree.
+  Leaving this to the shell is not enough: `zsh` aborts on a glob that matches nothing, so an
+  unguarded implementation dies with a shell error under `zsh` and prints the check's refusal only
+  under `bash`. Test the directory before globbing it.
 - A planted spec carrying `intents: [099]`, which no intent file has, does not abort the check:
   every real intent is still validated in the same run.
-- The check runs clean under both `bash` and `zsh`. It does not use `status` as a shell variable
-  name, which is read-only in `zsh`.
+- The check runs clean under both `bash` and `zsh`. Two `zsh` traps are already known and neither
+  may resurface: `status` is a read-only variable name, and a glob matching nothing is a fatal
+  error rather than an empty list.
 - The derivation command in this spec, run for an intent with at least one spec, prints that spec
   and the tasks naming it; run for an intent with no specs, it prints nothing and exits 0.
 
