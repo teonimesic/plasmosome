@@ -94,28 +94,49 @@ description: How a change reaches main — PR-only workflow, review rounds by di
      printf '%s\n%s\n%s\n' "$r" "$c" "$i" | sort | tail -1
    }
 
-   prev=""; quiet=0; waited=0
-   until [ "$quiet" -ge 5 ]; do
-     sleep 60; waited=$((waited + 1))
-     now=$(newest "$PR") || { echo "poll failed - not quiet, find out why"; break; }
-     if [ -z "$now" ]; then
-       quiet=0
-       [ "$waited" -ge 10 ] && { echo "nothing after ${waited}m - is it still a draft?"; break; }
-     elif [ "$now" = "$prev" ]; then quiet=$((quiet + 1))
-     else quiet=0; prev="$now"
-     fi
-   done
+   wait_for_quiet() {
+     local prev="" quiet=0 waited=0 now
+     until [ "$quiet" -ge 5 ]; do
+       sleep 60; waited=$((waited + 1))
+       now=$(newest "$1") || { echo "poll failed - not quiet" >&2; return 1; }
+       if [ -z "$now" ]; then
+         quiet=0
+         [ "$waited" -ge 10 ] && { echo "no review after ${waited}m" >&2; return 1; }
+       elif [ "$now" = "$prev" ]; then quiet=$((quiet + 1))
+       else quiet=0; prev="$now"
+       fi
+     done
+   }
+
+   wait_for_quiet "$PR" || echo "NOT QUIET - do not merge on this"
    ```
+
+   **Every way out of that loop except reaching five is a refusal, so it returns non-zero.** A
+   version that merely `break`s tells the caller nothing, and the next step in the routine is the
+   merge — an abandoned wait then reads exactly like a completed one. Step 6 runs only when this
+   returns zero.
 
    Four details in that loop are the difference between it working and it lying to you. **A failed
    poll is not quiet** — `gh api --jq` prints its error body to stdout, so without the explicit
    `|| return 1` a 404 or an expired token returns the same non-empty string every minute and the
-   loop reports quiet after five. **`--paginate` is required**: both endpoints return oldest first,
-   30 per page, so an unpaginated read of a busy PR returns a timestamp that never moves. **Empty
-   is not quiet** — it means nothing has started, which on a draft PR is permanent, so the wait is
-   bounded and reports instead of spinning. And **issue comments are read on `updated_at`**,
+   loop reports quiet after five. **`--paginate` is required**: all three endpoints return oldest
+   first, 30 per page, so an unpaginated read of a busy PR returns a timestamp that never moves.
+   **Empty is not quiet** — it means nothing has started yet, so the wait is bounded and refuses
+   instead of spinning. And **issue comments are read on `updated_at`**,
    because CodeRabbit edits its walkthrough comment in place; on PR #26 that comment was created at
    15:03:47 and last edited at 15:45:35, which `created_at` would never show.
+
+   **An absent check is a phase, not yet a fault.** For a while after a push there is no
+   `CodeRabbit` context on the new head at all — `.statuses` is empty, and the description you
+   would read is an empty string. That is indistinguishable from a review that will never be
+   queued, and it fails toward waiting forever, where a rate-limited green fails toward merging
+   early. Both are
+   the same defect: a check whose non-participation is unobservable. So do not alarm on first
+   sight of absence; bound it. If no status has appeared after ten minutes, re-trigger with
+   `@coderabbitai review`; if that produces nothing either, escalate. **Never read absence as a
+   pass** — `mergeStateStatus` will happily say `CLEAN`, because CodeRabbit is not a required
+   check. Ten minutes is a guess, not a measurement: the one instance we have seen resolved itself
+   once the new head registered.
 
    **Quiet alone is not enough straight after a push.** These timestamps are PR-wide, not per-head,
    so a finding from the previous head keeps holding the newest slot while the new one sits
