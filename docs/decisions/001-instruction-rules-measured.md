@@ -89,3 +89,6 @@ is why the entry requirement is affordable.
 
 The global `~/.claude/CLAUDE.md` could not be isolated. It was present in both arms, so it raises
 the baseline rather than biasing the comparison, but it likely understates any rule about testing.
+
+There is no `docs/specs/002`, and there never will be. It was written, then withdrawn and
+rewritten as this decision. Nothing is missing.

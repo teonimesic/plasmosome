@@ -1,7 +1,7 @@
 ---
 id: 004
 title: Build the testkit crate, the conformance suite, and the seam rules
-status: todo
+status: planned
 priority: 1
 specs: [003]
 intents: [002]
@@ -16,13 +16,15 @@ refs:
     crates/plasmosome-core/src/manifest.rs,
     crates/plasmosome-freeze-checks/AGENTS.md,
     crates/plasmosome-freeze-checks/tests/freeze_rules.rs,
+    .github/workflows/ci.yml,
   ]
 done_when: >-
   crates/plasmosome-testkit exists with builders, a five-clause backend
   conformance suite that FakeBackend passes, one cross-crate integration test
   asserting empty residue after LIFO replay, a mutation-tested freeze rule
-  keeping testkit out of non-dev dependencies, and a testkit AGENTS.md carrying
-  the layer table and seam rule — with the gate green.
+  keeping testkit out of non-dev dependencies, a testkit AGENTS.md carrying the
+  layer table and seam rule, and the crate's ci.yml matrix entry if that matrix
+  already exists — with the gate green.
 pr:
 evidence:
 ---
@@ -38,12 +40,20 @@ to cross crates at all.
 Do not claim this task until spec 003 is `accepted`. Priority 1 because spec 005's
 `attach_detach` benchmark and every future real backend depend on this crate.
 
+**A task that adds a workspace member adds that member's `ci.yml` matrix entry in the same PR.**
+Task 005's freeze rule `ci_matrix_matches_workspace_members` fails when a member is missing from
+the matrix, so a new member and its matrix entry cannot land in separate PRs in either order.
+Task 004 adds `plasmosome-testkit`; whichever of the two lands second carries the entry. If
+`ci.yml` already has a `crate` matrix when you start, add `plasmosome-testkit` to it and change
+nothing else in that file. If it does not, there is nothing to add and task 005 will carry it.
+
 **Deliverable:** the `plasmosome-testkit` crate exactly as spec 003's Design section lays it
 out — builders, conformance suite, first integration test, freeze rule, AGENTS.md.
 
-**Out of scope:** benchmarks (spec 005), CI changes (spec 004), any end-to-end test, any change
-to the kernel crates beyond adding `plasmosome-testkit` to workspace members. If a kernel API
-seems to need changing to make this buildable, stop and report; do not change it.
+**Out of scope:** benchmarks (spec 005), CI changes except the one matrix entry for the crate
+this task adds (spec 004), any end-to-end test, any change to the kernel crates beyond adding
+`plasmosome-testkit` to workspace members. If a kernel API seems to need changing to make this
+buildable, stop and report; do not change it.
 
 **Read only the files in `refs:` and this task.** Spec 003 makes every design decision: crate
 layout, module names, the factory-function shape of conformance clauses, the no-mock-framework
@@ -66,6 +76,8 @@ Steps:
    reverting, and recording that in the PR description.
 6. `crates/plasmosome-testkit/AGENTS.md`: the layer table and the seam rule, copied from spec
    003, plus the crate's own testing command.
+7. If `.github/workflows/ci.yml` already carries a `crate` matrix, add the `plasmosome-testkit`
+   entry to it. Nothing else in that file changes.
 
 | Test | Proves |
 | --- | --- |
@@ -77,10 +89,8 @@ Steps:
 | `attach_detach_residue` (integration) | core + backend + ledger together leave no residue after LIFO replay |
 | freeze rule `testkit_is_dev_only` | a non-dev dependency on testkit fails the build |
 
-**Done when:** `done_when:` above holds and the gate passes: `cargo test --workspace`,
-`cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`,
-`./.githooks/provenance-guard`. Append to `## Notes` anything the next agent would otherwise
-rediscover.
+**Done when:** `done_when:` above holds and the gate in the root `AGENTS.md` passes. Append to
+`## Notes` anything the next agent would otherwise rediscover.
 
 STOP when done — do not start the next piece of work.
 

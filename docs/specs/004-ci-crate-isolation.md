@@ -1,7 +1,7 @@
 ---
 id: 004
 title: CI proves each crate alone, the workspace together, and the MSRV
-status: draft
+status: accepted
 intents: [002]
 ---
 
@@ -43,6 +43,10 @@ crate that breaks alone but not in a workspace-wide build. It is not full standa
 that is `cargo package`, deferred to spec 007. This limit is stated here so nobody mistakes the
 matrix for the packaging check.
 
+One entry proves less than the rest: a green `crate (plasmosome-freeze-checks)` does not show
+that crate standing on its own. Its tests shell out to `cargo` and run it against the workspace
+root, so they read the whole workspace by construction and cannot do otherwise.
+
 ### Keeping the matrix honest
 
 A hardcoded matrix rots when a crate is added or renamed. A new rule in
@@ -74,5 +78,4 @@ minutes. Revisit if a run ever exceeds fifteen minutes.
   names a non-member, and the mutation test (entry removed, failure observed, entry restored)
   is recorded in the PR.
 - All new jobs are green on the PR that introduces them.
-- The gate is green: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D
-  warnings`, `cargo fmt --all -- --check`, `./.githooks/provenance-guard`.
+- The gate in the root `AGENTS.md` is green.

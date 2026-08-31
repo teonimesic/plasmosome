@@ -1,7 +1,7 @@
 ---
 id: 003
 title: Hexagonal test architecture — four layers, one seam rule
-status: draft
+status: accepted
 intents: [002]
 ---
 
@@ -114,5 +114,4 @@ only what spans crates.
   outside dev-dependencies, and the rule is mutation-tested: the violation was added, seen to
   fail, and reverted.
 - `crates/plasmosome-testkit/AGENTS.md` carries the layer table and the seam rule.
-- The gate is green: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D
-  warnings`, `cargo fmt --all -- --check`, `./.githooks/provenance-guard`.
+- The gate in the root `AGENTS.md` is green.

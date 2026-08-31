@@ -47,12 +47,20 @@ Decided now, so the spec is buildable the day the decisions land:
 
 ## Acceptance
 
-- The three blocking decisions are recorded in `docs/decisions/` before any of the below lands.
 - The `package` CI job is green for every publishable crate.
 - One tagged release has published every publishable crate to crates.io in dependency order.
-- The gate is green: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D
-  warnings`, `cargo fmt --all -- --check`, `./.githooks/provenance-guard`.
+- The gate in the root `AGENTS.md` is green.
 
 ## Blocked on
 
-The three owner decisions above. Until they are made this spec stays `draft` and files no task.
+Three decision records must exist in `docs/decisions/` before this spec can be accepted. Making
+those decisions is the owner's work, not this spec's, so recording them is not one of its
+acceptance criteria — it is the precondition for having any:
+
+1. **The `plasmid-sdk` interface freeze.** Whether the SDK's interface is stable enough to
+   publish, given that its own working notes forbid freezing it by accident.
+2. **The pre-1.0 versioning policy.** What a version bump promises a plasmid author.
+3. **Claiming the crates.io names.** Whether and when, weighed against squatting risk on one
+   side and premature commitment on the other.
+
+Until all three are written down this spec stays `draft` and files no task.

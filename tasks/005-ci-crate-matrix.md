@@ -1,7 +1,7 @@
 ---
 id: 005
 title: Per-crate CI matrix, MSRV job, and the matrix-drift freeze rule
-status: todo
+status: planned
 priority: 2
 specs: [004]
 intents: [002]
@@ -29,8 +29,14 @@ nothing checks that the declared minimum Rust version is still true.
 
 ## Plan
 
-Do not claim this task until spec 004 is `accepted`. Independent of task 004 — claim in either
-order; if testkit already exists when you start, it is one more matrix entry.
+Do not claim this task until spec 004 is `accepted`. Claim it in either order against task 004.
+
+**A task that adds a workspace member adds that member's `ci.yml` matrix entry in the same PR.**
+Task 005's freeze rule `ci_matrix_matches_workspace_members` fails when a member is missing from
+the matrix, so a new member and its matrix entry cannot land in separate PRs in either order.
+Task 004 adds `plasmosome-testkit`; whichever of the two lands second carries the entry. So if
+`plasmosome-testkit` is already a workspace member when you start, it is one more matrix entry
+here. If it is not, leave it out — task 004 adds it along with the crate.
 
 **Deliverable:** the `crate` matrix job, the `msrv` job, and the matrix-drift freeze rule,
 exactly as spec 004's Design lays them out.
@@ -44,7 +50,8 @@ what you find, stop and report.
 
 Steps:
 
-1. Add the `crate` matrix job: one entry per workspace member from `Cargo.toml`, steps
+1. Add the `crate` matrix job: one entry per workspace member listed in `Cargo.toml` at the
+   time you write it, steps
    `cargo build -p <crate> --all-targets` and `cargo test -p <crate>`, one command per step,
    `Swatinem/rust-cache` keyed by crate name.
 2. Add the `msrv` job: `dtolnay/rust-toolchain@1.96`, one step `cargo check --workspace
@@ -63,9 +70,8 @@ Steps:
 | green `crate (<member>)` for every member | each crate builds and tests alone via `-p` |
 | green `msrv` | the workspace type-checks on Rust 1.96 exactly |
 
-**Done when:** `done_when:` above holds and the gate passes: `cargo test --workspace`,
-`cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`,
-`./.githooks/provenance-guard`. Append surprises to `## Notes`.
+**Done when:** `done_when:` above holds and the gate in the root `AGENTS.md` passes. Append
+surprises to `## Notes`.
 
 STOP when done — do not start the next piece of work.
 
