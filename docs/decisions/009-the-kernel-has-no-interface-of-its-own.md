@@ -49,7 +49,7 @@ those revisits this file rather than re-deriving the answer.
 ## Rejected
 
 **Three crates from the start.** `plasmosome-cli` today would wrap nothing and be exercised by
-one caller. `AGENTS.md` states the brake: two adapters means a real seam, one means a
+one caller. `AGENTS.md` states it outright: two adapters means a real seam, one means a
 hypothetical one — do not abstract until something second exists. What such a library would wrap
 is the protocol surface core already exposes, so the CLI is a client of an existing contract.
 
@@ -89,10 +89,10 @@ and decision 005 leaves connection policy to it — a read or idle timeout, and 
 are served one at a time or concurrently. Whether it is a second binary in the `plasmosome`
 package or a package of its own re-opens the shared-table argument above.
 
-Anything worth testing lives in core, not in the binary. That is a constraint on whoever writes
-the CLI rather than a freebie, and when it stops holding, the trigger above has fired. Moving
-code out of the binary into the third crate is then a real refactor with a PR of its own — the
-cost being deferred here, accepted knowingly.
+Kernel logic worth testing lives in core, never in the binary, which stays thin enough to need no
+tests of its own. That is a constraint on whoever writes the CLI, not a freebie: the day the
+binary accumulates state a test wants — the trigger above — that state goes to `plasmosome-cli`,
+not into core. Standing that crate up is a real refactor with a PR of its own, deferred knowingly.
 
 The naming note that describes the CLI is superseded by this decision. Its two verb groups need
 no revisiting on their content — spec 001 §2 states the same split — but their authority does:
