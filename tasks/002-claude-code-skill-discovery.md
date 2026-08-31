@@ -3,6 +3,9 @@ id: 002
 title: Make the skills discoverable to Claude Code
 status: todo
 priority: 3
+specs: []
+intents: []
+refs: []
 done_when: >-
   .claude/skills/planning-work, .claude/skills/pr-review and .claude/skills/tasks
   are committed as symlinks (git mode 120000) pointing at ../../.agents/skills/<name>,

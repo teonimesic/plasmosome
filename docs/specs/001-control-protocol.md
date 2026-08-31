@@ -2,6 +2,7 @@
 id: 001
 title: Control protocol
 status: accepted
+intents: []
 ---
 
 # Plasmosome control protocol — freeze draft (P1)

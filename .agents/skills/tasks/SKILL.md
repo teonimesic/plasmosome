@@ -1,22 +1,53 @@
 ---
 name: tasks
-description: How work is written down, found, and closed — intents, specs, and the task queue. Use when picking up work, filing new work, closing finished work, or at the start of any working session.
+description: How work is written down, found, and closed — the six layers, the task queue, and the heartbeat. Use when picking up work, filing new work, closing finished work, or at the start of any working session.
 ---
 
 # Finding, filing and closing work
 
-Work is written down in three places. **`docs/intents/`** records why someone wanted something,
-in their own words, before anyone designed it. **`docs/specs/`** records what a thing must do —
-behavior, contract, acceptance — agreed before it is built. **`tasks/`** holds the units that
-actually move: one file each, with a status, a priority, and a plan for whoever will do the work.
+Work in this repository is written down in files, not left in a chat window. There are six
+layers, from the sentence that would survive a total rewrite down to the unit of work you do this
+afternoon: **vision**, **architecture**, **decisions**, **intents**, **specs**, **tasks**. Four
+have folders — `docs/decisions/`, `docs/intents/`, `docs/specs/` and `tasks/`. The other two
+already live in `README.md` and in each crate's `AGENTS.md`, and stay there.
 
-Tasks sit at the top level of the repository, not under `docs/`. `docs/` is finished reference
-you read to understand the system. `tasks/` is the live queue you work from and change every day.
-Keeping them apart stops one from being mistaken for the other.
+Most changes need only a task. A change of 100 lines or more, or one that touches enforcement or
+revocation semantics or a public contract, needs an accepted spec first. Only owner-originated
+capability work needs an intent. The two tables below decide; when in doubt, file a task.
 
-Most work needs only a task. Some needs a spec first. Very little needs an intent — the table
-below decides. To pick up work right now: run `grep -l "^status: planned" tasks/*.md`, take the
-file with the lowest `priority:` number, and follow its `## Plan`.
+To pick work up: run the **heartbeat** at the bottom of this file, top to bottom — it ends by
+handing you the next task. To file something: copy the matching skeleton out of `docs/templates/`
+and fill it in.
+
+## The six layers
+
+| Layer | Where it lives | It belongs here if |
+| --- | --- | --- |
+| Vision | `README.md` — `## Why`, `## Properties` | the sentence would survive rebuilding the system a completely different way |
+| Architecture | `README.md` — `## Architecture`; each crate's `AGENTS.md` | it is about how two or more pieces fit together, not about any one piece |
+| Decision | `docs/decisions/NNN-title.md` | a choice was made between real alternatives someone would argue for again |
+| Intent | `docs/intents/NNN-slug.md` | it says what and why, with no how |
+| Spec | `docs/specs/NNN-slug.md` | it says how, it is testable, and it says nothing about who or when |
+| Task | `tasks/NNN-slug.md` | you could delete it after merge and lose nothing permanent |
+
+Anything about one piece alone goes in that crate's own docs, not in an architecture note. A
+decision is never edited: when it stops holding, write a new one and mark the old `superseded`.
+
+`tasks/` sits at the top level of the repository rather than under `docs/` on purpose. `docs/` is
+finished reference you read to understand the system. `tasks/` is the live queue you work from
+and change every day. A task file read as documentation misleads in both directions.
+
+`docs/intents/` does not exist yet — the first intent creates it.
+
+### When to promote a layer into its own file
+
+- Write **`docs/VISION.md`** the first time an intent is turned down and there is no written
+  sentence to cite for turning it down.
+- Write **`docs/architecture.md`** at the first piece of reasoning that spans three or more
+  crates and fits in none of their own docs. When it exists it names crates and links to them; it
+  never restates a crate's contract.
+
+Until then, do not create either file. A second copy of the vision would contradict the first.
 
 ## When each one is required
 
@@ -39,87 +70,39 @@ file with the lowest `priority:` number, and follow its `## Plan`.
 **The `## Plan` belongs in the task, never in the spec.** A spec says what must be true and
 outlives many tasks. A plan is tied to one branch and is stale the day it merges.
 
-## Numbering
+## Numbering, and the fields that link the layers
 
-`NNN-slug.md`, three digits, in each of the three directories. Each directory numbers from 001
-on its own, so a spec 002 and a task 002 are unrelated. `docs/intents/` does not exist yet; the
-first intent creates it.
+Files are `NNN-slug.md`, three digits. Each folder numbers from 001 on its own, so spec 002 and
+task 002 are unrelated.
+
+Links point upward, and they are always **one-line flow lists of those three-digit ids**:
+
+- a spec carries `intents: [003]`
+- a task carries `specs: [001, 004]` and `intents: [003]`
+
+**Both fields are always present.** Write `[]` when there is nothing to link. An absent field
+would force every search to be written twice. Keeping them on one line, anchored at the start of
+the line, is what keeps the two id namespaces apart and stops a search matching body prose.
 
 ## Templates
 
-Fill these in as they stand. Anything marked optional may be left blank — a blank section is
-better than filler, because filler reads as something that was considered.
-
-### Intent — `docs/intents/NNN-slug.md`
+Copy the skeleton, do not retype it:
 
 ```
----
-id: 004
-title: short name for the thing wanted
-date: 2026-08-30
-originator: who asked
----
-
-The why, in the originator's words, unedited: what they want, and what made
-them want it. No design and no solution — those come later, in a spec.
-
-## Outcome
-Optional, added later: what was built, or why nothing was.
+cp docs/templates/task.md tasks/004-my-slug.md
 ```
 
-An intent has no status field. It records a moment and never changes state.
+`docs/templates/` holds `intent.md`, `spec.md`, `task.md` and `decision.md`. Fields marked
+optional, and sections you have nothing to put in, are left blank. A blank section is better than
+filler, because filler reads as something that was considered.
 
-### Spec — `docs/specs/NNN-slug.md`
+A few field values worth stating outright:
 
-```
----
-id: 002
-title: what the thing is
-status: draft
-intent: docs/intents/004-slug.md
----
-
-## Behavior
-What it does, seen from outside.
-
-## Contract
-Names, types, states, errors. What a caller may rely on.
-
-## Acceptance
-The list a reviewer checks the diff against. One checkable line each.
-```
-
-`status:` is `draft`, `accepted` or `superseded`. Leave out `intent:` when there is no intent
-file — a spec driven by a defect, or written before intents existed. New specs use all three
-headers; `docs/specs/001-control-protocol.md` predates this shape and keeps its own.
-
-### Task — `tasks/NNN-slug.md`
-
-```
----
-id: 003
-title: short name for the unit of work
-status: todo
-priority: 2
-spec: docs/specs/002-slug.md
-refs: crates/foo/AGENTS.md
-done_when: one sentence a stranger can check, or a short list of them
-pr:
-evidence:
----
-
-## Why
-One to three lines, or a pointer to the intent.
-
-## Plan
-Written by the planner. Blank while the task is `todo`.
-
-## Notes
-Dated appendices. Blank until someone has something to add.
-```
-
-`spec:` and `refs:` are optional; `refs:` takes one path or a list. `pr:` and `evidence:` stay
-empty until the work reaches review and then merges.
+- Spec `status:` is `draft`, `accepted` or `superseded`.
+- Task `refs:` is the files the executor must read. `pr:` and `evidence:` stay empty until the
+  work reaches review and then merges.
+- New specs use all three headers. `docs/specs/001-control-protocol.md` predates this shape and
+  keeps its own.
 
 ## Priority
 
@@ -132,7 +115,7 @@ empty until the work reaches review and then merges.
 | Status | Means | Entering it requires |
 | --- | --- | --- |
 | `todo` | filed | `done_when:` filled in |
-| `planned` | ready to hand to an executor | `## Plan` written; if the change crosses the spec threshold above, `spec:` names an accepted spec |
+| `planned` | ready to hand to an executor | `## Plan` written; if the change crosses the spec threshold above, `specs:` names an accepted spec |
 | `in_progress` | claimed | branch `task-NNN-slug`, in the executor's own worktree |
 | `in_review` | PR open | `pr:` set |
 | `done` | squash-merged | `evidence:` not empty |
@@ -159,18 +142,21 @@ out instead.
 ## Finding things
 
 ```
-grep -l "^status: planned" tasks/*.md
-grep -h "^title:" $(grep -l "^status: todo" tasks/*.md)
-grep -l "^priority: 1" tasks/*.md
-grep -rl "docs/specs/002" tasks/ docs/specs/
+grep -l '^status: todo' tasks/*.md
+grep -l '^status: planned' tasks/*.md
+grep -l '^priority: 1' tasks/*.md
+grep -l '^specs:.*\b001\b' tasks/*.md
+grep -l '^intents:.*\b003\b' docs/specs/*.md
+grep -l '^intents:.*\b003\b' tasks/*.md
+grep -h '^title:' $(grep -l '^status: todo' tasks/*.md)
 ```
 
 ## Checking whether a task is really done
 
 `gh pr merge --squash` puts a new commit on `main` and does not merge the branch. **Afterwards
-the branch tip is not an ancestor of `main` — the squash commit is.** So any check shaped like
-"is this branch merged into main" answers no for work that shipped weeks ago. Never verify a
-task that way.
+the branch tip is not an ancestor of `main` — the squash commit is.** Any check shaped like "is
+this branch merged into main" answers no for work that shipped weeks ago. Never verify a task
+that way.
 
 Ask GitHub instead:
 
@@ -189,23 +175,70 @@ gh pr view <number> --json state,mergeCommit
 - `done` flips are batched into the next work PR, or into a `chore(tasks): close NNN` PR of
   their own.
 
-## Heartbeat
+## The heartbeat
 
-Run this whenever you pick the work back up.
+Run this at the start of every working session, in this order. It replaces the session to-do
+list entirely: nothing that matters is remembered, everything that matters is a file.
 
-1. **Verify.** Run `gh pr list` and compare it against every task marked `in_review` or
-   `in_progress`. Where the file and GitHub disagree, correct the file and record in `## Notes`
-   what established the truth. A stale queue is worse than no queue, because people believe it.
-2. **Close.** Batch the `done` flips into one `chore(tasks)` PR.
-3. **Pick.** The highest-priority `planned` task — the lowest `priority:` number — not the
-   newest one.
-4. **File.** Anything you discovered that outlives this session becomes a task. Not a note in a
-   session to-do list that disappears when the session ends.
+**1. Pending PRs.**
+
+```
+gh pr list --state open
+```
+
+For each one, answer three questions: is CI green, are the review rounds for its diff size done,
+and are all conversations resolved? `main` requires conversation resolution, so a single
+unresolved thread is what is blocking the merge — not CI, and not a missing approval.
+
+**2. Pending reviews.**
+
+```
+gh pr view <number> --json reviewThreads
+```
+
+The threads still open are the queue. Work them before opening anything new.
+
+**3. Pending tasks.** Reconcile `tasks/` against reality: the open PRs from step 1 and the
+`task-*` branches on the remote.
+
+```
+git ls-remote --heads origin 'task-*'
+```
+
+Release a claim whose branch and PR are both gone — put it back to `planned`. Mark as `done`
+anything that already landed, with `evidence:`. Record in `## Notes` what established the truth.
+A stale queue is worse than no queue, because people believe it.
+
+**4. Pending specs.** Work that was described and then dropped hides in two places: a spec still
+in draft that no task implements, and an intent with no spec at all.
+
+```
+grep -l '^status: draft' docs/specs/*.md
+```
+
+For each draft spec id, an empty result here means nothing is implementing it:
+
+```
+grep -l '^specs:.*\b002\b' tasks/*.md
+```
+
+And for each intent id, an empty result here means no spec was ever written:
+
+```
+grep -l '^intents:.*\b003\b' docs/specs/*.md
+```
+
+Either way, decide out loud: plan it, or say why not.
+
+**5. Pick.** The highest-priority `todo` — the lowest `priority:` number — not the newest one.
+
+**6. File.** Anything you learned this session that must outlive it becomes a task file before
+the session ends.
 
 ## Tooling
 
-There is none, deliberately. The greps above are the whole interface, and plain files can be
-read and fixed by anyone without running anything.
+There is none, deliberately. The greps above are the whole interface, and plain files can be read
+and fixed by anyone without running anything.
 
 Write `tools/tasks.py` — `list`, `show`, `next`, `check` — when one of these happens, and not
 before: more than 15 open tasks, or the first time a file is malformed, a task is marked done

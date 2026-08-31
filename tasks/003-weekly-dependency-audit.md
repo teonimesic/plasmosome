@@ -3,6 +3,9 @@ id: 003
 title: Weekly cargo audit workflow
 status: todo
 priority: 3
+specs: []
+intents: []
+refs: []
 done_when: >-
   A workflow runs cargo audit on a weekly schedule and on any pull request that
   changes Cargo.lock, fails the job when a dependency has an open RustSec

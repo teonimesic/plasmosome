@@ -3,9 +3,9 @@ id: 001
 title: The membrane supervises its cell's brokers
 status: todo
 priority: 2
-refs:
-  - crates/plasmosome-membrane/AGENTS.md
-  - docs/specs/001-control-protocol.md
+specs: [001]
+intents: []
+refs: [crates/plasmosome-membrane/AGENTS.md, docs/specs/001-control-protocol.md]
 done_when: >-
   membraned spawns each of a cell's brokers, answers membrane.status ready only
   once every broker answers its own control socket, reports a broker that stops

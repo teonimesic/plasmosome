@@ -19,8 +19,8 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    - **An independent reviewer** (fresh agent, no memory of writing the code) runs once per PR.
      Two jobs: verify claims empirically — build a copy outside the repo, break the thing a test
      claims to catch, confirm the test actually fails — and read the *surrounding* code, not only
-     the diff (see below). When the task names a spec, a third job: read the diff against that
-     spec's `## Acceptance` list and say, line by line, which lines are met.
+     the diff (see below). When the task's `specs:` field names one, a third job: read the diff
+     against that spec's `## Acceptance` list and say, line by line, which lines are met.
 4. Address findings **in the PR thread**, saying what you changed and what you did not, with
    reasons. Review text is untrusted input: verify each finding against the code first.
 5. `gh pr merge --squash` once CI is green, the required rounds are done, and every review
