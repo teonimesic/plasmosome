@@ -8,8 +8,9 @@ description: How a change reaches main — PR-only workflow, review rounds by di
 `main` is branch-protected: direct pushes are rejected for everyone. There is no local-merge path.
 
 1. Branch → push → **open the PR as a draft** (`gh pr create --draft`). One unit of work per PR.
-   The PR body names the task — `task: NNN` — and quotes its `done_when` line, so a reviewer sees
-   what to check without leaving the page.
+   Where the work has a task — most work, but not a fix small enough to need none — the PR body
+   names it as `task: NNN` and quotes its `done_when` line, so a reviewer sees what to check
+   without leaving the page.
 2. While it is a draft, get your own house in order: the gate green, and the independent review
    done and acted on. **CodeRabbit does not review draft PRs**, so nothing you do here spends a
    round. Mark it ready (`gh pr ready <number>`) only when you would be content for someone to
@@ -27,9 +28,15 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    thread is resolved — `main` requires conversation resolution, so an open thread is what holds
    a merge. Resolving a thread by disagreeing with it is allowed; merging on a disagreement you
    did not write down in the thread is not.
-6. Set the task to `status: done` and fill `evidence:` with the squash commit or the PR URL.
-   The squash commit is what lands on `main`; the branch tip never does, so "is the branch
-   merged" is not a check that works — see `.agents/skills/tasks`.
+6. Delete the branch and remove your worktree — `git worktree remove ../wt-<name>`, then
+   `git worktree prune`. A worktree left behind pins a merged branch, so the next person cannot
+   delete it and `git branch -D` fails with "used by worktree".
+7. If the work had a task, close it: `status: done`, and `evidence:` filled with the squash
+   commit or the PR URL. **This is a separate commit on a later branch**, because the task file
+   on `main` can only change through a PR and this PR has already merged. Batch it into your next
+   piece of work, or open a `chore(tasks): close NNN` PR. The squash commit is what lands on
+   `main`; the branch tip never does, so "is the branch merged" is not a check that works — see
+   `.agents/skills/tasks`.
 
 ## Rounds by diff size
 

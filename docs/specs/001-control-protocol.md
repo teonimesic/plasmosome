@@ -5,7 +5,7 @@ status: accepted
 intents: []
 ---
 
-# Plasmosome control protocol — freeze draft (P1)
+# Plasmosome control protocol — the P1 freeze
 
 **Scope:** the P1 contract freeze (91 plan step 1). Everything binding below is
 traceable to a decided item: D1/D1a/D1b/D1c/D2/D2b/D3/D4 in `91-p1-plan.md`, the frozen

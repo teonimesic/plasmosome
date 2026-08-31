@@ -7,15 +7,15 @@ description: How work is written down, found, and closed — the six layers, the
 
 Work in this repository is written down in files, not left in a chat window. There are six
 layers, from the sentence that would survive a total rewrite down to the unit of work you do this
-afternoon: **vision**, **architecture**, **decisions**, **intents**, **specs**, **tasks**. Four
-have folders — `docs/decisions/`, `docs/intents/`, `docs/specs/` and `tasks/`. The other two
-already live in `README.md` and in each crate's `AGENTS.md`, and stay there.
+afternoon: **vision**, **architecture**, **decisions**, **intents**, **specs**, **tasks**. The
+bottom four have folders — `docs/decisions/`, `docs/intents/`, `docs/specs/` and `tasks/`. The
+top two already live in `README.md` and in each crate's `AGENTS.md`, and stay there.
 
 Most changes need only a task. A change of 100 lines or more, or one that touches enforcement or
 revocation semantics or a public contract, needs an accepted spec first. Only owner-originated
 capability work needs an intent. The two tables below decide; when in doubt, file a task.
 
-To pick work up: run the **heartbeat** at the bottom of this file, top to bottom — it ends by
+To pick work up: run the **heartbeat** (`.agents/skills/heartbeat`) top to bottom — it ends by
 handing you the next task. To file something: copy the matching skeleton out of `docs/templates/`
 and fill it in.
 
@@ -36,8 +36,6 @@ decision is never edited: when it stops holding, write a new one and mark the ol
 `tasks/` sits at the top level of the repository rather than under `docs/` on purpose. `docs/` is
 finished reference you read to understand the system. `tasks/` is the live queue you work from
 and change every day. A task file read as documentation misleads in both directions.
-
-`docs/intents/` does not exist yet — the first intent creates it.
 
 ### When to promote a layer into its own file
 
@@ -148,7 +146,7 @@ grep -l '^priority: 1' tasks/*.md
 grep -l '^specs:.*\b001\b' tasks/*.md
 grep -l '^intents:.*\b003\b' docs/specs/*.md
 grep -l '^intents:.*\b003\b' tasks/*.md
-grep -h '^title:' $(grep -l '^status: todo' tasks/*.md)
+grep -h '^title:' /dev/null $(grep -l '^status: todo' tasks/*.md)
 ```
 
 ## Checking whether a task is really done
@@ -167,73 +165,33 @@ gh pr view <number> --json state,mergeCommit
 `state: MERGED` with a merge commit is the proof. Put that commit hash, or the PR URL, in
 `evidence:`.
 
-## Queue changes travel by pull request
+## Which pull request does each file land in
 
-`main` is protected, so changing a task file is a commit like any other.
+`main` is protected, so every file here — intent, spec, task — reaches it the same way code does:
+on a branch, through a PR. Nothing is written straight to `main`. That has one consequence people
+trip over, so it is worth stating plainly.
+
+**A spec that gates work lands in its own PR, before the work branch exists.** The rule is that a
+task crossing the spec threshold may not be claimed until its spec is `accepted`, and a spec is
+`accepted` once its PR merges. So capability work is two PRs, in order:
+
+1. `docs(spec): NNN <title>` — the intent, if there is one, and the spec at `status: draft`. It
+   merges after review; that merge is what makes it `accepted`. Flip the status to `accepted` in
+   the last commit before merging, so `main` never holds a spec whose status lies.
+2. The work branch, `task-NNN-slug` — the code, plus the task's own status flips.
+
+Small work skips step 1 entirely and is one PR.
 
 - Filing a task, and every status flip up to `in_review`, rides the work branch itself.
-- `done` flips are batched into the next work PR, or into a `chore(tasks): close NNN` PR of
-  their own.
+- `in_review` needs `pr:`, which does not exist until the PR is open. Set it in a second commit
+  and push — that costs a CI run, so open the PR as a draft and set it before marking it ready.
+- `done` flips ride the next piece of work, or a `chore(tasks): close NNN` PR of their own. They
+  cannot ride the PR they describe: it has already merged.
 
 ## The heartbeat
 
-Run this at the start of every working session, in this order. It replaces the session to-do
-list entirely: nothing that matters is remembered, everything that matters is a file.
-
-**1. Pending PRs.**
-
-```
-gh pr list --state open
-```
-
-For each one, answer three questions: is CI green, are the review rounds for its diff size done,
-and are all conversations resolved? `main` requires conversation resolution, so a single
-unresolved thread is what is blocking the merge — not CI, and not a missing approval.
-
-**2. Pending reviews.**
-
-```
-gh pr view <number> --json reviewThreads
-```
-
-The threads still open are the queue. Work them before opening anything new.
-
-**3. Pending tasks.** Reconcile `tasks/` against reality: the open PRs from step 1 and the
-`task-*` branches on the remote.
-
-```
-git ls-remote --heads origin 'task-*'
-```
-
-Release a claim whose branch and PR are both gone — put it back to `planned`. Mark as `done`
-anything that already landed, with `evidence:`. Record in `## Notes` what established the truth.
-A stale queue is worse than no queue, because people believe it.
-
-**4. Pending specs.** Work that was described and then dropped hides in two places: a spec still
-in draft that no task implements, and an intent with no spec at all.
-
-```
-grep -l '^status: draft' docs/specs/*.md
-```
-
-For each draft spec id, an empty result here means nothing is implementing it:
-
-```
-grep -l '^specs:.*\b002\b' tasks/*.md
-```
-
-And for each intent id, an empty result here means no spec was ever written:
-
-```
-grep -l '^intents:.*\b003\b' docs/specs/*.md
-```
-
-Either way, decide out loud: plan it, or say why not.
-
-**5. Pick.** The highest-priority `todo` — the lowest `priority:` number — not the newest one.
-
-**6. File.** Anything you learned this session that must outlive it becomes a task file before
-the session ends.
+Every working session starts with it: reconcile the queue against reality, then pick. It is its
+own skill — see `.agents/skills/heartbeat`.
 
 ## Tooling
 

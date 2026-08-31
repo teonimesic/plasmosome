@@ -22,13 +22,14 @@ every grant records how to undo it.
 | --- | --- |
 | `.agents/skills/planning-work` | Starting a piece of work, or briefing another agent |
 | `.agents/skills/pr-review` | Opening a PR, addressing review feedback, or merging |
-| `.agents/skills/tasks` | Finding, filing, or closing work; and at the start of every session |
+| `.agents/skills/tasks` | Finding, filing, or closing work — the layers, formats and links |
+| `.agents/skills/heartbeat` | The start-of-session routine: reconcile, then pick what to do next |
 
-Short version: work is written down in `tasks/` before it is done, and in `docs/specs/` first
-when it is large or touches a contract; work moves in small, finishable pieces; the strongest
-model plans and the next one executes; `main` is protected and every change arrives by pull
-request; two reviewers look at each PR and one of them verifies claims by breaking things rather
-than reading.
+Short version. Work is written down before it is done: in `tasks/` always, and in `docs/specs/`
+first when it is large or touches a contract. It moves in small, finishable pieces. The strongest
+model available plans; the next one down executes. `main` is protected, so every change arrives
+by pull request. Two reviewers read each PR, and one of them checks claims by breaking things
+rather than by reading.
 
 ## Style
 
