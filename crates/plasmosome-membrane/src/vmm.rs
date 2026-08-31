@@ -230,6 +230,7 @@ mod tests {
         fn launch(self) -> ! {
             let worker = unsafe { libc::fork() };
             if worker == 0 {
+                unsafe { libc::alarm(60) };
                 loop {
                     unsafe { libc::pause() };
                 }
@@ -376,7 +377,6 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        unsafe { libc::kill(worker, libc::SIGKILL) };
         panic!("worker {worker} outlived {context}");
     }
 
