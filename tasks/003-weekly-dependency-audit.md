@@ -1,7 +1,7 @@
 ---
 id: 003
 title: Weekly cargo audit workflow
-status: planned
+status: in_progress
 priority: 3
 specs: []
 intents: []
