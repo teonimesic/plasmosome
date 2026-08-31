@@ -1,7 +1,7 @@
 ---
 id: 016
 title: The control loop needs a daemon to own its edges
-status: in_progress
+status: in_review
 priority: 2
 specs: [001]
 intents: []
@@ -21,7 +21,7 @@ done_when: >-
   handler, a handler returning a reserve code, and the absent-genome encoding.
   Each decision is tested, and the ones a client can observe are written into
   spec 001.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/30
 evidence:
 ---
 
