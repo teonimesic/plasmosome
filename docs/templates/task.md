@@ -3,8 +3,8 @@ id: NNN
 title: short name for the unit of work
 status: todo
 priority: 2
-specs: []
-intents: []
+specs: [NNN]
+intents: [NNN]
 refs: []
 done_when: one sentence a stranger can check, or a short list of them
 pr:

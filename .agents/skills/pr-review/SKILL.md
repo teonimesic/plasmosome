@@ -202,6 +202,13 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    The one exception is argued, never asserted: a finding needing a decision the author cannot
    make, or belonging to a unit this PR is explicitly not building. File it **and** say in the
    thread what is missing and who has to supply it. "Good point, filed" is not that.
+
+   **And a finding may only be filed when it maps to a spec.** A finding against behavior some
+   spec requires becomes an ordinary task naming that spec. A finding against something no spec
+   covers cannot become one: fix it here, or drop it and write the reasoning in the thread.
+   `.agents/skills/tasks` says why, under "A review finding that maps to nothing" — the short
+   version is that filing was how the queue came to grow with the amount of reviewing rather than
+   with what the product needed.
 6. `gh pr merge --squash` once CI is green, the required rounds are done, the head's `CodeRabbit`
    status reads `Review completed` rather than `Review rate limited`, the review queue has been
    quiet for five minutes (step 4), and every review thread is resolved — `main` requires

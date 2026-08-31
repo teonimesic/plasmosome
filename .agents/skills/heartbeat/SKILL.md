@@ -70,8 +70,8 @@ For every task carrying a `pr:`: `MERGED` means set `done` and record the merge 
 `planned`. Record in `## Notes` what established the truth. A stale queue is worse than no queue,
 because people believe it.
 
-**4. Pending specs.** Work that was described and then dropped hides in two places: a spec still
-in draft that no task implements, and an intent with no spec at all.
+**4. Pending specs, and unmapped work.** Work that was described and then dropped hides in two
+places: a spec still in draft that no task implements, and an intent with no spec at all.
 
 ```shell
 for f in docs/specs/*.md; do
@@ -89,6 +89,23 @@ done
 Both loops derive the ids from the files, so a record numbered anything is covered. Silence means
 nothing is pending. For anything they print, decide out loud: dispatch a planner for it, or say
 why not. The decision is yours; the plan is not.
+
+Then read the chain the other way, for work nothing asked for:
+
+```shell
+grep -l '^specs: \[\]' tasks/*.md
+grep -l '^intents: \[\]' docs/specs/*.md
+```
+
+These are not planner dispatches. A task naming no spec may not be planned and so may not be
+started, and a spec naming no intent may not be planned either — so for each one the answer is to
+map it to something that already exists, to put the question to the owner in your own words, or to
+recommend dropping it. **Never close the gap by writing an intent yourself**; that is the one move
+`.agents/skills/tasks` rules out, because an intent written to justify a filed task approves the
+work on the owner's behalf.
+
+Both lists shrinking over sessions is the signal that the queue is being fed by the plan. Both
+growing is the signal it is being fed by the review process instead.
 
 **5. Clean up.** Remove the worktrees of branches that have merged, and prune. A worktree left
 behind pins its branch and blocks the next person from deleting it. **This runs before the count

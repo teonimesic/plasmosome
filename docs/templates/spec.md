@@ -2,7 +2,7 @@
 id: NNN
 title: what the thing is
 status: draft
-intents: []
+intents: [NNN]
 ---
 
 ## Behavior
