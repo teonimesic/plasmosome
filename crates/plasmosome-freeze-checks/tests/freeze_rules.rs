@@ -1,6 +1,8 @@
 use std::process::Command;
 
-use plasmosome_freeze_checks::shared_memory::{SharedMemoryUse, shared_memory_uses};
+use plasmosome_freeze_checks::shared_memory::{
+    SharedMemoryUse, out_of_line_modules, shared_memory_uses,
+};
 use plasmosome_freeze_checks::workspace_root;
 
 const CONTROLLER_CRATES: &[&str] = &["plasmosome-core", "plasmosome-backend", "plasmosome-ledger"];
@@ -198,6 +200,22 @@ fn controller_wire_state_shares_no_memory_across_the_seam() {
     for relative in wire_sources {
         let source = std::fs::read_to_string(workspace_root().join(relative))
             .expect("the wire module is readable");
+        let unread = out_of_line_modules(&source)
+            .unwrap_or_else(|error| panic!("`{relative}` does not parse as Rust: {error}"));
+        assert!(
+            unread.is_empty(),
+            "86 §4 rule 2 unprovable: `{relative}` declares {} without a body, so this rule cannot read {} code; add the module's file to `wire_sources` or inline it",
+            unread
+                .iter()
+                .map(|name| format!("`mod {name};`"))
+                .collect::<Vec<String>>()
+                .join(", "),
+            if unread.len() == 1 {
+                "that module's"
+            } else {
+                "those modules'"
+            }
+        );
         let uses = shared_memory_uses(&source)
             .unwrap_or_else(|error| panic!("`{relative}` does not parse as Rust: {error}"));
         assert!(

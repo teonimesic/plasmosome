@@ -38,12 +38,18 @@ file that has to carry such a word narrows the construct list. That choice is pi
 `a_name_that_is_a_construct_word_but_means_something_else_is_over_reported`. None of the seven wire
 files carries such a word today.
 
+A third case is refused rather than missed. A `mod name;` keeps its body in another file, so a scan
+of the declaring file cannot see it — the rule reports the declaration and fails, naming the remedy
+(add that file to `wire_sources`, or inline the module). This one is decidable by the parser, so it
+is closed rather than documented as a limit: `out_of_line_modules` answers it, and the rule asks
+before it scans.
+
 ## Testing
 
 `cargo test -p plasmosome-freeze-checks`.
 
 **Count the tests by running them, not by grepping for them.**
-`grep -c '^#\[test\]' tests/shared_memory_reads_rust.rs` answers 21; the file holds 20 tests. The
+`grep -c '^#\[test\]' tests/shared_memory_reads_rust.rs` answers 26; the file holds 25 tests. The
 extra hit is inside the raw-string fixture belonging to `a_test_name_naming_a_lock_is_not_a_use`,
 which is a `#[test]` written as text so the rule can be shown ignoring it. A count taken that way
 is off by exactly the fixtures this crate exists to distinguish from code, and the same is true of

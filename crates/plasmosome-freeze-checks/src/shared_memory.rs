@@ -38,6 +38,7 @@ const SHARED_MEMORY_NAMES: &[&str] = &[
     "AtomicU32",
     "AtomicU64",
     "AtomicUsize",
+    "NonNull",
     "thread_local",
     "lazy_static",
     "once_cell",
@@ -115,6 +116,35 @@ pub fn shared_memory_uses(source: &str) -> Result<Vec<SharedMemoryUse>, syn::Err
     };
     scan.visit_file(&file);
     Ok(scan.found)
+}
+
+/// Returns the name of every module `source` declares without a body, in the order found.
+///
+/// A `mod name;` puts its body in another file, so a scan of this one cannot see it. A caller
+/// checking a fixed list of files must treat each name returned here as code it has not read —
+/// either by adding that file to its list, or by refusing.
+///
+/// An inline `mod name { .. }` is not returned: its body is part of this file and is scanned.
+///
+/// Returns the parse error when `source` is not valid Rust.
+pub fn out_of_line_modules(source: &str) -> Result<Vec<String>, syn::Error> {
+    let file = syn::parse_file(source)?;
+    let mut collect = CollectOutOfLineModules { found: Vec::new() };
+    collect.visit_file(&file);
+    Ok(collect.found)
+}
+
+struct CollectOutOfLineModules {
+    found: Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for CollectOutOfLineModules {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if node.content.is_none() {
+            self.found.push(node.ident.to_string());
+        }
+        visit::visit_item_mod(self, node);
+    }
 }
 
 fn is_shared_memory_name(name: &str) -> bool {
@@ -277,6 +307,11 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     fn visit_type_ptr(&mut self, node: &'ast syn::TypePtr) {
         self.record(RAW_POINTER.to_string(), None);
         visit::visit_type_ptr(self, node);
+    }
+
+    fn visit_expr_raw_addr(&mut self, node: &'ast syn::ExprRawAddr) {
+        self.record(RAW_POINTER.to_string(), None);
+        visit::visit_expr_raw_addr(self, node);
     }
 
     fn visit_item_static(&mut self, node: &'ast syn::ItemStatic) {

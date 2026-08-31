@@ -85,3 +85,9 @@ because a false positive argues with a person who can narrow the construct list,
 negative is a green that gets believed. Neither side is closed by a longer list; both close only
 with name resolution. A wire file that must carry such a word narrows the list, and both sides are
 pinned by a test.
+
+One neighbouring gap is closed rather than accepted, because it is decidable. A `mod name;` in a
+watched file puts its body in another file the scan never reads, which is a silent hole rather than
+a limit: the rule now reports the declaration and fails, naming the remedy. The distinction is the
+same one this record draws throughout — what a parser can answer, it answers; what needs name
+resolution is documented and pinned.

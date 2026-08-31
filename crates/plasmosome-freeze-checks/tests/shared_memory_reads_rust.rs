@@ -297,3 +297,69 @@ pub struct ControllerState {
         constructs(shadowed)
     );
 }
+
+#[test]
+fn a_raw_borrow_expression_is_a_use_even_without_a_pointer_type() {
+    let source = r#"
+pub fn leak() {
+    let value = 0u32;
+    let _pointer = &raw const value;
+}
+"#;
+    assert_eq!(constructs(source), vec!["a raw pointer".to_string()]);
+}
+
+#[test]
+fn a_raw_mut_borrow_expression_is_a_use() {
+    let source = r#"
+pub fn leak() {
+    let mut value = 0u32;
+    let _pointer = &raw mut value;
+}
+"#;
+    assert_eq!(constructs(source), vec!["a raw pointer".to_string()]);
+}
+
+#[test]
+fn a_non_null_field_is_a_use() {
+    let source = r#"
+pub struct ControllerState {
+    pub borrowed: std::ptr::NonNull<u32>,
+}
+"#;
+    assert!(
+        constructs(source).contains(&"NonNull".to_string()),
+        "NonNull is the safe-looking spelling of a raw pointer, got {:?}",
+        constructs(source)
+    );
+}
+
+#[test]
+fn an_out_of_line_module_declaration_is_reported_because_its_body_is_another_file() {
+    let source = r#"
+mod hidden;
+
+pub struct ControllerState {
+    pub name: String,
+}
+"#;
+    assert_eq!(
+        plasmosome_freeze_checks::shared_memory::out_of_line_modules(source)
+            .expect("the fixture parses as Rust"),
+        vec!["hidden".to_string()]
+    );
+}
+
+#[test]
+fn an_inline_module_is_not_out_of_line_because_the_scan_already_reads_it() {
+    let source = r#"
+mod tests {
+    pub fn helper() {}
+}
+"#;
+    assert_eq!(
+        plasmosome_freeze_checks::shared_memory::out_of_line_modules(source)
+            .expect("the fixture parses as Rust"),
+        Vec::<String>::new()
+    );
+}
