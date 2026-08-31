@@ -119,13 +119,29 @@ the newest fact.
   recovery will claim those effects as desired again. What a crash can leave is objects
   that exist but are no longer claimed, and those are named on the snapshot side of
   `drift`.
-- A multi-line transaction has no boundary marker, and this spec does not add one. The
-  real crash window is a reload's: the `revoke` durable, the fresh grants not yet
-  written. Disk then holds a valid ledger that reads as a completed removal, and recovery
-  treats it as exactly that — the plasmid is not desired, and whichever of its objects
-  still stand in the world surface as drift, named with their owner. Nothing is adopted
-  by guess, and nothing vanishes quietly. The operator has both halves in the file: the
-  revoked grants and their inverses are still on their lines, above the revoke.
+- A multi-line transaction has no boundary marker, and this spec does not add one — a
+  marker would be a transaction in everything but name, and this contract has already
+  said it does not have transactions. The real crash window is a reload's, and appending
+  per line makes it a spectrum: disk can hold the `revoke` and any prefix of the fresh
+  grants, from none of them to all but the last. Every point on that spectrum is a valid
+  ledger, and **recovery adopts exactly what the standing lines say**. The empty prefix
+  reads as a completed removal: the plasmid is not desired, and whichever of its old
+  objects still stand surface as drift, named with their owner. A non-empty prefix reads
+  as a **partially reloaded plasmid**: desired, with only the effects whose lines were
+  written, at the reload's generation, with the last written grant's mock. That is a
+  state the system can be in, not an error, and the ledger cannot distinguish it from a
+  smaller reload that finished.
+- What a partial reload can and cannot cost. Every written-but-unapplied grant is named
+  as `missing` drift; every old object not yet undone is named on the snapshot side. The
+  grants the crash prevented from being written are different: they produce no drift and
+  cannot — write-ahead means an unwritten grant also never touched the world, so there is
+  nothing anywhere to reconcile. The loss is capabilities the plasmid was meant to get
+  back, never an object owned by nothing: a partial reload under-provisions, and
+  under-provision is the failure direction a capability kernel chooses. The party that
+  notices is the reload's caller: acknowledgement comes only after every line is flushed
+  and every effect applied, so a crashed reload was never acknowledged, and the re-issued
+  reload writes a fresh `revoke` and the full grant set at a new generation, converging
+  over the partial state.
 - **Exactly-once is not guaranteed.** A line carries no transaction identifier beyond its
   generation, and an append can succeed while its acknowledgement is lost — a crash at that
   moment leaves the caller unsure, and a re-issued transaction appends again, under the next
@@ -187,6 +203,9 @@ effects are those standing grants, in file order; its mode is the last standing 
 `mock`. A cell whose plasmids were all revoked is still adopted: a `DesiredCell` with empty
 `plasmids`, at the generation of the ledger's last line. `genome` is `None` for every
 recovered cell: the ledger does not record a genome name and recovery does not invent one.
+A reload's partial prefix is one of the states this rule can return — a plasmid desired
+with only the effects whose lines were written before a crash. Recovery adopts it as it
+stands; what that state can and cannot cost is defined under what the writer guarantees.
 
 `RecoveryOutcome` holds:
 
@@ -304,6 +323,11 @@ rather than vanishing into an adopted history.
 - The same ledger, over a snapshot still holding the granted object, yields a `drift`
   naming that object as unaccounted for — the mid-reload crash reads as a completed
   removal, loudly.
+- A ledger holding a grant at generation 1 for one object, a revoke at generation 2, and
+  a grant at generation 2 for a different object — a reload crashed after its first fresh
+  grant — recovers the plasmid as desired with exactly the second object in `expected`;
+  over a snapshot still holding the first object and lacking the second, `drift` names
+  the first as unaccounted for and the second as missing, and nothing else.
 - A ledger holding a grant with `mock: simulate` at generation 1, a revoke at generation 2,
   and a grant with `mock: capture` at generation 3 recovers one desired plasmid whose mode
   is `capture`.
