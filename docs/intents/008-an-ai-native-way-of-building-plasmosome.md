@@ -1,8 +1,10 @@
 ---
 id: 008
 title: An AI-native way of building Plasmosome, with constraints that can refuse work
+status: approved
 date: 2026-08-31
 originator: Stefano
+outcome:
 ---
 
 Plasmosome development should have a great AI Native SDLC with strict guardrails and well defined
