@@ -117,6 +117,11 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    because CodeRabbit edits its walkthrough comment in place; on PR #26 that comment was created at
    15:03:47 and last edited at 15:45:35, which `created_at` would never show.
 
+   **Quiet alone is not enough straight after a push.** These timestamps are PR-wide, not per-head,
+   so a finding from the previous head keeps holding the newest slot while the new one sits
+   unreviewed — the loop then goes quiet on activity that predates your push. Pair it with the
+   current head's status reading `Review completed`, which is why step 6 asks for both.
+
    Five minutes is the worst measured gap plus a margin, from one PR, and it is not validated.
    Only two of that PR's six greens have a tail with no later push and no re-trigger inside it: the
    `Review completed` one gave 3m03s, the `Review rate limited` one gave 0m57s. So the number rests
