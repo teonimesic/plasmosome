@@ -1,7 +1,7 @@
 ---
 id: 011
 title: Close the seven backends that still walk through all eight clauses
-status: in_progress
+status: in_review
 priority: 1
 specs: [003]
 intents: []
@@ -17,7 +17,7 @@ done_when: >-
   tests/clauses_discriminate.rs, the live-grant assertion for a recycled handle is
   reached by a backend that gets past the earlier one, and FakeBackend and
   CompositeBackend still pass every clause.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/12
 evidence:
 ---
 
