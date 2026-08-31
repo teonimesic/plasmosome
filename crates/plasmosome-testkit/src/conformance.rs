@@ -396,11 +396,11 @@ impl RevokeOrder {
         }
     }
 
-    fn arrange(self, live: Vec<(LedgerEntry, OsObject)>) -> Vec<(LedgerEntry, OsObject)> {
-        match self {
-            RevokeOrder::ReversePush => live.into_iter().rev().collect(),
-            RevokeOrder::GrantOrder => live,
+    fn arrange(self, mut live: Vec<(LedgerEntry, OsObject)>) -> Vec<(LedgerEntry, OsObject)> {
+        if self == RevokeOrder::ReversePush {
+            live.reverse();
         }
+        live
     }
 }
 

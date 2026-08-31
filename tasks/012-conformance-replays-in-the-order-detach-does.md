@@ -162,7 +162,7 @@ STOP when done. Do not start another task.
 ## Notes
 
 **Every clause change here was watched failing.** The three backends went in first, in commit
-e6db0ec, before anything in the suite moved.
+d445436, before anything in the suite moved.
 
 `RevokesOnlyInGrantOrder` walked all eight clauses, exactly as `## Why` says. A throwaway test
 calling all eight against it passed; its own `#[should_panic]` test reported:
@@ -199,11 +199,11 @@ The two assertions task 011 added and never failed now each have one:
 
 ```text
 revoke_of_a_revoked_handle_is_error_catches_a_refused_revoke_that_restores_the_object
-  conformance.rs:357  the refused drained revoke of the already-revoked h2 must leave proxy-map
+  conformance.rs:366  the refused drained revoke of the already-revoked h2 must leave proxy-map
                       `api.plasmosome.test` owned by `conformance` withdrawn
 
 revoke_of_a_revoked_handle_is_error_catches_a_refused_revoke_that_clears_the_universe
-  conformance.rs:364  the refused drained revoke of the already-revoked h2 took broker-pid
+  conformance.rs:373  the refused drained revoke of the already-revoked h2 took broker-pid
                       `broker/4242` owned by `conformance` from the live grant holding h3
 ```
 
@@ -214,6 +214,47 @@ to the revoke-failure arm instead, because under reverse it revokes the newer se
 and then answers `UnknownHandle` for the older one. That is precisely the witness `## Why` asks
 for, so no fault-injecting backend had to be invented for that arm. If a later change reorders the
 two passes, that expected message and the identical-panic problem both come back.
+
+**The independent review found the grant-order pass unwitnessed, and it was right.** Its only
+witness was `RevokeTakesLastOfClass`, and that backend landed on the grant-order pass only because
+`session/skills/pr.md` sorts before `session/skills/review.md` in `OsState`'s `BTreeSet` — rename
+the second fixture so it sorts first and the defect migrates to the reverse pass, after which the
+**entire grant-order pass can be deleted with the suite still green**. That is the exact bug class
+this task exists to close, in the task's own new code. The fix is the mirror backend,
+`RevokesOnlyInReversePushOrder`, which refuses any handle that still has a *newer* live grant. It
+fails only `live_grants_hold_distinct_handles`, only on the grant-order pass, for a structural
+reason no fixture rename can move:
+
+```text
+live_grants_hold_distinct_handles_catches_a_backend_that_only_revokes_in_reverse_order
+  conformance.rs:234  the live grant of uds-path for `conformance` did not revoke through h1 on
+                      the grant-order pass: unknown handle h1
+```
+
+Both mutations now go red. Deleting the grant-order pass fails two tests; deleting it *after* the
+fixture rename that used to hide the hole still fails one:
+
+```text
+drop the grant-order pass                          2 failed (mirror backend, class-nuking revoke)
+rename the fixture, then drop the grant-order pass 1 failed (mirror backend)
+```
+
+**The clause's third assertion had no witness either**, which the same review surfaced: neuter
+`remaining.is_empty()` and nothing went red. `GrantMaterializesAShadow` reaches it — every revoke
+withdraws its own object honestly and six shadow files are still standing at the end:
+
+```text
+live_grants_hold_distinct_handles_catches_a_grant_that_materializes_a_shadow
+  conformance.rs:252  revoking every live grant in reverse-push-order must empty the universe,
+                      found ... session/shadow/1 .. session/shadow/6
+```
+
+All three assertions in this clause now have one. **Two things the review flagged that are worth
+knowing rather than fixing:** `d445436` pins an `expected` string naming a message that could not
+exist yet at that commit — the red was honest, but a watched-failing commit ideally pins what it
+observed, not the answer. And `revoke_of_a_revoked_handle_is_error` still hardcodes
+`spent.into_iter().rev()` with a paragraph explaining why reverse is right, twenty lines from the
+`RevokeOrder` this task introduced; the concept now exists twice in one file, spelled two ways.
 
 **Only one clause revokes a set of live grants.** `grant_is_replayable`,
 `drained_revoke_removes_object` and `planted_residue_survives_unrelated_revoke` grant and revoke
