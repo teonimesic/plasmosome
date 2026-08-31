@@ -1,7 +1,7 @@
 ---
 id: 012
 title: A backend can pass all eight clauses and still leak three capabilities on detach
-status: in_progress
+status: in_review
 priority: 2
 specs: [003]
 intents: []
@@ -160,3 +160,72 @@ filled, and a draft PR.
 STOP when done. Do not start another task.
 
 ## Notes
+
+**Every clause change here was watched failing.** The three backends went in first, in commit
+e6db0ec, before anything in the suite moved.
+
+`RevokesOnlyInGrantOrder` walked all eight clauses, exactly as `## Why` says. A throwaway test
+calling all eight against it passed; its own `#[should_panic]` test reported:
+
+```text
+---- live_grants_hold_distinct_handles_catches_a_backend_that_only_revokes_in_grant_order stdout ----
+note: test did not panic as expected at crates/plasmosome-testkit/tests/clauses_discriminate.rs:602:4
+```
+
+After the clause revokes its live set in reverse push order first, the four backends that reach
+`live_grants_hold_distinct_handles` fail at three different places, and none of them share a
+message:
+
+```text
+live_grants_hold_distinct_handles_catches_a_backend_that_only_revokes_in_grant_order
+  conformance.rs:234  the live grant of session-file for `conformance-second` did not revoke
+                      through h6 on the reverse-push-order pass: unknown handle h6
+
+live_grants_hold_distinct_handles_catches_a_ledger_keyed_by_class
+  conformance.rs:234  the live grant of session-file for `conformance` did not revoke through h5
+                      on the reverse-push-order pass: unknown handle h5
+
+live_grants_hold_distinct_handles_catches_a_revoke_that_takes_another_object_of_its_class
+  conformance.rs:243  revoking h5 on the grant-order pass left session-file
+                      `session/skills/pr.md` owned by `conformance` standing; a revoke must
+                      withdraw the object its own grant materialized
+
+live_grants_hold_distinct_handles_catches_one_handle_issued_twice
+  conformance.rs:219  the grant of proxy-map for `conformance` was issued h1, the handle the live
+                      grant of uds-path for `conformance` is already holding
+```
+
+The two assertions task 011 added and never failed now each have one:
+
+```text
+revoke_of_a_revoked_handle_is_error_catches_a_refused_revoke_that_restores_the_object
+  conformance.rs:357  the refused drained revoke of the already-revoked h2 must leave proxy-map
+                      `api.plasmosome.test` owned by `conformance` withdrawn
+
+revoke_of_a_revoked_handle_is_error_catches_a_refused_revoke_that_clears_the_universe
+  conformance.rs:364  the refused drained revoke of the already-revoked h2 took broker-pid
+                      `broker/4242` owned by `conformance` from the live grant holding h3
+```
+
+**Reverse-first is doing work, not decoration.** Run the grant-order pass first and
+`ALedgerKeyedByClass` dies where it dies today, on the between-revokes assertion, with a panic
+identical to `RevokeTakesLastOfClass`'s — the pair `## Why` complains about. Reverse-first sends it
+to the revoke-failure arm instead, because under reverse it revokes the newer session file honestly
+and then answers `UnknownHandle` for the older one. That is precisely the witness `## Why` asks
+for, so no fault-injecting backend had to be invented for that arm. If a later change reorders the
+two passes, that expected message and the identical-panic problem both come back.
+
+**Only one clause revokes a set of live grants.** `grant_is_replayable`,
+`drained_revoke_removes_object` and `planted_residue_survives_unrelated_revoke` grant and revoke
+one at a time; `revoke_of_a_revoked_handle_is_error` revokes two, but each was already withdrawn
+before the next was granted. So "revoke in both directions wherever the suite revokes a set" is one
+clause, not four.
+
+**Not done, and deliberately.** The five thinner backends `## Why` records are untouched.
+`DeadlineOtherThanFiftyMillisFaults` and `OnlyKnowsTheSampleCapabilities` exploit the suite being a
+fixed fixture — one drain deadline, one capability set — which is a property-test decision, not a
+clause. `SameCapabilityReusesTheHandle` is still underspecified rather than untested: what a second
+grant of an identical capability should do is not settled, and settling it belongs in a spec.
+
+**`FakeBackend` and `CompositeBackend` both pass the widened clause** with nothing changed in
+either. Both key their ledgers by handle, so revoke order was never something they cared about.
