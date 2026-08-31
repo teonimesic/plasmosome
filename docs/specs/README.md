@@ -5,14 +5,19 @@ that a stranger could build it and know when to stop. Copy `docs/templates/spec.
 
 Every **new** spec names an intent in its `intents:` field, and may not become `accepted` until
 that intent reads `status: approved`. Writing it before then is fine and is meant to happen: a
-`draft` spec may name a `draft` intent, so a human reading does not idle the queue. A spec already
-`accepted` keeps its place whether or not that field is filled in.
+`draft` spec may name a `draft` intent, so a human reading does not idle the queue.
+
+**One accepted spec names no intent, and it is the whole of the exception.**
+`001-control-protocol.md` predates the rule and keeps its place. Any *other* accepted spec with an
+empty `intents:` is a spec that skipped the gate, not one that predates it — an unbounded "it came
+first" is a permanent excuse, because nothing tells an old file from a new one claiming to be old.
+`.agents/skills/heartbeat` step 4 checks this and hardcodes that one name.
 
 A spec's status flips to `accepted` in the last commit before its pull request merges, so `main`
 never holds a spec whose status lies — **unless the intent it names is still `draft`, in which case
 it merges as a `draft` spec and a later one-line pull request flips it once that intent is
-approved.** The planner who wrote the spec is who accepts it; what that
-flip waits on is the owner approving the intent above it, not a second reading of the spec. No task
+approved.** The planner who wrote the spec is who accepts it; what that flip waits on is the owner
+approving the intent above it, not a second reading of the spec. No task
 may be claimed until it names a spec and that spec is `accepted`, which is how one approval reaches
 every task under it without the owner reading a single one.
 
