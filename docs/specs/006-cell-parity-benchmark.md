@@ -180,8 +180,11 @@ reports its median, its inter-quartile range, and the full list of run times.
 commands, so a ratio built from a cold-compile sample in one lane and a warm sample in another
 measures nothing. There is no combined number. Three lanes times three phases gives nine medians and nine
 inter-quartile ranges. The intervals are counted differently, because each one compares a pair of
-lanes rather than describing one: two comparisons — cell against Docker for the floor, cell
-against the host for the aspiration — times three phases gives six. An aggregate
+lanes rather than describing one. Three lane pairs times three phases gives nine, of which six
+carry a verdict: cell against Docker is the floor, cell against the host is the aspiration. The
+third pair, **Docker against the host, is reported and decides nothing** — it is the control. It
+separates what a cell costs from what any virtual machine on this host costs, and without it a
+cell at 1.4x the host looks bad until you learn Docker is at 1.35x. An aggregate
 would also hide one noisy phase behind two quiet ones.
 
 **A lane whose inter-quartile range exceeds 10% of its median, in any phase, is too noisy to
@@ -292,12 +295,15 @@ named; and the two verdicts.
   each run's user and system time.
 - Every lane ran all three phases with at least 20 timed runs each; cold compile ran zero
   warmups with the target directory removed before every run; warm incremental and test ran at
-  least 3 discarded warmups. Every lane's inter-quartile range is at most 10% of its median.
-- The floor verdict (cell vs Docker) and the aspiration figure (cell vs host, against 1.20x) are
-  both stated as bootstrap 95% confidence intervals on a ratio of medians, computed as the Design
-  section specifies. On the floor verdict only, an interval spanning 1.0 is reported as no
-  difference detected rather than as a pass; the aspiration figure is judged solely on its
-  interval lying entirely below 1.20.
+  least 3 discarded warmups. Every lane's inter-quartile range is at most 10% of its median, in
+  every phase.
+- Nine bootstrap 95% confidence intervals on ratios of medians are recorded: three lane pairs
+  across all three phases, computed as the Design section specifies. Six carry a verdict — the
+  floor (cell vs Docker) and the aspiration (cell vs host, against 1.20x) in each phase. The
+  remaining three (Docker vs host) are the control and carry no verdict.
+- On the floor verdict only, an interval spanning 1.0 is reported as no difference detected
+  rather than as a pass; the aspiration figure is judged solely on its interval lying entirely
+  below 1.20.
 - CPU utilization is reported per lane as a median of per-run figures, and no verdict depends
   on it.
 - Peak memory is reported per lane with its measurement method named, and no verdict depends
