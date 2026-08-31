@@ -1,6 +1,6 @@
 ---
 id: 013
-title: A broker's own children outlive the set, and the stale-pid guard is dead code here
+title: Two lifecycle gaps with no witness, and a deadline that multiplies
 status: todo
 priority: 2
 specs: []
@@ -12,53 +12,42 @@ refs:
     crates/plasmosome-membrane/AGENTS.md,
   ]
 done_when: >-
-  a broker's forked worker does not survive the set that owned its parent,
-  proven by observing the grandchild's pid rather than by asserting a code path
-  ran; and a BrokerSet that has observed a broker's terminal state does not
-  signal that pid again.
+  status answers within one deadline for a set of any size; a production Probe
+  has a caller; and either drop's no-signal-after-external-reap path gains a
+  witness, or this task records that it cannot have one and why.
 pr:
 evidence:
 ---
 
 ## Why
 
-Two findings from the review of PR #13. Neither blocks that PR; both bite the moment a real
-broker binary exists.
+Three things left over from PR #13. The two process-lifecycle defects that prompted this task were
+fixed there instead of deferred, so what remains is smaller and different.
 
-**A broker's own children survive the set.** `VmmChild` kills and reaps the broker, and nothing
-else. Measured:
+**Fixed in PR #13, recorded here so the history is legible.** A broker's forked worker used to
+survive the set: `VmmChild` killed the broker and nothing else. The child now calls `setsid` and
+drop signals the whole process group, verified by a test that forks a worker, reports its pid up a
+pipe, and fails with `worker 59230 outlived the child that forked it` when the group kill is
+removed. Drop also observes terminal state before signalling now, so a child that already exited
+or that something else reaped is recorded rather than signalled.
 
-```text
-GRANDCHILD broker_pid=49892 broker_alive=false grandchild_pid=49893 grandchild_alive=true
-49893  1  S  .../plasmosome_membrane-...
-```
+**One of those fixes has no witness, and that is the open question.** Drop's early return on
+`ECHILD` cannot be tested through the public API: sending `SIGKILL` to a freed pid is a harmless
+`ESRCH`, so a test asserting the pid is gone passes whether or not the signal was sent. The first
+test written for it did exactly that and was replaced. What has a witness is `state()` reporting
+`Lost` — mutating it to `Running` turns the test red. Distinguishing drop's behaviour needs the pid
+to be reused by an unrelated process, which cannot be forced deterministically. Either find an
+observation, or write down that there is none.
 
-The broker dies; its worker is reparented to init and keeps running. `VmmChild` neither calls
-`setsid` nor kills the process group. Real brokers — egressd, dnsd — are exactly the kind of
-daemon that forks workers, so this is a capability outliving its owner, which the first invariant
-of the root `AGENTS.md` names as the bug class this project exists to prevent.
+**`status` gives each broker the full deadline**, so a set of N brokers can take N times it —
+measured at 302ms for one broker and 1.85s for six — while the membrane must answer
+`membrane.status` inside its own budget. Probing concurrently, or spending one budget across the
+set, would fix it.
 
-**The stale-pid guard cannot fire under `BrokerSet`.** `crates/plasmosome-membrane/AGENTS.md`
-carries a hard rule: never signal a pid after its terminal state was observed. `VmmChild::drop`
-guards on `self.terminal.is_none()`, but `BrokerSet` never calls `state()` or `wait_terminal()`,
-so `terminal` is always `None` and every broker drop takes the kill path unconditionally. Measured
-on a broker already reaped by something else, immediately before the drop:
-
-```text
-EXTERNALLY-REAPED pid 49400: kill(pid,0) => -1 errno Some(3)   (ESRCH)
-```
-
-The pid is already free when the signal goes out. `VmmState::Lost` exists because the codebase
-anticipated this. A supervisor with a `SIGCHLD` handler or a `waitpid(-1)` reaper hits it every
-time. Pid reuse needs a wrap-around that could not be forced deterministically, which is why this
-is filed rather than treated as urgent — but it is a hard rule with no enforcement today.
-
-**Also open, smaller.** `status` gives each broker the full `deadline`, so a set of N brokers can
-take N times it (measured: 302ms for one, 1.85s for six) while the membrane must answer
-`membrane.status` within its own budget. And `ControlSocket`, the production `Probe`, is never
-constructed anywhere — `Probe` has one adapter in use and it is a test double, so by the
-two-adapter rule the seam is not yet earned. Both resolve when a real broker binary and a
-production launcher exist.
+**`ControlSocket` is never constructed.** The production `Probe` has no caller anywhere, so the
+seam has one adapter in use and it is a test double. By the two-adapter rule in the root
+`AGENTS.md` it is not yet earned. It becomes earned when a real broker binary and a production
+launcher exist.
 
 ## Plan
 

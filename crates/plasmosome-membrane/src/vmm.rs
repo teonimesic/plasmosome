@@ -47,9 +47,19 @@ impl std::fmt::Display for SpawnError {
 
 impl std::error::Error for SpawnError {}
 
-/// An owned VMM child process. Dropping it kills and reaps the child, so a
-/// dropped handle never leaves an orphan behind. The guarantee holds only if
-/// the handle is dropped: `mem::forget` leaks a running child.
+/// An owned VMM child process. Dropping it kills and reaps the child **and
+/// everything the child forked**: the child is its own session leader, so the
+/// signal goes to its whole process group. A dropped handle therefore leaves
+/// neither the child nor its workers behind. Only the child itself is reaped;
+/// its descendants are killed and reaped by init.
+///
+/// Before signalling, drop asks whether the child is already gone. A child that
+/// exited is recorded from its status, and one that something else reaped is
+/// recorded as `Lost` — neither is signalled, so a reused pid never receives a
+/// signal meant for a dead child.
+///
+/// The guarantee holds only if the handle is dropped: `mem::forget` leaks a
+/// running child.
 pub struct VmmChild {
     pid: libc::pid_t,
     terminal: Option<VmmState>,
@@ -65,6 +75,7 @@ impl VmmChild {
         }
         if pid == 0 {
             let _guard = ExitOnUnwind;
+            unsafe { libc::setsid() };
             launcher.launch()
         }
         Ok(VmmChild {
@@ -142,8 +153,18 @@ impl Drop for VmmChild {
         if self.terminal.is_some() {
             return;
         }
-        unsafe { libc::kill(self.pid, libc::SIGKILL) };
         let mut status: libc::c_int = 0;
+        let already = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+        if already == self.pid {
+            self.terminal = decode(status);
+            return;
+        }
+        if already < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+            self.terminal = Some(VmmState::Lost);
+            return;
+        }
+        unsafe { libc::kill(-self.pid, libc::SIGKILL) };
+        unsafe { libc::kill(self.pid, libc::SIGKILL) };
         loop {
             let reaped = unsafe { libc::waitpid(self.pid, &mut status, 0) };
             if reaped == self.pid {
@@ -192,6 +213,24 @@ mod tests {
     impl Launch for ExitWith {
         fn launch(self) -> ! {
             unsafe { libc::_exit(self.0) }
+        }
+    }
+
+    struct ForkAWorkerThenSleep(i32);
+
+    impl Launch for ForkAWorkerThenSleep {
+        fn launch(self) -> ! {
+            let worker = unsafe { libc::fork() };
+            if worker == 0 {
+                loop {
+                    unsafe { libc::pause() };
+                }
+            }
+            let bytes = (worker as i32).to_ne_bytes();
+            unsafe { libc::write(self.0, bytes.as_ptr() as *const libc::c_void, 4) };
+            loop {
+                unsafe { libc::pause() };
+            }
         }
     }
 
@@ -294,6 +333,68 @@ mod tests {
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ECHILD)
+        );
+    }
+
+    fn alive(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[test]
+    fn dropping_a_child_kills_the_workers_it_forked() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "a pipe opens");
+        let (read_end, write_end) = (fds[0], fds[1]);
+
+        let child = VmmChild::spawn(ForkAWorkerThenSleep(write_end)).expect("fork succeeds");
+        unsafe { libc::close(write_end) };
+        let mut buf = [0u8; 4];
+        let read = unsafe { libc::read(read_end, buf.as_mut_ptr() as *mut libc::c_void, 4) };
+        unsafe { libc::close(read_end) };
+        assert_eq!(read, 4, "the child reports the worker it forked");
+        let worker = i32::from_ne_bytes(buf);
+        assert!(alive(worker), "the worker is running before the drop");
+
+        drop(child);
+
+        for _ in 0..200 {
+            if !alive(worker) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        unsafe { libc::kill(worker, libc::SIGKILL) };
+        panic!("worker {worker} outlived the child that forked it");
+    }
+
+    #[test]
+    fn a_child_reaped_elsewhere_is_recorded_as_lost() {
+        let mut child = VmmChild::spawn(ExitWith(0)).expect("fork succeeds");
+        let pid = child.pid();
+        let mut status: libc::c_int = 0;
+        loop {
+            let reaped = unsafe { libc::waitpid(pid, &mut status, 0) };
+            if reaped == pid {
+                break;
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EINTR),
+                "the external reap must succeed"
+            );
+        }
+
+        assert_eq!(
+            child.state(),
+            VmmState::Lost,
+            "a child something else reaped is Lost, and a Lost child is never signalled again"
+        );
+
+        let started = std::time::Instant::now();
+        drop(child);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "dropping a child already recorded terminal must not wait on a pid it does not own"
         );
     }
 
