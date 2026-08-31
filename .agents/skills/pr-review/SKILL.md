@@ -79,8 +79,13 @@ behind a `<details>` fold.** It is proof for a reviewer who wants it, not the bo
 **Two hundred words above the fold. Count them.**
 
 ```shell
-gh pr view <number> --json body --jq .body | sed '/<details>/,$d' | wc -w
+gh pr view <number> --json body --jq .body \
+  | sed '/<!-- This is an auto-generated comment: release notes/,$d' \
+  | sed '/<details>/,$d' | wc -w
 ```
+
+CodeRabbit appends its own summary to the body, so count without it — otherwise you end up cutting
+your own writing to make room for a bot's.
 
 That is about two sentences on the problem, a short paragraph on what changes, one on what is
 missing, and a sentence each on any choice a reviewer would otherwise puzzle over. It is not much,
