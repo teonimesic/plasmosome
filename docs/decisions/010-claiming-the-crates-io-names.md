@@ -29,8 +29,8 @@ can see which names the project intends to use, and can publish to them in a min
 `docs/specs/007-publishing-pipeline.md` is blocked on four things and names this as its third:
 "Claiming the crates.io names. Whether and when, weighed against squatting risk on one side and
 premature commitment on the other." This record answers that one. Decisions and specs number
-separately, so a spec carrying the same number as this record is an unrelated document — 007 is
-the only spec this record refers to.
+separately, so two files sharing a number imply nothing about each other. This record cites specs
+by name, and 007 is the only one it cites.
 
 ## Decision
 
@@ -99,10 +99,17 @@ condition of agreeing to `0.0.0` at all.
 
 **The workspace publish guard has to carve these two out.**
 `no_workspace_crate_is_publishable_to_a_registry`, in
-`crates/plasmosome-freeze-checks/tests/freeze_rules.rs`, requires `publish = false` on every
-member and compares counts so that a new member cannot slip past it unnoticed. It gains an
-exception naming exactly these two packages. Every other member stays `publish = false`, and the
-guard keeps failing for any crate that quietly becomes publishable.
+`crates/plasmosome-freeze-checks/tests/freeze_rules.rs`, walks every package `cargo metadata`
+reports and requires `publish = false` on each one. It gains an exception naming exactly these
+two packages. Every other member stays `publish = false`, and the guard keeps failing for any
+crate that quietly becomes publishable.
+
+**`cargo install plasmid` will work, and will hand back a refusal.** The two names are claimed
+through different kinds of package, so they behave differently. `plasmosome` installs nothing,
+because it has no binary. `plasmid` is a real command line whose only verb, `plasmid new`, is a
+named refusal that exits 2 until the SDK interface is frozen. That is the intended answer and not
+an oversight: a tool that says plainly what it will not do yet is honest in the way a do-nothing
+executable is not.
 
 **A dry run cannot confirm the metadata is complete.** crates.io requires `description`,
 `license` and `repository`; cargo does not enforce any of them. A manifest carrying only name,
@@ -116,7 +123,9 @@ warning is absent.
 **Squatting is what crates.io policy discourages, and this is not that.** Holding a name for a
 project in active development is legitimate use of the registry. Both crates carry a README
 saying what the name is for and what will eventually live under it, so anyone who finds the
-package learns what it is holding instead of finding an empty shell.
+package learns what it is holding instead of finding an empty shell. Those READMEs become the
+crate's page on the registry, so the parts of them that describe these crates as unpublished are
+rewritten as part of making the claim.
 
 **This settles blocker 3 of spec 007 and nothing else.** Blockers 1, 2 and 4 — the `plasmid-sdk`
 interface freeze, the pre-1.0 versioning policy, and `plasmosome-backend` being on the registry —
