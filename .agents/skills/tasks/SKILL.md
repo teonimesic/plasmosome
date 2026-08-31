@@ -73,6 +73,27 @@ outlives many tasks. A plan is tied to one branch and is stale the day it merges
 Files are `NNN-slug.md`, three digits. Each folder numbers from 001 on its own, so spec 002 and
 task 002 are unrelated.
 
+**Take the number from the remote, not from `main`.** Another agent may already have filed one on
+an unmerged branch, and `main` cannot see it. Two branches carrying the same number is a conflict
+nobody notices until merge.
+
+```shell
+git fetch origin
+for b in $(git ls-remote --heads origin | awk '{print $2}' | sed 's|refs/heads/||'); do
+  git ls-tree -r --name-only "origin/$b" tasks/ 2>/dev/null
+done | sort -u > /tmp/tasknums
+
+sed -E 's|tasks/([0-9]{3}).*|\1|' /tmp/tasknums | sort -n | tail -1
+
+sed -E 's|tasks/([0-9]{3}).*|\1|' /tmp/tasknums | sort | uniq -d |
+  while read n; do grep "tasks/$n" /tmp/tasknums; done
+```
+
+The first command gives the number to take one past. The second prints nothing when the numbering
+is sound, and prints both files when it is not. It compares distinct paths, not branches — the
+same file on three branches is one file, while one number carrying two different slugs is the
+collision. Do the same for `docs/specs/` and `docs/intents/`, which number separately.
+
 Links point upward, and they are always **one-line flow lists of those three-digit ids**:
 
 - a spec carries `intents: [003]`
