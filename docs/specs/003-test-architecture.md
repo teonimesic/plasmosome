@@ -8,7 +8,8 @@ intents: [002]
 ## Behavior
 
 Every piece of kernel logic is testable without the outside world, and every contact with the
-outside world sits behind a trait that a test can replace. Tests are organized into four layers —
+outside world goes through a seam a test can replace — a trait where the behavior varies, an
+injected path or socket where only the resource varies. Tests are organized into four layers —
 unit, integration, end-to-end, performance — and each layer is answerable by one command. This
 spec builds the first two layers and the seam inventory; it defines the other two and names what
 they wait on.
@@ -53,10 +54,18 @@ Every place the kernel touches the world outside the process, and the trait that
 | Filesystem (session log, state) | paths injected as arguments | `tempfile::TempDir` |
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
 
+Both forms in that table are seams. Which one a contact gets is decided by what varies between
+the real thing and the test. When the *behavior* varies — enforcement that really grants and
+revokes versus one that records what it was asked to do — the seam is a trait with a fake that
+models the contract. When only the *resource* varies — the same filesystem calls against a
+different directory, the same socket calls against a different path — the seam is the path,
+injected as an argument. A trait over a file path would be ceremony: it would add an indirection
+without letting a test observe anything a `TempDir` does not already give it.
+
 The rule for new code: the first time a change touches something not in this table — a network
-call, a clock read that affects behavior, a new daemon — it adds a trait in the crate that owns
-the contact, a fake that models it, and a row here. It never calls the OS inline and mocks it
-in the test.
+call, a clock read that affects behavior, a new daemon — it adds the seam in the crate that owns
+the contact, in whichever of the two forms fits, and a row here. It never calls the OS inline and
+mocks it in the test.
 
 There is deliberately no mocking-framework dependency. Expectation-style mocks couple tests to
 call sequences; a fake that models the contract couples tests to behavior. Hand-built fakes

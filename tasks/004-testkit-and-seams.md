@@ -9,12 +9,17 @@ refs:
   [
     docs/specs/003-test-architecture.md,
     AGENTS.md,
+    Cargo.toml,
     crates/plasmosome-backend/AGENTS.md,
+    crates/plasmosome-backend/Cargo.toml,
     crates/plasmosome-backend/src/backend.rs,
     crates/plasmosome-backend/src/fake.rs,
+    crates/plasmosome-ledger/Cargo.toml,
     crates/plasmosome-ledger/src/lib.rs,
+    crates/plasmosome-core/Cargo.toml,
     crates/plasmosome-core/src/manifest.rs,
     crates/plasmosome-freeze-checks/AGENTS.md,
+    crates/plasmosome-freeze-checks/Cargo.toml,
     crates/plasmosome-freeze-checks/tests/freeze_rules.rs,
     .github/workflows/ci.yml,
   ]

@@ -8,11 +8,21 @@ intents: [002]
 refs:
   [
     docs/specs/005-kernel-operation-benchmarks.md,
+    AGENTS.md,
+    Cargo.toml,
+    crates/plasmosome-ledger/Cargo.toml,
     crates/plasmosome-ledger/src/lib.rs,
+    crates/plasmosome-core/Cargo.toml,
     crates/plasmosome-core/src/manifest.rs,
     crates/plasmosome-core/src/reconciler.rs,
     crates/plasmosome-core/src/session_log.rs,
+    crates/plasmosome-backend/Cargo.toml,
     crates/plasmosome-backend/src/fake.rs,
+    crates/plasmosome-membrane/Cargo.toml,
+    crates/plasmid-sdk/Cargo.toml,
+    crates/plasmosome-freeze-checks/Cargo.toml,
+    crates/plasmosome-testkit/Cargo.toml,
+    crates/plasmosome-testkit/src/builders.rs,
     .github/workflows/ci.yml,
   ]
 done_when: >-
