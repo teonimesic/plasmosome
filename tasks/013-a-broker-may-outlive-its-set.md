@@ -1,7 +1,7 @@
 ---
 id: 013
 title: Two lifecycle gaps with no witness, and a deadline that multiplies
-status: todo
+status: planned
 priority: 2
 specs: []
 intents: []
@@ -58,5 +58,27 @@ seam has one adapter in use and it is a test double. By the two-adapter rule in 
 launcher exist.
 
 ## Plan
+
+**Deliverable:** the three items in `## Why` are each closed or recorded as unclosable with a
+reason. Out of scope: the daemon, the control protocol, and anything in `plasmosome-core`.
+
+**1. `status` costs one deadline per broker, not one per call.** Give the whole call a single
+budget: track the time already spent and pass each probe what remains, so a set of six brokers
+cannot take six times the deadline. A broker reached after the budget is exhausted is not ready,
+and the report says which one ran the clock out. Test with a fake prober that consumes time.
+
+**2. Give `ControlSocket` a caller, or delete it.** It is the production `Probe` and nothing
+constructs it, so the seam has one adapter and it is a test double. Either wire it into a
+constructor a daemon would use, or remove it and let the seam earn itself when a real broker
+exists. Decide, say which in the task Notes, and do not leave it unused and undiscussed.
+
+**3. The check-then-signal window.** Already documented on `VmmChild` as a constraint — this
+handle must be the only reaper of its child. Add a test that a second reaper is what breaks it, if
+one can be written; if it cannot be observed without forcing pid reuse, record that in the Notes
+and leave the constraint documented. Do not invent a test that passes either way.
+
+**Watch each test fail first**, against the behaviour it replaces, and record the output.
+
+**Done when:** `done_when` holds, and the gate in root `AGENTS.md` is green.
 
 ## Notes
