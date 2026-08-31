@@ -49,13 +49,22 @@ record_model_trailers() {
   done <<< "$parsed"
 }
 
+# Splits the message on $1 into paragraphs and offers each to `record_model_trailers`.
+#
+# A paragraph ends at any line holding no non-whitespace, not only at an empty one. Git reads a
+# break that way too, and a message written on Windows separates its paragraphs with a line that
+# still holds a carriage return. Splitting only on an empty line collapsed such a message into one
+# paragraph, which git then read as prose, so a mid-body trailer in it went unseen.
 record_model_trailers_in_message() {
   local message=$1 line paragraph=''
   while IFS= read -r line; do
-    if [ -n "$line" ]; then
-      paragraph+="$line"$'\n'
-      continue
-    fi
+    line=${line%$'\r'}
+    case $line in
+      *[![:space:]]*)
+        paragraph+="$line"$'\n'
+        continue
+        ;;
+    esac
     record_model_trailers "$paragraph"
     paragraph=''
   done <<< "$message"

@@ -128,6 +128,22 @@ fn refuses_a_model_trailer_a_squash_merge_left_before_a_human_trailer_block() {
 }
 
 #[test]
+fn refuses_a_model_trailer_mid_body_when_the_message_uses_windows_line_endings() {
+    assert_refused(
+        "docs: a squashed change (#2)\r\n\r\n* docs: the first commit\r\n\r\nCo-Authored-By: Claude (Fable 5)\r\n\r\n* docs: the second commit\r\n\r\nMore body prose.\r\n",
+        "carries a mid-body model trailer in a message written with CRLF line endings, where a paragraph break is a line holding a carriage return rather than an empty one",
+    );
+}
+
+#[test]
+fn refuses_a_model_trailer_mid_body_when_paragraph_breaks_hold_whitespace() {
+    assert_refused(
+        "docs: a squashed change (#2)\n \n* docs: the first commit\n \nCo-Authored-By: Claude (Fable 5)\n \n* docs: the second commit\n",
+        "carries a mid-body model trailer in a message whose paragraph breaks hold a space, which git itself reads as a break",
+    );
+}
+
+#[test]
 fn clears_a_body_that_quotes_a_trailer_inside_a_sentence() {
     assert_cleared(
         "ci(guard): refuse a commit that credits a model as an author\n\nTwo commits carry a `Co-Authored-By: Claude (Fable 5)` line that the guard cannot see.\n",
