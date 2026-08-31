@@ -94,5 +94,5 @@ behind pins its branch and blocks the next person from deleting it.
 
 ```
 git worktree list
-git worktree remove ../wt-<name> && git worktree prune
+git worktree remove .worktrees/<branch> && git worktree prune
 ```

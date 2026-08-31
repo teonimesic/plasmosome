@@ -21,10 +21,11 @@ and the thresholds.
 **Dispatch is one line: "work task NNN."** The executor opens that file and reads only it and
 the files it names.
 
-**One worktree per agent.** Agents never share a checkout — substitute your own names into
-`git worktree add ../wt-ledger-replay -b task-004-ledger-replay`. Two agents in one clone will
-switch branches under each other and commit to the wrong one. Never run `git reset --hard`,
-force-push, or branch-switch a checkout you did not create —
+**One worktree per agent, under `.worktrees/`.** Agents never share a checkout — substitute your
+own names into `git worktree add .worktrees/task-004-ledger-replay -b task-004-ledger-replay`.
+`.worktrees/` is gitignored, so the checkouts stay inside the repo and one `rm -rf` cleans them
+all up. Two agents in one clone will switch branches under each other and commit to the wrong
+one. Never run `git reset --hard`, force-push, or branch-switch a checkout you did not create —
 if you find your commit on the wrong branch, cherry-pick it where it belongs and leave the other
 branch alone.
 
@@ -34,6 +35,10 @@ What a `## Plan` must contain is written once, in `.agents/skills/tasks` under "
 Before the executor calls the work finished, it appends to the task's `## Notes` whatever the
 next agent would otherwise have to work out again: what was tried and abandoned, where a surprise
 was hiding, which reference turned out to be wrong.
+
+Nested checkouts are invisible to `git grep` and to `rg`, which is what the gate and the guard
+use. They are **not** invisible to a plain `grep -r` or `find` from the repo root: those walk
+every worktree and report the same file many times. Search with `git grep` or `rg`.
 
 Honesty outranks finishing: never report a green you did not run; time-box a blocker, then
 document it and move on rather than weakening a test; if a test passes both before and after the

@@ -4,3 +4,4 @@ Cargo.lock.bak
 *.profraw
 .DS_Store
 /.plasmosome
+/.worktrees/

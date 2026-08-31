@@ -28,7 +28,7 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    thread is resolved — `main` requires conversation resolution, so an open thread is what holds
    a merge. Resolving a thread by disagreeing with it is allowed; merging on a disagreement you
    did not write down in the thread is not.
-6. Delete the branch and remove your worktree — `git worktree remove ../wt-<name>`, then
+6. Delete the branch and remove your worktree — `git worktree remove .worktrees/<branch>`, then
    `git worktree prune`. A worktree left behind pins a merged branch, so the next person cannot
    delete it and `git branch -D` fails with "used by worktree".
 7. If the work had a task, close it: `status: done`, and `evidence:` filled with the squash
