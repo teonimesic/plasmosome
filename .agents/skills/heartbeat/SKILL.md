@@ -105,7 +105,7 @@ git worktree list --porcelain |
        /^branch /{sub("refs/heads/","",$2); if (p ~ /\/\.worktrees\//) print p"\t"$2}
        /^detached$/{if (p ~ /\/\.worktrees\//) print p"\tDETACHED"}' |
   while IFS="$(printf '\t')" read -r dir branch; do
-    state=$(gh pr list --head "$branch" --state all --json state \
+    state=$(gh pr list --head "$branch" --state all --limit 100 --json state \
       --jq 'if any(.[]; .state=="OPEN") then "OPEN"
             elif length==0 then "NONE"
             elif any(.[]; .state=="MERGED") then "MERGED"
@@ -137,8 +137,10 @@ The other states are not cleanup, and three of them are traps:
 **6. Agents running.** Dispatching is the one thing only the orchestrator does, so it is the
 constraint on how much work is ever in flight. **Three running in parallel is the standing goal.**
 
-**The live rows from step 5 are the count** — the `OPEN` ones, plus any `NONE` you know an agent
-is actually in. Do not re-list the worktrees here, and do not count task files instead.
+**The live rows from step 5 are the count** — the `OPEN` ones, plus any `NONE` or `CLOSED` row you
+know an agent is actually in. Step 5 keeps those two precisely because someone may still be working
+there, so leaving them out here would dispatch a fourth agent on top of them. Do not re-list the
+worktrees, and do not count task files instead.
 
 ```shell
 grep -lE '^status: (in_progress|in_review)' tasks/*.md
@@ -174,5 +176,6 @@ Step 3 puts released claims back to `planned`, so this is also how abandoned wor
 circulation.
 
 **8. File.** Anything you learned this session that must outlive it becomes a task file before the
-session ends — dispatch a planner to write it. Reconciling `status:` and `evidence:` in step 3 is
-the only writing into `tasks/` you do yourself.
+session ends — dispatch a planner to write it. The only writing into `tasks/` you do yourself is
+step 3's reconciliation, and only for a claim whose author is gone: an author still open closes its
+own task, as `.agents/skills/pr-review` has it.
