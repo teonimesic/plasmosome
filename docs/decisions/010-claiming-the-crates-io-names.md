@@ -29,8 +29,9 @@ can see which names the project intends to use, and can publish to them in a min
 `docs/specs/007-publishing-pipeline.md` is blocked on four things and names this as its third:
 "Claiming the crates.io names. Whether and when, weighed against squatting risk on one side and
 premature commitment on the other." This record answers that one. Decisions and specs number
-separately, so two files sharing a number imply nothing about each other. This record cites specs
-by name, and 007 is the only one it cites.
+separately, so a shared number is not a reference; 007 is the only spec this record cites. The
+buildable half of this decision — the placeholder crate, the two versions, and the guard
+exception — belongs in a spec of its own, and one is in flight.
 
 ## Decision
 
@@ -104,15 +105,19 @@ reports and requires `publish = false` on each one. It gains an exception naming
 two packages. Every other member stays `publish = false`, and the guard keeps failing for any
 crate that quietly becomes publishable.
 
-**`cargo install plasmid` will work, and will hand back a refusal.** The two names are claimed
+**`cargo install plasmid` will succeed, and install a working binary.** The two names are claimed
 through different kinds of package, so they behave differently. `plasmosome` installs nothing,
-because it has no binary. `plasmid` is a real command line whose only verb, `plasmid new`, is a
-named refusal that exits 2 until the SDK interface is frozen. That is the intended answer and not
-an oversight: a tool that says plainly what it will not do yet is honest in the way a do-nothing
-executable is not.
+because it has no binary. Installing `plasmid` gives a real command line; running its only verb,
+`plasmid new`, is what refuses, exiting 2 until the SDK interface is frozen. That is the intended
+answer and not an oversight: a tool that says plainly what it will not do yet is honest in the way
+a do-nothing executable is not. Until the claim is made neither name is on the registry, and the
+binary comes from `cargo install --path crates/plasmid` in a checkout.
 
-**A dry run cannot confirm the metadata is complete.** crates.io requires `description`,
-`license` and `repository`; cargo does not enforce any of them. A manifest carrying only name,
+**A dry run cannot confirm the metadata is complete.** crates.io requires `description`, and
+either `license` or `license-file`; cargo enforces neither. `repository` is not a registry
+requirement — of 100 recently published crates, 11 carry none, while all 100 carry a description
+— and both of these crates set it anyway, so that a name held for a project leads back to the
+project holding it. A manifest carrying only name,
 version and edition reaches `Uploading` under `cargo publish --dry-run` and exits 0 (cargo
 1.96.0), so a missing field is rejected server-side on the real publish — the one command that
 cannot be retried at the same version. The usable proxy is cargo's own warning, `manifest has no
