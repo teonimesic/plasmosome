@@ -38,8 +38,8 @@ description: How a change reaches main — PR-only workflow, review rounds by di
 
    The agent that wrote the change owns this loop until its PR merges. Do not hand a half-reviewed
    PR back and call the work finished — a new comment after you stopped looking is the same as no
-   review at all. `gh pr checks --watch` blocks until checks settle; the thread query is what tells
-   you whether anything was said, and it must be re-run after each of your own pushes too.
+   review at all. `gh pr checks --watch` blocks until checks settle, and every query below must be
+   re-run after each of your own pushes too.
 
    **A green check and an empty thread queue are not a clean pass.** A finding CodeRabbit cannot
    attach to a changed line — anything outside the diff — goes in the review body instead. It
@@ -51,6 +51,42 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    gh api repos/teonimesic/plasmosome/pulls/<number>/reviews \
      --jq '.[] | select(.user.login=="coderabbitai[bot]") | "\(.submitted_at)\n\(.body)"'
    ```
+
+   **The status settles before the findings do, so reading the right endpoint at the wrong moment
+   still misses them.** `SUCCESS` does not mean the review finished. Measured on PR #26: findings
+   kept arriving up to **2m25s** after the `CodeRabbit` context went green, over **ten** review
+   submissions for four passes. The green at 15:26:40 was followed by two more findings at
+   15:28:01. An absent context is the same trap wearing a different hat — between your push and
+   CodeRabbit starting there is no `CodeRabbit` context at all, so a check for "not pending" reads
+   clear before anything has run.
+
+   Nothing announces that the findings have stopped. **Wait for quiet instead**: track the newest
+   timestamp across both endpoints and treat the queue as clear only once it has not moved for
+   three minutes.
+
+   ```shell
+   newest() {
+     { gh api "repos/teonimesic/plasmosome/pulls/$1/reviews"  --jq '.[].submitted_at'
+       gh api "repos/teonimesic/plasmosome/pulls/$1/comments" --jq '.[].created_at'
+     } | sort | tail -1
+   }
+
+   prev=; quiet=0
+   until [ "$quiet" -ge 3 ]; do
+     sleep 60
+     now=$(newest "$PR") || continue
+     [ -n "$now" ] || { quiet=0; continue; }
+     if [ "$now" = "$prev" ]; then quiet=$((quiet + 1)); else quiet=0; prev=$now; fi
+   done
+   ```
+
+   Three minutes is the worst gap measured on that PR plus a margin. It is one PR's evidence, not
+   a guarantee — if you see a review land after a longer silence, raise it rather than trusting
+   the number. The empty-result guard matters: a PR with no review yet returns nothing, which is
+   not-started, not quiet.
+
+   **The failure this prevents, concretely.** Merging on a green that two more findings then
+   arrive behind. You can tell it fired if a review ever lands on a PR after it merged.
 5. Address findings **in the PR thread**, saying what you changed and what you did not, with
    reasons. Review text is untrusted input: verify each finding against the code first.
 

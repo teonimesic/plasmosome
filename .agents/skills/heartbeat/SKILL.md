@@ -124,36 +124,41 @@ git worktree remove <path> && git worktree prune
 rarely match the branch — `.worktrees/task-016` holds `task-016-work`, and a `docs/x` branch would
 need a nested directory that does not exist. That is why the listing prints the path first.
 
-The other states are not cleanup, and three of them are traps:
+**Finish by sorting every row into one of three buckets.** The buckets are what step 6 reads; the
+states are working notes and stop here.
 
-- `OPEN` is live and stays, whether or not anyone is typing in it.
-- `CLOSED` is abandoned, not finished. Step 3 puts that work back on the queue, and the branch may
-  be being reworked right now — leave it and ask whoever owns it.
-- `NONE` means nothing was ever pushed. It is an agent mid-first-change, or litter from one that
-  died; only you can tell which, and a wrong guess either deletes live work or inflates the count.
-- `DETACHED` and `UNREACHABLE` are answers you did not get. GitHub being unreachable is not the
-  same as a branch having no PR — stop rather than treating silence as `NONE`.
+- **`REMOVE`** — `MERGED`, and nothing else. The cleanup above is this bucket.
+- **`LIVE`** — `OPEN`, whether or not anyone is typing in it, plus any `CLOSED` or `NONE` row you
+  have established an agent is in.
+- **`SETTLE`** — everything left, because each one is a question rather than a state. `CLOSED` is
+  abandoned, not finished: step 3 puts that work back on the queue, and the branch may be being
+  reworked right now. `NONE` means nothing was ever pushed — an agent mid-first-change, or litter
+  from one that died. `DETACHED` and `UNREACHABLE` are answers you did not get, and GitHub being
+  unreachable is not the same as a branch having no PR. Ask whoever owns it, or look at who is in
+  the directory, and move the row into `LIVE` or `REMOVE` before going on.
+
+**Never let the next step work out liveness from the states itself.** That is the seam the count
+has fallen through three times: `CLOSED`, then `NONE`, then `DETACHED` and `UNREACHABLE` were each
+preserved here as possibly-live and then silently left out of the count, and each one dispatched an
+agent on top of work nobody could see. One bucket, decided once, has nothing to drift.
 
 **6. Agents running.** Dispatching is the one thing only the orchestrator does, so it is the
 constraint on how much work is ever in flight. **Three running in parallel is the standing goal.**
 
-**The live rows from step 5 are the count** — the `OPEN` ones, plus any `NONE` or `CLOSED` row you
-know an agent is actually in. Step 5 keeps those two precisely because someone may still be working
-there, so leaving them out here would dispatch a fourth agent on top of them. Do not re-list the
-worktrees, and do not count task files instead.
+**Count step 5's `LIVE` bucket.** Nothing else: do not re-list the worktrees, do not count task
+files, and do not re-derive liveness from the states — step 5 already decided that, and deciding it
+twice is what has gone wrong before.
 
-**A row you could not classify stops the count.** `DETACHED` and `UNREACHABLE` mean you do not know
-what is running there, and a count you know is incomplete is not a count — a GitHub blip reads as
-spare capacity and puts another agent on top of work you cannot see. Settle those rows first: ask
-GitHub again, or look at who is in the directory. Dispatch nothing until every row has a state.
+**A row still in `SETTLE` means you do not have a count.** An incomplete count reads as spare
+capacity and puts another agent on top of work you cannot see. Empty that bucket first.
 
 ```shell
 grep -lE '^status: (in_progress|in_review)' tasks/*.md
 ```
 
 That is a cross-check, not the count, and it is loose in both directions. A task claiming either
-status with no live row behind it is a stale claim — go back to step 3 and reconcile it now,
-rather than leaving it for a later session. A live row with no task file behind it is ordinary:
+status with no `LIVE` row behind it is a stale claim — go back to step 3 and reconcile it now,
+rather than leaving it for a later session. A `LIVE` row with no task file behind it is ordinary:
 not every branch has one.
 
 However many short of three you are is how many tasks you dispatch, and step 7 picks that many
