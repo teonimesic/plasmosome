@@ -269,3 +269,122 @@ Read only the files in `refs:`. Do not explore beyond them.
 STOP when done. Do not start the daemon, another verb, or the membrane client.
 
 ## Notes
+
+### Stubs first: every `control.rs` test seen failing before the loop existed
+
+With `serve_connection` returning `Ok(())` without reading, and `Controller::handle`
+refusing every method, `cargo test -p plasmosome-core` reported:
+
+```
+test result: FAILED. 63 passed; 10 failed; 0 ignored; 0 measured; 0 filtered out
+failures:
+    control::tests::a_json_line_that_is_not_the_envelope_is_invalid_request
+    control::tests::a_line_that_is_not_json_gets_parse_error_with_null_id
+    control::tests::a_real_socket_conversation_answers_line_per_line_and_ends_at_eof
+    control::tests::an_unknown_method_is_method_not_found
+    control::tests::every_reply_echoes_the_request_id_verbatim
+    control::tests::replies_come_back_in_request_order
+    control::tests::status_for_a_name_this_controller_is_not_is_unknown_target
+    control::tests::status_params_that_do_not_parse_are_invalid_params
+    control::tests::status_reports_the_instance_its_cells_and_their_mock_labels
+    control::tests::the_loop_survives_a_bad_line_and_keeps_serving
+```
+
+The 63 that passed are the pre-existing suite plus the four `protocol.rs` shape tests,
+which cannot fail before their types exist. All 73 pass after the loop and the handler
+landed.
+
+### The eight mutations, each applied, run, observed, and reverted
+
+**1. Swap the integers for codes 100 and 101 in the `ErrorCode` serializer** —
+`every_application_error_serializes_its_code_and_structured_fields`:
+
+```
+the code on the wire for {"candidates":["cell-1","cell-2"],"code":101,
+"message":"the target is ambiguous: 2 candidates match"}
+  left: Some(Number(101))
+ right: Some(Number(100))
+```
+
+**2. Map unknown integers to `InvalidRequest` in the deserializer** —
+`an_unknown_error_code_does_not_deserialize`:
+
+```
+code 111 is outside the closed table and must not deserialize, got Ok(InvalidRequest)
+```
+
+**3. Hardcode id `0` in every reply** — `every_reply_echoes_the_request_id_verbatim`:
+
+```
+the ids that came back: [Object {"id": Number(0), "result": Object {}},
+                         Object {"id": Number(0), "result": Object {}}]
+  left: [Number(0), Number(0)]
+ right: [String("abc"), Object {"trace": String("x-9")}]
+```
+
+**4. Collect all replies and write them reversed** — `replies_come_back_in_request_order`:
+
+```
+replies arrive in request order: [ ... id 4, id 3, id Null, id 1 ... ]
+  left: [Number(4), Number(3), Null, Number(1)]
+ right: [Number(1), Null, Number(3), Number(4)]
+```
+
+**5. Map a params failure to `method_not_found`** —
+`status_params_that_do_not_parse_are_invalid_params`:
+
+```
+a served method with params that do not parse is not a missing method:
+{"error":{"code":-32601,"message":"`plasmosome.status` is not a method this controller
+serves"},"id":1}
+  left: -32601
+ right: -32602
+```
+
+**6. Default a missing `params` to an empty object** (`#[serde(default)]` on
+`Request::params`) — `a_json_line_that_is_not_the_envelope_is_invalid_request`:
+
+```
+reply {"id":2,"result":{}} carries no error code
+```
+
+**7. Ignore the `name` param and always answer own status** —
+`status_for_a_name_this_controller_is_not_is_unknown_target`:
+
+```
+reply {"id":3,"result":{"cells":[...],"controller":{"ledger_generation":4,"uptime_ms":1},
+"name":"work","ready":true,"state":"running"}} carries no error code
+```
+
+**8. Alias a std lock type at the top of `protocol.rs`**
+(`type ControllerGuard = std::sync::Mutex<u8>;`) —
+`controller_wire_state_shares_no_memory_across_the_seam`:
+
+```
+86 §4 rule 2 broken: `crates/plasmosome-core/src/protocol.rs` uses `Mutex`;
+controller⇄supervisor state moves only as serde types, never as shared memory
+```
+
+### Two places the plan met the compiler
+
+**Clippy rejects the plan's type shapes by default.** `WireError` is one flat struct with
+an `Option` per field in the §1 table, which makes it about 384 bytes. That trips
+`clippy::large_enum_variant` on `Response` (the `Failure` variant dwarfs `Success`) and
+`clippy::result_large_err` on `Handler::handle`. Boxing would silence both but would change
+two signatures the plan wrote out and force `Box::new` at every construction site, so both
+lints carry a narrow `#[expect(..., reason = ...)]` instead and every signature is the one
+the plan specified. Nothing about the wire changes: `code`, `message`, and the structured
+fields serialize the same either way.
+
+**Who owns ladder step 3.** The plan says the loop owns steps 1-3 and the handler owns step
+4, but the `Handler` signature it gives has no way for the loop to know which methods a
+handler serves. The concrete instruction two paragraphs later — "Every other method →
+`method_not_found`" on `Controller` — is what got built: the loop owns steps 1 and 2, the
+handler answers -32601 and -32602. The behaviour in `done_when` is unchanged.
+
+**One deliberate hole worth naming for the next reader.** `WireError`'s private fields stop
+anyone *constructing* a code without its fields. Its derived `Deserialize` — required by the
+freeze check, which holds every wire type to serde in both directions — will still accept a
+JSON object carrying a known code and no fields. That is the reading path, for a client
+parsing whatever a server sent; the producing path has one constructor per code and no
+other door.
