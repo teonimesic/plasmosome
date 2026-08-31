@@ -29,3 +29,10 @@ Runs on the host, one per cell. This is where enforcement lives.
 
 `cargo test -p plasmosome-membrane`. Process-lifecycle tests must prove absence of orphans by
 observation (a raw `waitpid` returning `ECHILD`), not by asserting the code path ran.
+
+A test that applies signal pressure must do two more things. It must **prove the pressure landed
+where it was aimed** — a signal sent to the process can be handled on any thread, so a test of an
+interrupted reap counts the interruptions the reaping thread actually took and fails if that count
+is zero, rather than passing on a reap that was never interrupted. And it must **bound the
+pressure**: a sender that fires until the reap finishes can keep interrupting it for as long as it
+likes, which is a hang rather than a failure. Give each burst a fixed budget of signals.
