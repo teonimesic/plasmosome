@@ -108,13 +108,15 @@ description: How a change reaches main — PR-only workflow, review rounds by di
      done
    }
 
-   wait_for_quiet "$PR" || echo "NOT QUIET - do not merge on this"
+   wait_for_quiet "$PR" || { echo "NOT QUIET - do not merge on this" >&2; false; }
    ```
 
    **Every way out of that loop except reaching five is a refusal, so it returns non-zero.** A
    version that merely `break`s tells the caller nothing, and the next step in the routine is the
    merge — an abandoned wait then reads exactly like a completed one. Step 6 runs only when this
-   returns zero.
+   returns zero, which is why the invocation ends in `false` rather than a bare `echo`: a
+   diagnostic that succeeds hands a zero status back to whatever gates on it, and re-opens the
+   same hole one level up.
 
    Four details in that loop are the difference between it working and it lying to you. **A failed
    poll is not quiet** — `gh api --jq` prints its error body to stdout, so without the explicit
