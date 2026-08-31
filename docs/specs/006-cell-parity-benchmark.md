@@ -178,8 +178,10 @@ reports its median, its inter-quartile range, and the full list of run times.
 
 **Every figure below is per lane and per phase.** The three timed phases are three different
 commands, so a ratio built from a cold-compile sample in one lane and a warm sample in another
-measures nothing. There is no combined number: three lanes times three phases gives nine medians,
-nine inter-quartile ranges, and — for the two comparison verdicts — nine intervals. An aggregate
+measures nothing. There is no combined number. Three lanes times three phases gives nine medians and nine
+inter-quartile ranges. The intervals are counted differently, because each one compares a pair of
+lanes rather than describing one: two comparisons — cell against Docker for the floor, cell
+against the host for the aspiration — times three phases gives six. An aggregate
 would also hide one noisy phase behind two quiet ones.
 
 **A lane whose inter-quartile range exceeds 10% of its median, in any phase, is too noisy to
