@@ -28,8 +28,10 @@ the fault was ours.
 
 **A line past 1 MiB is answered, then the connection closes.** `MAX_LINE_BYTES` is `1 << 20`,
 and it is a maximum, not a threshold: a line of exactly that many bytes is served, whether it
-ends in a newline or in end of input. A line that *exceeds* it without ending gets `-32600` under
-a `null` id, with a message naming the cap, and the connection then closes. Every frozen v1 verb's params are names, small
+ends in a newline or in end of input. A line that *exceeds* it gets `-32600` under a `null` id,
+with a message naming the cap, and the connection then closes. Length is the whole test: the loop
+stops reading at the cap, so a line is refused on its length alone whether or not a newline was
+waiting one byte later. Every frozen v1 verb's params are names, small
 maps and short argv lists, orders of magnitude under the cap, so no honest client comes near it;
 a hostile one costs one megabyte and one reply per connection.
 

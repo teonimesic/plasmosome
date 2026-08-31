@@ -699,3 +699,16 @@ the cap is a maximum, not a threshold, at end of input as well:
 **The `Ok(())` consequence was unqualified.** The refusal is written with `?`, so a write failure
 returns the io error like any other line; only a *delivered* refusal reports `Ok(())`. Corrected
 in the record and in the note above that repeats it.
+
+### Round 4: the cap is about length, not about termination
+
+The rebase onto `521919f` got its own review, which caught a third piece of prose disagreeing with
+the code. Three places described the refusal as a line that runs past the cap *without ending* —
+`MAX_LINE_BYTES`'s doc, `WireError::line_too_long`'s doc, and decision 005. The loop stops reading
+at `MAX_LINE_BYTES + 1`, so a line of `MAX_LINE_BYTES + 1` content bytes is refused **even when a
+newline is waiting one byte later**: `read_until` never reaches it, and `ends_with(b"\n")` is
+false because of where the read stopped, not because the client sent no newline.
+
+`a_line_past_the_cap_is_refused_and_the_connection_ends` had been driving exactly that case since
+it was written — its script is `MAX_LINE_BYTES + 1` bytes of `a` followed by `\n` — so the tests
+were right and only the words were wrong. All three now say the refusal is on length alone.

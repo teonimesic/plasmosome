@@ -446,7 +446,7 @@ impl WireError {
         )
     }
 
-    /// Reserve code -32600: the line ran past `cap` bytes without ending.
+    /// Reserve code -32600: the line is longer than `cap` bytes.
     pub fn line_too_long(cap: usize) -> WireError {
         WireError::bare(
             ErrorCode::InvalidRequest,

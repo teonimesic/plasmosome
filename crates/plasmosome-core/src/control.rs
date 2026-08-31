@@ -19,8 +19,9 @@ use crate::state::{CellRecord, ControllerState, InstanceName, PlasmidRecord};
 
 /// The most bytes one request line may carry before its terminating newline.
 ///
-/// A connection that sends more than this without a newline is answered
-/// `-32600` once and then closed; nothing past the cap is read.
+/// A line longer than this is answered `-32600` once and then the connection
+/// closes. Nothing past the cap is read, so a line is refused on its length
+/// alone — whether it would have ended never comes into it.
 pub const MAX_LINE_BYTES: usize = 1 << 20;
 
 /// What serves one verb.
