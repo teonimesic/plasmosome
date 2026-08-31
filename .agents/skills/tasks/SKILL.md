@@ -399,8 +399,9 @@ An intent reaches `main` the same way and earlier still, in a PR of its own. App
 one-line edit, `status: draft` to `status: approved`, and it travels through a PR like everything
 else — an agent may carry that edit on the owner's word, whether it heard it directly or had it
 relayed, exactly as it may transcribe the intent itself. It may never originate it. **That PR says
-where the approval came from**, which is the only place the provenance is recorded and the reason
-no field in the file tries to.
+where the approval came from** — the only place the provenance is recorded, and the reason no field
+in the file tries to. It is read rather than searched; that is its whole advantage, and
+`docs/intents/README.md` says why it is not a stronger one than that.
 
 Work whose spec already exists skips step 1 and is one PR, which is what most work should look
 like. Trivial work skips the task as well.

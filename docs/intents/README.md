@@ -50,22 +50,35 @@ approval and an invented one are the same line of text, and no search here can s
 only thing standing between the two is whether the agent recording it is telling the truth. That
 is worth stating rather than leaving for someone to discover.
 
-Three things are true about that risk, and not one of them is a check:
+**Agents here act as the owner's GitHub identity**, so nothing about the pull request record
+narrows this: the same actor writes the file line, the commit, the description and the review. Any
+argument that the record is harder to fake than the file is wrong today, and saying otherwise would
+be the false comfort this section exists to prevent.
+
+Three things are true about the risk, and not one of them is a check:
 
 - **The owner reads their own folder.** A fabricated approval is not undetectable, it is detectable
   late, by the only person who can tell. What it costs is whatever was built in between — bounded,
   because the specs and tasks under it are pull requests too.
-- **Every approval is a diff**, with an author, a description and a thread, on a protected `main`.
-  That record sits outside the file and the fabricating agent does not control it.
+- **Every approval is a diff**, with an author, a description and a thread. That does not make the
+  claim harder to forge; it puts it where a reviewer reads it rather than where a search reports it
+  clean, and it turns an ambient property of the folder into a specific statement somebody can
+  confront later.
 - **Two shapes are refused on sight**: an approval arriving in the same change as the work it
   authorizes, and an approval whose pull request does not say where it came from.
+
+**A GitHub gate would close this, and cannot be built while that identity holds.** The natural
+mechanism is CODEOWNERS requiring the owner's review on this folder. It is unusable when the author
+and the approver are one account: GitHub forbids approving your own pull request, so the rule would
+not gate these changes, it would block them outright. The gate becomes available the day agents
+have an identity of their own, and most of the risk above goes with it.
 
 **Why there is no `approved_by:` field.** Recording who approved an intent and who relayed it would
 make the claim specific, not checkable: an agent willing to write `status: approved` writes a name
 under it just as easily, and no search, hook or reviewer gets stronger. It buys a more detailed
-version of the same lie, and charges ceremony on every intent for it. The provenance worth having
-already exists in the pull request, where a reviewer is looking anyway — asking for it there costs
-one sentence and cannot be forged by editing the file.
+version of the same lie, and charges ceremony on every intent for it. Asking for the provenance in
+the pull request instead costs one sentence and puts it where a reviewer is already reading, which
+is the whole of the advantage — not that it is harder to write untruthfully, only that it is read.
 
 Work that maps to no intent here is not work that needs an intent written for it; it is work that
 has not been asked for. Drafting one puts that question to the owner on the record — it does not
