@@ -22,7 +22,6 @@ Runs on the host, one per cell. This is where enforcement lives.
 
 ## Conventions
 
-- No inline `//` comments. `///` contract docs on public items only.
 - Prefer types that make misuse unrepresentable over documentation asking callers to be careful.
 
 ## Testing

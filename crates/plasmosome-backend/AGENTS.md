@@ -17,7 +17,6 @@ makes the kernel testable without a VM.
 
 ## Conventions
 
-- No inline `//` comments. `///` contract docs on public items only.
 - New capability classes extend the universe enumeration deliberately: residue verification can
   only see classes it knows about, so an unlisted class is an invisible leak.
 

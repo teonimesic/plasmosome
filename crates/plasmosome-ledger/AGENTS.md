@@ -18,7 +18,6 @@ Detach replays them LIFO and the result is verified against observed system stat
 
 ## Conventions
 
-- No inline `//` comments. `///` contract docs on public items only.
 - Property tests over hand-written cases where the invariant is universal (replay converges,
   order is preserved).
 
