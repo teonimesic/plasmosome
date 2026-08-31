@@ -1,8 +1,10 @@
 ---
 id: 003
 title: Cells that were running come back after a crash
+status: approved
 date: 2026-08-31
 originator: Stefano
+outcome:
 ---
 
 Plasmosome can crash. When it comes back, I want the cells that were running to be brought back.

@@ -1,8 +1,10 @@
 ---
 id: 006
 title: High security standards in isolation and in dependencies
+status: approved
 date: 2026-08-31
 originator: Stefano
+outcome:
 ---
 
 Plasmosome should hold high security standards in both its isolation strategy and its

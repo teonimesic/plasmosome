@@ -1,8 +1,10 @@
 ---
 id: 004
 title: Removing a capability removes exactly that one
+status: approved
 date: 2026-08-31
 originator: Stefano
+outcome:
 ---
 
 When I remove one plasmid's capability, I want that one removed and nobody else's. And when a
