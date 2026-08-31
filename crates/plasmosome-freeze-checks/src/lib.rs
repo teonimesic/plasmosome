@@ -14,3 +14,18 @@
 //! (entitlement only on the HVF-entering process) binds when the macOS
 //! signing step returns. They are recorded as open enforcement points, not
 //! satisfied here.
+
+use std::path::PathBuf;
+
+/// The absolute path to the root of the workspace this crate is checked into.
+///
+/// Rules address the files they inspect by their path from that root. The caller must not assume
+/// the process working directory matches it, and must not call this from a crate moved to a
+/// different depth in the tree.
+pub fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("the checks crate sits two levels below the workspace root")
+        .to_path_buf()
+}

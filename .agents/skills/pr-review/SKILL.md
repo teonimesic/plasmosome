@@ -8,9 +8,9 @@ description: How a change reaches main — PR-only workflow, review rounds by di
 `main` is branch-protected: direct pushes are rejected for everyone. There is no local-merge path.
 
 1. Branch → push → **open the PR as a draft** (`gh pr create --draft`). One unit of work per PR.
-   Where the work has a task — most work, but not a fix small enough to need none — the PR body
-   names it as `task: NNN` and quotes its `done_when` line, so a reviewer sees what to check
-   without leaving the page.
+   Where the work has a task, the PR body links it once — `task: NNN` on its own line at the
+   bottom. Do not quote `done_when` or restate the plan; that is what the task file is for, and
+   putting it at the top buries the thing only you can write.
 2. While it is a draft, get your own house in order: the gate green, and the independent review
    done and acted on. **CodeRabbit does not review draft PRs**, so nothing you do here spends a
    round. Mark it ready (`gh pr ready <number>`) only when you would be content for someone to

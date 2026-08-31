@@ -21,6 +21,15 @@ and the thresholds.
 **Dispatch is one line: "work task NNN."** The executor opens that file and reads only it and
 the files it names.
 
+**Parallel agents share one scratchpad. Name your files uniquely.** Three executors running at
+once were all given the same scratch directory, and two wrote a PR body to `pr-body.md`. One
+overwrote the other, and a `gh pr edit` then pushed the wrong PR's text onto a PR. Put your task
+number in the filename, or write to a directory you made.
+
+**Say who else is running.** An agent that finds its PR edited underneath it will reasonably
+conclude something is wrong. Tell each one which other agents are live and what they own, so a
+collision reads as a collision rather than an attack.
+
 **Never commit in a worktree someone else is working in — not even a one-line docs change.**
 `git add -A` takes whatever is in the tree, including the half-finished file the agent working
 there has not committed yet. Creating the worktree does not make it yours while an agent is in it.

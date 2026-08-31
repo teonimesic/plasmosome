@@ -1,5 +1,6 @@
-use std::path::PathBuf;
 use std::process::Command;
+
+use plasmosome_freeze_checks::workspace_root;
 
 const CONTROLLER_CRATES: &[&str] = &["plasmosome-core", "plasmosome-backend", "plasmosome-ledger"];
 
@@ -49,14 +50,6 @@ const SHARED_MEMORY_PATTERNS: &[&str] = &[
     "once_cell",
     "static mut",
 ];
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("the checks crate sits two levels below the workspace root")
-        .to_path_buf()
-}
 
 fn cargo() -> Command {
     let mut command = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()));
