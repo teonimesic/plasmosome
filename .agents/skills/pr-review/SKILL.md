@@ -248,14 +248,13 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    version is that filing was how the queue came to grow with the amount of reviewing rather than
    with what the product needed.
 6. `gh pr merge --squash` once CI is green, the required rounds are done, **the independent
-   review is on the PR as an issue comment naming the model and the head it read, with nothing
-   changed since that head beyond what that review asked for** (step 3; for a rebase-only move,
-   step 4's diff-of-diffs settles it), the head's `CodeRabbit` status reads `Review completed`
-   rather than `Review rate limited`, the review queue has been quiet for five minutes (step 4),
-   and every review thread is resolved —
-   `main` requires conversation resolution, so an open thread is what holds a merge. Resolving
-   a thread by disagreeing with it is allowed; merging on a disagreement you did not write down
-   in the thread is not.
+   review is on the PR as an issue comment opening with the literal `Model:` marker and the head
+   it read, with nothing changed since that head beyond what that review asked for** (step 3; for
+   a rebase-only move, step 4's diff-of-diffs settles it), the head's `CodeRabbit` status reads
+   `Review completed` rather than `Review rate limited`, the review queue has been quiet for five
+   minutes (step 4), and every review thread is resolved — `main` requires conversation
+   resolution, so an open thread is what holds a merge. Resolving a thread by disagreeing with it
+   is allowed; merging on a disagreement you did not write down in the thread is not.
 
    **Merge the commit you validated, not whatever the head is by then.** `gh pr merge` takes the
    current head, so anything that checks a SHA and merges afterwards — a script, or you across two
