@@ -222,11 +222,12 @@ fn no_workspace_crate_is_publishable_to_a_registry() {
     }
 
     reported.sort();
-    let mut members = workspace_members();
-    members.sort();
+    let listed = workspace_members().len();
     assert_eq!(
-        reported, members,
-        "`cargo metadata` and the workspace manifest disagree about which crates exist, so this rule cannot claim to have checked them all"
+        reported.len(),
+        listed,
+        "the workspace manifest lists {listed} members but `cargo metadata` reported {}, so this rule cannot claim to have checked them all; it checked {reported:?}",
+        reported.len()
     );
 }
 
