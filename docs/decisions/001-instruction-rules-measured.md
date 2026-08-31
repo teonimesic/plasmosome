@@ -34,6 +34,11 @@ Four existing rules keep their place, one is added, one is deleted. Every rule p
 | No inline `//` comments | 16/16 | 10/16 | 0.018 |
 | Retry a syscall that returns `EINTR` — **deleted** | 16/16 | 16/16 | 1.0 |
 
+The runs behind these rows overlap: the comment row re-scores the code written for the reap and
+`EINTR` tasks against a different outcome, so the columns do not sum to 112. Of the 112 runs, 96
+produce code and 16 produce reviews; 94 of the 96 compiled. Nine comparisons were scored in all —
+the six above plus three secondary ones that are not shipped as rules.
+
 The seam rule is new and costs about a third more code (mean 181.6 to 244.5 lines), so it carries
 its own brake: two adapters means a real seam, one means a hypothetical one.
 
@@ -69,8 +74,8 @@ changed behavior. Importing the collection would add roughly 3,900 lines every a
 Eight runs per arm is a floor, not a guarantee. One hypothesis looked like 5/8 versus 1/8 at n=8
 and washed out to 11/16 versus 7/16 when the sample doubled. Report inconclusive as inconclusive.
 
-Nine comparisons were run without correcting for multiple testing. The four 8/8-versus-0/8 results
-are extreme enough that it does not matter. The comment rule at 16/16 versus 10/16 does not
+Nine comparisons were run without correcting for multiple testing. The three 8/8-versus-0/8
+results are extreme enough that it does not matter. The comment rule at 16/16 versus 10/16 does not
 survive a Bonferroni correction, so it is kept as the weakest thing in the table, not as proof.
 
 **Every appended rule makes the model write more comments** — the reap rule 3.62 lines against a
