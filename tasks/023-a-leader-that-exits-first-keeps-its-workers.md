@@ -90,8 +90,11 @@ on it. It is verified. Settling it is part of this task — including the doc an
 currently assert the leak as intended behaviour.
 
 **`setsid` is unchecked, and it is the same guarantee.** `spawn` calls `libc::setsid()` and
-discards the result. If it ever fails the child stays in the parent's process group and every
-later `kill(-self.pid, ...)` silently finds nothing, while the handle claims to own a group. The
+discards the result. A child whose `setsid` fails did not create the session and group the handle
+assumes it leads, so `-self.pid` stops naming a group `VmmChild` owns. Exactly how it then misfires
+depends on which `EPERM` it was — a child left in its parent's group is not reached by
+`kill(-self.pid, ...)` at all, while a child that was already a group leader would be reached along
+with whatever else shares that group — and the guarantee is broken either way. The
 parent cannot be the one to notice: `spawn` returns as soon as `fork` returns, before the child
 has reached `setsid` at all, so making the handle report the failure would need a handshake this
 type does not have and does not need. The child is where it is answerable — it can refuse to run
@@ -99,8 +102,9 @@ the launcher, which the parent then observes as an exited child through the mach
 exists.
 
 **This half is defensive, and the task should not pretend otherwise.** `setsid` fails with `EPERM`
-only for a caller that is already a process group leader, and POSIX requires `fork` to give the
-child a pid that matches no active process group id — so on a conforming implementation the child
+when the caller is already a process group leader, or when its pid is the group id of a group in
+another session. POSIX requires `fork` to give the child a pid that matches no active process
+group id, which excludes both — so on a conforming implementation the child
 cannot be a group leader and this call cannot fail that way. There is no reachable path here to
 demonstrate, and no test will be watched failing against it. What is left is worth the three
 lines anyway: a discarded return on the call that establishes the group means that if the
