@@ -44,6 +44,17 @@ of the declaring file cannot see it — the rule reports the declaration and fai
 is closed rather than documented as a limit: `out_of_line_modules` answers it, and the rule asks
 before it scans.
 
+## What the publish rule assumes
+
+`no_workspace_crate_is_publishable_to_a_registry` cross-checks the packages `cargo metadata`
+reports against `workspace_members()`, which reads the member *paths* out of the workspace
+manifest and takes each one's last path component as the crate name. A member whose directory is
+not named exactly like its package therefore reads as a mismatch. That is a false alarm, but it
+fails closed and prints both lists, and `testkit_is_dev_only` fails beside it for the same
+reason. If a crate ever needs a directory name that differs from its package name, resolve the
+name through `cargo metadata` instead of the path — do not weaken the cross-check, which is what
+lets the rule claim it saw every member.
+
 ## Testing
 
 `cargo test -p plasmosome-freeze-checks`.
