@@ -63,6 +63,11 @@ ones that discard nothing. The second revoke then fails with `UnknownObject`, an
 verification cannot see what the first revoke left behind. It is loud rather than silent, which is
 why it was left out of this change rather than folded into it.
 
+Four tests hold the fix and all four fail against the unfixed removal: two on `OsState` itself,
+one over `FakeBackend`, one over `CompositeBackend`. The composite one is what makes the claim
+"both backends in the repository" true rather than assumed — its `apply_removal` tries each leaf
+in turn, which is a second place an owner could have been lost.
+
 `OsState::owner_of` was deliberately left alone. It keeps its first-match answer, and after this
 change no removal goes through it — it is a diagnostic read, used in a conformance failure message
 and in tests. A reviewer who reads it as authoritative will be misled; that is worth watching, not

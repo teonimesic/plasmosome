@@ -221,6 +221,33 @@ mod tests {
     }
 
     #[test]
+    fn a_revoke_through_the_composite_spares_the_other_plasmid_on_that_host() {
+        let mut composite = CompositeBackend::new(fake(), fake(), fake());
+        let proxy = |who: &str, route: &str| Grant {
+            plugin: PluginId::from(who),
+            capability: Capability::ProxyMap {
+                host: "api.github.com".to_string(),
+                route: route.to_string(),
+            },
+            kind: GrantKind::Hot,
+        };
+        composite.grant(proxy("audit", "audit-proxy:8080"));
+        let deploy = composite.grant(proxy("deploy", "deploy-proxy:9090"));
+
+        composite
+            .revoke(deploy.handle, DrainSpec::forcing())
+            .expect("deploy's own grant is revocable through the composite");
+
+        let held = composite.snapshot_os_state();
+        let owners: Vec<&str> = held.objects().map(|o| o.owner.as_str()).collect();
+        assert_eq!(
+            owners,
+            vec!["audit"],
+            "revoking deploy's proxy map must leave audit's standing and take deploy's"
+        );
+    }
+
+    #[test]
     fn a_failed_revoke_names_the_handle_its_caller_asked_for() {
         let mut network = FakeBackend::new();
         network.mark_stuck(Handle(1));
