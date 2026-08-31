@@ -365,8 +365,22 @@ mod signal_pressure {
         }
     }
 
+    fn set_sigusr1_blocked(blocked: bool) {
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGUSR1);
+            let how = if blocked {
+                libc::SIG_BLOCK
+            } else {
+                libc::SIG_UNBLOCK
+            };
+            libc::pthread_sigmask(how, &set, std::ptr::null_mut());
+        }
+    }
+
     struct SignalStorm {
-        armed: Arc<AtomicBool>,
+        budget: Arc<AtomicUsize>,
         running: Arc<AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
@@ -374,52 +388,58 @@ mod signal_pressure {
     impl SignalStorm {
         fn aimed_at_this_thread() -> SignalStorm {
             let target = unsafe { libc::pthread_self() } as usize;
-            let armed = Arc::new(AtomicBool::new(false));
+            let budget = Arc::new(AtomicUsize::new(0));
             let running = Arc::new(AtomicBool::new(true));
             let thread = std::thread::spawn({
-                let armed = Arc::clone(&armed);
+                let budget = Arc::clone(&budget);
                 let running = Arc::clone(&running);
                 move || {
-                    let mut sent = 0;
                     while running.load(Ordering::Relaxed) {
-                        if !armed.load(Ordering::Relaxed) {
-                            sent = 0;
-                        } else if sent < SIGNALS_PER_BURST {
+                        let claimed = budget
+                            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                                left.checked_sub(1)
+                            })
+                            .is_ok();
+                        if claimed {
                             unsafe { libc::pthread_kill(target as libc::pthread_t, libc::SIGUSR1) };
-                            sent += 1;
+                        } else {
+                            std::thread::yield_now();
                         }
-                        std::thread::yield_now();
                     }
                 }
             });
+            set_sigusr1_blocked(true);
             SignalStorm {
-                armed,
+                budget,
                 running,
                 thread: Some(thread),
             }
         }
 
         fn burst(&self) -> Burst<'_> {
-            self.armed.store(true, Ordering::Relaxed);
-            Burst(&self.armed)
+            self.budget.store(SIGNALS_PER_BURST, Ordering::Relaxed);
+            set_sigusr1_blocked(false);
+            Burst(&self.budget)
         }
     }
 
     impl Drop for SignalStorm {
         fn drop(&mut self) {
-            self.armed.store(false, Ordering::Relaxed);
+            self.budget.store(0, Ordering::Relaxed);
             self.running.store(false, Ordering::Relaxed);
             if let Some(thread) = self.thread.take() {
                 let _ = thread.join();
             }
+            set_sigusr1_blocked(false);
         }
     }
 
-    struct Burst<'a>(&'a AtomicBool);
+    struct Burst<'a>(&'a AtomicUsize);
 
     impl Drop for Burst<'_> {
         fn drop(&mut self) {
-            self.0.store(false, Ordering::Relaxed);
+            self.0.store(0, Ordering::Relaxed);
+            set_sigusr1_blocked(true);
         }
     }
 
