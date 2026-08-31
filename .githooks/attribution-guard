@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# A person is accountable for every commit here. A model is a tool that was used, the way an
+# editor or a compiler is, and tools do not co-author. A `Co-Authored-By` trailer naming one
+# puts it in the repository's contributor list and in the blame of anyone reading later.
+#
+# Runs as a pre-push hook AND as a CI gate, because a hook is bypassable and a gate is not.
+# Fails closed: anything it cannot read is a refusal, never a pass.
+set -uo pipefail
+
+range="${1:-}"
+if [ -z "$range" ]; then
+  if git rev-parse --verify --quiet origin/main >/dev/null; then
+    range="origin/main..HEAD"
+  else
+    range="HEAD"
+  fi
+fi
+
+vendors='claude|anthropic|gpt|openai|copilot|codex|gemini|llama|mistral'
+
+# `%(trailers:...)` uses git's own trailer parser, so body prose that merely quotes a trailer
+# is not a match — only a real trailer block is.
+if ! commits=$(git log --format='%H' "$range" 2>&1); then
+  echo "attribution-guard: cannot read the range '$range':"
+  echo "$commits"
+  echo "Refusing rather than passing: a range this guard cannot read is a range it cannot clear."
+  exit 1
+fi
+
+status=0
+for sha in $commits; do
+  if ! trailers=$(git show -s --format='%(trailers:key=Co-authored-by,valueonly)%(trailers:key=Signed-off-by,valueonly)' "$sha" 2>&1); then
+    echo "attribution-guard: cannot read trailers of $sha:"
+    echo "$trailers"
+    exit 1
+  fi
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    if printf '%s' "$line" | grep -qiE "$vendors"; then
+      echo "attribution-guard: ${sha:0:9} credits a model as an author: $line"
+      status=1
+    fi
+  done <<< "$trailers"
+done
+
+if [ "$status" -ne 0 ]; then
+  echo
+  echo "A person is accountable for every commit here. Remove the trailer by rewording:"
+  echo "  git rebase -i <base>   # mark the commit 'reword', delete the trailer line"
+  echo "A model is a tool, and tools do not co-author."
+  exit 1
+fi
+
+echo "attribution-guard: clean"
