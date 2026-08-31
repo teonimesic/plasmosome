@@ -1,7 +1,7 @@
 ---
 id: 009
 title: Close the three gaps a broken backend can walk through the conformance suite
-status: todo
+status: in_progress
 priority: 2
 specs: [003]
 intents: []

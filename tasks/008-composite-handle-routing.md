@@ -1,7 +1,7 @@
 ---
 id: 008
 title: Route a composite handle back to the leaf that issued it
-status: in_review
+status: done
 priority: 1
 specs: []
 intents: []
@@ -18,7 +18,10 @@ done_when: >-
   that carry #[ignore] today pass with the #[ignore] attribute removed, and no
   conformance clause in crates/plasmosome-testkit/src/conformance.rs changed.
 pr: https://github.com/teonimesic/plasmosome/pull/9
-evidence:
+evidence: >-
+  squash commit b2bd6eb on main; CompositeBackend translates handles on both the Ok
+  and Err arms of revoke, and the three conformance clauses it failed are
+  un-ignored and green
 ---
 
 ## Why
