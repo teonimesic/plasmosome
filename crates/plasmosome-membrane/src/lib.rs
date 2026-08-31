@@ -18,7 +18,8 @@
 //! Broker supervision (`brokers`): a cell's brokers are one `vmm::VmmChild`
 //! each, so they inherit that same kill-and-reap-on-drop guarantee. The set
 //! answers ready only once every broker answers its own control socket, and
-//! asks again on every call.
+//! asks again on every call. One `status` call spends one deadline across the
+//! whole set, so a cell with many brokers answers as fast as a cell with one.
 
 pub mod brokers;
 pub mod readiness;

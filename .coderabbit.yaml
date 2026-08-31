@@ -43,7 +43,9 @@ reviews:
       instructions: |
         House style: no inline `//` comments. Documentation is `///` contract docs on public
         items only, stating what a caller must pass, what it gets back, and what it must not
-        do. Flag added inline comments; do not ask for comments to be added.
+        do. One exception: `//!` is allowed at the root of a library crate, saying in a
+        sentence or two what the crate is for; background belongs in its README. Flag added
+        inline comments; do not ask for comments to be added.
 
   auto_review:
     enabled: true
