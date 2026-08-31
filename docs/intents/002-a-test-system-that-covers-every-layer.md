@@ -21,6 +21,13 @@ piece of work. It should become several specs, and some of them will have to wai
 needs a real Linux host to run brings a lot of infrastructure with it, and should not block the
 parts that can be built on a Mac today.
 
+One benchmark I want specifically: how fast does work run **inside a cell** compared to the same
+work on the **host** and in a **plain Docker image**? Put Rust in all three, run something that
+parallelises — a test suite is the obvious candidate — and measure both how long it took and how
+much of the host's resources it managed to use when no limit was set. The result I am hoping for
+is that a cell with unlimited resource access performs close to the host. If it does not, I want
+to know the gap and where it goes.
+
 ## Outcome
 
 (filled in later)
