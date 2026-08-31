@@ -17,7 +17,7 @@ done_when: >-
   the revoke-failure arm and the two assertions added by task 011 each have a
   backend that fails them; and FakeBackend and CompositeBackend still pass
   every clause.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/29
 evidence:
 ---
 
