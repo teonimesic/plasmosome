@@ -1,6 +1,8 @@
-# Separate from `ci.yml` on purpose. This runs on a schedule, and a red run here means a new
-# advisory landed against code nobody touched — not that the pull request under review broke
-# something. One workflow carrying both triggers makes one of those meanings unreadable.
+# Separate from `ci.yml` on purpose, because a red run means something different per trigger.
+# On the schedule: a new advisory landed against code nobody touched. On a pull request: that
+# pull request's `Cargo.lock` brought a known-vulnerable dependency in. On a manual dispatch:
+# whatever the person running it wanted to know. One workflow carrying both triggers makes the
+# scheduled meaning unreadable, which is the one nobody is watching for.
 #
 # `cargo-audit` is pinned. Installing the latest release would let a version published upstream
 # change what this job accepts, with no commit in this repository saying so.
@@ -26,11 +28,13 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: stable
 
       - name: install cargo-audit
         run: cargo install cargo-audit --version 0.22.2 --locked

@@ -39,6 +39,8 @@ the job does without a commit saying so.
 PR body and leave the task `in_review` until a real scheduled run has passed.
 
 **Done when:** the workflow exists, its syntax is valid, a `Cargo.lock`-touching PR triggers it,
-and the gate in root `AGENTS.md` is green.
+the gate in root `AGENTS.md` is green, **and one scheduled run has completed green on `main`**.
+That last condition cannot be met inside a pull request — a `schedule:` trigger only fires from
+the default branch — so merging does not close this task.
 
 ## Notes
