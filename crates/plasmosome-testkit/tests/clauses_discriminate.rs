@@ -122,10 +122,8 @@ impl DefectiveBackend {
                     return Handle(reissued);
                 }
             }
-            Defect::HandleRecyclerDepthTwo => {
-                if self.freed.len() >= 2 {
-                    return Handle(self.freed.remove(0));
-                }
+            Defect::HandleRecyclerDepthTwo if self.freed.len() >= 2 => {
+                return Handle(self.freed.remove(0));
             }
             _ => {}
         }
