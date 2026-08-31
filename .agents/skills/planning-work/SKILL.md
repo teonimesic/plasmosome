@@ -21,6 +21,12 @@ and the thresholds.
 **Dispatch is one line: "work task NNN."** The executor opens that file and reads only it and
 the files it names.
 
+**Never commit in a worktree someone else is working in — not even a one-line docs change.**
+`git add -A` takes whatever is in the tree, including the half-finished file the agent working
+there has not committed yet. Creating the worktree does not make it yours while an agent is in it.
+If a change is urgent and the worktree is busy, branch from `main` somewhere else and let the two
+land separately.
+
 **One worktree per agent, under `.worktrees/`.** Agents never share a checkout — substitute your
 own names into `git worktree add .worktrees/task-004-ledger-replay -b task-004-ledger-replay`.
 `.worktrees/` is gitignored, so the checkouts stay inside the repo and one `rm -rf` cleans them

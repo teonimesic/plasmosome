@@ -76,6 +76,22 @@ Write it in this order, and stop when you run out of things a reader needs:
 Then, and only then, the evidence: the tests, the mutations you watched fail, the gate. **Put it
 behind a `<details>` fold.** It is proof for a reviewer who wants it, not the body of the message.
 
+**Two hundred words above the fold. Count them.**
+
+```shell
+gh pr view <number> --json body --jq .body | sed '/<details>/,$d' | wc -w
+```
+
+That is about two sentences on the problem, a short paragraph on what changes, one on what is
+missing, and a sentence each on any choice a reviewer would otherwise puzzle over. It is not much,
+and that is the point: **a PR that is too long is a PR no one reads**, and a description nobody
+finishes is worth the same as no description.
+
+**Over the limit, cut — do not fold.** Moving prose behind the fold to pass the count cheats the
+reader you were writing for. What goes first is the second example, the sentence defending a
+choice nobody would question, and every clause you wrote because it was true rather than because
+it was needed.
+
 Two failure modes, both common here:
 
 - **A description that is all "how".** Fifteen headings of implementation, and a reader who
