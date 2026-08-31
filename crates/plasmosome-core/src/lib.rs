@@ -2,7 +2,9 @@
 //! registry, the kernel-owned append-only session log, the credential
 //! gatekeeper, the plasmid lifecycle FSM, capability version selection, and
 //! the desired-state reconciler placeholder over named instances, cells, and
-//! genomes (D1b/D1c).
+//! genomes (D1b/D1c). It also answers the frozen control protocol on an ndjson
+//! connection: the request and reply envelopes, the closed error table, and
+//! `plasmosome.status` built from controller state.
 //!
 //! Contract (86 §4 rule 1): this crate must build and test with no dependency
 //! path to any VMM, netstack, or broker-process crate — `plasmosome-core` is
@@ -13,18 +15,22 @@
 //! and no locks), and desired state is generation-numbered so a replayed
 //! reconciler converges instead of re-firing.
 
+pub mod control;
 pub mod gatekeeper;
 pub mod lifecycle;
 pub mod manifest;
+pub mod protocol;
 pub mod reconciler;
 pub mod registry;
 pub mod session_log;
 pub mod state;
 pub mod version;
 
+pub use control::{Controller, Handler, serve_connection};
 pub use gatekeeper::Gatekeeper;
 pub use lifecycle::{PluginState, StateError};
 pub use manifest::{ManifestError, PlasmidManifest};
+pub use protocol::{ErrorCode, Request, Response, StatusResult, WireError};
 pub use reconciler::{DesiredState, ObservedState, ReconcilePlan, Reconciler};
 pub use registry::{LookupError, RegistryEntry, ToolRegistry};
 pub use session_log::{SessionLog, read_events};

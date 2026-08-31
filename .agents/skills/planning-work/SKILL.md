@@ -21,6 +21,12 @@ and the thresholds.
 **Dispatch is one line: "work task NNN."** The executor opens that file and reads only it and
 the files it names.
 
+**Never commit in a worktree someone else is working in — not even a one-line docs change.**
+`git add -A` takes whatever is in the tree, including the half-finished file the agent working
+there has not committed yet. Creating the worktree does not make it yours while an agent is in it.
+If a change is urgent and the worktree is busy, branch from `main` somewhere else and let the two
+land separately.
+
 **One worktree per agent, under `.worktrees/`.** Agents never share a checkout — substitute your
 own names into `git worktree add .worktrees/task-004-ledger-replay -b task-004-ledger-replay`.
 `.worktrees/` is gitignored, so the checkouts stay inside the repo and one `rm -rf` cleans them
@@ -40,6 +46,11 @@ Nested checkouts are invisible to `git grep` and to `rg`, which is what the gate
 use, and to `cargo`, whose workspace members are explicit paths. They are **not** invisible to a
 plain `grep -r` or `find` from the repo root: those walk every worktree and report the same file
 many times. Search with `git grep` or `rg`.
+
+**Brief the executor on the problem, not only the plan.** A plan that arrives as a list of files
+and assertions produces a change that works and a description nobody can read, because the person
+who wrote it was never told what it was for. Give them the intent in a sentence, and say the PR
+description has to lead with it — `.agents/skills/pr-review` says how.
 
 Honesty outranks finishing: never report a green you did not run; time-box a blocker, then
 document it and move on rather than weakening a test; if a test passes both before and after the

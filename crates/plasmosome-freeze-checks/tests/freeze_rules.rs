@@ -208,6 +208,7 @@ fn controller_wire_state_shares_no_memory_across_the_seam() {
         "crates/plasmosome-core/src/state.rs",
         "crates/plasmosome-core/src/reconciler.rs",
         "crates/plasmosome-core/src/manifest.rs",
+        "crates/plasmosome-core/src/protocol.rs",
         "crates/plasmosome-backend/src/backend.rs",
         "crates/plasmosome-backend/src/universe.rs",
         "crates/plasmosome-ledger/src/lib.rs",
@@ -229,6 +230,10 @@ fn every_seam_wire_type_is_serde_in_both_directions() {
     use plasmosome_backend::{
         Capability, Diff, DrainSpec, Grant, GrantKind, Handle, LedgerEntry, OsObject, OsState,
         PluginId, ResidueReport, RevokePolicy, UniverseClass, UniverseOp, UniverseRemoval,
+    };
+    use plasmosome_core::protocol::{
+        CellStatusEntry, ControllerInfo, ErrorCode, InstanceState, Request, Response, StatusParams,
+        StatusResult, WireError,
     };
     use plasmosome_core::{
         CellId, CellRecord, CellStatus, ControllerState, GenomeName, InstanceName, InstanceRecord,
@@ -263,4 +268,13 @@ fn every_seam_wire_type_is_serde_in_both_directions() {
     wire_serde::<GenomeName>();
     wire_serde::<PlasmidRecord>();
     wire_serde::<MockMode>();
+    wire_serde::<Request>();
+    wire_serde::<Response>();
+    wire_serde::<WireError>();
+    wire_serde::<ErrorCode>();
+    wire_serde::<InstanceState>();
+    wire_serde::<StatusResult>();
+    wire_serde::<ControllerInfo>();
+    wire_serde::<CellStatusEntry>();
+    wire_serde::<StatusParams>();
 }

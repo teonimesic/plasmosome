@@ -56,6 +56,33 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    `main`; the branch tip never does, so "is the branch merged" is not a check that works — see
    `.agents/skills/tasks`.
 
+## Writing the description
+
+**Someone who has never seen this code must finish the first paragraph knowing what problem it
+solves.** Not what you built — what was wrong before, and what a person can do now that they
+could not do yesterday.
+
+Write it in this order, and stop when you run out of things a reader needs:
+
+1. **The problem.** What was missing or broken, in the language of someone using Plasmosome, not
+   someone editing it. If you cannot say it without naming a module, you have not found it yet.
+2. **What changes for them.** The new capability, described from outside. Real examples of what
+   goes in and comes back beat any description of the code that does it.
+3. **What it deliberately does not do.** The next reader's first question is always "so is X done
+   now?" Answer it before they ask, and say where the rest lives.
+4. **Why the shape is what it is** — but only where a reviewer would otherwise be puzzled by a
+   choice, and only in a sentence or two each.
+
+Then, and only then, the evidence: the tests, the mutations you watched fail, the gate. **Put it
+behind a `<details>` fold.** It is proof for a reviewer who wants it, not the body of the message.
+
+**Keep it short — around four short paragraphs above the fold.** Two sentences on the problem, a
+paragraph on what changes, one on what is missing, and a sentence each on any choice a reviewer
+would otherwise puzzle over. **A PR that is too long is a PR no one reads.** If it has grown past
+that, cut it — moving prose behind the fold to look shorter cheats the reader.
+
+(CodeRabbit appends its own summary to the body. That is not yours and does not count.)
+
 ## Rounds by diff size
 
 A round = reviewed → addressed → (beyond the first) re-triggered with `@coderabbitai review`.
