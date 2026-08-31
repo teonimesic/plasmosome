@@ -15,6 +15,14 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    done and acted on. **CodeRabbit does not review draft PRs**, so nothing you do here spends a
    round. Mark it ready (`gh pr ready <number>`) only when you would be content for someone to
    read it as it stands.
+
+   **One kind of PR you never mark ready: one that proposes an intent, or moves one to
+   `status: approved`.** It stays a draft until the owner has read it here and approved it, and
+   they are who takes it out of draft. This is where their reading actually happens, so the draft
+   flag is where the waiting is visible — `gh pr list` shows it, and no agent has a reason to flip
+   it on their behalf. It is a convention and not a boundary: an agent *can* mark one ready, just
+   as it can write `approved` into a file. See
+   `docs/decisions/008-approving-an-intent-is-an-instruction.md`.
 3. Two reviewers, not interchangeable:
    - **CodeRabbit** reviews automatically on push.
    - **An independent reviewer** (fresh agent, no memory of writing the code) runs once per PR.

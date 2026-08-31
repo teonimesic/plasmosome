@@ -30,11 +30,12 @@ is an index, and a second copy of a rule is a copy that will disagree.
 
 **Approving an intent takes a human.** An intent in `docs/intents/` becomes `status: approved` only
 on the owner's word — relayed to you by another agent, or heard directly — and never on an agent's
-own judgement, its own draft least of all. Drafting one is open to anyone; approving one is not.
+own judgement, its own draft least of all. Who writes an intent does not matter; who approves it
+does. **A PR proposing an intent, or moving one to `approved`, stays a draft until the owner has
+read it and approved it there** — an agent does not mark it ready.
 The failure this prevents is an intent reaching `main` as approved that the owner never approved,
 which starts a chain of specs and tasks under a goal nobody asked for. Nothing mechanical enforces
-it, by decision: [`docs/intents/README.md`](docs/intents/README.md) has the rule in full and what
-it costs, and
+it, by decision: [`docs/intents/README.md`](docs/intents/README.md) has the rule in full, and
 [`docs/decisions/008-approving-an-intent-is-an-instruction.md`](docs/decisions/008-approving-an-intent-is-an-instruction.md)
 has what was rejected and why.
 

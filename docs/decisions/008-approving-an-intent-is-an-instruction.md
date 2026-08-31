@@ -24,10 +24,28 @@ record distinguishes them. And **the thing being protected is a sentence in a do
 capability the operating system can withdraw; there is no seam where a check could sit that the
 agent writing the sentence does not also control.
 
+**Authorship is not the control, and was never the risk.** It does not matter who writes an intent,
+as long as the owner approves it: an agent may draft one in its own words, and the owner reads it,
+asks for changes, and approves it or does not. The failure that matters is an agent claiming an
+approval nobody gave. Those are two different failures and only the second one is worth a rule.
+
 ## Decision
 
-The rule is an instruction. `AGENTS.md` carries it in its shortest form, `docs/intents/README.md`
-carries it in full with what it costs, and nothing in CI or in branch protection tries to hold it.
+An instruction, and a visible waiting state.
+
+**The instruction.** `AGENTS.md` carries the rule in its shortest form and `docs/intents/README.md`
+carries it in full with what it costs. Nothing in CI or in branch protection tries to hold it.
+
+**The waiting state.** A pull request proposing an intent, or moving one to `status: approved`,
+stays a draft until the owner has read it on GitHub and approved it there. An agent does not mark
+it ready; the owner does. This is where their reading actually happens, so it is where the waiting
+belongs. It costs nothing, `gh pr list` shows it, no agent has a reason to flip it on the owner's
+behalf, and — unlike everything under "Rejected" — it does not need identity separation to mean
+something, because it is a coordination signal rather than a permission boundary.
+
+It is a convention, not a boundary. An agent *can* mark such a pull request ready, exactly as it
+can write `status: approved` into a file. That is the same class of guarantee as every other link
+in this chain, and it is accepted deliberately rather than overlooked.
 
 This is the form this project already uses to govern what agents do. The rules in `AGENTS.md` — who
 may write into `tasks/`, what earns a place in a skill, that a new rule arrives with evidence — are
@@ -69,12 +87,14 @@ is harder to write untruthfully there, only because it is read.
 
 ## Consequences
 
-**The residual risk is now a stated price rather than a gap.** An agent that lies about carrying an
-approval can start a chain of specs and tasks under a goal the owner never asked for, and it runs
-until the owner reads their own folder. That is bounded — the specs and tasks beneath it are each a
-pull request — and it is detectable late by the one person who can tell. `docs/intents/README.md`
-says so, and says the pull-request record does not narrow it, because the same actor writes the
-file line, the commit and the review.
+**The residual risk is now a stated price rather than a gap, and a smaller one than the instruction
+alone would leave.** An agent that lies about carrying an approval can start a chain of specs and
+tasks under a goal the owner never asked for. But the lie has to survive a pull request the owner
+never took out of draft, which anyone can see and which the owner is the one watching for. Where it
+does survive, it runs until the owner reads their own folder — bounded, because the specs and tasks
+beneath it are each a pull request, and detectable by the one person who can tell. The
+pull-request record does not narrow it either: the same actor writes the file line, the commit and
+the review.
 
 **"Nothing enforces this" is not a defect report.** An agent finding the gap and filing work to
 close it would be doing the thing the work chain exists to stop: manufacturing a task from a review

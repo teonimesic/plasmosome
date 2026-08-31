@@ -10,8 +10,8 @@ outcome:
 What you want, and what made you want it — your own words, unedited.
 No design and no solution; those belong in a spec.
 
-A draft you write yourself is a proposal in your own voice, never a guess at the owner's. Who may
-set `status: approved`, and when, is in `docs/intents/README.md`.
+It does not matter who writes this. Who may set `status: approved`, and when, is in
+`docs/intents/README.md`.
 
 ## Outcome
 

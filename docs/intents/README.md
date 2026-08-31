@@ -4,10 +4,14 @@ One file per intent, named `NNN-slug.md`. An intent says what is wanted and why,
 and no solution. Copy `docs/templates/intent.md`.
 
 `status:` is `draft` or `approved`. Anyone may write a draft — proposing an intent is real work,
-and this folder is where a proposal belongs. **Approval originates with the owner.** An agent may
-record one it is carrying, relayed by another agent or heard directly, and may never originate one,
-its own draft least of all. The question is never who typed the line, only whether the owner really
-approved it.
+and this folder is where a proposal belongs — and it does not matter who writes one. **Approval
+originates with the owner**: an agent may record one it is carrying, relayed by another agent or
+heard directly, and may never originate one, its own draft least of all. The question is never who
+typed the line, only whether the owner really approved it.
+
+**A pull request proposing an intent, or moving one to `approved`, stays a draft until the owner
+has read it on GitHub and approved it there**; an agent does not mark it ready. That is where their
+reading happens, so it is where the waiting is visible.
 
 A spec may be drafted against a `draft` intent and may not become `accepted` until that intent is
 `approved`; tasks come from accepted specs. A refused draft stays `draft` and fills `outcome:`,

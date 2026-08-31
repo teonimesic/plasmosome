@@ -202,11 +202,10 @@ whether the count of tasks naming no spec falls; if it climbs, it is not.
 ## Who writes what
 
 - **Intent** — drafted by anyone; approved by the owner, and recorded by whoever is carrying that
-  approval, usually an agent it was relayed to. An agent may draft one, and may transcribe one the
-  owner dictates: word for word, never summarized. Its own draft stays `status: draft` until the
-  owner's approval actually arrives — relayed or direct, but arriving, never assumed. A draft
-  written only because a filed task needed something to point at is a proposal the owner should
-  refuse, and writing it does not make it less refusable.
+  approval, usually an agent it was relayed to. Who wrote it does not matter. An agent's own draft
+  stays `status: draft` until the owner's approval actually arrives — relayed or direct, but
+  arriving, never assumed. A draft written only because a filed task needed something to point at
+  is a proposal the owner should refuse, and writing it does not make it less refusable.
 - **Spec** — the planner, using the strongest model available. It becomes `status: accepted` when
   its pull request merges, and the planner is who accepts it. The owner's approval is spent on the
   intent above it.
@@ -391,9 +390,12 @@ spec is two PRs, in order:
 An intent reaches `main` the same way and earlier still, in a PR of its own. Approval is a second
 one-line edit, `status: draft` to `status: approved`, and it travels through a PR like everything
 else — an agent may carry that edit on the owner's word, whether it heard it directly or had it
-relayed, exactly as it may transcribe the intent itself. It may never originate it. **That PR says
-where the approval came from**, which is the only place the provenance is recorded and the reason
-no field in the file tries to.
+relayed, and may never originate it. **That PR says where the approval came from**, which is the
+only place the provenance is recorded and the reason no field in the file tries to.
+
+**Both of those PRs stay drafts until the owner approves them, and an agent does not mark them
+ready.** That is where the owner does the reading, so it is where the waiting is visible — see
+`.agents/skills/pr-review` step 2.
 
 Work whose spec already exists skips step 1 and is one PR, which is what most work should look
 like. Trivial work skips the task as well.
