@@ -1,15 +1,14 @@
 ---
 id: 007
 title: Adopt the instruction rules that passed the A/B test
-status: todo
+status: in_review
 priority: 2
 specs: []
 intents: [001]
 refs: [docs/decisions/001-instruction-rules-measured.md, AGENTS.md, crates/plasmosome-membrane/AGENTS.md, crates/plasmosome-backend/AGENTS.md]
 done_when: >-
-  crates/plasmosome-backend/AGENTS.md states the dependency-seam rule and its
-  two-adapter brake; the pid rule reads identically wherever it appears, with one
-  file authoritative and any other mention a pointer; no AGENTS.md and no
+  exactly one instruction file states the dependency-seam rule and its two-adapter
+  brake; exactly one states the pid rule; no AGENTS.md and no
   .agents/skills/**/SKILL.md tells anyone to retry EINTR; and the gate is green.
 pr:
 evidence:
@@ -29,3 +28,19 @@ question recorded in the decision.
 ## Plan
 
 ## Notes
+
+**2026-08-31.** Two of the three items needed no change, and the `done_when` was rewritten to say
+what is actually wanted — one copy of each rule — rather than to name a file.
+
+The seam rule went to root `AGENTS.md` under Style, not to
+`crates/plasmosome-backend/AGENTS.md`. It is a general rule about where a test seam belongs, and
+the task that measured it was supervisor code, not backend code. Root is the only file every
+agent loads, and a copy in a crate would be the duplicate `AGENTS.md` itself forbids two sections
+earlier. The backend crate already carries the rule's backend-shaped consequence — the fake
+backend is a model, not a stub — and that stays where it is.
+
+The pid rule was left in `crates/plasmosome-membrane/AGENTS.md`, unchanged. It already appears
+exactly once. Promoting it to root would either duplicate it or take it away from the only crate
+that touches pids today. When a second crate handles pids, move it then.
+
+No instruction file mentions retrying `EINTR`; verified rather than assumed.

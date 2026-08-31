@@ -50,6 +50,10 @@ should not have to pause over a sentence.
 pass, what it gets back, what it must not do. If deleting a doc block costs a caller nothing,
 delete it.
 
+**Seams.** Accept dependencies, do not create them. If a test has to drive the real operating
+system to observe a behavior, the seam is in the wrong place. The brake on this: two adapters
+means a real seam, one means a hypothetical one — do not abstract until something second exists.
+
 ## The gate
 
 ```shell
