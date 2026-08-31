@@ -1,0 +1,39 @@
+# Separate from `ci.yml` on purpose. This runs on a schedule, and a red run here means a new
+# advisory landed against code nobody touched — not that the pull request under review broke
+# something. One workflow carrying both triggers makes one of those meanings unreadable.
+#
+# `cargo-audit` is pinned. Installing the latest release would let a version published upstream
+# change what this job accepts, with no commit in this repository saying so.
+name: audit
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  pull_request:
+    paths:
+      - Cargo.lock
+      - .github/workflows/audit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: audit
+        run: cargo audit --deny warnings
