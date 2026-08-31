@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use plasmosome_backend::{
-    BackendError, Capability, DrainSpec, EnforcementBackend, Grant, Handle, OsObject, OsState,
-    PluginId, UniverseClass, UniverseOp,
+    BackendError, Capability, DrainSpec, EnforcementBackend, Grant, Handle, LedgerEntry, OsObject,
+    OsState, PluginId, UniverseClass, UniverseOp, UniverseRemoval,
 };
 
 use crate::builders::GrantSequence;
@@ -163,6 +163,115 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
     );
 }
 
+/// No two grants that are live at the same moment hold the same handle, and
+/// every one of them still revokes. A backend that reissues a live handle
+/// breaks a ledger replay at the second revoke: the handle is already spent,
+/// `UnknownHandle` aborts the detach, and every effect below it stays granted.
+pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() -> B) {
+    let mut backend = make();
+    let mut live: Vec<LedgerEntry> = Vec::new();
+    for grant in sample_grants() {
+        let entry = backend.grant(grant);
+        if let Some(held) = live.iter().find(|held| held.handle == entry.handle) {
+            panic!(
+                "the grant of {} was issued {}, the handle the live grant of {} is already holding",
+                entry.capability.class_str(),
+                entry.handle,
+                held.capability.class_str()
+            );
+        }
+        live.push(entry);
+    }
+    for entry in live {
+        backend
+            .revoke(entry.handle, DrainSpec::graceful(DRAIN))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "the live grant of {} did not revoke through {}: {error}",
+                    entry.capability.class_str(),
+                    entry.handle
+                )
+            });
+    }
+    let remaining = backend.snapshot_os_state();
+    assert!(
+        remaining.is_empty(),
+        "revoking every live grant must empty the universe, found {remaining:?}"
+    );
+}
+
+/// `apply` puts an object in the universe and `apply_removal` takes that same
+/// object away again, for every class the universe models. A ledger reaches
+/// `apply_removal` for `InverseVia::Universe` and for every compensating
+/// effect, so a backend that refuses either fails every detach that reaches one.
+pub fn apply_and_removal_reach_the_universe<B: EnforcementBackend>(make: impl Fn() -> B) {
+    let mut backend = make();
+    for (op, removal) in universe_pairs() {
+        let object = op.object();
+        backend
+            .apply(op)
+            .unwrap_or_else(|error| panic!("applying {} failed: {error}", object.describe()));
+        assert!(
+            backend
+                .snapshot_os_state()
+                .contains(object.class, &object.key),
+            "an applied op must materialize {}",
+            object.describe()
+        );
+        backend.apply_removal(removal).unwrap_or_else(|error| {
+            panic!("removing the applied {} failed: {error}", object.describe())
+        });
+        assert!(
+            !backend
+                .snapshot_os_state()
+                .contains(object.class, &object.key),
+            "an applied removal left {} behind",
+            object.describe()
+        );
+    }
+    let remaining = backend.snapshot_os_state();
+    assert!(
+        remaining.is_empty(),
+        "every applied op was removed again, so the universe must be empty, found {remaining:?}"
+    );
+}
+
+/// Revoking a handle that was granted and then revoked is `UnknownHandle`
+/// naming the handle the caller passed in. A partially replayed ledger resumes
+/// over handles an earlier pass already withdrew, so it must be able to tell a
+/// spent handle from a live one, and the error must name the handle it holds.
+pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> B) {
+    let mut backend = make();
+    let grant = one_grant();
+    let object = materialized(&grant);
+    let entry = backend.grant(grant);
+    backend
+        .revoke(entry.handle, DrainSpec::graceful(DRAIN))
+        .unwrap_or_else(|error| panic!("a graceful revoke of {} failed: {error}", entry.handle));
+    match backend.revoke(entry.handle, DrainSpec::graceful(DRAIN)) {
+        Err(BackendError::UnknownHandle { handle }) => assert_eq!(
+            handle, entry.handle,
+            "the error must name the revoked handle the caller asked for, not {handle}"
+        ),
+        Err(other) => panic!(
+            "revoking the already-revoked handle {} must be UnknownHandle, got {other}",
+            entry.handle
+        ),
+        Ok(replayed) => panic!(
+            "revoking the already-revoked handle {} reported success: {replayed:?}",
+            entry.handle
+        ),
+    }
+    assert!(
+        !backend
+            .snapshot_os_state()
+            .contains(object.class, &object.key),
+        "the second revoke of {} put {} back in the universe",
+        entry.handle,
+        object.describe()
+    );
+}
+
 fn sample_grants() -> Vec<Grant> {
     GrantSequence::for_plugin(CONFORMANCE_PLUGIN)
         .hot(Capability::UdsSocket {
@@ -184,6 +293,58 @@ fn sample_grants() -> Vec<Grant> {
             path: "skills/pr.md".to_string(),
         })
         .into_grants()
+}
+
+fn universe_pairs() -> Vec<(UniverseOp, UniverseRemoval)> {
+    let owner = PluginId::from(CONFORMANCE_PLUGIN);
+    vec![
+        (
+            UniverseOp::WriteSessionFile {
+                path: "notes/applied.md".to_string(),
+                owner: owner.clone(),
+            },
+            UniverseRemoval::RemoveSessionFile {
+                path: "notes/applied.md".to_string(),
+            },
+        ),
+        (
+            UniverseOp::BindUds {
+                path: "/run/conformance/applied.uds".to_string(),
+                owner: owner.clone(),
+            },
+            UniverseRemoval::UnbindUds {
+                path: "/run/conformance/applied.uds".to_string(),
+            },
+        ),
+        (
+            UniverseOp::SetProxyMap {
+                host: "applied.plasmosome.test".to_string(),
+                route: "splice".to_string(),
+                owner: owner.clone(),
+            },
+            UniverseRemoval::RemoveProxyMap {
+                host: "applied.plasmosome.test".to_string(),
+            },
+        ),
+        (
+            UniverseOp::SpawnBroker {
+                pid: 909,
+                name: "applied".to_string(),
+                owner: owner.clone(),
+            },
+            UniverseRemoval::KillBroker { pid: 909 },
+        ),
+        (
+            UniverseOp::AddMount {
+                source: "/src/applied".to_string(),
+                target: "/applied".to_string(),
+                owner,
+            },
+            UniverseRemoval::RemoveMount {
+                target: "/applied".to_string(),
+            },
+        ),
+    ]
 }
 
 fn one_grant() -> Grant {
