@@ -62,7 +62,9 @@ In the ledger itself, on every line. A line is one of two shapes, externally tag
   in the unsafe direction.
 - A `revoke` line records that every effect the named plasmid was granted before this line
   is no longer desired. `plasmid.remove` writes one. `plasmid.reload` writes one followed by
-  the reloaded plasmid's fresh `grant` lines, all at the same new generation.
+  the reloaded plasmid's fresh `grant` lines, all at the same new generation. A reload is
+  not atomic across its lines; the crash window between them is defined below, under what
+  the writer guarantees.
 
 All fields are required in both shapes; the recovery reader defaults nothing. Nothing
 durable exists in any older shape — no production writer of per-cell ledgers exists before
@@ -81,6 +83,9 @@ The generation rules:
   transactions that grant nothing, removal and reload, always append their `revoke` line, so
   the generation they took is on disk and recovery reads it back.
 - Within a file, generations never decrease. A decrease is a fault and quarantines the cell.
+- Every line's generation is at least 1. Generation 0 is reserved: it is the reading of a
+  cell with no lines at all, and only that. A line carrying 0 is a fault and quarantines
+  the cell.
 - A cell's `ledger_generation` is the generation of the last line of its ledger, whichever
   shape that line is. A cell with no ledger file, or an empty one, is a fresh cell:
   generation 0, no granted effects, still adopted. A quarantined cell has no generation; the
@@ -109,6 +114,18 @@ the newest fact.
   world. The invariant this buys is the one the project needs: no object the controller
   created exists without a line claiming it. A crash between flush and apply leaves a line
   without a world object, and recovery names that as `missing` drift rather than hiding it.
+- A `revoke` line is write-ahead too: durable before any inverse runs. The direction is
+  chosen so a crash can never resurrect a capability — once the revoke is on disk, no
+  recovery will claim those effects as desired again. What a crash can leave is objects
+  that exist but are no longer claimed, and those are named on the snapshot side of
+  `drift`.
+- A multi-line transaction has no boundary marker, and this spec does not add one. The
+  real crash window is a reload's: the `revoke` durable, the fresh grants not yet
+  written. Disk then holds a valid ledger that reads as a completed removal, and recovery
+  treats it as exactly that — the plasmid is not desired, and whichever of its objects
+  still stand in the world surface as drift, named with their owner. Nothing is adopted
+  by guess, and nothing vanishes quietly. The operator has both halves in the file: the
+  revoked grants and their inverses are still on their lines, above the revoke.
 - **Exactly-once is not guaranteed.** A line carries no transaction identifier beyond its
   generation, and an append can succeed while its acknowledgement is lost — a crash at that
   moment leaves the caller unsure, and a re-issued transaction appends again, under the next
@@ -135,7 +152,8 @@ cell attached. `open_file` keeps its current single-plugin callers; recovery get
 reader in `plasmosome-ledger`.
 
 The strict reader returns either every line in file order, or a fault carrying the path,
-the 1-based line number, and the kind: `Unparseable`, `GenerationDecreased`, or `Io`. A
+the 1-based line number, and the kind: `Unparseable`, `GenerationZero`,
+`GenerationDecreased`, or `Io`. A
 missing file and an empty file are not faults; they read as a fresh cell. There is no
 partial success: one bad line fails the whole read.
 
@@ -179,6 +197,11 @@ recovered cell: the ledger does not record a genome name and recovery does not i
   class and key plus the line's plugin form an expected `OsObject`.
   `Diff::between(&expected, &snapshot)` then names every object the ledgers promise but the
   snapshot lacks, and every object the snapshot holds but no adopted ledger accounts for.
+  One caveat binds the instance-wide union: `OsObject` ownership is a `PluginId` alone, so
+  when one plugin is attached to two cells their expected objects collapse into the same
+  set entries, and drift between those cells can hide. Exactness of `expected` and `drift`
+  across cells that share a plugin waits on the ownership decision in `## Blocked on`; per
+  cell, and across cells with disjoint plugins, they are exact.
 - `unmatched` — the standing grants recovery cannot verify: an `Exact` inverse via
   `InverseVia::Backend(Handle)` names no class and key, and a handle is process-local, so
   it is dead after a restart. Each entry carries the cell, the plugin, and the effect
@@ -194,15 +217,20 @@ recovered cell: the ledger does not record a genome name and recovery does not i
 - `instance: InstanceName` — the name the caller passed to `recover` — and `cell: CellId` —
   which cell. For a `NotACell` entry the cell id is the entry's name verbatim, so the
   operator can find the directory even though the path function refuses it.
-- `ledger: PathBuf` and `fault` — the file and the fault: `NotACell`, or the read fault
-  with its line number, so an operator can open the exact line the controller stopped at.
+- `path: PathBuf` and `fault` — where and what. For a read fault, `path` is the ledger
+  file, derived by `cell_ledger_path`, and the fault carries its line number, so an
+  operator can open the exact line the controller stopped at. For `NotACell`, `path` is
+  the raw `cells/` entry as the listing returned it — explicitly not a validated ledger
+  path, which a refused name cannot have — carried so the operator can find the entry.
 - `lines_parsed: usize` — how many lines read cleanly before the fault. Context only; the
   prefix is not trusted. Zero for `NotACell`.
 - `found: Vec<OsObject>` — every snapshot object whose owner is a plugin named by any line
   of the file that did parse, grant or revoke. This is what exists in the world and
   plausibly belongs to the cell; the snapshot does not need the ledger, so the operator
   sees it even though the controller will not act on it. Empty for `NotACell`, which has no
-  parsed lines to name a plugin.
+  parsed lines to name a plugin. Attribution is by plugin name, the only ownership
+  `OsObject` carries, so a plugin attached to a second cell can bring that cell's objects
+  into `found`; the ownership decision in `## Blocked on` settles the ambiguity.
 - `refuses: Vec<String>` — the fixed claims the controller declines, stated outright: it
   does not adopt the cell, does not trust the parsed prefix as the cell's history, claims no
   `ledger_generation` for it, and revokes none of the found objects without an operator
@@ -225,15 +253,18 @@ rather than vanishing into an adopted history.
   `revoke` carries `plugin: PluginId`, `generation: u64`. All fields required in serde.
   `mock` serializes to exactly `"simulate"`, `"capture"`, or `"passthrough"`; the set is
   closed. A strict read function returning `Result<Vec<LedgerLine>, LedgerReadFault>`;
-  `LedgerReadFault { path, line: Option<u64>, kind: Unparseable | GenerationDecreased |
-  Io }`. A per-line append that flushes before returning. Missing or empty file reads as
+  `LedgerReadFault { path, line: Option<u64>, kind: Unparseable | GenerationZero |
+  GenerationDecreased | Io }`. A per-line append that flushes before returning. Missing or empty file reads as
   `Ok(vec![])`.
 - `plasmosome-core::recovery`: `recover(instance: &InstanceName, instance_root: &Path,
   snapshot: &OsState) -> Result<RecoveryOutcome, RecoveryError>`. `RecoveryOutcome {
   desired: DesiredState, expected: OsState, drift: Diff, unmatched: Vec<UnmatchedRecord>,
   quarantined: Vec<QuarantineReport> }`. `RecoveryError::Discovery` carries the path that
   could not be listed and the io error; it is returned only for that instance-wide failure,
-  never for a per-cell one. `MockMode` moves into `LedgerLine`'s reach without a dependency
+  never for a per-cell one. `QuarantineReport.path` is the derived ledger file for a read
+  fault and the raw `cells/` entry for `NotACell`. Recovery requires of the backend that an
+  object's ownership answers which cell it belongs to; `## Blocked on` carries that
+  requirement. `MockMode` moves into `LedgerLine`'s reach without a dependency
   cycle: `plasmosome-ledger` must not depend on `plasmosome-core`, so `MockMode` either
   moves to `plasmosome-backend` or is mirrored by a ledger-owned type with the same three
   wire values; the implementer picks, the vocabulary and the strings stay fixed.
@@ -243,7 +274,8 @@ rather than vanishing into an adopted history.
 - Callers may rely on: the path function is total over valid ids and refuses invalid ones;
   every acknowledged effect has at least one durable line, written before the effect
   touched the world; a retried transaction may leave duplicate grant lines, visible in the
-  file, collapsing to one expected object; generations within a file never decrease; a
+  file, collapsing to one expected object; generations within a file start at 1 and never
+  decrease; a
   removal or reload moves the generation durably via its `revoke` line; a fresh cell reads
   as generation 0; a quarantined cell is absent from `desired`, has no claimed generation,
   and loses no objects; a replayer treats an inverse whose object is already absent as
@@ -262,15 +294,20 @@ rather than vanishing into an adopted history.
   no line set is returned.
 - Strict-reading lines with generations `2, 2, 1` returns `GenerationDecreased` naming
   line 3.
+- Strict-reading a file whose first line carries `generation: 0` returns `GenerationZero`
+  naming line 1.
 - Strict-reading a missing path and an empty file both return no lines and no fault.
 - The per-line append extends a file holding M lines to exactly M + 1; a test appends, then
   independently reopens the path and strict-reads the new line back.
 - A ledger holding a grant at generation 1 and a revoke at generation 2 recovers a cell at
   generation 2 with no desired plasmids and no expected objects.
+- The same ledger, over a snapshot still holding the granted object, yields a `drift`
+  naming that object as unaccounted for — the mid-reload crash reads as a completed
+  removal, loudly.
 - A ledger holding a grant with `mock: simulate` at generation 1, a revoke at generation 2,
   and a grant with `mock: capture` at generation 3 recovers one desired plasmid whose mode
   is `capture`.
-- Two grant lines promising the same universe object produce one object in `expected` and
+- Two grant lines in one cell's ledger promising the same universe object produce one object in `expected` and
   an empty `drift` when the snapshot holds it.
 - `recover` over a temp instance root with two cells at generations 3 and 5 returns
   `desired.generation == 5` and both cells in `desired.cells`.
@@ -284,7 +321,8 @@ rather than vanishing into an adopted history.
   report's `Display` output shows one `FOUND` line per object and one `REFUSES` line per
   claim.
 - A `cells/` entry that is a regular file, and one whose name contains `\`, are each
-  quarantined with fault `NotACell` while a valid sibling cell is still adopted.
+  quarantined with fault `NotACell`, each report carrying the raw entry path, while a
+  valid sibling cell is still adopted.
 - An instance root where `cells` is a regular file returns `RecoveryError::Discovery` and
   no outcome; an instance root with no `cells/` at all returns `Ok` with an empty outcome.
 - A controller constructed from a recovery outcome answers `plasmosome.status` with
@@ -307,8 +345,17 @@ rather than vanishing into an adopted history.
 
 ## Blocked on
 
-Nothing. Every behavior above runs against `FakeBackend`, `tempfile` directories, and the
-existing crates on a Mac, with no VM and no running cell. One rule stated here is testable
-only later: the write-ahead order — line durable before effect applied — binds the
-transaction writer inside the daemon, and no such writer exists yet. It is stated now so
-the first one is built against it, not discovered against it.
+- **A decision on object ownership identity.** `OsObject` is `{class, key, owner:
+  PluginId}`, and `plasmosome-backend` has no notion of `CellId`. Recovery requires one of
+  two things to be true: an object's ownership names the cell it belongs to, or a plugin
+  name belongs to at most one cell of an instance at a time. Neither holds today, and the
+  choice between them is one with rejected alternatives someone will argue for again — a
+  decision for `docs/decisions/`, not a contract detail for this spec. Until it is made,
+  two behaviors above cannot be finished: quarantine `found` for an instance where one
+  plugin spans cells, and `expected`/`drift` exactness across cells that share a plugin.
+  Everything else is implementable now, single-cell and disjoint-plugin cases included.
+- Nothing else. Every other behavior runs against `FakeBackend`, `tempfile` directories,
+  and the existing crates on a Mac, with no VM and no running cell. One rule is testable
+  only later rather than blocked: the write-ahead order binds the transaction writer
+  inside the daemon, and no such writer exists yet. It is stated now so the first one is
+  built against it, not discovered against it.
