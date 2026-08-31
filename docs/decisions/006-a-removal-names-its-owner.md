@@ -22,6 +22,13 @@ the same session file path to two plasmids — a key that discards nothing — a
 two objects there just the same, because nothing in `OsState` limits a key to one holder. The
 missing field was on the removal, not on the key.
 
+Decision 003 reached the same lookups from the other side and set this question down explicitly:
+`owner_of`, `contains` and `remove` "key on class and key alone", two plasmids "already collide
+under one class and key", and — its own words — "what an owner *is*, and which object a removal
+*names*, are separate questions, and this decision answers only the first." This answers the
+second. The two compose rather than compete: 003 widens what an owner is, this decides which
+object a removal takes, and neither needs the other to land first.
+
 ## Decision
 
 A removal names its owner. `OsState::remove` takes `(class, key, owner)` and takes that owner's
