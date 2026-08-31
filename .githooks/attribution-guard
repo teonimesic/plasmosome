@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# A person is accountable for every commit here. A model is a tool that was used, the way an
+# editor or a compiler is, and tools do not co-author. A `Co-Authored-By` trailer naming one
+# puts it in the repository's contributor list and in the blame of anyone reading later.
+#
+# Runs as a pre-push hook AND as a CI gate, because a hook is bypassable and a gate is not.
+set -uo pipefail
+
+range="${1:-}"
+if [ -z "$range" ]; then
+  if git rev-parse --verify --quiet origin/main >/dev/null; then
+    range="origin/main..HEAD"
+  else
+    range="HEAD~1..HEAD"
+  fi
+fi
+
+# Trailer forms seen in the wild: `Co-Authored-By`, `Co-authored-by`, and `Signed-off-by` used
+# the same way. Names matched loosely on purpose — `Claude`, `GPT`, `Copilot`, `Codex`, `Gemini`
+# and any noreply address at a model vendor.
+pattern='^[[:space:]]*(co-authored-by|signed-off-by)[[:space:]]*:.*(claude|anthropic|gpt|openai|copilot|codex|gemini|llama|mistral)'
+
+hits=$(git log --format='%H%n%B%n--commit-boundary--' $range 2>/dev/null |
+  awk -v pat="$pattern" '
+    /^[0-9a-f]{40}$/ { sha = $0; next }
+    /^--commit-boundary--$/ { next }
+    { line = tolower($0); if (line ~ pat) print substr(sha,1,9) " " $0 }
+  ')
+
+if [ -n "$hits" ]; then
+  echo "attribution-guard: a commit credits a model as an author:"
+  echo "$hits"
+  echo
+  echo "A person is accountable for every commit here. Remove the trailer:"
+  echo "  git rebase -i --exec 'git commit --amend --no-edit' <base>"
+  echo "or amend the message directly. A model is a tool, and tools do not co-author."
+  exit 1
+fi
+
+echo "attribution-guard: clean"
