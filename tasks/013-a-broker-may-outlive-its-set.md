@@ -1,7 +1,7 @@
 ---
 id: 013
 title: Two lifecycle gaps with no witness, and a deadline that multiplies
-status: in_progress
+status: in_review
 priority: 2
 specs: []
 intents: []
@@ -15,7 +15,7 @@ done_when: >-
   status answers within one deadline for a set of any size; a production Probe
   has a caller; and either drop's no-signal-after-external-reap path gains a
   witness, or this task records that it cannot have one and why.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/21
 evidence:
 ---
 
