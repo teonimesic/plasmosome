@@ -1,7 +1,7 @@
 ---
 id: 004
 title: Build the testkit crate, the conformance suite, and the seam rules
-status: in_progress
+status: in_review
 priority: 1
 specs: [003]
 intents: [002]
@@ -30,7 +30,7 @@ done_when: >-
   keeping testkit out of non-dev dependencies, a testkit AGENTS.md carrying the
   layer table and seam rule, and the crate's ci.yml matrix entry if that matrix
   already exists — with the gate green.
-pr:
+pr: 8
 evidence:
 ---
 
