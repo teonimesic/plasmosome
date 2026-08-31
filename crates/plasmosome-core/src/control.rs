@@ -749,13 +749,21 @@ mod tests {
             MAX_LINE_BYTES,
             "the test line is exactly the cap, or it proves nothing about the boundary"
         );
-        let mut script = line.into_bytes();
-        script.push(b'\n');
-        let replies = converse_of(&script, 1, &mut Echo);
+        let mut terminated = line.clone().into_bytes();
+        terminated.push(b'\n');
+        let replies = converse_of(&terminated, 1, &mut Echo);
         assert_eq!(
             replies[0].get("result"),
             Some(&echoed("{}")),
             "a line of exactly the cap fits under it: {}",
+            replies[0]
+        );
+
+        let replies = converse_of(line.as_bytes(), 1, &mut Echo);
+        assert_eq!(
+            replies[0].get("result"),
+            Some(&echoed("{}")),
+            "the cap is a maximum, not a threshold, at end of input as well: {}",
             replies[0]
         );
     }

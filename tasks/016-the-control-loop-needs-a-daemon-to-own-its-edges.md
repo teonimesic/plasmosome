@@ -622,8 +622,9 @@ record now says which wins: a framing complaint from the membrane's connection i
 this connection, so it becomes `-32603` here, and a verb needing to report the membrane's framing
 failure carries it in its result rather than as its error.
 
-Also corrected in decision 005's Consequences: the over-cap refusal returns `Ok(())`, the same
-value as a clean hangup, which the daemon will want to tell apart; and this crate now requires
+Also corrected in decision 005's Consequences: a delivered over-cap refusal reports `Ok(())`, the
+same value as a clean hangup, which the daemon will want to tell apart — while a refusal that
+cannot be written returns the write error like any other line; and this crate now requires
 unwinding, since `panic = "abort"` would void the whole panic contract without failing a test.
 Nothing in the workspace sets it today.
 
@@ -671,3 +672,30 @@ the cap counts every byte before the newline, the carriage return included
 
 `Panicking` now uses `panic!` rather than `assert_ne!`, so the two panic tests stop printing
 what looks like a broken assertion into every run.
+
+### CodeRabbit round 2: two wording defects in the decision record, both real
+
+Round 1 produced no actionable comments (its one pre-merge warning, docstring coverage below 80%,
+was declined in the PR thread: this repository's `AGENTS.md` bans doc blocks that restate a
+private helper, and the check counts private and `#[cfg(test)]` functions). Round 2 found two
+places where prose disagreed with the code — both in `docs/decisions/005`, which
+`docs/decisions/README.md` forbids editing once it lands, so both had to be right before merge.
+
+**The cap read as a threshold.** The record said "a line that reaches it without a newline gets
+`-32600`". The code refuses only a line that *exceeds* it: `buffer.len() > MAX_LINE_BYTES`. A
+line of exactly `MAX_LINE_BYTES` is served either way it ends.
+
+That second half was a claim no test held. `a_line_exactly_at_the_cap_is_served` covered only the
+newline termination, so the end-of-input case was reasoning, not evidence. It now covers both,
+and turning the comparison into `>=` fails it:
+
+```text
+the cap is a maximum, not a threshold, at end of input as well:
+{"error":{"code":-32600,"message":"the line exceeds 1048576 bytes"},"id":null}
+  left: None
+ right: Some(Object {})
+```
+
+**The `Ok(())` consequence was unqualified.** The refusal is written with `?`, so a write failure
+returns the io error like any other line; only a *delivered* refusal reports `Ok(())`. Corrected
+in the record and in the note above that repeats it.

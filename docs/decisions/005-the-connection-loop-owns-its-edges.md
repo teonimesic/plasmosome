@@ -26,9 +26,10 @@ the fault was ours.
 
 ## Decision
 
-**A line past 1 MiB is answered, then the connection closes.** `MAX_LINE_BYTES` is `1 << 20`. A
-line that reaches it without a newline gets `-32600` under a `null` id, with a message naming the
-cap, and then `serve_connection` returns `Ok(())`. Every frozen v1 verb's params are names, small
+**A line past 1 MiB is answered, then the connection closes.** `MAX_LINE_BYTES` is `1 << 20`,
+and it is a maximum, not a threshold: a line of exactly that many bytes is served, whether it
+ends in a newline or in end of input. A line that *exceeds* it without ending gets `-32600` under
+a `null` id, with a message naming the cap, and the connection then closes. Every frozen v1 verb's params are names, small
 maps and short argv lists, orders of magnitude under the cap, so no honest client comes near it;
 a hostile one costs one megabyte and one reply per connection.
 
@@ -113,10 +114,11 @@ input, and spec 001 §1 now says that rather than letting a client read it off t
 the closing cases a structured marker was left out deliberately: like every other reserve code,
 `internal()` and `line_too_long()` carry no fields.
 
-**`serve_connection` returns `Ok(())` for an over-cap refusal** — the same value as a client that
-hung up cleanly. Nothing consumes the difference yet, but the daemon that will wants to log and
-count a connection it closed itself separately from one the peer closed, and that will need a
-return shape carrying which happened.
+**`serve_connection` reports an over-cap refusal it delivered as `Ok(())`** — the same value as a
+client that hung up cleanly. (If that refusal cannot be written, the write error is returned
+instead, as on any other line.) Nothing consumes the difference yet, but the daemon that will
+wants to log and count a connection it closed itself separately from one the peer closed, and
+that will need a return shape carrying which happened.
 
 **This crate now requires unwinding.** `catch_unwind` is what turns a handler panic into an
 answer, so a profile built with `panic = "abort"` voids every promise above without failing a
