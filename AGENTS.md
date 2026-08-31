@@ -73,4 +73,5 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ./.githooks/provenance-guard
+./.githooks/attribution-guard
 ```

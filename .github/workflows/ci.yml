@@ -45,7 +45,10 @@ jobs:
       - name: provenance guard
         run: ./.githooks/provenance-guard
 
+      # On a push there is no base ref, and `origin/main..HEAD` is then an empty range the guard
+      # clears without reading a commit. A squash merge composes a message GitHub never showed the
+      # pull request, so the commit landing on main is exactly the one worth reading.
       - name: attribution guard
         env:
-          BASE_REF: ${{ github.base_ref || 'main' }}
-        run: ./.githooks/attribution-guard "origin/${BASE_REF}..HEAD"
+          RANGE: ${{ github.base_ref && format('origin/{0}..HEAD', github.base_ref) || format('{0}..{1}', github.event.before, github.sha) }}
+        run: ./.githooks/attribution-guard "$RANGE"

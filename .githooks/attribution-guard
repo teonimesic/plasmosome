@@ -18,9 +18,34 @@ else
 fi
 
 vendors='claude|anthropic|gpt|openai|copilot|codex|gemini|llama|mistral'
+
+# Nominates text worth parsing. Deliberately unanchored: it may only ever over-nominate, because
+# a paragraph it skips is a paragraph nothing else looks at.
+nominate='(co-authored-by|signed-off-by)[[:space:]]*:'
+
+# Reads a trailer off a line git's parser has already produced, where the key starts the line.
 attribution='^[[:space:]]*(co-authored-by|signed-off-by)[[:space:]]*:'
 
 offences=()
+
+# Answers whether $2 matches $1, and exits the guard if grep could not decide.
+#
+# `grep -q` exits 0 for a match and 1 for no match; anything higher is a failure to read. Treating
+# that as "no match" is how a guard reports clean because its own tooling broke.
+matches() {
+  local pattern=$1 text=$2 status
+  printf '%s' "$text" | grep -qiE "$pattern"
+  status=$?
+  case $status in
+    0) return 0 ;;
+    1) return 1 ;;
+    *)
+      echo "attribution-guard: grep exited $status matching '$pattern'"
+      echo "Refusing rather than passing: a check this guard cannot run is a check it cannot clear."
+      exit 1
+      ;;
+  esac
+}
 
 # Adds every attribution trailer in the paragraph on $1 that names a model.
 #
@@ -33,7 +58,7 @@ offences=()
 # between this and scanning the raw message, which flagged bodies that merely quoted a trailer.
 record_model_trailers() {
   local paragraph=$1 parsed line value
-  printf '%s' "$paragraph" | grep -qiE "$attribution" || return 0
+  matches "$nominate" "$paragraph" || return 0
   if ! parsed=$(printf 'x\n\n%s' "$paragraph" | git interpret-trailers --parse 2>&1); then
     echo "attribution-guard: cannot parse the trailers of a commit message:"
     echo "$parsed"
@@ -41,9 +66,9 @@ record_model_trailers() {
     exit 1
   fi
   while IFS= read -r line; do
-    printf '%s' "$line" | grep -qiE "$attribution" || continue
+    matches "$attribution" "$line" || continue
     value=${line#*:}
-    if printf '%s' "$value" | grep -qiE "$vendors"; then
+    if matches "$vendors" "$value"; then
       offences+=("$line")
     fi
   done <<< "$parsed"
@@ -57,6 +82,7 @@ record_model_trailers() {
 # paragraph, which git then read as prose, so a mid-body trailer in it went unseen.
 record_model_trailers_in_message() {
   local message=$1 line paragraph=''
+  matches "$nominate" "$message" || return 0
   while IFS= read -r line; do
     line=${line%$'\r'}
     case $line in

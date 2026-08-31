@@ -18,6 +18,11 @@ fn git(repository: &Path, arguments: &[&str], stdin: Option<&str>) -> Output {
         .env("GIT_AUTHOR_EMAIL", "person@example.com")
         .env("GIT_COMMITTER_NAME", "A Person")
         .env("GIT_COMMITTER_EMAIL", "person@example.com")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_COMMON_DIR")
         .args(arguments);
     if let Some(text) = stdin {
         command.stdin(std::process::Stdio::piped());
@@ -72,24 +77,48 @@ fn repository_with_commit(message: &str) -> TempDir {
     directory
 }
 
-fn run_guard_over(message: &str) -> Output {
-    let repository = repository_with_commit(message);
-    Command::new(guard())
-        .current_dir(repository.path())
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .arg("HEAD")
+fn run_guard_in(repository: &Path, range: &str) -> Output {
+    guard_command(repository)
+        .arg(range)
         .output()
         .expect("the guard runs")
 }
 
+fn guard_command(repository: &Path) -> Command {
+    let mut command = Command::new(guard());
+    command
+        .current_dir(repository)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_COMMON_DIR");
+    command
+}
+
+fn run_guard_over(message: &str) -> Output {
+    let repository = repository_with_commit(message);
+    run_guard_in(repository.path(), "HEAD")
+}
+
+const OFFENCE: &str = "credits a model as an author";
+
 fn assert_refused(message: &str, why: &str) {
     let output = run_guard_over(message);
-    assert!(
-        !output.status.success(),
-        "the guard passed a commit that {why}; its purpose is to stop exactly this from reaching main.\nmessage:\n{message}\nguard said:\n{}{}",
+    let said = format!(
+        "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "the guard passed a commit that {why}; its purpose is to stop exactly this from reaching main.\nmessage:\n{message}\nguard said:\n{said}"
+    );
+    assert!(
+        said.contains(OFFENCE),
+        "the guard refused a commit that {why}, but not by naming the trailer it found; a guard that refuses for some other reason would satisfy an assertion on the exit status alone, so the exit status is not enough to prove it saw anything.\nmessage:\n{message}\nguard said:\n{said}"
     );
 }
 
@@ -178,17 +207,53 @@ fn clears_a_body_whose_only_co_authors_are_people() {
 #[test]
 fn refuses_a_range_it_cannot_read() {
     let repository = repository_with_commit("docs: a change\n");
-    let output = Command::new(guard())
-        .current_dir(repository.path())
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .arg("no-such-ref..HEAD")
-        .output()
-        .expect("the guard runs");
-    assert!(
-        !output.status.success(),
-        "the guard cleared a range it could not read; a range it cannot read is a range it cannot clear.\nguard said:\n{}{}",
+    let output = run_guard_in(repository.path(), "no-such-ref..HEAD");
+    let said = format!(
+        "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "the guard cleared a range it could not read; a range it cannot read is a range it cannot clear.\nguard said:\n{said}"
+    );
+    assert!(
+        said.contains("cannot read the range"),
+        "the guard refused an unreadable range without saying that is why, so its output does not tell a caller what to fix.\nguard said:\n{said}"
+    );
+}
+
+#[test]
+fn refuses_when_the_tool_it_matches_with_cannot_answer() {
+    let repository = repository_with_commit(
+        "docs: a change\n\nSome body prose.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
+    );
+    let shadow = tempfile::tempdir().expect("a scratch directory is created");
+    let stub = shadow.path().join("grep");
+    std::fs::write(&stub, "#!/bin/sh\nexit 2\n").expect("the stub is written");
+    let mut permissions = std::fs::metadata(&stub)
+        .expect("the stub is readable")
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&stub, permissions).expect("the stub is made executable");
+
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    let output = guard_command(repository.path())
+        .env(
+            "PATH",
+            format!("{}:{inherited}", shadow.path().to_string_lossy()),
+        )
+        .arg("HEAD")
+        .output()
+        .expect("the guard runs");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "the guard cleared a commit carrying a model trailer while the tool it matches with was failing; `grep -q` exits 1 for no match and 2 or more for an error, and reading an error as no match is how a guard reports clean because its own tooling broke.\nguard said:\n{said}"
     );
 }

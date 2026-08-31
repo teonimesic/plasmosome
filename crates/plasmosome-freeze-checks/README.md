@@ -19,6 +19,7 @@ wrong.
 | Wire types contain no shared handles | The seam crosses processes; `Arc` across it is a lie |
 | Every seam type round-trips through serde | The boundary must be data, not memory |
 | Every skill in `.agents/skills/` has a symlink under `.claude/skills/` | A skill a tool cannot find is a rule nobody reads |
-| The attribution guard refuses a model co-author trailer wherever a squash merge left it | A control that reads only the last paragraph is one a squash merge walks past |
+| The attribution guard finds a model co-author trailer at any position in a message, not only the last paragraph | A control that reads only the last paragraph is one a squash merge walks past |
+| Both commit guards refuse when the search they depend on cannot run | A guard that reads a broken tool as "found nothing" reports clean for the wrong reason |
 
 Tests: `cargo test -p plasmosome-freeze-checks`
