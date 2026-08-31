@@ -12,6 +12,35 @@ exactly; if the plan contradicts reality, stop and report rather than improvise.
 
 **One unit of work per agent, per branch, per PR** — one finishable capability, not a theme.
 
+## Who does the work
+
+The agent that dispatches other agents does not write the change. It plans, dispatches, reviews,
+decides, and drives merges. It does not write product code, tests, PR descriptions, or specs.
+
+**Review findings go back to the agent that wrote the change.** That agent still holds the
+context — why the code is shaped the way it is, what it already tried and dropped. Resume it
+rather than spawning a fresh one to work all of that out again, and rather than fixing the finding
+yourself. A reviewer that patches what it is reviewing has stopped being an independent reader
+of it.
+
+The orchestrator's own work is the judgement a dispatched agent cannot make: which piece of work
+comes next, what is in scope and what is not, whether a finding is right, which of two designs to
+take, and when something needs a decision record rather than a spec. That is the whole job, and it
+is enough of one.
+
+There are three exceptions, and they are the only three: reconciling a task file's `status:` and
+`evidence:`, resolving review threads, and merging. Anything that would appear in a diff of
+`crates/` or `docs/` belongs to a dispatched agent — the decision record included, the spec
+included.
+
+It starts with a review finding too small to seem worth handing back, and grows from there. The
+drift feels faster because you can see the one change moving and cannot see the four that stopped:
+the orchestrator is the only thing that can review, decide and merge, so every minute it spends
+authoring is a minute nothing else advances. Measured end to end, work reaches `main` more slowly,
+not faster.
+
+## Handing work over
+
 **The planner's output is a file, not a message.** A plan is written into `tasks/NNN-slug.md`
 with `status: planned` — plus, for work that crosses the spec threshold, an accepted spec in
 `docs/specs/` that the task's `specs:` field names. A brief that exists only in a chat window
