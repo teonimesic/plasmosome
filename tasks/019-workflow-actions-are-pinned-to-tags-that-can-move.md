@@ -7,7 +7,7 @@ specs: []
 intents: []
 refs: [.github/workflows/ci.yml, .github/workflows/audit.yml]
 done_when: >-
-  every third-party action in every workflow is pinned to a full commit SHA, and
+  every action in every workflow is pinned, GitHub-authored ones included, to a full commit SHA, and
   a documented way exists to update them together.
 pr:
 evidence:
