@@ -37,8 +37,15 @@ next agent would otherwise have to work out again: what was tried and abandoned,
 was hiding, which reference turned out to be wrong.
 
 Nested checkouts are invisible to `git grep` and to `rg`, which is what the gate and the guard
-use. They are **not** invisible to a plain `grep -r` or `find` from the repo root: those walk
-every worktree and report the same file many times. Search with `git grep` or `rg`.
+use, and to `cargo`, whose workspace members are explicit paths. They are **not** invisible to a
+plain `grep -r` or `find` from the repo root: those walk every worktree and report the same file
+many times. Search with `git grep` or `rg`.
+
+**`git worktree move` needs a `cargo clean` after it.** Several tests bake an absolute path in at
+compile time through `env!("CARGO_MANIFEST_DIR")` or `env!("CARGO_BIN_EXE_…")`. Cargo still
+considers those binaries fresh after a move, so they run with a path that no longer exists and
+fail with `NotFound` — which reads as a broken test rather than a stale build. Creating a
+worktree in place never has this problem; only moving one does.
 
 Honesty outranks finishing: never report a green you did not run; time-box a blocker, then
 document it and move on rather than weakening a test; if a test passes both before and after the
