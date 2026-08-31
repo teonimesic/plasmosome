@@ -1,10 +1,11 @@
 # plasmid
 
-The command line for plasmid authors. `cargo install plasmid` gets you this.
+The command line for plasmid authors.
 
 A plasmid is a capability module a cell attaches and detaches at runtime. This binary is the tool
-you drive while writing one — today `plasmid new`, which scaffolds a plasmid crate, and later the
-verbs that attach, inspect and detach one against a running kernel.
+you drive while writing one. Today it holds a single verb, `plasmid new`, and that verb is
+reserved — it refuses and exits 2 rather than scaffolding anything. The verbs that attach, inspect
+and detach a plasmid against a running kernel come later.
 
 It is a client, not a library. The contract a plasmid is written against is
 [`plasmid-sdk`](../plasmid-sdk); nothing built against that crate depends on this one, which is
@@ -13,9 +14,10 @@ table.
 
 ## Status
 
-Reserved. `plasmid new` refuses to run and exits 2, because the SDK interface it would generate
-against is deliberately undesigned. The refusal is the feature: a scaffold that guesses the shape
-is worse than one that is honest about not knowing it.
+Reserved, and on no registry yet — the package carries `publish = false`, so the way to get the
+binary is `cargo install --path crates/plasmid` from a checkout. `plasmid new` refuses to run
+because the SDK interface it would generate against is deliberately undesigned. The refusal is the
+feature: a scaffold that guesses the shape is worse than one that is honest about not knowing it.
 
 ```console
 $ plasmid new my-thing

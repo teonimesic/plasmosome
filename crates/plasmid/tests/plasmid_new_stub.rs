@@ -2,7 +2,9 @@ use std::process::Command;
 
 #[test]
 fn plasmid_new_is_a_loud_reservation_not_a_scaffold() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
     let output = Command::new(env!("CARGO_BIN_EXE_plasmid"))
+        .current_dir(scratch.path())
         .args(["new", "my-thing"])
         .output()
         .expect("the plasmid stub runs");
@@ -10,9 +12,13 @@ fn plasmid_new_is_a_loud_reservation_not_a_scaffold() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("plasmid new"), "{stderr}");
     assert!(stderr.contains("not frozen"), "{stderr}");
+    let created: Vec<_> = std::fs::read_dir(scratch.path())
+        .expect("the scratch directory is readable")
+        .map(|entry| entry.expect("a directory entry").file_name())
+        .collect();
     assert!(
-        !std::path::Path::new("my-thing").exists(),
-        "the reserved verb must not scaffold a directory"
+        created.is_empty(),
+        "the reserved verb must scaffold nothing, but created {created:?}"
     );
 }
 
