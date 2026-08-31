@@ -50,7 +50,26 @@ already withdrew.
 
 ## Plan
 
-Written by the planner; blank while the task is `todo`. See `.agents/skills/tasks`.
+Written after the fact, which is the wrong order and is recorded here rather than hidden: the
+planner dispatched this in a message instead of writing it into the file, and
+`.agents/skills/planning-work` says outright that a plan is a file, not a message. The executor
+noticed the placeholder still sat here at `in_review`.
+
+Add three clauses to `crates/plasmosome-testkit/src/conformance.rs`, each
+`pub fn <name><B: EnforcementBackend>(make: impl Fn() -> B)` matching the five already there, and
+call each from both `tests/fake_backend_conformance.rs` and
+`tests/composite_backend_conformance.rs`.
+
+| Clause | Proves |
+| --- | --- |
+| handles are distinct across live grants | a backend reusing one handle cannot pass; the ledger's replay revokes each recorded handle in turn, so a shared handle aborts detach and strands every effect below it |
+| `apply` and `apply_removal` reach the universe | neither method had a clause, so a backend refusing both was conformant while the ledger's compensating path went nowhere |
+| revoking a revoked handle errors, naming the caller's handle | clause 2 only probed a handle no grant issued, which is why the suite could not catch the composite error-path defect in task 008 |
+
+Each clause is written against a scratch backend carrying exactly its defect, watched failing, and
+only then shown green against `FakeBackend` and `CompositeBackend`. A clause that fails against
+either of those is a real bug: stop and report it, never weaken the clause and never fix the
+backend inside this task.
 
 ## Notes
 
