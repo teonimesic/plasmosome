@@ -45,8 +45,10 @@ gh api graphql -f query='{repository(owner:"teonimesic",name:"plasmosome"){
 Read `pageInfo` before believing an empty result: a PR with more threads than one page returns a
 clear-looking queue that is not clear. The query fails loudly instead.
 
-The threads still open are the queue. Work them before opening anything new. Reply in the thread
-and resolve it there — a fix pushed without a reply leaves the merge blocked.
+The threads still open are the queue, and clearing it comes before opening anything new. They
+belong to the agent that wrote the PR: resume it and let it reply, fix and resolve in the thread.
+A fix pushed without a reply leaves the merge blocked, and a thread answered by anyone else costs
+the review the independence it was for.
 
 **3. Pending tasks.** Reconcile `tasks/` against reality: the open PRs from step 1 and the
 `task-*` branches on the remote.
@@ -85,7 +87,8 @@ done
 ```
 
 Both loops derive the ids from the files, so a record numbered anything is covered. Silence means
-nothing is pending. For anything they print, decide out loud: plan it, or say why not.
+nothing is pending. For anything they print, decide out loud: dispatch a planner for it, or say
+why not. The decision is yours; the plan is not.
 
 **5. Clean up.** Remove the worktrees of branches that have merged, and prune. A worktree left
 behind pins its branch and blocks the next person from deleting it. **This runs before the count
@@ -153,5 +156,6 @@ grep -l '^status: todo' tasks/*.md
 Step 3 puts released claims back to `planned`, so this is also how abandoned work returns to
 circulation.
 
-**8. File.** Anything you learned this session that must outlive it becomes a task file before
-the session ends.
+**8. File.** Anything you learned this session that must outlive it becomes a task file before the
+session ends — dispatch a planner to write it. Reconciling `status:` and `evidence:` in step 3 is
+the only writing into `tasks/` you do yourself.
