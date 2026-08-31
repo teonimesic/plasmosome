@@ -42,6 +42,25 @@ enum Defect {
     RemovalNukesTheClass,
     /// Every applied op lands under an owner nobody asked for.
     EveryOpLandsUnderAnImpostor,
+    /// A forced revoke empties the universe instead of removing its own object.
+    ForcedRevokeNukesUniverse,
+    /// A forced revoke withdraws the right object and hands back an entry that
+    /// describes a different one.
+    ForcedRevokeReturnsStranger,
+    /// A forced revoke of a handle no grant ever issued reports success.
+    ForcedRevokeOfUnknownHandleOk,
+    /// A forced revoke withdraws the object and leaves the handle revocable.
+    ForcedRevokeKeepsHandleAlive,
+    /// The ledger is keyed by handle honestly, and the withdrawal takes the last
+    /// object of the revoked capability's class rather than the one that grant
+    /// materialized.
+    RevokeTakesLastOfClass,
+    /// `apply_removal` takes every object of the removal's class for four of the
+    /// five classes and removes exactly the named session file.
+    ClassNukeSparingSessionFiles,
+    /// Freed handle numbers go into a first-in first-out pool that is drawn from
+    /// only once two numbers are waiting in it.
+    HandleRecyclerDepthTwo,
     /// Holds no universe of its own and answers every snapshot from its ledger,
     /// so what it reports is what it was asked to do. No clause can catch this
     /// one, and the test that runs it is what keeps that limit checkable.
@@ -97,10 +116,16 @@ impl DefectiveBackend {
     }
 
     fn mint(&mut self) -> Handle {
-        if self.defect == Defect::ARevokedHandleIsReissued
-            && let Some(reissued) = self.freed.pop()
-        {
-            return Handle(reissued);
+        match self.defect {
+            Defect::ARevokedHandleIsReissued => {
+                if let Some(reissued) = self.freed.pop() {
+                    return Handle(reissued);
+                }
+            }
+            Defect::HandleRecyclerDepthTwo if self.freed.len() >= 2 => {
+                return Handle(self.freed.remove(0));
+            }
+            _ => {}
         }
         self.next_handle += 1;
         Handle(self.next_handle)
@@ -113,7 +138,7 @@ impl DefectiveBackend {
         }
     }
 
-    fn withdraw(&mut self, entry: &LedgerEntry) -> Result<(), BackendError> {
+    fn withdraw(&mut self, entry: &LedgerEntry, policy: RevokePolicy) -> Result<(), BackendError> {
         match self.defect {
             Defect::AMirrorOfItsOwnLedger => Ok(()),
             Defect::RevokeKeepsTheObject => Ok(()),
@@ -121,7 +146,37 @@ impl DefectiveBackend {
                 self.state = OsState::new();
                 Ok(())
             }
+            Defect::ForcedRevokeNukesUniverse if policy == RevokePolicy::Force => {
+                self.state = OsState::new();
+                Ok(())
+            }
+            Defect::ForcedRevokeKeepsHandleAlive if policy == RevokePolicy::Force => {
+                let _ = self.apply_removal(removal_of(&entry.capability));
+                Ok(())
+            }
+            Defect::RevokeTakesLastOfClass => self.take_the_last_of_class(&entry.capability),
             _ => self.apply_removal(removal_of(&entry.capability)),
+        }
+    }
+
+    fn take_the_last_of_class(&mut self, capability: &Capability) -> Result<(), BackendError> {
+        let removal = removal_of(capability);
+        let class = removal.class();
+        let last = self
+            .state
+            .objects()
+            .filter(|held| held.class == class)
+            .map(|held| held.key.clone())
+            .last();
+        match last {
+            Some(key) => {
+                self.state.remove(class, &key);
+                Ok(())
+            }
+            None => Err(BackendError::UnknownObject {
+                class: class.as_str(),
+                key: removal.key(),
+            }),
         }
     }
 }
@@ -154,6 +209,7 @@ impl EnforcementBackend for DefectiveBackend {
     }
 
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError> {
+        let forced = drain.policy == RevokePolicy::Force;
         let key = match self.defect {
             Defect::ALedgerKeyedByClass => match self.class_of_handle.get(&handle.raw()) {
                 Some(class) => *class,
@@ -164,6 +220,7 @@ impl EnforcementBackend for DefectiveBackend {
         let Some(entry) = self.ledger.remove(&key) else {
             return match self.defect {
                 Defect::UnknownHandleReportsSuccess => Ok(a_stranger(handle)),
+                Defect::ForcedRevokeOfUnknownHandleOk if forced => Ok(a_stranger(handle)),
                 Defect::ARevokedHandleRevokesAgain => self
                     .spent
                     .get(&handle.raw())
@@ -172,12 +229,18 @@ impl EnforcementBackend for DefectiveBackend {
                 _ => Err(BackendError::UnknownHandle { handle }),
             };
         };
-        if self.defect != Defect::ForcedRevokeIsALie || drain.policy != RevokePolicy::Force {
-            self.withdraw(&entry)?;
+        if self.defect != Defect::ForcedRevokeIsALie || !forced {
+            self.withdraw(&entry, drain.policy)?;
         }
-        self.freed.push(handle.raw());
-        self.spent.insert(handle.raw(), entry.clone());
-        if self.defect == Defect::RevokeReturnsAStranger {
+        if self.defect == Defect::ForcedRevokeKeepsHandleAlive && forced {
+            self.ledger.insert(key, entry.clone());
+        } else {
+            self.freed.push(handle.raw());
+            self.spent.insert(handle.raw(), entry.clone());
+        }
+        if self.defect == Defect::RevokeReturnsAStranger
+            || (self.defect == Defect::ForcedRevokeReturnsStranger && forced)
+        {
             return Ok(a_stranger(handle));
         }
         Ok(entry)
@@ -224,7 +287,12 @@ impl EnforcementBackend for DefectiveBackend {
                 }),
             };
         }
-        if self.defect == Defect::RemovalNukesTheClass {
+        let nukes_the_class = match self.defect {
+            Defect::RemovalNukesTheClass => true,
+            Defect::ClassNukeSparingSessionFiles => class != UniverseClass::SessionFile,
+            _ => false,
+        };
+        if nukes_the_class {
             let doomed: Vec<String> = self
                 .state
                 .objects()
@@ -425,7 +493,7 @@ fn drained_revoke_removes_object_catches_a_forced_revoke_that_withdraws_nothing(
 }
 
 #[test]
-#[should_panic(expected = "did not revoke through")]
+#[should_panic(expected = "must withdraw the object its own grant materialized")]
 fn live_grants_hold_distinct_handles_catches_a_ledger_keyed_by_class() {
     conformance::live_grants_hold_distinct_handles(carrying(Defect::ALedgerKeyedByClass));
 }
@@ -448,4 +516,52 @@ fn apply_and_removal_reach_the_universe_catches_an_op_applied_under_an_impostor(
     conformance::apply_and_removal_reach_the_universe(carrying(
         Defect::EveryOpLandsUnderAnImpostor,
     ));
+}
+
+#[test]
+#[should_panic(expected = "removed the unrelated")]
+fn planted_residue_survives_unrelated_revoke_catches_a_forced_revoke_that_nukes_the_universe() {
+    conformance::planted_residue_survives_unrelated_revoke(carrying(
+        Defect::ForcedRevokeNukesUniverse,
+    ));
+}
+
+#[test]
+#[should_panic(expected = "revoking a handle must return the entry the grant issued")]
+fn grant_is_replayable_catches_a_forced_revoke_that_returns_a_stranger() {
+    conformance::grant_is_replayable(carrying(Defect::ForcedRevokeReturnsStranger));
+}
+
+#[test]
+#[should_panic(expected = "revoking the never-granted handle")]
+fn revoke_unknown_handle_is_error_catches_a_forced_success_report() {
+    conformance::revoke_unknown_handle_is_error(carrying(Defect::ForcedRevokeOfUnknownHandleOk));
+}
+
+#[test]
+#[should_panic(expected = "revoking the already-revoked handle")]
+fn revoke_of_a_revoked_handle_is_error_catches_a_forced_revoke_that_keeps_the_handle_alive() {
+    conformance::revoke_of_a_revoked_handle_is_error(carrying(
+        Defect::ForcedRevokeKeepsHandleAlive,
+    ));
+}
+
+#[test]
+#[should_panic(expected = "must withdraw the object its own grant materialized")]
+fn live_grants_hold_distinct_handles_catches_a_revoke_that_takes_another_object_of_its_class() {
+    conformance::live_grants_hold_distinct_handles(carrying(Defect::RevokeTakesLastOfClass));
+}
+
+#[test]
+#[should_panic(expected = "also took the unrelated")]
+fn apply_and_removal_reach_the_universe_catches_a_class_nuke_that_spares_session_files() {
+    conformance::apply_and_removal_reach_the_universe(carrying(
+        Defect::ClassNukeSparingSessionFiles,
+    ));
+}
+
+#[test]
+#[should_panic(expected = "revoking the already-revoked handle")]
+fn revoke_of_a_revoked_handle_is_error_catches_a_free_list_that_recycles_at_depth_two() {
+    conformance::revoke_of_a_revoked_handle_is_error(carrying(Defect::HandleRecyclerDepthTwo));
 }

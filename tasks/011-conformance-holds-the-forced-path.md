@@ -1,7 +1,7 @@
 ---
 id: 011
 title: Close the seven backends that still walk through all eight clauses
-status: todo
+status: in_review
 priority: 1
 specs: [003]
 intents: []
@@ -17,7 +17,7 @@ done_when: >-
   tests/clauses_discriminate.rs, the live-grant assertion for a recycled handle is
   reached by a backend that gets past the earlier one, and FakeBackend and
   CompositeBackend still pass every clause.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/12
 evidence:
 ---
 
@@ -58,5 +58,43 @@ backend that errors on the spent handle as it should, and only then hands the re
 live grant.
 
 ## Plan
+
+**Deliverable:** the seven backends named in `## Why` each fail at least one clause, each is in
+`tests/clauses_discriminate.rs`, and the unreached live-grant assertion is reached. Out of scope:
+changing `EnforcementBackend`, changing either shipped backend, adding a ninth clause unless the
+table below says so, and tasks 005 and 006.
+
+**Add every defective backend to the discriminator before touching a clause**, and run it. All
+seven must report `test did not panic as expected`. That is the gap reproduced rather than assumed,
+and it is the order task 010 used.
+
+**Prefer widening an existing clause to writing a new one.** Four of the seven are the same defect
+under a policy nobody checks, so the work is mostly a loop, not new prose.
+
+| Backend | Close it by | The clause must then fail against |
+| --- | --- | --- |
+| `ForcedRevokeNukesUniverse` | run `planted_residue_survives_unrelated_revoke` under both policies | a forced revoke that clears another plugin's objects |
+| `ForcedRevokeReturnsStranger` | run `grant_is_replayable` under both policies | a forced revoke returning an entry the grant never issued |
+| `ForcedRevokeOfUnknownHandleOk` | run `revoke_unknown_handle_is_error` under both policies | a forced revoke reporting success on a handle nobody holds |
+| `ForcedRevokeKeepsHandleAlive` | run `revoke_of_a_revoked_handle_is_error` under both policies | a handle that stays revocable after a forced revoke |
+| `RevokeTakesLastOfClass` | assert between the revokes in `live_grants_hold_distinct_handles`, not only after | a revoke that withdraws an arbitrary object of the right class |
+| `ClassNukeSparingSessionFiles` | plant residue of a class other than `SessionFile` in `apply_and_removal_reach_the_universe`, or plant one per class | an `apply_removal` that spares session files and clears the rest |
+| `HandleRecyclerDepthTwo` | free two handles before the recycling grant in `revoke_of_a_revoked_handle_is_error` | a FIFO free list that reuses only at depth two |
+
+**Reach the unreached assertion.** The live-grant assertion for a recycled handle needs a backend
+that errors on the spent handle correctly, then hands that number to a live grant — otherwise it
+dies at the earlier assertion, which is why `ARevokedHandleIsReissued` never gets there.
+
+**A note on the policy loop.** `drained_revoke_removes_object` already loops over both policies;
+copy that shape rather than inventing another. Where a clause loops, make sure the failure message
+still says which policy failed, or a red test will not say what broke.
+
+**Definition of done:** all seven fail at least one clause with the defect committed to the
+discriminator; the live-grant assertion is reached; `FakeBackend` and `CompositeBackend` still pass
+every clause; the gate in root `AGENTS.md` is green. If either shipped backend fails a widened
+clause, that is a real bug — stop and report, do not weaken the clause and do not fix the backend
+here.
+
+STOP when done. Do not start task 005 or 006.
 
 ## Notes
