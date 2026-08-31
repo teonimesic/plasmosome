@@ -17,6 +17,8 @@
 
 use std::path::PathBuf;
 
+pub mod shared_memory;
+
 /// The absolute path to the root of the workspace this crate is checked into.
 ///
 /// Rules address the files they inspect by their path from that root. The caller must not assume

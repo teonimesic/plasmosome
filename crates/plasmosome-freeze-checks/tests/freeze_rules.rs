@@ -1,5 +1,6 @@
 use std::process::Command;
 
+use plasmosome_freeze_checks::shared_memory::{SharedMemoryUse, shared_memory_uses};
 use plasmosome_freeze_checks::workspace_root;
 
 const CONTROLLER_CRATES: &[&str] = &["plasmosome-core", "plasmosome-backend", "plasmosome-ledger"];
@@ -37,18 +38,6 @@ const FORBIDDEN_DIRECT_DEPENDENCIES: &[&str] = &[
     "ak-dnsd",
     "ak-init",
     "plasmosome-membrane",
-];
-
-const SHARED_MEMORY_PATTERNS: &[&str] = &[
-    "Arc<",
-    "Rc<",
-    "Mutex",
-    "RwLock",
-    "UnsafeCell",
-    "thread_local",
-    "lazy_static",
-    "once_cell",
-    "static mut",
 ];
 
 fn cargo() -> Command {
@@ -209,12 +198,16 @@ fn controller_wire_state_shares_no_memory_across_the_seam() {
     for relative in wire_sources {
         let source = std::fs::read_to_string(workspace_root().join(relative))
             .expect("the wire module is readable");
-        for pattern in SHARED_MEMORY_PATTERNS {
-            assert!(
-                !source.contains(pattern),
-                "86 §4 rule 2 broken: `{relative}` uses `{pattern}`; controller⇄supervisor state moves only as serde types, never as shared memory"
-            );
-        }
+        let uses = shared_memory_uses(&source)
+            .unwrap_or_else(|error| panic!("`{relative}` does not parse as Rust: {error}"));
+        assert!(
+            uses.is_empty(),
+            "86 §4 rule 2 broken: `{relative}` uses {}; controller⇄supervisor state moves only as serde types, never as shared memory",
+            uses.iter()
+                .map(SharedMemoryUse::to_string)
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
     }
 }
 
