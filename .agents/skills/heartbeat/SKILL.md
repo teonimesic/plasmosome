@@ -13,8 +13,9 @@ routine replaces the session to-do list entirely. A list held in a chat window d
 the session does, and the next agent starts from nothing.
 
 The order is not arbitrary: finish what is already in flight before starting anything new. Steps
-1 and 2 close out work that is one reply away from merging; step 3 makes the queue trustworthy
-again; step 4 finds work that was described and then quietly dropped; only then do you pick.
+1 and 2 find the work that is one reply away from merging and get it moving again; step 3 makes
+the queue trustworthy; step 4 finds work that was described and then quietly dropped; step 5 clears
+the worktrees that only look busy so step 6 can count what is really running; only then do you pick.
 The formats and the layers those files use are in `.agents/skills/tasks`.
 
 
@@ -44,8 +45,10 @@ gh api graphql -f query='{repository(owner:"teonimesic",name:"plasmosome"){
 Read `pageInfo` before believing an empty result: a PR with more threads than one page returns a
 clear-looking queue that is not clear. The query fails loudly instead.
 
-The threads still open are the queue. Work them before opening anything new. Reply in the thread
-and resolve it there — a fix pushed without a reply leaves the merge blocked.
+The threads still open are the queue, and clearing it comes before opening anything new. They
+belong to the agent that wrote the PR: resume it and let it reply, fix and resolve in the thread.
+A fix pushed without a reply leaves the merge blocked, and a thread answered by anyone else costs
+the review the independence it was for.
 
 **3. Pending tasks.** Reconcile `tasks/` against reality: the open PRs from step 1 and the
 `task-*` branches on the remote.
@@ -84,11 +87,95 @@ done
 ```
 
 Both loops derive the ids from the files, so a record numbered anything is covered. Silence means
-nothing is pending. For anything they print, decide out loud: plan it, or say why not.
+nothing is pending. For anything they print, decide out loud: dispatch a planner for it, or say
+why not. The decision is yours; the plan is not.
 
-**5. Pick.** Look at `planned` before `todo`: a `planned` task already has a plan someone wrote,
+**5. Clean up.** Remove the worktrees of branches that have merged, and prune. A worktree left
+behind pins its branch and blocks the next person from deleting it. **This runs before the count
+and not at the end of the session**, because a skipped cleanup and a working agent look identical
+from the directory — reorder the two and the next step counts finished work as live and dispatches
+too little.
+
+The directory cannot tell you which is which; GitHub can. A worktree whose branch has an open PR is
+live work even when nobody is typing in it, and one whose branch merged is not.
+
+```shell
+git worktree list --porcelain |
+  awk '/^worktree /{p=$2}
+       /^branch /{sub("refs/heads/","",$2); if (p ~ /\/\.worktrees\//) print p"\t"$2}
+       /^detached$/{if (p ~ /\/\.worktrees\//) print p"\tDETACHED"}' |
+  while IFS="$(printf '\t')" read -r dir branch; do
+    state=$(gh pr list --head "$branch" --state all --limit 100 --json state \
+      --jq 'if any(.[]; .state=="OPEN") then "OPEN"
+            elif length==0 then "NONE"
+            elif any(.[]; .state=="MERGED") then "MERGED"
+            else "CLOSED" end') || state=UNREACHABLE
+    printf '%s\t%s\t%s\n' "$dir" "$branch" "${state:-UNREACHABLE}"
+  done
+```
+
+Remove `MERGED` and nothing else:
+
+```shell
+git worktree remove <path> && git worktree prune
+```
+
+**Remove by path, never by branch.** Worktree directories are named by whoever created them and
+rarely match the branch — `.worktrees/task-016` holds `task-016-work`, and a `docs/x` branch would
+need a nested directory that does not exist. That is why the listing prints the path first.
+
+The other states are not cleanup, and three of them are traps:
+
+- `OPEN` is live and stays, whether or not anyone is typing in it.
+- `CLOSED` is abandoned, not finished. Step 3 puts that work back on the queue, and the branch may
+  be being reworked right now — leave it and ask whoever owns it.
+- `NONE` means nothing was ever pushed. It is an agent mid-first-change, or litter from one that
+  died; only you can tell which, and a wrong guess either deletes live work or inflates the count.
+- `DETACHED` and `UNREACHABLE` are answers you did not get. GitHub being unreachable is not the
+  same as a branch having no PR — stop rather than treating silence as `NONE`.
+
+**6. Agents running.** Dispatching is the one thing only the orchestrator does, so it is the
+constraint on how much work is ever in flight. **Three running in parallel is the standing goal.**
+
+**The live rows from step 5 are the count** — the `OPEN` ones, plus any `NONE` or `CLOSED` row you
+know an agent is actually in. Step 5 keeps those two precisely because someone may still be working
+there, so leaving them out here would dispatch a fourth agent on top of them. Do not re-list the
+worktrees, and do not count task files instead.
+
+**A row you could not classify stops the count.** `DETACHED` and `UNREACHABLE` mean you do not know
+what is running there, and a count you know is incomplete is not a count — a GitHub blip reads as
+spare capacity and puts another agent on top of work you cannot see. Settle those rows first: ask
+GitHub again, or look at who is in the directory. Dispatch nothing until every row has a state.
+
+```shell
+grep -lE '^status: (in_progress|in_review)' tasks/*.md
+```
+
+That is a cross-check, not the count, and it is loose in both directions. A task claiming either
+status with no live row behind it is a stale claim — go back to step 3 and reconcile it now,
+rather than leaving it for a later session. A live row with no task file behind it is ordinary:
+not every branch has one.
+
+However many short of three you are is how many tasks you dispatch, and step 7 picks that many
+rather than one.
+
+**Pick tasks that will not write the same files.** Two agents editing one file produce two PRs that
+fight, and whichever merges second pays for it. `refs:` is the first thing to compare, but it lists
+what an executor must *read*, so it neither proves a collision nor rules one out — read the
+`## Plan` for what the work will actually change.
+
+If the queue does not hold three that clear that bar, dispatch what it does hold and say so in the
+report. Do not manufacture overlapping work to reach the number, and name which constraint bound:
+an empty queue and a queue where everything collides with something running need different fixes.
+
+**The failure this prevents, concretely.** One agent running while the queue held unblocked tasks
+touching different files — capacity sitting idle with nothing technical in the way. You can tell
+whether this step is working by whether a heartbeat ever ends with one agent live and two
+dispatchable tasks left untaken.
+
+**7. Pick.** Look at `planned` before `todo`: a `planned` task already has a plan someone wrote,
 so it is ready to hand to an executor, while a `todo` still needs planning. Within each, take the
-lowest `priority:` number, not the newest one.
+lowest `priority:` number, not the newest one — as many as step 6 said you were short.
 
 ```shell
 grep -l '^status: planned' tasks/*.md
@@ -98,13 +185,7 @@ grep -l '^status: todo' tasks/*.md
 Step 3 puts released claims back to `planned`, so this is also how abandoned work returns to
 circulation.
 
-**6. File.** Anything you learned this session that must outlive it becomes a task file before
-the session ends.
-
-**7. Clean up.** Remove the worktrees of branches that have merged, and prune. A worktree left
-behind pins its branch and blocks the next person from deleting it.
-
-```shell
-git worktree list
-git worktree remove .worktrees/<branch> && git worktree prune
-```
+**8. File.** Anything you learned this session that must outlive it becomes a task file before the
+session ends — dispatch a planner to write it. The only writing into `tasks/` you do yourself is
+step 3's reconciliation, and only for a claim whose author is gone: an author still open closes its
+own task, as `.agents/skills/pr-review` has it.
