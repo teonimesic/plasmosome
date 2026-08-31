@@ -12,15 +12,18 @@ approved intent may spin up many specs, each of which spawns tasks, so it is the
 decision multiplies into a lot of work. An agent may record an approval it is carrying — relayed
 by another agent or heard directly — and may never originate one.
 
-The question this settles is what enforces that. Nothing in the repository reads these fields:
-`.githooks/` and `.github/workflows/` do not, and the searches added alongside the field report
-what is *missing* rather than what is *wrong*. An independent reviewer put it precisely: an intent
-born `status: approved` is invisible to every one of them.
+The question this settles is what enforces that. No hook and no workflow reads these fields:
+`.githooks/` and `.github/workflows/` do not, so nothing refuses a push or fails a build over
+them. One check does read them — the cross-layer loop in `.agents/skills/heartbeat` step 4 — and it
+catches an accepted spec whose intent is unapproved or absent. It cannot catch the case that
+matters here. An independent reviewer put that precisely: an intent born `status: approved` is
+invisible to every check in the tree, because a relayed approval and a fabricated one are the same
+line of text.
 
-Two facts bound every mechanical answer. **Agents act as the owner's GitHub identity** — 42 of the
-43 human-authored pull requests here are one account, and the reviews on them are posted under it —
-so a relayed approval and a fabricated one are written by the same actor, in the same voice, and no
-record distinguishes them. And **the thing being protected is a sentence in a document**, not a
+Two facts bound every mechanical answer. **Agents act as the owner's GitHub identity** — every
+human-authored pull request in this repository is one account, and the reviews on them are posted
+under it — so a relayed approval and a fabricated one are written by the same actor, in the same
+voice, and no record distinguishes them. And **the thing being protected is a sentence in a document**, not a
 capability the operating system can withdraw; there is no seam where a check could sit that the
 agent writing the sentence does not also control.
 

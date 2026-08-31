@@ -124,12 +124,12 @@ that can catch the gate being broken rather than unmet:
 
 ```shell
 for f in $(grep -l '^status: accepted$' docs/specs/*.md); do
-  ids=$(sed -n 's/^intents: \[\(.*\)\]/\1/p' "$f" | tr -d ' ' | tr ',' ' ')
+  ids=$(sed -n 's/^intents: \[\(.*\)\]/\1/p' "$f" | tr -d ' ' | tr ',' '\n' | grep -v '^$')
   if [ -z "$ids" ]; then
     [ "$f" = "docs/specs/001-control-protocol.md" ] || echo "$f: accepted, names no intent"
     continue
   fi
-  for i in $ids; do
+  echo "$ids" | while read -r i; do
     n=$(grep -l "^id: $i\$" docs/intents/*.md 2>/dev/null | head -1)
     [ -n "$n" ] || { echo "$f: names intent $i, which does not exist"; continue; }
     grep -q '^status: approved$' "$n" || echo "$f: names intent $i, which is not approved"

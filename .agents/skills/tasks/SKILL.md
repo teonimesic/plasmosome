@@ -108,11 +108,10 @@ the price of not idling, not a failure by whoever wrote it, and it is why a spec
 **The second gate binds a spec being accepted, not one already accepted.** A spec that is already
 `accepted` stays usable, and a task naming it may be planned, whether or not anything above it is
 filled in. Otherwise this rule would strand finished work behind a document only the owner can
-approve — including the highest-priority task in the queue, whose two specs both carry
-`intents: []`. Backfilling those is worth doing: anyone may draft the intent that would close the
-gap, and only the owner can approve it. Nothing waits on either. What the gate stops is a *new*
-spec being committed to on the strength of an intent the owner has not read, which is the direction
-the drift actually runs.
+approve. Backfilling an empty `intents:` is worth doing: anyone may draft the intent that would
+close the gap, and only the owner can approve it. Nothing waits on either. What the gate stops is a
+*new* spec being committed to on the strength of an intent the owner has not read, which is the
+direction the drift actually runs.
 
 A task's `intents:` is copied from the spec it names, `[]` included. It is there so a search over
 tasks and a search over specs return the same answer, not as a second gate to clear.
