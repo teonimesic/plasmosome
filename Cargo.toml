@@ -5,6 +5,7 @@ members = [
     "crates/plasmosome-ledger",
     "crates/plasmosome-core",
     "crates/plasmosome-membrane",
+    "crates/plasmid",
     "crates/plasmid-sdk",
     "crates/plasmosome-freeze-checks",
     "crates/plasmosome-testkit",

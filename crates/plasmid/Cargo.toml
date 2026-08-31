@@ -1,11 +1,7 @@
 [package]
-name = "plasmid-sdk"
+name = "plasmid"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-
-[lib]
-name = "plasmid_sdk"
-path = "src/lib.rs"

@@ -186,8 +186,9 @@ fn testkit_is_dev_only() {
     }
 }
 
-#[test]
-fn no_workspace_crate_is_publishable_to_a_registry() {
+const STABILITY_BOUNDARY: &str = "plasmid-sdk";
+
+fn workspace_packages() -> Vec<serde_json::Value> {
     let output = cargo()
         .args(["metadata", "--locked", "--no-deps", "--format-version", "1"])
         .output()
@@ -199,16 +200,43 @@ fn no_workspace_crate_is_publishable_to_a_registry() {
     );
     let metadata: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("cargo metadata emits JSON");
-    let packages = metadata["packages"]
+    metadata["packages"]
         .as_array()
-        .expect("cargo metadata reports the workspace packages");
+        .expect("cargo metadata reports the workspace packages")
+        .clone()
+}
 
+fn binary_targets(package: &serde_json::Value) -> Vec<String> {
+    package["targets"]
+        .as_array()
+        .expect("a package reports its targets")
+        .iter()
+        .filter(|target| {
+            target["kind"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+        })
+        .map(|target| {
+            target["name"]
+                .as_str()
+                .expect("a target has a name")
+                .to_string()
+        })
+        .collect()
+}
+
+fn package_name(package: &serde_json::Value) -> String {
+    package["name"]
+        .as_str()
+        .expect("a package has a name")
+        .to_string()
+}
+
+#[test]
+fn no_workspace_crate_is_publishable_to_a_registry() {
     let mut reported = Vec::new();
-    for package in packages {
-        let name = package["name"]
-            .as_str()
-            .expect("a package has a name")
-            .to_string();
+    for package in workspace_packages() {
+        let name = package_name(&package);
         let registries = package["publish"].as_array().unwrap_or_else(|| {
             panic!(
                 "`{name}` leaves `publish` unset, so `cargo publish` would claim the name on crates.io permanently and irreversibly; nothing here is released yet, so its manifest must say `publish = false`"
@@ -326,4 +354,34 @@ fn every_seam_wire_type_is_serde_in_both_directions() {
     wire_serde::<ControllerInfo>();
     wire_serde::<CellStatusEntry>();
     wire_serde::<StatusParams>();
+}
+
+#[test]
+fn no_binary_target_takes_a_name_another_package_owns() {
+    let packages = workspace_packages();
+    let names: Vec<String> = packages.iter().map(package_name).collect();
+
+    for package in &packages {
+        let owner = package_name(package);
+        for binary in binary_targets(package) {
+            assert!(
+                binary == owner || !names.contains(&binary),
+                "`{owner}` ships a binary called `{binary}`, and `{binary}` is also a package in this workspace; two packages offering the same binary name collide in `target/` on every workspace build and make `cargo install` fail outright for anyone who installs both, which is a permanent problem once either name is claimed on a registry"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_stability_boundary_ships_no_executable() {
+    let package = workspace_packages()
+        .into_iter()
+        .find(|package| package_name(package) == STABILITY_BOUNDARY)
+        .unwrap_or_else(|| panic!("`{STABILITY_BOUNDARY}` is a member of this workspace"));
+
+    assert_eq!(
+        binary_targets(&package),
+        Vec::<String>::new(),
+        "`{STABILITY_BOUNDARY}` is what plasmid authors depend on, and a package has one `[dependencies]` table shared by its library and its binaries; a binary here makes everything that binary needs a dependency of every plasmid crate built against the library"
+    );
 }

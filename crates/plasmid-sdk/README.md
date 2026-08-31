@@ -11,6 +11,10 @@ it mid-run without the plasmid's cooperation.
 This crate is the stability boundary: build against it, and your plasmid works with any kernel
 that supports the same major version. The kernel never needs to know your plasmid exists.
 
+Only the contract ships here. A package has one dependency table, shared by its library and
+any binary beside it, so this crate's table is exactly what your plasmid inherits — which is why
+the `plasmid` command line is a [crate of its own](../plasmid) rather than a binary target here.
+
 ## Status
 
 Reserved and deliberately unimplemented. The interface is being designed rather than accreted —
