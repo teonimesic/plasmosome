@@ -27,11 +27,11 @@ dispatches,
 watches for work that has stalled, and puts in front of a person anything needing a decision or an
 action only a person can take.
 
-**Spawning the independent reviewer is the orchestrator's job when the author cannot do it.** An
-agent dispatched to author a PR usually has no Agent tool, so it cannot spawn its own reviewer
-and has to ask — one did, and stopped mid-PR to wait. The orchestrator is also the one that
-passes the model: a top-tier one, and different from the author's where that is the only
-independence on offer. `.agents/skills/pr-review` says which, why, and where the output goes.
+**The author spawns the independent reviewer where it can; the orchestrator is the fallback.**
+Whether a dispatched agent has the Agent tool varies by how it was dispatched — one author had
+none, stopped mid-PR and asked, which was the right move rather than a failure. Either way the
+model is the same: a top-tier one, different from the author's where that is the only independence
+on offer. `.agents/skills/pr-review` says which, why, and where the output goes.
 
 **Review findings go back to the agent that wrote the change.** That agent still holds the
 context — why the code is shaped the way it is, what it already tried and dropped. Resume it

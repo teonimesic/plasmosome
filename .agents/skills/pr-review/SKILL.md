@@ -38,8 +38,10 @@ description: How a change reaches main — PR-only workflow, review rounds by di
      spawning Fable satisfies the words while reading nothing new. A same-model review still
      finds real defects; it just cannot be counted as this pass.
 
-     **If you cannot spawn one, stop and ask the orchestrator.** An agent dispatched to author a
-     PR usually has no Agent tool. Do not skip the step, and do not review your own PR yourself.
+     **If you can spawn the reviewer, do; if you cannot, ask the orchestrator.** Whether a
+     dispatched agent has the Agent tool varies by how it was dispatched, so check what you have
+     rather than assuming either way. Neither answer is an excuse to skip the step or to review
+     your own PR on your own model.
 
      **The output goes on the PR as an issue comment**, not only into chat, opening with
      `Model: <name>` and saying what was examined, what was found, what the author changed, and
