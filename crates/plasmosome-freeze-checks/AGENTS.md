@@ -58,12 +58,12 @@ publishing, where a reader would not look for one. Comparing counts keeps the co
 and asserts nothing about layout. If the directory-naming convention is ever worth enforcing, it
 earns its own named rule and a stated intent, not a silent clause in this one.
 
-The publish allowlist is the one place that rule compares names, and both sides of that comparison
-come from `cargo metadata`: `HELD_NAMES` is checked against the package names metadata reported,
-never against the member paths, so it still asserts nothing about layout. The check is there
-because the count agrees with itself whether or not the list is honest — an entry naming a crate
-that was renamed or deleted is invisible to everything else the rule does, and it would hand its
-publish exemption to whatever takes that name next.
+The publish allowlist is the one place that rule compares names: the source-controlled `HELD_NAMES`
+in `tests/freeze_rules.rs` is checked against the package names `cargo metadata` reports, never
+against the member paths, so it still asserts nothing about layout. The check is there because the
+count agrees with itself whether or not the list is honest — an entry naming a crate that was
+renamed or deleted is invisible to everything else the rule does, and it would hand its publish
+exemption to whatever takes that name next.
 
 ## Testing
 
