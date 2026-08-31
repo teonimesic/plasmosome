@@ -1,7 +1,7 @@
 ---
 id: 002
 title: Make the skills discoverable to Claude Code
-status: planned
+status: in_progress
 priority: 3
 specs: []
 intents: []
