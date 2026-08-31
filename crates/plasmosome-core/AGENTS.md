@@ -18,8 +18,6 @@ gatekeeper, session log. It decides capability grants. It does not enforce them.
 
 ## Conventions
 
-- No inline `//` comments. `///` contract docs on public items only: what a caller must pass,
-  what it gets back, what it must not do.
 - Manifest grammar is frozen. Adding a field is a compatibility decision, not a refactor.
 
 ## Testing

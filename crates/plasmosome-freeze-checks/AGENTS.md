@@ -13,10 +13,6 @@ Architectural invariants as tests. It contains no product code; it inspects the 
   the violation it claims to catch, then revert the violation.
 - **Rules describe boundaries, not style.** Formatting belongs to fmt and clippy.
 
-## Conventions
-
-- No inline `//` comments. `///` contract docs on public items only.
-
 ## Testing
 
 `cargo test -p plasmosome-freeze-checks`.

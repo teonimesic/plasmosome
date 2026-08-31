@@ -1,6 +1,13 @@
-# Plasmosome control protocol — freeze draft (P1)
+---
+id: 001
+title: Control protocol
+status: accepted
+intents: []
+---
 
-**Status:** DRAFT for the P1 contract freeze (91 plan step 1). Everything binding below is
+# Plasmosome control protocol — the P1 freeze
+
+**Scope:** the P1 contract freeze (91 plan step 1). Everything binding below is
 traceable to a decided item: D1/D1a/D1b/D1c/D2/D2b/D3/D4 in `91-p1-plan.md`, the frozen
 credential grammar in `80-adr-credential-delivery.md` (D2 as confirmed by E4b, `[commands]` as
 frozen by E13/E13b), the six must-not-bake-in rules in `86-kernel-process-topology.md` §4, and

@@ -22,10 +22,15 @@ every grant records how to undo it.
 | --- | --- |
 | `.agents/skills/planning-work` | Starting a piece of work, or briefing another agent |
 | `.agents/skills/pr-review` | Opening a PR, addressing review feedback, or merging |
+| `.agents/skills/tasks` | Finding, filing, or closing work — the layers, formats and links |
+| `.agents/skills/heartbeat` | The start-of-session routine: reconcile, then pick what to do next |
 
-Short version: work moves in small, finishable pieces; the strongest model plans and the next one executes;
-`main` is protected and every change arrives by pull request; two reviewers look at each PR and
-one of them verifies claims by breaking things rather than reading.
+Read the one that covers what you are about to do. The rules live there, not here — this table
+is an index, and a second copy of a rule is a copy that will disagree.
+
+**What earns a place in a skill:** a rule that changes what the next agent does, and will again.
+Not a one-off — a migration you just ran, a path that moved, a bug you just fixed. Those belong
+in the PR and the git log. If it cannot happen twice, it is not a skill.
 
 ## Style
 
