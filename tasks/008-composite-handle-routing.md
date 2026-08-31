@@ -1,7 +1,7 @@
 ---
 id: 008
 title: Route a composite handle back to the leaf that issued it
-status: todo
+status: in_review
 priority: 1
 specs: []
 intents: []
@@ -44,6 +44,21 @@ and three of the five clauses failed on the spot. They are `#[ignore]`d there, n
 so they become the regression test for the fix rather than a red build.
 
 ## Plan
+
+Delete the three `#[ignore]` attributes first and watch the clauses fail, then make `routes` map a
+composite handle to the leaf **and the handle that leaf issued**, and forward the leaf's handle on
+revoke while reporting the composite's handle back to the caller.
+
+## Notes
+
+**2026-08-31.** The first regression test written for this was vacuous and nearly shipped. It
+granted twice to the same leaf, so the composite counter and the leaf counter stayed in lockstep
+and forwarding the wrong handle worked by coincidence — it passed against the unfixed code. The
+bug only appears once a grant to a *different* leaf has advanced the composite counter past that
+leaf's own. The test now grants to the filesystem leaf first. Verified failing against the
+unfixed revoke and passing against the fix.
+
+That is also why the original unit tests missed this: each granted once per leaf.
 
 Written by the planner; blank while the task is `todo`. See `.agents/skills/tasks`.
 

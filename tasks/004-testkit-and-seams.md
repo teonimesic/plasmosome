@@ -1,7 +1,7 @@
 ---
 id: 004
 title: Build the testkit crate, the conformance suite, and the seam rules
-status: in_review
+status: done
 priority: 1
 specs: [003]
 intents: [002]
@@ -31,7 +31,7 @@ done_when: >-
   layer table and seam rule, and the crate's ci.yml matrix entry if that matrix
   already exists — with the gate green.
 pr: 8
-evidence:
+evidence: squash commit 4e25a67 on main; plasmosome-testkit ships with 5 conformance clauses, the integration test and the freeze rule
 ---
 
 ## Why

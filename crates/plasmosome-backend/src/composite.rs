@@ -12,11 +12,17 @@ pub enum Leaf {
     Broker,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Route {
+    leaf: Leaf,
+    leaf_handle: Handle,
+}
+
 pub struct CompositeBackend {
     network: Box<dyn EnforcementBackend>,
     filesystem: Box<dyn EnforcementBackend>,
     broker: Box<dyn EnforcementBackend>,
-    routes: BTreeMap<u64, Leaf>,
+    routes: BTreeMap<u64, Route>,
     next_handle: u64,
 }
 
@@ -51,9 +57,10 @@ impl CompositeBackend {
         }
     }
 
-    fn mint_handle(&mut self, leaf: Leaf) -> Handle {
+    fn mint_handle(&mut self, leaf: Leaf, leaf_handle: Handle) -> Handle {
         self.next_handle += 1;
-        self.routes.insert(self.next_handle, leaf);
+        self.routes
+            .insert(self.next_handle, Route { leaf, leaf_handle });
         Handle(self.next_handle)
     }
 
@@ -74,17 +81,20 @@ impl EnforcementBackend for CompositeBackend {
             Capability::Broker { .. } => Leaf::Broker,
         };
         let mut entry = self.leaf_named(leaf).grant(grant);
-        entry.handle = self.mint_handle(leaf);
+        entry.handle = self.mint_handle(leaf, entry.handle);
         entry
     }
 
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError> {
-        let leaf = self
+        let route = self
             .routes
             .get(&handle.raw())
             .copied()
             .ok_or(BackendError::UnknownHandle { handle })?;
-        let entry = self.leaf_named(leaf).revoke(handle, drain)?;
+        let mut entry = self
+            .leaf_named(route.leaf)
+            .revoke(route.leaf_handle, drain)?;
+        entry.handle = handle;
         self.routes.remove(&handle.raw());
         Ok(entry)
     }
@@ -153,6 +163,40 @@ mod tests {
 
     fn fake() -> Box<dyn EnforcementBackend> {
         Box::new(FakeBackend::new())
+    }
+
+    #[test]
+    fn a_grant_revokes_after_another_leaf_advanced_the_composite_counter() {
+        let mut composite = CompositeBackend::new(fake(), fake(), fake());
+        composite.grant(Grant {
+            plugin: PluginId::from("github-pr"),
+            capability: Capability::SessionFile {
+                path: "skills/pr.md".to_string(),
+            },
+            kind: GrantKind::Hot,
+        });
+        let network = composite.grant(Grant {
+            plugin: PluginId::from("github-pr"),
+            capability: Capability::ProxyMap {
+                host: "api.github.com".to_string(),
+                route: "splice".to_string(),
+            },
+            kind: GrantKind::Hot,
+        });
+
+        let entry = composite
+            .revoke(
+                network.handle,
+                DrainSpec::graceful(std::time::Duration::from_millis(1)),
+            )
+            .expect("a grant must revoke even when an earlier grant went to another leaf");
+
+        assert_eq!(
+            entry.handle, network.handle,
+            "a revoke reports the handle its caller holds, not the leaf's own"
+        );
+        assert_eq!(composite.leaf_snapshot(Leaf::Network).len(), 0);
+        assert_eq!(composite.leaf_snapshot(Leaf::Filesystem).len(), 1);
     }
 
     #[test]
