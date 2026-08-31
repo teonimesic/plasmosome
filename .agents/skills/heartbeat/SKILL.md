@@ -103,8 +103,9 @@ live work even when nobody is typing in it, and one whose branch merged is not.
 git worktree list --porcelain |
   awk '/^worktree /{p=$2}
        /^branch /{sub("refs/heads/","",$2); if (p ~ /\/\.worktrees\//) print p"\t"$2}
-       /^detached$/{if (p ~ /\/\.worktrees\//) print p"\tDETACHED"}' |
-  while IFS="$(printf '\t')" read -r dir branch; do
+       /^detached$/{if (p ~ /\/\.worktrees\//) print p"\t-\tDETACHED"}' |
+  while IFS="$(printf '\t')" read -r dir branch known; do
+    [ -n "$known" ] && { printf '%s\t%s\t%s\n' "$dir" "$branch" "$known"; continue; }
     state=$(gh pr list --head "$branch" --state all --limit 100 --json state \
       --jq 'if any(.[]; .state=="OPEN") then "OPEN"
             elif length==0 then "NONE"
@@ -114,7 +115,7 @@ git worktree list --porcelain |
   done
 ```
 
-Remove `MERGED` and nothing else:
+Remove the `MERGED` rows, and the ones you have argued into `DROP` below:
 
 ```shell
 git worktree remove <path> && git worktree prune
@@ -124,36 +125,52 @@ git worktree remove <path> && git worktree prune
 rarely match the branch — `.worktrees/task-016` holds `task-016-work`, and a `docs/x` branch would
 need a nested directory that does not exist. That is why the listing prints the path first.
 
-The other states are not cleanup, and three of them are traps:
+**Finish by sorting every row into one of four buckets, and write the result down** — in your
+report, or a scratch file. Step 6 reads the buckets and never the states, and a classification held
+only in your head does not survive the gap between the two steps.
 
-- `OPEN` is live and stays, whether or not anyone is typing in it.
-- `CLOSED` is abandoned, not finished. Step 3 puts that work back on the queue, and the branch may
-  be being reworked right now — leave it and ask whoever owns it.
-- `NONE` means nothing was ever pushed. It is an agent mid-first-change, or litter from one that
-  died; only you can tell which, and a wrong guess either deletes live work or inflates the count.
-- `DETACHED` and `UNREACHABLE` are answers you did not get. GitHub being unreachable is not the
-  same as a branch having no PR — stop rather than treating silence as `NONE`.
+**Everything starts in `SETTLE` and has to be argued out of it.** A state added to this pipeline
+tomorrow therefore blocks the count rather than being silently skipped, which is the safe
+direction.
+
+- **`REMOVE`** — a row whose PR is `MERGED`. The cleanup above is this bucket.
+- **`LIVE`** — a row an agent is actually working in. An `OPEN` PR is the usual sign, but it is
+  not proof: a PR with unanswered threads and nobody on it is the stalled work step 2 sends back
+  to its author, not a slot in use. It becomes `LIVE` when you have resumed that author. A
+  `CLOSED` or `NONE` row counts the same way, on the same evidence.
+- **`DROP`** — a row you have established nobody is in and nothing is coming back to: litter from
+  a dead agent, or a `CLOSED` PR nobody is reworking. Remove it the same way, but only on that
+  evidence — `MERGED` needs no argument, this does.
+- **`SETTLE`** — everything you have not established either way, and the only bucket you may not
+  leave rows in. `CLOSED` is abandoned, not finished: step 3 puts that work back on the queue and
+  the branch may be being reworked right now. `NONE` means nothing was ever pushed — an agent
+  mid-first-change, or litter. `DETACHED` and `UNREACHABLE` are answers you did not get, and
+  GitHub being unreachable is not the same as a branch having no PR. Ask whoever owns it, or look
+  at who is in the directory.
+
+**Never let the next step work out liveness from the states itself.** That is the seam three
+review findings in a row landed on: `CLOSED`, then `NONE`, then `DETACHED` and `UNREACHABLE` were
+each preserved here as possibly-live and then left out of the count, which would have dispatched an
+agent on top of work nobody could see. You can tell this is still happening if a heartbeat ever
+dispatches while a row sits in `SETTLE`.
 
 **6. Agents running.** Dispatching is the one thing only the orchestrator does, so it is the
 constraint on how much work is ever in flight. **Three running in parallel is the standing goal.**
 
-**The live rows from step 5 are the count** — the `OPEN` ones, plus any `NONE` or `CLOSED` row you
-know an agent is actually in. Step 5 keeps those two precisely because someone may still be working
-there, so leaving them out here would dispatch a fourth agent on top of them. Do not re-list the
-worktrees, and do not count task files instead.
+**Count step 5's `LIVE` bucket.** Nothing else: do not re-list the worktrees, do not count task
+files, and do not re-derive liveness from the states — step 5 already decided that, and deciding it
+twice is what has gone wrong before.
 
-**A row you could not classify stops the count.** `DETACHED` and `UNREACHABLE` mean you do not know
-what is running there, and a count you know is incomplete is not a count — a GitHub blip reads as
-spare capacity and puts another agent on top of work you cannot see. Settle those rows first: ask
-GitHub again, or look at who is in the directory. Dispatch nothing until every row has a state.
+**A row still in `SETTLE` means you do not have a count.** An incomplete count reads as spare
+capacity and puts another agent on top of work you cannot see. Empty that bucket first.
 
 ```shell
 grep -lE '^status: (in_progress|in_review)' tasks/*.md
 ```
 
 That is a cross-check, not the count, and it is loose in both directions. A task claiming either
-status with no live row behind it is a stale claim — go back to step 3 and reconcile it now,
-rather than leaving it for a later session. A live row with no task file behind it is ordinary:
+status with no `LIVE` row behind it is a stale claim — go back to step 3 and reconcile it now,
+rather than leaving it for a later session. A `LIVE` row with no task file behind it is ordinary:
 not every branch has one.
 
 However many short of three you are is how many tasks you dispatch, and step 7 picks that many
