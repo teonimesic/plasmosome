@@ -1,7 +1,7 @@
 ---
 id: 014
 title: The controller answers its control socket
-status: planned
+status: in_progress
 priority: 1
 specs: [001]
 intents: []
