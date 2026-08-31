@@ -46,4 +46,6 @@ jobs:
         run: ./.githooks/provenance-guard
 
       - name: attribution guard
-        run: ./.githooks/attribution-guard "origin/${{ github.base_ref || 'main' }}..HEAD"
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: ./.githooks/attribution-guard "origin/${BASE_REF}..HEAD"
