@@ -108,7 +108,7 @@ Planted: `/// This type holds no Mutex and no lock.` above `pub struct InstanceN
 
 Before — `cargo test -p plasmosome-freeze-checks --test freeze_rules controller_wire_state`:
 
-```
+```text
 test controller_wire_state_shares_no_memory_across_the_seam ... FAILED
 
 86 §4 rule 2 broken: `crates/plasmosome-core/src/state.rs` uses `Mutex`; controller⇄supervisor state moves only as serde types, never as shared memory
@@ -116,7 +116,7 @@ test controller_wire_state_shares_no_memory_across_the_seam ... FAILED
 
 After, same plant:
 
-```
+```text
 test controller_wire_state_shares_no_memory_across_the_seam ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out
 ```
@@ -135,14 +135,14 @@ pub struct PlantedSharing {
 
 Before:
 
-```
+```text
 test controller_wire_state_shares_no_memory_across_the_seam ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out
 ```
 
 After:
 
-```
+```text
 86 §4 rule 2 broken: `crates/plasmosome-core/src/state.rs` uses `Cell`, `RefCell`, `AtomicUsize`, `RefCell` in `PlantedSharing`, `Cell` in `PlantedSharing`, `AtomicUsize` in `PlantedSharing`; controller⇄supervisor state moves only as serde types, never as shared memory
 ```
 
@@ -152,7 +152,7 @@ Planted: `use std::sync::RwLock as Registry;` and a `Registry<u32>` field. The o
 this one by accident — the word `RwLock` is still on the import line — so it is not evidence of a
 miss, but the new message says what was actually found:
 
-```
+```text
 86 §4 rule 2 broken: `crates/plasmosome-core/src/state.rs` uses `Registry`, a local alias for `RwLock`, `Registry`, a local alias for `RwLock` in `PlantedSharing`; controller⇄supervisor state moves only as serde types, never as shared memory
 ```
 
@@ -162,7 +162,7 @@ Planted: a sibling module `crates/plasmosome-core/src/task017_aliases.rs` holdin
 `pub use std::sync::RwLock as Registry;`, then in `state.rs` `use crate::task017_aliases::Registry;`
 and a `Registry<u32>` field. Before **and** after:
 
-```
+```text
 test controller_wire_state_shares_no_memory_across_the_seam ... ok
 ```
 
@@ -188,8 +188,8 @@ left as the record of what was true at the time.
 
 ### Gate
 
-```
-cargo test --workspace                                  all green, 16 new tests in
+```text
+cargo test --workspace                                  232 passed, 0 failed; 20 tests in
                                                         shared_memory_reads_rust.rs
 cargo clippy --workspace --all-targets -- -D warnings   clean
 cargo fmt --all -- --check                              clean
