@@ -1,7 +1,7 @@
 ---
 id: 011
 title: Close the seven backends that still walk through all eight clauses
-status: in_review
+status: done
 priority: 1
 specs: [003]
 intents: []
@@ -18,7 +18,7 @@ done_when: >-
   reached by a backend that gets past the earlier one, and FakeBackend and
   CompositeBackend still pass every clause.
 pr: https://github.com/teonimesic/plasmosome/pull/12
-evidence:
+evidence: squash commit 65e47b4 on main; four clauses now run under both drain policies and the seven backends that walked through all eight each fail one
 ---
 
 ## Why

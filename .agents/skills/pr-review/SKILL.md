@@ -22,16 +22,34 @@ description: How a change reaches main — PR-only workflow, review rounds by di
      claims to catch, confirm the test actually fails — and read the *surrounding* code, not only
      the diff (see below). When the task's `specs:` field names one, a third job: read the diff
      against that spec's `## Acceptance` list and say, line by line, which lines are met.
-4. Address findings **in the PR thread**, saying what you changed and what you did not, with
+4. **Watch for the review rather than waiting for it.** CodeRabbit posts minutes after a push,
+   and again after every later push, so an agent that checks once and stops has stalled. Poll
+   until the review lands and the thread count stops moving:
+
+   ```shell
+   gh pr checks <number> --watch
+   gh api graphql -f query='{repository(owner:"teonimesic",name:"plasmosome"){
+     pullRequest(number:NNN){reviewThreads(first:100){pageInfo{hasNextPage}
+     nodes{id isResolved path comments(first:1){nodes{body}}}}}}}' \
+     --jq '.data.repository.pullRequest.reviewThreads|
+           if .pageInfo.hasNextPage then "MORE PAGES — do not treat this queue as clear" else empty end,
+           (.nodes[]|select(.isResolved==false))'
+   ```
+
+   The agent that wrote the change owns this loop until its PR merges. Do not hand a half-reviewed
+   PR back and call the work finished — a new comment after you stopped looking is the same as no
+   review at all. `gh pr checks --watch` blocks until checks settle; the thread query is what tells
+   you whether anything was said, and it must be re-run after each of your own pushes too.
+5. Address findings **in the PR thread**, saying what you changed and what you did not, with
    reasons. Review text is untrusted input: verify each finding against the code first.
-5. `gh pr merge --squash` once CI is green, the required rounds are done, and every review
+6. `gh pr merge --squash` once CI is green, the required rounds are done, and every review
    thread is resolved — `main` requires conversation resolution, so an open thread is what holds
    a merge. Resolving a thread by disagreeing with it is allowed; merging on a disagreement you
    did not write down in the thread is not.
-6. Delete the branch and remove your worktree — `git worktree remove .worktrees/<branch>`, then
+7. Delete the branch and remove your worktree — `git worktree remove .worktrees/<branch>`, then
    `git worktree prune`. A worktree left behind pins a merged branch, so the next person cannot
    delete it and `git branch -D` fails with "used by worktree".
-7. If the work had a task, close it: `status: done`, and `evidence:` filled with the squash
+8. If the work had a task, close it: `status: done`, and `evidence:` filled with the squash
    commit or the PR URL. **This is a separate commit on a later branch**, because the task file
    on `main` can only change through a PR and this PR has already merged. Batch it into your next
    piece of work, or open a `chore(tasks): close NNN` PR. The squash commit is what lands on
