@@ -171,6 +171,7 @@ dependencies = [
  "plasmosome-core",
  "plasmosome-ledger",
  "serde",
+ "tempfile",
 ]
 
 [[package]]

@@ -18,9 +18,50 @@ else
 fi
 
 vendors='claude|anthropic|gpt|openai|copilot|codex|gemini|llama|mistral'
+attribution='^[[:space:]]*(co-authored-by|signed-off-by)[[:space:]]*:'
 
-# `%(trailers:...)` uses git's own trailer parser, so body prose that merely quotes a trailer
-# is not a match — only a real trailer block is.
+offences=()
+
+# Adds every attribution trailer in the paragraph on $1 that names a model.
+#
+# A squash merge concatenates the messages it squashes, which leaves the trailers of every commit
+# but the last one sitting mid-body. Git's trailer parser reads only the closing paragraph, so it
+# does not see them, and a commit shaped that way used to pass. Every paragraph is offered to that
+# parser here, not just the last.
+#
+# The grep only nominates a paragraph; git's parser is what decides. That is the difference
+# between this and scanning the raw message, which flagged bodies that merely quoted a trailer.
+record_model_trailers() {
+  local paragraph=$1 parsed line value
+  printf '%s' "$paragraph" | grep -qiE "$attribution" || return 0
+  if ! parsed=$(printf 'x\n\n%s' "$paragraph" | git interpret-trailers --parse 2>&1); then
+    echo "attribution-guard: cannot parse the trailers of a commit message:"
+    echo "$parsed"
+    echo "Refusing rather than passing: a message this guard cannot parse is a message it cannot clear."
+    exit 1
+  fi
+  while IFS= read -r line; do
+    printf '%s' "$line" | grep -qiE "$attribution" || continue
+    value=${line#*:}
+    if printf '%s' "$value" | grep -qiE "$vendors"; then
+      offences+=("$line")
+    fi
+  done <<< "$parsed"
+}
+
+record_model_trailers_in_message() {
+  local message=$1 line paragraph=''
+  while IFS= read -r line; do
+    if [ -n "$line" ]; then
+      paragraph+="$line"$'\n'
+      continue
+    fi
+    record_model_trailers "$paragraph"
+    paragraph=''
+  done <<< "$message"
+  record_model_trailers "$paragraph"
+}
+
 if ! commits=$(git log --format='%H' "${revs[@]}" 2>&1); then
   echo "attribution-guard: cannot read the range '${revs[*]}':"
   echo "$commits"
@@ -30,18 +71,17 @@ fi
 
 status=0
 for sha in $commits; do
-  if ! trailers=$(git show -s --format='%(trailers:key=Co-authored-by,valueonly)%(trailers:key=Signed-off-by,valueonly)' "$sha" 2>&1); then
-    echo "attribution-guard: cannot read trailers of $sha:"
-    echo "$trailers"
+  if ! message=$(git show -s --format='%B' "$sha" 2>&1); then
+    echo "attribution-guard: cannot read the message of $sha:"
+    echo "$message"
     exit 1
   fi
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    if printf '%s' "$line" | grep -qiE "$vendors"; then
-      echo "attribution-guard: ${sha:0:9} credits a model as an author: $line"
-      status=1
-    fi
-  done <<< "$trailers"
+  offences=()
+  record_model_trailers_in_message "$message"
+  for offence in "${offences[@]+"${offences[@]}"}"; do
+    echo "attribution-guard: ${sha:0:9} credits a model as an author: $offence"
+    status=1
+  done
 done
 
 if [ "$status" -ne 0 ]; then
