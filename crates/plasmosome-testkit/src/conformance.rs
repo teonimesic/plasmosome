@@ -337,8 +337,10 @@ pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn(
         for (entry, object) in spent.into_iter().rev() {
             match backend.revoke(entry.handle, drain) {
                 Err(BackendError::UnknownHandle { handle }) => assert_eq!(
-                    handle, entry.handle,
-                    "the error must name the revoked handle the caller asked for, not {handle}"
+                    handle,
+                    entry.handle,
+                    "a {} revoke of a spent handle must name the handle the caller asked for, not {handle}",
+                    policy_of(drain)
                 ),
                 Err(other) => panic!(
                     "revoking the already-revoked handle {} through a {} revoke must be UnknownHandle, got {other}",
