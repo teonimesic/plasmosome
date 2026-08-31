@@ -30,10 +30,13 @@ number the leaf never issued. The leaf answers `UnknownHandle`.
 
 The two counters agree only while each leaf has issued exactly one grant, which is why the
 existing unit tests in `composite.rs` pass: each grants once per leaf. Give any leaf a second
-grant and revocation stops working. So revocation silently fails for any composite with more
-than one leaf in use — capabilities stay granted while the caller is told nothing, or is told a
-handle it holds does not exist. That is the bug class this project exists to prevent: nothing
-outlives its owner unnoticed.
+grant and revocation stops working.
+
+The failure is loud but misleading, which is worse than silence. `revoke` returns
+`BackendError::UnknownHandle` for a handle the caller is holding and the composite did issue,
+while the capability stays granted. A caller reading that error concludes there is nothing to
+revoke, and stops. That is the bug class this project exists to prevent: nothing outlives its
+owner unnoticed.
 
 The conformance suite found it the first time it was pointed at a second implementation. Task 004
 wired `CompositeBackend` into `crates/plasmosome-testkit/tests/composite_backend_conformance.rs`

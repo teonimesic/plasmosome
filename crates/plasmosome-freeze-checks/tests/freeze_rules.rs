@@ -184,6 +184,8 @@ fn testkit_is_dev_only() {
                 "normal,build",
                 "--prefix",
                 "none",
+                "--target",
+                "all",
             ])
             .output()
             .expect("cargo tree runs");
