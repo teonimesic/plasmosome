@@ -44,3 +44,8 @@ That last condition cannot be met inside a pull request — a `schedule:` trigge
 the default branch — so merging does not close this task.
 
 ## Notes
+
+**2026-08-31.** Merged as `25a4cb8` but deliberately left `in_review`. `done_when` requires one
+green scheduled run, and a `schedule:` trigger only fires from the default branch — so it could
+not be met inside the pull request and cannot be met by merging. Close it when a Monday run has
+passed.
