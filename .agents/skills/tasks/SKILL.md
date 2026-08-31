@@ -92,8 +92,13 @@ Both gates are on what may be **started**, not on what may be written down:
 
 The two layers work the same way because their statuses mean the same thing. `draft` is a proposal
 on the record; `approved` and `accepted` are what may be built on. **An intent's `status:` is
-`draft` or `approved`, and only the owner sets `approved`** — an agent may draft one, and may
-transcribe one the owner dictates word for word, but may never approve one, its own draft included.
+`draft` or `approved`, and approval originates with the owner** — an agent may draft one, may
+transcribe one the owner dictates word for word, and may record an approval it is carrying,
+including one relayed to it by another agent rather than heard from the owner directly. What it may
+never do is fake one: originate an approval, read one into silence, or approve its own draft on its
+own judgement. **The line is origin, not identity** — never who typed it, always whether the owner
+actually approved it. Nothing mechanical separates a relayed approval from an invented one, so
+`docs/intents/README.md` says what carries the weight instead.
 
 **Why the owner's gate sits at approval and not somewhere cheaper.** An approved intent may spin up
 a great many specs, and each of those spawns tasks. Approval is the point where a single decision
@@ -201,11 +206,12 @@ whether the count of tasks naming no spec falls; if it climbs, it is not.
 
 ## Who writes what
 
-- **Intent** — drafted by anyone, approved only by the owner. An agent may draft one, and may
-  transcribe one the owner dictates: word for word, never summarized. An agent's draft stays
-  `status: draft` and the agent leaves it there. A draft written only because a filed task needed
-  something to point at is a proposal the owner should refuse, and writing it does not make it
-  less refusable.
+- **Intent** — drafted by anyone; approved by the owner, and recorded by whoever is carrying that
+  approval, usually an agent it was relayed to. An agent may draft one, and may transcribe one the
+  owner dictates: word for word, never summarized. Its own draft stays `status: draft` until the
+  owner's approval actually arrives — relayed or direct, but arriving, never assumed. A draft
+  written only because a filed task needed something to point at is a proposal the owner should
+  refuse, and writing it does not make it less refusable.
 - **Spec** — the planner, using the strongest model available. It becomes `status: accepted` when
   its pull request merges, and the planner is who accepts it. The owner's approval is spent on the
   intent above it.
@@ -272,7 +278,8 @@ filler, because filler reads as something that was considered.
 
 A few field values worth stating outright:
 
-- Intent `status:` is `draft` or `approved`. Only the owner sets `approved`. Its `outcome:` is
+- Intent `status:` is `draft` or `approved`. Approval originates with the owner; an agent records
+  one it is carrying and never invents one. Its `outcome:` is
   blank while the intent is open and non-blank once it is settled, which is what tells a refused
   draft from a forgotten one.
 - Spec `status:` is `draft`, `accepted` or `superseded`.
@@ -345,10 +352,12 @@ done
 ```
 
 **None of these finds a violation.** Every one of them reads a single layer and reports what is
-*missing*, so a file that is well-formed and wrong — an intent an agent approved for itself, an
-accepted spec whose intent is still `draft`, an `intents: [099]` pointing at nothing — matches none
-of them. The one check that reads two layers against each other is the cross-layer loop in
-`.agents/skills/heartbeat` step 4, and everything past that is the pull request: `main` is
+*missing*, so a file that is well-formed and wrong — an intent an agent approved on its own
+judgement, an accepted spec whose intent is still `draft`, an `intents: [099]` pointing at nothing
+— matches none of them. Two of those three the cross-layer loop in `.agents/skills/heartbeat` step
+4 does catch, by reading the layers against each other. **The first one nothing can catch**, and
+that is structural rather than an oversight: an approval an agent was handed and an approval an
+agent made up are the same line of text. Everything past the loop is the pull request — `main` is
 protected, so a person or a reviewing agent looking at the diff is where these gates are actually
 enforced. Read a clean grep as "nothing is waiting", never as "nothing is wrong".
 
@@ -388,8 +397,10 @@ spec is two PRs, in order:
 
 An intent reaches `main` the same way and earlier still, in a PR of its own. Approval is a second
 one-line edit, `status: draft` to `status: approved`, and it travels through a PR like everything
-else — an agent may carry that edit at the owner's word, exactly as it may transcribe the intent
-itself, and may never originate it.
+else — an agent may carry that edit on the owner's word, whether it heard it directly or had it
+relayed, exactly as it may transcribe the intent itself. It may never originate it. **That PR says
+where the approval came from**, which is the only place the provenance is recorded and the reason
+no field in the file tries to.
 
 Work whose spec already exists skips step 1 and is one PR, which is what most work should look
 like. Trivial work skips the task as well.

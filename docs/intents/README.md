@@ -3,11 +3,20 @@
 One file per intent, named `NNN-slug.md`. An intent says what is wanted and why, with no design
 and no solution. Copy `docs/templates/intent.md`.
 
-**`status:` is `draft` or `approved`, and only the owner sets `approved`.** Anyone may write a
+**`status:` is `draft` or `approved`, and approval originates with the owner.** Anyone may write a
 draft: proposing an intent is real work, and this folder is where a proposal belongs, so that it
 survives instead of dying in a pull request body. An agent may also transcribe an intent the owner
-dictates — word for word, never summarized. What an agent may never do is approve one, its own
-draft included.
+dictates — word for word, never summarized.
+
+**An agent may set `approved` only when it is carrying the owner's actual approval.** That approval
+may reach it directly, or by proxy — another agent relaying that the owner approved it. Proxy is
+the normal path here and not an edge case: every intent in this folder reached its author through
+somebody relaying the owner's words, and a rule forbidding that would forbid how this repository
+works. What an agent may never do is **fake** an approval: originate one, infer one from silence,
+decide a draft is obviously wanted, or put its own judgement where the owner's belongs. The
+question is never who typed the line. It is whether the owner actually approved this and the agent
+is recording it, or whether the agent is inventing it. An agent approving its own draft on its own
+judgement is the prohibited case, and it stays prohibited.
 
 **Approval is where one decision multiplies into a lot of work.** An approved intent may spin up a
 great many specs, and each spec spawns tasks. Drafting costs one document; approving commits a
@@ -34,13 +43,29 @@ This does not represent an approval being withdrawn — an intent has no `supers
 and a decision do, and specs accepted under a rescinded approval would stay accepted. Nothing here
 has needed it yet. If it comes up it is the owner's to decide, not an agent's to invent.
 
-**`approved` is a claim in a file, and nothing mechanical checks who wrote it.** Before this, the
-folder held only what the owner wrote, so a file's existence was its provenance. A typed line is
-weaker: an agent that writes `status: approved` into its own draft produces a file no grep here can
-tell from a real approval. That is a deliberate trade for being able to hold a proposal at all, and
-it moves the enforcement to the pull request — `main` is protected, so every approval is a diff
-somebody has to look at, and an approval arriving in the same change as the work it authorizes is
-the shape to refuse.
+**Nothing mechanical tells a relayed approval from a fabricated one, and that follows from the rule
+rather than being a gap in it.** Before this, the folder held only what the owner wrote, so a
+file's existence was its provenance. Once an agent may record an approval handed to it, a real
+approval and an invented one are the same line of text, and no search here can separate them. The
+only thing standing between the two is whether the agent recording it is telling the truth. That
+is worth stating rather than leaving for someone to discover.
+
+Three things are true about that risk, and not one of them is a check:
+
+- **The owner reads their own folder.** A fabricated approval is not undetectable, it is detectable
+  late, by the only person who can tell. What it costs is whatever was built in between — bounded,
+  because the specs and tasks under it are pull requests too.
+- **Every approval is a diff**, with an author, a description and a thread, on a protected `main`.
+  That record sits outside the file and the fabricating agent does not control it.
+- **Two shapes are refused on sight**: an approval arriving in the same change as the work it
+  authorizes, and an approval whose pull request does not say where it came from.
+
+**Why there is no `approved_by:` field.** Recording who approved an intent and who relayed it would
+make the claim specific, not checkable: an agent willing to write `status: approved` writes a name
+under it just as easily, and no search, hook or reviewer gets stronger. It buys a more detailed
+version of the same lie, and charges ceremony on every intent for it. The provenance worth having
+already exists in the pull request, where a reviewer is looking anyway — asking for it there costs
+one sentence and cannot be forged by editing the file.
 
 Work that maps to no intent here is not work that needs an intent written for it; it is work that
 has not been asked for. Drafting one puts that question to the owner on the record — it does not

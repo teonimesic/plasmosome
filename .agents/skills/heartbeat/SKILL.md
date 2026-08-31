@@ -107,8 +107,9 @@ rather than to stop anything.
 
 **A draft intent is how you raise the gap, not how you close it.** Writing one is allowed, and it
 is the honest way to put an unmapped task to the owner — a proposal in `docs/intents/` outlives the
-session, which one in a pull request body does not. Approving it is the owner's alone, so a draft
-you wrote unblocks nothing until they act. The fourth line is that queue: every draft is a question
+session, which one in a pull request body does not. Approval is the owner's to give, so a draft you
+wrote unblocks nothing until it actually arrives — relayed to you or heard directly, but never
+assumed from a silence. The fourth line is that queue: every draft is a question
 somebody asked, and one the owner has never been shown is the same as one nobody wrote. Say out
 loud which of them a person still has to see. A draft that has already been answered carries a
 non-blank `outcome:` and is not one of them:

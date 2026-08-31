@@ -83,8 +83,9 @@ spec in `docs/specs/`. An already-accepted spec is usable as it stands. Where th
 are writing, it cannot be accepted until the intent it names is approved — draft it against a draft
 intent rather than waiting, but do not plan work off it yet. Usually both already exist and the
 planner's job is to say which: writing a new spec is the exception, and a new intent is anyone's to
-draft and only the owner's to approve. A brief that exists only in a chat window cannot be picked
-up tomorrow by a different agent. See `.agents/skills/tasks` for the formats and the two gates.
+draft and only the owner's to approve, whoever ends up recording it. A brief that exists only in a
+chat window cannot be picked up tomorrow by a different agent. See `.agents/skills/tasks` for the
+formats and the two gates.
 
 **Dispatch is one line: "work task NNN."** The executor opens that file and reads only it and
 the files it names.
