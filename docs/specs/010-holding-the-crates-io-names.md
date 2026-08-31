@@ -8,9 +8,11 @@ intents: [013]
 ## Behavior
 
 Two names on crates.io — `plasmosome` and `plasmid` — belong to this project, and nothing usable
-is published under either. Someone who reaches for them gets version `0.0.0`: a crate that does
-nothing, with a description saying so and a link back to this repository. The names are held
-before anyone else takes them, and no interface is frozen by holding them.
+is published under either. Both sit at version `0.0.0`, each with a description saying what it is
+and a link back to this repository. `plasmosome` is an empty library. `plasmid` is the command
+line that already exists, whose one verb refuses and exits 2, so it installs and then says plainly
+that it is unfinished. The names are held before anyone else takes them, and no interface is
+frozen by holding them.
 
 Nothing else in this workspace can reach a registry, including a crate added tomorrow. That
 property exists today as a blanket refusal — the freeze rule
@@ -20,46 +22,62 @@ with two named exceptions, and keeps the default for everything else exactly as 
 
 Publishing is not part of this. What this spec covers is the state of the repository that makes
 the name claim correct and safe to make: two manifests that carry what crates.io asks for, ship
-no agent working notes, and are the only two the freeze rule lets through. Running `cargo publish`
-is a separate deliberate act by the owner, and no line below waits on it.
+no agent working notes, describe themselves honestly, and are the only two the freeze rule lets
+through. Running `cargo publish` is a separate deliberate act by the owner, and no line below
+waits on it.
 
 ## Design
 
 **`plasmosome` is a new workspace member at `crates/plasmosome`, library only.** It has a library
-target and no binary target. `cargo install plasmosome` then refuses cleanly, because there is
-nothing to install. A placeholder binary would be worse: it would install, run, and do nothing,
-which looks like a broken tool rather than an unfinished one. The crate needs a `README.md` of its
-own, because the `readme` field must point at a file that exists.
+target and no binary target. `cargo install plasmosome` then refuses with `no packages found with
+binaries or examples` and exits non-zero, because there is nothing to install. A placeholder
+binary would be worse: it would install, run, and do nothing, which looks like a broken tool
+rather than an unfinished one. The crate needs a `README.md` of its own, because the `readme`
+field must point at a file that exists.
 
 **`plasmid` is the crate that is already there.** `crates/plasmid` owns the name and ships the
-`plasmid` binary. It moves to version `0.0.0` and drops `publish = false`. A second package
-holding the name is not an option in either direction. Two packages called `plasmid` in one
-workspace is an error cargo refuses outright. And a second package that held the name while
-`crates/plasmid` kept shipping the `plasmid` binary is something the registry would accept without
-complaint — it breaks later, on a user's machine, after the name is permanently claimed.
+`plasmid` binary. It moves to version `0.0.0` and becomes publishable. A second package holding
+the name is not an option in either direction. Two packages called `plasmid` in one workspace is
+an error cargo refuses outright. And a second package that held the name while `crates/plasmid`
+kept shipping the `plasmid` binary is something the registry would accept without complaint — it
+breaks later, on a user's machine, after the name is permanently claimed.
 
 **Version `0.0.0` on both** says the same thing the crates say: nothing here is promised yet. The
 first real release picks its own number and is not bound by this one.
 
-**Both manifests carry what crates.io requires**: `name`, `version`, `description`, `license`
+**Both manifests carry what crates.io asks for**: `name`, `version`, `description`, `license`
 inherited from the workspace, `repository`, and `readme`. Cargo warns `manifest has no
-description, license, ...` when any of those is missing, and that warning is the mechanical check
-— it names every field it wants.
+description, license or license-file` and names the fields it wants, which covers most of them —
+but it never mentions `readme`, and a manifest with no `readme` at all packages without a word.
+So `readme` needs a check of its own rather than riding on the warning.
 
 **Both carry `exclude = ["AGENTS.md", "CLAUDE.md"]`.** Agent working notes are instructions for
 whoever edits this repository. They are not part of what a user installs, and a published crate
 that carries them ships guidance about a codebase the reader does not have.
 
-**The freeze rule becomes an allowlist, not a weakened assertion.** A constant names exactly
-`plasmosome` and `plasmid`. The rule then checks three things, one per member:
+**`crates/plasmid/README.md` stops describing the crate as unpublished.** Its Status section
+currently says the package carries `publish = false` and that a checkout is the only way to get
+the binary. That is what the `readme` field points crates.io at, so it becomes the crate's page —
+and the sentence would be false the moment it is published. The reasoning that keeps agent notes
+out of the tarball applies here too: what ships must be true for the person reading it.
 
-- A member on the list must be publishable.
-- A member off the list must be `publish = false`.
+**The freeze rule becomes an allowlist, not a weakened assertion.** It is renamed to
+`only_the_held_names_are_publishable_to_a_registry`, because the old name would then describe the
+opposite of what it checks. A constant names exactly `plasmosome` and `plasmid`. The rule checks
+three things, one per member:
+
+- A member on the list carries `publish = ["crates-io"]` — publishable, and to that registry only.
+- A member off the list carries `publish = false`.
 - A member that leaves `publish` unset still panics, exactly as it does today.
 
-The default is unchanged, which is the whole reason for the shape. Relaxing the assertion instead
-— allowing any package to be publishable, or checking only that most are not — would let the next
-crate through as a side effect of being new.
+Both allowed states are explicit, which is what keeps the third check intact. `cargo metadata`
+cannot tell an unset `publish` from `publish = true` — it reports `null` for both — so a name-hold
+that simply dropped `publish = false` would be indistinguishable from a crate whose author forgot
+the field. Naming the registry makes the two allowed states readable and leaves the unset default
+failing for every member, on the list or off it.
+
+Relaxing the assertion instead — allowing any package to be publishable, or checking only that
+most are not — would let the next crate through as a side effect of being new.
 
 **One check in that rule is not optional, and reads as if it were.** The rule cross-checks itself
 by comparing counts: `reported.len()` against `workspace_members().len()`. It never compares
@@ -76,7 +94,7 @@ what removing a public name claim should be.
 ## Contract
 
 - Exactly two packages in this workspace may be publishable: `plasmosome` and `plasmid`. They are
-  named in the freeze rule's allowlist.
+  named in the freeze rule's allowlist and carry `publish = ["crates-io"]`.
 - Every other member carries `publish = false`. A member added later with `publish` unset fails
   the rule.
 - Every name on the allowlist is a member of this workspace. An entry naming no member fails.
@@ -86,22 +104,27 @@ what removing a public name claim should be.
   `repository` and `readme`. Both are at version `0.0.0`.
 - Both carry `exclude = ["AGENTS.md", "CLAUDE.md"]`, and neither packaged crate contains either
   file.
-- Neither manifest emits cargo's `manifest has no description, license, ...` warning.
+- Neither manifest emits cargo's `manifest has no ...` warning.
+- Neither README claims the crate it belongs to is unpublished or reachable only from a checkout.
 
 ## Acceptance
 
-- `no_workspace_crate_is_publishable_to_a_registry` passes on a clean tree.
+- `only_the_held_names_are_publishable_to_a_registry` passes on a clean tree, and no test named
+  `no_workspace_crate_is_publishable_to_a_registry` remains.
 - In a copy of the tree with `publish = false` restored on `plasmosome`, and again on `plasmid`,
   the rule fails and names the package.
 - In a copy of the tree with a new member added whose manifest leaves `publish` unset, the rule
   fails.
 - In a copy of the tree whose allowlist names a package that is not a workspace member, the rule
   fails and names the entry.
-- `cargo metadata` reports no binary target for `plasmosome`.
+- `cargo metadata` reports no binary target for `plasmosome`, and a non-null `readme` for both
+  `plasmosome` and `plasmid`.
 - `cargo package -p plasmosome --list` and `cargo package -p plasmid --list` each name no
   `AGENTS.md` and no `CLAUDE.md`.
 - `cargo package -p plasmosome` and `cargo package -p plasmid` each emit no `manifest has no ...`
   warning.
+- `git grep -n 'publish = false' -- crates/plasmid/README.md crates/plasmosome/README.md` returns
+  nothing.
 - The gate in the root `AGENTS.md` is green.
 
 ## Out of scope
