@@ -1,7 +1,7 @@
 ---
 id: 010
 title: Close the six backends that still walk through all eight clauses
-status: todo
+status: in_review
 priority: 1
 specs: [003]
 intents: []
@@ -19,7 +19,7 @@ done_when: >-
   defect; and of the six backends named below, the first five no longer pass all
   eight clauses while LedgerMirror is documented as a limit of the seam rather
   than closed.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/11
 evidence:
 ---
 
@@ -66,5 +66,46 @@ turns the claim into a guard — and it would have caught the false claim task 0
 clause C covered the composite defect, while that clause was still being written.
 
 ## Plan
+
+**Deliverable:** the five closable defects below can no longer pass the suite, and a committed
+test proves every clause discriminates. Out of scope: changing `EnforcementBackend`, changing
+either shipped backend, and the benchmark work in tasks 005 and 006.
+
+**Do the discriminator test first.** Add `crates/plasmosome-testkit/tests/clauses_discriminate.rs`
+holding one defective backend per clause and asserting each clause panics against its own defect,
+with `#[should_panic(expected = ...)]` matching a distinctive fragment of the message. Write it for
+the eight clauses that exist today, before adding anything. It will fail to compile or fail its
+assertions where a clause does not discriminate — that is the point, and where it does, stop and
+report rather than adjusting the expectation.
+
+This comes first because every clause in this crate so far was watched failing against a scratch
+backend that was then deleted, so the discipline lived in prose. Task 009 shipped a false claim
+about what clause C covered, and a committed discriminator would have caught it while the clause
+was being written.
+
+**Then close five defects.** Prefer extending an existing clause over adding a new one; a suite of
+twenty clauses nobody reads is worse than eight that hold.
+
+| Defect | Where it is closed | The clause must now fail against |
+| --- | --- | --- |
+| `ForceIsALie` | new clause, or extend `drained_revoke_removes_object` | a backend that returns `Ok` for a `DrainSpec::forcing()` revoke and removes nothing |
+| `ClassKeyedLedger` | extend `live_grants_hold_distinct_handles` to hold two grants of one class | a backend keying its ledger by capability class rather than handle |
+| `HandleRecycler` | extend `revoke_of_a_revoked_handle_is_error` with a grant between the two revokes | a backend that reissues a freed handle number |
+| `ClassNukingRemoval` | plant residue at the top of `apply_and_removal_reach_the_universe` | an `apply_removal` that clears every object of the removal's class |
+| `ImpostorOwner` | compare `op.object()` rather than `(class, key)` in that same clause | a backend applying every operation under a different owner |
+
+Each new or changed clause goes into `clauses_discriminate.rs` too, so the guard grows with the
+suite rather than lagging it.
+
+**`LedgerMirror` is not closed.** Add a paragraph to `crates/plasmosome-testkit/README.md` saying
+`snapshot_os_state` is the only oracle any clause has, so the suite cannot tell a backend that
+enforces from one that reports its intent, and "conformant" must never be read as "enforcing".
+
+**Definition of done:** the discriminator test is committed and green; the five defects above each
+fail at least one clause; `FakeBackend` and `CompositeBackend` still pass every clause; and the
+gate in root `AGENTS.md` is green. If either shipped backend fails a new clause, that is a real
+bug — stop and report, do not weaken the clause and do not fix the backend here.
+
+STOP when done. Do not start task 005 or 006.
 
 ## Notes

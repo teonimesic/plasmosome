@@ -1,7 +1,7 @@
 ---
 id: 009
 title: Close the three gaps a broken backend can walk through the conformance suite
-status: in_review
+status: done
 priority: 2
 specs: [003]
 intents: []
@@ -21,7 +21,11 @@ done_when: >-
   against a backend carrying that defect before it is shown passing against
   FakeBackend.
 pr: https://github.com/teonimesic/plasmosome/pull/10
-evidence:
+evidence: >-
+  squash commit f42c797 on main; the conformance suite carries eight clauses. The
+  failing-first runs behind them were scratch and are not in that commit — task 010
+  commits them as tests/clauses_discriminate.rs, which is where that claim becomes
+  checkable
 ---
 
 ## Why

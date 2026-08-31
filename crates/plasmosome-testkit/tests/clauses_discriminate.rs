@@ -1,0 +1,451 @@
+use std::collections::BTreeMap;
+
+use plasmosome_backend::{
+    BackendError, Capability, DrainSpec, EnforcementBackend, Grant, GrantKind, Handle, LedgerEntry,
+    OsObject, OsState, PluginId, RevokePolicy, UniverseClass, UniverseOp, UniverseRemoval,
+};
+use plasmosome_testkit::conformance;
+
+/// The one way a `DefectiveBackend` departs from the `EnforcementBackend`
+/// contract. `None` departs in no way at all and must pass every clause, so a
+/// clause that panics against any other variant panicked because of that
+/// variant and not because the backend around it is sloppy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Defect {
+    None,
+    /// Revoke withdraws the right capability and hands back an entry that
+    /// describes a different one.
+    RevokeReturnsAStranger,
+    /// Revoke of a handle no grant ever issued reports success.
+    UnknownHandleReportsSuccess,
+    /// Revoke forgets the handle and leaves the object it materialized.
+    RevokeKeepsTheObject,
+    /// Revoke empties the universe instead of removing its own object.
+    RevokeTidiesTheWholeUniverse,
+    /// Every grant materializes a second object nobody asked for.
+    GrantMaterializesAShadow,
+    /// Every grant is issued the same handle number.
+    OneHandleForEveryLiveGrant,
+    /// `apply_removal` reports success and removes nothing.
+    RemovalIsANoOp,
+    /// A handle stays revocable after it was revoked.
+    ARevokedHandleRevokesAgain,
+    /// A forced revoke reports success and withdraws nothing.
+    ForcedRevokeIsALie,
+    /// The ledger is keyed by capability class, so a second grant of a class
+    /// displaces the first and either handle revokes whichever is left.
+    ALedgerKeyedByClass,
+    /// A revoked handle number goes back in the pool and is granted again.
+    ARevokedHandleIsReissued,
+    /// `apply_removal` takes every object of the removal's class, not the one
+    /// the removal names.
+    RemovalNukesTheClass,
+    /// Every applied op lands under an owner nobody asked for.
+    EveryOpLandsUnderAnImpostor,
+    /// Holds no universe of its own and answers every snapshot from its ledger,
+    /// so what it reports is what it was asked to do. No clause can catch this
+    /// one, and the test that runs it is what keeps that limit checkable.
+    AMirrorOfItsOwnLedger,
+}
+
+/// A backend that keeps a ledger by handle and a universe of the objects its
+/// grants materialized, carrying exactly one defect. Construct it with
+/// `carrying`; hand `conformance` a closure that constructs a fresh one.
+struct DefectiveBackend {
+    defect: Defect,
+    state: OsState,
+    ledger: BTreeMap<u64, LedgerEntry>,
+    spent: BTreeMap<u64, LedgerEntry>,
+    class_of_handle: BTreeMap<u64, u64>,
+    freed: Vec<u64>,
+    applied: Vec<UniverseOp>,
+    planted: Vec<OsObject>,
+    next_handle: u64,
+}
+
+impl DefectiveBackend {
+    fn carrying(defect: Defect) -> DefectiveBackend {
+        DefectiveBackend {
+            defect,
+            state: OsState::new(),
+            ledger: BTreeMap::new(),
+            spent: BTreeMap::new(),
+            class_of_handle: BTreeMap::new(),
+            freed: Vec::new(),
+            applied: Vec::new(),
+            planted: Vec::new(),
+            next_handle: 0,
+        }
+    }
+
+    fn mirrors_its_ledger(&self) -> bool {
+        self.defect == Defect::AMirrorOfItsOwnLedger
+    }
+
+    fn mirrored_state(&self) -> OsState {
+        let mut mirror = OsState::new();
+        for entry in self.ledger.values() {
+            mirror.insert(object_of(entry));
+        }
+        for op in &self.applied {
+            mirror.insert(op.object());
+        }
+        for object in &self.planted {
+            mirror.insert(object.clone());
+        }
+        mirror
+    }
+
+    fn mint(&mut self) -> Handle {
+        if self.defect == Defect::ARevokedHandleIsReissued
+            && let Some(reissued) = self.freed.pop()
+        {
+            return Handle(reissued);
+        }
+        self.next_handle += 1;
+        Handle(self.next_handle)
+    }
+
+    fn ledger_key(&self, handle: Handle, capability: &Capability) -> u64 {
+        match self.defect {
+            Defect::ALedgerKeyedByClass => class_index(capability),
+            _ => handle.raw(),
+        }
+    }
+
+    fn withdraw(&mut self, entry: &LedgerEntry) -> Result<(), BackendError> {
+        match self.defect {
+            Defect::AMirrorOfItsOwnLedger => Ok(()),
+            Defect::RevokeKeepsTheObject => Ok(()),
+            Defect::RevokeTidiesTheWholeUniverse => {
+                self.state = OsState::new();
+                Ok(())
+            }
+            _ => self.apply_removal(removal_of(&entry.capability)),
+        }
+    }
+}
+
+impl EnforcementBackend for DefectiveBackend {
+    fn grant(&mut self, grant: Grant) -> LedgerEntry {
+        let handle = self.mint();
+        let entry = LedgerEntry {
+            handle,
+            plugin: grant.plugin,
+            capability: grant.capability,
+            kind: grant.kind,
+        };
+        if !self.mirrors_its_ledger() {
+            self.state.insert(object_of(&entry));
+        }
+        if self.defect == Defect::GrantMaterializesAShadow {
+            self.state.insert(shadow_of(&entry));
+        }
+        let key = self.ledger_key(handle, &entry.capability);
+        self.class_of_handle.insert(handle.raw(), key);
+        self.ledger.insert(key, entry.clone());
+        if self.defect == Defect::OneHandleForEveryLiveGrant {
+            return LedgerEntry {
+                handle: Handle(1),
+                ..entry
+            };
+        }
+        entry
+    }
+
+    fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError> {
+        let key = match self.defect {
+            Defect::ALedgerKeyedByClass => match self.class_of_handle.get(&handle.raw()) {
+                Some(class) => *class,
+                None => return Err(BackendError::UnknownHandle { handle }),
+            },
+            _ => handle.raw(),
+        };
+        let Some(entry) = self.ledger.remove(&key) else {
+            return match self.defect {
+                Defect::UnknownHandleReportsSuccess => Ok(a_stranger(handle)),
+                Defect::ARevokedHandleRevokesAgain => self
+                    .spent
+                    .get(&handle.raw())
+                    .cloned()
+                    .ok_or(BackendError::UnknownHandle { handle }),
+                _ => Err(BackendError::UnknownHandle { handle }),
+            };
+        };
+        if self.defect != Defect::ForcedRevokeIsALie || drain.policy != RevokePolicy::Force {
+            self.withdraw(&entry)?;
+        }
+        self.freed.push(handle.raw());
+        self.spent.insert(handle.raw(), entry.clone());
+        if self.defect == Defect::RevokeReturnsAStranger {
+            return Ok(a_stranger(handle));
+        }
+        Ok(entry)
+    }
+
+    fn snapshot_os_state(&self) -> OsState {
+        if self.mirrors_its_ledger() {
+            return self.mirrored_state();
+        }
+        self.state.clone()
+    }
+
+    fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
+        if self.mirrors_its_ledger() {
+            self.applied.push(op);
+            return Ok(());
+        }
+        let mut object = op.object();
+        if self.defect == Defect::EveryOpLandsUnderAnImpostor {
+            object.owner = PluginId::from("impostor");
+        }
+        self.state.insert(object);
+        Ok(())
+    }
+
+    fn apply_removal(&mut self, removal: UniverseRemoval) -> Result<(), BackendError> {
+        if self.defect == Defect::RemovalIsANoOp {
+            return Ok(());
+        }
+        let (class, key) = (removal.class(), removal.key());
+        if self.mirrors_its_ledger() {
+            let recorded = self
+                .applied
+                .iter()
+                .position(|op| op.object().class == class && op.object().key == key);
+            return match recorded {
+                Some(index) => {
+                    self.applied.remove(index);
+                    Ok(())
+                }
+                None => Err(BackendError::UnknownObject {
+                    class: class.as_str(),
+                    key,
+                }),
+            };
+        }
+        if self.defect == Defect::RemovalNukesTheClass {
+            let doomed: Vec<String> = self
+                .state
+                .objects()
+                .filter(|held| held.class == class)
+                .map(|held| held.key.clone())
+                .collect();
+            let struck = doomed.len();
+            for doomed_key in doomed {
+                self.state.remove(class, &doomed_key);
+            }
+            return if struck == 0 {
+                Err(BackendError::UnknownObject {
+                    class: class.as_str(),
+                    key,
+                })
+            } else {
+                Ok(())
+            };
+        }
+        self.state
+            .remove(class, &key)
+            .map(|_| ())
+            .ok_or(BackendError::UnknownObject {
+                class: class.as_str(),
+                key,
+            })
+    }
+
+    fn plant(&mut self, object: OsObject) {
+        if self.mirrors_its_ledger() {
+            self.planted.push(object);
+            return;
+        }
+        self.state.insert(object);
+    }
+}
+
+fn object_of(entry: &LedgerEntry) -> OsObject {
+    let owner = entry.plugin.clone();
+    let op = match &entry.capability {
+        Capability::SessionFile { path } => UniverseOp::WriteSessionFile {
+            path: path.clone(),
+            owner,
+        },
+        Capability::UdsSocket { path } => UniverseOp::BindUds {
+            path: path.clone(),
+            owner,
+        },
+        Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
+            host: host.clone(),
+            route: route.clone(),
+            owner,
+        },
+        Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
+            pid: *pid,
+            name: name.clone(),
+            owner,
+        },
+        Capability::Mount { source, target } => UniverseOp::AddMount {
+            source: source.clone(),
+            target: target.clone(),
+            owner,
+        },
+    };
+    op.object()
+}
+
+fn removal_of(capability: &Capability) -> UniverseRemoval {
+    match capability {
+        Capability::SessionFile { path } => {
+            UniverseRemoval::RemoveSessionFile { path: path.clone() }
+        }
+        Capability::UdsSocket { path } => UniverseRemoval::UnbindUds { path: path.clone() },
+        Capability::ProxyMap { host, .. } => UniverseRemoval::RemoveProxyMap { host: host.clone() },
+        Capability::Broker { pid, .. } => UniverseRemoval::KillBroker { pid: *pid },
+        Capability::Mount { target, .. } => UniverseRemoval::RemoveMount {
+            target: target.clone(),
+        },
+    }
+}
+
+fn class_index(capability: &Capability) -> u64 {
+    match capability {
+        Capability::SessionFile { .. } => 0,
+        Capability::UdsSocket { .. } => 1,
+        Capability::ProxyMap { .. } => 2,
+        Capability::Broker { .. } => 3,
+        Capability::Mount { .. } => 4,
+    }
+}
+
+fn shadow_of(entry: &LedgerEntry) -> OsObject {
+    OsObject {
+        class: UniverseClass::SessionFile,
+        key: format!("session/shadow/{}", entry.handle.raw()),
+        owner: entry.plugin.clone(),
+    }
+}
+
+fn a_stranger(handle: Handle) -> LedgerEntry {
+    LedgerEntry {
+        handle,
+        plugin: PluginId::from("stranger"),
+        capability: Capability::SessionFile {
+            path: "stranger.md".to_string(),
+        },
+        kind: GrantKind::Hot,
+    }
+}
+
+fn carrying(defect: Defect) -> impl Fn() -> DefectiveBackend {
+    move || DefectiveBackend::carrying(defect)
+}
+
+#[test]
+fn a_backend_with_no_defect_passes_every_clause() {
+    conformance::grant_is_replayable(carrying(Defect::None));
+    conformance::revoke_unknown_handle_is_error(carrying(Defect::None));
+    conformance::drained_revoke_removes_object(carrying(Defect::None));
+    conformance::planted_residue_survives_unrelated_revoke(carrying(Defect::None));
+    conformance::snapshot_never_invents_objects(carrying(Defect::None));
+    conformance::live_grants_hold_distinct_handles(carrying(Defect::None));
+    conformance::apply_and_removal_reach_the_universe(carrying(Defect::None));
+    conformance::revoke_of_a_revoked_handle_is_error(carrying(Defect::None));
+}
+
+/// Pins the limit of this seam: a backend answering every snapshot from its own
+/// ledger passes all eight clauses, so no clause can separate enforcing from
+/// reporting. If this test ever fails, the seam grew a real oracle — delete this
+/// test and the README paragraph it belongs to. Never weaken the clause that
+/// caught it.
+#[test]
+fn snapshot_os_state_is_the_only_oracle_a_clause_has() {
+    conformance::grant_is_replayable(carrying(Defect::AMirrorOfItsOwnLedger));
+    conformance::revoke_unknown_handle_is_error(carrying(Defect::AMirrorOfItsOwnLedger));
+    conformance::drained_revoke_removes_object(carrying(Defect::AMirrorOfItsOwnLedger));
+    conformance::planted_residue_survives_unrelated_revoke(carrying(Defect::AMirrorOfItsOwnLedger));
+    conformance::snapshot_never_invents_objects(carrying(Defect::AMirrorOfItsOwnLedger));
+    conformance::live_grants_hold_distinct_handles(carrying(Defect::AMirrorOfItsOwnLedger));
+    conformance::apply_and_removal_reach_the_universe(carrying(Defect::AMirrorOfItsOwnLedger));
+    conformance::revoke_of_a_revoked_handle_is_error(carrying(Defect::AMirrorOfItsOwnLedger));
+}
+
+#[test]
+#[should_panic(expected = "revoking a handle must return the entry the grant issued")]
+fn grant_is_replayable_catches_a_revoke_that_returns_a_stranger() {
+    conformance::grant_is_replayable(carrying(Defect::RevokeReturnsAStranger));
+}
+
+#[test]
+#[should_panic(expected = "revoking the never-granted handle")]
+fn revoke_unknown_handle_is_error_catches_a_success_report() {
+    conformance::revoke_unknown_handle_is_error(carrying(Defect::UnknownHandleReportsSuccess));
+}
+
+#[test]
+#[should_panic(expected = "a drained revoke left")]
+fn drained_revoke_removes_object_catches_a_revoke_that_keeps_the_object() {
+    conformance::drained_revoke_removes_object(carrying(Defect::RevokeKeepsTheObject));
+}
+
+#[test]
+#[should_panic(expected = "removed the unrelated")]
+fn planted_residue_survives_unrelated_revoke_catches_a_revoke_that_tidies_the_universe() {
+    conformance::planted_residue_survives_unrelated_revoke(carrying(
+        Defect::RevokeTidiesTheWholeUniverse,
+    ));
+}
+
+#[test]
+#[should_panic(expected = "which was never granted or planted")]
+fn snapshot_never_invents_objects_catches_a_grant_that_materializes_a_shadow() {
+    conformance::snapshot_never_invents_objects(carrying(Defect::GrantMaterializesAShadow));
+}
+
+#[test]
+#[should_panic(expected = "is already holding")]
+fn live_grants_hold_distinct_handles_catches_one_handle_issued_twice() {
+    conformance::live_grants_hold_distinct_handles(carrying(Defect::OneHandleForEveryLiveGrant));
+}
+
+#[test]
+#[should_panic(expected = "an applied removal left")]
+fn apply_and_removal_reach_the_universe_catches_a_removal_that_removes_nothing() {
+    conformance::apply_and_removal_reach_the_universe(carrying(Defect::RemovalIsANoOp));
+}
+
+#[test]
+#[should_panic(expected = "revoking the already-revoked handle")]
+fn revoke_of_a_revoked_handle_is_error_catches_a_handle_that_revokes_twice() {
+    conformance::revoke_of_a_revoked_handle_is_error(carrying(Defect::ARevokedHandleRevokesAgain));
+}
+
+#[test]
+#[should_panic(expected = "a forced revoke left")]
+fn drained_revoke_removes_object_catches_a_forced_revoke_that_withdraws_nothing() {
+    conformance::drained_revoke_removes_object(carrying(Defect::ForcedRevokeIsALie));
+}
+
+#[test]
+#[should_panic(expected = "did not revoke through")]
+fn live_grants_hold_distinct_handles_catches_a_ledger_keyed_by_class() {
+    conformance::live_grants_hold_distinct_handles(carrying(Defect::ALedgerKeyedByClass));
+}
+
+#[test]
+#[should_panic(expected = "revoking the already-revoked handle")]
+fn revoke_of_a_revoked_handle_is_error_catches_a_reissued_handle_number() {
+    conformance::revoke_of_a_revoked_handle_is_error(carrying(Defect::ARevokedHandleIsReissued));
+}
+
+#[test]
+#[should_panic(expected = "also took the unrelated")]
+fn apply_and_removal_reach_the_universe_catches_a_removal_that_takes_the_whole_class() {
+    conformance::apply_and_removal_reach_the_universe(carrying(Defect::RemovalNukesTheClass));
+}
+
+#[test]
+#[should_panic(expected = "an applied op must materialize")]
+fn apply_and_removal_reach_the_universe_catches_an_op_applied_under_an_impostor() {
+    conformance::apply_and_removal_reach_the_universe(carrying(
+        Defect::EveryOpLandsUnderAnImpostor,
+    ));
+}
