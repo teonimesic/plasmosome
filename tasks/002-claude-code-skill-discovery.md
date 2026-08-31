@@ -1,7 +1,7 @@
 ---
 id: 002
 title: Make the skills discoverable to Claude Code
-status: in_progress
+status: in_review
 priority: 3
 specs: []
 intents: []
@@ -12,7 +12,7 @@ done_when: >-
   ../../.agents/skills/<name>, a fresh clone resolves all of them, and Claude Code
   lists all of them. A skill added later without its symlink is the failure this
   guards against.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/18
 evidence:
 ---
 
