@@ -53,8 +53,8 @@ build against.
 
 That spec is written:
 [`docs/specs/008-cell-recovery-contract.md`](../docs/specs/008-cell-recovery-contract.md). It
-decides all three, and it is `draft` until the owner reads it; this task may not be claimed
-before it is `accepted`.
+decides all three, and it is `draft`; this task may not be claimed before it is `accepted`,
+which happens when the spec's own pull request merges.
 
 ## Plan
 

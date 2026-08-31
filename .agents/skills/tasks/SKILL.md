@@ -11,9 +11,10 @@ afternoon: **vision**, **architecture**, **decisions**, **intents**, **specs**, 
 bottom four have folders — `docs/decisions/`, `docs/intents/`, `docs/specs/` and `tasks/`. The
 top two already live in `README.md` and in each crate's `AGENTS.md`, and stay there.
 
-Most changes need only a task. A change of 100 lines or more, or one that touches enforcement or
-revocation semantics or a public contract, needs an accepted spec first. Only owner-originated
-capability work needs an intent. The two tables below decide; when in doubt, file a task.
+**There is no task without a spec, and no spec without an intent.** A trivial change earns no
+task at all, so the chain never forces a spec for a typo. Everything above that line earns a task,
+that task names the spec it serves, and that spec names the intent it came from. Mapping to a spec
+and an intent that already exist is the normal case; writing new ones is the exception.
 
 To pick work up: run the **heartbeat** (`.agents/skills/heartbeat`) top to bottom — it ends by
 handing you the next task. To file something: copy the matching skeleton out of `docs/templates/`
@@ -51,19 +52,132 @@ Until then, do not create either file. A second copy of the vision would contrad
 
 | Change | Intent | Spec | Task |
 | --- | --- | --- | --- |
-| Trivial fix finished in the same session (under ~20 lines, no contract touched) | no | no | no — the PR is the record |
-| Work that outlives the session, or is handed to another agent | no | no | yes |
-| 100 lines or more, or it touches enforcement or revocation semantics, or a public contract | no | yes — accepted before building starts | yes |
-| Owner-originated capability work, or a change of direction | yes | yes | yes |
+| Trivial fix finished in the same session — under ~20 lines, no contract touched | no | no | no — the PR is the record |
+| Code an existing spec already governs, including a bug that spec did not get right | the one that spec names | that spec | yes |
+| Behavior an existing intent wants and no spec yet describes | that intent | a new one | yes |
+| Anything no existing spec and no existing intent reaches | the owner writes one, or the work does not happen | a new one | yes |
+
+**The line count that decided whether work needed a spec is gone; the one in the first row is not
+the same rule.** It bounds the trivial exemption from above and does nothing else — it says when a
+change is too small to be worth writing down, never when one is big enough to need a spec. Read the
+other way it would be a bypass, and an unbounded "trivial" is a worse one: without a ceiling, a
+500-line change touching no contract and finished in an afternoon would qualify. Size stopped being
+the question everywhere above that row: a 400-line change to code spec 003 already governs needs no
+new document, and a 30-line change to something nothing describes needs the same two links as a
+large one. The old
+threshold also could not be cited in review: four merged pull requests crossed it and none had a
+spec — two of them (126 and 218 lines) had no task either, and two (103 and 167) had a task and no
+spec. Every change that did name a spec was one the plan had already routed through one, so the
+number never decided anything.
+
+## The chain, and the two gates
+
+The links are the `specs:` and `intents:` fields. They are how anyone can tell, without asking,
+whether a piece of work is wanted.
+
+**Mapping is the normal case; writing is the exception.** A bug that exists because a spec did not
+get something right maps to the spec it violates: the spec is already there and so is the intent
+behind it, so that fix needs neither a new document nor an owner decision — it needs the two id
+fields filled in. Most work should be mappable this way. When most of it is not, what has drifted
+is the queue, not the paperwork.
+
+Both gates are on what may be **started**, not on what has been written down:
+
+- **A task may not enter `in_progress` until it has been planned**, and it cannot reach `planned`
+  until `specs:` names an accepted spec.
+- **A spec may not be planned until `intents:` names an approved intent.** An intent on `main` is
+  approved: only the owner writes one, `main` is protected, so a merged intent is one the owner
+  asked for. Nothing else goes in `docs/intents/` — a proposal there would be indistinguishable
+  from an approval.
+
+**The second gate binds a spec being written, not one already accepted.** A spec that is already
+`accepted` stays usable, and a task naming it may be planned, whether or not anything above it is
+filled in. Otherwise this rule would strand finished work behind a document only the owner can
+write — including the highest-priority task in the queue, whose two specs both carry `intents: []`.
+Backfilling those is worth doing and is the owner's to start; nothing waits on it. What the gate
+stops is a *new* spec written to justify work already filed, which is the direction the drift
+actually runs.
+
+A task's `intents:` is copied from the spec it names, `[]` included. It is there so a search over
+tasks and a search over specs return the same answer, not as a second gate to clear.
+
+**The owner approves intents. Nobody approves specs.** The planner writes a spec and accepts it.
+The gate sits where the question is "is this wanted", which only the owner can answer, and not
+where the question is "is this right", which a reviewer answers on the pull request.
+
+### What predates the rule
+
+`main` already holds tasks and specs that name nothing above them. They were filed correctly under
+the rule in force at the time, and **this one does not reach back**: they stay valid and they stay
+merged. **Editing such a file is not gated on backfilling it** — a correction, a rewritten `## Why`,
+a `pr:` or `evidence:` field, a flip to `in_review` or `done`, and any change elsewhere that happens
+to touch an unmapped task file. None of that waits for a mapping.
+
+**Two status values are outside that exception, because they are not bookkeeping — they are the work
+starting.** A flip to `planned` or to `in_progress` clears the gates above or it does not happen,
+and being a legacy file buys no discount on them. Naming the two is deliberate: stated in general
+terms this keeps coming out ambiguous between the file and the work, and "a status flip is fine"
+is exactly the sentence that lets `status: planned` through the gate this section exists to hold.
+The greps under "Finding things" are the waiting list that gate creates, not a list of faults.
+
+Two shapes that look like breakage and are not. An **accepted spec with an empty `intents:`** keeps
+its place; only a spec being written has to name one. And a **task whose chain closes one layer up**
+is mapped even while its own `intents:` is blank — if the task names a spec and that spec names an
+intent, the link is sound and the blank field is a missing copy, not a missing link. The copy exists
+so a search over tasks and a search over specs return the same answer; filling it in is bookkeeping,
+and the greps print those tasks until someone does.
+
+### What the gates refuse
+
+**A task that maps to no spec and to no plausible intent is evidence the work is not wanted.** It
+is not a prompt to write an intent that would make it wanted. An intent written to justify work
+already filed turns the owner's gate into a rubber stamp, and that gate is the only thing between
+the queue and everything anybody has ever noticed.
+
+There are two honest endings for a task you are filing **now**. Put the question to the owner in
+your own words and let them say whether an intent covers it. Or drop it, and write down why. Filing
+it and letting it wait is neither, and it is how a queue fills with work nobody chose.
+
+The legacy files above are not this. They are already filed, and mapping or dropping them is the
+backfill rather than a fresh filing — which is why they may sit on the waiting list while a new one
+may not be put there.
+
+### A review finding that maps to nothing
+
+A finding is fixed in the pull request that raised it. That rule is unchanged and it is still the
+default.
+
+What changes is the fallback. **Filing a finding as a task is only available when the finding maps
+to a spec.** A finding against behavior some spec requires is an ordinary task: it names that spec
+and joins the queue. A finding against something no spec covers has exactly two endings — fixed
+here, or dropped with the reasoning written in the thread. There is no third one, and "file it and
+move on" was the third one.
+
+This half is what makes the chain worth having. Without it the rule adds bookkeeping to a queue
+that keeps growing at the same rate, because every change produces a review, every review produces
+findings, and every finding used to produce a task.
+
+**The failure this prevents, concretely.** The queue stopped being fed by the plan and started
+being fed by the review process. On the day this was written `main` held twenty tasks, eight
+naming no spec and sixteen naming no intent, and seven more had been filed in a single day, none
+of them tracing to either. That generates work in proportion to how much reviewing happens rather
+than to what the product needs, and it compounds. You can tell whether this rule is working by
+whether the count of tasks naming no spec falls; if it climbs, it is not.
 
 ## Who writes what
 
-- **Intent** — the owner. An agent may transcribe it word for word. Never summarize it.
-- **Spec** — the planner, using the strongest model available. It becomes `status: accepted`
-  only after the owner has read it.
+- **Intent** — the owner. An agent may transcribe it word for word. Never summarize it, and
+  never write one on the owner's behalf because a task needed something to point at.
+- **Spec** — the planner, using the strongest model available. It becomes `status: accepted` when
+  its pull request merges, and the planner is who accepts it. The owner's approval is spent on the
+  intent above it.
 - **Task, and its `## Plan`** — the planner.
 - **Execution** — the next model down, in its own worktree, reading the task and the files the
   task names, and nothing else.
+
+**A decision is not a link in the chain.** It records why a choice was made, and a task may cite
+one in `refs:`, but it never stands in for the spec a task has to name. Where a decision settles
+something a task must build against, the buildable half of it belongs in a spec.
 
 **The `## Plan` belongs in the task, never in the spec.** A spec says what must be true and
 outlives many tasks. A plan is tied to one branch and is stale the day it merges.
@@ -99,7 +213,10 @@ Links point upward, and they are always **one-line flow lists of those three-dig
 - a spec carries `intents: [003]`
 - a task carries `specs: [001, 004]` and `intents: [003]`
 
-**Both fields are always present.** Write `[]` when there is nothing to link. An absent field
+**Both fields are always present.** Write `[]` while the link has not been made yet — a `todo`
+task nobody has planned is the one place that legitimately stays empty, and it is what the gates
+above refuse to let past. That is also why the templates ship `[]` rather than a placeholder:
+a copied-and-unfilled `[NNN]` would read as a link and pass every grep below. An absent field
 would force every search to be written twice. Keeping them on one line, anchored at the start of
 the line, is what keeps the two id namespaces apart and stops a search matching body prose.
 
@@ -134,7 +251,7 @@ A few field values worth stating outright:
 | Status | Means | Entering it requires |
 | --- | --- | --- |
 | `todo` | filed | `done_when:` filled in |
-| `planned` | ready to hand to an executor | `## Plan` written; if the change crosses the spec threshold above, `specs:` names an accepted spec |
+| `planned` | ready to hand to an executor | `## Plan` written; `specs:` names an accepted spec, and `intents:` carries whatever that spec carries |
 | `in_progress` | claimed | branch `task-NNN-slug`, in the executor's own worktree |
 | `in_review` | PR open | `pr:` set |
 | `done` | squash-merged | `evidence:` not empty |
@@ -167,8 +284,14 @@ grep -l '^priority: 1' tasks/*.md
 grep -l '^specs:.*\b001\b' tasks/*.md
 grep -l '^intents:.*\b003\b' docs/specs/*.md
 grep -l '^intents:.*\b003\b' tasks/*.md
+grep -l '^specs: \[\]' tasks/*.md
+grep -l '^intents: \[\]' tasks/*.md
+grep -l '^intents: \[\]' docs/specs/*.md
 grep -h '^title:' /dev/null $(grep -l '^status: todo' tasks/*.md)
 ```
+
+The last three are the gates read backwards: tasks that may not be planned yet, tasks whose spec
+names no intent, and specs that may not be planned yet. All three should be getting shorter.
 
 ## Checking whether a task is really done
 
@@ -192,16 +315,21 @@ gh pr view <number> --json state,mergeCommit
 on a branch, through a PR. Nothing is written straight to `main`. That has one consequence people
 trip over, so it is worth stating plainly.
 
-**A spec that gates work lands in its own PR, before the work branch exists.** The rule is that a
-task crossing the spec threshold may not be claimed until its spec is `accepted`, and a spec is
-`accepted` once its PR merges. So capability work is two PRs, in order:
+**A spec lands in its own PR, before the work branch exists.** No task may be claimed until the
+spec it names is `accepted`, and a spec is `accepted` once its PR merges. So work that needs a new
+spec is two PRs, in order:
 
-1. `docs(spec): NNN <title>` — the intent, if there is one, and the spec at `status: draft`. It
-   merges after review; that merge is what makes it `accepted`. Flip the status to `accepted` in
-   the last commit before merging, so `main` never holds a spec whose status lies.
+1. `docs(spec): NNN <title>` — the spec at `status: draft`, its `intents:` naming an intent that
+   is already on `main`. It merges after review; that merge is what makes it `accepted`. Flip the
+   status to `accepted` in the last commit before merging, so `main` never holds a spec whose
+   status lies.
 2. The work branch, `task-NNN-slug` — the code, plus the task's own status flips.
 
-Small work skips step 1 entirely and is one PR.
+An intent reaches `main` the same way and earlier still, in a PR of its own carrying the owner's
+words as the owner wrote them.
+
+Work whose spec already exists skips step 1 and is one PR, which is what most work should look
+like. Trivial work skips the task as well.
 
 - Filing a task, and every status flip up to `in_review`, rides the work branch itself.
 - `in_review` needs `pr:`, which does not exist until the PR is open. Set it in a second commit

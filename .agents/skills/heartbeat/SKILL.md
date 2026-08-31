@@ -70,8 +70,8 @@ For every task carrying a `pr:`: `MERGED` means set `done` and record the merge 
 `planned`. Record in `## Notes` what established the truth. A stale queue is worse than no queue,
 because people believe it.
 
-**4. Pending specs.** Work that was described and then dropped hides in two places: a spec still
-in draft that no task implements, and an intent with no spec at all.
+**4. Pending specs, and unmapped work.** Work that was described and then dropped hides in two
+places: a spec still in draft that no task implements, and an intent with no spec at all.
 
 ```shell
 for f in docs/specs/*.md; do
@@ -89,6 +89,25 @@ done
 Both loops derive the ids from the files, so a record numbered anything is covered. Silence means
 nothing is pending. For anything they print, decide out loud: dispatch a planner for it, or say
 why not. The decision is yours; the plan is not.
+
+Then read the chain the other way, for work nothing asked for:
+
+```shell
+grep -l '^specs: \[\]' tasks/*.md
+grep -l '^intents: \[\]' tasks/*.md
+grep -l '^intents: \[\]' docs/specs/*.md
+```
+
+These are not planner dispatches. A task naming no spec may not be planned and so may not be
+started — so the answer is to map it to a spec that already exists, to put the question to the
+owner in your own words, or to recommend dropping it. The specs the third line prints are a
+weaker signal: an accepted spec with no intent still works, and the line is there so the backfill
+stays visible rather than to stop anything. **Never close the gap by writing an intent yourself**; that is the one move
+`.agents/skills/tasks` rules out, because an intent written to justify a filed task approves the
+work on the owner's behalf.
+
+Both lists shrinking over sessions is the signal that the queue is being fed by the plan. Both
+growing is the signal it is being fed by the review process instead.
 
 **5. Clean up.** Remove the worktrees of branches that have merged, and prune. A worktree left
 behind pins its branch and blocks the next person from deleting it. **This runs before the count
@@ -209,7 +228,12 @@ grep -l '^status: todo' tasks/*.md
 Step 3 puts released claims back to `planned`, so this is also how abandoned work returns to
 circulation.
 
-**8. File.** Anything you learned this session that must outlive it becomes a task file before the
-session ends — dispatch a planner to write it. The only writing into `tasks/` you do yourself is
-step 3's reconciliation, and only for a claim whose author is gone: an author still open closes its
-own task, as `.agents/skills/pr-review` has it.
+**8. File — only what maps.** Anything you learned this session that must outlive it becomes a
+task file before the session ends **if it maps to a spec** — dispatch a planner to write it. What
+maps to nothing does not become a task: put it to the owner as a question, or write down why it is
+being dropped. `.agents/skills/tasks` has the rule and the reason; this step is where it is easiest
+to break, because everything learned late in a session looks worth keeping.
+
+The only writing into `tasks/` you do yourself is step 3's reconciliation, and only for a claim
+whose author is gone: an author still open closes its own task, as `.agents/skills/pr-review` has
+it.

@@ -20,8 +20,9 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    - **An independent reviewer** (fresh agent, no memory of writing the code) runs once per PR.
      Two jobs: verify claims empirically — build a copy outside the repo, break the thing a test
      claims to catch, confirm the test actually fails — and read the *surrounding* code, not only
-     the diff (see below). When the task's `specs:` field names one, a third job: read the diff
-     against that spec's `## Acceptance` list and say, line by line, which lines are met.
+     the diff (see below). A third job, on every PR that has a task: read the diff against the
+     `## Acceptance` list of the spec its `specs:` field names, and say line by line which are
+     met.
 4. **Watch for the review rather than waiting for it.** CodeRabbit posts minutes after a push,
    and again after every later push, so an agent that checks once and stops has stalled. Poll
    until the review lands and the thread count stops moving:
@@ -77,6 +78,20 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    `@coderabbitai review` and wait for a `Review completed` on the current head. Merging on a
    rate-limited green ships a change nobody reviewed, and neither the check state nor an empty
    thread list will ever say so.
+
+   **There is a fourth meaning, and it makes the reviews endpoint useless for this question.** A
+   review that finds nothing creates **no review object at all** — it posts its walkthrough as an
+   issue comment and stops. The endpoint returns zero entries, not an entry with an empty body. PR
+   #39 read `Review completed` with zero reviews and one issue comment; #34 and #36 read the same
+   status with two and four. So zero reviews cannot tell a clean pass from a review that never
+   ran, and to anything that counts them the two are identical.
+
+   That settles which signal answers which question. **Did a round happen** is the status
+   description on the head you are about to merge, and nothing else — not the check state, not a
+   review appearing, not the thread count. **What did it say** is the reviews endpoint, read only
+   after the description has already told you a review exists. A wait keyed on a review appearing
+   never trips on a clean one and hangs until it times out; a merge gate keyed on the same
+   evidence cannot see the difference between "nothing to say" and "never spoke".
 
    **The dangerous moment for a rate-limited green is the push you just made, not a quiet PR.**
    It arrives on a new head seconds after you act, which is exactly when a wait is primed to
@@ -202,6 +217,13 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    The one exception is argued, never asserted: a finding needing a decision the author cannot
    make, or belonging to a unit this PR is explicitly not building. File it **and** say in the
    thread what is missing and who has to supply it. "Good point, filed" is not that.
+
+   **And a finding may only be filed when it maps to a spec.** A finding against behavior some
+   spec requires becomes an ordinary task naming that spec. A finding against something no spec
+   covers cannot become one: fix it here, or drop it and write the reasoning in the thread.
+   `.agents/skills/tasks` says why, under "A review finding that maps to nothing" — the short
+   version is that filing was how the queue came to grow with the amount of reviewing rather than
+   with what the product needed.
 6. `gh pr merge --squash` once CI is green, the required rounds are done, the head's `CodeRabbit`
    status reads `Review completed` rather than `Review rate limited`, the review queue has been
    quiet for five minutes (step 4), and every review thread is resolved — `main` requires
