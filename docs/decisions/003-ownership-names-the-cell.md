@@ -14,16 +14,18 @@ only which plasmid asked for it.
 That is fine while a plasmid can only ever be attached once. It stops being fine the moment the
 same plasmid is attached to two cells of one instance, which the control protocol allows. Spec
 001 §2 addresses down `(kernel, cell, plasmid)`, so a plasmid is named relative to a cell, and
-the verb schemas carry it: `plasmid.list`, `plasmid.add`, `plasmid.remove` and `plasmid.reload`
-each take kernel, cell and plasmid as separate parameters (§3.9–3.12), and `plasmid.add`'s `mock`
-is chosen per attachment (§3.10). Nothing in the frozen set asserts uniqueness above the cell.
-The one line that reads that way on a fast skim is `plasmosome.list`'s instance-level
-`"plasmids": 3` (§3.2), which counts attachments rather than names. A plasmid is an attachment to
-a cell, not a thing an instance has one of.
+the verb schemas carry it: `plasmid.add`, `plasmid.remove` and `plasmid.reload` each take
+kernel, cell and plasmid as separate parameters, `plasmid.list` is addressed to one cell and
+returns that cell's plasmids (§3.9–3.12), and `plasmid.add`'s `mock` is chosen per attachment
+(§3.10). Nothing in the frozen set asserts uniqueness above the cell. The one line that reads
+that way on a fast skim is `plasmosome.list`'s instance-level `"plasmids": 3` (§3.2) — but §3.2
+never says what that number counts, so it settles nothing in either direction. A plasmid is an
+attachment to a cell, not a thing an instance has one of.
 
-Spec 008's recovery work is where this stopped being theoretical. Quarantine reports every object
-"owned by a plugin the ledger names", and recovery unions expected state across adopted cells —
-both of which need to answer *which cell*, and neither can.
+Spec 008's recovery work is where this stopped being theoretical. Quarantine reports every
+snapshot object whose owner is a plugin named by a line of the cell's ledger, and recovery unions
+expected state across adopted cells — both of which need to answer *which cell*, and neither
+can.
 
 ## Decision
 
@@ -59,7 +61,8 @@ will come back: the controller refuses a `plasmid.add` naming a plasmid already 
 another cell, so uniqueness is a constraint the runtime maintains rather than a claim the type
 makes. It does not fail quietly, and it deserves a straight answer. The objection is not that the
 refusal is hard to signal — error `102` is already `already_exists` / `already_attached` and fits
-without a new code. It is what the rule costs. It removes the per-cell mock mode of §3.10. And it
+without a new code. It is what the rule costs. It removes the one thing §3.10 allows that uniqueness
+cannot express — one plasmid holding a different mode in each of two cells. And it
 cannot stop at `plasmid.add`: §3.5 germinates a cell from a genome and attaches that genome's
 whole plasmid set, so the same rule must refuse the second `cell.new --genome researcher`. Two
 cells from one genome is the ordinary case — a second researcher, a retry alongside the first —
@@ -95,17 +98,21 @@ than a widening.
   an object's owner is built from `grant.plugin`. A cell has to reach that point: either those
   types grow one — they are frozen too — or every construction site supplies it.
 - **`OsState`'s lookups, which need rework rather than a new signature.** `owner_of`, `contains`
-  and `remove` key on class and key alone, and `owner_of` returns the first match. That is total
-  today, because a repeated class and key could only ever mean one object. After the widening it
-  can mean two, and `remove` would silently withdraw whichever cell sorts first — so the case it
-  breaks on is precisely the case this decision exists for. `plasmosome-testkit`'s conformance
-  suite asserts through `owner_of`, so every backend implementation meets this, not only ours.
+  and `remove` key on class and key alone, and `owner_of` returns the first match — so `remove`,
+  which resolves its owner through that match, can withdraw an object it was not asked for. That
+  hazard exists already: `SetProxyMap` drops its `route` when forming the key, so two plasmids
+  proxying one host collide under a single class and key today. What the widening changes is how
+  ordinary the collision becomes, since two cells running one plasmid is the case this decision
+  exists for. The fix is a cell in the lookup key, not a new return type. These are inherent
+  methods on the `OsState` every backend returns from `snapshot_os_state`, and the conformance
+  suite drives them — nine of its assertions go through `contains` — so this reaches every
+  backend implementation, not only ours.
 
 Two neighbours this deliberately does not reach. `plasmosome-ledger`'s `LogRecord` and `Ledger`
 stay plasmid-keyed, because spec 008 takes the cell from the ledger's path and the line does not
 need to carry one. `ToolRegistry` maps a tool name to a `PluginId` with no cell, and
-`withdraw_plugin` withdraws across every cell a plasmid serves — the same assumption in a fifth
-place, left alone only because nothing wires it into a controller yet.
+`withdraw_plugin` withdraws across every cell a plasmid serves — the same assumption again,
+left alone only because nothing wires it into a controller yet.
 
 Spec 008 is unblocked by this and needs a small follow-up: `found` and the union behind
 `expected` restated in terms of the decided identity, plus acceptance cases for two cells sharing
