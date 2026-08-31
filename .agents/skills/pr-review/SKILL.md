@@ -23,6 +23,29 @@ description: How a change reaches main — PR-only workflow, review rounds by di
      the diff (see below). A third job, on every PR that has a task: read the diff against the
      `## Acceptance` list of the spec its `specs:` field names, and say line by line which are
      met.
+
+     **Run it on a top-tier model.** This is the one step whose whole job is to disagree, so it
+     is where capability matters most. Reaching for a smaller model because the review is "just a
+     check" is the specific mistake: a weak reviewer produces agreeable text and no findings,
+     which reads exactly like a clean pass.
+
+     **A different model family would be better, and is not available here** — every model on
+     offer is a Claude one, so name that limit rather than counting two different model names as
+     independence achieved. The proxy we can actually apply is a model different from the
+     author's: two agents on one model correlate, so a review that only confirms the author's
+     reasoning looks like diligence and is not evidence. Today that means `model: "fable"` on the
+     Agent tool, or `opus` where the author was Fable — the difference is the point, not the
+     name. A same-model review still finds real defects; it just cannot be counted as this pass.
+
+     **If you can spawn the reviewer, do; if you cannot, ask the orchestrator.** Whether a
+     dispatched agent has the Agent tool varies by how it was dispatched, so check what you have
+     rather than assuming either way. Neither answer is an excuse to skip the step or to review
+     your own PR on your own model.
+
+     **The output goes on the PR as an issue comment**, not only into chat, opening with
+     `Model: <name>` and the head SHA it read, then saying what was examined, what was found,
+     what the author changed, and what was declined with the reasoning. Naming the model is what
+     makes a weak-model review visible afterwards instead of indistinguishable from a strong one.
 4. **Watch for the review rather than waiting for it.** CodeRabbit posts minutes after a push,
    and again after every later push, so an agent that checks once and stops has stalled. Poll
    until the review lands and the thread count stops moving:
@@ -224,12 +247,14 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    `.agents/skills/tasks` says why, under "A review finding that maps to nothing" — the short
    version is that filing was how the queue came to grow with the amount of reviewing rather than
    with what the product needed.
-6. `gh pr merge --squash` once CI is green, the required rounds are done, the head's `CodeRabbit`
-   status reads `Review completed` rather than `Review rate limited`, the review queue has been
-   quiet for five minutes (step 4), and every review thread is resolved — `main` requires
-   conversation resolution, so an open thread is what holds a merge. Resolving a thread by
-   disagreeing with it is allowed; merging on a disagreement you did not write down in the thread
-   is not.
+6. `gh pr merge --squash` once CI is green, the required rounds are done, **the independent
+   review is on the PR as an issue comment opening with the literal `Model:` marker and the head
+   it read, with nothing changed since that head beyond what that review asked for** (step 3; for
+   a rebase-only move, step 4's diff-of-diffs settles it), the head's `CodeRabbit` status reads
+   `Review completed` rather than `Review rate limited`, the review queue has been quiet for five
+   minutes (step 4), and every review thread is resolved — `main` requires conversation
+   resolution, so an open thread is what holds a merge. Resolving a thread by disagreeing with it
+   is allowed; merging on a disagreement you did not write down in the thread is not.
 
    **Merge the commit you validated, not whatever the head is by then.** `gh pr merge` takes the
    current head, so anything that checks a SHA and merges afterwards — a script, or you across two
@@ -304,7 +329,8 @@ Size is lines changed, excluding lockfiles and generated files.
 | 100–1000 | **2** |
 | > 1000 | **3** |
 
-The independent reviewer runs once per PR regardless of size.
+The independent reviewer is separate from the rounds above and runs at least once per PR. Diff
+size never adds an independent pass; a rewrite beyond what that review asked for does — step 6.
 
 ## Review the neighbourhood, not just the diff
 

@@ -27,6 +27,11 @@ dispatches,
 watches for work that has stalled, and puts in front of a person anything needing a decision or an
 action only a person can take.
 
+**The author spawns the independent reviewer where it can; the orchestrator is the fallback.**
+One author had no Agent tool, stopped mid-PR and asked, which was the right move rather than a
+failure — so spawn it when you can and ask when you cannot. `.agents/skills/pr-review` says what
+the reviewer must run on, why, and where its output goes.
+
 **Review findings go back to the agent that wrote the change.** That agent still holds the
 context — why the code is shaped the way it is, what it already tried and dropped. Resume it
 rather than spawning a fresh one to work all of that out again, and rather than fixing the finding
