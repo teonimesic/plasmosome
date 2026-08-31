@@ -63,7 +63,9 @@ impl std::error::Error for SpawnError {}
 /// check and the signal, and the freed pid may be reused before the signal
 /// lands. There is no portable way to close that window — `pidfd` is Linux-only
 /// and this crate targets macOS first — so the constraint is stated rather than
-/// defended in code.
+/// defended in code. Breaking it costs the child's workers: a child something
+/// else reaped is recorded as `Lost` and never signalled, so the process group
+/// it led keeps running.
 ///
 /// The guarantee holds only if the handle is dropped: `mem::forget` leaks a
 /// running child.
@@ -215,6 +217,7 @@ mod tests {
     use super::*;
 
     const DEADLINE: Duration = Duration::from_secs(5);
+    const SETTLE: Duration = Duration::from_millis(300);
 
     struct ExitWith(i32);
 
@@ -224,9 +227,18 @@ mod tests {
         }
     }
 
-    struct ForkAWorkerThenSleep(i32);
+    #[derive(Clone, Copy)]
+    enum ThenTheChild {
+        Sleeps,
+        Exits,
+    }
 
-    impl Launch for ForkAWorkerThenSleep {
+    struct ForkAWorker {
+        report_to: i32,
+        then: ThenTheChild,
+    }
+
+    impl Launch for ForkAWorker {
         fn launch(self) -> ! {
             let worker = unsafe { libc::fork() };
             if worker == 0 {
@@ -238,10 +250,13 @@ mod tests {
             if worker < 0 {
                 unsafe { libc::_exit(71) }
             }
-            let bytes = (worker as i32).to_ne_bytes();
-            unsafe { libc::write(self.0, bytes.as_ptr() as *const libc::c_void, 4) };
-            loop {
-                unsafe { libc::pause() };
+            let bytes = worker.to_ne_bytes();
+            unsafe { libc::write(self.report_to, bytes.as_ptr() as *const libc::c_void, 4) };
+            match self.then {
+                ThenTheChild::Exits => unsafe { libc::_exit(0) },
+                ThenTheChild::Sleeps => loop {
+                    unsafe { libc::pause() };
+                },
             }
         }
     }
@@ -352,22 +367,81 @@ mod tests {
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
-    fn spawn_with_worker() -> (VmmChild, i32) {
+    struct PipeEnd(i32);
+
+    impl Drop for PipeEnd {
+        fn drop(&mut self) {
+            unsafe { libc::close(self.0) };
+        }
+    }
+
+    struct ForkedWorker {
+        child: VmmChild,
+        worker: i32,
+        liveness: PipeEnd,
+    }
+
+    fn spawn_with_worker(then: ThenTheChild) -> ForkedWorker {
         let mut fds = [0; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "a pipe opens");
         let (read_end, write_end) = (fds[0], fds[1]);
-        let child = VmmChild::spawn(ForkAWorkerThenSleep(write_end)).expect("fork succeeds");
+        let child = VmmChild::spawn(ForkAWorker {
+            report_to: write_end,
+            then,
+        })
+        .expect("fork succeeds");
         unsafe { libc::close(write_end) };
         let mut buf = [0u8; 4];
         let read = unsafe { libc::read(read_end, buf.as_mut_ptr() as *mut libc::c_void, 4) };
-        unsafe { libc::close(read_end) };
         assert_eq!(read, 4, "the child reports the worker it forked");
         let worker = i32::from_ne_bytes(buf);
         assert!(
             worker > 0,
             "the reported worker pid must be a real process, got {worker}"
         );
-        (child, worker)
+        ForkedWorker {
+            child,
+            worker,
+            liveness: PipeEnd(read_end),
+        }
+    }
+
+    fn holds_the_pipe_open(liveness: &PipeEnd, patience: Duration) -> bool {
+        let mut watched = libc::pollfd {
+            fd: liveness.0,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = libc::c_int::try_from(patience.as_millis()).expect("the patience fits an int");
+        loop {
+            let ready = unsafe { libc::poll(&mut watched, 1, millis) };
+            if ready == 0 {
+                return true;
+            }
+            if ready > 0 {
+                return false;
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EINTR),
+                "watching the worker's end of the pipe must not fail"
+            );
+        }
+    }
+
+    fn reap_externally(pid: i32) {
+        let mut status: libc::c_int = 0;
+        loop {
+            let reaped = unsafe { libc::waitpid(pid, &mut status, 0) };
+            if reaped == pid {
+                return;
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EINTR),
+                "the reaper competing with the handle must take the child's exit status"
+            );
+        }
     }
 
     fn assert_dies(worker: i32, context: &str) {
@@ -382,7 +456,8 @@ mod tests {
 
     #[test]
     fn killing_a_child_kills_the_workers_it_forked() {
-        let (mut child, worker) = spawn_with_worker();
+        let forked = spawn_with_worker(ThenTheChild::Sleeps);
+        let (mut child, worker) = (forked.child, forked.worker);
         assert!(alive(worker), "the worker is running before the kill");
 
         child.kill().expect("the child is signalled");
@@ -397,10 +472,11 @@ mod tests {
 
     #[test]
     fn dropping_a_child_kills_the_workers_it_forked() {
-        let (child, worker) = spawn_with_worker();
+        let forked = spawn_with_worker(ThenTheChild::Sleeps);
+        let worker = forked.worker;
         assert!(alive(worker), "the worker is running before the drop");
 
-        drop(child);
+        drop(forked.child);
 
         assert_dies(worker, "the child that forked it");
     }
@@ -408,19 +484,7 @@ mod tests {
     #[test]
     fn a_child_reaped_elsewhere_is_recorded_as_lost() {
         let mut child = VmmChild::spawn(ExitWith(0)).expect("fork succeeds");
-        let pid = child.pid();
-        let mut status: libc::c_int = 0;
-        loop {
-            let reaped = unsafe { libc::waitpid(pid, &mut status, 0) };
-            if reaped == pid {
-                break;
-            }
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::EINTR),
-                "the external reap must succeed"
-            );
-        }
+        reap_externally(child.pid());
 
         assert_eq!(
             child.state(),
@@ -433,6 +497,24 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "dropping a child already recorded terminal must not wait on a pid it does not own"
+        );
+    }
+
+    #[test]
+    fn a_second_reaper_leaves_the_childs_workers_running() {
+        let forked = spawn_with_worker(ThenTheChild::Exits);
+        let worker = forked.worker;
+        reap_externally(forked.child.pid());
+
+        drop(forked.child);
+
+        let survived = holds_the_pipe_open(&forked.liveness, SETTLE);
+        if survived {
+            unsafe { libc::kill(worker, libc::SIGKILL) };
+        }
+        assert!(
+            survived,
+            "worker {worker} was signalled after a competing reaper had already taken the child's exit status, so drop reached a pid it no longer owns"
         );
     }
 
