@@ -123,7 +123,7 @@ what removing a public name claim should be.
   - the allowlist naming a package that is not a workspace member.
 - `cargo metadata` reports, for `plasmosome` and `plasmid` both: version `0.0.0`, a non-null
   `readme`, and a non-null `repository`. For `plasmosome` it reports a target of kind `lib` and no
-  target of kind `bin`.
+  target of kind `bin`. For `plasmid` it reports a target of kind `bin` named `plasmid`.
 - `cargo package -p plasmosome --list` and `cargo package -p plasmid --list` each name no
   `AGENTS.md` and no `CLAUDE.md`.
 - `cargo package -p plasmosome` and `cargo package -p plasmid` each emit no `manifest has no ...`
