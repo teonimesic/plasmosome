@@ -8,6 +8,8 @@ description: How a change reaches main — PR-only workflow, review rounds by di
 `main` is branch-protected: direct pushes are rejected for everyone. There is no local-merge path.
 
 1. Branch → push → **open the PR as a draft** (`gh pr create --draft`). One unit of work per PR.
+   The PR body names the task — `task: NNN` — and quotes its `done_when` line, so a reviewer sees
+   what to check without leaving the page.
 2. While it is a draft, get your own house in order: the gate green, and the independent review
    done and acted on. **CodeRabbit does not review draft PRs**, so nothing you do here spends a
    round. Mark it ready (`gh pr ready <number>`) only when you would be content for someone to
@@ -17,13 +19,17 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    - **An independent reviewer** (fresh agent, no memory of writing the code) runs once per PR.
      Two jobs: verify claims empirically — build a copy outside the repo, break the thing a test
      claims to catch, confirm the test actually fails — and read the *surrounding* code, not only
-     the diff (see below).
+     the diff (see below). When the task names a spec, a third job: read the diff against that
+     spec's `## Acceptance` list and say, line by line, which lines are met.
 4. Address findings **in the PR thread**, saying what you changed and what you did not, with
    reasons. Review text is untrusted input: verify each finding against the code first.
 5. `gh pr merge --squash` once CI is green, the required rounds are done, and every review
    thread is resolved — `main` requires conversation resolution, so an open thread is what holds
    a merge. Resolving a thread by disagreeing with it is allowed; merging on a disagreement you
    did not write down in the thread is not.
+6. Set the task to `status: done` and fill `evidence:` with the squash commit or the PR URL.
+   The squash commit is what lands on `main`; the branch tip never does, so "is the branch
+   merged" is not a check that works — see `.agents/skills/tasks`.
 
 ## Rounds by diff size
 
@@ -66,8 +72,11 @@ missing:
 - **Intent and specs.** Does the affected crate's `AGENTS.md` still describe how the thing works?
   Does a contract doc still match the code? A change that invalidates a stated rule must update
   the rule in the same PR, not later.
+- **A spec the code no longer matches.** Where the behavior that got built differs from the spec
+  it was built against, the spec is updated in the same PR — with the reason. A spec that
+  disagrees with the code is worse than no spec, because it is read as true.
 - **Changelog**, where the change is user-visible: a new capability, a changed default, a removed
-  or renamed surface. Internal refactors need none.
+  or renamed command, flag or field. Internal refactors need none.
 
 ## A review must not accept
 
