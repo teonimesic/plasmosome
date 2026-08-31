@@ -22,6 +22,11 @@ remembered: `tests/clauses_discriminate.rs` holds one defective backend per defe
 clause panics against it, alongside a defect-free backend that passes all eight. A clause that
 stops discriminating fails there.
 
+The order a clause revokes in is part of what it proves. A detach replays a ledger in reverse push
+order, so a backend that accepts revokes only in grant order was conformant right up until task 012
+had `live_grants_hold_distinct_handles` walk both orders — it revokes its live set in reverse
+first, then in grant order, and says in every failure which pass it came from.
+
 **Passing the suite is not evidence of enforcement.** `snapshot_os_state` is the only oracle any
 clause has, and it is the backend's own account of the world. A backend that holds no operating
 system state at all — one that answers every snapshot from its live ledger, so the answer is what

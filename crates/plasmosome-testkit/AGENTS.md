@@ -63,6 +63,12 @@ mocks it in the test.
   to add a clock trait — not before.
 - **Builders carry only what a test in this repository uses.** A helper written for a caller that
   does not exist is a guess about the next test.
+- **A clause that revokes a set of live grants walks both orders.** `plasmosome-ledger`'s
+  `replay` withdraws effects in reverse push order, so a suite that only ever revokes in grant
+  order certifies a backend that refuses the first handle a detach reaches for.
+  `live_grants_hold_distinct_handles` runs its revoke phase twice, reverse first, and every
+  message in that phase names which pass it came from. A new clause holding more than one live
+  grant does the same.
 - **The fake does not model path containment.** `OsState` is a flat set of objects in five
   classes. A mount at `/workspace` and a socket at `/workspace/run/egressd.uds` are unrelated
   entries; nothing in the fake knows one sits inside the other. So in

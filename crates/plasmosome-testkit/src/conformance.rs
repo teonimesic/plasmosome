@@ -197,55 +197,64 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
 
 /// No two grants that are live at the same moment hold the same handle, and
 /// every one of them still revokes — including two grants of one capability
-/// class, which two plugins each holding a session file produce every day. A
-/// backend that reissues a live handle breaks a ledger replay at the second
-/// revoke: the handle is already spent, `UnknownHandle` aborts the detach, and
-/// every effect below it stays granted. A backend that keys its ledger by class
-/// instead of by handle strands the first of the two the same way, and one that
+/// class, which two plugins each holding a session file produce every day. The
+/// live set is revoked twice: once in the reverse push order a ledger replay
+/// walks on detach, and once in grant order. A backend that accepts a revoke
+/// only for the oldest live handle satisfies the grant-order pass and then
+/// strands every effect below the first one a detach reaches for. A backend
+/// that reissues a live handle breaks a ledger replay at the second revoke: the
+/// handle is already spent, `UnknownHandle` aborts the detach, and every effect
+/// below it stays granted. A backend that keys its ledger by class instead of by
+/// handle strands one of the two session files the same way, and one that
 /// withdraws whichever object of the class it finds first takes the wrong
 /// plugin's session file while still leaving the universe empty at the end.
 pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() -> B) {
-    let mut backend = make();
-    let mut live: Vec<(LedgerEntry, OsObject)> = Vec::new();
-    for grant in grants_with_two_of_one_class() {
-        let object = materialized(&grant);
-        let entry = backend.grant(grant);
-        if let Some((held, _)) = live.iter().find(|(held, _)| held.handle == entry.handle) {
-            panic!(
-                "the grant of {} for `{}` was issued {}, the handle the live grant of {} for `{}` is already holding",
-                entry.capability.class_str(),
-                entry.plugin,
-                entry.handle,
-                held.capability.class_str(),
-                held.plugin
-            );
-        }
-        live.push((entry, object));
-    }
-    for (entry, object) in live {
-        backend
-            .revoke(entry.handle, DrainSpec::graceful(DRAIN))
-            .unwrap_or_else(|error| {
+    for order in [RevokeOrder::ReversePush, RevokeOrder::GrantOrder] {
+        let mut backend = make();
+        let mut live: Vec<(LedgerEntry, OsObject)> = Vec::new();
+        for grant in grants_with_two_of_one_class() {
+            let object = materialized(&grant);
+            let entry = backend.grant(grant);
+            if let Some((held, _)) = live.iter().find(|(held, _)| held.handle == entry.handle) {
                 panic!(
-                    "the live grant of {} for `{}` did not revoke through {}: {error}",
+                    "the grant of {} for `{}` was issued {}, the handle the live grant of {} for `{}` is already holding",
                     entry.capability.class_str(),
                     entry.plugin,
-                    entry.handle
-                )
-            });
-        let after = backend.snapshot_os_state();
+                    entry.handle,
+                    held.capability.class_str(),
+                    held.plugin
+                );
+            }
+            live.push((entry, object));
+        }
+        for (entry, object) in order.arrange(live) {
+            backend
+                .revoke(entry.handle, DrainSpec::graceful(DRAIN))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "the live grant of {} for `{}` did not revoke through {} on the {} pass: {error}",
+                        entry.capability.class_str(),
+                        entry.plugin,
+                        entry.handle,
+                        order.name()
+                    )
+                });
+            let after = backend.snapshot_os_state();
+            assert!(
+                !after.contains(object.class, &object.key),
+                "revoking {} on the {} pass left {} standing; a revoke must withdraw the object its own grant materialized",
+                entry.handle,
+                order.name(),
+                object.describe()
+            );
+        }
+        let remaining = backend.snapshot_os_state();
         assert!(
-            !after.contains(object.class, &object.key),
-            "revoking {} left {} standing; a revoke must withdraw the object its own grant materialized",
-            entry.handle,
-            object.describe()
+            remaining.is_empty(),
+            "revoking every live grant in {} must empty the universe, found {remaining:?}",
+            order.name()
         );
     }
-    let remaining = backend.snapshot_os_state();
-    assert!(
-        remaining.is_empty(),
-        "revoking every live grant must empty the universe, found {remaining:?}"
-    );
 }
 
 /// `apply` puts an object in the universe under the owner the op names, and
@@ -369,6 +378,28 @@ pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn(
                 later_object.describe(),
                 later_entry.handle
             );
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevokeOrder {
+    ReversePush,
+    GrantOrder,
+}
+
+impl RevokeOrder {
+    fn name(self) -> &'static str {
+        match self {
+            RevokeOrder::ReversePush => "reverse-push-order",
+            RevokeOrder::GrantOrder => "grant-order",
+        }
+    }
+
+    fn arrange(self, live: Vec<(LedgerEntry, OsObject)>) -> Vec<(LedgerEntry, OsObject)> {
+        match self {
+            RevokeOrder::ReversePush => live.into_iter().rev().collect(),
+            RevokeOrder::GrantOrder => live,
         }
     }
 }

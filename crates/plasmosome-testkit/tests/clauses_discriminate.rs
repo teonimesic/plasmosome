@@ -524,7 +524,7 @@ fn drained_revoke_removes_object_catches_a_forced_revoke_that_withdraws_nothing(
 }
 
 #[test]
-#[should_panic(expected = "must withdraw the object its own grant materialized")]
+#[should_panic(expected = "did not revoke through h5 on the reverse-push-order pass")]
 fn live_grants_hold_distinct_handles_catches_a_ledger_keyed_by_class() {
     conformance::live_grants_hold_distinct_handles(carrying(Defect::ALedgerKeyedByClass));
 }
