@@ -96,18 +96,24 @@ Then read the chain the other way, for work nothing asked for:
 grep -l '^specs: \[\]' tasks/*.md
 grep -l '^intents: \[\]' tasks/*.md
 grep -l '^intents: \[\]' docs/specs/*.md
+grep -l '^status: draft' docs/intents/*.md
 ```
 
 These are not planner dispatches. A task naming no spec may not be planned and so may not be
 started — so the answer is to map it to a spec that already exists, to put the question to the
-owner in your own words, or to recommend dropping it. The specs the third line prints are a
-weaker signal: an accepted spec with no intent still works, and the line is there so the backfill
-stays visible rather than to stop anything. **Never close the gap by writing an intent yourself**; that is the one move
-`.agents/skills/tasks` rules out, because an intent written to justify a filed task approves the
-work on the owner's behalf.
+owner, or to recommend dropping it. The specs the third line prints are a weaker signal: an
+accepted spec with no intent still works, and the line is there so the backfill stays visible
+rather than to stop anything.
 
-Both lists shrinking over sessions is the signal that the queue is being fed by the plan. Both
-growing is the signal it is being fed by the review process instead.
+**A draft intent is how you raise the gap, not how you close it.** Writing one is allowed, and it
+is the honest way to put an unmapped task to the owner — a proposal in `docs/intents/` outlives the
+session, which one in a pull request body does not. Approving it is the owner's alone, so a draft
+you wrote unblocks nothing until they act. The fourth line is that queue: every draft is a question
+somebody asked, and one the owner has never been shown is the same as one nobody wrote. Say out
+loud which of them a person still has to see.
+
+The first two lists shrinking over sessions is the signal that the queue is being fed by the plan.
+Both growing is the signal it is being fed by the review process instead.
 
 **5. Clean up.** Remove the worktrees of branches that have merged, and prune. A worktree left
 behind pins its branch and blocks the next person from deleting it. **This runs before the count
@@ -232,9 +238,10 @@ circulation.
 
 **8. File — only what maps.** Anything you learned this session that must outlive it becomes a
 task file before the session ends **if it maps to a spec** — dispatch a planner to write it. What
-maps to nothing does not become a task: put it to the owner as a question, or write down why it is
-being dropped. `.agents/skills/tasks` has the rule and the reason; this step is where it is easiest
-to break, because everything learned late in a session looks worth keeping.
+maps to nothing does not become a task: put it to the owner as a question, as a `draft` intent if
+it is one, or write down why it is being dropped. `.agents/skills/tasks` has the rule and the
+reason; this step is where it is easiest to break, because everything learned late in a session
+looks worth keeping.
 
 The only writing into `tasks/` you do yourself is step 3's reconciliation, and only for a claim
 whose author is gone: an author still open closes its own task, as `.agents/skills/pr-review` has

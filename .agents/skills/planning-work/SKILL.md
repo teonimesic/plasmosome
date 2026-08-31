@@ -79,12 +79,12 @@ and nobody assigned to it should not survive a heartbeat.
 
 **The planner's output is a file, not a message.** A plan is written into `tasks/NNN-slug.md`
 with `status: planned`, which the task cannot reach until its `specs:` field names an accepted
-spec in `docs/specs/`. Where that spec is one you are writing, it names an approved intent first;
-an already-accepted spec is usable as it stands. Usually both already exist and the planner's job
-is to say which — writing a new spec is the exception, and a new intent is the owner's to write or
-the work does not happen. A brief that exists only in a chat window cannot be
-picked up tomorrow by a different agent. See `.agents/skills/tasks` for the formats and the two
-gates.
+spec in `docs/specs/`. An already-accepted spec is usable as it stands. Where the spec is one you
+are writing, it cannot be accepted until the intent it names is approved — draft it against a draft
+intent rather than waiting, but do not plan work off it yet. Usually both already exist and the
+planner's job is to say which: writing a new spec is the exception, and a new intent is anyone's to
+draft and only the owner's to approve. A brief that exists only in a chat window cannot be picked
+up tomorrow by a different agent. See `.agents/skills/tasks` for the formats and the two gates.
 
 **Dispatch is one line: "work task NNN."** The executor opens that file and reads only it and
 the files it names.

@@ -1,6 +1,7 @@
 ---
 id: 001
 title: Instructions for agents that measurably improve the code they write
+status: approved
 date: 2026-08-30
 originator: Stefano
 ---

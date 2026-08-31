@@ -55,7 +55,7 @@ Until then, do not create either file. A second copy of the vision would contrad
 | Trivial fix finished in the same session — under ~20 lines, no contract touched | no | no | no — the PR is the record |
 | Code an existing spec already governs, including a bug that spec did not get right | the one that spec names | that spec | yes |
 | Behavior an existing intent wants and no spec yet describes | that intent | a new one | yes |
-| Anything no existing spec and no existing intent reaches | the owner writes one, or the work does not happen | a new one | yes |
+| Anything no existing spec and no existing intent reaches | a new one — anyone drafts it, the owner approves it or the work does not happen | a new one | yes |
 
 **The line count that decided whether work needed a spec is gone; the one in the first row is not
 the same rule.** It bounds the trivial exemption from above and does nothing else — it says when a
@@ -81,29 +81,46 @@ behind it, so that fix needs neither a new document nor an owner decision — it
 fields filled in. Most work should be mappable this way. When most of it is not, what has drifted
 is the queue, not the paperwork.
 
-Both gates are on what may be **started**, not on what has been written down:
+Both gates are on what may be **started**, not on what may be written down:
 
 - **A task may not enter `in_progress` until it has been planned**, and it cannot reach `planned`
   until `specs:` names an accepted spec.
-- **A spec may not be planned until `intents:` names an approved intent.** An intent on `main` is
-  approved: only the owner writes one, `main` is protected, so a merged intent is one the owner
-  asked for. Nothing else goes in `docs/intents/` — a proposal there would be indistinguishable
-  from an approval.
+- **A spec may not become `accepted` until `intents:` names an intent whose `status:` is
+  `approved`.** Generating that spec earlier is allowed and is meant to happen: a `draft` spec may
+  name a `draft` intent, so a human reading does not idle the queue. What waits on approval is
+  commitment, not thought.
 
-**The second gate binds a spec being written, not one already accepted.** A spec that is already
+The two layers work the same way because their statuses mean the same thing. `draft` is a proposal
+on the record; `approved` and `accepted` are what may be built on. **An intent's `status:` is
+`draft` or `approved`, and only the owner sets `approved`** — an agent may draft one, and may
+transcribe one the owner dictates word for word, but may never approve one, its own draft included.
+
+**Why the owner's gate sits at approval and not somewhere cheaper.** An approved intent may spin up
+a great many specs, and each of those spawns tasks. Approval is the point where a single decision
+multiplies into a lot of work, so it is the point a person has to hold. Drafting costs one document;
+approving commits a queue. Apply that reasoning to a case not written down here by asking whether
+the step turns one yes into work nobody has counted.
+
+**What working ahead costs.** A draft spec whose intent is later rejected does not survive. That is
+the accepted price of not idling, not a failure by whoever wrote it, and it is why speculative specs
+stay `draft` where they are cheap to throw away.
+
+**The second gate binds a spec being accepted, not one already accepted.** A spec that is already
 `accepted` stays usable, and a task naming it may be planned, whether or not anything above it is
 filled in. Otherwise this rule would strand finished work behind a document only the owner can
-write — including the highest-priority task in the queue, whose two specs both carry `intents: []`.
-Backfilling those is worth doing and is the owner's to start; nothing waits on it. What the gate
-stops is a *new* spec written to justify work already filed, which is the direction the drift
-actually runs.
+approve — including the highest-priority task in the queue, whose two specs both carry
+`intents: []`. Backfilling those is worth doing: anyone may draft the intent that would close the
+gap, and only the owner can approve it. Nothing waits on either. What the gate stops is a *new*
+spec being committed to on the strength of an intent the owner has not read, which is the direction
+the drift actually runs.
 
 A task's `intents:` is copied from the spec it names, `[]` included. It is there so a search over
 tasks and a search over specs return the same answer, not as a second gate to clear.
 
-**The owner approves intents. Nobody approves specs.** The planner writes a spec and accepts it.
-The gate sits where the question is "is this wanted", which only the owner can answer, and not
-where the question is "is this right", which a reviewer answers on the pull request.
+**The owner approves intents. Nobody approves specs.** The planner writes a spec and accepts it,
+once the intent above it is approved. The gate sits where the question is "is this wanted", which
+only the owner can answer, and not where the question is "is this right", which a reviewer answers
+on the pull request.
 
 ### What predates the rule
 
@@ -130,17 +147,22 @@ and the greps print those tasks until someone does.
 ### What the gates refuse
 
 **A task that maps to no spec and to no plausible intent is evidence the work is not wanted.** It
-is not a prompt to write an intent that would make it wanted. An intent written to justify work
-already filed turns the owner's gate into a rubber stamp, and that gate is the only thing between
+is not a prompt to approve an intent that would make it wanted. That gate is the only thing between
 the queue and everything anybody has ever noticed.
 
-There are two honest endings for a task you are filing **now**. Put the question to the owner in
-your own words and let them say whether an intent covers it. Or drop it, and write down why. Filing
-it and letting it wait is neither, and it is how a queue fills with work nobody chose.
+There are two honest endings for a task you are filing **now**. Put the question to the owner — a
+`draft` intent in `docs/intents/` is how to do that on the record, where the next agent finds it
+instead of working it out again — and let them approve it or refuse it. Or drop it, and write down
+why. Filing it and letting it wait is neither, and it is how a queue fills with work nobody chose.
 
 The legacy files above are not this. They are already filed, and mapping or dropping them is the
 backfill rather than a fresh filing — which is why they may sit on the waiting list while a new one
 may not be put there.
+
+**Drafting is not approving, and that is what makes drafting safe.** A draft cannot rubber-stamp the
+work under it, because nothing may be committed to until the owner approves it. So write the
+proposal down rather than leaving it somewhere it will be lost — but write it as the question it is,
+and never as an answer that unblocks what you already filed.
 
 ### A review finding that maps to nothing
 
@@ -166,8 +188,11 @@ whether the count of tasks naming no spec falls; if it climbs, it is not.
 
 ## Who writes what
 
-- **Intent** — the owner. An agent may transcribe it word for word. Never summarize it, and
-  never write one on the owner's behalf because a task needed something to point at.
+- **Intent** — drafted by anyone, approved only by the owner. An agent may draft one, and may
+  transcribe one the owner dictates: word for word, never summarized. An agent's draft stays
+  `status: draft` and the agent leaves it there. A draft written only because a filed task needed
+  something to point at is a proposal the owner should refuse, and writing it does not make it
+  less refusable.
 - **Spec** — the planner, using the strongest model available. It becomes `status: accepted` when
   its pull request merges, and the planner is who accepts it. The owner's approval is spent on the
   intent above it.
@@ -234,6 +259,7 @@ filler, because filler reads as something that was considered.
 
 A few field values worth stating outright:
 
+- Intent `status:` is `draft` or `approved`. Only the owner sets `approved`.
 - Spec `status:` is `draft`, `accepted` or `superseded`.
 - Task `refs:` is the files the executor must read. `pr:` and `evidence:` stay empty until the
   work reaches review and then merges.
@@ -287,11 +313,14 @@ grep -l '^intents:.*\b003\b' tasks/*.md
 grep -l '^specs: \[\]' tasks/*.md
 grep -l '^intents: \[\]' tasks/*.md
 grep -l '^intents: \[\]' docs/specs/*.md
+grep -l '^status: draft' docs/intents/*.md
 grep -h '^title:' /dev/null $(grep -l '^status: todo' tasks/*.md)
 ```
 
-The last three are the gates read backwards: tasks that may not be planned yet, tasks whose spec
-names no intent, and specs that may not be planned yet. All three should be getting shorter.
+Three of those are the gates read backwards: tasks that may not be planned yet, tasks whose spec
+names no intent, and specs that cannot be accepted because they name none. All three should be
+getting shorter. The fourth is the queue in front of the owner — every draft intent is a question
+somebody asked, and a draft nobody has been shown is the same as one nobody wrote.
 
 ## Checking whether a task is really done
 
@@ -322,11 +351,15 @@ spec is two PRs, in order:
 1. `docs(spec): NNN <title>` — the spec at `status: draft`, its `intents:` naming an intent that
    is already on `main`. It merges after review; that merge is what makes it `accepted`. Flip the
    status to `accepted` in the last commit before merging, so `main` never holds a spec whose
-   status lies.
+   status lies. **That flip is only available once the intent it names reads `status: approved`.**
+   A spec written against a draft intent merges as a draft and waits for the approval; a later
+   one-line PR flips it, and step 2 does not start before that.
 2. The work branch, `task-NNN-slug` — the code, plus the task's own status flips.
 
-An intent reaches `main` the same way and earlier still, in a PR of its own carrying the owner's
-words as the owner wrote them.
+An intent reaches `main` the same way and earlier still, in a PR of its own. Approval is a second
+one-line edit, `status: draft` to `status: approved`, and it travels through a PR like everything
+else — an agent may carry that edit at the owner's word, exactly as it may transcribe the intent
+itself, and may never originate it.
 
 Work whose spec already exists skips step 1 and is one PR, which is what most work should look
 like. Trivial work skips the task as well.
