@@ -61,6 +61,17 @@ enum Defect {
     /// Freed handle numbers go into a first-in first-out pool that is drawn from
     /// only once two numbers are waiting in it.
     HandleRecyclerDepthTwo,
+    /// Answers `UnknownHandle` for any handle that still has an older live grant
+    /// ahead of it, so a set of live grants revokes only in grant order.
+    RevokesOnlyInGrantOrder,
+    /// Answers `UnknownHandle` for any handle that still has a newer live grant
+    /// behind it, so a set of live grants revokes only in reverse push order.
+    RevokesOnlyInReversePushOrder,
+    /// A refused revoke puts back every object its earlier revokes withdrew.
+    ARefusedRevokeRestoresWhatItWithdrew,
+    /// A refused revoke empties the universe, tearing down a ledger it has
+    /// decided is past repairing.
+    ARefusedRevokeClearsTheUniverse,
     /// Holds no universe of its own and answers every snapshot from its ledger,
     /// so what it reports is what it was asked to do. No clause can catch this
     /// one, and the test that runs it is what keeps that limit checkable.
@@ -129,6 +140,31 @@ impl DefectiveBackend {
         }
         self.next_handle += 1;
         Handle(self.next_handle)
+    }
+
+    fn refuses_out_of_grant_order(&self, handle: Handle) -> bool {
+        self.defect == Defect::RevokesOnlyInGrantOrder
+            && self
+                .ledger
+                .keys()
+                .next()
+                .is_some_and(|oldest| *oldest < handle.raw())
+    }
+
+    fn refuses_out_of_reverse_push_order(&self, handle: Handle) -> bool {
+        self.defect == Defect::RevokesOnlyInReversePushOrder
+            && self
+                .ledger
+                .keys()
+                .next_back()
+                .is_some_and(|newest| *newest > handle.raw())
+    }
+
+    fn restore_everything_withdrawn(&mut self) {
+        let withdrawn: Vec<OsObject> = self.spent.values().map(object_of).collect();
+        for object in withdrawn {
+            self.state.insert(object);
+        }
     }
 
     fn ledger_key(&self, handle: Handle, capability: &Capability) -> u64 {
@@ -210,6 +246,10 @@ impl EnforcementBackend for DefectiveBackend {
 
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError> {
         let forced = drain.policy == RevokePolicy::Force;
+        if self.refuses_out_of_grant_order(handle) || self.refuses_out_of_reverse_push_order(handle)
+        {
+            return Err(BackendError::UnknownHandle { handle });
+        }
         let key = match self.defect {
             Defect::ALedgerKeyedByClass => match self.class_of_handle.get(&handle.raw()) {
                 Some(class) => *class,
@@ -226,6 +266,14 @@ impl EnforcementBackend for DefectiveBackend {
                     .get(&handle.raw())
                     .cloned()
                     .ok_or(BackendError::UnknownHandle { handle }),
+                Defect::ARefusedRevokeRestoresWhatItWithdrew => {
+                    self.restore_everything_withdrawn();
+                    Err(BackendError::UnknownHandle { handle })
+                }
+                Defect::ARefusedRevokeClearsTheUniverse => {
+                    self.state = OsState::new();
+                    Err(BackendError::UnknownHandle { handle })
+                }
                 _ => Err(BackendError::UnknownHandle { handle }),
             };
         };
@@ -493,7 +541,7 @@ fn drained_revoke_removes_object_catches_a_forced_revoke_that_withdraws_nothing(
 }
 
 #[test]
-#[should_panic(expected = "must withdraw the object its own grant materialized")]
+#[should_panic(expected = "did not revoke through h5 on the reverse-push-order pass")]
 fn live_grants_hold_distinct_handles_catches_a_ledger_keyed_by_class() {
     conformance::live_grants_hold_distinct_handles(carrying(Defect::ALedgerKeyedByClass));
 }
@@ -564,4 +612,38 @@ fn apply_and_removal_reach_the_universe_catches_a_class_nuke_that_spares_session
 #[should_panic(expected = "revoking the already-revoked handle")]
 fn revoke_of_a_revoked_handle_is_error_catches_a_free_list_that_recycles_at_depth_two() {
     conformance::revoke_of_a_revoked_handle_is_error(carrying(Defect::HandleRecyclerDepthTwo));
+}
+
+#[test]
+#[should_panic(expected = "did not revoke through h6 on the reverse-push-order pass")]
+fn live_grants_hold_distinct_handles_catches_a_backend_that_only_revokes_in_grant_order() {
+    conformance::live_grants_hold_distinct_handles(carrying(Defect::RevokesOnlyInGrantOrder));
+}
+
+#[test]
+#[should_panic(expected = "of the already-revoked h2 must leave")]
+fn revoke_of_a_revoked_handle_is_error_catches_a_refused_revoke_that_restores_the_object() {
+    conformance::revoke_of_a_revoked_handle_is_error(carrying(
+        Defect::ARefusedRevokeRestoresWhatItWithdrew,
+    ));
+}
+
+#[test]
+#[should_panic(expected = "from the live grant holding")]
+fn revoke_of_a_revoked_handle_is_error_catches_a_refused_revoke_that_clears_the_universe() {
+    conformance::revoke_of_a_revoked_handle_is_error(carrying(
+        Defect::ARefusedRevokeClearsTheUniverse,
+    ));
+}
+
+#[test]
+#[should_panic(expected = "did not revoke through h1 on the grant-order pass")]
+fn live_grants_hold_distinct_handles_catches_a_backend_that_only_revokes_in_reverse_order() {
+    conformance::live_grants_hold_distinct_handles(carrying(Defect::RevokesOnlyInReversePushOrder));
+}
+
+#[test]
+#[should_panic(expected = "must empty the universe")]
+fn live_grants_hold_distinct_handles_catches_a_grant_that_materializes_a_shadow() {
+    conformance::live_grants_hold_distinct_handles(carrying(Defect::GrantMaterializesAShadow));
 }
