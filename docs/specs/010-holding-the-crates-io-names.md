@@ -1,7 +1,7 @@
 ---
 id: 010
 title: Holding the crates.io names plasmosome and plasmid
-status: draft
+status: accepted
 intents: [013]
 ---
 
@@ -105,26 +105,32 @@ what removing a public name claim should be.
 - Both carry `exclude = ["AGENTS.md", "CLAUDE.md"]`, and neither packaged crate contains either
   file.
 - Neither manifest emits cargo's `manifest has no ...` warning.
-- Neither README claims the crate it belongs to is unpublished or reachable only from a checkout.
+- Each crate's README has a Status section naming version `0.0.0`. Neither claims the crate is
+  unpublished, and neither offers a checkout as the way to get it.
 
 ## Acceptance
 
 - `only_the_held_names_are_publishable_to_a_registry` passes on a clean tree, and no test named
   `no_workspace_crate_is_publishable_to_a_registry` remains.
-- In a copy of the tree with `publish = false` restored on `plasmosome`, and again on `plasmid`,
-  the rule fails and names the package.
-- In a copy of the tree with a new member added whose manifest leaves `publish` unset, the rule
-  fails.
-- In a copy of the tree whose allowlist names a package that is not a workspace member, the rule
-  fails and names the entry.
-- `cargo metadata` reports no binary target for `plasmosome`, and a non-null `readme` for both
-  `plasmosome` and `plasmid`.
+- In a copy of the tree, each of these mutations makes the rule fail and name the package or
+  entry it is about. Every one of them is a state some weaker version of the rule would accept, so
+  each is checked separately:
+  - `publish = false` restored on `plasmosome`, and again on `plasmid`.
+  - `publish` removed altogether from `plasmosome`, and again from `plasmid`.
+  - `publish = ["crates-io", "some-other"]` on `plasmosome`, and again on `plasmid`.
+  - a registry list given to an off-list member, `plasmosome-core`.
+  - a new member added whose manifest leaves `publish` unset.
+  - the allowlist naming a package that is not a workspace member.
+- `cargo metadata` reports, for `plasmosome` and `plasmid` both: version `0.0.0`, a non-null
+  `readme`, and a non-null `repository`. For `plasmosome` it reports a target of kind `lib` and no
+  target of kind `bin`.
 - `cargo package -p plasmosome --list` and `cargo package -p plasmid --list` each name no
   `AGENTS.md` and no `CLAUDE.md`.
 - `cargo package -p plasmosome` and `cargo package -p plasmid` each emit no `manifest has no ...`
   warning.
-- `git grep -n 'publish = false' -- crates/plasmid/README.md crates/plasmosome/README.md` returns
-  nothing.
+- `crates/plasmosome/README.md` and `crates/plasmid/README.md` each contain a Status section
+  naming version `0.0.0`, and neither file contains the strings `publish = false` or
+  `cargo install --path`.
 - The gate in the root `AGENTS.md` is green.
 
 ## Out of scope
