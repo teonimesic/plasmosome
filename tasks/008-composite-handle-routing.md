@@ -1,7 +1,7 @@
 ---
 id: 008
 title: Route a composite handle back to the leaf that issued it
-status: todo
+status: in_review
 priority: 1
 specs: []
 intents: []
@@ -17,7 +17,7 @@ done_when: >-
   the three tests in crates/plasmosome-testkit/tests/composite_backend_conformance.rs
   that carry #[ignore] today pass with the #[ignore] attribute removed, and no
   conformance clause in crates/plasmosome-testkit/src/conformance.rs changed.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/9
 evidence:
 ---
 
@@ -45,8 +45,33 @@ so they become the regression test for the fix rather than a red build.
 
 ## Plan
 
-Written by the planner; blank while the task is `todo`. See `.agents/skills/tasks`.
+Delete the three `#[ignore]` attributes first and watch the clauses fail, then make `routes` map a
+composite handle to the leaf **and the handle that leaf issued**, and forward the leaf's handle on
+revoke while reporting the composite's handle back to the caller.
 
 ## Notes
 
-Blank until there is something to add.
+**2026-08-31.** The first regression test written for this was vacuous and nearly shipped. It
+granted twice to the same leaf, so the composite counter and the leaf counter stayed in lockstep
+and forwarding the wrong handle worked by coincidence — it passed against the unfixed code. The
+bug only appears once a grant to a *different* leaf has advanced the composite counter past that
+leaf's own. The test now grants to the filesystem leaf first. Verified failing against the
+unfixed revoke and passing against the fix.
+
+That is also why the original unit tests missed this: each granted once per leaf.
+
+The independent review then found the other half: `revoke` translated the handle on the `Ok` arm
+and left the `Err` arm alone, so a leaf's error travelled to the caller carrying the leaf's
+handle — a number that could name a different live grant of theirs. `rename_handle` now rewrites
+the handle-bearing variants on the way out.
+
+That limit is now closed. `a_revoked_handle_is_forgotten_and_not_reissued` first could not catch
+a composite that never drops the route — the leaf rejects the second revoke by itself, and
+`rename_handle` gives that rejection the caller's handle regardless, so nothing was observable
+through the public API. A `#[cfg(test)] fn live_routes` reads the map's length, which is the
+smallest exposure that makes the cleanup assertable, and the test now fails against that mutation.
+
+Route lifetime is deliberate in both directions and both are tested: a successful revoke drops
+the route, and a failed one keeps it, because the capability is still granted and the caller must
+be able to retry. `a_failed_revoke_keeps_its_route_so_the_caller_can_retry` fails against a
+version that drops the route before the leaf call.
