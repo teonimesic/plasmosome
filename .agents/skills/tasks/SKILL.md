@@ -60,9 +60,10 @@ Until then, do not create either file. A second copy of the vision would contrad
 There is no line count in that table any more. Size stopped being the question the moment every
 task needed a spec: a 400-line change to code spec 003 already governs needs no new document, and
 a 30-line change to something nothing describes needs the same two links as a large one. The old
-threshold also could not be cited in review: five merged pull requests crossed it — 103, 126, 167,
-218 and 297 lines — and shipped with no spec and no task, while every change that did name a spec
-was one the plan had already routed through one.
+threshold also could not be cited in review: four merged pull requests crossed it and none had a
+spec — two of them (126 and 218 lines) had no task either, and two (103 and 167) had a task and no
+spec. Every change that did name a spec was one the plan had already routed through one, so the
+number never decided anything.
 
 ## The chain, and the two gates
 
@@ -83,6 +84,17 @@ Both gates are on what may be **started**, not on what has been written down:
   approved: only the owner writes one, `main` is protected, so a merged intent is one the owner
   asked for. Nothing else goes in `docs/intents/` — a proposal there would be indistinguishable
   from an approval.
+
+**The second gate binds a spec being written, not one already accepted.** A spec that is already
+`accepted` stays usable, and a task naming it may be planned, whether or not anything above it is
+filled in. Otherwise this rule would strand finished work behind a document only the owner can
+write — including the highest-priority task in the queue, whose two specs both carry `intents: []`.
+Backfilling those is worth doing and is the owner's to start; nothing waits on it. What the gate
+stops is a *new* spec written to justify work already filed, which is the direction the drift
+actually runs.
+
+A task's `intents:` is copied from the spec it names, `[]` included. It is there so a search over
+tasks and a search over specs return the same answer, not as a second gate to clear.
 
 **The owner approves intents. Nobody approves specs.** The planner writes a spec and accepts it.
 The gate sits where the question is "is this wanted", which only the owner can answer, and not
@@ -132,6 +144,10 @@ whether the count of tasks naming no spec falls; if it climbs, it is not.
 - **Execution** — the next model down, in its own worktree, reading the task and the files the
   task names, and nothing else.
 
+**A decision is not a link in the chain.** It records why a choice was made, and a task may cite
+one in `refs:`, but it never stands in for the spec a task has to name. Where a decision settles
+something a task must build against, the buildable half of it belongs in a spec.
+
 **The `## Plan` belongs in the task, never in the spec.** A spec says what must be true and
 outlives many tasks. A plan is tied to one branch and is stale the day it merges.
 
@@ -167,8 +183,10 @@ Links point upward, and they are always **one-line flow lists of those three-dig
 - a task carries `specs: [001, 004]` and `intents: [003]`
 
 **Both fields are always present.** Write `[]` while the link has not been made yet — a `todo`
-task nobody has planned is the one place that legitimately stays empty, and it is what the two
-gates above refuse to let past. An absent field would force every search to be written twice. Keeping them on one line, anchored at the start of
+task nobody has planned is the one place that legitimately stays empty, and it is what the gates
+above refuse to let past. That is also why the templates ship `[]` rather than a placeholder:
+a copied-and-unfilled `[NNN]` would read as a link and pass every grep below. An absent field
+would force every search to be written twice. Keeping them on one line, anchored at the start of
 the line, is what keeps the two id namespaces apart and stops a search matching body prose.
 
 ## Templates
@@ -202,8 +220,8 @@ A few field values worth stating outright:
 | Status | Means | Entering it requires |
 | --- | --- | --- |
 | `todo` | filed | `done_when:` filled in |
-| `planned` | ready to hand to an executor | `## Plan` written; `specs:` names an accepted spec, and `intents:` names the intent that spec carries |
-| `in_progress` | claimed | it was `planned` first; branch `task-NNN-slug`, in the executor's own worktree |
+| `planned` | ready to hand to an executor | `## Plan` written; `specs:` names an accepted spec, and `intents:` carries whatever that spec carries |
+| `in_progress` | claimed | branch `task-NNN-slug`, in the executor's own worktree |
 | `in_review` | PR open | `pr:` set |
 | `done` | squash-merged | `evidence:` not empty |
 
@@ -236,13 +254,13 @@ grep -l '^specs:.*\b001\b' tasks/*.md
 grep -l '^intents:.*\b003\b' docs/specs/*.md
 grep -l '^intents:.*\b003\b' tasks/*.md
 grep -l '^specs: \[\]' tasks/*.md
+grep -l '^intents: \[\]' tasks/*.md
 grep -l '^intents: \[\]' docs/specs/*.md
 grep -h '^title:' /dev/null $(grep -l '^status: todo' tasks/*.md)
 ```
 
-The last two are the gates read backwards: the first prints every task that may not be planned
-yet, the second every spec that may not be planned yet. Both should be short lists and both should
-be getting shorter.
+The last three are the gates read backwards: tasks that may not be planned yet, tasks whose spec
+names no intent, and specs that may not be planned yet. All three should be getting shorter.
 
 ## Checking whether a task is really done
 

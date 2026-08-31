@@ -94,6 +94,7 @@ Then read the chain the other way, for work nothing asked for:
 
 ```shell
 grep -l '^specs: \[\]' tasks/*.md
+grep -l '^intents: \[\]' tasks/*.md
 grep -l '^intents: \[\]' docs/specs/*.md
 ```
 
@@ -226,7 +227,12 @@ grep -l '^status: todo' tasks/*.md
 Step 3 puts released claims back to `planned`, so this is also how abandoned work returns to
 circulation.
 
-**8. File.** Anything you learned this session that must outlive it becomes a task file before the
-session ends — dispatch a planner to write it. The only writing into `tasks/` you do yourself is
-step 3's reconciliation, and only for a claim whose author is gone: an author still open closes its
-own task, as `.agents/skills/pr-review` has it.
+**8. File — only what maps.** Anything you learned this session that must outlive it becomes a
+task file before the session ends **if it maps to a spec** — dispatch a planner to write it. What
+maps to nothing does not become a task: put it to the owner as a question, or write down why it is
+being dropped. `.agents/skills/tasks` has the rule and the reason; this step is where it is easiest
+to break, because everything learned late in a session looks worth keeping.
+
+The only writing into `tasks/` you do yourself is step 3's reconciliation, and only for a claim
+whose author is gone: an author still open closes its own task, as `.agents/skills/pr-review` has
+it.

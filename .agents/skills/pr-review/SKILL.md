@@ -20,8 +20,9 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    - **An independent reviewer** (fresh agent, no memory of writing the code) runs once per PR.
      Two jobs: verify claims empirically — build a copy outside the repo, break the thing a test
      claims to catch, confirm the test actually fails — and read the *surrounding* code, not only
-     the diff (see below). When the task's `specs:` field names one, a third job: read the diff
-     against that spec's `## Acceptance` list and say, line by line, which lines are met.
+     the diff (see below). A third job, on every PR that has a task: read the diff against the
+     `## Acceptance` list of the spec its `specs:` field names, and say line by line which are
+     met.
 4. **Watch for the review rather than waiting for it.** CodeRabbit posts minutes after a push,
    and again after every later push, so an agent that checks once and stops has stalled. Poll
    until the review lands and the thread count stops moving:
