@@ -1,7 +1,7 @@
 ---
 id: 016
 title: The control loop needs a daemon to own its edges
-status: in_review
+status: done
 priority: 2
 specs: [001]
 intents: []
@@ -22,7 +22,7 @@ done_when: >-
   Each decision is tested, and the ones a client can observe are written into
   spec 001.
 pr: https://github.com/teonimesic/plasmosome/pull/30
-evidence:
+evidence: squash commit b53419d on main (PR #30); the connection loop answers a non-UTF-8 line, an over-cap line, a panicking handler and a handler returning a loop-owned code, and spec 001 §1 carries -32603 and the connection-edge rules
 ---
 
 ## Why
