@@ -1,7 +1,7 @@
 ---
 id: 004
 title: Build the testkit crate, the conformance suite, and the seam rules
-status: planned
+status: in_progress
 priority: 1
 specs: [003]
 intents: [002]
