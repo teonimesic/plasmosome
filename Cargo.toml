@@ -7,6 +7,7 @@ members = [
     "crates/plasmosome-membrane",
     "crates/plasmid-sdk",
     "crates/plasmosome-freeze-checks",
+    "crates/plasmosome-testkit",
 ]
 
 [workspace.package]

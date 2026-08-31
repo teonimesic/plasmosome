@@ -194,6 +194,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "plasmosome-testkit"
+version = "0.1.0"
+dependencies = [
+ "plasmosome-backend",
+ "plasmosome-core",
+ "plasmosome-ledger",
+]
+
+[[package]]
 name = "ppv-lite86"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"

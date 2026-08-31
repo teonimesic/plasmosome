@@ -53,7 +53,9 @@ if it changes, what exactly is equal, what the unit of work is.
 
 **Code.** No inline `//` comments. Documentation is `///` on public items: what a caller must
 pass, what it gets back, what it must not do. If deleting a doc block costs a caller nothing,
-delete it.
+delete it. `//!` is allowed in one place only — the root of a library crate, saying in a sentence
+or two what the crate is for and how a caller reaches it. Background belongs in the crate's
+`README.md`, not there.
 
 **Seams.** Accept dependencies, do not create them. If a test has to drive the real operating
 system to observe a behavior, the seam is in the wrong place. The brake on this: two adapters

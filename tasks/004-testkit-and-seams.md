@@ -1,7 +1,7 @@
 ---
 id: 004
 title: Build the testkit crate, the conformance suite, and the seam rules
-status: planned
+status: in_review
 priority: 1
 specs: [003]
 intents: [002]
@@ -30,7 +30,7 @@ done_when: >-
   keeping testkit out of non-dev dependencies, a testkit AGENTS.md carrying the
   layer table and seam rule, and the crate's ci.yml matrix entry if that matrix
   already exists — with the gate green.
-pr:
+pr: 8
 evidence:
 ---
 
@@ -102,3 +102,44 @@ Steps:
 STOP when done — do not start the next piece of work.
 
 ## Notes
+
+- `.github/workflows/ci.yml` has no `crate` matrix — it runs one `gates` job over the whole
+  workspace. Step 7 had nothing to add, so task 005 carries the `plasmosome-testkit` entry when
+  it builds the matrix.
+- Cargo refuses the `testkit_is_dev_only` violation before the rule can see it, but only for the
+  three crates the testkit depends on: `plasmosome-core` naming `plasmosome-testkit` in
+  `[dependencies]` is a package cycle and `cargo test` stops there. The rule was mutation-tested
+  against `plasmosome-membrane`, which the testkit does not depend on and where cargo is happy to
+  build the violation.
+- `PlasmidManifest` has no constructor other than `parse`/`load`, and every field is public, so
+  `ManifestBuilder` fills the struct directly. That skips the grammar's validation on purpose —
+  a builder that can only produce valid manifests cannot set up a test about an invalid one.
+- The conformance clauses need to know which `OsObject` a `Capability` materializes, and the
+  fake's mapping is private. `conformance::materialized` states that mapping independently, over
+  the public `UniverseOp::object()`. Two copies is the point: the suite is a statement of the
+  contract, the fake is one implementation of it.
+- **What proves LIFO replay, exactly.** In `tests/attach_detach_residue.rs` the only thing that
+  proves replay ran last effect first is the ordered-string assertion on `report.replayed`.
+  Nothing structural depends on the order: `OsState` is a flat `BTreeSet<OsObject>` with no
+  containment semantics, so the `Mount` at `/workspace` and the `UdsPath` at
+  `/workspace/run/egressd.uds` are unrelated entries in different classes, and FIFO replay leaves
+  exactly the same empty state. Reversing replay to FIFO fails that one assertion and nothing
+  else; relaxing it to an order-blind comparison makes FIFO pass. The fake does not model path
+  nesting, and a reader of this test should not assume it does.
+- **The conformance suite was pointed at a second backend and found a real bug.**
+  `tests/composite_backend_conformance.rs` runs the same five clauses against `CompositeBackend`
+  over three fake leaves. Two pass; three fail, because `CompositeBackend::grant` overwrites the
+  handle its leaf issued with the composite's own counter and `revoke` forwards that composite
+  handle back down to the leaf. The three are `#[ignore]`d with that defect named. The fix is
+  task 008 and is deliberately not in this PR — no clause was weakened to make them pass.
+- **The suite has gaps of its own**, recorded as task 009: handle uniqueness is not a clause,
+  `apply` and `apply_removal` are never called, and revoking an already-revoked handle is not a
+  clause. A backend with any of those three defects is certified conformant today.
+- **`testkit_is_dev_only` walks `cargo tree`, not the manifest text.** Parsing `[dependencies]`
+  by exact header match missed two forms that produce a genuine non-dev dependency: a
+  `[dependencies.plasmosome-testkit]` table, and a `[target.'cfg(unix)'.dependencies]` section.
+  Both were confirmed to slip past the old rule and to fire the new one. The rule now matches the
+  idiom `controller_crates_have_no_dependency_path_to_a_vmm_or_netstack_crate` already used.
+  `declared_in` stays, because the fork/socketpair rule still uses it.
+- **`ManifestBuilder::version` and `GrantSequence::plugin` were deleted.** Both had zero callers,
+  which the crate's own "builders carry only what a test in this repository uses" rule forbids.
