@@ -11,15 +11,6 @@ pub trait Probe {
     fn probe(&self, socket: &Path, deadline: Duration) -> Readiness;
 }
 
-/// The probe that talks to a real control socket.
-pub struct ControlSocket;
-
-impl Probe for ControlSocket {
-    fn probe(&self, socket: &Path, deadline: Duration) -> Readiness {
-        crate::readiness::probe(socket, deadline)
-    }
-}
-
 /// One broker to spawn, and the control socket it answers on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerSpec {
