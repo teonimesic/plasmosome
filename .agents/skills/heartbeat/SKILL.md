@@ -14,8 +14,8 @@ the session does, and the next agent starts from nothing.
 
 The order is not arbitrary: finish what is already in flight before starting anything new. Steps
 1 and 2 close out work that is one reply away from merging; step 3 makes the queue trustworthy
-again; step 4 finds work that was described and then quietly dropped; step 5 says how many agents
-should be running before you choose anything; only then do you pick.
+again; step 4 finds work that was described and then quietly dropped; step 5 clears the worktrees
+that only look busy so step 6 can count what is really running; only then do you pick.
 The formats and the layers those files use are in `.agents/skills/tasks`.
 
 
@@ -87,20 +87,46 @@ done
 Both loops derive the ids from the files, so a record numbered anything is covered. Silence means
 nothing is pending. For anything they print, decide out loud: plan it, or say why not.
 
-**5. Agents running.** The orchestrator is the only thing that can review, decide and merge, so it
+**5. Clean up.** Remove the worktrees of branches that have merged, and prune. A worktree left
+behind pins its branch and blocks the next person from deleting it. **This runs before the count
+and not at the end of the session**, because a skipped cleanup and a working agent look identical
+from the directory — reorder the two and the next step counts finished work as live and dispatches
+too little.
+
+The directory cannot tell you which is which; GitHub can. A worktree whose branch has an open PR is
+live work even when nobody is typing in it, and one whose branch merged is not.
+
+```shell
+git worktree list --porcelain |
+  awk '/^worktree /{p=$2} /^branch /{sub("refs/heads/","",$2); if (p ~ /\/\.worktrees\//) print $2}' |
+  while read -r b; do
+    printf '%s\t%s\n' "$b" "$(gh pr list --head "$b" --state all --json state --jq '.[0].state // "NONE"')"
+  done
+```
+
+`MERGED` or `CLOSED` is finished work. `OPEN`, or no PR at all, is live and stays. The `awk` filter
+keeps the primary checkout out of the list — it is nobody's agent, and counting it puts you one over
+every time.
+
+```shell
+git worktree remove .worktrees/<branch> && git worktree prune
+```
+
+**6. Agents running.** The orchestrator is the only thing that can review, decide and merge, so it
 is the constraint on everything else. What reaches `main` is limited by how much is in flight, and
 one agent at a time means the queue moves at the speed of one agent. **Three running in parallel is
 the standing goal.** Fewer than three is a problem to fix here, not a state to note and move past.
 
+Count the rows step 5 left live, before picking anything — do not re-list the worktrees here, or
+you will count the primary checkout again. Each of those rows is an agent at work or an open PR.
+
 ```shell
-git worktree list
 grep -l '^status: in_progress' tasks/*.md
 ```
 
-Count what is actually running before picking anything. A worktree with a live agent in it is the
-count; `status: in_progress` is a line someone wrote, so check it against the worktrees rather than
-believing it. However many short of three you are is how many tasks you dispatch in the next step,
-taken from the unblocked work the queue already holds.
+`status: in_progress` is a line someone wrote, so read it against that list rather than believing
+it. However many short of three you are is how many tasks you dispatch in the next step, taken from
+the unblocked work the queue already holds.
 
 **Disjointness is the constraint, not a nicety.** Two agents editing the same file produce two PRs
 that fight, and whichever merges second pays for it. Compare the `refs:` of the candidates and take
@@ -111,7 +137,7 @@ If the queue does not hold three unblocked disjoint tasks, say so plainly in the
 what it does hold. Do not manufacture overlapping work to reach the number. Coming up short is a
 real signal: either the queue needs filing, or something is blocking more than it should.
 
-**6. Pick.** Look at `planned` before `todo`: a `planned` task already has a plan someone wrote,
+**7. Pick.** Look at `planned` before `todo`: a `planned` task already has a plan someone wrote,
 so it is ready to hand to an executor, while a `todo` still needs planning. Within each, take the
 lowest `priority:` number, not the newest one.
 
@@ -123,13 +149,5 @@ grep -l '^status: todo' tasks/*.md
 Step 3 puts released claims back to `planned`, so this is also how abandoned work returns to
 circulation.
 
-**7. File.** Anything you learned this session that must outlive it becomes a task file before
+**8. File.** Anything you learned this session that must outlive it becomes a task file before
 the session ends.
-
-**8. Clean up.** Remove the worktrees of branches that have merged, and prune. A worktree left
-behind pins its branch and blocks the next person from deleting it.
-
-```shell
-git worktree list
-git worktree remove .worktrees/<branch> && git worktree prune
-```

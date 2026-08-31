@@ -25,6 +25,12 @@ rather than spawning a fresh one to work all of that out again, and rather than 
 yourself. A reviewer that patches what it is reviewing has stopped being an independent reader
 of it.
 
+**Do not transcribe review findings.** An agent can read the pull request. Dispatch it to the PR —
+"you own PR #23, read the open threads, resolve them, push" — and let it read the reviewer's words
+rather than the orchestrator's summary of them. Brief only what is genuinely not in the PR: a
+decision that is yours to make, a constraint the reviewer could not know, or which of two
+directions to take.
+
 The orchestrator's own work is the judgement a dispatched agent cannot make: which piece of work
 comes next, what is in scope and what is not, whether a finding is right, which of two designs to
 take, and when something needs a decision record rather than a spec. That is the whole job, and it
