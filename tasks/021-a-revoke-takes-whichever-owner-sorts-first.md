@@ -1,7 +1,7 @@
 ---
 id: 021
 title: A revoke takes whichever owner sorts first, not the one it was for
-status: in_review
+status: done
 priority: 2
 specs: []
 intents: []
@@ -19,7 +19,11 @@ done_when: >-
   same key standing, proven by a test that fails against the unfixed removal; and the removal path
   from a backend revoke and from a ledger replay both carry the owner rather than resolving it.
 pr: https://github.com/teonimesic/plasmosome/pull/34
-evidence:
+evidence: >-
+  squash commit aebb34d on main (PR #34, state MERGED); `OsState::remove` and
+  `EnforcementBackend::apply_removal` name the owner whose object they take, held by seven tests
+  that fail against the unfixed removal and by three narrower mutations each caught by the test
+  that names it
 ---
 
 ## Why
