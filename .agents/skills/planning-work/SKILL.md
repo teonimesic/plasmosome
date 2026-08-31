@@ -27,6 +27,12 @@ dispatches,
 watches for work that has stalled, and puts in front of a person anything needing a decision or an
 action only a person can take.
 
+**Spawning the independent reviewer is the orchestrator's job when the author cannot do it.** A
+dispatched agent has no Agent tool, so an author cannot spawn its own reviewer and has to ask —
+one did, and stopped mid-PR to wait. The orchestrator is also the one that passes the model: the
+reviewer runs on a different one from the author (`model: "fable"`), which is the whole point of
+it. `.agents/skills/pr-review` says why, and where the reviewer's output goes.
+
 **Review findings go back to the agent that wrote the change.** That agent still holds the
 context — why the code is shaped the way it is, what it already tried and dropped. Resume it
 rather than spawning a fresh one to work all of that out again, and rather than fixing the finding

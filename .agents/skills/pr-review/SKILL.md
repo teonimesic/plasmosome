@@ -23,6 +23,22 @@ description: How a change reaches main — PR-only workflow, review rounds by di
      the diff (see below). A third job, on every PR that has a task: read the diff against the
      `## Acceptance` list of the spec its `specs:` field names, and say line by line which are
      met.
+
+     **Run it on a different model** — `model: "fable"` on the Agent tool. Many agents on the
+     same model, reading the same context, agree with each other reliably and at scale; a review
+     that only confirms the author's reasoning looks like diligence and is not evidence.
+     Same-model reviews here have found real defects, so the point is not that they are
+     worthless — it is that they cannot count as this pass.
+
+     **A dispatched agent has no Agent tool and cannot spawn its own reviewer.** Stop and ask the
+     orchestrator to spawn it. Do not skip the step and do not run one yourself on your own
+     model: every independent review this repository has had ran on the author's model, and
+     nothing reported it.
+
+     **The reviewer's output goes on the PR as an issue comment**, not only into chat — what was
+     examined, what was found, what the author changed, and what was declined with the reasoning.
+     Six of roughly twenty PRs did that, and a review that caught two decision records
+     contradicting each other exists nowhere on GitHub.
 4. **Watch for the review rather than waiting for it.** CodeRabbit posts minutes after a push,
    and again after every later push, so an agent that checks once and stops has stalled. Poll
    until the review lands and the thread count stops moving:
