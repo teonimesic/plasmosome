@@ -97,3 +97,102 @@ comments under it.
    `./.githooks/attribution-guard`.
 
 ## Notes
+
+Both failure modes were planted in a real listed file
+(`crates/plasmosome-core/src/state.rs`) and run against the old check and the new one. Every line
+below is copied from the run, not reconstructed.
+
+### 1. Prose fails the build
+
+Planted: `/// This type holds no Mutex and no lock.` above `pub struct InstanceName(String);`.
+
+Before — `cargo test -p plasmosome-freeze-checks --test freeze_rules controller_wire_state`:
+
+```
+test controller_wire_state_shares_no_memory_across_the_seam ... FAILED
+
+86 §4 rule 2 broken: `crates/plasmosome-core/src/state.rs` uses `Mutex`; controller⇄supervisor state moves only as serde types, never as shared memory
+```
+
+After, same plant:
+
+```
+test controller_wire_state_shares_no_memory_across_the_seam ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out
+```
+
+### 2. Real shared memory passes
+
+Planted: `use std::cell::Cell; use std::cell::RefCell; use std::sync::atomic::AtomicUsize;` and
+
+```rust
+pub struct PlantedSharing {
+    pub seen: RefCell<u32>,
+    pub hits: Cell<u32>,
+    pub count: AtomicUsize,
+}
+```
+
+Before:
+
+```
+test controller_wire_state_shares_no_memory_across_the_seam ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out
+```
+
+After:
+
+```
+86 §4 rule 2 broken: `crates/plasmosome-core/src/state.rs` uses `Cell`, `RefCell`, `AtomicUsize`, `RefCell` in `PlantedSharing`, `Cell` in `PlantedSharing`, `AtomicUsize` in `PlantedSharing`; controller⇄supervisor state moves only as serde types, never as shared memory
+```
+
+### 3. A lock renamed inside the file
+
+Planted: `use std::sync::RwLock as Registry;` and a `Registry<u32>` field. The old check caught
+this one by accident — the word `RwLock` is still on the import line — so it is not evidence of a
+miss, but the new message says what was actually found:
+
+```
+86 §4 rule 2 broken: `crates/plasmosome-core/src/state.rs` uses `Registry`, a local alias for `RwLock`, `Registry`, a local alias for `RwLock` in `PlantedSharing`; controller⇄supervisor state moves only as serde types, never as shared memory
+```
+
+### 4. The limit, planted and still missed
+
+Planted: a sibling module `crates/plasmosome-core/src/task017_aliases.rs` holding
+`pub use std::sync::RwLock as Registry;`, then in `state.rs` `use crate::task017_aliases::Registry;`
+and a `Registry<u32>` field. Before **and** after:
+
+```
+test controller_wire_state_shares_no_memory_across_the_seam ... ok
+```
+
+Nothing in `state.rs` says `Registry` is a lock. Deciding that is name resolution, and it needs a
+compiler — rustc's own resolver or rust-analyzer — not a parser. There is no `cargo` command that
+answers "what does this identifier resolve to", which is why `cargo tree` has no equivalent here
+even though the neighbouring rule 1 check uses it: a dependency edge is a fact cargo already
+computes and prints. This limit is stated in the module's `///` documentation, in
+`crates/plasmosome-freeze-checks/AGENTS.md`, in
+`docs/decisions/004-a-rule-about-code-parses-code.md`, and pinned by the test
+`an_alias_declared_in_another_file_is_missed_because_that_needs_name_resolution` so it stays
+visible in the suite rather than only in a document.
+
+### What was not done
+
+The construct list is wide but finite — reference-counted sharing, locks and guards, cell types,
+the standard atomics, raw pointers, `static mut`, and the crates that supply these. A shared-memory
+type outside it is missed. That is a list to extend, not a shape to replace.
+
+Task 014's plan, which told its executor to keep those nine words out of `protocol.rs` "tests and
+doc text included", no longer needs to route around the check. Task 014 is `done`, so its plan was
+left as the record of what was true at the time.
+
+### Gate
+
+```
+cargo test --workspace                                  all green, 16 new tests in
+                                                        shared_memory_reads_rust.rs
+cargo clippy --workspace --all-targets -- -D warnings   clean
+cargo fmt --all -- --check                              clean
+./.githooks/provenance-guard                            provenance-guard: clean
+./.githooks/attribution-guard                           attribution-guard: clean
+```
