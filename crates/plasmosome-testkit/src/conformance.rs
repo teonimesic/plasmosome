@@ -386,9 +386,6 @@ fn universe_pairs() -> Vec<(UniverseOp, UniverseRemoval)> {
     ]
 }
 
-/// The sample grants and a second session file held by a second plugin. Two
-/// live capabilities of one class is the ordinary case for this kernel, and a
-/// ledger keyed by class rather than by handle can only hold one of them.
 fn grants_with_two_of_one_class() -> Vec<Grant> {
     let mut grants = sample_grants();
     grants.extend(

@@ -14,8 +14,9 @@ refs:
   ]
 done_when: >-
   the seven backends named below each fail at least one clause, each is added to
-  tests/clauses_discriminate.rs, and FakeBackend and CompositeBackend still pass
-  every clause.
+  tests/clauses_discriminate.rs, the live-grant assertion for a recycled handle is
+  reached by a backend that gets past the earlier one, and FakeBackend and
+  CompositeBackend still pass every clause.
 pr:
 evidence:
 ---
@@ -50,9 +51,11 @@ which clears the whole class for the other four and behaves for session files â€
 `HandleRecyclerDepthTwo` uses a FIFO free list that reuses only after two handles are free, which
 is an ordinary allocator shape, and passes.
 
-One further gap, cheap to close while here: the assertion added at `conformance.rs:303-311` for a
-recycled handle taking a live grant has no defective backend reaching it â€” the clause panics
-earlier. It is unexercised, not wrong.
+One further gap, now part of `done_when` rather than a note: the assertion for a recycled handle
+taking a live grant is never reached. `ARevokedHandleIsReissued` returns `Ok` from the second
+revoke and panics at the earlier assertion, so the later one is unexercised. Closing it needs a
+backend that errors on the spent handle as it should, and only then hands the recycled number to a
+live grant.
 
 ## Plan
 
