@@ -23,9 +23,6 @@ The consequence I want is that this holds for anything running in a cell: the ha
 today, the ones I have not tried yet, and software that has never heard of Plasmosome. If the
 isolation only holds when the workload cooperates, it is not isolation I can rely on.
 
-Two pieces of work belong under this: the four-plasmid end-to-end run, and the first enforcement
-backend that is not a fake. I want them built against it.
-
 ## Outcome
 
 (filled in later)
