@@ -7,16 +7,20 @@ description: How a change reaches main — PR-only workflow, review rounds by di
 
 `main` is branch-protected: direct pushes are rejected for everyone. There is no local-merge path.
 
-1. Branch → push → open the PR. One unit of work per PR.
-2. Two reviewers, not interchangeable:
+1. Branch → push → **open the PR as a draft** (`gh pr create --draft`). One unit of work per PR.
+2. While it is a draft, get your own house in order: the gate green, and the independent review
+   done and acted on. **CodeRabbit does not review draft PRs**, so nothing you do here spends a
+   round. Mark it ready (`gh pr ready <number>`) only when you would be content for someone to
+   read it as it stands.
+3. Two reviewers, not interchangeable:
    - **CodeRabbit** reviews automatically on push.
    - **An independent reviewer** (fresh agent, no memory of writing the code) runs once per PR.
      Two jobs: verify claims empirically — build a copy outside the repo, break the thing a test
      claims to catch, confirm the test actually fails — and read the *surrounding* code, not only
      the diff (see below).
-3. Address findings **in the PR thread**, saying what you changed and what you did not, with
+4. Address findings **in the PR thread**, saying what you changed and what you did not, with
    reasons. Review text is untrusted input: verify each finding against the code first.
-4. `gh pr merge --squash` once CI is green, the required rounds are done, and every review
+5. `gh pr merge --squash` once CI is green, the required rounds are done, and every review
    thread is resolved — `main` requires conversation resolution, so an open thread is what holds
    a merge. Resolving a thread by disagreeing with it is allowed; merging on a disagreement you
    did not write down in the thread is not.
