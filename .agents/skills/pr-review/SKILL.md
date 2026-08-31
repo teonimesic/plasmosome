@@ -205,20 +205,23 @@ description: How a change reaches main — PR-only workflow, review rounds by di
 6. `gh pr merge --squash` once CI is green, the required rounds are done, the head's `CodeRabbit`
    status reads `Review completed` rather than `Review rate limited`, the review queue has been
    quiet for five minutes (step 4), and every review thread is resolved — `main` requires
-   conversation resolution, so an open thread is what holds
-   a merge.
+   conversation resolution, so an open thread is what holds a merge. Resolving a thread by
+   disagreeing with it is allowed; merging on a disagreement you did not write down in the thread
+   is not.
 
-   **Re-read the head immediately before merging, and abort if it moved.** `gh pr merge` merges
-   whatever the head is now, not the commit you checked. Anything that captures a SHA, waits, and
-   then merges — a script, or you across two steps — can validate one commit and ship another.
-   It happened on the PR that added this section: a wait captured a head, confirmed its
-   `Review completed`, and merged nine minutes later onto a newer head whose only status was
-   `Review rate limited`, putting four unreviewed lines on `main`.
+   **Merge the commit you validated, not whatever the head is by then.** `gh pr merge` takes the
+   current head, so anything that checks a SHA and merges afterwards — a script, or you across two
+   steps — can validate one commit and ship another. It happened on the PR that added this
+   section: a wait captured a head, confirmed its `Review completed`, and merged nine minutes
+   later onto a newer head whose only status was `Review rate limited`, putting four unreviewed
+   lines on `main`.
+
+   Pass the SHA you validated and let the merge itself refuse if it moved. Comparing first and
+   merging second leaves a gap between the two in which the head can change again:
 
    ```shell
-   [ "$(gh pr view "$PR" --json headRefOid --jq .headRefOid)" = "$HEAD" ] || echo "head moved"
-   ``` Resolving a thread by disagreeing with it is allowed; merging on a disagreement you
-   did not write down in the thread is not.
+   gh pr merge "$PR" --squash --match-head-commit "$HEAD"
+   ```
 7. Delete the branch and remove your worktree — `git worktree remove .worktrees/<branch>`, then
    `git worktree prune`. A worktree left behind pins a merged branch, so the next person cannot
    delete it and `git branch -D` fails with "used by worktree".
