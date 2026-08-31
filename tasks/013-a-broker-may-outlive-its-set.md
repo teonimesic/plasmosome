@@ -1,7 +1,7 @@
 ---
 id: 013
 title: Two lifecycle gaps with no witness, and a deadline that multiplies
-status: planned
+status: in_progress
 priority: 2
 specs: []
 intents: []
