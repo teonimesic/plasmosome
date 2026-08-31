@@ -67,11 +67,15 @@ Three things are true about the risk, and not one of them is a check:
 - **Two shapes are refused on sight**: an approval arriving in the same change as the work it
   authorizes, and an approval whose pull request does not say where it came from.
 
-**A GitHub gate would close this, and cannot be built while that identity holds.** The natural
-mechanism is CODEOWNERS requiring the owner's review on this folder. It is unusable when the author
-and the approver are one account: GitHub forbids approving your own pull request, so the rule would
-not gate these changes, it would block them outright. The gate becomes available the day agents
-have an identity of their own, and most of the risk above goes with it.
+**Nothing mechanical enforces any of this, and that is a decision rather than an omission.**
+CODEOWNERS on this folder, a split putting drafts and approvals in separate directories, an
+approval workflow and a scoped token were each considered and each turned down: while agents act as
+the owner's account they gate nothing, and the one that would work needs an identity split larger
+than the thing it protects.
+[`../decisions/008-approving-an-intent-is-an-instruction.md`](../decisions/008-approving-an-intent-is-an-instruction.md)
+records what was rejected and what would reopen it. **Read "nothing enforces this" as a choice
+somebody made, not as work waiting to be done** — and the risk above as its stated price. The rule
+itself is in `AGENTS.md`, which every agent reads first.
 
 **Why there is no `approved_by:` field.** Recording who approved an intent and who relayed it would
 make the claim specific, not checkable: an agent willing to write `status: approved` writes a name
