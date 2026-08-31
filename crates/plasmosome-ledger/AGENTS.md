@@ -9,8 +9,8 @@ Detach replays them LIFO and the result is verified against observed system stat
 
 - **An effect without an inverse is not an effect this ledger accepts** — it is an `External`
   entry, and the type system must force the caller to say so deliberately.
-- **Replay order is LIFO and that is load-bearing.** A mount created inside a directory must be
-  removed before the directory. Do not make replay order configurable.
+- **Replay order is LIFO, and reversing it corrupts the undo.** A mount created inside a
+  directory must be removed before the directory. Do not make replay order configurable.
 - **Replay must be idempotent and resumable.** Detach can be interrupted; running it again must
   converge, not double-undo.
 - **The log is the truth, not the in-memory state.** The ledger is replayable from its written

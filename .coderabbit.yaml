@@ -7,7 +7,7 @@
 #
 #   1. A "simplification" that widens a capability is a vulnerability, not a cleanup. Revocation
 #      paths, deny floors, and reap-on-drop logic are deliberately explicit.
-#   2. The architectural rules in `crates/plasmosome-freeze-checks` are load-bearing: the
+#   2. The architectural rules in `crates/plasmosome-freeze-checks` are enforced as tests: the
 #      controller must never gain a dependency on virtualization code. A suggestion to "just
 #      import it" is always wrong.
 

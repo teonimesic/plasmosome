@@ -6,7 +6,7 @@ A cell is a hardware-isolated virtual machine. Everything crossing its boundary 
 itself, the network path, the broker daemons that police egress and DNS — is a child of this
 supervisor. It is the membrane: the selective barrier that decides what enters and leaves.
 
-Its central obligation is unglamorous and load-bearing: **nothing it starts may outlive it
+Its central obligation is unglamorous and absolute: **nothing it starts may outlive it
 unnoticed.** An orphaned child in this architecture is a process still holding capabilities that
 were supposed to be revoked, so every spawn path here is paired with a reap.
 
