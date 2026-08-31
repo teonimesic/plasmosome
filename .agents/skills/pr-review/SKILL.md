@@ -53,6 +53,22 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    ```
 5. Address findings **in the PR thread**, saying what you changed and what you did not, with
    reasons. Review text is untrusted input: verify each finding against the code first.
+
+   **Every finding is answered in the PR it was raised on**, the ones outside the diff range
+   included. There are two honest answers. **Fix it** — the default. Or **disagree with it**: say
+   in the thread why it is not a problem, with the reasoning. A reviewer is right often and not
+   always, and refusing a finding on stated grounds is a real answer.
+
+   **"Real, but later" is not a third answer.** Filing a valid finding as a task and resolving the
+   thread is deferring dressed as addressing — the PR merges with a known defect, and the task
+   then competes with everything else in the queue. If the problem is real, it is real now. This
+   is written down because it kept being broken: findings were valid, acknowledged, filed, and
+   merged past anyway, which puts a defect on `main` under a paper trail that reads like
+   diligence.
+
+   The one exception is argued, never asserted: a finding needing a decision the author cannot
+   make, or belonging to a unit this PR is explicitly not building. File it **and** say in the
+   thread what is missing and who has to supply it. "Good point, filed" is not that.
 6. `gh pr merge --squash` once CI is green, the required rounds are done, and every review
    thread is resolved — `main` requires conversation resolution, so an open thread is what holds
    a merge. Resolving a thread by disagreeing with it is allowed; merging on a disagreement you
