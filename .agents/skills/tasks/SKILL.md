@@ -109,11 +109,16 @@ where the question is "is this right", which a reviewer answers on the pull requ
 
 `main` already holds tasks and specs that name nothing above them. They were filed correctly under
 the rule in force at the time, and **this one does not reach back**: they stay valid and they stay
-merged. **Editing such a file is not gated on backfilling it** — a status flip, a correction, a
-rewritten `## Why` can land as it stands, and a change elsewhere does not stall because a task file
-it touches is unmapped. What *is* gated is the work the task describes: an unmapped task cannot be
-planned, so it waits rather than counting as a defect. The greps under "Finding things" are that
-waiting list, not a list of faults.
+merged. **Editing such a file is not gated on backfilling it** — a correction, a rewritten `## Why`,
+a `pr:` or `evidence:` field, a flip to `in_review` or `done`, and any change elsewhere that happens
+to touch an unmapped task file. None of that waits for a mapping.
+
+**Two status values are outside that exception, because they are not bookkeeping — they are the work
+starting.** A flip to `planned` or to `in_progress` clears the gates above or it does not happen,
+and being a legacy file buys no discount on them. Naming the two is deliberate: stated in general
+terms this keeps coming out ambiguous between the file and the work, and "a status flip is fine"
+is exactly the sentence that lets `status: planned` through the gate this section exists to hold.
+The greps under "Finding things" are the waiting list that gate creates, not a list of faults.
 
 Two shapes that look like breakage and are not. An **accepted spec with an empty `intents:`** keeps
 its place; only a spec being written has to name one. And a **task whose chain closes one layer up**
