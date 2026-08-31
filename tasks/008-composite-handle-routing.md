@@ -17,7 +17,7 @@ done_when: >-
   the three tests in crates/plasmosome-testkit/tests/composite_backend_conformance.rs
   that carry #[ignore] today pass with the #[ignore] attribute removed, and no
   conformance clause in crates/plasmosome-testkit/src/conformance.rs changed.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/9
 evidence:
 ---
 
@@ -60,8 +60,13 @@ unfixed revoke and passing against the fix.
 
 That is also why the original unit tests missed this: each granted once per leaf.
 
-Written by the planner; blank while the task is `todo`. See `.agents/skills/tasks`.
+The independent review then found the other half: `revoke` translated the handle on the `Ok` arm
+and left the `Err` arm alone, so a leaf's error travelled to the caller carrying the leaf's
+handle — a number that could name a different live grant of theirs. `rename_handle` now rewrites
+the handle-bearing variants on the way out.
 
-## Notes
-
-Blank until there is something to add.
+One honest limit on the new tests. `a_revoked_handle_is_forgotten_and_not_reissued` locks the
+double-revoke contract, but it does **not** catch a composite that never drops the route: the
+leaf rejects the second revoke by itself, and `rename_handle` gives that rejection the caller's
+handle regardless. With the rename in place that mutation has no effect observable through the
+public API — only unbounded `routes` growth, which no test can see without exposing internals.

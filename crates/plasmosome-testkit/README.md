@@ -9,9 +9,10 @@ the trait. Every backend is held to the same functions, unchanged; a backend tha
 the thing that is wrong. That is what makes the fake a model of enforcement rather than a hope
 about it.
 
-`FakeBackend` passes all five. `CompositeBackend` over three fake leaves passes two and fails
-three, because it loses the handle its leaf issued — the failing three are `#[ignore]`d in
-`tests/composite_backend_conformance.rs` and task 008 fixes the backend, not the clauses.
+`FakeBackend` and `CompositeBackend` over three fake leaves both pass all five. The composite
+failed three of them when it was first wired in, because it lost the handle its leaf issued;
+task 008 fixed the backend rather than the clauses, which is the point of holding every backend
+to the same functions.
 
 The second is the **integration layer**. A unit test exercises one crate. These exercise core,
 backend and ledger together through their public APIs, with the outside world replaced only at

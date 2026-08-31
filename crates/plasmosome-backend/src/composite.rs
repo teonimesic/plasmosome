@@ -12,6 +12,17 @@ pub enum Leaf {
     Broker,
 }
 
+fn rename_handle(error: BackendError, caller: Handle) -> BackendError {
+    match error {
+        BackendError::UnknownHandle { .. } => BackendError::UnknownHandle { handle: caller },
+        BackendError::DrainTimedOut { deadline_ms, .. } => BackendError::DrainTimedOut {
+            handle: caller,
+            deadline_ms,
+        },
+        other => other,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Route {
     leaf: Leaf,
@@ -93,7 +104,8 @@ impl EnforcementBackend for CompositeBackend {
             .ok_or(BackendError::UnknownHandle { handle })?;
         let mut entry = self
             .leaf_named(route.leaf)
-            .revoke(route.leaf_handle, drain)?;
+            .revoke(route.leaf_handle, drain)
+            .map_err(|error| rename_handle(error, handle))?;
         entry.handle = handle;
         self.routes.remove(&handle.raw());
         Ok(entry)
@@ -197,6 +209,82 @@ mod tests {
         );
         assert_eq!(composite.leaf_snapshot(Leaf::Network).len(), 0);
         assert_eq!(composite.leaf_snapshot(Leaf::Filesystem).len(), 1);
+    }
+
+    #[test]
+    fn a_failed_revoke_names_the_handle_its_caller_asked_for() {
+        let mut network = FakeBackend::new();
+        network.mark_stuck(Handle(1));
+        let mut composite = CompositeBackend::new(Box::new(network), fake(), fake());
+        composite.grant(Grant {
+            plugin: PluginId::from("github-pr"),
+            capability: Capability::SessionFile {
+                path: "skills/pr.md".to_string(),
+            },
+            kind: GrantKind::Hot,
+        });
+        let proxy = composite.grant(Grant {
+            plugin: PluginId::from("github-pr"),
+            capability: Capability::ProxyMap {
+                host: "api.anthropic.com".to_string(),
+                route: "splice".to_string(),
+            },
+            kind: GrantKind::Hot,
+        });
+        assert_eq!(
+            proxy.handle,
+            Handle(2),
+            "the filesystem grant must push the composite counter past the network leaf's own"
+        );
+
+        let error = composite
+            .revoke(
+                proxy.handle,
+                DrainSpec::graceful(std::time::Duration::from_millis(1)),
+            )
+            .expect_err("a stuck leaf grant must fail the revoke");
+
+        match error {
+            BackendError::DrainTimedOut { handle, .. } => assert_eq!(
+                handle, proxy.handle,
+                "an error must name the handle its caller asked for, never the leaf's own"
+            ),
+            other => panic!("expected a drain timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_revoked_handle_is_forgotten_and_not_reissued() {
+        let mut composite = CompositeBackend::new(fake(), fake(), fake());
+        let file = composite.grant(Grant {
+            plugin: PluginId::from("github-pr"),
+            capability: Capability::SessionFile {
+                path: "skills/pr.md".to_string(),
+            },
+            kind: GrantKind::Hot,
+        });
+        let drain = DrainSpec::graceful(std::time::Duration::from_millis(1));
+        composite.revoke(file.handle, drain).expect("first revoke");
+
+        let error = composite
+            .revoke(file.handle, drain)
+            .expect_err("a handle already revoked must not revoke twice");
+        match error {
+            BackendError::UnknownHandle { handle } => assert_eq!(handle, file.handle),
+            other => panic!("expected an unknown handle, got {other:?}"),
+        }
+
+        let next = composite.grant(Grant {
+            plugin: PluginId::from("github-pr"),
+            capability: Capability::SessionFile {
+                path: "skills/other.md".to_string(),
+            },
+            kind: GrantKind::Hot,
+        });
+        assert_ne!(
+            next.handle, file.handle,
+            "a revoked handle must never be handed out again"
+        );
     }
 
     #[test]
