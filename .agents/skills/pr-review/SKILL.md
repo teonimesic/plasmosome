@@ -89,6 +89,22 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    the cause is usually somewhere else: another agent's pushes, or your own earlier rounds. Being
    the only one pushing right now is not evidence that there is budget left.
 
+   **When a PR is both behind and unreviewed, rebase before spending the review, never after.** A
+   review is spent on one head, and rebasing makes a new one; updating the branch afterwards pays
+   twice for the same diff, and in an exhausted window the second payment may not be there to
+   make. Get the branch up to date first, then spend the review on the head you will merge.
+
+   A rebase that changes nothing need not cost a review — CodeRabbit re-stamps an existing
+   completed review onto the new head, same Run ID, when the diff is unchanged. **Verify that
+   rather than assuming it**, or a re-stamp becomes another pass that never happened:
+
+   ```shell
+   diff <(git diff <old-base>..<old-head>) <(git diff <new-base>..<new-head>)
+   ```
+
+   Empty output means the rebase was content-neutral, so the earlier review covers the merged
+   bytes exactly. Any output means it does not, and the new head needs its own review.
+
    Nothing announces that the findings have stopped. **Wait for quiet instead**: track the newest
    timestamp across the three places CodeRabbit writes, and treat the queue as clear only once it
    has not moved for five minutes.
