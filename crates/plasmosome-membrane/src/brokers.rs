@@ -32,7 +32,14 @@ pub struct BrokerSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetStatus {
     Ready,
-    NotReady { broker: String, reason: NotReady },
+    NotReady {
+        broker: String,
+        reason: NotReady,
+    },
+    /// A set with no brokers. Never `Ready`: a cell whose brokers are all
+    /// absent has nothing enforcing, and answering ready there would let a
+    /// caller treat an unenforced cell as a working one.
+    Empty,
 }
 
 impl SetStatus {
@@ -41,11 +48,43 @@ impl SetStatus {
     }
 }
 
+/// Why a set refused or failed to spawn a broker.
+#[derive(Debug)]
+pub enum SetSpawnError {
+    /// The fork itself failed.
+    Forked(SpawnError),
+    /// Two specs named the same control socket. One socket answering for two
+    /// brokers makes a dead broker read as ready.
+    DuplicateControlSocket { socket: PathBuf, held_by: String },
+}
+
+impl std::fmt::Display for SetSpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SetSpawnError::Forked(error) => write!(f, "{error}"),
+            SetSpawnError::DuplicateControlSocket { socket, held_by } => write!(
+                f,
+                "control socket {} is already answered by broker `{held_by}`",
+                socket.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SetSpawnError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SetSpawnError::Forked(error) => Some(error),
+            SetSpawnError::DuplicateControlSocket { .. } => None,
+        }
+    }
+}
+
 /// The broker a set could not spawn, and why.
 #[derive(Debug)]
 pub struct SpawnFailed {
     pub broker: String,
-    pub reason: SpawnError,
+    pub reason: SetSpawnError,
 }
 
 impl std::fmt::Display for SpawnFailed {
@@ -81,13 +120,29 @@ impl<P: Probe> BrokerSet<P> {
     /// Spawns one child per spec, in order, through `launcher`. When a spawn
     /// fails the brokers already spawned are killed and reaped before the
     /// error is returned, so a part-way failure leaves nothing behind.
+    ///
+    /// Two specs may not share a control socket. One socket answering for two
+    /// brokers makes a dead broker read as ready, which is the false positive
+    /// the answered-query rule exists to prevent.
     pub fn spawn(
         specs: Vec<BrokerSpec>,
         mut launcher: impl FnMut(&BrokerSpec) -> Result<VmmChild, SpawnError>,
         prober: P,
     ) -> Result<BrokerSet<P>, SpawnFailed> {
-        let mut brokers = Vec::with_capacity(specs.len());
+        let mut brokers: Vec<Broker> = Vec::with_capacity(specs.len());
         for spec in specs {
+            if let Some(other) = brokers
+                .iter()
+                .find(|held| held.control_socket == spec.control_socket)
+            {
+                return Err(SpawnFailed {
+                    broker: spec.name,
+                    reason: SetSpawnError::DuplicateControlSocket {
+                        socket: spec.control_socket,
+                        held_by: other.name.clone(),
+                    },
+                });
+            }
             match launcher(&spec) {
                 Ok(child) => brokers.push(Broker {
                     name: spec.name,
@@ -97,7 +152,7 @@ impl<P: Probe> BrokerSet<P> {
                 Err(reason) => {
                     return Err(SpawnFailed {
                         broker: spec.name,
-                        reason,
+                        reason: SetSpawnError::Forked(reason),
                     });
                 }
             }
@@ -106,8 +161,13 @@ impl<P: Probe> BrokerSet<P> {
     }
 
     /// Asks every broker whether it is serving and returns `Ready` only when
-    /// all of them answered ready. Every call asks again.
+    /// all of them answered ready. Every call asks again. `deadline` is the
+    /// budget for one broker, not for the call: a set of N brokers can take up
+    /// to N times it. An empty set is `Empty`, never `Ready`.
     pub fn status(&self, deadline: Duration) -> SetStatus {
+        if self.brokers.is_empty() {
+            return SetStatus::Empty;
+        }
         for broker in &self.brokers {
             if let Readiness::NotReady(reason) = self.prober.probe(&broker.control_socket, deadline)
             {
@@ -310,7 +370,7 @@ mod tests {
                     "the set must carry the answer `dnsd` gave, not only that it was not ready"
                 );
             }
-            SetStatus::Ready => panic!("`dnsd` reported not ready, so the set cannot be ready"),
+            other => panic!("`dnsd` reported not ready, so the set cannot be {other:?}"),
         }
     }
 
@@ -332,6 +392,56 @@ mod tests {
 
         for (pid, name) in pids.into_iter().zip(names) {
             assert_reaped(pid, name);
+        }
+    }
+
+    #[test]
+    fn a_set_with_no_brokers_is_never_ready() {
+        let set = match BrokerSet::spawn(Vec::new(), forking(), ScriptedProbe::new()) {
+            Ok(set) => set,
+            Err(failure) => panic!("an empty set spawns nothing and cannot fail: {failure}"),
+        };
+
+        assert_eq!(
+            set.status(Duration::from_millis(50)),
+            SetStatus::Empty,
+            "a cell with no brokers has nothing enforcing and must not answer ready"
+        );
+        assert!(
+            !set.status(Duration::from_millis(50)).is_ready(),
+            "an empty set must not read as ready"
+        );
+    }
+
+    #[test]
+    fn two_brokers_may_not_share_a_control_socket() {
+        let home = tempfile::tempdir().expect("a temporary directory");
+        let shared = home.path().join("shared.uds");
+        let specs = vec![
+            BrokerSpec {
+                name: "egressd".to_string(),
+                control_socket: shared.clone(),
+            },
+            BrokerSpec {
+                name: "dnsd".to_string(),
+                control_socket: shared.clone(),
+            },
+        ];
+
+        let failure = match BrokerSet::spawn(specs, forking(), ScriptedProbe::new()) {
+            Ok(_) => panic!("a shared control socket must be refused"),
+            Err(failure) => failure,
+        };
+
+        assert_eq!(failure.broker, "dnsd");
+        match failure.reason {
+            SetSpawnError::DuplicateControlSocket { held_by, .. } => {
+                assert_eq!(
+                    held_by, "egressd",
+                    "the refusal names the broker that holds it"
+                )
+            }
+            other => panic!("expected a duplicate control socket, got {other}"),
         }
     }
 
