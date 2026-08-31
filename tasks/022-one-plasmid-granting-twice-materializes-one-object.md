@@ -14,9 +14,11 @@ refs:
     docs/decisions/006-a-removal-names-its-owner.md,
   ]
 done_when: >-
-  a plasmid that mounts two sources at one target, or maps one host down two routes, holds two
-  objects in the universe and can detach both; and the conformance suite holds every backend to a
-  revoke that takes its own plugin's object and no other holder's.
+  a plasmid that mounts two sources at one target, maps one host down two routes, or holds a broker
+  pid a residue object also names, holds two objects in the universe and can detach both; the
+  conformance suite holds every backend to a revoke that takes its own plugin's object and no other
+  holder's; and that suite's post-removal assertion asks whether the named owner still holds the
+  key rather than whether anyone does.
 pr:
 evidence:
 ---
@@ -29,9 +31,18 @@ Two things task 021 found and did not fix.
 when it forms the key, so one plasmid mounting `/secrets` and then `/code` at `/workspace` holds
 one object, not two. The operating system keeps both mounts. The first detach takes the object,
 the second answers `UnknownObject`, and the residue diff cannot see the mount still standing.
-`SetProxyMap` does the same with `route`. The classes that discard nothing behave the same way for
-two identical grants, so widening those two keys closes part of it and not all of it — what to do
-about identical grants is the open question, and it is a modelling question, not a bug fix.
+`SetProxyMap` does the same with `route`. `SpawnBroker` reaches the same state by a different
+route: pids are reused, and the universe keeps abandoned objects deliberately, so a residue
+`broker/31337` and a live grant of that pid are two objects on one key. The classes that discard
+nothing behave the same way for two identical grants, so widening keys closes part of it and not
+all of it — what to do about identical grants is the open question, and it is a modelling question,
+not a bug fix.
+
+**A third thing, smaller.** `apply_and_removal_reach_the_universe` asserts after a removal that
+`OsState::contains` is false — that *nobody* holds the key. Now that a removal names an owner, the
+question it should ask is whether that owner still holds it. It passes today only because the
+clause's ops and its planted residue use disjoint keys, and it becomes wrong the moment this task
+makes one key hold two objects. Change it here, with the rest.
 
 **The revoke-takes-its-own-object rule has no conformance clause.** Task 021 proved it over
 `FakeBackend` and, through it, `CompositeBackend`. A real backend can still take another plugin's

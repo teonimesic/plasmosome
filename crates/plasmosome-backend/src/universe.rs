@@ -416,26 +416,26 @@ mod tests {
 
     #[test]
     fn removal_takes_the_named_owners_object_and_leaves_the_other_holders_alone() {
-        for insertion in [["audit", "deploy"], ["deploy", "audit"]] {
+        for (asked_for, left_standing) in [("deploy", "audit"), ("audit", "deploy")] {
             let mut state = OsState::new();
-            for owner in insertion {
+            for owner in ["audit", "deploy"] {
                 state.insert(object(UniverseClass::ProxyMap, "api.github.com", owner));
             }
             let taken = state.remove(
                 UniverseClass::ProxyMap,
                 "api.github.com",
-                &PluginId::from("deploy"),
+                &PluginId::from(asked_for),
             );
             assert_eq!(
                 taken.map(|o| o.owner),
-                Some(PluginId::from("deploy")),
-                "a removal must take the owner it named, inserted {insertion:?}"
+                Some(PluginId::from(asked_for)),
+                "a removal must take the owner it named, asked for {asked_for}"
             );
             let left: Vec<&str> = state.objects().map(|o| o.owner.as_str()).collect();
             assert_eq!(
                 left,
-                vec!["audit"],
-                "a removal must leave every other holder of that key standing, inserted {insertion:?}"
+                vec![left_standing],
+                "a removal must leave every other holder of that key standing, asked for {asked_for}"
             );
         }
     }

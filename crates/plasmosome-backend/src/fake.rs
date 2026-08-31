@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn a_revoke_takes_the_object_its_own_grant_created() {
         let mut backend = FakeBackend::new();
-        let audit = backend.grant(grant(
+        backend.grant(grant(
             "audit",
             Capability::ProxyMap {
                 host: "api.github.com".to_string(),
@@ -233,7 +233,6 @@ mod tests {
             vec!["audit"],
             "revoking deploy's proxy map must leave audit's standing and take deploy's"
         );
-        assert_eq!(audit.plugin, PluginId::from("audit"));
     }
 
     #[test]
@@ -425,6 +424,33 @@ mod tests {
             )
             .unwrap();
         assert!(backend.snapshot_os_state().is_empty());
+    }
+
+    #[test]
+    fn a_removal_names_the_asking_plasmid_and_never_claims_the_key_is_free() {
+        let mut backend = FakeBackend::new();
+        backend.plant(OsObject {
+            class: UniverseClass::BrokerPid,
+            key: "broker/1234".to_string(),
+            owner: PluginId::from("audit"),
+        });
+        let held_by_another = backend
+            .apply_removal(
+                UniverseRemoval::KillBroker { pid: 1234 },
+                &PluginId::from("network"),
+            )
+            .unwrap_err();
+        assert_eq!(
+            held_by_another.to_string(),
+            "`network` holds no broker-pid object `broker/1234`",
+            "the error says what is true of the asking plasmid, never that the object is absent"
+        );
+        assert!(
+            backend
+                .snapshot_os_state()
+                .contains(UniverseClass::BrokerPid, "broker/1234"),
+            "a refused removal must leave the other plasmid's object where it was"
+        );
     }
 
     #[test]

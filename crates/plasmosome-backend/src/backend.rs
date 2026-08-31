@@ -131,10 +131,7 @@ impl fmt::Display for BackendError {
                 )
             }
             BackendError::UnknownObject { class, key, owner } => {
-                write!(
-                    f,
-                    "no {class} object `{key}` owned by `{owner}` in the verification universe"
-                )
+                write!(f, "`{owner}` holds no {class} object `{key}`")
             }
             BackendError::Fault(cause) => write!(f, "injected backend fault: {cause}"),
             BackendError::Unimplemented(what) => write!(f, "unimplemented in this track: {what}"),

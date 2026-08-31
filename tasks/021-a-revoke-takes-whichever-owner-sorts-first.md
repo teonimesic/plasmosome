@@ -47,10 +47,16 @@ choice between widening the key and naming the owner, and why the key lost.
 
 **2026-08-31.** The variant audit asked for by the brief. Three `UniverseOp` variants discard a
 field when they form their key: `SetProxyMap` drops `route`, `AddMount` drops `source`,
-`SpawnBroker` drops `name`. Only the first two can make two live capabilities collide —
-`AddMount` in exactly the way `SetProxyMap` does, since two sources may be mounted at one target
-and the OS keeps both. `SpawnBroker` cannot: a pid names one live process, so two brokers never
-hold it at the same time, and `KillBroker` keys on the pid to match.
+`SpawnBroker` drops `name`. `AddMount` collides in exactly the way `SetProxyMap` does, since two
+sources may be mounted at one target and the OS keeps both.
+
+The first answer written here said `SpawnBroker` was immune, because a pid names one live process
+and two brokers never hold it at once. That was wrong, and the independent review found it. The
+universe keeps abandoned objects on purpose — the conformance suite's own fixture plants
+`broker/31337` owned by `abandoned` — and pids are reused, so a residue object and a live grant sit
+on one key with different owners. Run against the unfixed removal, revoking the live broker takes
+the abandoned one and leaves the live one standing. No class is immune; the model imposes no
+uniqueness on any key.
 
 The discarded fields turned out not to be the cause. Two plasmids granted the *same* session file
 path — a key that discards nothing — also produce two objects, because nothing in `OsState` limits
@@ -63,10 +69,18 @@ ones that discard nothing. The second revoke then fails with `UnknownObject`, an
 verification cannot see what the first revoke left behind. It is loud rather than silent, which is
 why it was left out of this change rather than folded into it.
 
-Four tests hold the fix and all four fail against the unfixed removal: two on `OsState` itself,
-one over `FakeBackend`, one over `CompositeBackend`. The composite one is what makes the claim
-"both backends in the repository" true rather than assumed — its `apply_removal` tries each leaf
-in turn, which is a second place an owner could have been lost.
+The first composite test written for this did not test what its own commit message claimed.
+`CompositeBackend::revoke` routes by handle to the leaf's `revoke`, so it never reaches
+`CompositeBackend::apply_removal` — the function the change actually modified. The independent
+review demonstrated it: the original first-match bug can be reinstated inside that function and
+the whole workspace suite stays green. A test now drives `apply_removal` directly.
+
+That gap led to the other half. `apply_removal` tried each leaf in turn and returned the last
+error, while `apply` and `plant` both routed by class. The fallback could never fire — objects only
+enter a leaf through those two, both class-routed — and it made every removal miss at two leaves
+that cannot hold it, then report the third leaf's answer. A leaf reporting a real fault had that
+fault overwritten by "not held". It now routes by class like its neighbours, which deletes the
+fallback and the wrong error together.
 
 `OsState::owner_of` was deliberately left alone. It keeps its first-match answer, and after this
 change no removal goes through it — it is a diagnostic read, used in a conformance failure message

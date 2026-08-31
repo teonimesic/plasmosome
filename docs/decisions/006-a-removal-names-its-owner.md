@@ -53,16 +53,36 @@ replacement for it, and it turns a state two plasmids can legitimately reach int
 Every `EnforcementBackend` implementation accepts the owner. There are three in the repository and
 the change is mechanical in all of them.
 
-`BackendError::UnknownObject` names the owner. Without it the fixed code would answer a revoke of
-another plasmid's object with "no such object", which is false — the object is there and is not
-theirs. The two read differently now.
+`BackendError::UnknownObject` names the plasmid that asked, and its wording no longer asserts the
+object is absent: "`network` holds no broker-pid object `broker/1234`" is true whether or not
+someone else holds it. The old wording — "no such object in the verification universe" — was a
+false statement in exactly the case this change makes reachable. What the error still does not say
+is *who* does hold the key. Nothing branches on that today, and saying it would be a new contract
+every backend must implement with no clause holding it to the answer, so it was left out.
 
 `OsState::owner_of` keeps its first-match answer and is now only a diagnostic read: it still names
 one owner where several hold a key, and no removal goes through it. `contains` is the same shape —
 it answers whether anyone holds a key, not whether you do.
 
+A detach may no longer withdraw an object its plugin does not own. `Ledger` replays
+`InverseVia::Universe` and every compensation on behalf of the ledger's own plugin, so a removal
+naming another plugin's object is now refused, and a refusal stops the replay — the effects below
+it in the ledger are left standing. That is a real precondition on `Effect::exact` and
+`Effect::compensating` where there was none: a compensation may retract only what its own plugin
+created. Both constructors say so, and a test pins the refusal. It is the right direction — the
+alternative is a compensation quietly taking a neighbour's capability — but it is a narrowing, not
+a pure bug fix, and callers building ledgers by hand can trip on it.
+
 Two things this does not fix, both filed as task 022. One plasmid granted the same capability twice
-still materializes one object, so the second detach fails with `UnknownObject` and residue
-verification cannot see what the first one left; that is the discarded fields — `route`, `source` —
-in their same-owner form. And the rule that a revoke takes its own plugin's object is enforced by
-tests over `FakeBackend` rather than by a clause the conformance suite holds every backend to.
+still materializes one object, so the second detach fails and residue verification cannot see what
+the first one left. And the rule that a revoke takes its own plugin's object is enforced by tests
+over the two backends in this repository rather than by a clause the conformance suite holds every
+backend to, so a third backend can still break it and be certified.
+
+Finally, the rule this adds to `crates/plasmosome-backend/AGENTS.md` carries no A/B result, and
+decision 001 asks for one before a rule lands. The method there scores code an agent writes from a
+prompt, which reaches a style or approach heuristic and cannot reach a statement of what this
+crate's types guarantee. The four rules already under that heading are the same kind — "a grant
+returns a ledger entry", "wire types stay serde-serializable" — and none was measured. This
+decision is the evidence for that line; if the reading is wrong, the line goes rather than the
+requirement bending.
