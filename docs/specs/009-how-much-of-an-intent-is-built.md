@@ -43,12 +43,18 @@ whole risk in adding it is that a reader takes it for one of them.
 | `served:` | How much of it exists? | `none`, `partly`, `substantially` |
 | `outcome:` | Is this still open? | blank while open, non-blank once settled |
 
-They are independent, and every combination of them occurs. A refused draft is `status: draft`,
-`served: none`, with `outcome:` filled. A goal half built is `status: approved`, `served: partly`,
-`outcome:` blank. A goal that is mostly there and will never be closed is `status: approved`,
-`served: substantially`, `outcome:` blank for good. No value of one field is a value of another, so
-a reader who confuses two of them is contradicted by the words themselves rather than by a rule
-they have to know.
+**They vary independently, and every combination of the three is legal.** That is a design
+commitment rather than an observation, and the one worth stating outright is the combination that
+looks wrong and is not: a `draft` intent may carry any of the three values, `substantially`
+included. **Existence does not wait for approval.** An intent drafted over an area where code
+already exists is exactly the backfill `docs/intents/README.md` invites — anyone may draft the
+intent that closes a gap under work already finished — and `partly` is the truthful value for it.
+Nothing may be *committed to* under a draft goal; that gate is `status:`, and it is not this field's
+business. A check that refused `draft` with work beneath it would be reading the approval axis off
+the existence axis, which is the confusion this whole design exists to prevent.
+
+No value of one field is a value of another, so a reader who confuses two of them is contradicted by
+the words themselves rather than by a rule they have to know.
 
 The three values are the whole vocabulary and there is deliberately no fourth. `none` is nothing
 built. `partly` is some of it built. `substantially` is most of what was asked for built, with what
@@ -79,25 +85,34 @@ It holds two things and nothing else: what of the goal exists, and what is left.
 id, no task id, and no counts. An intent whose `## What is served` lists the specs beneath it has
 reintroduced the stale copy this spec exists to prevent, and a reviewer should refuse it on sight.
 
+**When an intent settles, `## What is served` stops being updated and stays where it is.** It
+becomes the record of what existed at the end, and `## Outcome` says why the goal stopped. The two
+are not one story told twice: the first says what was built, the second says why nothing more will
+be. A settled intent whose `## Outcome` merely restates `## What is served` should lose one of them,
+and the one to lose is `## Outcome` — the frontmatter `outcome:` already carries the fact that it
+settled.
+
 ### Who moves it
 
-`served:` and `## What is served` are the owner's judgement, and they move the way `status:` moves:
-an agent may carry the owner's word, relayed or heard directly, and may never originate it. The
-reasoning is the same one `docs/decisions/008-approving-an-intent-is-an-instruction.md` gives for
-approval — only the person who wanted the goal can say whether what exists meets it — and it needs
-no second rule, only one more trigger for a convention that already exists.
+`served:` and `## What is served` are the owner's judgement, and a pull request that changes either
+stays a draft until the owner takes it out, exactly as one proposing an intent does. An agent that
+notices a merged task moved a goal forward raises it that way: opens the edit as a draft, says what
+landed, and lets the owner decide the value.
 
-That trigger is the draft-pull-request convention. A pull request that changes `served:` or
-`## What is served` stays a draft until the owner has read it and taken it out of draft, exactly as
-one proposing an intent does. An agent noticing that a merged task has moved a goal forward raises
-it that way: open the edit as a draft, say what landed, and let the owner decide what the new value
-is. Nothing mechanical enforces this, for the reasons that record already sets out.
+**The reason is not the one that puts approval with the owner, and borrowing that reasoning would be
+wrong.** `docs/decisions/008-approving-an-intent-is-an-instruction.md` puts approval there because
+an approved intent multiplies into specs and tasks — one decision committing a queue. `served:`
+commits nothing; no gate reads it and nothing downstream waits on it. It is the owner's for a
+different reason: **the question is not answerable from the tree.** "How much of this goal exists"
+compares what was built against what was wanted, and only the person who wanted it holds the second
+half. An agent can read every spec and task beneath an intent and still not know whether they add up
+to the thing that was asked for. That is why the derived half below can be computed by anyone and
+this half cannot.
 
-The cost is stated rather than hidden. A judgement only the owner can revise is a judgement that
-goes stale between his readings, and the check below catches only the two ways it can go stale
-loudly. The alternative — letting an agent set the value from what it can see in the tree — was
-rejected because it collapses the two halves back together: the derived facts would be laundered
-into a judgement, and the file would claim an authority it did not have.
+The cost is stated rather than hidden. A judgement only the owner can revise goes stale between his
+readings, and the check catches only the loud ways. Letting an agent set the value from what it can
+see in the tree was rejected for collapsing the two halves back together: the derived facts would be
+laundered into a judgement, and the file would claim an authority it did not have.
 
 ### The check
 
@@ -107,30 +122,47 @@ this repository has already decided not to add more of. It belongs beside the cr
 `.agents/skills/heartbeat` step 4, and reads the same way: it prints faults, and silence is the only
 passing answer.
 
-Work has **landed** under an intent when some task with `status: done` names a spec whose `intents:`
-names that intent. That is the one derived fact the check needs.
+**Work has landed** under an intent when a task with `status: done` reaches it either way:
 
-The two contradictions, and nothing else:
+- **through a spec** — the task's `specs:` names a spec whose `intents:` names the intent; or
+- **directly** — the task's own `intents:` names the intent.
+
+**Both legs are required, and the second is not defensive.** `.agents/skills/tasks` keeps the
+task-level `intents:` copy so that a search over tasks and a search over specs return the same
+answer; a check walking only the spec leg makes them differ. On the tree today four `done` tasks
+carry `specs: []`, and `tasks/007-adopt-the-measured-instruction-rules.md` names `intents: [001]`
+directly — finished work under intent 001 that a spec-only walk cannot see, which would let intent
+001 sit at `served: none` forever without a word.
+
+The three faults, and nothing else:
 
 - **`served: none` with work landed.** Something was built under this goal and the file says nothing
   was. This is the staleness case, and it is the common one: it fires the first time a task closes
   under a goal nobody has revisited.
 - **`served: substantially` with no work landed.** The file claims most of the goal exists and
   nothing under it has shipped.
+- **A `served:` line that is absent, empty, or outside the three values.** Malformation rather than
+  contradiction, reported the same way. Absent counts because the field is required and a file that
+  never received it is exactly what needs finding — an intent merging from a branch written before
+  this spec is the shape that will hit it.
 
-Two more faults are malformation rather than contradiction, and the loop reports them the same way:
-a `served:` value outside the three, and a `served:` above `none` on an intent whose `status:` is
-still `draft`, which says work landed under a goal the owner has not approved.
+**The check does not read `status:` at all.** Approval and existence are independent, so no
+combination of the two is a fault, and a `draft` intent carrying `substantially` is not the check's
+business. An earlier draft of this spec had that fault and it was wrong twice over: it fired on the
+value alone with no landed-work condition, and it left a truthful shape — a draft intent over work
+that already exists — with no legal value at all.
 
 **What it must not flag, stated because it is the tempting check and it is wrong.** Open tasks
 beneath an intent marked `served: substantially` are not a contradiction. Substantial is not
 exhausted, no intent is expected to be exhausted, and a check that treated leftover work as a fault
 would fire on every healthy goal in the folder and be switched off within a week.
 
-**`partly` is compatible with every state of the tree**, so the check can never contradict it. That
-is a real limit and the reason this is a floor rather than a proof: it catches the two extremes
-going stale and catches nothing in the middle. An intent drifting from `partly` to
-`substantially` is caught by the owner reading, and by nothing else.
+**No state of the work beneath an intent can contradict `partly`.** It is compatible with landed
+work and with none, so only the malformation fault can ever name a `partly` intent, and only by
+being unreadable rather than by being wrong. That is a real limit and the reason this is a floor
+rather than a proof: it catches the two extremes going stale and catches nothing in the middle. An
+intent drifting from `partly` to `substantially` is caught by the owner reading, and by nothing
+else.
 
 ### Reading the derived half
 
@@ -155,59 +187,76 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
 
 ## Contract
 
-- **`served:`** is a required frontmatter field on every intent, on its own line, anchored at the
-  start of the line, directly after `status:`. Its value is exactly one of `none`, `partly`,
+- **`served:`** is a required frontmatter field on every intent file, on its own line, anchored at
+  the start of the line, directly after `status:`. Its value is exactly one of `none`, `partly`,
   `substantially`. `docs/templates/intent.md` ships `served: none`, so a copied and unfilled file
   claims nothing.
 - **`## What is served`** is a section of `docs/templates/intent.md`, placed before `## Outcome`.
   It holds what of the goal exists and what is left. It contains no spec id, no task id and no
-  count.
+  count. It stops being updated once the intent settles and is not deleted.
 - **`status:`, `outcome:` and `## Outcome` are unchanged** by this spec, in meaning and in
-  placement.
-- **Every intent already on `main` gains the field.** The value is the owner's; the mechanical part
-  of the backfill is that no intent is left without one.
+  placement. No fault in the check reads `status:`.
+- **Every intent file already on `main` gains the field.** The value is the owner's; the mechanical
+  part of the backfill is that no intent file is left without one.
 - **The check** lives in `.agents/skills/heartbeat` step 4 beside the existing cross-layer loop.
-  It prints one line per fault naming the intent file and the fault, and prints nothing on a clean
-  tree. It reports exactly four faults: `served: none` with a `done` task reaching the intent
-  through any spec that names it; `served: substantially` with no such task; a `served:` value outside the
-  three; and `served:` above `none` on a `status: draft` intent. It reports nothing about open tasks
-  under any value, and nothing about `partly`. It reads only the files in `docs/intents/` that
-  carry an `id:`, so the folder's `README.md` is skipped rather than reported as malformed.
+  Its inputs are `docs/intents/`, `docs/specs/` and `tasks/`. It **validates** only the files in
+  `docs/intents/` that carry an `id:`, so the folder's `README.md` is neither validated nor
+  reported; it reads the other two folders to derive whether work has landed.
+- It prints one line per fault naming the intent file and the fault, and prints nothing on a tree
+  where every intent's `served:` is well-formed and unrefuted. It reports exactly three faults:
+  `served: none` with work landed; `served: substantially` with no work landed; and a `served:`
+  line that is absent, empty, or outside the three values. It reports nothing about open tasks
+  under any value, nothing about `status:`, and nothing that contradicts `partly`.
+- **"Work has landed"** is true when some task with `status: done` either names a spec whose
+  `intents:` names the intent, or names the intent directly in its own `intents:`. Either leg
+  suffices.
+- **A spec naming an intent id that no intent file carries does not abort the check**; the intents
+  that do exist are still validated. Ids are resolved by reading each file's `id:`, never by
+  globbing a filename.
 - **Callers may rely on** the check being a floor and not a proof: silence means no intent makes a
   claim the tree flatly contradicts, never that any intent's coverage is accurate.
 - **A pull request changing `served:` or `## What is served` stays a draft** until the owner takes
   it out of draft, and says where the judgement came from. `.agents/skills/pr-review` step 2 gains
   that trigger; `.agents/skills/tasks` and `docs/intents/README.md` gain the field and its values.
-  Nothing mechanical enforces it, per
-  `docs/decisions/008-approving-an-intent-is-an-instruction.md`.
+  Nothing mechanical enforces it.
 
 ## Acceptance
 
 - `docs/templates/intent.md` carries `served: none` directly after `status:`, and a
   `## What is served` section before `## Outcome`.
-- Every file in `docs/intents/` carries a `served:` line whose value is one of the three;
-  the count of files matching `^served: (none|partly|substantially)$` equals the number of
-  intent files.
-- `docs/intents/README.md` states the three values and the question the field answers, and states
-  that the field is the owner's to move.
+- Every intent file — every file in `docs/intents/` carrying an `id:`, which excludes `README.md` —
+  has a line matching `grep -E '^served: (none|partly|substantially)$'`, and the count of such files
+  equals the count of intent files.
+- `docs/intents/README.md` states the three values and the question the field answers, states that
+  the field is the owner's to move, and states that it is independent of `status:`.
 - `.agents/skills/tasks` lists intent `served:` beside intent `status:` in its field-value list, and
   neither section restates the other's rule.
 - `.agents/skills/pr-review` step 2 names a `served:` change as a pull request that stays a draft.
 - No intent file names a spec id, a task id or a count in `## What is served`.
-- The check prints nothing on the tree as it stands.
-- The check prints the offending file for each of the four faults, injected one at a time into a
-  scratch copy of the tree: an intent flipped to `served: none` while a `done` task reaches it
-  through a spec that names it; one flipped to `served: substantially` with nothing done beneath it; one
-  carrying `served: mostly`; and a `status: draft` intent carrying `served: partly`.
+- The check prints nothing on the tree as it stands **after the backfill in the same change** — the
+  tree this spec merges into has no `served:` field at all, so the clean run is asserted against the
+  post-backfill tree.
+- The check prints the offending file for each of the three faults, injected one at a time into a
+  scratch copy: an intent flipped to `served: none` while a `done` task reaches it; one flipped to
+  `served: substantially` with nothing done beneath it; and one carrying `served: mostly`.
+- The check prints the offending file for an intent whose `served:` line is **deleted**, and for one
+  whose `served:` line is present but empty.
+- The check prints nothing for a `status: draft` intent carrying `served: partly`, and nothing for a
+  `status: draft` intent carrying `served: substantially` with work landed beneath it.
 - The check prints nothing for an intent marked `served: substantially` that has open tasks beneath
   it, verified by planting exactly that shape.
 - The check prints nothing for an intent marked `served: partly` in any of those shapes.
-- The check survives an intent whose `intents:` reference points at no file, and reports rather than
-  aborting — verified by planting a spec naming intent `099`.
+- **The second landing leg is exercised:** with `tasks/007-adopt-the-measured-instruction-rules.md`
+  `done`, `specs: []` and `intents: [001]`, intent 001 at `served: none` prints the staleness fault
+  and at `served: substantially` prints nothing. A check walking only the spec leg gets both
+  backwards, which is what this bullet is for.
 - The check says nothing about `docs/intents/README.md`, which carries no `id:`.
-- The check runs clean under both `bash` and `zsh`.
+- A planted spec carrying `intents: [099]`, which no intent file has, does not abort the check:
+  every real intent is still validated in the same run.
+- The check runs clean under both `bash` and `zsh`. It does not use `status` as a shell variable
+  name, which is read-only in `zsh`.
 - The derivation command in this spec, run for an intent with at least one spec, prints that spec
-  and the tasks naming it.
+  and the tasks naming it; run for an intent with no specs, it prints nothing and exits 0.
 
 ## Out of scope
 
@@ -227,3 +276,8 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
   source of truth.
 - **Changing what `status:` or `outcome:` mean.** Both keep the definitions
   `docs/intents/README.md` gives them.
+- **A decision record.** The alternatives turned down here — an agent deriving `served:` from the
+  tree, folding coverage into `status:`, reusing `## Outcome` — are argued above rather than in
+  `docs/decisions/`. The first of them is the one that will be argued for again, because deriving
+  the value looks like less work every time someone meets a stale field. **If it is raised a second
+  time, that is the trigger to write the record** rather than to re-run the argument from here.
