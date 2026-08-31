@@ -27,7 +27,7 @@ evidence:
 the oldest live one — passes all eight clauses and then breaks a real detach. Driven through
 `SealedLedger::detach` with three live grants:
 
-```
+```text
 detach -> Err("ledger replay failed: unknown handle h3")
 universe left = [uds-path `/run/victim/a.uds`, proxy-map `victim.test`, mount `/victim`]
 ```
