@@ -41,3 +41,11 @@ files carries such a word today.
 ## Testing
 
 `cargo test -p plasmosome-freeze-checks`.
+
+**Count the tests by running them, not by grepping for them.**
+`grep -c '^#\[test\]' tests/shared_memory_reads_rust.rs` answers 21; the file holds 20 tests. The
+extra hit is inside the raw-string fixture belonging to `a_test_name_naming_a_lock_is_not_a_use`,
+which is a `#[test]` written as text so the rule can be shown ignoring it. A count taken that way
+is off by exactly the fixtures this crate exists to distinguish from code, and the same is true of
+any file here: the fixtures are Rust-shaped on purpose. `cargo test` prints the number that is
+true.
