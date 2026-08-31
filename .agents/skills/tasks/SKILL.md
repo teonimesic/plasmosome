@@ -60,8 +60,9 @@ Until then, do not create either file. A second copy of the vision would contrad
 There is no line count in that table any more. Size stopped being the question the moment every
 task needed a spec: a 400-line change to code spec 003 already governs needs no new document, and
 a 30-line change to something nothing describes needs the same two links as a large one. The old
-threshold said 100 lines and no merged change had ever obeyed it, which made it useless as a
-review standard.
+threshold also could not be cited in review: five merged pull requests crossed it — 103, 126, 167,
+218 and 297 lines — and shipped with no spec and no task, while every change that did name a spec
+was one the plan had already routed through one.
 
 ## The chain, and the two gates
 
