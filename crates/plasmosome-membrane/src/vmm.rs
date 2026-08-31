@@ -319,6 +319,7 @@ mod signal_pressure {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const CHILDREN: usize = 64;
+    const SIGNALS_PER_BURST: usize = 512;
 
     static DELIVERED: AtomicUsize = AtomicUsize::new(0);
 
@@ -379,9 +380,13 @@ mod signal_pressure {
                 let armed = Arc::clone(&armed);
                 let running = Arc::clone(&running);
                 move || {
+                    let mut sent = 0;
                     while running.load(Ordering::Relaxed) {
-                        if armed.load(Ordering::Relaxed) {
+                        if !armed.load(Ordering::Relaxed) {
+                            sent = 0;
+                        } else if sent < SIGNALS_PER_BURST {
                             unsafe { libc::pthread_kill(target as libc::pthread_t, libc::SIGUSR1) };
+                            sent += 1;
                         }
                         std::thread::yield_now();
                     }
