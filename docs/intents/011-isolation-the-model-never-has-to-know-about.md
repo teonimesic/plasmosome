@@ -20,12 +20,11 @@ a model knows about changes what the model does. A cage it does not know about c
 except what it can actually reach.
 
 The consequence I want is that this holds for anything running in a cell: the harnesses I use
-today, the ones I have not tried yet, and software that has never heard of Plasmosome. If a
-capability only holds for a workload that cooperates, it is not a capability I have.
+today, the ones I have not tried yet, and software that has never heard of Plasmosome. If the
+isolation only holds when the workload cooperates, it is not isolation I can rely on.
 
-Two pieces of work are waiting on this. The four-plasmid end-to-end run and the first enforcement
-backend that is not a fake sit above nothing today, so under the work chain neither may be
-started. This is the goal they belong to.
+Two pieces of work belong under this: the four-plasmid end-to-end run, and the first enforcement
+backend that is not a fake. This is the goal I want them built against.
 
 ## Outcome
 
