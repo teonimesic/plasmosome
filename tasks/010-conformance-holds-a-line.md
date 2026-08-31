@@ -1,7 +1,7 @@
 ---
 id: 010
 title: Close the six backends that still walk through all eight clauses
-status: in_review
+status: done
 priority: 1
 specs: [003]
 intents: []
@@ -20,7 +20,7 @@ done_when: >-
   eight clauses while LedgerMirror is documented as a limit of the seam rather
   than closed.
 pr: https://github.com/teonimesic/plasmosome/pull/11
-evidence:
+evidence: squash commit cb34d1a on main; tests/clauses_discriminate.rs commits a defective backend per defect and the five named defects each fail a clause
 ---
 
 ## Why
