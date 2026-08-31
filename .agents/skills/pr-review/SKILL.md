@@ -249,9 +249,10 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    with what the product needed.
 6. `gh pr merge --squash` once CI is green, the required rounds are done, **the independent
    review is on the PR as an issue comment naming the model and the head it read, with nothing
-   material changed since that head** (step 3), the
-   head's `CodeRabbit` status reads `Review completed` rather than `Review rate limited`, the
-   review queue has been quiet for five minutes (step 4), and every review thread is resolved —
+   changed since that head beyond what that review asked for** (step 3; for a rebase-only move,
+   step 4's diff-of-diffs settles it), the head's `CodeRabbit` status reads `Review completed`
+   rather than `Review rate limited`, the review queue has been quiet for five minutes (step 4),
+   and every review thread is resolved —
    `main` requires conversation resolution, so an open thread is what holds a merge. Resolving
    a thread by disagreeing with it is allowed; merging on a disagreement you did not write down
    in the thread is not.
@@ -329,8 +330,8 @@ Size is lines changed, excluding lockfiles and generated files.
 | 100–1000 | **2** |
 | > 1000 | **3** |
 
-The independent reviewer runs once per PR regardless of size. Size never adds a pass; a rewrite
-that changes what it read does — step 6.
+The independent reviewer runs at least once per PR. Size never adds a pass; a rewrite beyond what
+the review asked for does — step 6.
 
 ## Review the neighbourhood, not just the diff
 
