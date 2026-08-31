@@ -96,6 +96,15 @@ beneath it are each a pull request, and detectable by the one person who can tel
 pull-request record does not narrow it either: the same actor writes the file line, the commit and
 the review.
 
+**Recording an approval already given is not a new approval.** Filling `status:` on an intent that
+predates the field does not grant anything; it writes down what was already true. The rule binds an
+approval being *granted*, so a backfill needs no fresh one, and demanding a ceremony for it would
+mean re-approving everything the owner ever approved each time the schema changes. The carve-out is
+narrow and it is checkable: it applies where the approval is established by a record outside the
+file — for intents 001 and 002, the owner's own commit `02f6e9e`, which predates the field. It is
+**not** a licence for an agent to decide that some older intent was probably approved. Without a
+record outside the file, there is no backfill, only an approval, and the ordinary rule applies.
+
 **"Nothing enforces this" is not a defect report.** An agent finding the gap and filing work to
 close it would be doing the thing the work chain exists to stop: manufacturing a task from a review
 observation that maps to no goal. This record is the answer to that finding; if the reading is
