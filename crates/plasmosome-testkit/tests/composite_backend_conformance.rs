@@ -32,3 +32,18 @@ fn composite_backend_leaves_planted_residue_alone() {
 fn composite_backend_snapshots_invent_nothing() {
     conformance::snapshot_never_invents_objects(composite_over_fake_leaves);
 }
+
+#[test]
+fn composite_backend_gives_every_live_grant_its_own_handle() {
+    conformance::live_grants_hold_distinct_handles(composite_over_fake_leaves);
+}
+
+#[test]
+fn composite_backend_applies_and_removes_universe_objects() {
+    conformance::apply_and_removal_reach_the_universe(composite_over_fake_leaves);
+}
+
+#[test]
+fn composite_backend_rejects_a_handle_it_already_revoked() {
+    conformance::revoke_of_a_revoked_handle_is_error(composite_over_fake_leaves);
+}

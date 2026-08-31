@@ -25,3 +25,18 @@ fn fake_backend_leaves_planted_residue_alone() {
 fn fake_backend_snapshots_invent_nothing() {
     conformance::snapshot_never_invents_objects(FakeBackend::new);
 }
+
+#[test]
+fn fake_backend_gives_every_live_grant_its_own_handle() {
+    conformance::live_grants_hold_distinct_handles(FakeBackend::new);
+}
+
+#[test]
+fn fake_backend_applies_and_removes_universe_objects() {
+    conformance::apply_and_removal_reach_the_universe(FakeBackend::new);
+}
+
+#[test]
+fn fake_backend_rejects_a_handle_it_already_revoked() {
+    conformance::revoke_of_a_revoked_handle_is_error(FakeBackend::new);
+}
