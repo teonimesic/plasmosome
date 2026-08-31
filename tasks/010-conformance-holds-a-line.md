@@ -1,7 +1,7 @@
 ---
 id: 010
 title: Close the six backends that still walk through all eight clauses
-status: in_progress
+status: in_review
 priority: 1
 specs: [003]
 intents: []
@@ -19,7 +19,7 @@ done_when: >-
   defect; and of the six backends named below, the first five no longer pass all
   eight clauses while LedgerMirror is documented as a limit of the seam rather
   than closed.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/11
 evidence:
 ---
 
