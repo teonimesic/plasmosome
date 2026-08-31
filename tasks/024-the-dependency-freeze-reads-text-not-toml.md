@@ -3,7 +3,7 @@ id: 024
 title: The dependency freeze reads text, not TOML
 status: todo
 priority: 2
-specs: []
+specs: [001]
 intents: []
 refs:
   [
@@ -16,7 +16,8 @@ done_when: >-
   `sneaky = { package = "libc", version = "0.2" }` to `plasmosome-core`, or
   `"libc" = "0.2"`, or `nix` under `[target."cfg(unix)".dependencies]`, or
   `libc` under `[dev-dependencies]`, `[build-dependencies]` or
-  `[dependencies.libc]`, fails the check; a test covers each of the six. The
+  `[dependencies.libc]`, fails the check; a test covers each of the six.
+  `workspace_members` in the same file no longer parses TOML by hand either. The
   manifests as they stand today still pass.
 pr:
 evidence:
@@ -65,8 +66,13 @@ and the whole suite stays green.
 and the rename for every dependency in every table. Either is enough; parsing the manifest by
 hand a second time is not.
 
-`workspace_members` in the same file is the same shape of mistake and worth taking in the same
-pass: it looks for a literal `members = [` line and strips quotes by hand, held up by an assertion
+Spec 001 §6 item 3 is what this falsifies. Its freeze checklist says the controller-side wire
+rules are "enforced by `plasmosome-freeze-checks` (86 §4 rules 1–3 green today)", and rule 1 is the
+check above — which announces "86 §4 rule 1 broken" when it fires and admits five ways not to. The
+spec claims an enforcement it does not have.
+
+`workspace_members` in the same file is the same shape of mistake and is in `done_when` for the
+same pass: it looks for a literal `members = [` line and strips quotes by hand, held up by an assertion
 that the root manifest still lists its members one per line. Whichever parser this task brings in
 covers both.
 

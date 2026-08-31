@@ -15,12 +15,9 @@ done_when: >-
   signalled, and the reused-pgid hazard below is prevented by a check that the
   group is still ours — not merely noted; or it is not signalled, and the reason
   says what was measured. Either way the residual hazard is answered rather than
-  left to "there was nothing to recover". A child whose `setsid` fails does not go
-  on to run the launcher; that is about what the child does, not what `spawn`
-  returns, which cannot know — `spawn` returns as soon as `fork` does, and the
-  `setsid` failure it would report has not happened yet — and that clause is
-  defensive, not reproducible: POSIX makes it unreachable, so it is checked by
-  reading `spawn` and no test is claimed for it. `VmmChild`'s doc and
+  left to "there was nothing to recover". All three of `drop`, `state` and `kill`
+  answer the same way, since each of them early-returns on the cached terminal
+  state. `VmmChild`'s doc and
   `a_second_reaper_leaves_the_childs_workers_running` say the same thing as the
   code when this is done.
 pr:
@@ -89,37 +86,41 @@ raised this as an open question and asked that the POSIX guarantee be verified b
 on it. It is verified. Settling it is part of this task — including the doc and the test, which
 currently assert the leak as intended behaviour.
 
-**`setsid` is unchecked, and it is the same guarantee.** `spawn` calls `libc::setsid()` and
-discards the result. A child whose `setsid` fails did not create the session and group the handle
-assumes it leads, so `-self.pid` stops naming a group `VmmChild` owns. Exactly how it then misfires
-depends on which `EPERM` it was — a child left in its parent's group is not reached by
-`kill(-self.pid, ...)` at all, while a child that was already a group leader would be reached along
-with whatever else shares that group — and the guarantee is broken either way. The
-parent cannot be the one to notice: `spawn` returns as soon as `fork` returns, before the child
-has reached `setsid` at all, so making the handle report the failure would need a handshake this
-type does not have and does not need. The child is where it is answerable — it can refuse to run
-the launcher, which the parent then observes as an exited child through the machinery that already
-exists.
-
-**This half is defensive, and the task should not pretend otherwise.** `setsid` fails with `EPERM`
-when the caller is already a process group leader, or when its pid is the group id of a group in
-another session. POSIX requires `fork` to give the child a pid that matches no active process
-group id, which excludes both — so on a conforming implementation the child
-cannot be a group leader and this call cannot fail that way. There is no reachable path here to
-demonstrate, and no test will be watched failing against it. What is left is worth the three
-lines anyway: a discarded return on the call that establishes the group means that if the
-assumption ever stops holding — a non-conforming platform, or a future `spawn` that puts the child
-in a group before `setsid` — the guarantee this type sells fails silently and nothing says so.
-Handle it as the other half of the same sentence: the group has to be established, and it has to
-be killed. Rank it accordingly against the two halves above, which are reproducible today.
-
 **Where it came from.** CodeRabbit raised the drop half twice on PR #13, the `setsid` half once,
 and the competing-reaper branch on PR #21 — all as "outside diff range" comments in the review
 body. Those never become review threads, so both PRs merged green with nothing to answer.
 
-This crosses the spec threshold in `.agents/skills/tasks` — it touches the enforcement semantics
-and `VmmChild`'s public contract, since `state()` gains the side effect of tearing down the group.
+**What it is blocked on.** This crosses the spec threshold, and there is no spec to name. Spec 001
+reserves exactly this ground: §4's last bullet holds "broker spawn/supervision verbs" for P1 step
+2, and §5 lists "the membrane's VMM/shim/broker verb set" among what the draft deliberately does
+not freeze. So the guarantee this task defends traces to the root `AGENTS.md` — "nothing outlives
+its owner unnoticed" — and to no spec. `specs: []` is the honest answer, not a gap to be papered
+over by naming spec 001; what is missing is a supervision contract saying what a `VmmChild` owes
+the processes below it, and that has to be written before this is claimed.
 
 ## Plan
 
 ## Notes
+
+**2026-08-31, on the third finding, which is deliberately not in `done_when`.** CodeRabbit raised
+on PR #13 that `spawn` calls `libc::setsid()` and discards the result. It is recorded here rather
+than as a completion criterion, because it cannot be one: a criterion that no observation can fail
+dilutes the two above it that can.
+
+A child whose `setsid` fails did not create the session and group the handle assumes it leads, so
+`-self.pid` stops naming a group `VmmChild` owns. How it then misfires depends on which `EPERM` it
+was: a child left in its parent's group is not reached by `kill(-self.pid, ...)` at all, while a
+child that was already a group leader would be reached along with whatever else shares that group.
+The guarantee is broken either way.
+
+It is not reproducible. `setsid` fails with `EPERM` when the caller is already a process group
+leader, or when its pid is the group id of a group in another session, and POSIX requires `fork` to
+give the child a pid matching no active process group id — which excludes both. On a conforming
+implementation this call cannot fail, so no test will be watched failing against it.
+
+The parent could not report it in any case: `spawn` returns as soon as `fork` returns, before the
+child has reached `setsid` at all, so surfacing the failure through the handle would need a
+handshake this type does not have. The child is where it is answerable — it can refuse to run the
+launcher, which the parent then observes as an exited child through the machinery that already
+exists. Whether it *should* is a contract sentence, so it belongs to the supervision spec this task
+is blocked on rather than to the repair.

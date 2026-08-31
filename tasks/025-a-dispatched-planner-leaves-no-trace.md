@@ -19,10 +19,7 @@ done_when: >-
   and the second says which record told it to skip. A record whose planner died
   before it pushed does not silence that item for ever: the written procedure says
   how such a record is recognised and retried, and says it in a way a third
-  heartbeat can follow. The same record, or another named in the same place, is
-  what stops two agents claiming one `NNN` — the numbering check in
-  `.agents/skills/tasks` reads the remote and cannot see a claim that has not been
-  pushed.
+  heartbeat can follow.
 pr:
 evidence:
 ---
@@ -69,3 +66,11 @@ nothing to answer.
 ## Plan
 
 ## Notes
+
+**2026-08-31, on the numbering collision, which is related and not the same.** The `021`/`022`
+collision in `## Why` came from two agents *filing* at once, not from an unrecorded planner
+dispatch, and a dispatch record on its own does not close it — the numbering check in
+`.agents/skills/tasks` reads the remote, and a file that has not been pushed is not there whatever
+else was recorded. It is kept as evidence that claims held only in an agent's head do bite, not as
+something this task must fix. Reserving a number is its own problem and deserves its own task if
+anyone wants it closed.
