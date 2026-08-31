@@ -88,7 +88,7 @@ Copy the skeleton, do not retype it:
 
 ```shell
 cp docs/templates/task.md tasks/004-my-slug.md
-```shell
+```
 
 `docs/templates/` holds `intent.md`, `spec.md`, `task.md` and `decision.md`. Fields marked
 optional, and sections you have nothing to put in, are left blank. A blank section is better than
@@ -147,7 +147,7 @@ grep -l '^specs:.*\b001\b' tasks/*.md
 grep -l '^intents:.*\b003\b' docs/specs/*.md
 grep -l '^intents:.*\b003\b' tasks/*.md
 grep -h '^title:' /dev/null $(grep -l '^status: todo' tasks/*.md)
-```shell
+```
 
 ## Checking whether a task is really done
 
@@ -160,7 +160,7 @@ Ask GitHub instead:
 
 ```shell
 gh pr view <number> --json state,mergeCommit
-```shell
+```
 
 `state: MERGED` with a merge commit is the proof. Put that commit hash, or the PR URL, in
 `evidence:`.
