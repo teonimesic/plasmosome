@@ -17,6 +17,11 @@ done_when: >-
 constant baked into each test binary. Cargo's fingerprint does not invalidate on a directory
 rename, so a stale `target/` keeps serving binaries carrying the old path.
 
+The idiom is not confined to that helper. `plasmosome-membrane/src/readiness.rs` and
+`plasmosome-freeze-checks/src/lib.rs` each spell out `PathBuf::from(env!("CARGO_MANIFEST_DIR"))`
+followed by `.ancestors().nth(2)`, so a fix applied to one leaves the other wrong. Whatever
+replaces it should be the single thing both call.
+
 Renaming the checkout is the mild case: every check that reads a file through `workspace_root()`
 fails with `No such file or directory`, which reads as a broken invariant rather than a stale
 build. Ten checks failed that way after a move, on both `main` and a feature branch, and
@@ -41,6 +46,25 @@ staleness instead of a missing file.
 compile-time: …/attribution-guard-nonterminal/crates/plasmosome-freeze-checks
 runtime     : Ok("…/attribution-guard-nonterminal/crates/plasmosome-freeze-checks")
 ```
+
+## Evidence the stale binary is real
+
+The repository moved from `~/Documents/plasmosome` to `~/Documents/plasmosome/plasmosome` while
+PR #35 was open. In the worktree at
+`~/Documents/plasmosome/plasmosome/.worktrees/attribution-guard-nonterminal`, with the pre-move
+`target/` in place, `cargo test --workspace` failed once:
+
+```text
+panicked at crates/plasmosome-membrane/src/readiness.rs:130:13:
+the control protocol spec is readable at
+/Users/stefano/Documents/plasmosome/.worktrees/attribution-guard-nonterminal/docs/specs/001-control-protocol.md:
+No such file or directory (os error 2)
+```
+
+The path in the panic is the pre-move one; the file was present at the post-move path throughout.
+`cargo clean -p plasmosome-membrane` alone, with no source change and the same command, took that
+crate from 1 failed to 29 passed. Sources unchanged, command unchanged, worktree unchanged — only
+the cached artifacts differed.
 
 ## Plan
 
