@@ -65,8 +65,13 @@ and left the `Err` arm alone, so a leaf's error travelled to the caller carrying
 handle — a number that could name a different live grant of theirs. `rename_handle` now rewrites
 the handle-bearing variants on the way out.
 
-One honest limit on the new tests. `a_revoked_handle_is_forgotten_and_not_reissued` locks the
-double-revoke contract, but it does **not** catch a composite that never drops the route: the
-leaf rejects the second revoke by itself, and `rename_handle` gives that rejection the caller's
-handle regardless. With the rename in place that mutation has no effect observable through the
-public API — only unbounded `routes` growth, which no test can see without exposing internals.
+That limit is now closed. `a_revoked_handle_is_forgotten_and_not_reissued` first could not catch
+a composite that never drops the route — the leaf rejects the second revoke by itself, and
+`rename_handle` gives that rejection the caller's handle regardless, so nothing was observable
+through the public API. A `#[cfg(test)] fn live_routes` reads the map's length, which is the
+smallest exposure that makes the cleanup assertable, and the test now fails against that mutation.
+
+Route lifetime is deliberate in both directions and both are tested: a successful revoke drops
+the route, and a failed one keeps it, because the capability is still granted and the caller must
+be able to retry. `a_failed_revoke_keeps_its_route_so_the_caller_can_retry` fails against a
+version that drops the route before the leaf call.

@@ -75,6 +75,11 @@ impl CompositeBackend {
         Handle(self.next_handle)
     }
 
+    #[cfg(test)]
+    fn live_routes(&self) -> usize {
+        self.routes.len()
+    }
+
     pub fn leaf_snapshot(&self, leaf: Leaf) -> OsState {
         match leaf {
             Leaf::Network => self.network.snapshot_os_state(),
@@ -285,6 +290,41 @@ mod tests {
             next.handle, file.handle,
             "a revoked handle must never be handed out again"
         );
+        assert_eq!(
+            composite.live_routes(),
+            1,
+            "a revoked handle's route must be forgotten, or the map grows for the life of the cell"
+        );
+    }
+
+    #[test]
+    fn a_failed_revoke_keeps_its_route_so_the_caller_can_retry() {
+        let mut network = FakeBackend::new();
+        network.mark_stuck(Handle(1));
+        let mut composite = CompositeBackend::new(Box::new(network), fake(), fake());
+        let proxy = composite.grant(Grant {
+            plugin: PluginId::from("github-pr"),
+            capability: Capability::ProxyMap {
+                host: "api.anthropic.com".to_string(),
+                route: "splice".to_string(),
+            },
+            kind: GrantKind::Hot,
+        });
+        let drain = DrainSpec::graceful(std::time::Duration::from_millis(1));
+
+        composite
+            .revoke(proxy.handle, drain)
+            .expect_err("the stuck grant must fail to drain");
+
+        assert_eq!(
+            composite.live_routes(),
+            1,
+            "a revoke that failed must keep its route; the capability is still granted"
+        );
+        match composite.revoke(proxy.handle, drain) {
+            Err(BackendError::DrainTimedOut { handle, .. }) => assert_eq!(handle, proxy.handle),
+            other => panic!("a retry must reach the leaf again, got {other:?}"),
+        }
     }
 
     #[test]
