@@ -79,6 +79,20 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    rate-limited green ships a change nobody reviewed, and neither the check state nor an empty
    thread list will ever say so.
 
+   **There is a fourth meaning, and it makes the reviews endpoint useless for this question.** A
+   review that finds nothing creates **no review object at all** — it posts its walkthrough as an
+   issue comment and stops. The endpoint returns zero entries, not an entry with an empty body. PR
+   #39 read `Review completed` with zero reviews and one issue comment; #34 and #36 read the same
+   status with two and four. So zero reviews cannot tell a clean pass from a review that never
+   ran, and to anything that counts them the two are identical.
+
+   That settles which signal answers which question. **Did a round happen** is the status
+   description on the head you are about to merge, and nothing else — not the check state, not a
+   review appearing, not the thread count. **What did it say** is the reviews endpoint, read only
+   after the description has already told you a review exists. A wait keyed on a review appearing
+   never trips on a clean one and hangs until it times out; a merge gate keyed on the same
+   evidence cannot see the difference between "nothing to say" and "never spoke".
+
    **The dangerous moment for a rate-limited green is the push you just made, not a quiet PR.**
    It arrives on a new head seconds after you act, which is exactly when a wait is primed to
    accept it as the fresh review it was waiting for — the check went from absent to green, on the
