@@ -38,8 +38,9 @@ description: How a change reaches main — PR-only workflow, review rounds by di
 
    The agent that wrote the change owns this loop until its PR merges. Do not hand a half-reviewed
    PR back and call the work finished — a new comment after you stopped looking is the same as no
-   review at all. `gh pr checks --watch` blocks until checks settle, and every query below must be
-   re-run after each of your own pushes too.
+   review at all. `gh pr checks --watch` is for `gates`, which does settle; the `CodeRabbit`
+   context is not a completion signal and is covered below. The thread query tells you what was
+   said inline, and every query here must be re-run after each of your own pushes too.
 
    **A green check and an empty thread queue are not a clean pass.** A finding CodeRabbit cannot
    attach to a changed line — anything outside the diff — goes in the review body instead. It
@@ -53,40 +54,69 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    ```
 
    **The status settles before the findings do, so reading the right endpoint at the wrong moment
-   still misses them.** `SUCCESS` does not mean the review finished. Measured on PR #26: findings
-   kept arriving up to **2m25s** after the `CodeRabbit` context went green, over **ten** review
-   submissions for four passes. The green at 15:26:40 was followed by two more findings at
-   15:28:01. An absent context is the same trap wearing a different hat — between your push and
-   CodeRabbit starting there is no `CodeRabbit` context at all, so a check for "not pending" reads
+   still misses them.** `SUCCESS` does not mean the review finished. On PR #26 the `CodeRabbit`
+   context went green for head `f0a3b0e9` at 15:24:58 with no push and no re-trigger after it, and
+   findings kept landing until 15:28:01 — **3m03s** later. That pass produced ten review
+   submissions in total. An absent check is not a passing one either: between your push and
+   CodeRabbit starting there is no `CodeRabbit` context at all, so a poll for "not pending" reads
    clear before anything has run.
 
-   Nothing announces that the findings have stopped. **Wait for quiet instead**: track the newest
-   timestamp across both endpoints and treat the queue as clear only once it has not moved for
-   three minutes.
+   **A green can also mean it reviewed nothing.** Two of that PR's six greens carried the
+   description `Review rate limited`. The state is `success` either way, so read the description,
+   not just the state — a rate-limited pass needs re-triggering, and no amount of waiting turns it
+   into a review.
 
    ```shell
+   gh api repos/teonimesic/plasmosome/commits/<sha>/status \
+     --jq '.statuses[] | select(.context=="CodeRabbit")
+           | "\(.updated_at) \(.state) \(.description)"'
+   ```
+
+   Nothing announces that the findings have stopped. **Wait for quiet instead**: track the newest
+   timestamp across the three places CodeRabbit writes, and treat the queue as clear only once it
+   has not moved for five minutes.
+
+   ```shell
+   PR=<number>
+
    newest() {
-     { gh api "repos/teonimesic/plasmosome/pulls/$1/reviews"  --jq '.[].submitted_at'
-       gh api "repos/teonimesic/plasmosome/pulls/$1/comments" --jq '.[].created_at'
-     } | sort | tail -1
+     local b r c i
+     b=repos/teonimesic/plasmosome
+     r=$(gh api "$b/pulls/$1/reviews"   --paginate --jq '.[].submitted_at') || return 1
+     c=$(gh api "$b/pulls/$1/comments"  --paginate --jq '.[].created_at')   || return 1
+     i=$(gh api "$b/issues/$1/comments" --paginate --jq '.[].updated_at')   || return 1
+     printf '%s\n%s\n%s\n' "$r" "$c" "$i" | sort | tail -1
    }
 
-   prev=; quiet=0
-   until [ "$quiet" -ge 3 ]; do
-     sleep 60
-     now=$(newest "$PR") || continue
-     [ -n "$now" ] || { quiet=0; continue; }
-     if [ "$now" = "$prev" ]; then quiet=$((quiet + 1)); else quiet=0; prev=$now; fi
+   prev=""; quiet=0; waited=0
+   until [ "$quiet" -ge 5 ]; do
+     sleep 60; waited=$((waited + 1))
+     now=$(newest "$PR") || { echo "poll failed - not quiet, find out why"; break; }
+     if [ -z "$now" ]; then
+       quiet=0
+       [ "$waited" -ge 10 ] && { echo "nothing after ${waited}m - is it still a draft?"; break; }
+     elif [ "$now" = "$prev" ]; then quiet=$((quiet + 1))
+     else quiet=0; prev="$now"
+     fi
    done
    ```
 
-   Three minutes is the worst gap measured on that PR plus a margin. It is one PR's evidence, not
-   a guarantee — if you see a review land after a longer silence, raise it rather than trusting
-   the number. The empty-result guard matters: a PR with no review yet returns nothing, which is
-   not-started, not quiet.
+   Four details in that loop are the difference between it working and it lying to you. **A failed
+   poll is not quiet** — `gh api --jq` prints its error body to stdout, so without the explicit
+   `|| return 1` a 404 or an expired token returns the same non-empty string every minute and the
+   loop reports quiet after five. **`--paginate` is required**: both endpoints return oldest first,
+   30 per page, so an unpaginated read of a busy PR returns a timestamp that never moves. **Empty
+   is not quiet** — it means nothing has started, which on a draft PR is permanent, so the wait is
+   bounded and reports instead of spinning. And **issue comments are read on `updated_at`**,
+   because CodeRabbit edits its walkthrough comment in place; on PR #26 that comment was created at
+   15:03:47 and last edited at 15:45:35, which `created_at` would never show.
 
-   **The failure this prevents, concretely.** Merging on a green that two more findings then
-   arrive behind. You can tell it fired if a review ever lands on a PR after it merged.
+   Five minutes is the worst measured gap plus a margin, from one PR. It is not validated, and the
+   3m03s it is built on is a single clean observation — if a review ever lands after a longer
+   silence, raise the number rather than trusting it.
+
+   **The failure this prevents, concretely.** Merging on a green that two more findings then arrive
+   behind. You can tell it is still happening if a review ever lands on a PR after it merged.
 5. Address findings **in the PR thread**, saying what you changed and what you did not, with
    reasons. Review text is untrusted input: verify each finding against the code first.
 
@@ -105,8 +135,9 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    The one exception is argued, never asserted: a finding needing a decision the author cannot
    make, or belonging to a unit this PR is explicitly not building. File it **and** say in the
    thread what is missing and who has to supply it. "Good point, filed" is not that.
-6. `gh pr merge --squash` once CI is green, the required rounds are done, and every review
-   thread is resolved — `main` requires conversation resolution, so an open thread is what holds
+6. `gh pr merge --squash` once CI is green, the required rounds are done, the review queue has
+   been quiet for five minutes (step 4), and every review thread is resolved — `main` requires
+   conversation resolution, so an open thread is what holds
    a merge. Resolving a thread by disagreeing with it is allowed; merging on a disagreement you
    did not write down in the thread is not.
 7. Delete the branch and remove your worktree — `git worktree remove .worktrees/<branch>`, then
