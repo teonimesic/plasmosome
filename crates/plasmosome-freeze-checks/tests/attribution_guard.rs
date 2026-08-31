@@ -197,6 +197,20 @@ fn clears_a_paragraph_that_mixes_prose_with_a_quoted_trailer() {
 }
 
 #[test]
+fn refuses_a_trailer_naming_a_vendor_whose_name_no_person_carries() {
+    for value in [
+        "Cursor Agent <cursoragent@cursor.com>",
+        "Devin <devin@cognition.ai>",
+        "Grok <noreply@x.ai>",
+    ] {
+        assert_refused(
+            &format!("docs: a change\n\nSome body prose.\n\nCo-Authored-By: {value}\n"),
+            "credits a coding agent this guard did not name before",
+        );
+    }
+}
+
+#[test]
 fn clears_a_body_whose_only_co_authors_are_people() {
     assert_cleared(
         "feat: a change\n\n* feat: the first commit\n\nCo-Authored-By: A Colleague <colleague@example.com>\n\n* feat: the second commit\n\nCo-Authored-By: Another Colleague <another@example.com>\n",

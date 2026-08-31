@@ -17,7 +17,10 @@ else
   revs=("HEAD")
 fi
 
-vendors='claude|anthropic|gpt|openai|copilot|codex|gemini|llama|mistral'
+# Matched against a trailer's value, so it must not hold a string a person could carry. `devin`
+# and `sonnet` are left out for that reason and reached through their vendor domains instead:
+# refusing a contributor for their own name is a refusal they cannot act on.
+vendors='claude|anthropic|gpt|openai|copilot|codex|gemini|llama|mistral|cursor|cognition\.ai|grok|x\.ai'
 
 # Nominates text worth parsing. Deliberately unanchored: it may only ever over-nominate, because
 # a paragraph it skips is a paragraph nothing else looks at.
