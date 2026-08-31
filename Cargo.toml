@@ -22,6 +22,8 @@ toml = "0.8"
 proptest = "1"
 tempfile = "3"
 libc = "0.2"
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = "1"
 
 plasmosome-backend = { path = "crates/plasmosome-backend" }
 plasmosome-ledger = { path = "crates/plasmosome-ledger" }

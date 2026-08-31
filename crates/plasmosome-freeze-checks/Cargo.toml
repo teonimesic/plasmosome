@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+syn = { workspace = true }
+proc-macro2 = { workspace = true }
 serde = { workspace = true }
 plasmosome-backend = { workspace = true }
 plasmosome-ledger = { workspace = true }
