@@ -1,7 +1,7 @@
 ---
 id: 001
 title: The membrane supervises its cell's brokers
-status: in_review
+status: done
 priority: 1
 specs: [001]
 intents: []
@@ -20,7 +20,7 @@ done_when: >-
   answering rather than staying ready, and leaves no broker process behind when
   the supervisor is dropped — the last proven by a raw waitpid returning ECHILD.
 pr: https://github.com/teonimesic/plasmosome/pull/13
-evidence:
+evidence: squash commit 720dac6 on main; BrokerSet spawns, probes and reaps a cell's brokers, and a dropped or killed child takes the workers it forked with it
 ---
 
 ## Why

@@ -2,7 +2,7 @@
 id: 012
 title: A backend can pass all eight clauses and still leak three capabilities on detach
 status: todo
-priority: 1
+priority: 2
 specs: [003]
 intents: []
 refs:
@@ -22,6 +22,13 @@ evidence:
 ---
 
 ## Why
+
+**Demoted to 2 on 2026-08-31.** It was filed at 1 while the conformance suite was the active
+work. Nothing in the product has this defect: `FakeBackend` and `CompositeBackend` both revoke by
+handle and both pass. It becomes urgent the moment a second real backend is written, because that
+is when the suite would certify a leaking one — so it is the first thing to do before any new
+backend lands, and not before.
+
 
 `RevokesOnlyInGrantOrder` — a backend answering `UnknownHandle` for any live handle that is not
 the oldest live one — passes all eight clauses and then breaks a real detach. Driven through
