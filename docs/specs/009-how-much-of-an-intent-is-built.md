@@ -210,6 +210,12 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
   placement. No fault in the check reads `status:`.
 - **Every intent file already on `main` gains the field.** The value is the owner's; the mechanical
   part of the backfill is that no intent file is left without one.
+- **The task under this spec runs after `status:` exists.** `served:` is placed relative to
+  `status:`, and no intent on `main` carries that field yet — it arrives with the change that
+  introduces intent approval. Sequencing the backfill after it keeps one placement rule instead of
+  two, and avoids a second pass to move every line. This is an ordering constraint on the task, not
+  a second gate: nothing about this contract changes if the two land in the other order, only the
+  amount of editing.
 - **The check** lives in `.agents/skills/heartbeat` step 4 beside the existing cross-layer loop.
   Its inputs are `docs/intents/`, `docs/specs/` and `tasks/`. It **validates** only the files in
   `docs/intents/` that carry an `id:`, so the folder's `README.md` is neither validated nor
