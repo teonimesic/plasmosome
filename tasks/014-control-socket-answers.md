@@ -1,7 +1,7 @@
 ---
 id: 014
 title: The controller answers its control socket
-status: in_review
+status: done
 priority: 1
 specs: [001]
 intents: []
@@ -27,7 +27,7 @@ done_when: >-
   exactly the structured fields in §1's table, and an unknown code does not
   deserialize. The freeze checks cover the new wire module and its types.
 pr: https://github.com/teonimesic/plasmosome/pull/14
-evidence:
+evidence: squash commit 11a94c3 on main; protocol.rs and control.rs answer plasmosome.status over an ndjson control socket, with the closed error table
 ---
 
 ## Why

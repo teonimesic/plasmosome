@@ -1,7 +1,7 @@
 ---
 id: 002
 title: Make the skills discoverable to Claude Code
-status: in_review
+status: done
 priority: 3
 specs: []
 intents: []
@@ -13,7 +13,7 @@ done_when: >-
   lists all of them. A skill added later without its symlink is the failure this
   guards against.
 pr: https://github.com/teonimesic/plasmosome/pull/18
-evidence:
+evidence: squash commit 255679b on main; four skills symlinked into .claude/skills/ with a test that derives the list from .agents/skills/ rather than naming them
 ---
 
 ## Why

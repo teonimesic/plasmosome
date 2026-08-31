@@ -1,7 +1,7 @@
 ---
 id: 015
 title: The readiness probe sends a verb the control protocol does not define
-status: in_review
+status: done
 priority: 2
 specs: [001]
 intents: []
@@ -15,7 +15,7 @@ done_when: >-
   names the verb the probe sends, and a test asserts the two agree rather than
   leaving it to a reader.
 pr: https://github.com/teonimesic/plasmosome/pull/16
-evidence:
+evidence: squash commit 93113bc on main; the probe sends membrane.status, and a test reads the verb out of the spec so the two cannot drift
 ---
 
 ## Why
