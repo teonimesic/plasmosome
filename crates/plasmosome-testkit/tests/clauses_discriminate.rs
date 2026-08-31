@@ -351,8 +351,13 @@ fn a_backend_with_no_defect_passes_every_clause() {
     conformance::revoke_of_a_revoked_handle_is_error(carrying(Defect::None));
 }
 
+/// Pins the limit of this seam: a backend answering every snapshot from its own
+/// ledger passes all eight clauses, so no clause can separate enforcing from
+/// reporting. If this test ever fails, the seam grew a real oracle — delete this
+/// test and the README paragraph it belongs to. Never weaken the clause that
+/// caught it.
 #[test]
-fn a_backend_that_only_mirrors_its_ledger_passes_every_clause() {
+fn snapshot_os_state_is_the_only_oracle_a_clause_has() {
     conformance::grant_is_replayable(carrying(Defect::AMirrorOfItsOwnLedger));
     conformance::revoke_unknown_handle_is_error(carrying(Defect::AMirrorOfItsOwnLedger));
     conformance::drained_revoke_removes_object(carrying(Defect::AMirrorOfItsOwnLedger));

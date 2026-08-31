@@ -25,11 +25,11 @@ stops discriminating fails there.
 **Passing the suite is not evidence of enforcement.** `snapshot_os_state` is the only oracle any
 clause has, and it is the backend's own account of the world. A backend that holds no operating
 system state at all — one that answers every snapshot from its live ledger, so the answer is what
-it was asked to do rather than what happened — passes all eight clauses;
-`a_backend_that_only_mirrors_its_ledger_passes_every_clause` is that backend, passing. Nothing at
-this seam can
-separate a backend that enforces from one that reports its intent, because the seam never reads
-the operating system. Read "conformant" as "keeps its own books consistently", never as
+it was asked to do rather than what happened — passes all eight clauses, and
+`snapshot_os_state_is_the_only_oracle_a_clause_has` is that backend, passing. Nothing at this seam
+separates a backend that enforces from one that reports its intent, because the seam never reads
+the operating system. **If that test ever fails, the seam gained a real oracle: delete the test
+and this paragraph, never the clause that caught it.** Read "conformant" as "keeps its own books consistently", never as
 "enforcing"; the evidence for enforcement has to come from an end-to-end test that drives the real
 thing and looks at the real world.
 

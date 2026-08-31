@@ -22,8 +22,10 @@ done_when: >-
   FakeBackend.
 pr: https://github.com/teonimesic/plasmosome/pull/10
 evidence: >-
-  squash commit f42c797 on main; the conformance suite carries eight clauses, each
-  shown failing against a backend carrying its defect
+  squash commit f42c797 on main; the conformance suite carries eight clauses. The
+  failing-first runs behind them were scratch and are not in that commit — task 010
+  commits them as tests/clauses_discriminate.rs, which is where that claim becomes
+  checkable
 ---
 
 ## Why
