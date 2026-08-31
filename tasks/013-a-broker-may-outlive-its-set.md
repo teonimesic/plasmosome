@@ -62,7 +62,7 @@ launcher exist.
 **Deliverable:** the three items in `## Why` are each closed or recorded as unclosable with a
 reason. Out of scope: the daemon, the control protocol, and anything in `plasmosome-core`.
 
-**1. `status` costs one deadline per broker, not one per call.** Give the whole call a single
+**1. `status` must cost one deadline per call, not one per broker.** Give the whole call a single
 budget: track the time already spent and pass each probe what remains, so a set of six brokers
 cannot take six times the deadline. A broker reached after the budget is exhausted is not ready,
 and the report says which one ran the clock out. Test with a fake prober that consumes time.
