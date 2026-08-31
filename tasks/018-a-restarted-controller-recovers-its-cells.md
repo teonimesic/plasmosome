@@ -13,9 +13,13 @@ refs:
     crates/plasmosome-core/src/state.rs,
   ]
 done_when: >-
-  a controller started over an instance directory holding live cells rebuilds its
-  ControllerState from their ledgers, diffs it against what the backend reports,
-  and names every difference rather than trusting either side.
+  an accepted spec names the per-cell ledger path, the durable home for
+  ledger_generation, and the quarantine report; a controller started over an
+  instance directory holding live cells rebuilds desired state from their ledgers
+  and diffs it against the backend's observed state, naming every difference; a
+  cell whose ledger does not parse is quarantined and named rather than adopted
+  from its valid prefix; and each of those is shown failing against a controller
+  that skips it.
 pr:
 evidence:
 ---
@@ -35,6 +39,16 @@ the first will confidently report capabilities that were revoked out from under 
 This is the piece that makes `plasmosomed` restartable, and nothing above it can be trusted until
 it exists — including `ledger_generation`, which spec 001 §3.3 reports and which is a constructor
 argument today because nothing tracks it.
+
+## Notes
+
+A spec comes first. `docs/decisions/002` settles the shape and deliberately leaves three contract
+details open: where a cell's ledger lives and how both the writer and recovery derive that path
+from a cell's identity, where `ledger_generation` is durably kept — `Ledger::open_file` restores
+only the plugin and its effects today, and `ControllerState` has no generation field at all — and
+what the quarantine report actually says. None of those is a design choice with rejected
+alternatives, so none belongs in the decision; they are the contract a stranger would need to
+build against.
 
 ## Plan
 

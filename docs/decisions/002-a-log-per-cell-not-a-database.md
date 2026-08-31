@@ -36,6 +36,12 @@ Recovery is required, not optional. A controller that comes up and refuses to ad
 left running would be a controller that has lost the capabilities it is responsible for revoking —
 the failure this project exists to prevent, arrived at by restarting.
 
+**A cell whose ledger does not parse cleanly is quarantined, not half-recovered.** Its ledger is
+not trusted as a history, the cell is not adopted, and it is reported by name. Its objects are
+still found — the backend snapshot does not need the ledger — so an operator is told what exists
+without the controller pretending to know how to undo it. Containment is the point of one file per
+cell, and silently accepting a shorter history would give that up while keeping the file layout.
+
 ## Rejected
 
 **A relational database.** It would store an ordered sequence we always read whole, in reverse,
@@ -55,18 +61,29 @@ the invariant in the root `AGENTS.md`.
 system holds what is *true*. A replay that does not diff against reality would confidently report
 capabilities that were revoked out from under it, or miss ones it never recorded.
 
+**Treating a torn ledger's valid prefix as authoritative.** `Ledger::open_file` skips lines it
+cannot parse and returns the rest, so a half-written record silently becomes a shorter, plausible
+history. Anything granted after the tear would then be owned by nothing, which is the failure this
+decision exists to prevent — arrived at quietly instead of loudly.
+
 ## Consequences
 
-Recovery becomes a reconciliation, and `Reconciler` and `Diff` already exist for it: replay each
-cell's ledger to learn what was granted, snapshot what the OS shows, and treat the difference as
-the work to do. That is a real unit of work and it does not exist yet.
+Recovery becomes a reconciliation, and `Reconciler` and `Diff` already exist for it, in the shape
+they were built for: **replay reconstructs the desired state — what was asked for — and the
+backend snapshot supplies the observed state.** The difference between them is the work to do.
+Keeping those two apart is the whole point; a recovery that let a replayed grant stand in for an
+observed one would report intent as fact and miss every drift that happened while the controller
+was down. That is a real unit of work and it does not exist yet.
 
 `ledger_generation`, which spec 001 §3.3 reports, has to come from somewhere real. It is a
 constructor argument today because nothing tracks it, and this decision is what makes it a
 per-cell counter rather than a process-wide one.
 
-Writing a ledger per cell means the instance directory layout has to name them, which is a
-decision the daemon unit now inherits rather than invents.
+Writing a ledger per cell means the instance directory layout has to name them, and both the
+writer and the recovery path must resolve the same path from a cell's identity. That layout, the
+durable home for `ledger_generation`, and the exact quarantine report are contract details this
+decision does not settle — they belong in a spec, which task 018 now requires before its work can
+start.
 
 The cost is paid at startup: a controller with many cells replays many files before it can answer
 anything. If that ever becomes the reason a restart is slow, the fix is a snapshot alongside the
