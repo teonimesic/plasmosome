@@ -101,9 +101,18 @@ impl DrainSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendError {
-    UnknownHandle { handle: Handle },
-    DrainTimedOut { handle: Handle, deadline_ms: u64 },
-    UnknownObject { class: &'static str, key: String },
+    UnknownHandle {
+        handle: Handle,
+    },
+    DrainTimedOut {
+        handle: Handle,
+        deadline_ms: u64,
+    },
+    UnknownObject {
+        class: &'static str,
+        key: String,
+        owner: PluginId,
+    },
     Fault(String),
     Unimplemented(&'static str),
 }
@@ -121,8 +130,8 @@ impl fmt::Display for BackendError {
                     "handle {handle} did not drain within its {deadline_ms} ms deadline"
                 )
             }
-            BackendError::UnknownObject { class, key } => {
-                write!(f, "no {class} object `{key}` in the verification universe")
+            BackendError::UnknownObject { class, key, owner } => {
+                write!(f, "`{owner}` holds no {class} object `{key}`")
             }
             BackendError::Fault(cause) => write!(f, "injected backend fault: {cause}"),
             BackendError::Unimplemented(what) => write!(f, "unimplemented in this track: {what}"),
@@ -137,6 +146,14 @@ pub trait EnforcementBackend {
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError>;
     fn snapshot_os_state(&self) -> OsState;
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError>;
-    fn apply_removal(&mut self, removal: UniverseRemoval) -> Result<(), BackendError>;
+    /// Withdraws the object `owner` holds at the removal's class and key. A key
+    /// may be held by more than one owner; the removal takes that owner's object
+    /// and must never take another's, nor report success when the owner holds
+    /// nothing there.
+    fn apply_removal(
+        &mut self,
+        removal: UniverseRemoval,
+        owner: &PluginId,
+    ) -> Result<(), BackendError>;
     fn plant(&mut self, object: OsObject);
 }

@@ -61,6 +61,12 @@ pub struct Effect {
 }
 
 impl Effect {
+    /// Records an effect whose inverse undoes it exactly.
+    ///
+    /// An `InverseVia::Universe` removal is replayed on behalf of the ledger's
+    /// own plugin, so it must name an object that plugin owns. A removal naming
+    /// another plugin's object is refused at detach, and refusing it stops the
+    /// replay — pass `InverseVia::Backend` for anything granted to someone else.
     pub fn exact(description: impl Into<String>, via: InverseVia) -> Effect {
         let text: String = description.into();
         Effect {
@@ -72,6 +78,12 @@ impl Effect {
         }
     }
 
+    /// Records an effect that cannot be undone exactly, with the removal that
+    /// stands as its compensation.
+    ///
+    /// The witness is replayed on behalf of the ledger's own plugin and must
+    /// name an object that plugin owns. A compensation cannot retract another
+    /// plugin's object.
     pub fn compensating(description: impl Into<String>, witness: UniverseRemoval) -> Effect {
         Effect {
             description: description.into(),
@@ -360,11 +372,11 @@ fn replay(
                     backend.revoke(*handle, drain)?;
                 }
                 InverseVia::Universe(removal) => {
-                    backend.apply_removal(removal.clone())?;
+                    backend.apply_removal(removal.clone(), plugin)?;
                 }
             },
             Reversibility::Compensating(compensation) => {
-                backend.apply_removal(compensation.witness.clone())?;
+                backend.apply_removal(compensation.witness.clone(), plugin)?;
             }
             Reversibility::Delayed(outbox) => {
                 if outbox.published {
@@ -502,6 +514,45 @@ mod tests {
             grant_uds(backend, "/run/ak/github.uds"),
             grant_file(backend, "skills/pr.md"),
         ]
+    }
+
+    #[test]
+    fn a_universe_inverse_naming_another_plugins_object_is_refused_and_leaves_it_standing() {
+        let mut backend = FakeBackend::new();
+        backend
+            .apply(UniverseOp::WriteSessionFile {
+                path: "skills/pr.md".to_string(),
+                owner: PluginId::from("workspace-bind"),
+            })
+            .unwrap();
+        let mut ledger = Ledger::new("github-pr");
+        ledger.push(Effect::exact(
+            "a skill file this plugin did not write",
+            InverseVia::Universe(UniverseRemoval::RemoveSessionFile {
+                path: "skills/pr.md".to_string(),
+            }),
+        ));
+        let Closure::ExternalFree(mut sealed) = ledger.close() else {
+            panic!("a single exact effect closes as ExternalFree");
+        };
+        let error = sealed
+            .detach(
+                &mut backend,
+                DrainSpec::graceful(std::time::Duration::from_millis(1)),
+            )
+            .expect_err("a plugin may not withdraw an object another plugin owns");
+        assert!(
+            matches!(
+                error,
+                DetachError::Backend(BackendError::UnknownObject { .. })
+            ),
+            "refusal names the object the plugin does not hold: {error:?}"
+        );
+        assert_eq!(
+            backend.snapshot_os_state().len(),
+            1,
+            "the object its real owner holds must still be standing"
+        );
     }
 
     #[test]
