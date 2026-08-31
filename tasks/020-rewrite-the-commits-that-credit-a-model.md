@@ -7,8 +7,8 @@ specs: []
 intents: []
 refs: [.githooks/attribution-guard]
 done_when: >-
-  no commit reachable from main carries a Co-Authored-By trailer naming a model,
-  and GitHub's contributor list for the repository shows only people.
+  `./.githooks/attribution-guard main` prints `attribution-guard: clean`, and GitHub's
+  contributor list for the repository shows only people.
 pr:
 evidence:
 ---
@@ -43,3 +43,37 @@ commit, which is one of the five.
 ## Plan
 
 ## Notes
+
+**The five commits carry twelve trailer lines between them, not five.** A reword that deletes one
+line per commit leaves eight behind. The count the guard reports today:
+
+```text
+002e821  1
+0250ad3  1
+11a94c3  2
+57fdbc4  7
+fb952db  1
+```
+
+`57fdbc4` and `0250ad3` are squash merges, so the message is every squashed commit's message
+concatenated. Each contributes its own trailer, and all but the last sit mid-body.
+
+**The guard used to see only three of the five.** It read trailers with git's trailer parser
+(`%(trailers:...)`), which recognises only the block that closes a message, so the mid-body
+trailers in `57fdbc4` and `0250ad3` were invisible to it. That was a bypass as much as a
+miscount: a squash merge is the ordinary way a commit reaches `main` here, and one carrying a
+model trailer passed the control meant to stop it. The guard now offers every paragraph to that
+same parser, and reports all five. Verify the count before and after the rewrite with the command
+in `done_when` — it is the same instrument in both places.
+
+**Switch CI to guard the whole of `main` once this lands.** The workflow checks the range a push
+carries, because a full-history check is red today by design — these five commits are what make it
+red. When they are gone, changing the push case in `.github/workflows/ci.yml` to
+`./.githooks/attribution-guard main` turns the guard into a standing assertion that the history
+stays clean, rather than one that only ever sees new commits. Do it in the same pull request that
+records the rewrite, so `main` is never briefly green for the wrong reason.
+
+**Expect CI to go red during the rewrite itself.** The push case guards
+`${{ github.event.before }}..${{ github.sha }}`, and a force-push leaves `before` pointing at a
+commit the fetched repository no longer has, which the guard refuses rather than skips. That is the
+fail-closed behaviour working; it is not a reason to weaken the step.

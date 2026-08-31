@@ -8,13 +8,25 @@ set -uo pipefail
 forbidden=(maestro toptal heavenstudio)
 status=0
 
+# `git grep` exits 0 when it finds something, 1 when it does not, and higher when it could not
+# look. Collapsing the third into the second is how a guard reports clean because its own search
+# broke, so each is answered separately.
 for term in "${forbidden[@]}"; do
-  hits=$(git grep -In -i -- "$term" -- . ':(exclude).githooks/provenance-guard' 2>/dev/null || true)
-  if [ -n "$hits" ]; then
-    echo "provenance-guard: forbidden term '$term' found:"
-    echo "$hits"
-    status=1
-  fi
+  hits=$(git grep -In -i -- "$term" -- . ':(exclude).githooks/provenance-guard' 2>&1)
+  case $? in
+    0)
+      echo "provenance-guard: forbidden term '$term' found:"
+      echo "$hits"
+      status=1
+      ;;
+    1) ;;
+    *)
+      echo "provenance-guard: cannot search for '$term':"
+      echo "$hits"
+      echo "Refusing rather than passing: a search this guard cannot run is a search it cannot clear."
+      exit 1
+      ;;
+  esac
 done
 
 if [ "$status" -ne 0 ]; then

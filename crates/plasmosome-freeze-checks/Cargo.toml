@@ -10,3 +10,6 @@ serde = { workspace = true }
 plasmosome-backend = { workspace = true }
 plasmosome-ledger = { workspace = true }
 plasmosome-core = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
