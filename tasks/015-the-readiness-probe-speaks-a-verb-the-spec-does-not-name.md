@@ -1,7 +1,7 @@
 ---
 id: 015
 title: The readiness probe sends a verb the control protocol does not define
-status: planned
+status: in_progress
 priority: 2
 specs: [001]
 intents: []
