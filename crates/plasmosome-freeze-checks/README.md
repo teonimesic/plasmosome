@@ -18,5 +18,6 @@ wrong.
 | No fork/process plumbing dependencies in controller crates | Same boundary, stated for the layer below |
 | Wire types contain no shared handles | The seam crosses processes; `Arc` across it is a lie |
 | Every seam type round-trips through serde | The boundary must be data, not memory |
+| Every skill in `.agents/skills/` has a symlink under `.claude/skills/` | A skill a tool cannot find is a rule nobody reads |
 
 Tests: `cargo test -p plasmosome-freeze-checks`
