@@ -1,7 +1,7 @@
 ---
 id: 007
 title: Adopt the instruction rules that passed the A/B test
-status: in_review
+status: done
 priority: 2
 specs: []
 intents: [001]
@@ -10,8 +10,10 @@ done_when: >-
   exactly one instruction file states the dependency-seam rule and its two-adapter
   brake; exactly one states the pid rule; no AGENTS.md and no
   .agents/skills/**/SKILL.md tells anyone to retry EINTR; and the gate is green.
-pr:
-evidence:
+pr: https://github.com/teonimesic/plasmosome/pull/6
+evidence: >-
+  squash commit 2fb281b on main adds the seam rule to AGENTS.md Style; the pid rule
+  and the EINTR absence were verified unchanged and recorded in Notes.
 ---
 
 ## Why
