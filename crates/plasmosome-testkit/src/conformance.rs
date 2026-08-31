@@ -2,12 +2,13 @@ use std::time::Duration;
 
 use plasmosome_backend::{
     BackendError, Capability, DrainSpec, EnforcementBackend, Grant, Handle, LedgerEntry, OsObject,
-    OsState, PluginId, UniverseClass, UniverseOp, UniverseRemoval,
+    OsState, PluginId, RevokePolicy, UniverseClass, UniverseOp, UniverseRemoval,
 };
 
 use crate::builders::GrantSequence;
 
 const CONFORMANCE_PLUGIN: &str = "conformance";
+const SECOND_PLUGIN: &str = "conformance-second";
 const DRAIN: Duration = Duration::from_millis(50);
 
 /// Every grant returns a ledger entry that describes the grant it came from, and
@@ -72,33 +73,40 @@ pub fn revoke_unknown_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> 
     );
 }
 
-/// After a graceful revoke drains, the object the grant materialized is gone
-/// from the snapshot. A backend that forgets the handle but leaves the object is
-/// exactly the leak this kernel exists to prevent.
+/// After a revoke drains, the object the grant materialized is gone from the
+/// snapshot, under both drain policies. A backend that forgets the handle but
+/// leaves the object is exactly the leak this kernel exists to prevent, and a
+/// forced revoke that reports success while withdrawing nothing is that same
+/// leak wearing a success report.
 pub fn drained_revoke_removes_object<B: EnforcementBackend>(make: impl Fn() -> B) {
-    let mut backend = make();
-    for grant in sample_grants() {
-        let object = materialized(&grant);
-        let entry = backend.grant(grant);
-        assert!(
-            backend
-                .snapshot_os_state()
-                .contains(object.class, &object.key),
-            "a grant must materialize {}",
-            object.describe()
-        );
-        backend
-            .revoke(entry.handle, DrainSpec::graceful(DRAIN))
-            .unwrap_or_else(|error| {
-                panic!("a graceful revoke of {} failed: {error}", entry.handle)
+    for drain in [DrainSpec::graceful(DRAIN), DrainSpec::forcing()] {
+        let mut backend = make();
+        for grant in sample_grants() {
+            let object = materialized(&grant);
+            let entry = backend.grant(grant);
+            assert!(
+                backend
+                    .snapshot_os_state()
+                    .contains(object.class, &object.key),
+                "a grant must materialize {}",
+                object.describe()
+            );
+            backend.revoke(entry.handle, drain).unwrap_or_else(|error| {
+                panic!(
+                    "a {} revoke of {} failed: {error}",
+                    policy_of(drain),
+                    entry.handle
+                )
             });
-        assert!(
-            !backend
-                .snapshot_os_state()
-                .contains(object.class, &object.key),
-            "a drained revoke left {} behind",
-            object.describe()
-        );
+            assert!(
+                !backend
+                    .snapshot_os_state()
+                    .contains(object.class, &object.key),
+                "a {} revoke left {} behind",
+                policy_of(drain),
+                object.describe()
+            );
+        }
     }
 }
 
@@ -164,20 +172,25 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
 }
 
 /// No two grants that are live at the same moment hold the same handle, and
-/// every one of them still revokes. A backend that reissues a live handle
-/// breaks a ledger replay at the second revoke: the handle is already spent,
-/// `UnknownHandle` aborts the detach, and every effect below it stays granted.
+/// every one of them still revokes — including two grants of one capability
+/// class, which two plugins each holding a session file produce every day. A
+/// backend that reissues a live handle breaks a ledger replay at the second
+/// revoke: the handle is already spent, `UnknownHandle` aborts the detach, and
+/// every effect below it stays granted. A backend that keys its ledger by class
+/// instead of by handle strands the first of the two the same way.
 pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() -> B) {
     let mut backend = make();
     let mut live: Vec<LedgerEntry> = Vec::new();
-    for grant in sample_grants() {
+    for grant in grants_with_two_of_one_class() {
         let entry = backend.grant(grant);
         if let Some(held) = live.iter().find(|held| held.handle == entry.handle) {
             panic!(
-                "the grant of {} was issued {}, the handle the live grant of {} is already holding",
+                "the grant of {} for `{}` was issued {}, the handle the live grant of {} for `{}` is already holding",
                 entry.capability.class_str(),
+                entry.plugin,
                 entry.handle,
-                held.capability.class_str()
+                held.capability.class_str(),
+                held.plugin
             );
         }
         live.push(entry);
@@ -187,8 +200,9 @@ pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() 
             .revoke(entry.handle, DrainSpec::graceful(DRAIN))
             .unwrap_or_else(|error| {
                 panic!(
-                    "the live grant of {} did not revoke through {}: {error}",
+                    "the live grant of {} for `{}` did not revoke through {}: {error}",
                     entry.capability.class_str(),
+                    entry.plugin,
                     entry.handle
                 )
             });
@@ -200,54 +214,73 @@ pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() 
     );
 }
 
-/// `apply` puts an object in the universe and `apply_removal` takes that same
-/// object away again, for every class the universe models. A ledger reaches
-/// `apply_removal` for `InverseVia::Universe` and for every compensating
-/// effect, so a backend that refuses either fails every detach that reaches one.
+/// `apply` puts an object in the universe under the owner the op names, and
+/// `apply_removal` takes that same object away again and nothing else, for
+/// every class the universe models. A ledger reaches `apply_removal` for
+/// `InverseVia::Universe` and for every compensating effect, so a backend that
+/// refuses either fails every detach that reaches one; one that applies under
+/// an owner of its own choosing makes every residue report attribute a leak to
+/// the wrong plugin; and one that takes the whole class instead of the object
+/// tidies away residue it never created.
 pub fn apply_and_removal_reach_the_universe<B: EnforcementBackend>(make: impl Fn() -> B) {
     let mut backend = make();
+    let residue = residue_object();
+    backend.plant(residue.clone());
     for (op, removal) in universe_pairs() {
         let object = op.object();
         backend
             .apply(op)
             .unwrap_or_else(|error| panic!("applying {} failed: {error}", object.describe()));
+        let applied = backend.snapshot_os_state();
         assert!(
-            backend
-                .snapshot_os_state()
-                .contains(object.class, &object.key),
-            "an applied op must materialize {}",
-            object.describe()
+            applied.objects().any(|held| *held == object),
+            "an applied op must materialize {}; the snapshot holds that key under {:?}",
+            object.describe(),
+            applied.owner_of(object.class, &object.key)
         );
         backend.apply_removal(removal).unwrap_or_else(|error| {
             panic!("removing the applied {} failed: {error}", object.describe())
         });
+        let removed = backend.snapshot_os_state();
         assert!(
-            !backend
-                .snapshot_os_state()
-                .contains(object.class, &object.key),
+            !removed.contains(object.class, &object.key),
             "an applied removal left {} behind",
             object.describe()
         );
+        assert!(
+            removed.contains(residue.class, &residue.key),
+            "removing the applied {} also took the unrelated {}",
+            object.describe(),
+            residue.describe()
+        );
     }
     let remaining = backend.snapshot_os_state();
-    assert!(
-        remaining.is_empty(),
-        "every applied op was removed again, so the universe must be empty, found {remaining:?}"
+    assert_eq!(
+        remaining.len(),
+        1,
+        "every applied op was removed again, so only the planted {} may remain, found {remaining:?}",
+        residue.describe()
     );
 }
 
 /// Revoking a handle that was granted and then revoked is `UnknownHandle`
-/// naming the handle the caller passed in. A partially replayed ledger resumes
-/// over handles an earlier pass already withdrew, so it must be able to tell a
-/// spent handle from a live one, and the error must name the handle it holds.
+/// naming the handle the caller passed in, even after a later grant has taken
+/// a handle number of its own. A partially replayed ledger resumes over handles
+/// an earlier pass already withdrew while the cell keeps granting, so a backend
+/// that hands a freed handle number out again turns that resumed replay into a
+/// revoke of whichever live grant now holds it.
 pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> B) {
     let mut backend = make();
-    let grant = one_grant();
+    let mut grants = sample_grants();
+    let later = grants.remove(1);
+    let grant = grants.remove(0);
     let object = materialized(&grant);
+    let later_object = materialized(&later);
     let entry = backend.grant(grant);
     backend
         .revoke(entry.handle, DrainSpec::graceful(DRAIN))
         .unwrap_or_else(|error| panic!("a graceful revoke of {} failed: {error}", entry.handle));
+    let later_entry = backend.grant(later);
     match backend.revoke(entry.handle, DrainSpec::graceful(DRAIN)) {
         Err(BackendError::UnknownHandle { handle }) => assert_eq!(
             handle, entry.handle,
@@ -262,13 +295,19 @@ pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn(
             entry.handle
         ),
     }
+    let after = backend.snapshot_os_state();
     assert!(
-        !backend
-            .snapshot_os_state()
-            .contains(object.class, &object.key),
+        !after.contains(object.class, &object.key),
         "the second revoke of {} put {} back in the universe",
         entry.handle,
         object.describe()
+    );
+    assert!(
+        after.contains(later_object.class, &later_object.key),
+        "the second revoke of {} took {} from the live grant holding {}",
+        entry.handle,
+        later_object.describe(),
+        later_entry.handle
     );
 }
 
@@ -347,8 +386,30 @@ fn universe_pairs() -> Vec<(UniverseOp, UniverseRemoval)> {
     ]
 }
 
+/// The sample grants and a second session file held by a second plugin. Two
+/// live capabilities of one class is the ordinary case for this kernel, and a
+/// ledger keyed by class rather than by handle can only hold one of them.
+fn grants_with_two_of_one_class() -> Vec<Grant> {
+    let mut grants = sample_grants();
+    grants.extend(
+        GrantSequence::for_plugin(SECOND_PLUGIN)
+            .hot(Capability::SessionFile {
+                path: "skills/review.md".to_string(),
+            })
+            .into_grants(),
+    );
+    grants
+}
+
 fn one_grant() -> Grant {
     sample_grants().remove(0)
+}
+
+fn policy_of(drain: DrainSpec) -> &'static str {
+    match drain.policy {
+        RevokePolicy::Graceful => "drained",
+        RevokePolicy::Force => "forced",
+    }
 }
 
 fn residue_object() -> OsObject {
