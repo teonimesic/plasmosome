@@ -1,7 +1,7 @@
 ---
 id: 015
 title: The readiness probe sends a verb the control protocol does not define
-status: in_progress
+status: in_review
 priority: 2
 specs: [001]
 intents: []
@@ -14,7 +14,7 @@ done_when: >-
   readiness::probe sends a verb the spec defines, or the spec
   names the verb the probe sends, and a test asserts the two agree rather than
   leaving it to a reader.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/16
 evidence:
 ---
 
