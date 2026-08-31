@@ -23,6 +23,8 @@ impl Readiness {
     }
 }
 
+const READINESS_METHOD: &str = "membrane.status";
+
 pub fn probe(socket: &Path, deadline: Duration) -> Readiness {
     let stream = match UnixStream::connect(socket) {
         Ok(stream) => stream,
@@ -35,7 +37,7 @@ pub fn probe(socket: &Path, deadline: Duration) -> Readiness {
     let _ = stream.set_read_timeout(Some(deadline));
     let _ = stream.set_write_timeout(Some(deadline));
     let mut stream = stream;
-    let request = "{\"id\":0,\"method\":\"status\",\"params\":{}}\n";
+    let request = format!("{{\"id\":0,\"method\":\"{READINESS_METHOD}\",\"params\":{{}}}}\n");
     if stream.write_all(request.as_bytes()).is_err() {
         return Readiness::NotReady(NotReady::TimedOut);
     }
@@ -76,6 +78,7 @@ fn classify(line: &str) -> Readiness {
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
     use std::thread;
 
     const DEADLINE: Duration = Duration::from_millis(500);
@@ -87,9 +90,10 @@ mod tests {
         Nonsense(&'static str),
     }
 
-    fn serve(socket: PathBuf, answer: Answer) {
+    fn serve(socket: PathBuf, answer: Answer) -> mpsc::Receiver<String> {
         let listener =
             UnixListener::bind(&socket).expect("the test broker binds its control socket");
+        let (requests, received) = mpsc::channel();
         thread::spawn(move || {
             let (mut stream, _) = listener
                 .accept()
@@ -97,6 +101,7 @@ mod tests {
             let mut reader = BufReader::new(stream.try_clone().expect("clone for reading"));
             let mut line = String::new();
             let _ = reader.read_line(&mut line);
+            let _ = requests.send(line);
             let reply = match answer {
                 Answer::Ready(state) => {
                     format!("{{\"id\":0,\"result\":{{\"ready\":true,\"state\":\"{state}\"}}}}\n")
@@ -110,6 +115,48 @@ mod tests {
             let _ = stream.write_all(reply.as_bytes());
             let _ = stream.flush();
         });
+        received
+    }
+
+    fn readiness_verb_named_by_the_spec() -> String {
+        let spec = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("the membrane crate sits two levels below the workspace root")
+            .join("docs")
+            .join("specs")
+            .join("001-control-protocol.md");
+        let text = std::fs::read_to_string(&spec).unwrap_or_else(|error| {
+            panic!(
+                "the control protocol spec is readable at {}: {error}",
+                spec.display()
+            )
+        });
+        let section = text
+            .split("\n## ")
+            .find(|section| section.starts_with("4. Controller"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} has a section 4 naming the controller-to-membrane verbs",
+                    spec.display()
+                )
+            });
+        let bullet = section
+            .lines()
+            .find(|line| line.contains("the F9 readiness probe"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} section 4 names one verb as the F9 readiness probe",
+                    spec.display()
+                )
+            });
+        bullet
+            .split('`')
+            .nth(1)
+            .unwrap_or_else(|| {
+                panic!("the F9 readiness probe verb is quoted in backticks, got: {bullet}")
+            })
+            .to_string()
     }
 
     #[test]
@@ -176,5 +223,29 @@ mod tests {
             })
         );
         assert!(!verdict.is_ready());
+    }
+
+    #[test]
+    fn the_probe_asks_for_the_verb_the_control_protocol_spec_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("membraned.control");
+        let requests = serve(socket.clone(), Answer::Ready("serving"));
+        assert!(probe(&socket, DEADLINE).is_ready());
+        let line = requests
+            .recv_timeout(DEADLINE)
+            .expect("the test broker captured the request the probe sent");
+        let request: serde_json::Value =
+            serde_json::from_str(line.trim()).unwrap_or_else(|error| {
+                panic!("the probe sends one JSON request per line, got {line:?}: {error}")
+            });
+        let method = request
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("the probe's request carries a method, got {request}"));
+        assert_eq!(
+            method,
+            readiness_verb_named_by_the_spec(),
+            "the verb the readiness probe sends and the verb the control protocol spec names have diverged"
+        );
     }
 }
