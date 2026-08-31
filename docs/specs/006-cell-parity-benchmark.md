@@ -98,6 +98,13 @@ edit-and-build loop takes in this environment.
 
 The test phase follows the warm protocol: at least 3 warmups discarded, target directory kept.
 
+**Both warm phases need a populated target directory before their first timed run**, and neither
+`--prepare` creates one. The driver runs an untimed `cargo build --tests` in the lane before
+starting the warm incremental phase and again before the test phase, or else preserves the
+artifacts the cold phase left behind. Without that, a lane starting from an empty target
+directory measures a cold build on its first timed run and a warming cache on the next few, which
+is the error the split exists to prevent.
+
 Neither compile phase substitutes for the other. A cell can sit close to the host on incremental
 builds and far off it on a cold one, and a developer feels both.
 
@@ -167,12 +174,20 @@ actually choose, which is the decision the numbers exist to inform.
 ### What "close to the host" means
 
 A threshold applied to noisy numbers means nothing, so the run protocol comes first. Every lane
-reports its median, its inter-quartile range, and the full list of run times. **A lane whose
-inter-quartile range exceeds 10% of its median is too noisy to judge.** Fix the environment and
-run it again; never widen the band to fit the noise.
+reports its median, its inter-quartile range, and the full list of run times.
 
-Two thresholds, both judged on a bootstrap 95% confidence interval on the ratio of medians rather
-than on a bare comparison of two numbers:
+**Every figure below is per lane and per phase.** The three timed phases are three different
+commands, so a ratio built from a cold-compile sample in one lane and a warm sample in another
+measures nothing. There is no combined number: three lanes times three phases gives nine medians,
+nine inter-quartile ranges, and — for the two comparison verdicts — nine intervals. An aggregate
+would also hide one noisy phase behind two quiet ones.
+
+**A lane whose inter-quartile range exceeds 10% of its median, in any phase, is too noisy to
+judge in that phase.** Fix the environment and run it again; never widen the band to fit the
+noise.
+
+Two thresholds, each evaluated separately for each phase, both judged on a bootstrap 95%
+confidence interval on the ratio of medians rather than on a bare comparison of two numbers:
 
 1. **Floor (pass/fail):** the cell lane's median must not exceed the Docker lane's median. Docker
    is the incumbent a cell replaces, and being slower than the incumbent has to be explained

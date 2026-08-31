@@ -74,8 +74,10 @@ Steps:
 3. `src/conformance.rs`: the five clauses from spec 003's Design, each
    `pub fn <clause_name><B: EnforcementBackend>(make: impl Fn() -> B)`, failing tests first
    against a deliberately broken local impl, then green against `FakeBackend`.
-4. `tests/attach_detach_residue.rs`: the manifest → grant → ledger → replay → empty-residue
-   scenario.
+4. `tests/attach_detach_residue.rs`: the full scenario in this order —
+   manifest → register → grant → ledger → detach → replay → empty-residue. Register and detach
+   are not optional: spec 003 requires both before LIFO replay, and a scenario that skips them
+   can pass without ever exercising the attach and detach path this test exists for.
 5. The freeze rule in `plasmosome-freeze-checks` (follow the existing rules' style in
    `freeze_rules.rs`); mutation-test it by adding the violation, observing the failure,
    reverting, and recording that in the PR description.
