@@ -1,7 +1,7 @@
 ---
 id: 019
 title: ci.yml runs actions from tags anyone upstream can move
-status: planned
+status: in_progress
 priority: 2
 specs: []
 intents: []
