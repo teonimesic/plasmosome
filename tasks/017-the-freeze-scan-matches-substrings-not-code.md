@@ -1,7 +1,7 @@
 ---
 id: 017
 title: The freeze scan matches substrings, not code
-status: planned
+status: in_progress
 priority: 2
 specs: []
 intents: []
