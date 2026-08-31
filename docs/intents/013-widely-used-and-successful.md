@@ -16,7 +16,7 @@ users and existing ones — an artifact that only serves arrival leaves everyone
 unserved.
 
 Contribution has two surfaces and they are separate. Someone may want to contribute to the
-Plasmosome codebase itself. Someone else may want to contribute to the plasmid plugin ecosystem
+Plasmosome codebase itself. Someone else may want to contribute to the plasmid plugin ecosystems
 and never touch the kernel. Both should be possible, and neither should be the price of the other.
 
 Nothing in this repository currently says that being installable or contributable is wanted. The
