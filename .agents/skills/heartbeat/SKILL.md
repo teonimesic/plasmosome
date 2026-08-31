@@ -142,6 +142,11 @@ know an agent is actually in. Step 5 keeps those two precisely because someone m
 there, so leaving them out here would dispatch a fourth agent on top of them. Do not re-list the
 worktrees, and do not count task files instead.
 
+**A row you could not classify stops the count.** `DETACHED` and `UNREACHABLE` mean you do not know
+what is running there, and a count you know is incomplete is not a count — a GitHub blip reads as
+spare capacity and puts another agent on top of work you cannot see. Settle those rows first: ask
+GitHub again, or look at who is in the directory. Dispatch nothing until every row has a state.
+
 ```shell
 grep -lE '^status: (in_progress|in_review)' tasks/*.md
 ```
