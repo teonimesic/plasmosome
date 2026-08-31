@@ -5,10 +5,12 @@ status: todo
 priority: 2
 specs: []
 intents: []
-refs: [crates/plasmosome-freeze-checks/src/lib.rs]
+refs: [crates/plasmosome-freeze-checks/src/lib.rs, crates/plasmosome-membrane/src/readiness.rs]
 done_when: >-
-  moving or copying a checkout cannot make `cargo test -p plasmosome-freeze-checks` inspect a
-  different tree than the one it was invoked in, and a stale `target/` fails by naming staleness.
+  a regression test over a copied checkout, with the original still in place, proves that
+  `plasmosome-freeze-checks` and `plasmosome-membrane` both read the tree they were invoked in
+  rather than the one they were compiled in; and a stale `target/` fails by naming staleness
+  instead of a missing file.
 ---
 
 ## Why
@@ -36,16 +38,29 @@ itself.
 CI never sees either: a fresh checkout compiles at the path it runs from. This is a local-only
 false green, which is what makes it easy to leave in place.
 
-The fix is small and verified: cargo also sets `CARGO_MANIFEST_DIR` **in the environment of the
-test binary it runs**, and that value always reflects the invocation rather than the build. Read
-`std::env::var("CARGO_MANIFEST_DIR")` first and fall back to `env!` only when it is absent, then
-assert the resolved root holds the workspace `Cargo.toml` so a stale build fails by naming
-staleness instead of a missing file.
+One candidate is to read `CARGO_MANIFEST_DIR` from the environment at runtime rather than through
+`env!`. Under `cargo test` here it was present and did name the invocation:
 
 ```text
 compile-time: …/attribution-guard-nonterminal/crates/plasmosome-freeze-checks
 runtime     : Ok("…/attribution-guard-nonterminal/crates/plasmosome-freeze-checks")
 ```
+
+**Do not take that as the answer.** Cargo documents these variables as build-time and does not
+guarantee them in the environment of the process it runs, so the fallback to `env!` is not a rare
+path — it is whatever happens when the binary is run any other way, and it is the stale value. A
+mechanism that is right only when an unguaranteed variable happens to be set has moved the failure
+rather than removed it.
+
+Nor is asserting that the resolved root holds the workspace `Cargo.toml` enough. That catches the
+checkout that **moved**, where the old path is gone. It does not catch the checkout that was
+**copied**, where the old path still exists and still holds a perfectly good `Cargo.toml` — the
+case that reports green while reading the wrong tree, and the reason this is filed at all.
+
+So: pass the root in explicitly, or find a source that is guaranteed at runtime. Whatever is
+chosen, the thing that proves it is a regression test over a **copied** checkout, asserting the
+check reads the tree it was invoked in rather than the one it was compiled in. Without that test
+this task cannot be called done, because its own headline failure would go unobserved.
 
 ## Evidence the stale binary is real
 
@@ -57,7 +72,7 @@ PR #35 was open. In the worktree at
 ```text
 panicked at crates/plasmosome-membrane/src/readiness.rs:130:13:
 the control protocol spec is readable at
-/Users/stefano/Documents/plasmosome/.worktrees/attribution-guard-nonterminal/docs/specs/001-control-protocol.md:
+/<home>/Documents/plasmosome/.worktrees/attribution-guard-nonterminal/docs/specs/001-control-protocol.md:
 No such file or directory (os error 2)
 ```
 
