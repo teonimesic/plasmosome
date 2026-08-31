@@ -102,3 +102,19 @@ Steps:
 STOP when done — do not start the next piece of work.
 
 ## Notes
+
+- `.github/workflows/ci.yml` has no `crate` matrix — it runs one `gates` job over the whole
+  workspace. Step 7 had nothing to add, so task 005 carries the `plasmosome-testkit` entry when
+  it builds the matrix.
+- Cargo refuses the `testkit_is_dev_only` violation before the rule can see it, but only for the
+  three crates the testkit depends on: `plasmosome-core` naming `plasmosome-testkit` in
+  `[dependencies]` is a package cycle and `cargo test` stops there. The rule was mutation-tested
+  against `plasmosome-membrane`, which the testkit does not depend on and where cargo is happy to
+  build the violation.
+- `PlasmidManifest` has no constructor other than `parse`/`load`, and every field is public, so
+  `ManifestBuilder` fills the struct directly. That skips the grammar's validation on purpose —
+  a builder that can only produce valid manifests cannot set up a test about an invalid one.
+- The conformance clauses need to know which `OsObject` a `Capability` materializes, and the
+  fake's mapping is private. `conformance::materialized` states that mapping independently, over
+  the public `UniverseOp::object()`. Two copies is the point: the suite is a statement of the
+  contract, the fake is one implementation of it.

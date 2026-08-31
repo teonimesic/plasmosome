@@ -3,6 +3,8 @@ use std::process::Command;
 
 const CONTROLLER_CRATES: &[&str] = &["plasmosome-core", "plasmosome-backend", "plasmosome-ledger"];
 
+const TESTKIT: &str = "plasmosome-testkit";
+
 const FORBIDDEN_CRATE_FRAGMENTS: &[&str] = &[
     "libkrun",
     "krun",
@@ -118,14 +120,18 @@ fn controller_crates_declare_no_fork_or_socketpair_plumbing_dependency() {
 }
 
 fn declared_dependencies(manifest: &str) -> Vec<String> {
-    let mut in_dependencies = false;
+    declared_in(manifest, "[dependencies]")
+}
+
+fn declared_in(manifest: &str, section: &str) -> Vec<String> {
+    let mut in_section = false;
     let mut names = Vec::new();
     for line in manifest.lines() {
         if line.starts_with('[') {
-            in_dependencies = line == "[dependencies]";
+            in_section = line == section;
             continue;
         }
-        if in_dependencies && let Some(name) = line.split('=').next() {
+        if in_section && let Some(name) = line.split('=').next() {
             let name = name.trim();
             if !name.is_empty() {
                 names.push(name.to_string());
@@ -133,6 +139,55 @@ fn declared_dependencies(manifest: &str) -> Vec<String> {
         }
     }
     names
+}
+
+fn workspace_members() -> Vec<String> {
+    let manifest = std::fs::read_to_string(workspace_root().join("Cargo.toml"))
+        .expect("the workspace manifest is readable");
+    let mut in_members = false;
+    let mut members = Vec::new();
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line == "members = [" {
+            in_members = true;
+            continue;
+        }
+        if in_members {
+            if line == "]" {
+                break;
+            }
+            let path = line.trim_matches(|c: char| c == ',' || c == '"');
+            let name = path.rsplit('/').next().unwrap_or(path);
+            members.push(name.to_string());
+        }
+    }
+    assert!(
+        members.contains(&TESTKIT.to_string()),
+        "the workspace manifest no longer lists its members one per line: {members:?}"
+    );
+    members
+}
+
+#[test]
+fn testkit_is_dev_only() {
+    for member in workspace_members() {
+        if member == TESTKIT {
+            continue;
+        }
+        let manifest = std::fs::read_to_string(
+            workspace_root()
+                .join("crates")
+                .join(&member)
+                .join("Cargo.toml"),
+        )
+        .expect("the crate manifest is readable");
+        for section in ["[dependencies]", "[build-dependencies]"] {
+            assert!(
+                !declared_in(&manifest, section).iter().any(|d| d == TESTKIT),
+                "`{member}` names `{TESTKIT}` in `{section}`; the testkit is test support and reaches a kernel crate only through `[dev-dependencies]`, or it ships"
+            );
+        }
+    }
 }
 
 #[test]
