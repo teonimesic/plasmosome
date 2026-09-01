@@ -90,12 +90,20 @@ Beads-native ids. Each id must resolve to exactly one document of the required k
 also materialize relations for queries, but import and export are compared through the logical
 record above. Beads-native row ids and its internal table layout are not caller-visible contracts.
 
+For a task naming several specs, its intent closure is an ordered union. Traverse `spec_ids` in the
+task's order and each spec's `intent_ids` in that spec's order; append an intent the first time it
+appears and omit later duplicates. The task's copied `intent_ids` must equal that complete ordered
+union. Ready, planning and start checks evaluate every spec and every intent in the union, never
+only the first named spec.
+
 ### Pinned local store and remote
 
-The only supported tracker is Beads `1.1.2`, pinned by version and verified release checksum. The
-wrapper checks `bd --version` before opening or changing the store and returns
-`unsupported_beads_version` on any other version; it never performs an automatic schema upgrade.
-The pinned release is MIT licensed.
+The only supported tracker is Beads `1.1.2`, pinned by version and verified release checksum. A
+repository pin manifest records each supported artifact filename and SHA-256 copied from the
+`checksums.txt` asset on the upstream Beads v1.1.2 GitHub release. The wrapper checks both that
+manifest and `bd --version` before opening or changing the store and returns
+`unsupported_beads_version` or `beads_checksum_mismatch` on failure; it never performs an automatic
+schema upgrade. The pinned release is MIT licensed.
 
 Each clone has one embedded Dolt store shared by its worktrees. Initialization uses
 `bd init --stealth` or a verified equivalent that installs no hooks, edits no `AGENTS.md`,
@@ -330,9 +338,11 @@ shared filesystem.
   An agent fixture, inferred GitHub event and mismatched content SHA are each refused.
 - `gate-refusals` tries to plan a task without plan/`done_when`, claim or start an unplanned task,
   start through a draft or missing spec, accept a spec under a draft or missing intent, and reuse an
-  approval for changed intent content. It also gives a task an accepted spec but copied
-  `intent_ids` different from that spec's complete intent list. Every case exits non-zero before any
-  remote state or external effect changes.
+  approval for changed intent content. Multi-spec fixtures cover two accepted specs with distinct
+  intents and two with an overlapping intent: the exact first-seen ordered union passes when every
+  intent is approved, while a missing second-spec intent, a duplicate, wrong order and an
+  unapproved intent each refuse. Every refusal exits non-zero before any remote state or external
+  effect changes.
 - `merge-reconciliation --replay 3` omits the initial merge observation, repairs it by polling, and
   replays the same PR, check, review and merge facts three times. It produces one final lifecycle
   transition and one set of facts with the merge commit preserved.
@@ -347,8 +357,14 @@ shared filesystem.
   hooks and heartbeat entry points. It fails if an agent is still told to write or reconstruct
   volatile Markdown fields, and proves those entry points use the wrapper and its lifecycle values
   after the authority epoch.
+- `cutover-freeze` starts the ordered cutover, then attempts Markdown-originated and
+  wrapper-originated operational mutations before the ledger epoch; both are refused. Publishing
+  the epoch is also refused until the wrapper observes the exact Git commit that removed the
+  volatile fields and updated the agent-facing instructions, after which ledger writes alone work.
 - `version-pin` passes with a checksum-verified Beads 1.1.2 binary and refuses a lower, higher or
-  unparsable `bd --version` before store migration, sync or mutation.
+  unparsable `bd --version`, a missing platform entry in the repository pin manifest, and a binary
+  reporting 1.1.2 whose SHA-256 differs from the pinned upstream release checksum. Every refusal
+  occurs before store migration, sync or mutation.
 - `stealth-init` initializes a clean fixture and proves agent instructions, hooks and tracked files
   are unchanged, embedded Dolt uses the configured GitHub `refs/dolt/data` remote, and automatic or
   concurrent Git-protocol pushes remain disabled.
