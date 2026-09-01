@@ -1,7 +1,7 @@
 ---
 id: 042
 title: Prove the pinned Beads transport fence
-status: planned
+status: in_progress
 priority: 1
 specs: [014]
 intents: [015]
@@ -361,3 +361,20 @@ description leads with the reason from `## Why`, ends with `task: 042`, and does
 or cutover. STOP when done — do not start the next piece of work.
 
 ## Notes
+
+2026-09-01: TDD evidence: the first pin test command failed as intended because
+`plasmosome-work-state` was not yet a workspace package. After the package and verifier were
+implemented, `cargo test -p plasmosome-work-state --test pin` passed 5 tests. The command,
+contract and CLI groups first failed on absent contract APIs, then passed 8 tests; the stealth-init
+planning test first failed on the absent command builder, then passed after implementation. The
+real v1.1.2 Apple Silicon archive was downloaded and extracted only under `mktemp -d`;
+`./tools/work-state contract-test hermetic` passed after the runner created its isolated HOME/XDG
+directories and supplied PATH to the isolated child environment.
+
+2026-09-01: No injected disposable public GitHub fixture was supplied. The required real command
+`./tools/work-state contract-test github --archive <verified-temporary-archive> --bd
+<verified-temporary-bd>` returned JSON code `github_fixture_required` and exit 2 before any remote
+write. GitHub transport cases, coverage, the full root gate, PR and cutover conclusion therefore
+remain unrun. Required input: an explicit public, empty, disposable GitHub repository URL whose
+basename starts `plasmosome-work-state-fixture`, with existing caller-provided read/write access,
+and the exact confirmation token `refs/dolt/data`.

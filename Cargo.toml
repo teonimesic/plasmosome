@@ -10,6 +10,7 @@ members = [
     "crates/plasmid-sdk",
     "crates/plasmosome-guards",
     "crates/plasmosome-testkit",
+    "crates/plasmosome-work-state",
 ]
 
 [workspace.package]
@@ -24,6 +25,7 @@ toml = "0.8"
 proptest = "1"
 tempfile = "3"
 libc = "0.2"
+sha2 = "0.10"
 
 plasmosome-backend = { path = "crates/plasmosome-backend" }
 plasmosome-ledger = { path = "crates/plasmosome-ledger" }
