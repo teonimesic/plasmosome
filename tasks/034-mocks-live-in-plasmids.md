@@ -26,10 +26,11 @@ done_when: >-
   is a claim about the whole tree and not about `refs:` alone, so it is checked
   with `grep -rn 'mock-github' --include='*.toml' --include='*.wit' .` returning
   nothing and every surviving `[mock]` sitting beside a `[network]` in the same
-  manifest, `mock-github` remaining only as the `MOCK_WITHOUT_NETWORK` fixture
-  that proves the refusal; spec
-  001 §3.10 states that refusal and its code `104` resolutions name only
-  resolutions still reachable once no plasmid is a mock; D2b's three propagation
+  manifest, and the name `mock-github` remaining only as the `id` of the
+  `MOCK_WITHOUT_NETWORK` fixture that proves such a manifest is refused — the
+  plasmid is what stops existing, not the string; spec 001 §3.10 states that
+  refusal and its code `104` resolutions name only resolutions still reachable
+  once no plasmid is a mock; D2b's three propagation
   rules and its safety-wins clause are all still stated in §3.5 and §3.10; spec
   001 describes itself as a record of what was delivered rather than as a text
   that may not be edited, its §6 still carrying six items in the same order with
@@ -71,9 +72,12 @@ does not serve.
 
 ## Plan
 
-The deliverable, in one sentence: `mock-github` stops existing anywhere, a manifest that tries to
-be one is refused, spec 001 shows a mock declared inside `github-pr`, and spec 001 stops claiming
-to be unrevisable.
+The deliverable, in one sentence: the `mock-github` **plasmid** stops existing, a manifest that
+tries to be one is refused, spec 001 shows a mock declared inside `github-pr`, and spec 001 stops
+claiming to be unrevisable. The *name* outlives the plasmid on purpose — it stays as the `id` of
+`MOCK_WITHOUT_NETWORK`, the fixture whose only job is to prove such a manifest no longer parses.
+Deleting that string too would delete the evidence that the refusal works, so "stops existing"
+binds what a manifest may declare, never what a test may name.
 
 **Out of scope.** The `plasmosome-freeze-checks` crate, its tests, and the must-not-bake-in CI
 rules — that is a different sense of the word, invariants pinned in code rather than a spec
@@ -86,7 +90,7 @@ removing one is a manifest-grammar change, and the refusal below makes the dupli
 Read the files in `refs:` and edit nothing beyond them. The one thing that reaches wider is a
 read: the sweep for a mock-only plasmid in `done_when` is a claim about the whole tree, and
 `refs:` names the files this change edits rather than every place such a declaration could hide,
-so that one is greped repo-wide and its command is written out above. Two of the refs are
+so that one is grepped repo-wide and its command is written out above. Two of the refs are
 downstream of the rewrite rather than subjects of it: `docs/specs/008-cell-recovery-contract.md` and
 `tasks/024-the-dependency-freeze-reads-text-not-toml.md` each quote spec 001's freeze language and
 need the quote refreshed.
