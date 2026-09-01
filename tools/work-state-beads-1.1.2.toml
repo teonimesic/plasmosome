@@ -1,0 +1,18 @@
+version = "1.1.2"
+release = "https://github.com/gastownhall/beads/releases/tag/v1.1.2"
+source_commit = "20e493e569c922d1253bdeff068c5e56c94957fb"
+license = "MIT"
+checksums_url = "https://github.com/gastownhall/beads/releases/download/v1.1.2/checksums.txt"
+checksums_sha256 = "8ea26179417c8a206b8d18c515b9a7588c1dad5336f6ce1e61b329c2ed7138a5"
+
+[[targets]]
+target = "aarch64-apple-darwin"
+archive = "beads_1.1.2_darwin_arm64.tar.gz"
+archive_sha256 = "9b0137a83a2afd343e2abd2a506be72ea032721000f76669c2cf81729e78501d"
+binary_sha256 = "621b7b6c20c38db27ef4120398eb46dc35ba5b3e6c3611e19e14d33de10ce351"
+
+[[targets]]
+target = "x86_64-unknown-linux-gnu"
+archive = "beads_1.1.2_linux_amd64.tar.gz"
+archive_sha256 = "a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2"
+binary_sha256 = "6d767629e90560506d0ea3de9823aef48386414f5425d8853e2ae3312cad9a82"

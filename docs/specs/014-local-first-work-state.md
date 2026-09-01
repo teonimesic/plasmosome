@@ -118,10 +118,29 @@ Each clone has one embedded Dolt store shared by its worktrees. Initialization u
 configures the existing GitHub `origin` as the Dolt remote whose authoritative generation is
 `refs/dolt/data`.
 
+Embedded cleanup drops its handles and removes its temporary root; it does not invoke `bd dolt
+stop`, because embedded mode starts no Dolt server. The harness reaps only child processes it
+actually started.
+
 `dolt.auto-push` is false and no daemon, hook or background job performs a Git-protocol push.
 Beads 1.1.2 warns that concurrent automatic pushes can corrupt or strand remote history; all pulls,
 commits and pushes used for authoritative mutations occur inside the guarded wrapper protocol.
 Ordinary queries never invoke Beads behavior that synchronizes implicitly.
+
+Transport contract tests use the same injected command boundary as the production adapter. They
+script the exact `git` and Beads observations for two independent clone-local stores: expected-base
+read, winning non-forcing push, stale non-fast-forward rejection, retry before publication and
+re-observation after a lost response. They assert the constructed publication command is
+non-forcing and that any exceptional compare-and-set ref update uses an explicit
+`--force-with-lease` expected SHA; a bare force is always unsafe. This tests Plasmosome's command
+construction, classification and idempotency logic without a Git or GitHub emulator.
+
+GitHub's documented rejection of non-fast-forward pushes is the stable platform contract for the
+ref update, and Git receive-pack defines the underlying ref-update behavior. No GitHub REST mock,
+hosted fixture or credential is involved because Beads synchronization uses Git transport. Not
+running a live GitHub proof is not a cutover blocker; an unsafe configured command, a missing
+expected base where a lease is required, or an observed result that contradicts the documented
+contract is.
 
 ### Local reads and honest freshness
 
@@ -202,11 +221,11 @@ former holder's candidate descends from an old base and GitHub rejects it as non
 Release is recorded in the operation commit or a later idempotent release commit. A lost release
 response is recovered from history or by expiry.
 
-The cutover test must establish empirically that Beads 1.1.2 exposes and preserves this non-forcing
-expected-base behavior for `refs/dolt/data`, including a stale holder after takeover. If the
-wrapper cannot prove the expected base, if Beads force-updates the ref, or if GitHub cannot reject
-the stale candidate, cutover is blocked. Retrying unsafe concurrent `bd dolt push` operations or
-weakening exactly-one publication is not an alternative.
+The cutover test must establish that the wrapper constructs and classifies this non-forcing
+expected-base behavior for `refs/dolt/data`, including a stale holder after takeover. A publication
+plan containing an unleased force, an exceptional leased update without the exact observed base,
+or a recorded accepted stale result is `cutover_blocked`. The absence of a live hosted test is not.
+Retrying a stale `bd dolt push` or weakening exactly-one publication is not an alternative.
 
 ### Ownership before effects
 
@@ -332,10 +351,12 @@ not part of this contract.
 
 ## Acceptance
 
-The implementation supplies a hermetic runner, `./tools/work-state contract-test <case>`, and CI
-runs `./tools/work-state contract-test all`. GitHub cases use two independent clones and temporary
-fixture refs in a disposable public test repository; they do not simulate the remote with one
-shared filesystem.
+The implementation supplies a hermetic runner, `./tools/work-state contract-test <case> --archive
+PATH --bd PATH`, and CI runs `./tools/work-state contract-test all --archive PATH --bd PATH`. It
+initializes two independent temporary clone-local
+stores with the pinned Beads binary, then scripts the exact external Git/Beads observations at the
+existing command seam. It uses no server, hosted repository, credential, GitHub API mock, fake
+forge or shared store in place of the two clients.
 
 - `shadow-parity --source-ref origin/main` dynamically imports every numeric intent, spec and task
   present when it runs and reports no missing, extra or different lifecycle, priority, link, PR or
@@ -374,10 +395,10 @@ shared filesystem.
 - `expired-lease-recovery` stops a holder, advances trusted time past expiry, publishes takeover,
   and proves the new holder can finish. The former holder's later publication and external effect
   are refused, and both expiry and takeover remain in audit history.
-- `stale-base-fence` races a renewed holder and an expired former holder against GitHub. The
-  candidate whose parent is no longer the current `refs/dolt/data` generation is rejected without
-  force. This case is a mandatory cutover blocker if Beads 1.1.2 cannot expose or preserve the
-  expected base.
+- `stale-base-fence` scripts a renewed holder and an expired former holder against one recorded
+  `refs/dolt/data` history. The production command is non-forcing, the stale non-fast-forward result
+  is terminal, and a later observation still names the winner. An unleased force, missing expected
+  base or accepted stale result is a mandatory cutover blocker.
 - `push-conflict-recovery` creates divergent local Dolt commits in two clones, resolves by guarded
   pull, replay and push, and compares every operation id and transition before and after. No history
   entry is lost, overwritten or silently force-pushed.
@@ -420,15 +441,16 @@ shared filesystem.
   reporting 1.1.2 whose SHA-256 differs from the pinned upstream release checksum. Every refusal
   occurs before store migration, sync or mutation.
 - `stealth-init` initializes a clean fixture and proves agent instructions, hooks and tracked files
-  are unchanged, embedded Dolt uses the configured GitHub `refs/dolt/data` remote, and automatic or
+  are unchanged, embedded Dolt uses the configured `refs/dolt/data` remote, and automatic or
   concurrent Git-protocol pushes remain disabled.
 - `network-required-mutations` disables the network and proves claim, transition, approval,
   acceptance, reconciliation and release commands fail without changing authoritative state or
   reporting success; local reads continue to work with `unknown` freshness.
 
 The repository gate in the root `AGENTS.md` is green for the implementation, and the contract
-runner records its Beads version, two clone paths, remote refs and final operation ids so a reviewer
-can reproduce every distributed result.
+runner records its Beads version, two clone labels, redacted production commands, scripted remote
+observations and final operation ids so a reviewer can reproduce every decision without recording
+secret or machine-specific paths.
 
 ## Out of scope
 
