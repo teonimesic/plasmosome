@@ -570,9 +570,14 @@ version = "0.1.0"
 mount = { backend = "virtiofs", dst = "/workspace" }
 "#;
 
-    const MOCK_GITHUB: &str = r#"
-id = "mock-github"
+    const GITHUB_PR_WITH_MOCK: &str = r#"
+id = "github-pr"
 version = "0.1.0"
+impl.wasm = "components/github-pr.wasm"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
 
 [mock]
 hosts = ["api.github.com"]
@@ -697,13 +702,19 @@ subject = "git"
     }
 
     #[test]
-    fn mock_manifest_carries_hosts_and_backend_shape() {
-        let manifest = PlasmidManifest::parse(MOCK_GITHUB).unwrap();
+    fn a_plasmid_carries_its_own_mock_alongside_the_hosts_it_stands_in_for() {
+        let manifest = PlasmidManifest::parse(GITHUB_PR_WITH_MOCK).unwrap();
+        assert_eq!(manifest.id, "github-pr");
         let mock = manifest.mock.as_ref().unwrap();
         assert_eq!(mock.hosts, vec!["api.github.com".to_string()]);
         assert_eq!(mock.kind, "recorded");
         assert_eq!(mock.api, "github");
         assert_eq!(mock.source, "fixtures/github-pr");
+        assert_eq!(
+            mock.hosts,
+            manifest.network.as_ref().unwrap().hosts,
+            "a mock names the hosts its own manifest declares, so the two lists cannot drift"
+        );
     }
 
     #[test]

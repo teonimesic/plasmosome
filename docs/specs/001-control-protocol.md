@@ -5,13 +5,22 @@ status: accepted
 intents: []
 ---
 
-# Plasmosome control protocol — the P1 freeze
+# Plasmosome control protocol — the P1 contract, as delivered
 
-**Scope:** the P1 contract freeze (91 plan step 1). Everything binding below is
-traceable to a decided item: D1/D1a/D1b/D1c/D2/D2b/D3/D4 in `91-p1-plan.md`, the frozen
-credential grammar in `80-adr-credential-delivery.md` (D2 as confirmed by E4b, `[commands]` as
-frozen by E13/E13b), the six must-not-bake-in rules in `86-kernel-process-topology.md` §4, and
-F9's measured readiness rule. Undecided items are marked RESERVED and do not freeze here.
+**Scope:** the P1 control contract (91 plan step 1). Everything binding below is
+traceable to a decided item: D1/D1a/D1b/D1c/D2/D2b/D3/D4 in `91-p1-plan.md`, the credential
+grammar in `80-adr-credential-delivery.md` (D2 as confirmed by E4b, `[commands]` as settled by
+E13/E13b), the six must-not-bake-in rules in `86-kernel-process-topology.md` §4, and
+F9's measured readiness rule. Items nobody has decided are marked RESERVED and are not decided
+here.
+
+**This file records what was delivered. It is not a text nobody may edit.** Every shape below
+binds each client until this file changes, and it changes the way anything else here does: on a
+branch, in a pull request, with the reasoning written down. So a shape is the shape a client
+gets today, and altering one is a change to the contract — announced, never slipped in. What it
+is not is permanent. A design here that turns out wrong is rewritten in place; correcting it
+needs no amendment layered on top, and the history is in the log. §6 is the record of how much
+of this is built.
 
 The protocol is the controller's (`plasmosomed`) **only** control surface. The CLI (`plasmosome`
 / `plasmid` binaries), the future MCP server (D1: a later transposition of the same verbs), and
@@ -109,7 +118,7 @@ Application error codes (closed set; additions are a contract change):
   when unambiguous**. One running instance → default; otherwise code `100` with the candidate
   list. The server resolves; the client never guesses.
 
-## 3. Verb schemas (frozen v1 set)
+## 3. Verb schemas (the v1 set)
 
 ### 3.1 `plasmosome.start`
 
@@ -209,7 +218,7 @@ side**, never from controller memory (86 §4 rule 4). Non-empty residue is repor
   different modes → error `104` naming the node, both modes, both plasmids, and the
   `resolutions` (`force_simulate`, `force_passthrough`, `remove_plasmid`); safety-wins
   (simulate/capture beats passthrough) on inherited collisions.
-- RESERVED (not frozen): `cell.clone` (tier-2: state + plasmids, fresh brain), `cell.save` /
+- RESERVED (undecided): `cell.clone` (tier-2: state + plasmids, fresh brain), `cell.save` /
   `cell.load` (tier-3: dormant captured cell, `*.cell` file), `freeze` (future
   pause-and-resume).
 
@@ -291,8 +300,8 @@ Completion is asynchronous; `exec.status` (companion, same envelope) polls:
 ]}}
 ```
 
-`mock` ∈ `simulate | capture | passthrough` — the frozen D2 vocabulary, closed. Absent
-declarations mean `passthrough`.
+`mock` ∈ `simulate | capture | passthrough` — the D2 vocabulary, closed; an addition to it is a
+contract change. Absent declarations mean `passthrough`.
 
 ### 3.10 `plasmid.add`
 
@@ -303,22 +312,30 @@ declarations mean `passthrough`.
 
 ```json
 {"id": 12, "result": {"plasmid": "github-pr", "mock": "capture", "generation": 4,
-  "propagated": {"mode": "capture", "closure": ["github-pr", "mock-github"]},
+  "propagated": {"mode": "capture", "closure": ["github-pr"]},
   "attach": {"attach_to_first_allowed_ms": 57}}}
 ```
 
 - `mock` optional; absent = the cell's inherited default (`passthrough` when nothing is
   declared). Setting a mode propagates across the plasmid's **whole dependency closure
-  transitively** (D2b rule 1) — the reply reports what was propagated.
+  transitively** (D2b rule 1) — the reply reports what was propagated. `github-pr` requires no
+  other plasmid, so its closure is itself alone, which is what the reply above shows; a plasmid
+  that requires others names every one it reaches.
+- **A mock is never a plasmid of its own.** It is the `[mock]` section of the manifest that
+  declares the `[network]` hosts it stands in for, so the two host lists are one file apart and
+  cannot drift. A mode still propagates across a closure exactly as above — what it never lands on
+  is a node whose only content is a mock.
 - Inherited levels yield to the new explicit declaration (D2b rule 2). An explicit-vs-explicit
   conflict on the same node at different modes → code `104` with
-  `resolutions: ["--force-simulate", "--force-passthrough", "remove plasmid mock-github"]`
-  (D2b rule 3 — never last-write-wins).
+  `resolutions: ["force_simulate", "force_passthrough", "remove_plasmid"]` (D2b rule 3 — never
+  last-write-wins), the same three names §3.5 gives. `remove_plasmid` drops one of the two
+  plasmids that declared a mode on the shared node, which is what makes it reachable without a
+  mock plasmid to remove.
 - Attach is the two-phase transaction over the Track B seam: validate the whole subgraph,
   then commit; a mid-commit failure rolls the prefix back and replies `CommitFailed`-shaped
   code `103`/`109` with the rolled-back list. Attach receipts carry the ledger generation so
   the reconciler converges on replay (86 §4 rule 2).
-- Credential refs in the manifest freeze per ADR 80: `delivery` is an ordered non-empty list
+- Credential refs in the manifest follow ADR 80: `delivery` is an ordered non-empty list
   over the **closed** enum `handle | helper | inject | mint`, `consumer` pairs with it
   (`handle⇔wasm`, `helper⇔git`, `inject/mint⇒http/process`, `mint` legal as the git fallback),
   `inject` requires an absolute `path_scope`, and `[commands.<id>]` refs gain exactly one
@@ -356,10 +373,10 @@ be changed in the same swap (D2's third layer).
 {"id": 14, "result": {"plasmid": "github-pr", "mock": "simulate", "generation": 5, "state": "active"}}
 ```
 
-## 4. Controller ⇄ membrane (the supervisor side of the freeze)
+## 4. Controller ⇄ membrane (the supervisor side of the contract)
 
 The controller drives each cell's `membraned` over a second, private ndjson-UDS
-(`<instance>/cells/<cell>/membrane.uds`). Same envelope as §1. The frozen subset:
+(`<instance>/cells/<cell>/membrane.uds`). Same envelope as §1. The subset this spec covers:
 
 - `membrane.status` — the F9 readiness probe. Reply `{"ready": true, "state": "serving"}`.
   Readiness = the socket **answers**; accept-without-answer is the half-alive broker and is
@@ -381,7 +398,7 @@ The controller drives each cell's `membraned` over a second, private ndjson-UDS
   and the credential vsock proxy (port 4041 terminates at the membrane and proxies to the
   controller; custody state stays kernel-core).
 
-## 5. What this draft deliberately does not freeze
+## 5. What this spec deliberately leaves undecided
 
 - The plasmid WIT world (SDK surface) — deferred by design; `plasmid-sdk` is a reserved crate
   with a placeholder world.
@@ -391,14 +408,18 @@ The controller drives each cell's `membraned` over a second, private ndjson-UDS
 - The membrane's VMM/shim/broker verb set (P1 step 2 owns it; §4 bounds its shape).
 - Multi-instance brokers, remote orchestration, multi-tenancy — out of scope per 90.
 
-## 6. Freeze checklist (what makes this "frozen")
+## 6. How much of this is delivered
+
+Item by item, what is true of the tree today. An item that is not yet true says so. None of them
+is a claim that the text above may not be corrected.
 
 1. Every verb above has a passing round-trip test against the real controller (ndjson in,
-   typed result out) — not yet: the controller daemon is P1 step 3.
-2. The error code table is closed and every code has a structured-field spec — done (§1).
-3. The controller-side wire types are serde and share no memory — enforced by
+   typed result out) — **not yet**: the controller daemon is P1 step 3.
+2. The error code table is closed and every code has a structured-field spec — **delivered**
+   (§1).
+3. The controller-side wire types are serde and share no memory — **delivered**, and held there by
    `plasmosome-freeze-checks` (86 §4 rules 1–3 green today).
-4. The D2 mock-mode field appears in every plasmid-carrying response — done (§3).
-5. Ambiguity-as-error with candidate lists is the only selection semantics — done (§2).
+4. The D2 mock-mode field appears in every plasmid-carrying response — **delivered** (§3).
+5. Ambiguity-as-error with candidate lists is the only selection semantics — **delivered** (§2).
 6. Ledger replayable-from-log and residue-empty as standing rows — ledger property green
    today (rule 3); the D4 residue row re-points at the membrane in P1 step 2.
