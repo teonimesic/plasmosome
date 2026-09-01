@@ -1,7 +1,7 @@
 ---
 id: 012
 title: How work enters the tree — the chain, the gates, and what a pull request must carry
-status: draft
+status: accepted
 intents: [008]
 ---
 
