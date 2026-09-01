@@ -1,7 +1,7 @@
 ---
 id: 038
 title: Spec 012 says an unmatched glob comes back empty in bash, and it does not
-status: in_review
+status: done
 priority: 2
 specs: [012]
 intents: [008]
@@ -26,7 +26,7 @@ done_when: >-
   and within the spec exactly the one sentence naming the two shells — no other line of 012 is
   reworded, and the requirement itself is neither weakened, strengthened, nor restructured.
 pr: https://github.com/teonimesic/plasmosome/pull/67
-evidence:
+evidence: squash commit fc0e8d0 on main; spec 012's two-shells bullet now says zsh aborts on an unmatched glob and bash leaves the pattern standing as a literal, running the loop once over a path that does not exist
 ---
 
 ## Why

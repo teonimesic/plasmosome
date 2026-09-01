@@ -4,7 +4,7 @@ title: The dependency freeze reads text, not TOML
 status: todo
 priority: 2
 specs: [001]
-intents: []
+intents: [003, 004, 009, 012]
 refs:
   [
     crates/plasmosome-freeze-checks/tests/freeze_rules.rs,

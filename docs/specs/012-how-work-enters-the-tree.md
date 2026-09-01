@@ -53,14 +53,13 @@ Every change that reaches `main` is reachable upward: the pull request names a t
 a spec, the spec names an intent. Read that way it answers "was this wanted", which is the whole
 point of the links. A change the walk cannot follow to a top has no answer to give.
 
-**The walk ends at an intent, with one named exception that ends it a step earlier.**
-`docs/specs/001-control-protocol.md` is `accepted` carrying `intents: []` and keeps its place —
-`docs/specs/README.md` states that amnesty and `.agents/skills/tasks` says why. A change under that
-one spec therefore walks up to the spec and stops, and its task carrying `intents: []` is a correct
-field rather than an unfilled one. **The amnesty is one file and it is closed**: any *other*
-accepted spec with an empty `intents:` skipped the gate rather than predating it, because nothing
-distinguishes an old file from a new one claiming to be old. This spec adds nothing to that set,
-and no clause below reopens it.
+**The walk ends at an intent, and no spec ends it early any more.** The one amnesty this spec once
+named — `docs/specs/001-control-protocol.md`, `accepted` while carrying `intents: []` — is closed
+and empty: that spec now names the intents it serves, a change under it walks through to them like
+a change under any other spec, and a task naming only 001 copies that list rather than carrying
+`intents: []`. Every accepted spec names an intent, so an accepted spec with an empty `intents:`
+skipped the gate rather than predating it, because nothing distinguishes an old file from a new
+one claiming to be old. This spec adds nothing to that set, and no clause below reopens it.
 
 **Exactly two shapes carry no task, and both are structural.** They are not the same shape and
 flattening them is the error to avoid. A pull request filing an **intent** has nothing above it at
@@ -221,11 +220,11 @@ it.
   Those change without this spec changing.
 - **Every change reaching `main` is reachable upward to an intent**: pull request → task → spec →
   intent, or by the shorter route the two shapes below provide.
-- **One named spec ends that walk a step early.** `docs/specs/001-control-protocol.md` is `accepted`
-  with `intents: []` under the amnesty `docs/specs/README.md` states. A change beneath it reaches
-  that spec and stops, and its task's `intents: []` satisfies this contract rather than breaching
-  it. **The amnesty is one file and closed** — any other accepted spec with an empty `intents:`
-  skipped the gate rather than predating it — and nothing in this spec adds to it or removes it.
+- **No spec ends that walk early.** The amnesty that once let `docs/specs/001-control-protocol.md`
+  stand `accepted` with `intents: []` is closed and empty: that spec names its intents, a change
+  beneath it walks through to them, and a task naming only 001 copies that spec's list. **An
+  accepted spec with an empty `intents:` skipped the gate rather than predating it** — and nothing
+  in this spec reopens the amnesty.
 - **Exactly two shapes carry no task**: a pull request filing an intent, which has nothing above it
   at all, and one filing a spec, which names the intent it serves but has no task until the work
   branch that follows it. **The list is closed, and adding to it means editing this file** in a pull
@@ -292,10 +291,10 @@ it.
   Should the table and the tree disagree again, that is settled before the sweep is written and not
   by it, with the change saying where the answer came from. That provenance is a sentence a reviewer
   reads and not a line a script checks, exactly as an intent's approval is.
-- The amnesty this spec names and the one `.agents/skills/tasks` names are the same one file,
-  `docs/specs/001-control-protocol.md`, described as closed in both. No task under this spec widens
-  it, and a task whose `specs:` names only 001 carries `intents: []` without that reading as an
-  unfilled field.
+- The amnesty this spec once named and the one `.agents/skills/tasks` names are the same one file,
+  `docs/specs/001-control-protocol.md`, described as closed and empty in both. No task under this
+  spec reopens it, and a task whose `specs:` names only 001 carries the `intents:` that spec
+  carries rather than `[]`.
 - Each sweep prints nothing on the tree as it stands; prints the offending file for a record whose
   state line is absent, empty, duplicated, malformed, or outside the set, injected one at a time
   into a scratch copy; and refuses in its own words, non-zero, on an empty input set. **Both shapes

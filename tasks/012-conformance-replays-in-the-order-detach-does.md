@@ -1,7 +1,7 @@
 ---
 id: 012
 title: A backend can pass all eight clauses and still leak three capabilities on detach
-status: in_review
+status: done
 priority: 2
 specs: [003]
 intents: []
@@ -18,7 +18,7 @@ done_when: >-
   backend that fails them; and FakeBackend and CompositeBackend still pass
   every clause.
 pr: https://github.com/teonimesic/plasmosome/pull/29
-evidence:
+evidence: squash commit 0841738 on main; the suite revokes the live set in the order a detach replays it, a backend that only accepts revokes in grant order fails a clause, and FakeBackend and CompositeBackend still pass every clause
 ---
 
 ## Why

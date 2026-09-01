@@ -1,7 +1,7 @@
 ---
 id: 039
 title: A network list declared as a scalar parses to nothing, and pin_cidrs fails open
-status: in_review
+status: done
 priority: 2
 specs: [001]
 intents: [003, 004, 009, 012]
@@ -23,7 +23,7 @@ done_when: >-
   numeric or boolean — by matching every value that does not open a list, and whose
   only hits are the five fixtures inside `manifest.rs` that exist to prove the refusal.
 pr: 68
-evidence:
+evidence: squash commit 96ad908 on main; parse_network refuses a non-table [network] and a hosts or pin_cidrs that is not an array of strings at both call sites, naming the section and field, and an explicit pin_cidrs = [] still parses
 ---
 
 ## Why
