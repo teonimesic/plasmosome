@@ -197,10 +197,14 @@ the scaffold writes the declaration now and still refuses the component, saying 
   mean every reference is gone: one taken before the detach keeps its object alive, and detach
   neither waits for it nor destroys it. What the contract holds instead is the bound — every
   reference that outlives the detach is named, with the owner holding it, until the last one
-  goes. A reference with no owner, or one still held past its bound, is a failure this contract
-  is accountable for. Verification of that is part of the detach it verifies, not a reading
-  taken after success has already been reported: a check that cannot change the outcome it
-  describes is telemetry, and this contract does not rest on one.
+  goes. These are two failures, and they are not observable at the same moment. A surviving
+  reference with no owner is visible while the detach is still running, and it fails that detach:
+  the check runs where it can still change the outcome, because a check that cannot is telemetry
+  and this contract does not rest on one. A reference held past its bound cannot be seen then —
+  the bound expires after the detach has returned — so it is not a detach failure but an
+  obligation the contract keeps afterwards, reported against the owner named at detach. Naming
+  the second as though the detach could have caught it would be claiming a check nothing can
+  run.
 - **What a refusal cannot protect.** A detach that would strand an attached requirer is refused,
   and that covers dependence some declaration states. It does not cover dependence nothing
   declared — work the agent did against a tool while it was attached, state it holds that assumes
@@ -244,7 +248,7 @@ a change nobody reviewed.
 ### The gate, and what this spec does not decide
 
 Intent 010 names a gate between generating a plasmid and it taking effect, and says outright that
-its shape is undecided. It stays undecided here. Three things about it are already settled — not
+its shape is undecided. It stays undecided here. Four things about it are already settled — not
 by this spec, but by approved intents and by how the kernel enforces — and stating them is what
 keeps the open question from being answered by accident.
 
@@ -264,14 +268,17 @@ with it.
 **Reading bounds reach, not conduct.** A plasmid granted a repository can do anything to that
 repository. The credential grammar's scopes narrow part of the gap and do not close it.
 
-**One approval covers both directions.** A gate approves a declaration. Because the kernel grants
-exactly what that declaration names, and detach revokes exactly what it held, the reverse
-procedure is not a second artifact needing its own approval — it is the same one read backwards.
-This is why nothing signs off on a detach separately: there is nothing to sign that was not
-already signed at attach. The fields that put the strongest authority on removal are the ones
-whose approved artifact carries the reverse procedure alongside the forward one, and a
-declaration is that artifact here. What this does not reach is dependence no declaration
-expresses, which the detach promises above state as a limit rather than leave to be inferred.
+**One approval bounds reach in both directions.** A gate approves a declaration. Because the
+kernel grants exactly what that declaration names, and detach revokes exactly what it held, a
+detach cannot widen reach — so bounding reach needs no second artifact, and the fields that put
+the strongest authority on removal are the ones whose approved artifact carries the reverse
+procedure alongside the forward one. This is a statement about reach, on the same terms as the
+paragraph above it, and it is not the claim that a detach therefore needs no gate. Removing a
+plasmid changes conduct without widening reach — detaching a mock or an audit plasmid leaves the
+closure narrower and the behaviour different — and whether that warrants its own approval is part
+of the question this section leaves open. What one approval does not reach at all is dependence
+no declaration expresses, which the detach promises above state as a limit rather than leave to
+be inferred.
 
 **This says what a declaration is sufficient for, not what a gate is limited to.** A gate that
 also reads the code, the diff, or where the declaration came from is ruled out by nothing here,
@@ -332,19 +339,26 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 - **Detach requires nothing from the plasmid** and cannot be refused or failed by it. It revokes
   every grant the plasmid's own declaration held and unregisters its tools. A provider is
   revoked only with its last requirer; a detach that would strand an attached requirer is
-  refused, naming the requirers. Revocation is enforcement rather than erasure: after detach
-  nothing the plasmid's grants allowed passes the boundary, and what a running process already
-  read is not claimed back. Detach returns when no new reference can be obtained; a reference
-  taken before it keeps its object alive, and every such reference is named with its owner until
-  the last one goes. A reference with no owner, or one held past that bound, is a failure of the
-  detach, and the check that finds it runs where it can still fail the detach rather than after
-  it has been reported done.
+  refused, naming the requirers. That is not the only refusal: spec 001 §3.11 already refuses a
+  safe removal with code `105` when external effects are outstanding, and force requires the
+  operator/reason pair — unchanged here, and named so that the promise above is not read as a
+  claim that a detach never refuses. Neither refusal is the plasmid's to make. Revocation is
+  enforcement rather than erasure: after detach nothing the plasmid's grants allowed passes the
+  boundary, and what a running process already read is not claimed back. Detach returns when no
+  new reference can be obtained; a reference taken before it keeps its object alive, and every
+  such reference is named with its owner until the last one goes. A surviving reference with no
+  owner fails the detach, on a check that runs where it can still fail it. A reference held past
+  that bound is not a detach failure — the bound expires after the detach returns — but an
+  obligation reported against the owner named at detach.
 - **`plasmid new <name>` writes exactly one file, the declaration**, grants nothing, attaches
   nothing, and prints the sections the author must add. It writes no component, says that it
   will not until the plasmid interface is frozen, and exits `2` — the code decision 010 fixed
   for that refusal, kept for as long as the component half is refused.
 - **The generated path and the hand path produce the same artifact.** No field, section or value
-  is reachable from only one of them, and the kernel reads no field recording which produced it.
+  is reachable from only one of them, and neither path writes a field recording which produced
+  it. Provenance is a TOML comment, which costs the grammar nothing; a field would have to be
+  admitted by the parser, and a parser that admits fields it does not define cannot tell a
+  provenance note from a misspelled one.
 - **This spec amends spec 001 in three named places** — `delivery` optionality in §3.10, the
   `fix` field in §1, and the `denials` field on the per-plasmid objects of §3.9 and §3.6 — and
   nowhere else. No error code is added, removed or renumbered.
@@ -404,11 +418,18 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   after which a call the provider's grants had allowed is denied.
 - Detaching a provider that an attached plasmid still requires is refused, and the refusal names
   the requirer.
-- A detach whose object outlives it reports that object, with the owner holding it, and the
-  report is reached on a path that can still fail the detach; a detach whose object is gone
-  reports none. A check that only ever runs after the detach has been reported done does not
-  satisfy this clause, and neither does one that finds nothing because the name was destroyed
-  while the object it named is still alive.
+- A detach whose object outlives it and whose owner is named succeeds, and reports that object
+  with its owner; a detach whose object is gone reports none.
+- A detach whose surviving object has no owner **fails**, and the failure names that object. The
+  same staging with an owner recorded succeeds — the two cases differ only in the owner, so a
+  detach that fails for any other reason does not satisfy this clause, and a failure branch no
+  case ever reaches does not either.
+- Neither check is satisfied by one that only ever runs after the detach has been reported done,
+  nor by one that finds nothing because the name was destroyed while the object it named is
+  still alive: the object is identified by what it is, not by what it was called.
+- A reference still held when its bound expires is reported against the owner named at detach.
+  This is asserted after the detach returned successfully, and no case requires the detach to
+  have anticipated it.
 - After a detach, a process that was already running when it happened is denied at the boundary
   on every capability the detached declaration named, and no tool of that plasmid resolves for
   it.
@@ -420,8 +441,11 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 - The scaffold's output, with the sections it named filled in, parses to the same declaration as
   the same content typed from scratch, and the scaffold writes no field the grammar does not
   already define.
-- A declaration carrying an extra field recording how it was produced parses to the same
-  declaration as one without it, and the kernel grants the two identically.
+- A declaration carrying a comment recording how it was produced parses to the same declaration
+  as one without it, and the kernel grants the two identically. A declaration carrying an extra
+  *field* is refused, and the refusal names that field — including when the field is a plausible
+  provenance note, since the parser cannot distinguish one from a misspelling of a field the
+  grammar does define.
 - Every manifest fixture in the tree is updated to the new grammar; none is exempted, and no
   fixture parses without a description.
 
