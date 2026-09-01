@@ -33,22 +33,34 @@ So **a rule in this layer names which of three things can refuse it**, and a rul
 them does not go in:
 
 - **A sweep over the files** — mechanical, runnable by anybody, printing faults and nothing else.
-- **A person's judgement, recorded where it is visible** — not remembered, and not reported by the
-  agent whose work it gates.
+- **A person's judgement, recorded where it is visible** — not remembered, and not self-attested by
+  the agent whose work it gates. An agent may *record* a judgement the person actually made, and
+  relaying one is ordinary work; what it may never do is originate the judgement and then cite it
+  as the check on its own change.
 - **A named failure with a count somebody can take** — concrete enough that a reader can go and see
   whether it stopped happening.
 
 The third is the weakest of the three and is still a check, because it can be contradicted: "you
 can tell whether this is working by whether an open pull request without a task survives a
 heartbeat" is a claim the tree can refute. What is not a check is an agent's own report that it
-followed the rule. That is the answer coming from inside the loop, which is the one shape intent
-008 rules out by name.
+followed the rule, or an approval it originated and then relied on. That is the answer coming from
+inside the loop, which is the one shape intent 008 rules out by name — and it is a different thing
+from carrying somebody else's answer, which is how approval reaches the tree at all.
 
 ### The chain is total, and the list of shapes carrying no task is closed
 
-Every change that reaches `main` is reachable upward to an intent: the pull request names a task,
-the task names a spec, the spec names an intent. Read that way it answers "was this wanted", which
-is the whole point of the links. A change that reaches no intent by any route has no answer to give.
+Every change that reaches `main` is reachable upward: the pull request names a task, the task names
+a spec, the spec names an intent. Read that way it answers "was this wanted", which is the whole
+point of the links. A change the walk cannot follow to a top has no answer to give.
+
+**The walk ends at an intent, with one named exception that ends it a step earlier.**
+`docs/specs/001-control-protocol.md` is `accepted` carrying `intents: []` and keeps its place —
+`docs/specs/README.md` states that amnesty and `.agents/skills/tasks` says why. A change under that
+one spec therefore walks up to the spec and stops, and its task carrying `intents: []` is a correct
+field rather than an unfilled one. **The amnesty is one file and it is closed**: any *other*
+accepted spec with an empty `intents:` skipped the gate rather than predating it, because nothing
+distinguishes an old file from a new one claiming to be old. This spec adds nothing to that set,
+and no clause below reopens it.
 
 **Exactly two shapes carry no task, and both are structural.** They are not the same shape and
 flattening them is the error to avoid. A pull request filing an **intent** has nothing above it at
@@ -140,8 +152,12 @@ merging, and an agent doing exactly what it was told is the one that ships the u
 
 ### A record nobody can read has left the queue
 
-Every rule above is enforced by reading files, and every list this repository builds finds its
-records by matching a line — `status:`, `specs:`, `intents:`. **A selector like that fails open.** A
+The record-validation rules in this section are enforced by reading files — not every rule above
+is. Approval is a person's and is not derivable from the tree; the waiting state is GitHub's draft
+flag; the review evidence is an answer the forge gives about a commit. Reading those off the files
+would be reading them off the wrong thing. What files do carry is the records, and every list this
+repository builds finds them by matching a line — `status:`, `specs:`, `intents:`. **A selector
+like that fails open.** A
 record written `status:todo`, or with a trailing space, or saved with CRLF endings, does not turn up
 late in its queue. It leaves the queue, silently, and the count meant to notice is the thing that
 stopped seeing it. That is the opposite direction from a gate, where a mismatch is a refusal.
@@ -164,12 +180,13 @@ reason; this is the general form of it.
 `docs/specs/` are. `tasks/` holds 28 records, more than either, and every list built over it is a
 selector with nothing behind it.
 
-**The vocabulary is settled before the sweep is written, never by it.** `.agents/skills/tasks`
-lists five task statuses and the tree carries four: no task file on the tree holds `in_progress`.
-A sweep written today would have to pick a side, and a check is the worst place to settle a
-question — from then on the disagreement is enforced instead of discussed. Whether an executor
-records claiming a task changes what an agent must write down mid-flight, so the answer is the
-owner's and it comes first.
+**The vocabulary is settled before the sweep is written, never by it.** When this spec was drafted
+`.agents/skills/tasks` listed five task statuses and the tree carried four — no task file held
+`in_progress` — so a sweep written then would have had to pick a side, and from then on the
+disagreement would have been enforced rather than discussed. The owner has since ruled that
+`in_progress` stays, so the set is the five the table lists and this particular question is closed.
+What generalises is the shape: whether an executor records claiming a task changes what an agent
+must write down mid-flight, which is a decision, and a check is the worst place to make one.
 
 ### One statement per rule
 
@@ -204,6 +221,11 @@ it.
   Those change without this spec changing.
 - **Every change reaching `main` is reachable upward to an intent**: pull request → task → spec →
   intent, or by the shorter route the two shapes below provide.
+- **One named spec ends that walk a step early.** `docs/specs/001-control-protocol.md` is `accepted`
+  with `intents: []` under the amnesty `docs/specs/README.md` states. A change beneath it reaches
+  that spec and stops, and its task's `intents: []` satisfies this contract rather than breaching
+  it. **The amnesty is one file and closed** — any other accepted spec with an empty `intents:`
+  skipped the gate rather than predating it — and nothing in this spec adds to it or removes it.
 - **Exactly two shapes carry no task**: a pull request filing an intent, which has nothing above it
   at all, and one filing a spec, which names the intent it serves but has no task until the work
   branch that follows it. **The list is closed, and adding to it means editing this file** in a pull
@@ -266,10 +288,14 @@ it.
 - `.agents/skills/heartbeat` step 4 sweeps `tasks/*.md` for a well-formed `status:` line, alongside
   the two folders it already sweeps.
 - The statuses that sweep accepts are exactly the set the `## Lifecycle` table in
-  `.agents/skills/tasks` lists, and the disagreement between them — five listed, four on the tree,
-  `in_progress` in no file — is settled before the sweep is written, with the change saying where
-  the answer came from. That provenance is a sentence a reviewer reads and not a line a script
-  checks, exactly as an intent's approval is.
+  `.agents/skills/tasks` lists — five, `in_progress` among them, which the owner has ruled stays.
+  Should the table and the tree disagree again, that is settled before the sweep is written and not
+  by it, with the change saying where the answer came from. That provenance is a sentence a reviewer
+  reads and not a line a script checks, exactly as an intent's approval is.
+- The amnesty this spec names and the one `.agents/skills/tasks` names are the same one file,
+  `docs/specs/001-control-protocol.md`, described as closed in both. No task under this spec widens
+  it, and a task whose `specs:` names only 001 carries `intents: []` without that reading as an
+  unfilled field.
 - Each sweep prints nothing on the tree as it stands; prints the offending file for a record whose
   state line is absent, empty, duplicated, malformed, or outside the set, injected one at a time
   into a scratch copy; and refuses in its own words, non-zero, on an empty input set. **Both shapes
