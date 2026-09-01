@@ -1,7 +1,7 @@
 ---
 id: 035
 title: Cut the freeze checks down to the guards, and name the crate for what is left
-status: in_review
+status: done
 priority: 2
 specs: [013]
 intents: [008]
@@ -25,7 +25,7 @@ done_when: >-
   the old crate name enforces anything, the dated records under
   `docs/decisions/` and `tasks/` and spec 013's own account of the change aside.
 pr: 64
-evidence:
+evidence: squash commit db3cea6 on main; plasmosome-freeze-checks is gone and plasmosome-guards holds the six guards that refuse permanent harm, each shown to fail on the violation it names
 ---
 
 ## Why
@@ -66,3 +66,6 @@ wrong, and nobody finds out until it blocks a change that is right.
 `docs/decisions/004-a-rule-about-code-parses-code.md` still holds — a guard that makes a claim
 about what code does must parse it rather than grep it. What is gone is its only instance, so
 nothing in the crate parses Rust today, and the decision governs the next one that has to.
+
+2026-09-01 — GitHub reports PR 64 merged at
+`db3cea6a54a298b83c894422853b372b13f646b2`; the heartbeat reconciled the stale task record.
