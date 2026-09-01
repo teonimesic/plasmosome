@@ -99,9 +99,12 @@ remembering to mention what it is waiting for. It carries down the chain unchang
 chain reaches a goal nobody has approved is waiting on the same person, in the same place, for the
 same reason.
 
-It is a coordination signal and not a boundary: an agent can mark such a pull request ready exactly
-as it can write `approved` into a file. `docs/decisions/008-approving-an-intent-is-an-instruction.md`
-argues why nothing mechanical holds it and what that costs, and nothing here reopens it.
+**The wait is ended by the owner and by nobody else.** That is the contract this spec states. The
+rule agents read — that an agent does not mark such a pull request ready, and never originates an
+approval — is written in `docs/intents/README.md`, and
+`docs/decisions/008-approving-an-intent-is-an-instruction.md` records why nothing mechanical holds
+it, what the residual risk is, and what would reopen it. Neither is restated here and neither is
+changed here.
 
 ### What a merged pull request has to carry
 
@@ -197,7 +200,8 @@ it.
   gate is an amendment here too. **Nothing gates what may be written down.**
 - **Approval is the owner's**, and is the only judgement in this layer not derivable from the tree.
 - **Anything waiting on the owner waits as a draft pull request**, so the waiting is a state anyone
-  can list rather than something an agent has to say.
+  can list rather than something an agent has to say, and **the wait is ended by the owner, never by
+  an agent**.
 - **A merged pull request carries** a link upward or is one of the two shapes; a review that read
   the commit being merged; and an answer to every thread.
 - **Evidence that a review happened binds to the commit being merged** and distinguishes a review
@@ -249,8 +253,11 @@ it.
   checks, exactly as an intent's approval is.
 - Each sweep prints nothing on the tree as it stands; prints the offending file for a record whose
   state line is absent, empty, duplicated, malformed, or outside the set, injected one at a time
-  into a scratch copy; and refuses in its own words, non-zero, when run where its folder does not
-  exist. Verified under both `bash` and `zsh`, because a glob matching nothing is fatal in one and
+  into a scratch copy; and refuses in its own words, non-zero, on an empty input set. **Both shapes
+  of empty are tested** — the folder missing, and the folder present but holding nothing the sweep
+  would read. The second is the one a missing-folder test walks straight past, and it is the shape a
+  file match that has quietly stopped matching produces, which is the failure the refusal exists to
+  catch. Verified under both `bash` and `zsh`, because a glob matching nothing is fatal in one and
   empty in the other.
 - Every rule a task under this spec adds to a skill file names, in its own text, what can refuse
   it.
