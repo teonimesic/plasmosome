@@ -2,6 +2,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Readiness {
@@ -26,7 +27,16 @@ impl Readiness {
 const READINESS_METHOD: &str = "membrane.status";
 
 pub fn probe(socket: &Path, deadline: Duration) -> Readiness {
-    let stream = match UnixStream::connect(socket) {
+    probe_with(socket, deadline, |it| UnixStream::connect(it))
+}
+
+fn probe_with(
+    socket: &Path,
+    deadline: Duration,
+    connect: impl FnOnce(&Path) -> std::io::Result<UnixStream>,
+) -> Readiness {
+    let started = Instant::now();
+    let stream = match connect(socket) {
         Ok(stream) => stream,
         Err(_) => {
             return Readiness::NotReady(NotReady::Unreachable {
@@ -34,19 +44,43 @@ pub fn probe(socket: &Path, deadline: Duration) -> Readiness {
             });
         }
     };
-    let _ = stream.set_read_timeout(Some(deadline));
-    let _ = stream.set_write_timeout(Some(deadline));
+    let Some(to_write) = deadline
+        .checked_sub(started.elapsed())
+        .filter(|it| !it.is_zero())
+    else {
+        return Readiness::NotReady(NotReady::TimedOut);
+    };
+    let _ = stream.set_write_timeout(Some(to_write));
     let mut stream = stream;
     let request = format!("{{\"id\":0,\"method\":\"{READINESS_METHOD}\",\"params\":{{}}}}\n");
     if stream.write_all(request.as_bytes()).is_err() {
         return Readiness::NotReady(NotReady::TimedOut);
     }
     let _ = stream.flush();
+    let Some(left) = deadline
+        .checked_sub(started.elapsed())
+        .filter(|it| !it.is_zero())
+    else {
+        return Readiness::NotReady(NotReady::TimedOut);
+    };
+    let _ = stream.set_read_timeout(Some(left));
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     match reader.read_line(&mut line) {
         Ok(0) | Err(_) => Readiness::NotReady(NotReady::TimedOut),
         Ok(_) => classify(&line),
+    }
+}
+
+/// The probe a running membrane asks its brokers with: it opens the broker's
+/// control socket, sends `membrane.status`, and relays what came back. Every
+/// call asks again, as `brokers::Probe` requires — a kept answer cannot report a
+/// broker that has since stopped serving.
+pub struct ControlSocketProbe;
+
+impl crate::brokers::Probe for ControlSocketProbe {
+    fn probe(&self, socket: &Path, deadline: Duration) -> Readiness {
+        probe(socket, deadline)
     }
 }
 
@@ -185,6 +219,19 @@ mod tests {
     }
 
     #[test]
+    fn connecting_spends_the_probe_deadline_so_a_ready_broker_still_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("membraned.control");
+        serve(socket.clone(), Answer::Ready("serving"));
+        let deadline = Duration::from_millis(50);
+        let verdict = probe_with(&socket, deadline, |it| {
+            thread::sleep(deadline);
+            UnixStream::connect(it)
+        });
+        assert_eq!(verdict, Readiness::NotReady(NotReady::TimedOut));
+    }
+
+    #[test]
     fn a_missing_control_socket_is_unreachable_not_ready() {
         let dir = tempfile::tempdir().unwrap();
         let verdict = probe(&dir.path().join("absent.control"), DEADLINE);
@@ -223,6 +270,28 @@ mod tests {
             })
         );
         assert!(!verdict.is_ready());
+    }
+
+    #[test]
+    fn the_production_probe_asks_the_broker_socket_and_relays_its_answer() {
+        use crate::brokers::Probe;
+
+        let dir = tempfile::tempdir().unwrap();
+        let serving = dir.path().join("s.uds");
+        serve(serving.clone(), Answer::Ready("serving"));
+        assert_eq!(
+            ControlSocketProbe.probe(&serving, DEADLINE),
+            Readiness::Ready {
+                state: "serving".to_string()
+            }
+        );
+
+        let silent = dir.path().join("q.uds");
+        serve(silent.clone(), Answer::Silent);
+        assert_eq!(
+            ControlSocketProbe.probe(&silent, DEADLINE),
+            Readiness::NotReady(NotReady::TimedOut)
+        );
     }
 
     #[test]

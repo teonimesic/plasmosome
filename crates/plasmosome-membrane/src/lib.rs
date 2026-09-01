@@ -1,9 +1,9 @@
 //! The cell membrane: one host-side supervisor per cell. It holds the VMM
 //! fork, the netstack shim, the vsock bridges, and egressd/dnsd supervision
 //! — everything the controller (`plasmosome-core`) must never own (86 §4
-//! rules 1, 5, 6). P1 freeze groundwork: the crate is reserved with its
-//! binary name (`membraned`) and the F9 readiness contract; the shim and the
-//! vsock bridges land in the next P1 step.
+//! rules 1, 5, 6). Its binary, `membraned`, spawns the brokers its config
+//! names and answers `membrane.status` for them on a private control socket;
+//! the shim and the vsock bridges land in the next P1 step.
 //!
 //! Readiness (F9, measured): a supervisor is ready when its control socket
 //! *answers* a control-`status` request — not when the process is alive and
@@ -22,5 +22,8 @@
 //! whole set, so a cell with many brokers answers as fast as a cell with one.
 
 pub mod brokers;
+pub mod control;
+pub mod daemon;
+pub mod exec;
 pub mod readiness;
 pub mod vmm;
