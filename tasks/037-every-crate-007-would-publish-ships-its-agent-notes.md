@@ -2,7 +2,7 @@
 id: 037
 title: Every crate spec 007 would publish ships its agent working notes
 status: todo
-priority: 2
+priority: 3
 specs: [007]
 intents: [002]
 refs:
@@ -12,7 +12,8 @@ refs:
   ]
 done_when: >-
   `cargo package -p <crate> --list` prints neither `AGENTS.md` nor `CLAUDE.md` for any crate spec
-  007 names as publishable, and the two names already held stay clean by the same check.
+  007 names as publishable, while each of those crates still carries both files in the repository,
+  and the exclusion spec 010 already requires for the two held names is left standing.
 pr:
 evidence:
 ---
@@ -39,8 +40,12 @@ listing, is the planner's call — the line above says only what has to be true 
 
 ## What this waits on
 
-Spec 007 is `draft` and blocked on three decisions of its own, so this task is filed rather than
+Spec 007 is `draft` and blocked on four items of its own, so this task is filed rather than
 planned, and it is written down now so that it is not rediscovered at the moment of publishing.
+
+That spec also says it files no task until those are settled. This one exists because
+`docs/specs/010-holding-the-crates-io-names.md` promised it when it put the workspace-wide case out
+of scope — a filing that waits, not a plan that starts.
 
 Its `intents:` copies what spec 007 carries today. Task 036 asks for that value to change; if it
 lands first, this file moves with it.
