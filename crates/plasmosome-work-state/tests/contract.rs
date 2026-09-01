@@ -186,9 +186,9 @@ fn embedded_cleanup_never_plans_or_invokes_dolt_stop() {
 fn guarded_pull_replay_push_preserves_both_operations_once() {
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(observation(G0)),
+        Ok(observation(G0)),
         Ok(CommandOutput::success("winner")),
         Ok(observation(G1)),
-        Ok(observation(G0)),
         Ok(CommandOutput {
             status: 1,
             stdout: String::new(),
@@ -196,7 +196,6 @@ fn guarded_pull_replay_push_preserves_both_operations_once() {
         }),
         Ok(observation(G1)),
         Ok(CommandOutput::success("refreshed")),
-        Ok(observation(G1)),
         Ok(CommandOutput::success("replayed")),
         Ok(observation(G2)),
     ]);
@@ -260,4 +259,30 @@ fn every_named_transport_case_has_its_own_exact_script() {
         assert!(!scripted_outcomes(case).unwrap().is_empty(), "{case}");
     }
     assert!(scripted_outcomes("unknown").is_err());
+}
+
+#[test]
+fn recovery_observes_both_g0_candidates_before_the_winner_publishes_g1() {
+    let mut runner = RecordingCommandRunner::scripted(vec![
+        Ok(observation(G0)),
+        Ok(observation(G0)),
+        Ok(CommandOutput::success("winner")),
+        Ok(observation(G1)),
+        Ok(CommandOutput {
+            status: 1,
+            stdout: String::new(),
+            stderr: "non-fast-forward".into(),
+        }),
+        Ok(observation(G1)),
+        Ok(CommandOutput::success("refreshed")),
+        Ok(CommandOutput::success("replayed")),
+        Ok(observation(G2)),
+    ]);
+    let evidence = run_scripted_case("push-conflict-recovery", &mut runner).unwrap();
+    assert_eq!(evidence.final_generation, G2);
+    let commands = runner.commands();
+    assert_eq!(commands[0].argv[0], "ls-remote");
+    assert_eq!(commands[1].argv[0], "ls-remote");
+    assert_eq!(commands[2].argv[2], "push");
+    assert!(runner.finish().is_ok());
 }

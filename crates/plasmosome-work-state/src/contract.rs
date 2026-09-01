@@ -387,9 +387,9 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
         ]),
         "push-conflict-recovery" => Ok(vec![
             Ok(observation_output(g0)),
+            Ok(observation_output(g0)),
             Ok(CommandOutput::success("winner")),
             Ok(observation_output(g1)),
-            Ok(observation_output(g0)),
             Ok(CommandOutput {
                 status: 1,
                 stdout: String::new(),
@@ -397,7 +397,6 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
             }),
             Ok(observation_output(g1)),
             Ok(CommandOutput::success("refreshed")),
-            Ok(observation_output(g1)),
             Ok(CommandOutput::success("replayed")),
             Ok(observation_output(g2)),
         ]),
@@ -428,19 +427,21 @@ pub fn run_scripted_case<R: CommandRunner>(
             _ => Err("cutover_blocked".into()),
         },
         "push-conflict-recovery" => {
-            let winner = publish_candidate(runner, "winner")?;
-            let Publication::Published {
-                generation: winner_generation,
-                ..
-            } = winner
-            else {
-                return Err("cutover_blocked".into());
-            };
-            if winner_generation.len() != 40 {
+            let winner_base = observe(runner)?;
+            let stale_base = observe(runner)?;
+            if winner_base != stale_base {
                 return Err("cutover_blocked".into());
             }
-            let stale = publish_candidate(runner, "stale")?;
-            if !matches!(stale, Publication::StaleBase { .. }) {
+            let winner_generation = publish_after_observation(runner)?;
+            let stale_push = runner
+                .run(publish_command())
+                .map_err(|_| "cutover_blocked".to_owned())?;
+            if stale_push.status == 0 || classify_push(&stale_push.stderr) != PushFailure::StaleBase
+            {
+                return Err("cutover_blocked".into());
+            }
+            let observed_after_stale = observe(runner)?;
+            if observed_after_stale != winner_generation {
                 return Err("cutover_blocked".into());
             }
             let refresh = runner
@@ -449,10 +450,7 @@ pub fn run_scripted_case<R: CommandRunner>(
             if refresh.status != 0 {
                 return Err("cutover_blocked".into());
             }
-            let replay = publish_candidate(runner, "replay")?;
-            let Publication::Published { generation, .. } = replay else {
-                return Err("cutover_blocked".into());
-            };
+            let generation = publish_after_observation(runner)?;
             Ok(ScriptEvidence {
                 final_generation: generation,
                 operation_ids: vec!["winner".into(), "replay".into()],
@@ -470,6 +468,16 @@ pub fn run_scripted_case<R: CommandRunner>(
         }
         _ => Err("cutover_blocked".into()),
     }
+}
+
+fn publish_after_observation<R: CommandRunner>(runner: &mut R) -> Result<String, String> {
+    let output = runner
+        .run(publish_command())
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    if output.status != 0 {
+        return Err("cutover_blocked".into());
+    }
+    observe(runner)
 }
 
 pub fn embedded_cleanup_commands() -> Vec<CommandSpec> {
