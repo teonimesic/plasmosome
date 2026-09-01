@@ -21,8 +21,9 @@ done_when:
   - The section 1 envelope edges hold on the wire - -32700 continues (non-JSON and
     non-UTF-8 both), a line at the cap is served with its id echoed verbatim, one byte over
     is -32600 under a null id and the connection closes, and an unknown method is -32601.
-  - The binary lives in crates/plasmosome-core as `plasmosomed`; crates/plasmosome and
-    crates/plasmid still have no binary target, and every plasmosome-guards test passes.
+  - The binary lives in crates/plasmosome-core as `plasmosomed`; crates/plasmosome, the
+    crates.io name-hold, still has no binary target, no package ships a binary named after
+    another package, and every plasmosome-guards test passes.
   - All five gate commands exit 0, reported as bare exit codes.
   - The chain walks - this task names spec 001 and intents 003, 004, 009, 012, reaches
     in_review with pr: set, and the pull request is a draft whose body ends with `task: 043`.
@@ -184,3 +185,44 @@ cargo fmt --all -- --check
 STOP when done — do not start the next piece of work.
 
 ## Notes
+
+### 2026-09-01
+
+**The plan's fourth `done_when` was wrong about `crates/plasmid` and has been corrected.** It
+asked that `crates/plasmosome` and `crates/plasmid` both still have no binary target.
+`crates/plasmid` has carried `src/main.rs` — a binary target named `plasmid`, auto-discovered —
+since task 031 (`6d6048c`), so that half of the line was already false on `main` and no
+implementation could satisfy it. What is true and checkable is what the line now says:
+`crates/plasmosome` alone is the name-hold with no binary, and the guard that matters here is
+`no_binary_target_takes_a_name_another_package_owns`, which `plasmosomed` passes because it is
+not the name of any package. The reasoning that refused siting the binary in a held crate is
+unchanged.
+
+**The manifest change moved one commit later than planned.** The plan put `[lib]`, `[[bin]]` and
+`libc` in the serve-loop commit. `[[bin]] path = "src/main.rs"` does not build before that file
+exists, and nothing used `libc` until the signal handlers, so both landed with `main.rs`.
+
+**serde does not name a mistyped field, and the config test needs it to.** `{"name": 7}` yields
+`invalid type: integer `7`, expected a string` with no mention of `name`; missing and unknown
+fields are named, mistyped ones are not. Each field is therefore read through a
+`deserialize_with` that puts the field name back into the message, which keeps the refusal
+naming its offender without hand-rolling the parse.
+
+**Roughly forty lines are duplicated from `plasmosome-membrane` on purpose: do not extract them
+yet.** The accept-loop skeleton, the `Next` classification, the 25 ms poll, the `BoundSocket`
+guard, the three timeout constants and the `Running`/`addressable`/`ask` test scaffolding all
+exist twice now. Extracting them needs either a new shared crate or a new dependency edge, and
+the edge is the wrong one in both directions — `plasmosome-core` may never depend on
+`plasmosome-membrane`, since a controller linking its supervisor inverts the crash-isolation
+boundary both crates' notes state, and a membrane depending on core would serve nobody today.
+The repo's own seam rule is not to abstract until something second exists as a real adapter, and
+two daemons sharing forty stable lines is not that. What is **not** duplicated is the part that
+would drift: the section 1 envelope has exactly one implementation (`control::serve_connection`)
+and the status wire shape exactly one (`protocol::StatusResult`). **Extract when a third daemon
+appears, or at the first divergence between the two accept loops** — whichever comes first.
+
+**One idle client holds every other client out.** Connections are served sequentially, as
+`membraned` serves them, so a client that connects and sends nothing occupies the daemon until
+it disconnects or the daemon is asked to stop. It cannot hold the daemon past shutdown — that is
+what `FlaggedReads` and the write timeout are tested for — but it can starve a second client.
+Stated in `run`'s contract; concurrency is not part of this unit of work.
