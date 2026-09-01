@@ -228,7 +228,11 @@ a change nobody reviewed.
   write. Where the field is list-valued, `fix` holds the entry to add, not the whole line: a
   replacement line would either drop the entries already there or name them, and naming what is
   already granted is what the report above forbids.
-- **§3.9 and §3.6, the responses that carry a plasmid as an object.** Each per-plasmid object
+- **§3.9 and §3.6, and only those two.** The `plasmid.add` reply of §3.10 and the
+  `plasmid.reload` reply of §3.12 also carry a plasmid as an object and are deliberately left
+  alone: both report a transition, and the plasmid on the far side of it has been denied nothing
+  yet — a reloaded plasmid is a new generation, and the previous generation's denials belong to
+  the status and list responses that report accumulated state. Each per-plasmid object
   gains one field, `denials` — omitted when empty, per §1's rule that a field with nothing in it
   is never sent. Each entry names one distinct denial: what was reached for, in the
   declaration's own vocabulary; the declaration field it belongs in; the `fix` line the author
