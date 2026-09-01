@@ -2,7 +2,7 @@
 id: 001
 title: Control protocol
 status: accepted
-intents: []
+intents: [004, 009, 012]
 ---
 
 # Plasmosome control protocol — the P1 contract, as delivered
@@ -322,9 +322,11 @@ contract change. Absent declarations mean `passthrough`.
   other plasmid, so its closure is itself alone, which is what the reply above shows; a plasmid
   that requires others names every one it reaches.
 - **A mock is never a plasmid of its own.** It is the `[mock]` section of the manifest that
-  declares the `[network]` hosts it stands in for, so the two host lists are one file apart and
-  cannot drift. A mode still propagates across a closure exactly as above — what it never lands on
-  is a node whose only content is a mock.
+  declares the `[network]` hosts it stands in for, and the manifest is refused unless it is: a
+  `[mock]` with no `[network]`, or naming a host that `[network]` does not declare, is a code `108`
+  naming the host, never a silent acceptance. That is what keeps the two lists from drifting, and
+  it is checked when the manifest is read rather than asserted here. A mode still propagates across
+  a closure exactly as above — what it never lands on is a node whose only content is a mock.
 - Inherited levels yield to the new explicit declaration (D2b rule 2). An explicit-vs-explicit
   conflict on the same node at different modes → code `104` with
   `resolutions: ["force_simulate", "force_passthrough", "remove_plasmid"]` (D2b rule 3 — never

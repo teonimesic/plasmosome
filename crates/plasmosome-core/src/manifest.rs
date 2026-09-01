@@ -285,6 +285,9 @@ impl PlasmidManifest {
                 "plasmid {id} declares [network] without hosts"
             )));
         }
+        if let Some(spec) = &mock {
+            validate_mock(&id, spec, network.as_ref())?;
+        }
         validate_secret_refs(&id, &secrets)?;
         if let Some(commands) = &commands {
             validate_commands(&id, commands)?;
@@ -457,6 +460,26 @@ fn validate_secret_refs(id: &str, refs: &[SecretRef]) -> Result<(), ManifestErro
     Ok(())
 }
 
+fn validate_mock(
+    id: &str,
+    mock: &MockSpec,
+    network: Option<&NetworkSpec>,
+) -> Result<(), ManifestError> {
+    let Some(network) = network else {
+        return Err(ManifestError::Invalid(format!(
+            "plasmid {id} declares [mock] without the [network] hosts it stands in for"
+        )));
+    };
+    for host in &mock.hosts {
+        if !network.hosts.iter().any(|declared| declared == host) {
+            return Err(ManifestError::Invalid(format!(
+                "plasmid {id}: [mock] names host `{host}`, which its [network] does not declare"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestError> {
     for decl in &commands.commands {
         for secret in &decl.secrets {
@@ -581,6 +604,30 @@ ports = [443]
 
 [mock]
 hosts = ["api.github.com"]
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const MOCK_WITHOUT_NETWORK: &str = r#"
+id = "mock-github"
+version = "0.1.0"
+
+[mock]
+hosts = ["api.github.com"]
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const MOCK_HOSTS_DRIFTED_FROM_NETWORK: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+
+[mock]
+hosts = ["api.github.example"]
 api = "github"
 backend = { kind = "recorded", source = "fixtures/github-pr" }
 "#;
@@ -714,6 +761,24 @@ subject = "git"
             mock.hosts,
             manifest.network.as_ref().unwrap().hosts,
             "a mock names the hosts its own manifest declares, so the two lists cannot drift"
+        );
+    }
+
+    #[test]
+    fn a_manifest_whose_whole_content_is_a_mock_is_refused() {
+        let err = PlasmidManifest::parse(MOCK_WITHOUT_NETWORK).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("[network]")),
+            "a mock stands in for hosts a plasmid declares, so it is never a plasmid of its own: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_mock_naming_a_host_its_own_manifest_does_not_declare_is_refused() {
+        let err = PlasmidManifest::parse(MOCK_HOSTS_DRIFTED_FROM_NETWORK).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("api.github.example")),
+            "the refusal names the host that drifted: {err:?}"
         );
     }
 
