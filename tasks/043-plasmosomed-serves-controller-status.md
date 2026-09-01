@@ -242,3 +242,12 @@ extraction named above should carry.
 it disconnects or the daemon is asked to stop. It cannot hold the daemon past shutdown — that is
 what `FlaggedReads` and the write timeout are tested for — but it can starve a second client.
 Stated in `run`'s contract; concurrency is not part of this unit of work.
+
+2026-09-01 — Round 2 did not start on its own. The push of `b8f2052` produced no CodeRabbit
+status, no review object and no comment, and neither `@coderabbitai review` (17:00) nor
+`@coderabbitai full review` (17:39) drew any response over the following hour. It is not a
+repo-wide rate limit: CodeRabbit served pull request 75 at 17:36, between the two triggers. The
+sound check is a review object whose `commit_id` is the head — `gh api
+repos/teonimesic/plasmosome/pulls/76/reviews` — because `mergeStateStatus` reads `CLEAN` here on
+the strength of resolved threads and the checks that did report, while CodeRabbit is absent from
+the rollup entirely. Absent is not clean.
