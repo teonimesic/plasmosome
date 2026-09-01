@@ -18,8 +18,8 @@ refs:
 done_when: >-
   tasks 009, 010, 011 and 012 each carry intents: [002], matching the spec they
   name and their sibling task 004; and a search for the tasks under intent 002
-  returns the same set as a search for the specs under it plus the tasks naming
-  those specs.
+  returns the same task set as a search for tasks naming specs that carry intent
+  002.
 pr:
 evidence:
 ---
