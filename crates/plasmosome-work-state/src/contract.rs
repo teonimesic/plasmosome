@@ -1292,7 +1292,10 @@ fn host_target() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContractResult, finish_contract, manifest_path};
+    use super::{ContractRequest, ContractResult, finish_contract, manifest_path, run_contract};
+    use std::sync::Mutex;
+
+    static PROCESS_WORKING_DIRECTORY: Mutex<()> = Mutex::new(());
 
     #[test]
     fn cleanup_failure_preserves_an_earlier_refusal() {
@@ -1328,5 +1331,23 @@ mod tests {
         assert!(path.is_absolute());
         assert!(path.ends_with("tools/work-state-beads-1.1.2.toml"));
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn run_contract_loads_the_pin_outside_the_process_working_directory() {
+        let _working_directory = PROCESS_WORKING_DIRECTORY.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("wrong-archive");
+        std::fs::write(&archive, "wrong archive").unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(root.path()).unwrap();
+        let result = run_contract(&ContractRequest {
+            case: "version-pin".into(),
+            archive,
+            binary: root.path().join("bd"),
+        });
+        std::env::set_current_dir(original).unwrap();
+
+        assert_eq!(result.unwrap_err().code, "beads_checksum_mismatch");
     }
 }
