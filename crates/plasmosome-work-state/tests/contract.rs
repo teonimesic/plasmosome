@@ -360,6 +360,17 @@ fn execution_time_validation_refuses_unsafe_untrusted_force_plans_before_dispatc
         environment: Default::default(),
         redacted_argv_positions: Vec::new(),
     };
+    let equals_force = CommandSpec {
+        program: "git".into(),
+        argv: vec![
+            "push".into(),
+            "origin".into(),
+            "--force=refs/dolt/data".into(),
+        ],
+        cwd: None,
+        environment: Default::default(),
+        redacted_argv_positions: Vec::new(),
+    };
     let forced_refspec = CommandSpec {
         program: "git".into(),
         argv: vec![
@@ -386,6 +397,7 @@ fn execution_time_validation_refuses_unsafe_untrusted_force_plans_before_dispatc
         unsafe_force,
         wrong_lease,
         short_force,
+        equals_force,
         forced_refspec,
         unleased_ref_update,
     ] {

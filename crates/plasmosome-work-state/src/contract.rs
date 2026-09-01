@@ -785,7 +785,7 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
     let root = tempfile::tempdir()
         .map_err(|_| Box::new(ContractResult::refusal(&request.case, "cutover_blocked")))?;
     let result = (|| {
-        let manifest = PinManifest::load("tools/work-state-beads-1.1.2.toml")
+        let manifest = PinManifest::load(manifest_path())
             .map_err(|error| Box::new(ContractResult::refusal(&request.case, error.code())))?;
         let mut runner = SystemCommandRunner;
         VerifiedBeads::verify_with_environment(
@@ -820,6 +820,12 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
         Ok(result)
     })();
     finish_contract(result, dispose_fixture_root(root), &request.case)
+}
+
+fn manifest_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tools/work-state-beads-1.1.2.toml")
 }
 
 fn finish_contract(
@@ -1286,7 +1292,7 @@ fn host_target() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContractResult, finish_contract};
+    use super::{ContractResult, finish_contract, manifest_path};
 
     #[test]
     fn cleanup_failure_preserves_an_earlier_refusal() {
@@ -1313,5 +1319,14 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(result.code, "fixture_cleanup_failed");
+    }
+
+    #[test]
+    fn pin_manifest_path_is_independent_of_the_process_working_directory() {
+        let path = manifest_path();
+
+        assert!(path.is_absolute());
+        assert!(path.ends_with("tools/work-state-beads-1.1.2.toml"));
+        assert!(path.is_file());
     }
 }
