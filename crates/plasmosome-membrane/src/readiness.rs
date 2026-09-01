@@ -50,6 +50,18 @@ pub fn probe(socket: &Path, deadline: Duration) -> Readiness {
     }
 }
 
+/// The probe a running membrane asks its brokers with: it opens the broker's
+/// control socket, sends `membrane.status`, and relays what came back. Every
+/// call asks again, as `brokers::Probe` requires — a kept answer cannot report a
+/// broker that has since stopped serving.
+pub struct ControlSocketProbe;
+
+impl crate::brokers::Probe for ControlSocketProbe {
+    fn probe(&self, socket: &Path, deadline: Duration) -> Readiness {
+        probe(socket, deadline)
+    }
+}
+
 fn classify(line: &str) -> Readiness {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
         return Readiness::NotReady(NotReady::Malformed {
@@ -223,6 +235,28 @@ mod tests {
             })
         );
         assert!(!verdict.is_ready());
+    }
+
+    #[test]
+    fn the_production_probe_asks_the_broker_socket_and_relays_its_answer() {
+        use crate::brokers::Probe;
+
+        let dir = tempfile::tempdir().unwrap();
+        let serving = dir.path().join("s.uds");
+        serve(serving.clone(), Answer::Ready("serving"));
+        assert_eq!(
+            ControlSocketProbe.probe(&serving, DEADLINE),
+            Readiness::Ready {
+                state: "serving".to_string()
+            }
+        );
+
+        let silent = dir.path().join("q.uds");
+        serve(silent.clone(), Answer::Silent);
+        assert_eq!(
+            ControlSocketProbe.probe(&silent, DEADLINE),
+            Readiness::NotReady(NotReady::TimedOut)
+        );
     }
 
     #[test]
