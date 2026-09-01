@@ -205,18 +205,23 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    ```shell
    completed_on() {
      local pages
-     pages=$(gh api "repos/teonimesic/plasmosome/statuses/$1" --paginate --slurp) || return 1
+     pages=$(gh api "repos/teonimesic/plasmosome/statuses/$1" --paginate --slurp) ||
+       { printf 'completed_on: status query failed for %s\n' "$1" >&2; return 1; }
      printf '%s' "$pages" |
        jq '[.[][] | select(.context=="CodeRabbit" and .description=="Review completed")] | length'
    }
 
    rounds() {
-     local sha total=0 n
+     local sha total=0 n shas
      local url="repos/teonimesic/plasmosome/pulls/$1/commits"
-     for sha in $(gh api "$url" --paginate --jq '.[].sha'); do
+     shas=$(gh api "$url" --paginate --jq '.[].sha') ||
+       { printf 'rounds: commit query failed for #%s\n' "$1" >&2; return 1; }
+     [ -n "$shas" ] ||
+       { printf 'rounds: #%s listed no commits; refusing\n' "$1" >&2; return 1; }
+     while IFS= read -r sha; do
        n=$(completed_on "$sha") || return 1
        total=$((total + n))
-     done
+     done <<<"$shas"
      printf '%s\n' "$total"
    }
    ```
@@ -257,6 +262,14 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    An unknown commit returns an empty list rather than a 404, so `rounds` answers `0` for it. That
    is the safe direction — nothing merges on a zero — but it does mean a mistyped SHA reads as an
    unreviewed one rather than as an error.
+
+   **`0` is a count, and a failed query must not be able to produce one.** Both functions therefore
+   return non-zero and say so on stderr rather than falling through to a number, and `rounds`
+   refuses an empty commit list instead of summing nothing to `0`. Without that, an expired token
+   or a network fault reads as the same `0` an unreviewed pull request gives, and the two want
+   opposite responses: one is fixed by triggering a round, the other is fixed by fixing the query,
+   and spending a round to find that out costs from a repo-wide budget. **Read the exit status, not
+   only the number** — a gate that tests the number alone cannot tell the difference.
 
    `/commits/<sha>/status` collapses a context to its latest value, so a second round leaves it
    reading exactly like the first; `/statuses/<sha>` lists every entry posted against that commit,

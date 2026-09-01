@@ -12,7 +12,9 @@ bottom four have folders — `docs/decisions/`, `docs/intents/`, `docs/specs/` a
 top two already live in `README.md` and in each crate's `AGENTS.md`, and stay there.
 
 **There is no task without a spec, and no spec without an intent.** Every pull request earns a
-task, that task names the spec it serves, and that spec names the intent it came from. Mapping to
+task, that task names the spec it serves, and that spec names the intent it came from. Two
+structural shapes carry no task; "Every pull request has a task" below has the
+closed list. Mapping to
 a spec and an intent that already exist is the normal case; writing new ones is the exception.
 
 To pick work up: run the **heartbeat** (`.agents/skills/heartbeat`) top to bottom — it ends by
@@ -59,8 +61,9 @@ Until then, do not create either file. A second copy of the vision would contrad
 
 **Every change that reaches `main` is reachable upward**: the pull request names a task, the task
 names a spec, the spec names an intent. That walk is what answers "was this wanted" without asking
-anybody, and a change it cannot follow to a top has no answer to give. **Every accepted spec names
-an intent**, so the walk reaches a top from wherever it starts and no spec ends it early. Task files
+anybody, and a change it cannot follow to a top has no answer to give. Two structural shapes carry
+no task and still reach a top; the closed list is below. **Every accepted spec names an intent**, so
+the walk reaches a top from wherever it starts and no spec ends it early. Task files
 merged before the rule may still name nothing above them; "What predates the rule" below is what
 covers those, and it bounds what may stay unmapped rather than where the walk stops.
 
@@ -493,7 +496,7 @@ ready.** That is where the owner does the reading, so it is where the waiting is
 `.agents/skills/pr-review` step 2.
 
 Work whose spec already exists skips step 1 and is one PR, which is what most work should look
-like. Nothing skips the task.
+like. Nothing skips the task but the two structural shapes above.
 
 - Filing a task, and every status flip up to `in_review`, rides the work branch itself.
 - `in_review` needs `pr:`, which does not exist until the PR is open. Set it in a second commit
