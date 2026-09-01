@@ -41,28 +41,34 @@ rather than by trusting whoever or whatever wrote it.*
 
 ### The declaration is the whole of what an author writes
 
-One file. It carries six things and nothing else:
+One file. It carries six kinds of thing:
 
-- **Who it is** — a stable id and a version.
+- **Who it is, and what implements it** — a stable id, a version, and the component the
+  declaration names.
 - **What it is for** — a sentence in plain words. This is not decoration. It is what a person
   browsing reaches for and what a model reads before choosing to use the thing at all. A plasmid
   whose purpose can only be recovered by reading its code is unusable by both audiences this goal
   names.
 - **What it needs from the outside world** — hosts and ports, workspace paths, credentials,
-  commands it may run. Stated in the vocabulary of the outside world: `api.github.com`, not a
-  routing rule.
+  commands it may run, a model endpoint, a recorded backend to stand in for a live one. Stated in
+  the vocabulary of the outside world: `api.github.com`, not a routing rule.
 - **What it offers back** — named tools, each with the sentence a caller reads before choosing it.
-- **What it needs from, and offers to, other plasmids** — capabilities by name, with a version
-  range.
+- **What it needs from other plasmids** — capabilities by name.
 - **How long it may take to stop** — a drain budget.
 
-The grammar in `plasmosome-core::manifest` already carries most of this and this spec does not
-re-open it. What that grammar has nowhere to put is the two prose fields: the plasmid's purpose,
-and the per-tool sentence. Their absence is the difference between a declaration a kernel can
-enforce and one an author or a model can use. Tools today are bare names — `pr.read`,
-`pr.comment` — and the intended consumer of that list is a model, which cannot choose from a bare
+Every section the grammar in `plasmosome-core::manifest` carries today falls into one of the six:
+`[impl]` into the first; `[network]`, `[workspace]`, `[secrets]`, `[commands]`, `[model]` and
+`[mock]` into the third; `[provides]` into the fourth; `[requires]` into the fifth; `[lifecycle]`
+into the sixth. **This spec removes none of them and adds no seventh kind.**
+
+Three of the six are served badly or not at all, and this spec fixes two of them. There is nowhere
+to say **what the plasmid is for**, and nowhere to say **what a tool does** — tools are bare names
+like `pr.read`, and the intended consumer of that list is a model, which cannot choose from a bare
 name. Both fields are required rather than optional, because an optional purpose field is one
-nobody fills in and a registry of blanks is worse than none.
+nobody fills in and a registry of blanks is worse than none. The third gap is named and left:
+a requirement is a capability name with no version range, while the kernel underneath already
+selects a version across competing providers. How an author writes a range, and how a conflict is
+explained to them, is its own spec.
 
 ### What the author never writes
 
@@ -70,19 +76,28 @@ Naming this list is the whole of "without understanding much about it":
 
 - **How a host becomes reachable.** The author names the host. Brokering, address plans and
   pinning are the kernel's.
-- **How the plasmid is torn down.** A plasmid never implements its own revocation, gets no chance
-  to refuse one, and runs no code during one. Detach is done to it, not with it.
+- **How the plasmid is torn down.** A plasmid implements no revocation hook, gets no chance to
+  refuse a detach, and cannot make one fail. Its own work may still be finishing inside the drain
+  window its declaration asks for; what it never gets is a say in whether the teardown happens.
 - **How the cell is supervised**, what happens if the plasmid crashes, and what the kernel has to
   undo afterwards.
 
-**One part of the declaration as it stands does not meet that bar, and this spec fixes it.** The
-frozen credential grammar makes an author choose a delivery mode — `handle`, `helper`, `inject`,
-`mint` — which is precisely the kernel-internal knowledge intent 010 says an author should not
-need. What an author does know is the **consumer**: the thing that will use the credential — a
-component, `git`, an HTTP call, a spawned process. In every pairing the frozen validator accepts,
-the delivery list follows from the consumer and from whether a path scope is present, so the
-author may omit it and the kernel fills it in. Nothing about the pairing rules changes, and an
-author who wants to pin the delivery still writes it.
+**One part of the declaration as it stands does not meet that bar, and this spec changes it.** The
+credential grammar makes an author choose a delivery mode — `handle`, `helper`, `inject`,
+`mint` — precisely the kernel-internal knowledge intent 010 says an author should not need. What
+an author does know is the **consumer**: the thing that will use the credential — a component,
+`git`, an HTTP call, a spawned process. The delivery follows from the consumer and from whether
+the reference is path-scoped, so the author may leave it out and the kernel fills it in.
+
+**A derived delivery is always a single mode, and always the narrowest the frozen pairing
+accepts.** That is the rule that keeps deriving from granting anything. It has one visible
+consequence: a `git` credential derives `helper` alone, not the `helper`-then-`mint` pair the
+canonical fixture writes. Minting is a second way to obtain a credential, and an author who never
+asked for it should not get it — intent 012 is explicit that nothing arrives by accident. An
+author who wants the fallback writes both, exactly as today.
+
+This is a change to the credential grammar spec 001 §3.10 froze, not a way around it. It is stated
+as an amendment below rather than slipped past as an addition.
 
 ### The refusal names the line that is missing
 
@@ -105,10 +120,16 @@ declared — is reported as a missing declaration, naming the host and the field
 An author handed a connection error starts guessing about the network. An author told that
 `api.github.com` is not in this plasmid's declared hosts writes one line and is finished.
 
-That report says what was denied and never what would have been allowed, and it is addressed to
-whoever is authoring the plasmid — it appears in the cell's session log and in the plasmid's
-status — rather than being handed back to the code that made the call. The denial itself is
-unchanged: enforcement is not cooperation, and a better error message is not a second chance.
+That report names what was denied and never what would have been allowed, **and that is the whole
+of the safety property.** Routing is not a second one. In the case intent 010 expects most the
+author *is* the agent inside the cell, so "it goes to the author rather than to the calling code"
+moves the report between two readers who are one reader, and any design leaning on that separation
+is leaning on nothing. What holds instead is that the report adds no knowledge: it names a host
+that this plasmid's own code chose to reach for, it enumerates nothing that is reachable, and a
+poisoned agent learns from it only that the thing it was told to try was refused — which the
+refusal already told it. What it gets is a ready-made widening request, which it must still take
+through the gate. The denial itself is unchanged: enforcement is not cooperation, and a better
+error message is not a second chance.
 
 ### Both authors write the same file
 
@@ -127,11 +148,11 @@ reasonable thing for a reviewer to want; it is a record, not an input, and the k
 two files identically.
 
 **This narrows the `plasmid new` reservation rather than overriding it.** The stub refuses today
-because "the interface a scaffold would generate against is not frozen yet", and for the half it
-names that is right: a component skeleton generated against an unfrozen world is generated against
-a shape that will change. The declaration is not that half. It is parsed by a grammar that already
-ships and it names nothing the world decides. So the scaffold writes the declaration now and still
-refuses the component half, saying so.
+because "the plasmid-sdk interface a scaffold would generate against is not frozen yet, so there
+is no shape to write", and for the half it names that is right: a component skeleton generated
+against an unfrozen world is generated against a shape that will change. The declaration is not
+that half. It is parsed by a grammar that already ships and it names nothing the world decides. So
+the scaffold writes the declaration now and still refuses the component, saying so.
 
 ### What attach promises
 
@@ -142,34 +163,61 @@ refuses the component half, saying so.
   names resolves where a caller looks. A plasmid that attached but whose tools nothing can find
   has not attached.
 - **Attach widens the cell and does nothing else.** It does not restart the cell, does not
-  interrupt what is running in it, and does not change what any already-attached plasmid holds.
+  interrupt what is running in it, and does not change what any already-attached plasmid was
+  **granted**. It does change one thing about them: a mock mode propagates across the dependency
+  closure exactly as spec 001 §3.10 froze it. A mode decides whether a granted call reaches a live
+  service or a recording; it is not itself a grant, and that propagation is untouched here.
 - **Attach never rounds up.** If satisfying the declaration would require granting more than it
   names, attach refuses rather than granting the wider thing.
 - **Detach takes exactly what attach gave**, needs nothing from the plasmid, and leaves the cell
   as it was.
 
+### What this amends in spec 001
+
+Three of the changes above reach into an accepted spec. Gathering them here is deliberate: a
+change to a frozen contract that is only visible as a new capability elsewhere in the document is
+a change nobody reviewed.
+
+- **§3.10, the credential grammar.** `delivery` becomes optional. Where it was "an ordered
+  non-empty list over the closed enum", it is now that or absent, and absent derives the single
+  narrowest mode the pairing rules accept for the declared consumer. The four modes, the consumer
+  set and the pairing rules themselves are unchanged; what changes is that a well-formed reference
+  need no longer carry the field.
+- **§1, the error table.** No code is added, removed or renumbered — the closed set stands. The
+  refusals an author can reach gain one structured field, `fix`, holding the line the author would
+  write.
+- **§3.9 and §3.3, the plasmid-carrying responses.** A plasmid's status gains the denial reports
+  described above. This is a field added to a frozen response shape, which is why it is named here
+  rather than left to be discovered in the diff.
+
 ### The gate, and what this spec does not decide
 
 Intent 010 names a gate between generating a plasmid and it taking effect, and says outright that
-its shape is undecided. It stays undecided here. Two things about it are not a matter of policy,
-because they follow from the architecture, and stating them is what keeps the open question from
-being answered by accident.
+its shape is undecided. It stays undecided here. Two things about it are already settled — not by
+this spec, but by approved intents and by how the kernel enforces — and stating them is what keeps
+the open question from being answered by accident.
 
 **A cell cannot approve its own widening.** The agent that found the gap is the one asking for the
 capability, and intent 012 puts the agent inside the boundary last on the list of things to rely
-on — it reads untrusted text all day and a poisoned one is following instructions faithfully.
-So the request leaves the cell and the decision is made outside it. Whatever the gate turns out to
-be, it is not something a cell performs on itself.
+on — it reads untrusted text all day, and a poisoned one is following instructions faithfully. A
+gate operated by the party requesting it is not a gate. So the request leaves the cell and the
+decision is made outside it, whatever the gate turns out to be.
 
-**What the gate reads is the declaration.** Because the kernel grants exactly what is declared,
-the declaration bounds what the plasmid can reach, and a reviewer who reads only the declaration
-knows the worst case in reach. It does **not** bound what the plasmid does with what it reaches: a
-plasmid granted a repository can do anything to that repository. Reach is what reading buys, and
-saying so is what stops the gate being trusted for more than it gives.
+**A declaration is enough to bound reach — the plasmid's own, and every declaration it requires.**
+Because the kernel grants exactly what is declared, that closure is what a plasmid can touch, and
+a reviewer who reads it knows the worst case without reading a line of code. The single
+declaration is not enough on its own: a plasmid requiring a capability reaches, through its
+provider's tools, whatever that provider's declaration grants, and attach brings the whole closure
+with it.
 
-Everything else — where the gate sits, who holds it, whether a hand-crafted plasmid on the
-author's own cell passes through the same one — is the owner's to settle and belongs to a sibling
-spec. Nothing above prejudges it.
+**Reading bounds reach, not conduct.** A plasmid granted a repository can do anything to that
+repository. The credential grammar's scopes narrow part of the gap and do not close it.
+
+**This says what a declaration is sufficient for, not what a gate is limited to.** A gate that
+also reads the code, the diff, or where the declaration came from is ruled out by nothing here,
+and the reach-versus-conduct gap is a positive argument for one. Where the gate sits, who holds
+it, and whether a hand-crafted plasmid on the author's own cell passes through the same one is the
+owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 
 ## Contract
 
@@ -188,35 +236,48 @@ spec. Nothing above prejudges it.
 
   A tool named with no sentence does not parse. This replaces the list form; no manifest in the
   tree keeps it, and the change is deliberate rather than additive — a grammar that accepts both
-  leaves the sentence optional in practice.
-- **A secret ref's `delivery` is optional and derived from its `consumer`** when absent:
-  `wasm` derives `["handle"]`; `git` derives `["helper", "mint"]`; `http` and `process` derive
-  `["inject"]` when the ref carries a `path_scope` and `["mint"]` when it does not. An explicit
-  `delivery` is still accepted and still validated exactly as it is today. **Deriving never
-  widens:** every derived list is one the frozen pairing validator already accepts, and `inject`
-  is derived only where the path scope it requires is present. The four modes, the consumer set
-  and the pairing rules frozen in spec 001 §3.10 are unchanged.
-- **Every refusal an author can cause carries three things**: the plasmid id, the field path in
-  the declaration, and a `fix` sentence holding the line the author would write. The closed error
-  code table in spec 001 §1 is unchanged; `fix` is one added structured field on the refusals an
-  author can reach.
+  leaves the sentence optional in practice. `plasmosome-testkit`'s manifest builder carries the
+  same shape.
+- **A secret ref's `delivery` is optional.** When absent it derives to **exactly one mode**, the
+  narrowest the frozen pairing accepts for that consumer: `wasm` derives `handle`; `git` derives
+  `helper`; `http` and `process` derive `inject` when the ref carries a non-empty `path_scope` and
+  `mint` when it does not. An explicit `delivery` is still accepted and still validated exactly as
+  today, including the `git` pair `["helper", "mint"]`, which an author who wants the minting
+  fallback writes for themselves. **Deriving grants nothing:** each derived mode is a single mode
+  the validator accepts, and no derived list is wider than one the author could have written for
+  the same consumer and scope.
+- **An `inject` reference whose `path_scope` is empty is refused**, whether the `delivery` was
+  written or derived. Spec 001 §3.10 requires an absolute path scope for `inject`, and an empty
+  list satisfies a check that walks its entries while scoping nothing.
+- **Deriving rescues nothing else.** A reference with no `delivery` whose scope is malformed — a
+  relative path-scope entry — is refused with the same named error an explicit `inject` gets.
+- **Every refusal an author can cause carries the field path in the declaration and a `fix`
+  sentence** holding the line the author would write, and carries the plasmid id wherever the
+  declaration supplies one. A declaration with no `id` is the single case that cannot name a
+  plasmid; it names the missing `id` instead.
 - **A capability denied at the boundary is reported as a missing declaration.** The report names
-  what was denied and the declaration field it belongs in, contains nothing about what would have
-  been allowed, and is written to the cell's session log and the plasmid's status rather than
-  returned to the caller. The denial's own behavior is unchanged.
+  what was denied and the declaration field it belongs in, and names nothing that was granted or
+  would have been. It is written to the cell's session log and the plasmid's status. The denial's
+  own behavior is unchanged, and the report is not a channel the calling code reads.
 - **Attach is all-or-nothing.** On any failure the cell holds no record of the plasmid, no tool of
   its own, and no grant made on its behalf.
 - **A plasmid is reported active only when every tool its declaration names resolves.**
 - **Attach grants nothing the declaration does not name**, and refuses rather than granting more.
-- **Detach requires nothing from the plasmid** and leaves the cell holding what it held before
-  attach.
+  It changes no already-attached plasmid's grants; mock-mode propagation across the dependency
+  closure is unchanged from spec 001 §3.10.
+- **Detach requires nothing from the plasmid**, cannot be refused or failed by it, and leaves the
+  cell holding what it held before attach.
 - **`plasmid new <name>` writes exactly one file, the declaration**, grants nothing, attaches
   nothing, and prints the sections the author must add. It writes no component and says that it
   will not until the plasmid interface is frozen.
 - **The generated path and the hand path produce the same artifact.** No field, section or value
   is reachable from only one of them, and the kernel reads no field recording which produced it.
-- **Nothing here decides the gate.** Two properties bound it and no more: the approval is not the
-  cell's to give, and the declaration is what it reads.
+- **This spec amends spec 001 in three named places** — `delivery` optionality in §3.10, the
+  `fix` field in §1, and denial reports on the plasmid status shapes in §3.9 and §3.3 — and
+  nowhere else. No error code is added, removed or renumbered.
+- **Nothing here decides the gate.** Two properties hold whatever it turns out to be: the approval
+  is not the cell's to give, and the declarations of a plasmid and its required closure are
+  sufficient for a reviewer to bound its reach. Neither limits what else a gate may read.
 
 ## Acceptance
 
@@ -224,32 +285,50 @@ spec. Nothing above prejudges it.
 - A `[provides]` binding naming a tool with no sentence is refused, and the refusal names the
   tool.
 - The list form of `tools` is refused, and no manifest anywhere in the tree still uses it.
-- A secret ref with a `consumer` and no `delivery` parses, and its derived list is asserted for
-  all four consumers — including both `http`/`process` branches, one ref carrying a `path_scope`
-  and one not.
-- Every derived list is passed through the frozen pairing validator in the same test and accepted,
-  rather than being compared to a table by eye.
-- An explicit `delivery` still parses; an illegal explicit pairing is still the same named error
-  it is today.
-- Each of these refusals carries the plasmid id, the field, and a non-empty `fix`: missing
-  `description`; a tool with no sentence; an illegal delivery pairing; `inject` with no path
+- `plasmosome-testkit`'s manifest builder produces the table form, and every test that drives it
+  still passes.
+- A well-formed secret ref with a `consumer` and no `delivery` parses, and its derived list is
+  asserted for all four consumers — including both `http`/`process` branches, one ref carrying a
+  non-empty `path_scope` and one carrying none.
+- Every derived list holds exactly one mode, and is passed through the frozen pairing validator in
+  the same test and accepted, rather than being compared to a table by eye.
+- A `git` ref with no `delivery` derives `["helper"]` and not `["helper", "mint"]`.
+- An `inject` ref whose `path_scope` is the empty list is refused, asserted once with an explicit
+  `delivery` and once with a derived one.
+- A ref with no `delivery` and a relative `path_scope` entry is refused with the same named error
+  the explicit form gets.
+- An explicit `delivery` still parses; an illegal explicit pairing, an empty explicit list, and an
+  unknown mode are each still the same named error they are today.
+- Each of these refusals carries the field and a non-empty `fix`, and the plasmid id where there
+  is one: missing `description`; a tool with no sentence; an illegal delivery pairing; an empty
+  explicit delivery list; an unknown delivery mode; `inject` with no path scope; an empty path
   scope; a relative path-scope entry; a network section with no hosts; a declaration naming no
-  capability at all; a command secret naming no subject.
-- A plasmid denied a host it did not declare produces a report naming that host and the hosts
-  field, and that report contains none of the hosts the plasmid *was* granted — asserted by
-  searching the report for the allowed host and finding it absent.
+  capability and no implementation; a command secret naming no subject; and a declaration with no
+  `id`, which names `id` and carries no plasmid id.
+- A plasmid granted two hosts and denied a third produces a report naming the denied host and the
+  hosts field, in which neither granted host appears anywhere.
 - The denial report reaches the session log and the plasmid's status, and the calling code inside
   the plasmid sees the denial unchanged.
 - An attach failed partway leaves no trace: the cell lists no such plasmid, the tool registry
   holds none of its tools, and the ledger records no grant for it.
+- An attach that could only succeed by granting more than the declaration names is refused, and
+  the refusal names the wider thing it would have taken.
+- An attach leaves every already-attached plasmid's grants unchanged, asserted by comparing the
+  cell's grants before and after; a mock mode propagating across the closure in the same attach is
+  asserted separately and is not counted as a change of grant.
 - A plasmid one of whose declared tools does not resolve is not reported active.
+- A plasmid whose code is unresponsive still detaches: the cell reports it gone, the registry
+  holds none of its tools, and the ledger records the reverse of every grant the attach made.
 - `plasmid new <name>` writes exactly one file, creates nothing else, exits non-zero, and prints
   the names of the sections the author must add.
 - The file `plasmid new` writes is refused by the parser, and the refusal names the same sections
   the command printed. The existing test asserting that `plasmid new` creates nothing at all is
   replaced by this pair rather than kept alongside it.
-- A declaration typed by hand and one produced by the scaffold for the same inputs are the same
-  file, and no field in the grammar is settable only through the scaffold.
+- The scaffold's output, with the sections it named filled in, parses to the same declaration as
+  the same content typed from scratch, and the scaffold writes no field the grammar does not
+  already define.
+- A declaration carrying an extra field recording how it was produced parses to the same
+  declaration as one without it, and the kernel grants the two identically.
 - Every manifest fixture in the tree is updated to the new grammar; none is exempted, and no
   fixture parses without a description.
 
@@ -262,17 +341,20 @@ spec. Nothing above prejudges it.
   is the larger of the two.
 - **Where the approval gate sits, who holds it, and whether a hand-crafted plasmid on the author's
   own cell passes through it.** Open in intent 010, open here, and the owner's to settle. The two
-  properties named above are the only ones this spec asserts about it, and they were derived
-  rather than chosen.
+  properties named above are the only ones this spec asserts about it, and neither narrows what a
+  gate may read.
 - **The registry.** Finding a plasmid somebody else wrote and publishing your own is intent 014
   and a different goal. This spec says what the thing in a registry would be, not where it lives.
 - **The skill an agent inside a cell invokes to generate one.** Intent 010 names that path as the
   common case; what the skill is made of is downstream of this contract rather than part of it.
-- **Mock modes and their layering.** Frozen in spec 001 §3.10 and untouched.
-- **The credential grammar itself.** The four delivery modes, the consumer set and the pairing
-  rules stay exactly as spec 001 froze them. This spec only lets an author leave the choice out.
+- **Mock modes and their layering.** The three modes, their propagation across a dependency
+  closure, and the conflict rules are frozen in spec 001 §3.10 and untouched. The only thing said
+  about them here is that propagation is not a change of grant.
+- **The delivery modes, the consumer set and the pairing rules.** Unchanged. What this spec
+  changes about the credential grammar is one thing only — that `delivery` may be omitted — and
+  that change is named as an amendment above rather than claimed as untouched.
 - **Capability requirement and version selection between plasmids.** The kernel already selects a
-  version across providers; turning that into an author-facing surface — how a requirement is
-  written, how a conflict is explained — is its own question and its own spec.
+  version across providers; how an author writes a version range and how a conflict is explained
+  to them is its own question and its own spec.
 - **The `[commands]` section's shape.** Reserved in spec 001; an author declaring a command still
   writes it as it stands today.
