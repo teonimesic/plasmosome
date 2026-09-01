@@ -138,9 +138,14 @@ for f in $(grep -l '^status: accepted$' docs/specs/*.md); do
 done
 ```
 
-It prints three different faults with one loop: an accepted spec whose intent is still `draft`, an
-accepted spec naming an id no intent file has, and a **new** accepted spec with no intent at all.
-Ids are resolved by reading each intent's `id:` rather than by globbing the filename, so a missing
+It prints four faults with one loop: an accepted spec whose intent is still `draft`, one naming an
+id no intent file carries, one naming an id that several files carry, and a **new** accepted spec
+naming no intent at all. The middle two share a message, because an id must resolve to **exactly
+one** file and both zero and several are failures to do that. Resolving it by picking the first
+match would make the gate hold or fail on filename order, since the duplicate that sorts first is
+the one that answers.
+
+Ids are read out of each intent's own `id:` rather than globbed from the filename, so a missing
 intent is reported instead of aborting the loop. The last fault needs the one name hardcoded,
 because `docs/specs/001-control-protocol.md` is the whole of the amnesty — see "What predates the
 rule" in `.agents/skills/tasks`. Anything else that line prints is a spec that skipped the gate.

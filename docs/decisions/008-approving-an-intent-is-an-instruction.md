@@ -23,9 +23,9 @@ line of text.
 Two facts bound every mechanical answer. **Agents act as the owner's GitHub identity** — every
 human-authored pull request in this repository is one account, and the reviews on them are posted
 under it — so a relayed approval and a fabricated one are written by the same actor, in the same
-voice, and no record distinguishes them. And **the thing being protected is a sentence in a document**, not a
-capability the operating system can withdraw; there is no seam where a check could sit that the
-agent writing the sentence does not also control.
+voice, and no record distinguishes them. And **the thing being protected is a sentence in a
+document**, not a capability the operating system can withdraw; there is no seam where a check
+could sit that the agent writing the sentence does not also control.
 
 **Authorship is not the control, and was never the risk.** It does not matter who writes an intent,
 as long as the owner approves it: an agent may draft one in its own words, and the owner reads it,
