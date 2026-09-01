@@ -26,7 +26,7 @@ done_when: >-
   `grep -rni amnesty docs .agents` prints describes the spec-side amnesty as closed and empty,
   with `grep -rn 'intents: \[\]' docs .agents` matching no sentence that asserts spec 001 carries
   it — the templates' own skeleton lines are the only hits.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/69
 evidence:
 ---
 
