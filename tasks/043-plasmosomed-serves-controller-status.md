@@ -221,6 +221,22 @@ would drift: the section 1 envelope has exactly one implementation (`control::se
 and the status wire shape exactly one (`protocol::StatusResult`). **Extract when a third daemon
 appears, or at the first divergence between the two accept loops** — whichever comes first.
 
+**Three tests used to detect their mutation by hanging rather than by failing, and now do
+not.** Independent review found it: with the bind wrongly succeeding on an occupied path, `run`
+served forever and neither `an_existing_control_socket_path_is_refused_and_the_path_is_not_unlinked`
+nor the occupied-socket arm of `plasmosomed_exits_nonzero_naming_the_failure` had any deadline to
+fail against; and with the write timeout or the `FlaggedReads` shutdown check removed, the two
+shutdown tests raised their assertion on time but `Running::drop` then joined a thread that could
+never exit, turning a detected failure into a wedged process. Three fixes, all in the harness:
+`refuses` runs a start expected to fail on its own thread and asserts the refusal arrives inside
+`PATIENCE`; `Running::drop` waits for the daemon to signal before it joins, and leaks the thread
+rather than blocking when it does not; and `output_within` gives the spawned binary a deadline,
+killing it and failing rather than waiting on a process that should have exited. Re-measured
+against the same three mutations: 10s, 10s and 20s to a reported failure, where all three
+previously ran until killed. **The shape is inherited verbatim from `plasmosome-membrane`, whose
+tests still have it** — fixing it there is not this unit of work, and it is the first thing the
+extraction named above should carry.
+
 **One idle client holds every other client out.** Connections are served sequentially, as
 `membraned` serves them, so a client that connects and sends nothing occupies the daemon until
 it disconnects or the daemon is asked to stop. It cannot hold the daemon past shutdown — that is

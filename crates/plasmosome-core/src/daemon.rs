@@ -117,7 +117,6 @@ impl std::error::Error for DaemonError {
     }
 }
 
-/// What the accept loop does with an error the listener returned.
 #[derive(Debug, PartialEq, Eq)]
 enum Next {
     Poll,
@@ -276,7 +275,10 @@ mod tests {
     impl Drop for Running {
         fn drop(&mut self) {
             self.shutdown.store(true, Ordering::Relaxed);
-            if let Some(handle) = self.handle.take() {
+            let Some(handle) = self.handle.take() else {
+                return;
+            };
+            if self.finished.recv_timeout(PATIENCE).is_ok() {
                 let _ = handle.join();
             }
         }
@@ -296,6 +298,22 @@ mod tests {
             finished,
             handle: Some(handle),
         }
+    }
+
+    fn refuses(config: DaemonConfig) -> DaemonError {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&shutdown);
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done.send(run(config, &flag));
+        });
+        let outcome = finished.recv_timeout(PATIENCE).expect(
+            "run refuses within the deadline rather than serving; a daemon still running here \
+             is one that took a path it should have refused, and asserting on the returned \
+             error alone would wait for it forever instead of failing",
+        );
+        shutdown.store(true, Ordering::Relaxed);
+        outcome.expect_err("the start is refused")
     }
 
     fn addressable(socket: &Path) -> BufReader<UnixStream> {
@@ -458,9 +476,7 @@ mod tests {
         let control = directory.path().join("control.uds");
         std::fs::write(&control, b"someone else's socket").expect("the test occupies the path");
 
-        let shutdown = AtomicBool::new(false);
-        let refusal = run(config(&control, "work"), &shutdown)
-            .expect_err("an occupied control socket path refuses the start");
+        let refusal = refuses(config(&control, "work"));
 
         match &refusal {
             DaemonError::Bind { path, .. } => assert_eq!(path, &control),

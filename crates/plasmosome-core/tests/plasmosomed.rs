@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -76,6 +76,33 @@ fn start(config: &Path) -> Daemon {
             .spawn()
             .expect("plasmosomed starts as a process"),
     }
+}
+
+fn output_within(mut command: Command, budget: Duration) -> Output {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("plasmosomed starts as a process");
+    let deadline = Instant::now() + budget;
+    while child
+        .try_wait()
+        .expect("the daemon's state is readable")
+        .is_none()
+    {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "plasmosomed exits within {budget:?} rather than serving; a start that should \
+                 have been refused otherwise runs forever, and a test that only inspects the \
+                 exit status waits for it forever instead of failing"
+            );
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    child
+        .wait_with_output()
+        .expect("the daemon's output is readable")
 }
 
 fn write_config(path: &Path, body: &Value) {
@@ -271,7 +298,7 @@ fn plasmosomed_serves_status_and_dies_cleanly_on_sigterm() {
 fn plasmosomed_exits_nonzero_naming_the_failure() {
     let directory = tempfile::tempdir().expect("the test owns a temporary directory");
 
-    let no_arguments = plasmosomed(&[]).output().expect("plasmosomed runs");
+    let no_arguments = output_within(plasmosomed(&[]), PATIENCE);
     assert_eq!(
         no_arguments.status.code(),
         Some(2),
@@ -283,7 +310,7 @@ fn plasmosomed_exits_nonzero_naming_the_failure() {
     );
 
     let absent = directory.path().join("absent.json");
-    let unreadable = plasmosomed(&[&absent]).output().expect("plasmosomed runs");
+    let unreadable = output_within(plasmosomed(&[&absent]), PATIENCE);
     assert_eq!(
         unreadable.status.code(),
         Some(2),
@@ -296,9 +323,7 @@ fn plasmosomed_exits_nonzero_naming_the_failure() {
 
     let malformed = directory.path().join("malformed.json");
     std::fs::write(&malformed, b"{not json").expect("the test writes a malformed config");
-    let invalid = plasmosomed(&[&malformed])
-        .output()
-        .expect("plasmosomed runs");
+    let invalid = output_within(plasmosomed(&[&malformed]), PATIENCE);
     assert_eq!(
         invalid.status.code(),
         Some(2),
@@ -309,9 +334,7 @@ fn plasmosomed_exits_nonzero_naming_the_failure() {
     std::fs::write(&control, b"someone else's socket").expect("the test occupies the path");
     let occupied = directory.path().join("occupied.json");
     write_config(&occupied, &one_instance(&control, "work"));
-    let refused = plasmosomed(&[&occupied])
-        .output()
-        .expect("plasmosomed runs");
+    let refused = output_within(plasmosomed(&[&occupied]), PATIENCE);
     assert_eq!(
         refused.status.code(),
         Some(1),
