@@ -22,5 +22,6 @@
 //! whole set, so a cell with many brokers answers as fast as a cell with one.
 
 pub mod brokers;
+pub mod exec;
 pub mod readiness;
 pub mod vmm;
