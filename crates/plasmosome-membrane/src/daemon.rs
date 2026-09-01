@@ -726,11 +726,14 @@ mod tests {
             DaemonError::Spawn(failure) => assert_eq!(failure.broker, "dnsd"),
             other => panic!("a shared socket is a spawn failure, got {other:?}"),
         }
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_secs(1));
         assert!(
             !pidfile.exists(),
-            "the broker that was spawned was killed before it could run: a broker left \
-             running records its pid within 50ms"
+            "the broker that was spawned was killed before it could run. A broker left running \
+             records its pid within 50ms, measured; this waits twenty times that, so under load \
+             the assertion fails rather than passing early. The reap itself is observed by \
+             ECHILD at the brokers layer, which is the only place the pid is knowable — here \
+             the kill lands before the child finishes exec'ing, so no pid is ever recorded"
         );
         assert!(!control.exists(), "the socket path is removed on a refusal");
     }

@@ -107,9 +107,6 @@ fn resolve(program: &str) -> Option<CString> {
     search_path(program, &search)
 }
 
-/// Finds `program` in `search`, a `PATH`-shaped list, skipping entries that exist
-/// but cannot be executed — the same walk `execvp` performs, so a non-executable
-/// file early in the list does not shadow a runnable one later.
 fn search_path(program: &str, search: &std::ffi::OsStr) -> Option<CString> {
     let found = std::env::split_paths(search)
         .map(|directory| directory.join(program))
@@ -118,11 +115,13 @@ fn search_path(program: &str, search: &std::ffi::OsStr) -> Option<CString> {
 }
 
 fn is_executable_file(candidate: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    candidate.is_file()
-        && candidate
-            .metadata()
-            .is_ok_and(|data| data.permissions().mode() & 0o111 != 0)
+    if !candidate.is_file() {
+        return false;
+    }
+    let Ok(path) = CString::new(candidate.as_os_str().as_bytes()) else {
+        return false;
+    };
+    unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
 }
 
 impl std::fmt::Debug for ExecCommand {

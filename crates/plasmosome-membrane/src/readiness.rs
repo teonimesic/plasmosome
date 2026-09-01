@@ -2,6 +2,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Readiness {
@@ -34,7 +35,7 @@ pub fn probe(socket: &Path, deadline: Duration) -> Readiness {
             });
         }
     };
-    let _ = stream.set_read_timeout(Some(deadline));
+    let started = Instant::now();
     let _ = stream.set_write_timeout(Some(deadline));
     let mut stream = stream;
     let request = format!("{{\"id\":0,\"method\":\"{READINESS_METHOD}\",\"params\":{{}}}}\n");
@@ -42,6 +43,13 @@ pub fn probe(socket: &Path, deadline: Duration) -> Readiness {
         return Readiness::NotReady(NotReady::TimedOut);
     }
     let _ = stream.flush();
+    let Some(left) = deadline
+        .checked_sub(started.elapsed())
+        .filter(|it| !it.is_zero())
+    else {
+        return Readiness::NotReady(NotReady::TimedOut);
+    };
+    let _ = stream.set_read_timeout(Some(left));
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     match reader.read_line(&mut line) {
