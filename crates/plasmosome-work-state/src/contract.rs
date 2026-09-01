@@ -221,7 +221,7 @@ fn config_entries(contents: &[u8]) -> Result<Vec<(String, String)>, &'static str
             section = name.trim().to_ascii_lowercase();
             continue;
         }
-        let (key, value) = line.split_once('=').ok_or("cutover_blocked")?;
+        let (key, value) = line.split_once('=').unwrap_or((line, "true"));
         entries.push((
             format!("{section}.{}", key.trim().to_ascii_lowercase()),
             value.trim().to_owned(),
@@ -819,9 +819,18 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
         result.clone_labels = vec!["clone-a".into(), "clone-b".into()];
         Ok(result)
     })();
-    match dispose_fixture_root(root) {
-        Ok(()) => result,
-        Err(code) => Err(Box::new(ContractResult::refusal(&request.case, code))),
+    finish_contract(result, dispose_fixture_root(root), &request.case)
+}
+
+fn finish_contract(
+    result: Result<ContractResult, Box<ContractResult>>,
+    cleanup: Result<(), &'static str>,
+    case: &str,
+) -> Result<ContractResult, Box<ContractResult>> {
+    match (cleanup, result) {
+        (Ok(()), result) => result,
+        (Err(_), Err(result)) => Err(result),
+        (Err(code), Ok(_)) => Err(Box::new(ContractResult::refusal(case, code))),
     }
 }
 pub fn run_scripted_cases(case: &str) -> Result<ContractResult, &'static str> {
@@ -1272,5 +1281,37 @@ fn host_target() -> &'static str {
         "x86_64-unknown-linux-gnu"
     } else {
         "unsupported"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ContractResult, finish_contract};
+
+    #[test]
+    fn cleanup_failure_preserves_an_earlier_refusal() {
+        let result = finish_contract(
+            Err(Box::new(ContractResult::refusal(
+                "version-pin",
+                "beads_checksum_mismatch",
+            ))),
+            Err("fixture_cleanup_failed"),
+            "version-pin",
+        )
+        .unwrap_err();
+
+        assert_eq!(result.code, "beads_checksum_mismatch");
+    }
+
+    #[test]
+    fn cleanup_failure_refuses_an_otherwise_successful_contract() {
+        let result = finish_contract(
+            Ok(ContractResult::passed("version-pin", Vec::new())),
+            Err("fixture_cleanup_failed"),
+            "version-pin",
+        )
+        .unwrap_err();
+
+        assert_eq!(result.code, "fixture_cleanup_failed");
     }
 }

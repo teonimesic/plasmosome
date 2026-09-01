@@ -51,6 +51,7 @@ fn logical_export(operations: &[&str]) -> CommandOutput {
 }
 
 fn assert_isolated_plan(command: &CommandSpec) {
+    let host_home = std::env::var("HOME").unwrap_or_default();
     assert_eq!(
         command.cwd.as_deref(),
         Some(std::path::Path::new("/contract-isolated/repository"))
@@ -77,7 +78,9 @@ fn assert_isolated_plan(command: &CommandSpec) {
             .environment
             .iter()
             .filter(|(key, _)| key.as_str() != "PATH")
-            .all(|(_, value)| !value.contains("/Users/"))
+            .all(|(_, value)| {
+                !value.contains("/Users/") && (host_home.is_empty() || !value.contains(&host_home))
+            })
     );
 }
 
@@ -741,33 +744,8 @@ fn scripted_history_refuses_a_malformed_extra_line() {
 
 #[test]
 fn stale_base_fence_keeps_g1_then_g2_across_recovery_and_paused_holder() {
-    let mut runner = RecordingCommandRunner::scripted(vec![
-        Ok(observation(G0)),
-        Ok(observation(G0)),
-        Ok(operation_write("winner")),
-        Ok(operation_commit("winner")),
-        Ok(CommandOutput::success("winner")),
-        Ok(observation(G1)),
-        Ok(CommandOutput {
-            status: 1,
-            stdout: String::new(),
-            stderr: "non-fast-forward".into(),
-        }),
-        Ok(observation(G1)),
-        Ok(CommandOutput::success("refreshed")),
-        Ok(operation_write("replay")),
-        Ok(operation_commit("replay")),
-        Ok(CommandOutput::success("replayed")),
-        Ok(observation(G2)),
-        Ok(CommandOutput {
-            status: 1,
-            stdout: String::new(),
-            stderr: "non-fast-forward".into(),
-        }),
-        Ok(observation(G2)),
-        Ok(logical_export(&["winner", "replay"])),
-        Ok(recovery_history()),
-    ]);
+    let mut runner =
+        RecordingCommandRunner::scripted(scripted_outcomes("stale-base-fence").unwrap());
     let evidence = run_scripted_case("stale-base-fence", &mut runner).unwrap();
     assert_eq!(evidence.final_generation, G2);
     assert_eq!(evidence.operation_ids, vec!["winner", "replay"]);
@@ -845,17 +823,17 @@ fn fixture_allows_only_the_pinned_beads_role_local_config_delta() {
     std::fs::create_dir_all(git.join("hooks")).unwrap();
     std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::write(git.join("index"), "fixture-index\n").unwrap();
-    std::fs::write(git.join("config"), "[core]\n\tbare = false\n").unwrap();
+    std::fs::write(git.join("config"), "[core]\n\tbare = false\n\tfilemode\n").unwrap();
     fixture.snapshot_git_state().unwrap();
     std::fs::write(
         git.join("config"),
-        "[core]\n\tbare = false\n[beads]\n\trole = maintainer\n",
+        "[core]\n\tbare = false\n\tfilemode\n[beads]\n\trole = maintainer\n",
     )
     .unwrap();
     fixture.assert_after_stealth_init().unwrap();
     std::fs::write(
         git.join("config"),
-        "[core]\n\tbare = true\n[beads]\n\trole = maintainer\n",
+        "[core]\n\tbare = true\n\tfilemode\n[beads]\n\trole = maintainer\n",
     )
     .unwrap();
     assert_eq!(fixture.assert_after_stealth_init(), Err("cutover_blocked"));
