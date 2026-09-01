@@ -1,7 +1,8 @@
 use plasmosome_work_state::command::{CommandOutput, RecordingCommandRunner};
 use plasmosome_work_state::contract::{
     Publication, PushFailure, classify_push, leased_ref_update, publish_candidate,
-    recover_after_lost_response, retry_after_transport, run_scripted_case, scripted_outcomes,
+    recover_after_lost_response, retry_after_transport, run_scripted_case,
+    run_scripted_contract_case, scripted_outcomes,
 };
 
 const G0: &str = "0000000000000000000000000000000000000000";
@@ -284,5 +285,49 @@ fn recovery_observes_both_g0_candidates_before_the_winner_publishes_g1() {
     assert_eq!(commands[0].argv[0], "ls-remote");
     assert_eq!(commands[1].argv[0], "ls-remote");
     assert_eq!(commands[2].argv[2], "push");
+    assert!(runner.finish().is_ok());
+}
+
+#[test]
+fn scripted_result_names_generation_operation_ids_and_redacted_plans() {
+    let mut runner =
+        RecordingCommandRunner::scripted(scripted_outcomes("stale-base-fence").unwrap());
+    let result = run_scripted_contract_case("stale-base-fence", &mut runner).unwrap();
+    assert_eq!(result.observed_base.as_deref(), Some(G0));
+    assert_eq!(result.final_generation.as_deref(), Some(G1));
+    assert_eq!(result.operation_ids, vec!["winner"]);
+    assert_eq!(result.command_plans.len(), 3);
+    assert!(
+        result
+            .command_plans
+            .iter()
+            .all(|plan| !plan.contains("origin"))
+    );
+    assert!(runner.finish().is_ok());
+}
+
+#[test]
+fn aggregate_transport_retries_runs_lost_response_rediscovery_after_prepublication_retry() {
+    let mut runner = RecordingCommandRunner::scripted(vec![
+        Ok(observation(G0)),
+        Err("connection reset".into()),
+        Ok(observation(G0)),
+        Ok(CommandOutput::success("published")),
+        Ok(observation(G1)),
+        Ok(observation(G0)),
+        Err("connection reset".into()),
+        Ok(observation(G1)),
+    ]);
+    let evidence = run_scripted_case("transport-retries", &mut runner).unwrap();
+    assert_eq!(evidence.operation_ids, vec!["retry", "lost-response"]);
+    assert_eq!(evidence.final_generation, G1);
+    assert_eq!(
+        runner
+            .commands()
+            .iter()
+            .filter(|command| command.argv[2] == "push")
+            .count(),
+        3
+    );
     assert!(runner.finish().is_ok());
 }

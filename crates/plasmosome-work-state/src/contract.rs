@@ -33,6 +33,8 @@ pub struct ContractResult {
     pub clone_labels: Vec<String>,
     pub observed_base: Option<String>,
     pub final_generation: Option<String>,
+    pub operation_ids: Vec<String>,
+    pub command_plans: Vec<String>,
 }
 
 impl ContractResult {
@@ -45,6 +47,8 @@ impl ContractResult {
             clone_labels: labels,
             observed_base: None,
             final_generation: None,
+            operation_ids: Vec::new(),
+            command_plans: Vec::new(),
         }
     }
     fn refusal(case: &str, code: &str) -> Self {
@@ -56,6 +60,8 @@ impl ContractResult {
             clone_labels: Vec::new(),
             observed_base: None,
             final_generation: None,
+            operation_ids: Vec::new(),
+            command_plans: Vec::new(),
         }
     }
 }
@@ -344,14 +350,12 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
         .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
     init_store(&request.binary, root.path(), "clone-b")
         .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
-    run_scripts(&request.case)
+    let mut result = run_scripts(&request.case)
         .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
-    Ok(ContractResult::passed(
-        &request.case,
-        vec!["clone-a".into(), "clone-b".into()],
-    ))
+    result.clone_labels = vec!["clone-a".into(), "clone-b".into()];
+    Ok(result)
 }
-fn run_scripts(case: &str) -> Result<(), &'static str> {
+fn run_scripts(case: &str) -> Result<ContractResult, &'static str> {
     let cases: &[&str] = if matches!(case, "transport" | "all") {
         &[
             "stale-base-fence",
@@ -361,14 +365,32 @@ fn run_scripts(case: &str) -> Result<(), &'static str> {
     } else {
         &[case]
     };
+    let mut results = Vec::new();
     for case in cases {
         let mut runner = RecordingCommandRunner::scripted(
             scripted_outcomes(case).map_err(|_| "cutover_blocked")?,
         );
-        run_scripted_case(case, &mut runner).map_err(|_| "cutover_blocked")?;
+        let result =
+            run_scripted_contract_case(case, &mut runner).map_err(|_| "cutover_blocked")?;
         runner.finish().map_err(|_| "cutover_blocked")?;
+        results.push(result);
     }
-    Ok(())
+    let final_result = results.pop().ok_or("cutover_blocked")?;
+    let operation_ids = results
+        .iter()
+        .flat_map(|result| result.operation_ids.iter().cloned())
+        .chain(final_result.operation_ids.iter().cloned())
+        .collect();
+    let command_plans = results
+        .iter()
+        .flat_map(|result| result.command_plans.iter().cloned())
+        .chain(final_result.command_plans.iter().cloned())
+        .collect();
+    Ok(ContractResult {
+        operation_ids,
+        command_plans,
+        ..final_result
+    })
 }
 
 pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>>, String> {
@@ -405,6 +427,9 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
             Err("connection reset".into()),
             Ok(observation_output(g0)),
             Ok(CommandOutput::success("published")),
+            Ok(observation_output(g1)),
+            Ok(observation_output(g0)),
+            Err("connection reset".into()),
             Ok(observation_output(g1)),
         ]),
         _ => Err("cutover_blocked".into()),
@@ -458,16 +483,47 @@ pub fn run_scripted_case<R: CommandRunner>(
         }
         "transport-retries" => {
             let result = retry_after_transport(runner, "retry")?;
-            let Publication::Published { generation, .. } = result else {
+            let Publication::Published { generation: _, .. } = result else {
+                return Err("cutover_blocked".into());
+            };
+            let recovered = recover_after_lost_response(runner, "lost-response")?;
+            let Publication::Recovered {
+                generation: recovered_generation,
+                ..
+            } = recovered
+            else {
                 return Err("cutover_blocked".into());
             };
             Ok(ScriptEvidence {
-                final_generation: generation,
-                operation_ids: vec!["retry".into()],
+                final_generation: recovered_generation,
+                operation_ids: vec!["retry".into(), "lost-response".into()],
             })
         }
         _ => Err("cutover_blocked".into()),
     }
+}
+
+pub fn run_scripted_contract_case(
+    case: &str,
+    runner: &mut RecordingCommandRunner,
+) -> Result<ContractResult, String> {
+    let evidence = run_scripted_case(case, runner)?;
+    let command_plans = runner
+        .commands()
+        .iter()
+        .map(CommandSpec::display)
+        .collect::<Vec<_>>();
+    Ok(ContractResult {
+        case: case.into(),
+        outcome: "passed".into(),
+        code: "ok".into(),
+        beads_version: "1.1.2".into(),
+        clone_labels: vec!["clone-a".into(), "clone-b".into()],
+        observed_base: Some("0000000000000000000000000000000000000000".into()),
+        final_generation: Some(evidence.final_generation),
+        operation_ids: evidence.operation_ids,
+        command_plans,
+    })
 }
 
 fn publish_after_observation<R: CommandRunner>(runner: &mut R) -> Result<String, String> {

@@ -36,7 +36,7 @@ done_when:
   - `./tools/work-state contract-test hermetic` verifies the supplied pinned artifact and initializes only disposable state without hooks, agent-file edits, staged files, telemetry, automatic pushes or writes to the user's global configuration.
   - `./tools/work-state contract-test transport` uses the real pinned binary to initialize two independent temporary clone-local stores, then the existing `RecordingCommandRunner` scripts the exact expected-base, winning push, stale non-fast-forward, retry-before-publication and lost-response observations required by the documented GitHub/Git contract.
   - Production command plans are explicit and redacted: ordinary publication is non-forcing, any exceptional compare-and-set ref update uses `--force-with-lease` with the exact expected SHA, and neither a hosted repository, credential, server nor GitHub API mock is required.
-  - Retry publishes or rediscovers one generation, stale-base refusal never enters the transport-retry path, and every initialized Beads child is stopped and waited before isolated temporary state is removed.
+  - Retry publishes or rediscovers one generation, stale-base refusal never enters the transport-retry path, and every process the harness actually starts is synchronously waited and reaped before isolated temporary state is removed; embedded mode starts no Dolt server child.
   - An unleased force, missing expected base or scripted result contradicting the documented non-fast-forward contract exits non-zero as `cutover_blocked`; absence of a live hosted test does not.
   - Coverage is collected and its meaningful misses are reviewed; the timed full root gate exits 0; and no migration, cutover or operational work-state claim occurs.
 pr: https://github.com/teonimesic/plasmosome/pull/75
@@ -448,6 +448,11 @@ that command, instead dropping store handles, reaping only harness-started child
 temporary roots. A new cleanup test first failed on the absent no-stop plan, then passed after the
 embedded cleanup implementation removed the unsupported command. Real hermetic and two-store
 transport commands passed after that correction.
+
+2026-09-01: Independent review found no task-042 CI invocation. Plan-author direction records that
+as later full-migration work: the task remains the narrower foundation, may not edit CI, and a
+future CI integration must first solve safe pinned-artifact acquisition. The finding is not a
+claim that spec 014's full migration acceptance is met or weakened here.
 
 2026-09-01: Revised offline command-contract evidence: tests first failed on the absent offline
 parser, scripted runner, publication/lease/retry APIs; then pin (5), contract (8) and CLI (1)
