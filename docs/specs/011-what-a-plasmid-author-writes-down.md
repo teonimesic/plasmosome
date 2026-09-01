@@ -1,7 +1,7 @@
 ---
 id: 011
 title: What a plasmid author writes down, and what attaching it promises
-status: draft
+status: accepted
 intents: [010]
 ---
 
