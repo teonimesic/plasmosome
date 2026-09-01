@@ -468,6 +468,7 @@ fn scripted_result_names_generation_operation_ids_and_redacted_plans() {
             .iter()
             .all(|plan| !plan.contains("origin"))
     );
+    validate_scripted_history(&mut runner, &[G0, G1, G2], &["winner", "replay"]).unwrap();
     assert!(runner.finish().is_ok());
 }
 
