@@ -497,11 +497,6 @@ fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestEr
     Ok(())
 }
 
-/// Reads a `field` that must be an array of strings, refusing every other shape.
-///
-/// An absent field is an empty list. A field present as anything but an array, or an array
-/// holding anything but strings, is a `ManifestError::Invalid` naming `section` and `field`.
-/// Callers that silently coerce instead narrow what a plasmid declared without saying so.
 fn declared_string_list(
     id: &str,
     section: &str,

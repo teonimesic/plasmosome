@@ -22,7 +22,12 @@ done_when: >-
   covered by the first two: a malformed `hosts` reads as no hosts at all, so the
   host-by-host comparison has nothing to walk and the manifest passes while
   standing in for nothing; no manifest, fixture, spec example or
-  crate doc declares a plasmid whose whole content is a `[mock]` section; spec
+  crate doc declares a plasmid whose whole content is a `[mock]` section — that
+  is a claim about the whole tree and not about `refs:` alone, so it is checked
+  with `grep -rn 'mock-github' --include='*.toml' --include='*.wit' .` returning
+  nothing and every surviving `[mock]` sitting beside a `[network]` in the same
+  manifest, `mock-github` remaining only as the `MOCK_WITHOUT_NETWORK` fixture
+  that proves the refusal; spec
   001 §3.10 states that refusal and its code `104` resolutions name only
   resolutions still reachable once no plasmid is a mock; D2b's three propagation
   rules and its safety-wins clause are all still stated in §3.5 and §3.10; spec
@@ -78,8 +83,11 @@ world and every other RESERVED item in §5 stay reserved. No fourth plasmid repl
 the P1 set is `model-provider`, `workspace-bind`, `github-pr`. `MockSpec` keeps its `hosts` field:
 removing one is a manifest-grammar change, and the refusal below makes the duplicate harmless.
 
-Read the files in `refs:` and nothing beyond them. Two of them are downstream of the rewrite rather
-than subjects of it: `docs/specs/008-cell-recovery-contract.md` and
+Read the files in `refs:` and edit nothing beyond them. The one thing that reaches wider is a
+read: the sweep for a mock-only plasmid in `done_when` is a claim about the whole tree, and
+`refs:` names the files this change edits rather than every place such a declaration could hide,
+so that one is greped repo-wide and its command is written out above. Two of the refs are
+downstream of the rewrite rather than subjects of it: `docs/specs/008-cell-recovery-contract.md` and
 `tasks/024-the-dependency-freeze-reads-text-not-toml.md` each quote spec 001's freeze language and
 need the quote refreshed.
 
