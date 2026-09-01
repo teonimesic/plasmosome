@@ -37,7 +37,7 @@ done_when: >-
   the same claims, every §5 RESERVED item still reserved, and the
   `plasmosome-freeze-checks` crate untouched.
 pr: 63
-evidence: squash commit 42a8f6c on main; PlasmidManifest::parse refuses a [mock] without [network], a mock host the [network] does not carry, and a hosts that is not an array of strings, and spec 001 records what was delivered
+evidence: squash commit 42a8f6c on main; PlasmidManifest::parse refuses a [mock] without [network], a mock host the [network] does not carry, and a hosts field that is not an array of strings, and spec 001 records what was delivered
 ---
 
 ## Why

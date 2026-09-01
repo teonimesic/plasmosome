@@ -24,10 +24,10 @@ done_when: >-
   to spec 001's own, and task 018 carries the union of what specs 001 and 008 carry; tasks 009,
   010 and 011 are untouched, because task 029 already owns their backfill; and every passage
   `grep -rni amnesty docs .agents` prints describes the spec-side amnesty as closed and empty,
-  with `grep -rn 'intents: \[\]' docs .agents` matching no sentence that asserts spec 001 carries
-  it — its hits are the two template skeletons, the past-tense clauses in spec 012 recording that
-  the amnesty closed, the clause about what a task carries, and the skills' general rule, none of
-  which asserts it of spec 001 today.
+  and `docs/specs/001-control-protocol.md` carries a non-empty `intents:` line of its own, which is
+  the fact those passages must agree with. A repo-wide `grep` for `intents: []` cannot stand in for
+  this: many tasks legitimately carry the empty list, and the prose recording that the amnesty
+  closed necessarily quotes it.
 pr: https://github.com/teonimesic/plasmosome/pull/69
 evidence:
 ---
