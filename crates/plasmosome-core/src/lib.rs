@@ -12,6 +12,7 @@
 //! written down in `AGENTS.md`, not by a test.
 
 pub mod control;
+pub mod daemon;
 pub mod gatekeeper;
 pub mod lifecycle;
 pub mod manifest;
