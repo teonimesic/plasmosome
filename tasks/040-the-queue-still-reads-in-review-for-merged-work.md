@@ -1,7 +1,7 @@
 ---
 id: 040
 title: The queue still reads in_review for merged work, and cites an amnesty that is closed
-status: in_review
+status: done
 priority: 3
 specs: [012]
 intents: [008]
@@ -29,7 +29,7 @@ done_when: >-
   this: many tasks legitimately carry the empty list, and the prose recording that the amnesty
   closed necessarily quotes it.
 pr: https://github.com/teonimesic/plasmosome/pull/69
-evidence:
+evidence: 441847df6389ccc910600b342d0907570f7b9ba0
 ---
 
 ## Why
@@ -59,3 +59,6 @@ exit code read bare rather than through a pipe.
 STOP when done — do not start the next piece of work.
 
 ## Notes
+
+2026-09-01 — GitHub reports PR 69 merged at
+`441847df6389ccc910600b342d0907570f7b9ba0`; the heartbeat reconciled the stale task record.
