@@ -13,7 +13,7 @@ refs:
 done_when: >-
   `docs/specs/007-publishing-pipeline.md` names in `intents:` the approved intent that asks for
   the crates to be distributed, rather than the testing intent it names today, and every task
-  naming spec 007 carries the same value. No task names it at the time of filing.
+  naming spec 007 carries the same value.
 pr:
 evidence:
 ---
@@ -33,12 +33,14 @@ so the gate passes. On the day someone accepts 007, nothing stops them, and what
 is a spec whose stated parent does not ask for what it builds. A reader gets the same silence — the
 walk ends in the test system and reads as though publishing were a testing concern.
 
-The edit is one line. `002` appears nowhere else in the file, checked at `17ace62`.
+The edit is one line. `002` appears nowhere else in the file, checked at `17ace62`. Nothing on the
+tree copies the value yet — at filing, no task names spec 007 — but task 037 does, so the second
+half of the line above is what keeps the two from disagreeing.
 
 ## What this does not change
 
-007 stays `draft`, and re-parenting clears none of the three blockers it lists — those are the
-owner's decisions and this task does not touch them. One of the three has since been answered
+007 stays `draft`, and re-parenting clears none of the four blockers it lists — those are the
+owner's decisions and this task does not touch them. One of the four has since been answered
 elsewhere, which is a separate edit to the same file and deliberately not carried here: a task that
 re-parents a spec and also rewrites what it is blocked on is two units of work sharing a diff.
 
