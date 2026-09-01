@@ -20,7 +20,7 @@ done_when: >-
   `grep -rn 'pin_cidrs *= *"' --include='*.toml' --include='*.rs' .` and the same
   for `hosts`, whose only remaining hits are the fixtures inside `manifest.rs`
   that exist to prove the refusal, and prose in this task and task 034.
-pr:
+pr: 68
 evidence:
 ---
 
