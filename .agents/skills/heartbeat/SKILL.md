@@ -133,10 +133,39 @@ for f in $(grep -l '^status: accepted$' docs/specs/*.md); do
     n=$(grep -l "^id: $i\$" docs/intents/*.md 2>/dev/null)
     c=$(printf '%s' "$n" | grep -c . )
     [ "$c" -eq 1 ] || { echo "$f: intent $i matches $c intent files, not 1"; continue; }
+    s=$(grep -c '^status:' "$n")
+    [ "$s" -eq 1 ] || { echo "$f: intent $i has $s status lines, not 1"; continue; }
     grep -q '^status: approved$' "$n" || echo "$f: names intent $i, which is not approved"
   done
 done
 ```
+
+Every check above **selects** files by matching a status line, and a selector fails *open*: a
+record written `status: accepted ` with a trailing space, or saved with CRLF endings, matches
+nothing and leaves the queue silently rather than being reported. That is the opposite direction
+from the gate predicates, which refuse on a mismatch. So one sweep asks whether the status lines
+themselves are well formed, which is what makes the enumerations above trustworthy:
+
+```shell
+for f in docs/intents/[0-9]*.md; do
+  n=$(grep -c '^status:' "$f")
+  if [ "$n" -ne 1 ] || ! grep -qE '^status: (draft|approved)$' "$f"; then
+    echo "$f: not exactly one status line reading draft or approved"
+  fi
+done
+
+for f in docs/specs/[0-9]*.md; do
+  n=$(grep -c '^status:' "$f")
+  if [ "$n" -ne 1 ] || ! grep -qE '^status: (draft|accepted|superseded)$' "$f"; then
+    echo "$f: not exactly one status line reading draft, accepted or superseded"
+  fi
+done
+```
+
+This is the only check here that reads a file the other loops never selected, which is the point:
+a record can opt out of every enumeration by being slightly malformed, and nothing else would
+notice. Two `status:` lines is the case worth naming — a file declaring both `draft` and
+`approved` gates as approved on any check that asks whether an approved line exists.
 
 It prints four faults with one loop: an accepted spec whose intent is still `draft`, one naming an
 id no intent file carries, one naming an id that several files carry, and a **new** accepted spec

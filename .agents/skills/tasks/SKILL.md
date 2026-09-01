@@ -345,12 +345,20 @@ done
 ```
 
 **None of these finds a violation.** Each reads one layer and reports what is *missing*, so a file
-that is well-formed and wrong matches none of them. The cross-layer loop in
-`.agents/skills/heartbeat` step 4 catches an accepted spec whose intent is still `draft` and an
-`intents: [099]` pointing at nothing. Nothing catches an intent an agent approved on its own
-judgement, by decision rather than by oversight —
-`docs/decisions/008-approving-an-intent-is-an-instruction.md` says why and what it costs. Read a
-clean grep as "nothing is waiting", never as "nothing is wrong".
+that is well-formed and wrong matches none of them. Two checks in `.agents/skills/heartbeat` step 4
+do more: a cross-layer loop that reads specs against intents, and a sweep that reads whether the
+status lines are well formed at all. Both live there rather than here, so this list does not
+restate what they catch and cannot fall behind them.
+
+**A selector fails open, and that is why the sweep exists.** Every grep above finds records by
+matching a status line, so a record written `status: draft ` with a trailing space, or saved with
+CRLF endings, matches nothing and leaves the queue silently instead of being reported. A gate
+predicate refuses on a mismatch; an enumeration just stops seeing you. Anything that can opt out of
+being counted has to be caught by asking whether it is well formed, which is a different question.
+
+Nothing catches an intent an agent approved on its own judgement, by decision rather than by
+oversight — `docs/decisions/008-approving-an-intent-is-an-instruction.md` says why and what it
+costs. Read a clean grep as "nothing is waiting", never as "nothing is wrong".
 
 ## Checking whether a task is really done
 
