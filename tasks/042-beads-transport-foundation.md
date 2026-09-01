@@ -516,3 +516,8 @@ hook set. Aggregate evidence first lacked a public scenario result and reported 
 retry case; it now preserves every named scenario's observed base, final generation, operation ids
 and redacted plan. The checksum-verified real `all` command now reports `case: all` with all three
 scenario evidence blocks and passed.
+
+2026-09-01: Lost-response identity is now checked from the executed scripted observation. A new
+test first accepted G1 carrying `operation:another-operation`; after implementation it refuses
+that unrelated advance as `cutover_blocked`, while the existing same-operation G1 rediscovery and
+the G0 same-candidate retry remain covered.

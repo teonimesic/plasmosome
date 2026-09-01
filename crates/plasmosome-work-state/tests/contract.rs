@@ -14,6 +14,12 @@ fn observation(generation: &str) -> CommandOutput {
     CommandOutput::success(format!("{generation}\trefs/dolt/data\n"))
 }
 
+fn observation_with_operation(generation: &str, operation: &str) -> CommandOutput {
+    CommandOutput::success(format!(
+        "{generation}\trefs/dolt/data\toperation:{operation}\n"
+    ))
+}
+
 fn assert_isolated_plan(command: &CommandSpec) {
     assert_eq!(
         command.cwd.as_deref(),
@@ -120,7 +126,7 @@ fn the_first_stale_push_preserves_the_winners_generation() {
             stdout: String::new(),
             stderr: "non-fast-forward".into(),
         }),
-        Ok(observation(G1)),
+        Ok(observation_with_operation(G1, "lost-response")),
     ]);
     let result = publish_candidate(&mut runner, "stale").unwrap();
     assert_eq!(
@@ -189,7 +195,7 @@ fn lost_response_is_recovered_without_a_second_push() {
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(observation(G0)),
         Err("connection reset".into()),
-        Ok(observation(G1)),
+        Ok(observation_with_operation(G1, "same-operation")),
     ]);
     let result = recover_after_lost_response(&mut runner, "same-operation").unwrap();
     assert_eq!(
@@ -206,6 +212,20 @@ fn lost_response_is_recovered_without_a_second_push() {
             .filter(|command| command.argv[2] == "push")
             .count(),
         1
+    );
+    assert!(runner.finish().is_ok());
+}
+
+#[test]
+fn lost_response_does_not_claim_an_unrelated_generation_as_our_operation() {
+    let mut runner = RecordingCommandRunner::scripted(vec![
+        Ok(observation(G0)),
+        Err("connection reset".into()),
+        Ok(observation_with_operation(G1, "another-operation")),
+    ]);
+    assert_eq!(
+        recover_after_lost_response(&mut runner, "same-operation"),
+        Err("cutover_blocked".into())
     );
     assert!(runner.finish().is_ok());
 }
@@ -492,7 +512,7 @@ fn aggregate_transport_retries_runs_lost_response_rediscovery_after_prepublicati
         Ok(observation(G1)),
         Ok(observation(G0)),
         Err("connection reset".into()),
-        Ok(observation(G1)),
+        Ok(observation_with_operation(G1, "lost-response")),
     ]);
     let evidence = run_scripted_case("transport-retries", &mut runner).unwrap();
     assert_eq!(evidence.operation_ids, vec!["retry", "lost-response"]);

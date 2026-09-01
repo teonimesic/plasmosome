@@ -576,8 +576,11 @@ fn recover_after_lost_response_with_base<R: CommandRunner>(
         Ok(output) if classify_push(&output.stderr) == PushFailure::Transport => {}
         _ => return Err("cutover_blocked".into()),
     }
-    let observed_after_failure = observe(runner)?;
+    let (observed_after_failure, operations) = observe_with_operations(runner)?;
     if observed_after_failure != observed_base {
+        if !operations.iter().any(|value| value == operation) {
+            return Err("cutover_blocked".into());
+        }
         return Ok((
             observed_base,
             Publication::Recovered {
@@ -612,6 +615,27 @@ fn observe<R: CommandRunner>(runner: &mut R) -> Result<String, String> {
     } else {
         Err("cutover_blocked".into())
     }
+}
+fn observe_with_operations<R: CommandRunner>(
+    runner: &mut R,
+) -> Result<(String, Vec<String>), String> {
+    let output = runner
+        .run(observe_command())
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    if output.status != 0 {
+        return Err("cutover_blocked".into());
+    }
+    let mut fields = output.stdout.split_whitespace();
+    let generation = fields.next().unwrap_or("");
+    if !sha(generation) {
+        return Err("cutover_blocked".into());
+    }
+    Ok((
+        generation.into(),
+        fields
+            .filter_map(|field| field.strip_prefix("operation:").map(str::to_owned))
+            .collect(),
+    ))
 }
 fn sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -759,13 +783,18 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
             Ok(observation_output(g1)),
             Ok(observation_output(g0)),
             Err("connection reset".into()),
-            Ok(observation_output(g1)),
+            Ok(observation_output_with_operation(g1, "lost-response")),
         ]),
         _ => Err("cutover_blocked".into()),
     }
 }
 fn observation_output(generation: &str) -> CommandOutput {
     CommandOutput::success(format!("{generation}\trefs/dolt/data\n"))
+}
+fn observation_output_with_operation(generation: &str, operation: &str) -> CommandOutput {
+    CommandOutput::success(format!(
+        "{generation}\trefs/dolt/data\toperation:{operation}\n"
+    ))
 }
 
 pub fn run_scripted_case<R: CommandRunner>(
