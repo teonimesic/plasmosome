@@ -16,8 +16,12 @@ refs:
   ]
 done_when: >-
   `PlasmidManifest::parse` refuses a manifest carrying `[mock]` with no
-  `[network]`, and one whose `[mock]` names a host its `[network]` does not,
-  each refusal naming what is missing; no manifest, fixture, spec example or
+  `[network]`, one whose `[mock]` names a host its `[network]` does not, and one
+  whose `[mock] hosts` is not an array of strings — a bare scalar, or an array
+  holding a non-string — each refusal naming what is missing. The third is not
+  covered by the first two: a malformed `hosts` reads as no hosts at all, so the
+  host-by-host comparison has nothing to walk and the manifest passes while
+  standing in for nothing; no manifest, fixture, spec example or
   crate doc declares a plasmid whose whole content is a `[mock]` section; spec
   001 §3.10 states that refusal and its code `104` resolutions name only
   resolutions still reachable once no plasmid is a mock; D2b's three propagation
@@ -92,3 +96,19 @@ exit code read bare rather than through a pipe.
 STOP when done — do not start the next piece of work.
 
 ## Notes
+
+**A malformed `[mock] hosts` was accepted in silence, and the asymmetry is what made it easy to
+miss.** `string_list` returns an empty vector for anything that is not an array and drops array
+entries that are not strings, so `hosts = "api.github.com"` parsed to `MockSpec { hosts: [] }` and
+`hosts = ["api.github.com", 443]` parsed to one host with the `443` gone. In `[network]` the same
+typo is caught, but only incidentally, by the separate "declares [network] without hosts" check;
+`[mock]` has no such check, because an empty mock host list is a legal subset of the network's. So
+the identical mistake was refused in one section and accepted in the other, and the accepted one
+produced a mock that stood in for nothing.
+
+`declared_string_list` now reads that field strictly — absent is an empty list, anything that is
+not an array of strings is a refusal naming the section and field. Two tests were written first and
+watched fail against the old parser, one per shape. The pre-existing `string_list` callers in
+`parse_network` are the same latent defect at two more call sites (`hosts`, and `pin_cidrs`, which
+has no emptiness check behind it at all); they are untouched here because this change does not add
+them, and they want their own task.

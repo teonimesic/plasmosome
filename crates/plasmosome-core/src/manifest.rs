@@ -226,30 +226,33 @@ impl PlasmidManifest {
                     .unwrap_or("/workspace")
                     .to_string(),
             });
-        let mock = raw.get("mock").map(|m| {
-            let backend = m.get("backend");
-            let source = backend
-                .and_then(|b| b.get("source"))
-                .and_then(toml::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let kind = backend
-                .and_then(|b| b.get("kind"))
-                .and_then(toml::Value::as_str)
-                .unwrap_or("recorded")
-                .to_string();
-            let api = m
-                .get("api")
-                .and_then(toml::Value::as_str)
-                .unwrap_or("github")
-                .to_string();
-            MockSpec {
-                hosts: string_list(m.get("hosts")),
-                kind,
-                api,
-                source,
-            }
-        });
+        let mock = raw
+            .get("mock")
+            .map(|m| {
+                let backend = m.get("backend");
+                let source = backend
+                    .and_then(|b| b.get("source"))
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let kind = backend
+                    .and_then(|b| b.get("kind"))
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("recorded")
+                    .to_string();
+                let api = m
+                    .get("api")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("github")
+                    .to_string();
+                Ok(MockSpec {
+                    hosts: declared_string_list(&id, "mock", "hosts", m.get("hosts"))?,
+                    kind,
+                    api,
+                    source,
+                })
+            })
+            .transpose()?;
         let model = raw.get("model").map(|m| ModelSpec {
             endpoint: m
                 .get("endpoint")
@@ -494,6 +497,37 @@ fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestEr
     Ok(())
 }
 
+/// Reads a `field` that must be an array of strings, refusing every other shape.
+///
+/// An absent field is an empty list. A field present as anything but an array, or an array
+/// holding anything but strings, is a `ManifestError::Invalid` naming `section` and `field`.
+/// Callers that silently coerce instead narrow what a plasmid declared without saying so.
+fn declared_string_list(
+    id: &str,
+    section: &str,
+    field: &str,
+    value: Option<&toml::Value>,
+) -> Result<Vec<String>, ManifestError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        return Err(ManifestError::Invalid(format!(
+            "plasmid {id}: [{section}] `{field}` must be an array of strings"
+        )));
+    };
+    items
+        .iter()
+        .map(|item| {
+            item.as_str().map(String::from).ok_or_else(|| {
+                ManifestError::Invalid(format!(
+                    "plasmid {id}: [{section}] `{field}` holds `{item}`, which is not a string"
+                ))
+            })
+        })
+        .collect()
+}
+
 fn string_list(value: Option<&toml::Value>) -> Vec<String> {
     value
         .and_then(toml::Value::as_array)
@@ -628,6 +662,34 @@ ports = [443]
 
 [mock]
 hosts = ["api.github.example"]
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const MOCK_HOSTS_AS_SCALAR: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+
+[mock]
+hosts = "api.github.com"
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const MOCK_HOSTS_MIXED_TYPES: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+
+[mock]
+hosts = ["api.github.com", 443]
 api = "github"
 backend = { kind = "recorded", source = "fixtures/github-pr" }
 "#;
@@ -779,6 +841,25 @@ subject = "git"
         assert!(
             matches!(&err, ManifestError::Invalid(m) if m.contains("api.github.example")),
             "the refusal names the host that drifted: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_mock_whose_hosts_is_a_bare_string_is_refused() {
+        let err = PlasmidManifest::parse(MOCK_HOSTS_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("hosts")),
+            "a scalar `hosts` declares no host at all, and silently standing in for nothing is \
+             the failure a mock exists to prevent: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_mock_whose_hosts_holds_a_non_string_is_refused() {
+        let err = PlasmidManifest::parse(MOCK_HOSTS_MIXED_TYPES).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("hosts")),
+            "dropping the entry that is not a string would narrow the mock without saying so: {err:?}"
         );
     }
 
