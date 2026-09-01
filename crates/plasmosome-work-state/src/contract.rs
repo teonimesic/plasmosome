@@ -978,45 +978,8 @@ pub fn run_scripted_case<R: CommandRunner>(
     runner: &mut R,
 ) -> Result<ScriptEvidence, String> {
     match case {
-        "stale-base-fence" => full_stale_base_fence(runner),
-        "push-conflict-recovery" => {
-            let winner_base = observe(runner)?;
-            let stale_base = observe(runner)?;
-            if winner_base != stale_base {
-                return Err("cutover_blocked".into());
-            }
-            replay_operation(runner, "winner")?;
-            let winner_generation = publish_after_observation(runner, &winner_base)?;
-            let stale_push = execute_publication_command(runner, publish_command(), &stale_base)
-                .map_err(|_| "cutover_blocked".to_owned())?;
-            if stale_push.status == 0 || classify_push(&stale_push.stderr) != PushFailure::StaleBase
-            {
-                return Err("cutover_blocked".into());
-            }
-            let observed_after_stale = observe(runner)?;
-            if observed_after_stale != winner_generation {
-                return Err("cutover_blocked".into());
-            }
-            let refresh = runner
-                .run(refresh_command())
-                .map_err(|_| "cutover_blocked".to_owned())?;
-            if refresh.status != 0 {
-                return Err("cutover_blocked".into());
-            }
-            replay_operation(runner, "replay")?;
-            let generation = publish_after_observation(runner, &observed_after_stale)?;
-            validate_observed_export(runner, &["winner", "replay"])?;
-            validate_scripted_history(
-                runner,
-                &[&winner_base, &winner_generation, &generation],
-                &["winner", "replay"],
-            )?;
-            Ok(ScriptEvidence {
-                observed_base: winner_base,
-                final_generation: generation,
-                operation_ids: vec!["winner".into(), "replay".into()],
-            })
-        }
+        "stale-base-fence" => stale_base_recovery(runner, true),
+        "push-conflict-recovery" => stale_base_recovery(runner, false),
         "transport-retries" => {
             replay_operation(runner, "retry")?;
             let (observed_base, result) = retry_after_transport_with_base(runner, "retry")?;
@@ -1044,7 +1007,10 @@ pub fn run_scripted_case<R: CommandRunner>(
     }
 }
 
-fn full_stale_base_fence<R: CommandRunner>(runner: &mut R) -> Result<ScriptEvidence, String> {
+fn stale_base_recovery<R: CommandRunner>(
+    runner: &mut R,
+    includes_paused_holder: bool,
+) -> Result<ScriptEvidence, String> {
     let winner_base = observe(runner)?;
     let stale_base = observe(runner)?;
     if winner_base != stale_base {
@@ -1057,7 +1023,8 @@ fn full_stale_base_fence<R: CommandRunner>(runner: &mut R) -> Result<ScriptEvide
     if stale_push.status == 0 || classify_push(&stale_push.stderr) != PushFailure::StaleBase {
         return Err("cutover_blocked".into());
     }
-    if observe(runner)? != winner_generation {
+    let observed_after_stale = observe(runner)?;
+    if observed_after_stale != winner_generation {
         return Err("cutover_blocked".into());
     }
     let refresh = runner
@@ -1067,14 +1034,17 @@ fn full_stale_base_fence<R: CommandRunner>(runner: &mut R) -> Result<ScriptEvide
         return Err("cutover_blocked".into());
     }
     replay_operation(runner, "replay")?;
-    let recovery_generation = publish_after_observation(runner, &winner_generation)?;
-    let paused_push = execute_publication_command(runner, publish_command(), &winner_generation)
-        .map_err(|_| "cutover_blocked".to_owned())?;
-    if paused_push.status == 0 || classify_push(&paused_push.stderr) != PushFailure::StaleBase {
-        return Err("cutover_blocked".into());
-    }
-    if observe(runner)? != recovery_generation {
-        return Err("cutover_blocked".into());
+    let recovery_generation = publish_after_observation(runner, &observed_after_stale)?;
+    if includes_paused_holder {
+        let paused_push =
+            execute_publication_command(runner, publish_command(), &winner_generation)
+                .map_err(|_| "cutover_blocked".to_owned())?;
+        if paused_push.status == 0 || classify_push(&paused_push.stderr) != PushFailure::StaleBase {
+            return Err("cutover_blocked".into());
+        }
+        if observe(runner)? != recovery_generation {
+            return Err("cutover_blocked".into());
+        }
     }
     validate_observed_export(runner, &["winner", "replay"])?;
     validate_scripted_history(

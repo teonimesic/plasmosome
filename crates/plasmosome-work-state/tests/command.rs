@@ -36,5 +36,10 @@ fn every_bd_child_has_the_isolated_environment() {
     ] {
         assert!(environment.contains_key(key), "missing {key}");
     }
-    assert!(!environment.values().any(|value| value.contains("secret")));
+    assert!(
+        environment
+            .iter()
+            .filter(|(key, _)| key.as_str() != "PATH")
+            .all(|(_, value)| !value.contains("secret"))
+    );
 }

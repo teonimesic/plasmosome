@@ -702,6 +702,10 @@ fn logical_export_requires_each_replayed_operation_exactly_once() {
         Err("cutover_blocked")
     );
     assert_eq!(
+        validate_logical_export(&logical_export(&["winner"]).stdout, &["winner", "replay"]),
+        Err("cutover_blocked")
+    );
+    assert_eq!(
         validate_logical_export(
             "{\"id\":\"issue-winner\",\"title\":\"operation:winner\",\"description\":\"wrong\"}",
             &["winner"]
@@ -824,6 +828,12 @@ fn fixture_snapshot_detects_a_changed_hook_index_or_local_config() {
     assert_eq!(fixture.assert_unchanged(), Err("cutover_blocked"));
     std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::write(git.join("hooks/post-commit"), "unexpected\n").unwrap();
+    assert_eq!(fixture.assert_unchanged(), Err("cutover_blocked"));
+    std::fs::remove_file(git.join("hooks/post-commit")).unwrap();
+    std::fs::write(git.join("index"), "changed-index\n").unwrap();
+    assert_eq!(fixture.assert_unchanged(), Err("cutover_blocked"));
+    std::fs::write(git.join("index"), "fixture-index\n").unwrap();
+    std::fs::write(git.join("config"), "[core]\n\tbare = true\n").unwrap();
     assert_eq!(fixture.assert_unchanged(), Err("cutover_blocked"));
 }
 

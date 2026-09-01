@@ -351,8 +351,9 @@ not part of this contract.
 
 ## Acceptance
 
-The implementation supplies a hermetic runner, `./tools/work-state contract-test <case>`, and CI
-runs `./tools/work-state contract-test all`. It initializes two independent temporary clone-local
+The implementation supplies a hermetic runner, `./tools/work-state contract-test <case> --archive
+PATH --bd PATH`, and CI runs `./tools/work-state contract-test all --archive PATH --bd PATH`. It
+initializes two independent temporary clone-local
 stores with the pinned Beads binary, then scripts the exact external Git/Beads observations at the
 existing command seam. It uses no server, hosted repository, credential, GitHub API mock, fake
 forge or shared store in place of the two clients.
