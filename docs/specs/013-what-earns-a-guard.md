@@ -59,8 +59,11 @@ reverted tomorrow" is yes, the check does not go in the build.
 - Anything that becomes part of a public git history — authorship and attribution above all.
 - Anything that moves private material into a public tree.
 - Anything that ships to a consumer, including test scaffolding leaving `[dev-dependencies]`.
-- A local operational property that costs nothing to check and silently degrades a tool
-  otherwise — a skill a tool cannot find is the example the repository already has.
+- A local operational property that costs nothing to check, silently degrades a tool, and that
+  **no other signal in the tree would surface** — the guard is the only thing that could catch
+  it. A property a reviewer could see in a diff is not one. A skill a tool cannot find is the
+  example the repository already has, and it qualifies because nothing anywhere reports it: the
+  tool simply behaves as though the skill were never written.
 
 **What is out of scope**, and belongs in a spec or a crate's `AGENTS.md`:
 
