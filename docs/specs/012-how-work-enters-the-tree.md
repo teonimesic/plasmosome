@@ -44,25 +44,37 @@ heartbeat" is a claim the tree can refute. What is not a check is an agent's own
 followed the rule. That is the answer coming from inside the loop, which is the one shape intent
 008 rules out by name.
 
-### The chain is total, and the list of things above it is closed
+### The chain is total, and the list of shapes carrying no task is closed
 
-Every change that reaches `main` is reachable upward: the pull request names a task, the task names
-a spec, the spec names an intent. Read that way it answers "was this wanted", which is the whole
-point of the links. A change that skips them has no answer to give.
+Every change that reaches `main` is reachable upward to an intent: the pull request names a task,
+the task names a spec, the spec names an intent. Read that way it answers "was this wanted", which
+is the whole point of the links. A change that reaches no intent by any route has no answer to give.
 
-**Exactly two shapes have nothing above them, and both are structural.** A pull request filing an
-intent sits at the top of the chain and has no layer above it to point at. A pull request filing a
-spec is the first half of a pair whose task rides the second half — the work branch that cannot
-exist until the spec is accepted. Neither can name a governing document without one being invented
-for the purpose, which is precisely the move the gates exist to refuse.
+**Exactly two shapes carry no task, and both are structural.** They are not the same shape and
+flattening them is the error to avoid. A pull request filing an **intent** has nothing above it at
+all: the intent is the top of the chain. A pull request filing a **spec** does have something above
+it — its `intents:` names the goal it serves, which `docs/specs/README.md` requires of every new
+spec, and this spec's own frontmatter reads `intents: [008]` — but it has no *task*, because the
+task rides the work branch that follows and cannot exist until the spec is accepted. What the two
+share is the missing task, not a missing parent. Neither can name a task governing it without one
+being invented for the purpose, which is precisely the move the gates exist to refuse.
 
 **That list is closed here rather than in the skill, and the placement is the point.** An exemption
 written where the author of a change can widen it gets widened. The previous one said "under about
 twenty lines" and was in practice applied to a whole category at any size: three merged pull
 requests carrying no task changed 173, 65 and 51 lines, all three of them edits to the skills. That
 was not cheating. The rule sat in a file the exempted change was also editing, so it had no author
-but the person it was refusing. Adding a third shape is an amendment to this spec, in a pull
-request of its own, which is a different act from writing a paragraph into a skill.
+but the person it was refusing. Adding a third shape means editing this file, in a pull request of
+its own, which is a different act from writing a paragraph into a skill the exempted change is
+already open in.
+
+**That is a claim about where a change is made, not about this file being hard to change.** A spec
+records what was delivered, and one whose design turns out wrong is edited — ordinarily, by whoever
+finds it, with the reason — exactly as `.agents/skills/pr-review` already requires when built
+behavior and its spec disagree. Nothing here is frozen, and no clause in this spec draws authority
+from being unchangeable. What the closed list buys is that widening it is one visible edit somebody
+reviews on its own, instead of a sentence added to the document the widening change was editing
+anyway.
 
 **The tempting third shape, refused here by name: "no spec describes my area yet."** That is not
 above the chain. It is the ordinary case of work needing a new spec, and the answer is to write one
@@ -85,7 +97,7 @@ There are two gates on starting, and this spec adds none:
 
 **That set is closed the same way the exemptions are, for the mirror-image reason.** A gate is
 cheapest to add in the document describing the work it would delay, and a process layer that
-accumulates gates stops being read at all. A third gate is an amendment here.
+accumulates gates stops being read at all. A third gate is an edit to this file, on the same terms.
 
 ### One gate belongs to a person, and it is a state rather than a courtesy
 
@@ -110,7 +122,7 @@ changed here.
 
 Three things. They are stated together because each has failed on its own:
 
-- **A link upward** — a task, or being one of the two shapes above.
+- **A link upward** — a task, or being one of the two shapes that carry none.
 - **A review that read the commit being merged** — not a review of an earlier head, and not a
   signal whose real meaning is queued, rate limited, skipped, or not started yet.
 - **An answer to every thread**, by a fix or by a disagreement written down.
@@ -190,14 +202,16 @@ it.
   records all of that is read out of. It does not reach the content of any individual rule — how
   many review rounds a diff size earns, which reviewer, which endpoint answers which question.
   Those change without this spec changing.
-- **Every change reaching `main` is reachable upward**: pull request → task → spec → intent.
-- **Exactly two shapes have nothing above them**: a pull request filing an intent, and one filing a
-  spec. **The list is closed, and adding to it is an amendment to this spec** in a pull request of
-  its own — not a judgement available to the author of the change that would use it. An area no
-  spec covers is not one of the two and does not become a third.
+- **Every change reaching `main` is reachable upward to an intent**: pull request → task → spec →
+  intent, or by the shorter route the two shapes below provide.
+- **Exactly two shapes carry no task**: a pull request filing an intent, which has nothing above it
+  at all, and one filing a spec, which names the intent it serves but has no task until the work
+  branch that follows it. **The list is closed, and adding to it means editing this file** in a pull
+  request of its own — not a judgement available to the author of the change that would use it. An
+  area no spec covers is not one of the two and does not become a third.
 - **The gates on starting are two and no more**: a spec may not become `accepted` until the intent
   it names is `approved`; a task may not be started until the spec it names is `accepted`. Adding a
-  gate is an amendment here too. **Nothing gates what may be written down.**
+  gate means editing this file too. **Nothing gates what may be written down.**
 - **Approval is the owner's**, and is the only judgement in this layer not derivable from the tree.
 - **Anything waiting on the owner waits as a draft pull request**, so the waiting is a state anyone
   can list rather than something an agent has to say, and **the wait is ended by the owner, never by
@@ -223,6 +237,9 @@ it.
   files, the gate on a spec becoming `accepted` in three, an intent's `status:` values in two — and
   collapsing them is a backfill this spec names rather than schedules: a copy goes when the rule it
   copies is next edited, removed by whoever edits it. **A new copy is refused now.**
+- **This spec is edited when it turns out wrong**, like any other, and no clause here relies on it
+  being unchangeable. The closed lists above bind *where* a change is made, never whether one may
+  be made.
 - **Callers may rely on** this being a floor. Nothing here makes the chain unbypassable: every
   clause is a rule agents read, and
   `docs/decisions/008-approving-an-intent-is-an-instruction.md` records why the mechanical forms
@@ -230,13 +247,15 @@ it.
 
 ## Acceptance
 
-- `.agents/skills/tasks` states that every pull request is reachable upward, names the two shapes
-  that are not, and says the list is closed by this spec rather than by the skill.
+- `.agents/skills/tasks` states that every pull request is reachable upward to an intent, names the
+  two shapes that carry no task, distinguishes them — an intent's pull request has nothing above it,
+  a spec's names an intent and lacks only a task — and says the list is closed by this spec rather
+  than by the skill.
 - `.agents/skills/tasks` states that an area no spec covers is not one of those shapes, and says
   what to do instead.
 - No skill file states a size, a kind or a category of change that is exempt from the chain. The
-  two shapes above are not one: having nothing above you to name is a different claim from being
-  excused from naming it, and the skill text has to make that difference visible.
+  two shapes above are not one: having no task to name is a different claim from being excused from
+  naming what you do have, and the skill text has to make that difference visible.
   `grep -riE 'trivial|20 lines' .agents/skills/` finds the candidates; a hit is something to read,
   not a fault on its own.
 - `.agents/skills/pr-review` states the three things a merged pull request carries, and states that
