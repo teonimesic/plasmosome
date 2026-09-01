@@ -429,7 +429,12 @@ Item by item, what is true of the tree today. An item that is not yet true says 
 is a claim that the text above may not be corrected.
 
 1. Every verb above has a passing round-trip test against the real controller (ndjson in,
-   typed result out) — **not yet**: the controller daemon is P1 step 3.
+   typed result out) — **one verb of them**. `plasmosomed` exists: it reads a config naming its
+   control socket and its instance, serves the §1 envelope on that socket, and answers
+   `plasmosome.status` (§3.3) from an empty cell registry at ledger generation 0. Every other
+   verb in §3 is **not yet** — nothing serves them. The socket path in §1 is not yet the one it
+   binds either: the daemon takes the path from its config, and the
+   `~/.plasmosome/instances/<name>/` convention arrives with `plasmosome.start`.
 2. The error code table is closed and every code has a structured-field spec — **delivered**
    (§1).
 3. The controller-side wire types are serde and share no memory — **delivered**, and true of the
