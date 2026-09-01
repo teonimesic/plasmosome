@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::process::Command;
 
 use plasmosome_guards::workspace_root;
@@ -130,20 +131,113 @@ fn only_the_held_names_are_publishable_to_a_registry() {
     );
 }
 
-#[test]
-fn no_binary_target_takes_a_name_another_package_owns() {
-    let packages = workspace_packages();
+fn binary_name_collisions(packages: &[serde_json::Value]) -> Vec<String> {
     let names: Vec<String> = packages.iter().map(package_name).collect();
+    let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut violations = Vec::new();
 
-    for package in &packages {
+    for package in packages {
         let owner = package_name(package);
         for binary in binary_targets(package) {
-            assert!(
-                binary == owner || !names.contains(&binary),
-                "`{owner}` ships a binary called `{binary}`, and `{binary}` is also a package in this workspace; two packages offering the same binary name collide in `target/` on every workspace build and make `cargo install` fail outright for anyone who installs both, which is a permanent problem once either name is claimed on a registry"
-            );
+            owners.entry(binary).or_default().push(owner.clone());
         }
     }
+
+    for (binary, mut sharing) in owners {
+        if sharing.len() < 2 {
+            continue;
+        }
+        sharing.sort();
+        let listed = match sharing.split_last() {
+            Some((last, [])) => format!("`{last}`"),
+            Some((last, rest)) => format!(
+                "{} and `{last}`",
+                rest.iter()
+                    .map(|owner| format!("`{owner}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => String::new(),
+        };
+        violations.push(format!(
+            "{listed} each ship a binary called `{binary}`; two packages offering the same binary name collide in `target/` on every workspace build and make `cargo install` fail outright for anyone who installs both, which is a permanent problem once either name is claimed on a registry"
+        ));
+    }
+
+    for package in packages {
+        let owner = package_name(package);
+        for binary in binary_targets(package) {
+            if binary != owner && names.contains(&binary) {
+                violations.push(format!(
+                    "`{owner}` ships a binary called `{binary}`, and `{binary}` is also a package in this workspace; two packages offering the same binary name collide in `target/` on every workspace build and make `cargo install` fail outright for anyone who installs both, which is a permanent problem once either name is claimed on a registry"
+                ));
+            }
+        }
+    }
+
+    violations
+}
+
+#[test]
+fn no_binary_target_takes_a_name_another_package_owns() {
+    let violations = binary_name_collisions(&workspace_packages());
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+fn metadata_package(name: &str, binaries: &[&str]) -> serde_json::Value {
+    let mut targets = vec![serde_json::json!({"kind": ["lib"], "name": name})];
+    for binary in binaries {
+        targets.push(serde_json::json!({"kind": ["bin"], "name": binary}));
+    }
+    serde_json::json!({"name": name, "targets": targets})
+}
+
+#[test]
+fn two_packages_shipping_one_binary_name_are_reported_even_when_no_package_bears_it() {
+    let packages = [
+        metadata_package("alpha", &["runner"]),
+        metadata_package("beta", &["runner"]),
+        metadata_package("gamma", &[]),
+    ];
+
+    let violations = binary_name_collisions(&packages);
+
+    assert_eq!(
+        violations.len(),
+        1,
+        "`alpha` and `beta` both ship a binary called `runner` while no package bears that name, so the package-name check alone never sees this collision and nothing else in the workspace would report it; it reported {violations:?}"
+    );
+}
+
+#[test]
+fn a_binary_named_after_its_own_package_is_not_reported() {
+    let packages = [
+        metadata_package("alpha", &["alpha"]),
+        metadata_package("beta", &["beta"]),
+    ];
+
+    let violations = binary_name_collisions(&packages);
+
+    assert!(
+        violations.is_empty(),
+        "a package shipping a binary under its own name takes nothing from anybody, and reporting it would make the guard refuse the ordinary case; it reported {violations:?}"
+    );
+}
+
+#[test]
+fn a_binary_taking_another_packages_name_is_still_reported() {
+    let packages = [
+        metadata_package("alpha", &["beta"]),
+        metadata_package("beta", &[]),
+    ];
+
+    let violations = binary_name_collisions(&packages);
+
+    assert_eq!(
+        violations.len(),
+        1,
+        "`alpha` ships a binary called `beta` while `beta` is a package in this workspace, which is the collision the guard already refused before it also learned about duplicate binaries; it reported {violations:?}"
+    );
 }
 
 #[test]
