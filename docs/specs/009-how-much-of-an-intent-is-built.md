@@ -195,20 +195,40 @@ else.
 ### Reading the derived half
 
 Nothing above replaces reading the tree, and the command that reads it is what an intent file
-points at instead of listing anything. For one intent, its specs and the tasks under them:
+points at instead of listing anything. For one intent: its specs with the tasks under each, then any
+task that reaches the intent directly.
+
+**It walks both legs, for the same reason the check does.** A reader forming this judgement is
+reading to answer "how much of this exists", and a spec-only walk answers it wrong in exactly the
+place the check was built to catch: no spec on the tree names intent 001, so a spec-only command
+prints nothing for it while `tasks/007-adopt-the-measured-instruction-rules.md` sits `done` beneath
+it. A command that hides finished work from the person setting `served:` is worse than no command.
 
 ```shell
 n=008
+shown=""
 for f in docs/specs/*.md; do
   grep -q "^intents:.*\b$n\b" "$f" || continue
   sid=$(sed -n 's/^id: *//p' "$f" | head -1)
   printf '%s\t%s\n' "$(sed -n 's/^status: *//p' "$f" | head -1)" "$f"
   for t in tasks/*.md; do
-    grep -q "^specs:.*\b$sid\b" "$t" &&
-      printf '  %s\t%s\n' "$(sed -n 's/^status: *//p' "$t" | head -1)" "$t"
+    grep -q "^specs:.*\b$sid\b" "$t" || continue
+    printf '  %s\t%s\n' "$(sed -n 's/^status: *//p' "$t" | head -1)" "$t"
+    shown="$shown|$t|"
   done
 done
+for t in tasks/*.md; do
+  grep -q "^intents:.*\b$n\b" "$t" || continue
+  case "$shown" in *"|$t|"*) continue ;; esac
+  printf '%s\t%s\n' "$(sed -n 's/^status: *//p' "$t" | head -1)" "$t"
+done
 ```
+
+A task that carries both links is printed once, under its spec: `.agents/skills/tasks` has every
+task copy its spec's `intents:` down, so the common case is a task matching both legs, and a
+command that listed it twice would read as two pieces of work. The second loop prints only what the
+first did not — `shown` is why it exists, and it is a string rather than an array because array
+syntax and unquoted word splitting differ between `bash` and `zsh`.
 
 Ids are read from each file's `id:` rather than from its filename, for the reason the heartbeat's
 loop already gives: a glob over a dangling id aborts the loop it was meant to report on.
@@ -311,7 +331,13 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
   may resurface: `status` is a read-only variable name, and a glob matching nothing is a fatal
   error rather than an empty list.
 - The derivation command in this spec, run for an intent with at least one spec, prints that spec
-  and the tasks naming it; run for an intent with no specs, it prints nothing and exits 0.
+  and the tasks naming it. Run for **intent 001** — which no spec names, and which
+  `tasks/007-adopt-the-measured-instruction-rules.md` reaches directly — it prints that task. It
+  prints nothing, and exits 0, only for an intent neither leg reaches.
+- The derivation command prints a task carrying **both** links exactly once, under its spec:
+  verified against `tasks/004-testkit-and-seams.md`, which names `specs: [003]` and `intents: [002]`,
+  in a run for intent 002. It runs identically under `bash` and `zsh`, which is why the seen-set is a
+  string tested with `case` rather than an array.
 
 ## Out of scope
 
