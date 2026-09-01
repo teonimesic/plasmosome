@@ -1,18 +1,13 @@
-use std::path::PathBuf;
-
-use plasmosome_work_state::{ContractRequest, run_contract};
+use plasmosome_work_state::contract::parse_contract_request;
 
 #[test]
-fn github_and_all_refuse_a_missing_fixture() {
-    for case in ["github", "all"] {
-        let result = run_contract(&ContractRequest {
-            case: case.to_owned(),
-            archive: PathBuf::from("missing"),
-            binary: PathBuf::from("missing"),
-            github_remote: None,
-            confirmation: None,
-        })
-        .unwrap_err();
-        assert_eq!(result.code, "github_fixture_required");
+fn all_and_transport_accept_no_remote_or_credential_arguments() {
+    for case in ["all", "transport"] {
+        let request = parse_contract_request(["contract-test", case, "--archive", "archive", "--bd", "bd"])
+            .expect("offline contract command parses");
+        assert_eq!(request.case, case);
+    }
+    for forbidden in ["--github-remote", "--confirm-disposable"] {
+        assert!(parse_contract_request(["contract-test", "all", "--archive", "archive", "--bd", "bd", forbidden, "value"]).is_err());
     }
 }

@@ -75,28 +75,30 @@ impl CommandRunner for SystemCommandRunner {
 #[derive(Default)]
 pub struct RecordingCommandRunner {
     commands: Vec<CommandSpec>,
-    outputs: Vec<CommandOutput>,
+    outputs: Vec<Result<CommandOutput, String>>,
 }
 
 impl RecordingCommandRunner {
     pub fn with_output(output: CommandOutput) -> Self {
         Self {
             commands: Vec::new(),
-            outputs: vec![output],
+            outputs: vec![Ok(output)],
         }
     }
     pub fn commands(&self) -> &[CommandSpec] {
         &self.commands
+    }
+    pub fn scripted(outputs: Vec<Result<CommandOutput, String>>) -> Self {
+        Self { commands: Vec::new(), outputs }
+    }
+    pub fn finish(self) -> Result<(), String> {
+        if self.outputs.is_empty() { Ok(()) } else { Err("unconsumed_script_result".into()) }
     }
 }
 
 impl CommandRunner for RecordingCommandRunner {
     fn run(&mut self, command: CommandSpec) -> Result<CommandOutput, String> {
         self.commands.push(command);
-        Ok(if self.outputs.is_empty() {
-            CommandOutput::default()
-        } else {
-            self.outputs.remove(0)
-        })
+        if self.outputs.is_empty() { Err("unexpected_command".into()) } else { self.outputs.remove(0) }
     }
 }
