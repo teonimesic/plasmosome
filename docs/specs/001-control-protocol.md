@@ -383,6 +383,19 @@ The controller drives each cell's `membraned` over a second, private ndjson-UDS
 - `membrane.status` — the F9 readiness probe. Reply `{"ready": true, "state": "serving"}`.
   Readiness = the socket **answers**; accept-without-answer is the half-alive broker and is
   reported not-ready (measured in F9; implemented in `plasmosome-membrane::readiness`).
+  A membrane that is **not** ready answers the same `result` object with `"ready": false` and a
+  `state` naming which case it is. Every call asks every broker again; no answer is kept.
+
+  | `state` | further fields |
+  | --- | --- |
+  | `not_serving` | `broker` — the one that held the set back; `reason`; and `broker_state` when, and only when, `reason` is `reported` |
+  | `deadline_spent` | `unreached` — the first broker never asked; `asked` — those that spent the budget, in probe order, omitted when the deadline was gone before any broker was asked |
+  | `empty` | none — a membrane supervising no brokers, which is never ready |
+
+  `reason` is one of `unreachable`, `timed_out`, `malformed` or `reported`: the socket was not
+  there, it did not answer inside the deadline, it answered something that was not a status, or
+  it answered that it is not serving and said so in `broker_state`. Delivered in
+  `plasmosome-membrane::{control, daemon}` and served by `membraned`.
 - `membrane.cell.desired` — desired-state push, **idempotent and generation-numbered**: the
   full desired cell record plus `generation: u64`. A membrane that receives an equal-or-older
   generation acks and does nothing (replayed reconciler converges instead of re-firing —
