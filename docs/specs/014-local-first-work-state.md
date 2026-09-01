@@ -70,6 +70,7 @@ document_id        = exactly three decimal digits
 document_path      = canonical Git-relative Markdown path
 title              = current Markdown title, read-only in Beads
 content_commit_sha = 40-hex Git commit that established the imported content
+state_version      = monotonically increasing unsigned integer
 intent_ids         = ordered list of three-digit intent ids
 spec_ids           = ordered list of three-digit spec ids
 ```
@@ -84,6 +85,12 @@ the current path and contents. The importer verifies that the file read from tha
 same contents as the imported file. An unrelated later commit does not change this value. Every
 approval, acceptance and content import records this SHA; a gate refuses a governance transition
 whose receipt names a different content revision.
+
+`state_version` starts at 1 on first import and increments on every authoritative
+mutation to that record, including content import, lifecycle, priority, ownership and reconciled
+forge state. A mutation's `expected_document_version` is this exact public value, not the content
+commit. Its receipt records expected and resulting versions. The project remote generation fences
+publication, while the per-record version refuses a lifecycle mutation based on stale state.
 
 The link lists are imported from Markdown without renumbering, reordering or replacing them with
 Beads-native ids. Each id must resolve to exactly one document of the required kind. The ledger may
@@ -128,7 +135,8 @@ local_generation        = local Dolt commit SHA
 remote_generation       = last observed refs/dolt/data SHA or unknown
 remote_observed_at      = UTC timestamp or unknown
 pending_mutations       = count plus operation ids
-freshness               = synchronized_as_of | stale | unknown | unpublished
+freshness               = synchronized_as_of | stale | unknown | unpublished |
+                          stale_with_unpublished | unknown_with_unpublished
 ```
 
 `synchronized_as_of` means only that local and remote generations were equal at
@@ -138,6 +146,11 @@ means the local store contains a mutation not confirmed on GitHub. A clone with 
 remote observation, or an explicit synchronization attempt whose failure leaves equality unknown,
 is `unknown`. Only an online command that re-reads the remote in the same operation may say it
 observed the current remote generation.
+
+Pending publication and remote freshness are independent. When pending mutations coexist with an
+observed newer remote, the value is `stale_with_unpublished`; when they coexist with unknown remote
+equality, it is `unknown_with_unpublished`; otherwise pending mutations produce `unpublished`.
+`pending_mutations` remains populated in all three cases, so recovery never hides either condition.
 
 `ready` and `blocked` are local projections and carry the same freshness envelope. A ready task is
 `planned`, has no live task owner or dependency blocker, names accepted specs, and reaches approved
@@ -150,11 +163,13 @@ The supported writer is the small Plasmosome work-state wrapper. Agents may use 
 for diagnostics against a disposable copy, but direct `bd` writes or pushes to the project store
 are unsupported and are rejected as missing a wrapper operation receipt.
 
-Every mutation supplies a project id, actor, session id, semantic operation id and expected
-document version. The operation id is stable across retries. The ledger stores its request and
-result: repeating a completed operation returns the recorded result, and repeating a refused
-operation returns the same refusal unless the caller starts a new operation against a newer
-version.
+Every mutation supplies a project id, actor, session id, semantic operation id and
+`expected_document_version`. The operation id is stable across retries. A completed result or a
+terminal refusal validated against fresh authoritative state is published as an operation receipt;
+repeating it returns that result. A transport or process failure before any authoritative receipt
+exists does not consume the operation id, so the same operation resumes after recovery. A published
+version conflict is terminal for that operation; the caller refreshes and uses a new operation id
+and expected version for a different request.
 
 An authoritative mutation requires a working GitHub connection. The wrapper synchronizes,
 acquires admission, validates document versions and lifecycle gates, mutates locally, and publishes.
@@ -217,7 +232,19 @@ other effect.
 The ledger preserves the current lifecycle vocabularies: intents are `draft` or `approved`; specs
 are `draft`, `accepted` or `superseded`; tasks are `todo`, `planned`, `in_progress`, `in_review` or
 `done`; task priority is 1, 2 or 3. The wrapper, not Beads' built-in ready or claim behavior,
-defines these meanings.
+defines these meanings and rejects every transition not listed here:
+
+- intent: `draft -> approved`; `approved -> approved` only to bind an explicit new owner approval
+  to a changed content commit;
+- spec: `draft -> accepted`; `accepted -> accepted` only to bind reviewed changed content;
+  `accepted -> superseded` with a reason; and
+- task: `todo -> planned`, `planned -> in_progress`, `in_progress -> in_review`,
+  `in_review -> done`, plus `in_progress -> planned` or `in_review -> planned` only through the
+  recovery rules below.
+
+The wrapper validates the edge, expected state version, gates and ownership before any mutation or
+external effect. In particular, `todo -> done`, `planned -> done`, skipping `in_review`, and every
+transition out of `done` are refusals.
 
 A task may move from `todo` to `planned` only when its Markdown revision has a non-empty plan and
 `done_when`, its `spec_ids` name accepted specs, and its copied `intent_ids` match the intents those
@@ -236,6 +263,12 @@ actor, review, comment, elapsed time or agent request. An explicit owner approva
 `draft -> approved`, the exact intent content commit, UTC timestamp, reason or relayed instruction,
 operation id and resulting remote generation. The wrapper can enforce every machine-readable gate
 that consumes this receipt; it does not claim it can decide that the owner approved.
+
+The repository currently gives agents the owner's GitHub identity, so the actor field is audit and
+not authentication. The wrapper requires an explicit owner directive rather than an actor string,
+but instruction remains the control on who may supply it, as recorded in
+`docs/decisions/008-approving-an-intent-is-an-instruction.md`. Cryptographic distinction between the
+owner and an agent requires separate identities and is not invented by this work-state migration.
 
 Every lifecycle transition records previous state, new state, actor, session, document key,
 content commit, operation id, timestamp, reason and remote generation. Histories are append-only;
@@ -279,11 +312,18 @@ use the wrapper. Only after that Git commit is observed does the guarded mutatio
 the `ledger` authority epoch. CI and the wrapper reject dual authority from that epoch onward. The
 maintenance interval has no writable operational authority; it never enables both.
 
-Rollback is an explicit authority transition, not a concurrent fallback. It first blocks ledger
-writes, backs up the last remote generation and audit, restores a tested snapshot, regenerates the
-Markdown operational fields from that one generation, and only then changes authority back to
-Markdown. Failure before the final authority switch leaves ledger authority in place. No rollback
-step permits both sides to accept writes.
+Rollback is an explicit authority transition, not a concurrent fallback. A published write freeze
+leaves `ledger` as the sole authority while refusing every ordinary mutation; only the idempotent
+administrative rollback operation is admitted through the writer lease and expected-base fence. It
+backs up the last remote generation and audit, restores a tested snapshot, and stages regenerated
+Markdown operational fields from that one generation without accepting writes from them.
+
+The administrative operation publishes `ledger -> markdown-shadow`, the exact target Git
+revision, reason and invalidation of older ledger tokens before Markdown writes are enabled. A
+failure before that publication leaves the published mode `ledger`; a failure after it leaves
+`markdown-shadow`. There may be a no-writer interval while the target Git revision is activated,
+but never zero or two published authorities, and a stale ledger writer cannot publish after the
+mode transition.
 
 Beads, embedded Dolt and the existing GitHub repository are the complete required infrastructure.
 Public open-source use requires no paid runtime or synchronization service. Community web or TUI
@@ -314,6 +354,10 @@ shared filesystem.
   local mutation. They report `unknown`, `synchronized_as_of`, `stale` and `unpublished`
   respectively; the human form says "synchronized as of" with its timestamp, and neither output
   mode presents `synchronized_as_of`, stale or unknown data as current.
+- `combined-freshness` leaves a mutation unpublished, then observes a newer remote generation and
+  separately loses remote equality knowledge. The reads report `stale_with_unpublished` and
+  `unknown_with_unpublished`, preserve the remote metadata and list the pending operation in both
+  structured and human-readable output.
 - `claim-race --processes 2 --clones 2` releases two contenders from a barrier against one planned
   task and asserts one published ownership token, one `writer_conflict` or `claim_conflict`, and one
   append-only winning transition on `refs/dolt/data`.
@@ -323,6 +367,10 @@ shared filesystem.
 - `interrupted-mutation` kills the writer after lease publication, after local mutation, and after
   remote publication before the response. Each restart exposes pending state correctly, returns or
   completes one idempotent result, and leaves one transition rather than losing or duplicating it.
+- `mutation-retries` gives two sessions the same expected state version and proves the first
+  publication increments it while the second receives a terminal version conflict without a state
+  change. It also interrupts transport before any receipt, then retries the same operation id after
+  recovery and publishes exactly one result.
 - `expired-lease-recovery` stops a holder, advances trusted time past expiry, publishes takeover,
   and proves the new holder can finish. The former holder's later publication and external effect
   are refused, and both expiry and takeover remain in audit history.
@@ -333,9 +381,10 @@ shared filesystem.
 - `push-conflict-recovery` creates divergent local Dolt commits in two clones, resolves by guarded
   pull, replay and push, and compares every operation id and transition before and after. No history
   entry is lost, overwritten or silently force-pushed.
-- `approval-audit` approves an intent only through an explicit owner fixture and asserts actor,
-  content commit, `draft -> approved`, UTC timestamp, reason, operation id and remote generation.
-  An agent fixture, inferred GitHub event and mismatched content SHA are each refused.
+- `approval-audit` supplies an explicit owner directive and asserts actor, content commit,
+  `draft -> approved`, UTC timestamp, reason, operation id and remote generation. A missing
+  directive, inferred GitHub event and mismatched content SHA are each refused; the test does not
+  claim authentication the repository's shared GitHub identity cannot provide.
 - `gate-refusals` tries to plan a task without plan/`done_when`, claim or start an unplanned task,
   start through a draft or missing spec, accept a spec under a draft or missing intent, and reuse an
   approval for changed intent content. Multi-spec fixtures cover two accepted specs with distinct
@@ -343,6 +392,9 @@ shared filesystem.
   intent is approved, while a missing second-spec intent, a duplicate, wrong order and an
   unapproved intent each refuse. Every refusal exits non-zero before any remote state or external
   effect changes.
+- `transition-graph` exercises every listed intent, spec and task edge, then tries every other pair
+  of lifecycle values. It proves unlisted edges, including `todo -> done`, `planned -> done`, a
+  skipped review and every transition out of `done`, fail before state or external effects change.
 - `merge-reconciliation --replay 3` omits the initial merge observation, repairs it by polling, and
   replays the same PR, check, review and merge facts three times. It produces one final lifecycle
   transition and one set of facts with the merge commit preserved.
@@ -352,7 +404,9 @@ shared filesystem.
 - `dual-authority` proves shadow mode rejects ledger-originated operational writes, then switches a
   fixture to ledger mode and proves a hand-written Markdown `status:`, task `priority:` or `pr:` and
   a Markdown-to-ledger state overwrite each fail before publication. It also exercises the ordered
-  rollback without a point where both authorities accept writes.
+  rollback, injects failure before and after its fenced administrative transition, and finds
+  exactly one published authority after each failure. Markdown writes start only after
+  `markdown-shadow` publishes, and stale ledger tokens remain refused.
 - `cutover-instructions` scans the ledger-mode fixture's skills, intent/spec/task READMEs, templates,
   hooks and heartbeat entry points. It fails if an agent is still told to write or reconstruct
   volatile Markdown fields, and proves those entry points use the wrapper and its lifecycle values
