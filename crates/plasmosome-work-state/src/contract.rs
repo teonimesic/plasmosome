@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -36,6 +36,16 @@ pub struct ContractResult {
     pub final_generation: Option<String>,
     pub operation_ids: Vec<String>,
     pub command_plans: Vec<String>,
+    pub scenarios: Vec<ScenarioEvidence>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScenarioEvidence {
+    pub case: String,
+    pub observed_base: String,
+    pub final_generation: String,
+    pub operation_ids: Vec<String>,
+    pub command_plans: Vec<String>,
 }
 
 impl ContractResult {
@@ -50,6 +60,7 @@ impl ContractResult {
             final_generation: None,
             operation_ids: Vec::new(),
             command_plans: Vec::new(),
+            scenarios: Vec::new(),
         }
     }
     fn refusal(case: &str, code: &str) -> Self {
@@ -63,6 +74,7 @@ impl ContractResult {
             final_generation: None,
             operation_ids: Vec::new(),
             command_plans: Vec::new(),
+            scenarios: Vec::new(),
         }
     }
 }
@@ -104,32 +116,69 @@ pub struct StoreFixture {
     pub store_root: PathBuf,
     pub environment: BTreeMap<String, String>,
     sentinels: BTreeMap<PathBuf, Vec<u8>>,
+    hook_paths: BTreeSet<PathBuf>,
+    hooks_snapshotted: bool,
 }
 
 impl StoreFixture {
     pub fn snapshot_git_state(&mut self) -> Result<(), &'static str> {
         for path in [
-            self.repository.join(".git/hooks/pre-commit"),
             self.repository.join(".git/index"),
             self.repository.join(".git/config"),
         ] {
             let contents = std::fs::read(&path).map_err(|_| "cutover_blocked")?;
             self.sentinels.insert(path, contents);
         }
-        Ok(())
-    }
-
-    pub fn assert_unchanged(&self) -> Result<(), &'static str> {
-        for (path, expected) in &self.sentinels {
-            if std::fs::read(path).map_err(|_| "cutover_blocked")? != *expected {
-                return Err("cutover_blocked");
-            }
+        let hooks = self.repository.join(".git/hooks");
+        self.hook_paths = std::fs::read_dir(&hooks)
+            .map_err(|_| "cutover_blocked")?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|_| "cutover_blocked")
+            })
+            .collect::<Result<_, _>>()?;
+        self.hooks_snapshotted = true;
+        for path in &self.hook_paths {
+            let contents = std::fs::read(path).map_err(|_| "cutover_blocked")?;
+            self.sentinels.insert(path.clone(), contents);
         }
         Ok(())
     }
 
+    pub fn assert_unchanged(&self) -> Result<(), &'static str> {
+        if !self.hooks_snapshotted {
+            return self.assert_sentinels_unchanged();
+        }
+        let hooks = self.repository.join(".git/hooks");
+        let current_hook_paths = std::fs::read_dir(&hooks)
+            .map_err(|_| "cutover_blocked")?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|_| "cutover_blocked")
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if current_hook_paths != self.hook_paths {
+            return Err("cutover_blocked");
+        }
+        self.assert_sentinels_unchanged()
+    }
+
     pub fn assert_after_stealth_init(&self) -> Result<(), &'static str> {
         let local_config = self.repository.join(".git/config");
+        let hooks = self.repository.join(".git/hooks");
+        let current_hook_paths = std::fs::read_dir(&hooks)
+            .map_err(|_| "cutover_blocked")?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|_| "cutover_blocked")
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if current_hook_paths != self.hook_paths {
+            return Err("cutover_blocked");
+        }
         for (path, expected) in &self.sentinels {
             let actual = std::fs::read(path).map_err(|_| "cutover_blocked")?;
             if path == &local_config {
@@ -140,6 +189,15 @@ impl StoreFixture {
                     return Err("cutover_blocked");
                 }
             } else if actual != *expected {
+                return Err("cutover_blocked");
+            }
+        }
+        Ok(())
+    }
+
+    fn assert_sentinels_unchanged(&self) -> Result<(), &'static str> {
+        for (path, expected) in &self.sentinels {
+            if std::fs::read(path).map_err(|_| "cutover_blocked")? != *expected {
                 return Err("cutover_blocked");
             }
         }
@@ -211,6 +269,8 @@ pub fn prepare_store_fixture(root: &Path, label: &str) -> Result<StoreFixture, &
         store_root: repository.join(".beads"),
         environment,
         sentinels,
+        hook_paths: BTreeSet::new(),
+        hooks_snapshotted: false,
     })
 }
 
@@ -396,7 +456,11 @@ pub fn execute_publication_command<R: CommandRunner>(
     }
     let expected_lease = format!("--force-with-lease=refs/dolt/data:{observed_base}");
     for argument in &command.argv {
-        if argument == "--force" || argument.starts_with("--force=") {
+        if argument == "--force"
+            || argument == "-f"
+            || argument.starts_with("--force=")
+            || (argument.starts_with('+') && argument.ends_with(":refs/dolt/data"))
+        {
             return Err("cutover_blocked".into());
         }
         if argument.starts_with("--force-with-lease") && argument != &expected_lease {
@@ -412,6 +476,19 @@ pub fn execute_publication_command<R: CommandRunner>(
                 .argv
                 .iter()
                 .any(|argument| argument.strip_suffix(":refs/dolt/data").is_some_and(sha)))
+    {
+        return Err("cutover_blocked".into());
+    }
+    if command.program == Path::new("git")
+        && command.argv.first().map(String::as_str) == Some("push")
+        && command
+            .argv
+            .iter()
+            .any(|argument| argument.ends_with(":refs/dolt/data"))
+        && !command
+            .argv
+            .iter()
+            .any(|argument| argument == &expected_lease)
     {
         return Err("cutover_blocked".into());
     }
@@ -573,7 +650,7 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
             .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
         validate_independent_stores(&first, &second)
             .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
-        let mut result = run_scripts(&request.case)
+        let mut result = run_scripted_cases(&request.case)
             .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
         result.clone_labels = vec!["clone-a".into(), "clone-b".into()];
         Ok(result)
@@ -583,7 +660,7 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
         Err(code) => Err(Box::new(ContractResult::refusal(&request.case, code))),
     }
 }
-fn run_scripts(case: &str) -> Result<ContractResult, &'static str> {
+pub fn run_scripted_cases(case: &str) -> Result<ContractResult, &'static str> {
     let cases: &[&str] = if matches!(case, "transport" | "all") {
         &[
             "stale-base-fence",
@@ -603,20 +680,32 @@ fn run_scripts(case: &str) -> Result<ContractResult, &'static str> {
         runner.finish().map_err(|_| "cutover_blocked")?;
         results.push(result);
     }
-    let final_result = results.pop().ok_or("cutover_blocked")?;
+    let final_result = results.last().cloned().ok_or("cutover_blocked")?;
     let operation_ids = results
         .iter()
         .flat_map(|result| result.operation_ids.iter().cloned())
-        .chain(final_result.operation_ids.iter().cloned())
         .collect();
     let command_plans = results
         .iter()
         .flat_map(|result| result.command_plans.iter().cloned())
-        .chain(final_result.command_plans.iter().cloned())
         .collect();
+    let scenarios = results
+        .iter()
+        .map(|result| {
+            Ok(ScenarioEvidence {
+                case: result.case.clone(),
+                observed_base: result.observed_base.clone().ok_or("cutover_blocked")?,
+                final_generation: result.final_generation.clone().ok_or("cutover_blocked")?,
+                operation_ids: result.operation_ids.clone(),
+                command_plans: result.command_plans.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(ContractResult {
+        case: case.into(),
         operation_ids,
         command_plans,
+        scenarios,
         ..final_result
     })
 }
@@ -795,6 +884,7 @@ pub fn run_scripted_contract_case(
         final_generation: Some(evidence.final_generation),
         operation_ids: evidence.operation_ids,
         command_plans,
+        scenarios: Vec::new(),
     })
 }
 

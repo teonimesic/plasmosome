@@ -2,7 +2,7 @@ use plasmosome_work_state::command::{CommandOutput, CommandSpec, RecordingComman
 use plasmosome_work_state::contract::{
     Publication, PushFailure, assert_no_ls_remote, classify_push, dispose_fixture_root,
     execute_publication_command, leased_ref_update, prepare_store_fixture, publish_candidate,
-    recover_after_lost_response, retry_after_transport, run_scripted_case,
+    recover_after_lost_response, retry_after_transport, run_scripted_case, run_scripted_cases,
     run_scripted_contract_case, scripted_outcomes, validate_independent_stores,
 };
 
@@ -259,7 +259,42 @@ fn execution_time_validation_refuses_unsafe_untrusted_force_plans_before_dispatc
         environment: Default::default(),
         redacted_argv_positions: Vec::new(),
     };
-    for command in [unsafe_force, wrong_lease] {
+    let short_force = CommandSpec {
+        program: "git".into(),
+        argv: vec!["push".into(), "origin".into(), "-f".into()],
+        cwd: None,
+        environment: Default::default(),
+        redacted_argv_positions: Vec::new(),
+    };
+    let forced_refspec = CommandSpec {
+        program: "git".into(),
+        argv: vec![
+            "push".into(),
+            "origin".into(),
+            format!("+{G2}:refs/dolt/data"),
+        ],
+        cwd: None,
+        environment: Default::default(),
+        redacted_argv_positions: Vec::new(),
+    };
+    let unleased_ref_update = CommandSpec {
+        program: "git".into(),
+        argv: vec![
+            "push".into(),
+            "origin".into(),
+            format!("{G2}:refs/dolt/data"),
+        ],
+        cwd: None,
+        environment: Default::default(),
+        redacted_argv_positions: Vec::new(),
+    };
+    for command in [
+        unsafe_force,
+        wrong_lease,
+        short_force,
+        forced_refspec,
+        unleased_ref_update,
+    ] {
         let mut runner = RecordingCommandRunner::scripted(vec![Ok(CommandOutput::success("no"))]);
         assert_eq!(
             execute_publication_command(&mut runner, command, G0),
@@ -474,6 +509,19 @@ fn aggregate_transport_retries_runs_lost_response_rediscovery_after_prepublicati
 }
 
 #[test]
+fn aggregate_result_preserves_each_named_scenario_evidence() {
+    let result = run_scripted_cases("transport").unwrap();
+    assert_eq!(result.case, "transport");
+    assert_eq!(result.scenarios.len(), 3);
+    assert_eq!(result.scenarios[0].case, "stale-base-fence");
+    assert_eq!(result.scenarios[0].final_generation, G2);
+    assert_eq!(result.scenarios[1].case, "push-conflict-recovery");
+    assert_eq!(result.scenarios[1].final_generation, G2);
+    assert_eq!(result.scenarios[2].case, "transport-retries");
+    assert_eq!(result.scenarios[2].final_generation, G1);
+}
+
+#[test]
 fn stale_base_fence_keeps_g1_then_g2_across_recovery_and_paused_holder() {
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(observation(G0)),
@@ -550,6 +598,9 @@ fn fixture_snapshot_detects_a_changed_hook_index_or_local_config() {
     fixture.snapshot_git_state().unwrap();
     fixture.assert_unchanged().unwrap();
     std::fs::write(git.join("hooks/pre-commit"), "changed\n").unwrap();
+    assert_eq!(fixture.assert_unchanged(), Err("cutover_blocked"));
+    std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(git.join("hooks/post-commit"), "unexpected\n").unwrap();
     assert_eq!(fixture.assert_unchanged(), Err("cutover_blocked"));
 }
 

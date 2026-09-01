@@ -507,3 +507,12 @@ again after these changes.
 passed in 6.22 seconds. `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `.githooks/provenance-guard` and
 `.githooks/attribution-guard` all exited 0.
+
+2026-09-01: Fresh exact-head review correctly found additional in-scope gaps. Regression tests
+first showed that `-f`, `+<refspec>` and a direct unleased Git data-ref update reached the runner;
+the execution-time validator now refuses each before dispatch. A hook-directory snapshot regression
+first accepted a newly installed `post-commit` hook, then passed after snapshotting the complete
+hook set. Aggregate evidence first lacked a public scenario result and reported only the final
+retry case; it now preserves every named scenario's observed base, final generation, operation ids
+and redacted plan. The checksum-verified real `all` command now reports `case: all` with all three
+scenario evidence blocks and passed.
