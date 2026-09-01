@@ -22,4 +22,4 @@ The first release with something in it picks its own version number.
 
 To follow the work, read the repository. To build a capability module today, the contract is
 [`plasmid-sdk`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid-sdk) and the
-authoring tool is [`plasmid`](https://crates.io/crates/plasmid).
+authoring tool is [`plasmid`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid).
