@@ -10,7 +10,9 @@ outcome:
 Plasmosome should keep intents, specs and tasks as durable documents while the changing status and
 coordination of that work live in shared state. An agent returning in another session or on another
 machine should be able to see what is ready, claimed, blocked, under review or done without
-reconstructing that truth from old files and remote activity.
+reconstructing that truth from old files and remote activity. When sessions run concurrently, they
+must not both carry out the same coordination action, including claiming or dispatching the same
+work, because a shared view that permits duplicate execution has not coordinated them.
 
 Agents ask these questions repeatedly. The state needed for ordinary planning should be available
 locally and while disconnected, so reading it does not require another network request each time.
