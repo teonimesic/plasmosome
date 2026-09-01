@@ -1,7 +1,7 @@
 ---
 id: 042
 title: Prove the pinned Beads transport fence
-status: in_review
+status: done
 priority: 1
 specs: [014]
 intents: [015]
@@ -40,7 +40,7 @@ done_when:
   - An unleased force, missing expected base or scripted result contradicting the documented non-fast-forward contract exits non-zero as `cutover_blocked`; absence of a live hosted test does not.
   - Coverage is collected and its meaningful misses are reviewed; the timed full root gate exits 0; and no migration, cutover or operational work-state claim occurs.
 pr: https://github.com/teonimesic/plasmosome/pull/75
-evidence:
+evidence: PR #75 squash merge 4973a58ed761794a1ceafc6c3a7e30b1fa5a175c
 ---
 
 ## Why
