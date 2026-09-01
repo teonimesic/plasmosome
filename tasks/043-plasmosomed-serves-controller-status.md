@@ -1,7 +1,7 @@
 ---
 id: 043
 title: plasmosomed answers plasmosome.status from its cell registry
-status: in_progress
+status: in_review
 priority: 2
 specs: [001]
 intents: [003, 004, 009, 012]
@@ -26,7 +26,7 @@ done_when:
   - All five gate commands exit 0, reported as bare exit codes.
   - The chain walks - this task names spec 001 and intents 003, 004, 009, 012, reaches
     in_review with pr: set, and the pull request is a draft whose body ends with `task: 043`.
-pr:
+pr: 76
 evidence:
 ---
 
