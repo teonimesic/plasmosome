@@ -10,7 +10,8 @@ intents: [008]
 **Somebody should be able to open this repository and find out, without asking anybody, whether a
 change in flight was wanted, whether it was allowed to start, and whether anyone read it before it
 merged.** All three answers exist today. Each of them can also come back yes when the truth is no.
-They are spread across three skill files that have contradicted one another in writing. They are
+They are spread across six documents — three skills, the root `AGENTS.md`, and the READMEs of two
+folders — one of which already asks two incompatible things of the same small pull request. They are
 read out of records that can stop being records with nothing saying so. And the rules that produce
 them sit where the author of the change they would refuse can widen them.
 
@@ -157,11 +158,27 @@ owner's and it comes first.
 
 ### One statement per rule
 
-A rule in this layer is written in exactly one file, and every other mention points at it. Copies
-drift, and the copy a reader happens to open is the one they follow. That is how two rules about
-the same small pull request came to require incompatible things — merge only a commit a review
-read, and spend one round without re-triggering — each of them true where it was written and
-unfollowable together.
+A rule in this layer is written in exactly one file, and every other mention points at it.
+`AGENTS.md` already says as much — "a second copy of a rule is a copy that will disagree" — and the
+tree does not hold it. The rule that a pull request waiting on the owner stays a draft is written
+out in `AGENTS.md`, in `docs/intents/README.md` and in `.agents/skills/pr-review` step 2. The gate
+on a spec becoming `accepted` is written out in `.agents/skills/tasks`, in `docs/specs/README.md`
+and in `docs/intents/README.md`. The values an intent's `status:` may take are written out twice.
+
+**None of those copies disagrees today, and that is the difficulty rather than the reassurance.** A
+copy costs nothing until the day one of them is edited and the others are not, and it does not
+announce itself before then; the copy a reader happens to open is the one they follow. So this
+clause stands on that reasoning and not on an instance. Nothing on this tree has yet been measured
+drifting between two copies of one rule, and saying otherwise would be the kind of claim this spec
+exists to make contradictable.
+
+What has been measured is the same reading failure by a shorter route. `.agents/skills/pr-review`
+requires the commit being merged to be one a review read, and its own rounds table gives a change
+under 100 lines a single round and says not to re-trigger; addressing a finding makes a new commit,
+so a small pull request that finds anything cannot honour both. Those are two distinct rules, each
+written once, in one file — not copies that drifted. They are cited here for what a reader meets,
+which is two sentences that cannot both be followed, and copies are the commoner way to arrive at
+it.
 
 ## Contract
 
@@ -187,8 +204,7 @@ unfollowable together.
   that found nothing from one that never ran. A signal reading identically in both cases does not
   satisfy this.
 - **Each record in the chain declares its state in exactly one field**, on one line, anchored at
-  the start of the line, whose value comes from a closed set — and **each set is written down in
-  exactly one place**.
+  the start of the line, whose value comes from a closed set.
 - **Each of `docs/intents/`, `docs/specs/` and `tasks/` is swept** for records whose state line is
   not well formed. A sweep prints one line per fault, prints nothing on a clean tree, and treats an
   empty input set as a refusal rather than a pass.
@@ -197,7 +213,12 @@ unfollowable together.
 - **A rule in this layer names what can refuse it** — a sweep, a person's judgement recorded
   visibly, or a named failure someone can go and count. An agent's report that it followed the rule
   is none of the three.
-- **A rule is written in one file**; every other mention is a pointer.
+- **A rule in this layer is written in one file, and each closed set of values is written in one
+  place; every other mention is a pointer. This clause binds what a change adds or edits**, never
+  what is already on the tree. Three rules carry copies today — the wait-as-a-draft rule in three
+  files, the gate on a spec becoming `accepted` in three, an intent's `status:` values in two — and
+  collapsing them is a backfill this spec names rather than schedules: a copy goes when the rule it
+  copies is next edited, removed by whoever edits it. **A new copy is refused now.**
 - **Callers may rely on** this being a floor. Nothing here makes the chain unbypassable: every
   clause is a rule agents read, and
   `docs/decisions/008-approving-an-intent-is-an-instruction.md` records why the mechanical forms
@@ -209,7 +230,9 @@ unfollowable together.
   that are not, and says the list is closed by this spec rather than by the skill.
 - `.agents/skills/tasks` states that an area no spec covers is not one of those shapes, and says
   what to do instead.
-- No skill file states a size, a kind or a category of change that is exempt from the chain.
+- No skill file states a size, a kind or a category of change that is exempt from the chain. The
+  two shapes above are not one: having nothing above you to name is a different claim from being
+  excused from naming it, and the skill text has to make that difference visible.
   `grep -riE 'trivial|20 lines' .agents/skills/` finds the candidates; a hit is something to read,
   not a fault on its own.
 - `.agents/skills/pr-review` states the three things a merged pull request carries, and states that
@@ -221,8 +244,9 @@ unfollowable together.
   the two folders it already sweeps.
 - The statuses that sweep accepts are exactly the set the `## Lifecycle` table in
   `.agents/skills/tasks` lists, and the disagreement between them — five listed, four on the tree,
-  `in_progress` in no file — is settled in that change or before it, by the owner, and not by the
-  sweep.
+  `in_progress` in no file — is settled before the sweep is written, with the change saying where
+  the answer came from. That provenance is a sentence a reviewer reads and not a line a script
+  checks, exactly as an intent's approval is.
 - Each sweep prints nothing on the tree as it stands; prints the offending file for a record whose
   state line is absent, empty, duplicated, malformed, or outside the set, injected one at a time
   into a scratch copy; and refuses in its own words, non-zero, when run where its folder does not
@@ -231,7 +255,8 @@ unfollowable together.
 - Every rule a task under this spec adds to a skill file names, in its own text, what can refuse
   it.
 - No rule a task under this spec adds or edits is stated in more than one file; every other mention
-  is a pointer.
+  is a pointer. Where such a task edits a rule that already carries copies, the copies go in the
+  same change.
 
 ## Out of scope
 
