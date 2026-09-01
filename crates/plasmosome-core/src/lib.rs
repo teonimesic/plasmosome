@@ -4,7 +4,9 @@
 //! the desired-state reconciler placeholder over named instances, cells, and
 //! genomes (D1b/D1c). It also answers the frozen control protocol on an ndjson
 //! connection: the request and reply envelopes, the closed error table, and
-//! `plasmosome.status` built from controller state.
+//! `plasmosome.status` built from controller state. Its binary,
+//! `plasmosomed`, serves that protocol on the control socket its config
+//! names.
 //!
 //! This crate is the controller: VMs, shims and brokers belong to
 //! `plasmosome-membrane`, and controller state crosses processes as serde
@@ -24,6 +26,7 @@ pub mod state;
 pub mod version;
 
 pub use control::{Controller, Handler, MAX_LINE_BYTES, serve_connection};
+pub use daemon::{ConfigError, DaemonConfig, DaemonError, parse_config, run};
 pub use gatekeeper::Gatekeeper;
 pub use lifecycle::{PluginState, StateError};
 pub use manifest::{ManifestError, PlasmidManifest};
