@@ -271,3 +271,19 @@ fn refuses_when_the_tool_it_matches_with_cannot_answer() {
         "the guard cleared a commit carrying a model trailer while the tool it matches with was failing; `grep -q` exits 1 for no match and 2 or more for an error, and reading an error as no match is how a guard reports clean because its own tooling broke.\nguard said:\n{said}"
     );
 }
+
+#[test]
+fn clears_a_body_larger_than_a_pipe_buffer_whose_first_line_is_trailer_shaped() {
+    let mut message = String::from("ci(guard): a body that outgrows a pipe buffer\n\n");
+    message.push_str("Co-Authored-By: A Person <person@example.com>\n");
+    for _ in 0..20_000 {
+        message.push_str("padding that carries the body past the pipe buffer\n");
+    }
+    let output = run_guard_over(&message);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("grep exited"),
+        "the guard called its own tooling unreadable on a body it can read; a guard that refuses \
+         because a writer it spawned took SIGPIPE refuses at random.\nguard said:\n{stdout}",
+    );
+}

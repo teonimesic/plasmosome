@@ -37,7 +37,7 @@ offences=()
 # that as "no match" is how a guard reports clean because its own tooling broke.
 matches() {
   local pattern=$1 text=$2 status
-  printf '%s' "$text" | grep -qiE "$pattern"
+  grep -qiE "$pattern" <<<"$text"
   status=$?
   case $status in
     0) return 0 ;;
