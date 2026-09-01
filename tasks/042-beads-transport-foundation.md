@@ -1,7 +1,7 @@
 ---
 id: 042
 title: Prove the pinned Beads transport fence
-status: in_progress
+status: in_review
 priority: 1
 specs: [014]
 intents: [015]
@@ -39,7 +39,7 @@ done_when:
   - Retry publishes or rediscovers one generation, stale-base refusal never enters the transport-retry path, and every initialized Beads child is stopped and waited before isolated temporary state is removed.
   - An unleased force, missing expected base or scripted result contradicting the documented non-fast-forward contract exits non-zero as `cutover_blocked`; absence of a live hosted test does not.
   - Coverage is collected and its meaningful misses are reviewed; the timed full root gate exits 0; and no migration, cutover or operational work-state claim occurs.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/75
 evidence:
 ---
 
