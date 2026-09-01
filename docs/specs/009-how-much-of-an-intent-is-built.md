@@ -34,8 +34,11 @@ misread the field.
 
 ### Three fields, three different questions
 
-`served:` is a new frontmatter field on an intent. It sits beside two that already exist, and the
-whole risk in adding it is that a reader takes it for one of them.
+`served:` is a new frontmatter field on an intent. It sits beside two others, and the whole risk in
+adding it is that a reader takes it for one of them. Neither neighbour is on `main` yet: `status:`
+and `outcome:` arrive together with the change that introduces intent approval, and the table below
+is the shape of an intent's frontmatter once they have. `docs/templates/intent.md` on `main` today
+carries neither field and defines only a `## Outcome` section.
 
 | Field | The question it answers | Values |
 | --- | --- | --- |
@@ -43,15 +46,17 @@ whole risk in adding it is that a reader takes it for one of them.
 | `served:` | How much of it exists? | `none`, `partly`, `substantially` |
 | `outcome:` | Is this still open? | blank while open, non-blank once settled |
 
-**They vary independently, and every combination of the three is legal.** That is a design
-commitment rather than an observation, and the one worth stating outright is the combination that
-looks wrong and is not: a `draft` intent may carry any of the three values, `substantially`
-included. **Existence does not wait for approval.** An intent drafted over an area where code
-already exists is exactly the backfill `docs/intents/README.md` invites — anyone may draft the
-intent that closes a gap under work already finished — and `partly` is the truthful value for it.
-Nothing may be *committed to* under a draft goal; that gate is `status:`, and it is not this field's
-business. A check that refused `draft` with work beneath it would be reading the approval axis off
-the existence axis, which is the confusion this whole design exists to prevent.
+**`status:` and `served:` vary independently, and every combination of the two is legal.**
+`outcome:` is not a free third axis and does not join that claim: it is blank while the intent is
+open and takes a word once it settles, exactly as the table says, and nothing here changes it. The
+independence is a design commitment rather than an observation, and the combination worth stating
+outright is the one that looks wrong and is not: a `draft` intent may carry any of the three values,
+`substantially` included. **Existence does not wait for approval.** An intent drafted over an area
+where code already exists is exactly the backfill `docs/intents/README.md` invites — anyone may
+draft the intent that closes a gap under work already finished — and `partly` is the truthful value
+for it. Nothing may be *committed to* under a draft goal; that gate is `status:`, and it is not this
+field's business. A check that refused `draft` with work beneath it would be reading the approval
+axis off the existence axis, which is the confusion this whole design exists to prevent.
 
 No value of one field is a value of another, so a reader who confuses two of them is contradicted by
 the words themselves rather than by a rule they have to know.
@@ -134,31 +139,42 @@ carry `specs: []`, and `tasks/007-adopt-the-measured-instruction-rules.md` names
 directly — finished work under intent 001 that a spec-only walk cannot see, which would let intent
 001 sit at `served: none` forever without a word.
 
-The three faults, and nothing else:
+The three per-intent faults, and nothing else:
 
 - **`served: none` with work landed.** Something was built under this goal and the file says nothing
   was. This is the staleness case, and it is the common one: it fires the first time a task closes
   under a goal nobody has revisited.
 - **`served: substantially` with no work landed.** The file claims most of the goal exists and
   nothing under it has shipped.
-- **A `served:` line that is absent, empty, or outside the three values.** Malformation rather than
+- **A file that does not carry exactly one well-formed `served:` line.** Malformation rather than
   contradiction, reported the same way. Absent counts because the field is required and a file that
   never received it is exactly what needs finding — an intent merging from a branch written before
-  this spec is the shape that will hit it.
+  this spec is the shape that will hit it. Empty counts, and so does a value outside the three. So
+  does a *second* `served:` line: the check reads the field by matching a line, a file carrying two
+  has whichever one sorts first silently chosen for it, and a file that says two things says
+  nothing.
 
-**The check does not read `status:` at all.** Approval and existence are independent, so no
-combination of the two is a fault, and a `draft` intent carrying `substantially` is not the check's
-business. An earlier draft of this spec had that fault and it was wrong twice over: it fired on the
-value alone with no landed-work condition, and it left a truthful shape — a draft intent over work
-that already exists — with no legal value at all.
+**The check never reads an *intent's* `status:`.** It does read a *task's* `status:`, and only to
+tell landed work from open work — that is the `done` test above, and it is the only `status:` the
+check has any use for. An intent's approval is invisible to it: approval and existence are
+independent, so no combination of the two is a fault, and a `draft` intent carrying `substantially`
+is not the check's business. An earlier draft of this spec had that fault and it was wrong twice
+over: it fired on the value alone with no landed-work condition, and it left a truthful shape — a
+draft intent over work that already exists — with no legal value at all.
 
 **Silence needs a floor, because silence is the passing answer.** The check reads relative paths in
 the working tree, so a run started from the wrong directory finds no intent files, prints nothing,
 and is indistinguishable from a clean tree. That is the same shape as a review status that reads
-green because no review ran. So **an empty input set is a fault, never a pass**: finding no intent
-file carrying an `id:` is reported and the run refuses, rather than passing quietly. One condition
-buys the difference between "nothing is wrong" and "nothing was read", and without it every other
+green because no review ran. So **an empty input set refuses, never passes**: finding no intent file
+carrying an `id:` is reported and the run refuses, rather than passing quietly. One condition buys
+the difference between "nothing is wrong" and "nothing was read", and without it every other
 guarantee here is conditional on a fact nobody checked.
+
+**That refusal is not a fourth fault, and the distinction is what makes it implementable.** The
+three above are per-intent: each names the intent file it fires on, and finding them is what a run
+does. This one is about the run itself, has no intent file to name, and is the answer to whether
+there was a run at all. It is reported in the check's own words rather than in the one-line-per-fault
+shape, and it ends the run.
 
 This is the whole of the provenance question the check can answer on its own. It names its inputs,
 and it refuses when they are absent. It cannot tell which *repository* it is standing in, and it
@@ -199,15 +215,16 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
 
 ## Contract
 
-- **`served:`** is a required frontmatter field on every intent file, on its own line, anchored at
-  the start of the line, directly after `status:`. Its value is exactly one of `none`, `partly`,
-  `substantially`. `docs/templates/intent.md` ships `served: none`, so a copied and unfilled file
-  claims nothing.
+- **`served:`** is a required frontmatter field on every intent file, appearing **exactly once**, on
+  its own line, anchored at the start of the line, inside the frontmatter and directly after
+  `status:`. Its value is exactly one of `none`, `partly`, `substantially`.
+  `docs/templates/intent.md` ships `served: none`, so a copied and unfilled file claims nothing.
 - **`## What is served`** is a section of `docs/templates/intent.md`, placed before `## Outcome`.
   It holds what of the goal exists and what is left. It contains no spec id, no task id and no
   count. It stops being updated once the intent settles and is not deleted.
 - **`status:`, `outcome:` and `## Outcome` are unchanged** by this spec, in meaning and in
-  placement. No fault in the check reads `status:`.
+  placement. No fault in the check reads an intent's `status:`; the only `status:` it reads is a
+  task's, to tell landed work from open.
 - **Every intent file already on `main` gains the field.** The value is the owner's; the mechanical
   part of the backfill is that no intent file is left without one.
 - **The task under this spec runs after `status:` exists.** `served:` is placed relative to
@@ -220,20 +237,24 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
   Its inputs are `docs/intents/`, `docs/specs/` and `tasks/`. It **validates** only the files in
   `docs/intents/` that carry an `id:`, so the folder's `README.md` is neither validated nor
   reported; it reads the other two folders to derive whether work has landed.
-- It prints one line per fault naming the intent file and the fault, and prints nothing on a tree
-  where every intent's `served:` is well-formed and unrefuted. It reports exactly three faults:
-  `served: none` with work landed; `served: substantially` with no work landed; and a `served:`
-  line that is absent, empty, or outside the three values. It reports nothing about open tasks
-  under any value, nothing about `status:`, and nothing that contradicts `partly`.
+- **Per intent**, it prints one line per fault naming the intent file and the fault, and prints
+  nothing on a tree where every intent's `served:` is well-formed and unrefuted. There are exactly
+  three per-intent faults: `served: none` with work landed; `served: substantially` with no work
+  landed; and a file not carrying exactly one well-formed `served:` line — absent, empty,
+  duplicated, or outside the three values. It reports nothing about open tasks under any value,
+  nothing about an intent's `status:`, and nothing that contradicts `partly`.
 - **"Work has landed"** is true when some task with `status: done` either names a spec whose
   `intents:` names the intent, or names the intent directly in its own `intents:`. Either leg
   suffices.
 - **A spec naming an intent id that no intent file carries does not abort the check**; the intents
   that do exist are still validated. Ids are resolved by reading each file's `id:`, never by
   globbing a filename.
-- **An empty input set is a fault.** If no file in `docs/intents/` carries an `id:`, the check
-  reports that and refuses rather than printing nothing, so a run in the wrong working directory
-  cannot be read as a clean tree.
+- **An empty input set is a run-level refusal, outside the three per-intent faults.** If no file in
+  `docs/intents/` carries an `id:`, there is no intent file to name and the one-line-per-fault shape
+  does not apply: the check prints its own refusal, naming the input set it did not find, and exits
+  non-zero without validating anything. It is not counted among the three, and a run that refuses
+  reports no per-intent faults at all — it did not read far enough to have any. This is what stops a
+  run in the wrong working directory being read as a clean tree.
 - **Callers may rely on** the check being a floor and not a proof: silence means no intent makes a
   claim the tree flatly contradicts, never that any intent's coverage is accurate.
 - **A pull request changing `served:` or `## What is served` stays a draft** until the owner takes
@@ -246,8 +267,12 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
 - `docs/templates/intent.md` carries `served: none` directly after `status:`, and a
   `## What is served` section before `## Outcome`.
 - Every intent file — every file in `docs/intents/` carrying an `id:`, which excludes `README.md` —
-  has a line matching `grep -E '^served: (none|partly|substantially)$'`, and the count of such files
-  equals the count of intent files.
+  carries **exactly one** `^served:` line, sitting in the frontmatter on the line directly after
+  `status:`, whose value is one of the three. Counting the files that match
+  `grep -E '^served: (none|partly|substantially)$'` does **not** establish this and is not the
+  criterion: that count passes a file carrying both `served: none` and `served: mostly`, and passes
+  one whose only `served:` line sits in the body. Count `^served:` lines per file, assert one, then
+  assert its position and its value.
 - `docs/intents/README.md` states the three values and the question the field answers, states that
   the field is the owner's to move, and states that it is independent of `status:`.
 - `.agents/skills/tasks` lists intent `served:` beside intent `status:` in its field-value list, and
@@ -260,8 +285,10 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
 - The check prints the offending file for each of the three faults, injected one at a time into a
   scratch copy: an intent flipped to `served: none` while a `done` task reaches it; one flipped to
   `served: substantially` with nothing done beneath it; and one carrying `served: mostly`.
-- The check prints the offending file for an intent whose `served:` line is **deleted**, and for one
-  whose `served:` line is present but empty.
+- The check prints the offending file for an intent whose `served:` line is **deleted**, for one
+  whose `served:` line is present but empty, and for one carrying **two** `served:` lines — planted
+  as `served: none` and `served: mostly` in the same file, the shape a per-file line count catches
+  and a match count does not.
 - The check prints nothing for a `status: draft` intent carrying `served: partly`, and nothing for a
   `status: draft` intent carrying `served: substantially` with work landed beneath it.
 - The check prints nothing for an intent marked `served: substantially` that has open tasks beneath
