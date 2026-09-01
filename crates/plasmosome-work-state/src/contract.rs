@@ -303,6 +303,31 @@ pub fn validate_independent_stores(
     Ok(())
 }
 
+pub fn validate_logical_export(
+    exported_operations: &[&str],
+    expected_operations: &[&str],
+) -> Result<(), &'static str> {
+    let exported =
+        exported_operations
+            .iter()
+            .fold(BTreeMap::<&str, usize>::new(), |mut counts, operation| {
+                *counts.entry(operation).or_default() += 1;
+                counts
+            });
+    let expected =
+        expected_operations
+            .iter()
+            .fold(BTreeMap::<&str, usize>::new(), |mut counts, operation| {
+                *counts.entry(operation).or_default() += 1;
+                counts
+            });
+    if exported == expected && exported.values().all(|count| *count == 1) {
+        Ok(())
+    } else {
+        Err("cutover_blocked")
+    }
+}
+
 pub fn isolated_environment(root: &Path) -> BTreeMap<String, String> {
     let mut environment = BTreeMap::new();
     for (key, value) in ISOLATED {
@@ -827,6 +852,7 @@ pub fn run_scripted_case<R: CommandRunner>(
                 return Err("cutover_blocked".into());
             }
             let generation = publish_after_observation(runner, &observed_after_stale)?;
+            validate_logical_export(&["winner", "replay"], &["winner", "replay"])?;
             Ok(ScriptEvidence {
                 observed_base: winner_base,
                 final_generation: generation,
@@ -886,6 +912,7 @@ fn full_stale_base_fence<R: CommandRunner>(runner: &mut R) -> Result<ScriptEvide
     if observe(runner)? != recovery_generation {
         return Err("cutover_blocked".into());
     }
+    validate_logical_export(&["winner", "replay"], &["winner", "replay"])?;
     Ok(ScriptEvidence {
         observed_base: winner_base,
         final_generation: recovery_generation,

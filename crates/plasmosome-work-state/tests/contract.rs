@@ -4,6 +4,7 @@ use plasmosome_work_state::contract::{
     execute_publication_command, leased_ref_update, prepare_store_fixture, publish_candidate,
     recover_after_lost_response, retry_after_transport, run_scripted_case, run_scripted_cases,
     run_scripted_contract_case, scripted_outcomes, validate_independent_stores,
+    validate_logical_export,
 };
 
 const G0: &str = "0000000000000000000000000000000000000000";
@@ -539,6 +540,19 @@ fn aggregate_result_preserves_each_named_scenario_evidence() {
     assert_eq!(result.scenarios[1].final_generation, G2);
     assert_eq!(result.scenarios[2].case, "transport-retries");
     assert_eq!(result.scenarios[2].final_generation, G1);
+}
+
+#[test]
+fn logical_export_requires_each_replayed_operation_exactly_once() {
+    assert!(validate_logical_export(&["winner", "replay"], &["winner", "replay"]).is_ok());
+    assert_eq!(
+        validate_logical_export(&["winner", "winner"], &["winner", "replay"]),
+        Err("cutover_blocked")
+    );
+    assert_eq!(
+        validate_logical_export(&["winner", "replay", "replay"], &["winner", "replay"]),
+        Err("cutover_blocked")
+    );
 }
 
 #[test]

@@ -521,3 +521,8 @@ scenario evidence blocks and passed.
 test first accepted G1 carrying `operation:another-operation`; after implementation it refuses
 that unrelated advance as `cutover_blocked`, while the existing same-operation G1 rediscovery and
 the G0 same-candidate retry remain covered.
+
+2026-09-01: Logical export validation was added at the existing recording seam. Its test first
+failed on the absent validator, then proved a winner/replay export must contain each expected
+operation exactly once and refuses missing or duplicate entries; both stale/recovery scripts apply
+that check before reporting success.
