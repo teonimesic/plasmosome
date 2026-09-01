@@ -328,6 +328,34 @@ pub fn validate_logical_export(
     }
 }
 
+pub fn validate_scripted_history<R: CommandRunner>(
+    runner: &mut R,
+    expected_generations: &[&str],
+    expected_operations: &[&str],
+) -> Result<(), String> {
+    let output = runner.run(production_command(
+        "git",
+        vec!["log".into(), "--format=%H%x09%s".into()],
+        Vec::new(),
+    ))?;
+    if output.status != 0 {
+        return Err("cutover_blocked".into());
+    }
+    let entries = output
+        .stdout
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .collect::<Vec<_>>();
+    if entries.iter().map(|(sha, _)| *sha).collect::<Vec<_>>() != expected_generations {
+        return Err("cutover_blocked".into());
+    }
+    let operations = entries
+        .iter()
+        .filter_map(|(_, content)| content.strip_prefix("operation:"))
+        .collect::<Vec<_>>();
+    validate_logical_export(&operations, expected_operations).map_err(str::to_owned)
+}
+
 pub fn isolated_environment(root: &Path) -> BTreeMap<String, String> {
     let mut environment = BTreeMap::new();
     for (key, value) in ISOLATED {
@@ -726,6 +754,18 @@ pub fn run_scripted_cases(case: &str) -> Result<ContractResult, &'static str> {
         );
         let result =
             run_scripted_contract_case(case, &mut runner).map_err(|_| "cutover_blocked")?;
+        if matches!(*case, "stale-base-fence" | "push-conflict-recovery") {
+            validate_scripted_history(
+                &mut runner,
+                &[
+                    "0000000000000000000000000000000000000000",
+                    "1111111111111111111111111111111111111111",
+                    "2222222222222222222222222222222222222222",
+                ],
+                &["winner", "replay"],
+            )
+            .map_err(|_| "cutover_blocked")?;
+        }
         runner.finish().map_err(|_| "cutover_blocked")?;
         results.push(result);
     }
@@ -784,6 +824,9 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
                 stderr: "non-fast-forward".into(),
             }),
             Ok(observation_output(g2)),
+            Ok(CommandOutput::success(format!(
+                "{g0}\tbase\n{g1}\toperation:winner\n{g2}\toperation:replay\n"
+            ))),
         ]),
         "push-conflict-recovery" => Ok(vec![
             Ok(observation_output(g0)),
@@ -799,6 +842,9 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
             Ok(CommandOutput::success("refreshed")),
             Ok(CommandOutput::success("replayed")),
             Ok(observation_output(g2)),
+            Ok(CommandOutput::success(format!(
+                "{g0}\tbase\n{g1}\toperation:winner\n{g2}\toperation:replay\n"
+            ))),
         ]),
         "transport-retries" => Ok(vec![
             Ok(observation_output(g0)),

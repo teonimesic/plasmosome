@@ -4,7 +4,7 @@ use plasmosome_work_state::contract::{
     execute_publication_command, leased_ref_update, prepare_store_fixture, publish_candidate,
     recover_after_lost_response, retry_after_transport, run_scripted_case, run_scripted_cases,
     run_scripted_contract_case, scripted_outcomes, validate_independent_stores,
-    validate_logical_export,
+    validate_logical_export, validate_scripted_history,
 };
 
 const G0: &str = "0000000000000000000000000000000000000000";
@@ -553,6 +553,16 @@ fn logical_export_requires_each_replayed_operation_exactly_once() {
         validate_logical_export(&["winner", "replay", "replay"], &["winner", "replay"]),
         Err("cutover_blocked")
     );
+}
+
+#[test]
+fn scripted_history_requires_g0_winner_replay_and_their_contents() {
+    let mut runner = RecordingCommandRunner::scripted(vec![Ok(CommandOutput::success(format!(
+        "{G0}\tbase\n{G1}\toperation:winner\n{G2}\toperation:replay\n"
+    )))]);
+    validate_scripted_history(&mut runner, &[G0, G1, G2], &["winner", "replay"]).unwrap();
+    assert_eq!(runner.commands()[0].argv, vec!["log", "--format=%H%x09%s"]);
+    assert!(runner.finish().is_ok());
 }
 
 #[test]
