@@ -23,12 +23,23 @@ The formats and the layers those files use are in `.agents/skills/tasks`.
 **1. Pending PRs.**
 
 ```shell
-gh pr list --state open
+gh pr list --state open --json number,isDraft,title
 ```
 
-For each one, answer three questions: is CI green, are the review rounds for its diff size done,
-and are all conversations resolved? `main` requires conversation resolution, so a single
-unresolved thread is what is blocking the merge — not CI, and not a missing approval.
+For each one, answer four questions: does it have a task, is CI green, are the review rounds for
+its diff size done, and are all conversations resolved? `main` requires conversation resolution, so
+a single unresolved thread is what is blocking the merge — not CI, and not a missing approval.
+
+**A pull request with no task is not one to merge, and this is the check that repeats.**
+`.agents/skills/tasks` has the rule, the two shapes that carry no task, and the remedy — which is
+usually work to send back rather than a reason to stall.
+
+**A draft is not automatically stalled work.** One waiting on the owner — because it proposes an
+intent, or because its chain reaches an intent nobody has approved — is in the right place and is
+not waiting on an agent. Do not resume its author to unblock it; say who it is waiting on.
+`.agents/skills/pr-review` step 2 has when that applies. You can tell this is working by whether
+such a draft ever turns up in a session's stalled-work list, or gets its author resumed to unblock
+it: either is the failure, and the session that did it is where both are visible.
 
 **2. Pending reviews.** `gh pr view --json` has no `reviewThreads` field; review threads come
 from the GraphQL API only.
@@ -126,7 +137,7 @@ that can catch the gate being broken rather than unmet:
 for f in $(grep -l '^status: accepted$' docs/specs/*.md); do
   ids=$(sed -n 's/^intents: \[\(.*\)\]/\1/p' "$f" | tr -d ' ' | tr ',' '\n' | grep -v '^$')
   if [ -z "$ids" ]; then
-    [ "$f" = "docs/specs/001-control-protocol.md" ] || echo "$f: accepted, names no intent"
+    echo "$f: accepted, names no intent"
     continue
   fi
   echo "$ids" | while read -r i; do
@@ -142,16 +153,17 @@ done
 
 That loop prints five faults: an accepted spec whose intent is still `draft`, one naming an id no
 intent file carries, one naming an id that several files carry, one naming an intent that does not
-declare its status exactly once, and a **new** accepted spec naming no intent at all. Two of them
+declare its status exactly once, and an accepted spec naming no intent at all. Two of them
 share a message, because an id must resolve to **exactly one** file and both zero and several are
 failures to do that. Resolving it by picking the first match would make the gate hold or fail on
 filename order, since the duplicate that sorts first is the one that answers.
 
 Ids are read out of each intent's own `id:` rather than globbed from the filename, so a missing
-intent is reported instead of aborting the loop. The amnesty fault needs the one name hardcoded,
-because `docs/specs/001-control-protocol.md` is the whole of it — see "What predates the rule" in
-`.agents/skills/tasks`. Anything else that line prints is a spec that skipped the gate. Silence is
-the only passing answer: unlike the lists above, output here is a fault, not a queue.
+intent is reported instead of aborting the loop. The loop exempts no spec by name: every `accepted`
+spec names an intent, so anything that line prints is a spec that skipped the gate. An exception
+hardcoded here would go on suppressing that fault for the named file long after it stopped
+applying. Silence is the only passing answer: unlike the lists above, output here is a fault, not a
+queue.
 
 **A selector fails open, and one sweep is what covers that.** Every check that finds records by
 matching a status line — the draft-intent lists above, and the accepted-spec selector this loop
