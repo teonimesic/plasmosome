@@ -3,8 +3,8 @@
 //!
 //! A ledger's contents are serde data framed one `LogRecord` per ndjson line,
 //! so the ledger is recoverable by replaying its log alone — `Ledger::open_file`
-//! rebuilds it from disk and replay proceeds unchanged (86 §4 rule 3: durable
-//! state never lives only in the crashiest process). `append_to_file` appends
+//! rebuilds it from disk and replay proceeds unchanged, so durable state never
+//! lives only in the crashiest process. `append_to_file` appends
 //! the whole current ledger; rebuild-then-extend is `open_file` → `push` →
 //! `append_to_file` on the reopened ledger.
 
