@@ -510,16 +510,13 @@ fn stale_base_is_never_routed_through_transport_retry() {
 
 #[test]
 fn contradictory_scripted_result_is_cutover_blocked() {
-    let mut runner = RecordingCommandRunner::scripted(vec![
-        Ok(observation(G0)),
-        Ok(observation(G0)),
-        Ok(CommandOutput::success("published")),
-        Ok(observation(G0)),
-    ]);
+    let mut runner =
+        RecordingCommandRunner::scripted(vec![Ok(observation(G0)), Ok(observation(G1))]);
     assert_eq!(
         run_scripted_case("stale-base-fence", &mut runner).unwrap_err(),
         "cutover_blocked"
     );
+    assert_eq!(runner.commands().len(), 2);
     assert!(runner.finish().is_ok());
 }
 

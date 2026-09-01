@@ -26,7 +26,12 @@ impl CommandSpec {
             })
             .collect::<Vec<_>>()
             .join(" ");
-        format!("{} {args}", self.program.display())
+        let program = self
+            .program
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<redacted>");
+        format!("{program} {args}")
     }
 }
 

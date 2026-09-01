@@ -13,7 +13,7 @@ fn command_output_redacts_credentials_and_paths() {
         environment: Default::default(),
         redacted_argv_positions: vec![1],
     };
-    assert_eq!(command.display(), "/private/secret/bd push <redacted>");
+    assert_eq!(command.display(), "bd push <redacted>");
 }
 
 #[test]
