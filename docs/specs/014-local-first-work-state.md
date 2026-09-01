@@ -124,11 +124,12 @@ freshness               = synchronized_as_of | stale | unknown | unpublished
 ```
 
 `synchronized_as_of` means only that local and remote generations were equal at
-`remote_observed_at`; it never means that an offline read knows the remote has not advanced since.
-`stale` means a newer remote generation has been observed but not applied. `unpublished` means the
-local store contains a mutation not confirmed on GitHub. Missing remote knowledge, a failed poll or
-an offline session is `unknown`, not current. Only an online command that re-reads the remote in
-the same operation may say it observed the current remote generation.
+`remote_observed_at`; an offline read may retain that label and timestamp, but never presents it as
+current. `stale` means a newer remote generation has been observed but not applied. `unpublished`
+means the local store contains a mutation not confirmed on GitHub. A clone with no successful
+remote observation, or an explicit synchronization attempt whose failure leaves equality unknown,
+is `unknown`. Only an online command that re-reads the remote in the same operation may say it
+observed the current remote generation.
 
 `ready` and `blocked` are local projections and carry the same freshness envelope. A ready task is
 `planned`, has no live task owner or dependency blocker, names accepted specs, and reaches approved
@@ -263,10 +264,12 @@ requires parity plus the race, interruption, stale-holder, expiry, conflict, bac
 tests below on two processes and two independent clones.
 
 Before cutover, the migration makes a restorable Dolt backup, a logical export and a Git tag or
-commit identifying the Markdown snapshot. Cutover takes the project writer lease, performs a final
-import and reconciliation, writes the `ledger` authority epoch, publishes it, and only then removes
-or unmistakably generates the volatile Markdown fields. CI and the wrapper reject dual authority
-from that epoch onward.
+commit identifying the Markdown snapshot. Cutover then blocks work-state mutations, performs the
+final import and reconciliation, and merges one Git change that removes writable volatile fields
+and updates every agent-facing lifecycle rule, template, selector and status-flip instruction to
+use the wrapper. Only after that Git commit is observed does the guarded mutation write and publish
+the `ledger` authority epoch. CI and the wrapper reject dual authority from that epoch onward. The
+maintenance interval has no writable operational authority; it never enables both.
 
 Rollback is an explicit authority transition, not a concurrent fallback. It first blocks ledger
 writes, backs up the last remote generation and audit, restores a tested snapshot, regenerates the
@@ -286,18 +289,23 @@ runs `./tools/work-state contract-test all`. GitHub cases use two independent cl
 fixture refs in a disposable public test repository; they do not simulate the remote with one
 shared filesystem.
 
-- `shadow-parity --source-ref origin/main` dynamically imports every numeric intent, spec and task,
-  asserts that the baseline contains 39 task records, and reports no missing, extra or different
-  lifecycle, priority, link, PR or evidence value while Markdown is authoritative.
+- `shadow-parity --source-ref origin/main` dynamically imports every numeric intent, spec and task
+  present when it runs and reports no missing, extra or different lifecycle, priority, link, PR or
+  evidence value while Markdown is authoritative. The fixed historical fixture
+  `13c0f68c13743f4db2fb123fef560f3fa12734d1` separately asserts 39 task records.
 - `document-mapping --source-ref origin/main` exports and reimports every logical record and
   compares the exact three-digit id, kind, key, path, title, content commit and ordered upward
   links. Duplicate ids, missing targets, a changed order and a content/SHA mismatch each make the
   command exit non-zero with the offending key.
-- `offline-reads` disables DNS and network routes, then successfully runs `list`, `show`, `ready`,
-  `blocked` and `heartbeat observe` against the local store and verifies that no socket was opened.
-- `freshness` advances the remote from a second clone and separately leaves a local mutation
-  unpublished. The first clone reports `unknown` until it observes the new generation, then
-  `stale`; the second case reports `unpublished`. Neither output contains a current claim.
+- `offline-reads` disables DNS and network routes, then runs `list`, `show`, `ready`, `blocked` and
+  `heartbeat observe` in both structured and human-readable forms. Every result contains
+  `last_successful_sync_at`, `local_generation`, `remote_generation`, `remote_observed_at`,
+  `pending_mutations` and `freshness`, and the harness verifies that no socket was opened.
+- `freshness` starts with an unsynchronized clone, an offline clone synchronized at a known old
+  generation, a clone that has observed a newer remote generation, and a clone with an unpublished
+  local mutation. They report `unknown`, `synchronized_as_of`, `stale` and `unpublished`
+  respectively; the human form says "synchronized as of" with its timestamp, and neither output
+  mode presents `synchronized_as_of`, stale or unknown data as current.
 - `claim-race --processes 2 --clones 2` releases two contenders from a barrier against one planned
   task and asserts one published ownership token, one `writer_conflict` or `claim_conflict`, and one
   append-only winning transition on `refs/dolt/data`.
@@ -322,8 +330,9 @@ shared filesystem.
   An agent fixture, inferred GitHub event and mismatched content SHA are each refused.
 - `gate-refusals` tries to plan a task without plan/`done_when`, claim or start an unplanned task,
   start through a draft or missing spec, accept a spec under a draft or missing intent, and reuse an
-  approval for changed intent content. Every case exits non-zero before any remote state or external
-  effect changes.
+  approval for changed intent content. It also gives a task an accepted spec but copied
+  `intent_ids` different from that spec's complete intent list. Every case exits non-zero before any
+  remote state or external effect changes.
 - `merge-reconciliation --replay 3` omits the initial merge observation, repairs it by polling, and
   replays the same PR, check, review and merge facts three times. It produces one final lifecycle
   transition and one set of facts with the merge commit preserved.
@@ -334,6 +343,10 @@ shared filesystem.
   fixture to ledger mode and proves a hand-written Markdown `status:`, task `priority:` or `pr:` and
   a Markdown-to-ledger state overwrite each fail before publication. It also exercises the ordered
   rollback without a point where both authorities accept writes.
+- `cutover-instructions` scans the ledger-mode fixture's skills, intent/spec/task READMEs, templates,
+  hooks and heartbeat entry points. It fails if an agent is still told to write or reconstruct
+  volatile Markdown fields, and proves those entry points use the wrapper and its lifecycle values
+  after the authority epoch.
 - `version-pin` passes with a checksum-verified Beads 1.1.2 binary and refuses a lower, higher or
   unparsable `bd --version` before store migration, sync or mutation.
 - `stealth-init` initializes a clean fixture and proves agent instructions, hooks and tracked files
