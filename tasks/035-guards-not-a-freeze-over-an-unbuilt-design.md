@@ -19,11 +19,11 @@ done_when: >-
   testkit dev-only rule, the attribution guard, the provenance guard and skill
   discovery; no test in the workspace asserts the controller's dependency set,
   the shape of a wire type, or shared memory across the seam; `cargo test
-  --workspace` is green and reports 231 tests against 261 before; the publish
-  guard is shown by mutation to still fail when a member becomes publishable;
-  and nothing in the tree claims the old crate name enforces anything, the
-  dated records under `docs/decisions/` and `tasks/` and spec 013's own account
-  of the change aside.
+  --workspace` is green and reports 235 tests against 261 before; each of the
+  six guards is shown to fail on the violation it names, by an in-crate refusal
+  test or by a live mutation recorded in the PR; and nothing in the tree claims
+  the old crate name enforces anything, the dated records under
+  `docs/decisions/` and `tasks/` and spec 013's own account of the change aside.
 pr: 64
 evidence:
 ---
@@ -47,7 +47,9 @@ into a bar the surviving guards clear and the removed ones do not.
    `docs/decisions/` and `tasks/` alone: they are dated records of what was true when written.
 4. Rewrite the crate's `README.md` and `AGENTS.md` around the permanent-or-public bar, and correct
    every doc that claimed an enforcement which no longer exists.
-5. Mutation-test the three workspace guards after the move.
+5. Show each of the six guards refusing the violation it names — a test in the crate that feeds
+   it the violation and asserts refusal, or a live mutation observed to fail and reverted — and
+   record the evidence in the PR.
 
 ## Notes
 

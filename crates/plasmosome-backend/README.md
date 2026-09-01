@@ -15,6 +15,10 @@ The seam also carries an honest distinction: some grants are **hot** (a proxy ma
 appear mid-run) and some are **generation-bound** (a VM's memory size cannot). The interface
 makes a backend say which, rather than letting callers assume.
 
+The seam crosses a process boundary, so its state travels as serde data: every type in that
+vocabulary derives `Serialize`/`Deserialize` and holds no shared memory. Why the crate names no
+VMM or broker process is covered in `AGENTS.md`.
+
 ## What's inside
 
 | Piece | Responsibility |
