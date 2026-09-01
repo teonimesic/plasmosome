@@ -2,7 +2,7 @@
 id: 001
 title: Control protocol
 status: accepted
-intents: [004, 009, 012]
+intents: [003, 004, 009, 012]
 ---
 
 # Plasmosome control protocol — the P1 contract, as delivered

@@ -4,7 +4,7 @@ title: A mock lives inside the plasmid that owns the hosts, and a spec records w
 status: in_review
 priority: 2
 specs: [001]
-intents: [004, 009, 012]
+intents: [003, 004, 009, 012]
 refs:
   [
     docs/specs/001-control-protocol.md,
@@ -48,14 +48,17 @@ its design is wrong it is corrected in place, rather than kept intact under an a
 top. The first ruling is the case in point: the mock plasmid is wrong, and correcting it should not
 need a ceremony.
 
-`intents:` is copied from spec 001, which this branch fills in for the first time: `004`
-(removing a capability removes exactly that one — §3.11 in wire form), `009` (a command line an
-agent can drive — the protocol is the only control surface, and what the CLI speaks) and `012` (a
-capability exists only while it is needed — the attach and detach lifecycle). Those were always the
-goals the control protocol served; nobody had written them down. Intent 010 is where the first
-ruling comes from, and it is not among them: a mock an author writes inside their own plasmid is
-squarely *plasmids anyone can write*, but the control protocol as a whole is not, so recording 010
-on spec 001 would map the spec to a goal it does not serve.
+`intents:` is copied from spec 001, which this branch fills in for the first time: `003` (cells
+come back after a crash — §4's generation-numbered desired-state push, §3.10's attach receipts
+carrying the ledger generation, and §6 item 6's replayable-from-log ledger, all of which mean
+nothing unless the controller restarts), `004` (removing a capability removes exactly that one —
+§3.11 in wire form), `009` (a command line an agent can drive — the protocol is the only control
+surface, and what the CLI speaks) and `012` (a capability exists only while it is needed — the
+attach and detach lifecycle). Those were always the goals the control protocol served; nobody had
+written them down. Intent 010 is where the first ruling comes from, and it is not among them: a
+mock an author writes inside their own plasmid is squarely *plasmids anyone can write*, but the
+control protocol as a whole is not, so recording 010 on spec 001 would map the spec to a goal it
+does not serve.
 
 ## Plan
 
