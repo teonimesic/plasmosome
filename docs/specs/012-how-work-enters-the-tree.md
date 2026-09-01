@@ -1,0 +1,260 @@
+---
+id: 012
+title: How work enters the tree — the chain, the gates, and what a pull request must carry
+status: draft
+intents: [008]
+---
+
+## Behavior
+
+**Somebody should be able to open this repository and find out, without asking anybody, whether a
+change in flight was wanted, whether it was allowed to start, and whether anyone read it before it
+merged.** All three answers exist today. Each of them can also come back yes when the truth is no.
+They are spread across three skill files that have contradicted one another in writing. They are
+read out of records that can stop being records with nothing saying so. And the rules that produce
+them sit where the author of the change they would refuse can widen them.
+
+The rules governing how work enters the tree are a layer of this repository like any other: the
+chain from an intent down to a task, the gates on what may be started, the conditions a pull
+request meets before it merges, and the records all of that is read out of. **This spec is the
+contract that layer answers to.** It is not the rules. A rule written for the next agent to read
+lives in `.agents/skills/`; what this says is which properties such a rule must have, so that one
+added tomorrow can be checked against something instead of argued about.
+
+### Every rule here is paired with something that can come back negative
+
+`docs/intents/008-an-ai-native-way-of-building-plasmosome.md` asks one thing of any loop: a check
+that can answer no, whose answer does not come from the agents being checked. A process rule
+nobody can fail is a preference, and this is the layer where preferences are cheapest to add and
+most expensive to keep.
+
+So **a rule in this layer names which of three things can refuse it**, and a rule naming none of
+them does not go in:
+
+- **A sweep over the files** — mechanical, runnable by anybody, printing faults and nothing else.
+- **A person's judgement, recorded where it is visible** — not remembered, and not reported by the
+  agent whose work it gates.
+- **A named failure with a count somebody can take** — concrete enough that a reader can go and see
+  whether it stopped happening.
+
+The third is the weakest of the three and is still a check, because it can be contradicted: "you
+can tell whether this is working by whether an open pull request without a task survives a
+heartbeat" is a claim the tree can refute. What is not a check is an agent's own report that it
+followed the rule. That is the answer coming from inside the loop, which is the one shape intent
+008 rules out by name.
+
+### The chain is total, and the list of things above it is closed
+
+Every change that reaches `main` is reachable upward: the pull request names a task, the task names
+a spec, the spec names an intent. Read that way it answers "was this wanted", which is the whole
+point of the links. A change that skips them has no answer to give.
+
+**Exactly two shapes have nothing above them, and both are structural.** A pull request filing an
+intent sits at the top of the chain and has no layer above it to point at. A pull request filing a
+spec is the first half of a pair whose task rides the second half — the work branch that cannot
+exist until the spec is accepted. Neither can name a governing document without one being invented
+for the purpose, which is precisely the move the gates exist to refuse.
+
+**That list is closed here rather than in the skill, and the placement is the point.** An exemption
+written where the author of a change can widen it gets widened. The previous one said "under about
+twenty lines" and was in practice applied to a whole category at any size: three merged pull
+requests carrying no task changed 173, 65 and 51 lines, all three of them edits to the skills. That
+was not cheating. The rule sat in a file the exempted change was also editing, so it had no author
+but the person it was refusing. Adding a third shape is an amendment to this spec, in a pull
+request of its own, which is a different act from writing a paragraph into a skill.
+
+**The tempting third shape, refused here by name: "no spec describes my area yet."** That is not
+above the chain. It is the ordinary case of work needing a new spec, and the answer is to write one
+under the intent that wants it — or, where no intent wants it, to put the question to the owner or
+to drop the change and say why. Absence of a governing document is the chain not yet reaching
+something, never permission to step around it. Read loosely, this readmits every change the size
+exemption used to let through, which is why it is written as a refusal rather than left to be
+inferred.
+
+### The gates bind starting, not writing
+
+Anything may be written down at any time, and working ahead is meant to happen: a draft spec under
+a draft intent is a proposal on the record and costs one document to throw away. **What waits is
+commitment.**
+
+There are two gates on starting, and this spec adds none:
+
+- A spec may not become `accepted` until the intent it names is `approved`.
+- A task may not be started until the spec it names is `accepted`.
+
+**That set is closed the same way the exemptions are, for the mirror-image reason.** A gate is
+cheapest to add in the document describing the work it would delay, and a process layer that
+accumulates gates stops being read at all. A third gate is an amendment here.
+
+### One gate belongs to a person, and it is a state rather than a courtesy
+
+Approval is the owner's, and it is the only judgement in this layer that cannot be derived from the
+tree — every other answer is a field somebody can read. An approved intent multiplies into specs
+and each of those into tasks, so it is the point where one yes becomes work nobody has counted.
+
+**Anything waiting on the owner waits in the open, as a draft pull request.** That is a state and
+not a memory: `gh pr list` is the queue in front of them, and it does not depend on an agent
+remembering to mention what it is waiting for. It carries down the chain unchanged — a change whose
+chain reaches a goal nobody has approved is waiting on the same person, in the same place, for the
+same reason.
+
+It is a coordination signal and not a boundary: an agent can mark such a pull request ready exactly
+as it can write `approved` into a file. `docs/decisions/008-approving-an-intent-is-an-instruction.md`
+argues why nothing mechanical holds it and what that costs, and nothing here reopens it.
+
+### What a merged pull request has to carry
+
+Three things. They are stated together because each has failed on its own:
+
+- **A link upward** — a task, or being one of the two shapes above.
+- **A review that read the commit being merged** — not a review of an earlier head, and not a
+  signal whose real meaning is queued, rate limited, skipped, or not started yet.
+- **An answer to every thread**, by a fix or by a disagreement written down.
+
+**The middle one carries a requirement about evidence, and that is the part worth stating
+precisely.** A signal reading the same whether or not a review happened is not evidence of a
+review, whatever its colour. The evidence has to bind to the commit that merges, and it has to tell
+a review that found nothing from a review that never ran — the two states that look identical to
+anything counting reviews rather than reading them. Which reviewer, which endpoint and which
+command obtain that is the skill's business and changes when the tool does. That it binds to the
+merged commit is this spec's, and does not.
+
+This is not a rule about carelessness. Every signal named above fails in the same direction, toward
+merging, and an agent doing exactly what it was told is the one that ships the unread change.
+
+### A record nobody can read has left the queue
+
+Every rule above is enforced by reading files, and every list this repository builds finds its
+records by matching a line — `status:`, `specs:`, `intents:`. **A selector like that fails open.** A
+record written `status:todo`, or with a trailing space, or saved with CRLF endings, does not turn up
+late in its queue. It leaves the queue, silently, and the count meant to notice is the thing that
+stopped seeing it. That is the opposite direction from a gate, where a mismatch is a refusal.
+
+So the layer carries two requirements about its own records.
+
+**Each record declares its state once, from a set of values written down in one place.** One field,
+one line, anchored at the start of it, one value from a closed set. A set written down twice
+eventually disagrees with itself, and a sweep built on the wrong copy is worse than no sweep: it
+clears the files that are wrong and reports the ones that are right.
+
+**Each folder holding those records is swept for whether its state lines are well formed at all.**
+A sweep is not a queue. It prints faults, silence is the only passing answer, and an empty input set
+refuses rather than passes — a run that found no files to read is indistinguishable from a run over
+a clean tree, which is the same shape as a green that reviewed nothing.
+`docs/specs/009-how-much-of-an-intent-is-built.md` requires that floor of its own check for that
+reason; this is the general form of it.
+
+**Two of the three folders are swept today and the third is not.** `docs/intents/` and
+`docs/specs/` are. `tasks/` holds 28 records, more than either, and every list built over it is a
+selector with nothing behind it.
+
+**The vocabulary is settled before the sweep is written, never by it.** `.agents/skills/tasks`
+lists five task statuses and the tree carries four: no task file on the tree holds `in_progress`.
+A sweep written today would have to pick a side, and a check is the worst place to settle a
+question — from then on the disagreement is enforced instead of discussed. Whether an executor
+records claiming a task changes what an agent must write down mid-flight, so the answer is the
+owner's and it comes first.
+
+### One statement per rule
+
+A rule in this layer is written in exactly one file, and every other mention points at it. Copies
+drift, and the copy a reader happens to open is the one they follow. That is how two rules about
+the same small pull request came to require incompatible things — merge only a commit a review
+read, and spend one round without re-triggering — each of them true where it was written and
+unfollowable together.
+
+## Contract
+
+- **The subject** is how work enters the tree: the chain from intent to spec to task, the gates on
+  what may be started, the conditions a pull request meets before it merges, and the form of the
+  records all of that is read out of. It does not reach the content of any individual rule — how
+  many review rounds a diff size earns, which reviewer, which endpoint answers which question.
+  Those change without this spec changing.
+- **Every change reaching `main` is reachable upward**: pull request → task → spec → intent.
+- **Exactly two shapes have nothing above them**: a pull request filing an intent, and one filing a
+  spec. **The list is closed, and adding to it is an amendment to this spec** in a pull request of
+  its own — not a judgement available to the author of the change that would use it. An area no
+  spec covers is not one of the two and does not become a third.
+- **The gates on starting are two and no more**: a spec may not become `accepted` until the intent
+  it names is `approved`; a task may not be started until the spec it names is `accepted`. Adding a
+  gate is an amendment here too. **Nothing gates what may be written down.**
+- **Approval is the owner's**, and is the only judgement in this layer not derivable from the tree.
+- **Anything waiting on the owner waits as a draft pull request**, so the waiting is a state anyone
+  can list rather than something an agent has to say.
+- **A merged pull request carries** a link upward or is one of the two shapes; a review that read
+  the commit being merged; and an answer to every thread.
+- **Evidence that a review happened binds to the commit being merged** and distinguishes a review
+  that found nothing from one that never ran. A signal reading identically in both cases does not
+  satisfy this.
+- **Each record in the chain declares its state in exactly one field**, on one line, anchored at
+  the start of the line, whose value comes from a closed set — and **each set is written down in
+  exactly one place**.
+- **Each of `docs/intents/`, `docs/specs/` and `tasks/` is swept** for records whose state line is
+  not well formed. A sweep prints one line per fault, prints nothing on a clean tree, and treats an
+  empty input set as a refusal rather than a pass.
+- **A sweep never settles what the legal values are.** Where the written set and the tree disagree,
+  that is resolved before the sweep is written.
+- **A rule in this layer names what can refuse it** — a sweep, a person's judgement recorded
+  visibly, or a named failure someone can go and count. An agent's report that it followed the rule
+  is none of the three.
+- **A rule is written in one file**; every other mention is a pointer.
+- **Callers may rely on** this being a floor. Nothing here makes the chain unbypassable: every
+  clause is a rule agents read, and
+  `docs/decisions/008-approving-an-intent-is-an-instruction.md` records why the mechanical forms
+  were turned down and what would reopen them.
+
+## Acceptance
+
+- `.agents/skills/tasks` states that every pull request is reachable upward, names the two shapes
+  that are not, and says the list is closed by this spec rather than by the skill.
+- `.agents/skills/tasks` states that an area no spec covers is not one of those shapes, and says
+  what to do instead.
+- No skill file states a size, a kind or a category of change that is exempt from the chain.
+  `grep -riE 'trivial|20 lines' .agents/skills/` finds the candidates; a hit is something to read,
+  not a fault on its own.
+- `.agents/skills/pr-review` states the three things a merged pull request carries, and states that
+  the review evidence binds to the commit being merged rather than to the pull request.
+- `.agents/skills/pr-review` step 2 states that a change whose chain reaches an unapproved intent
+  stays a draft, and `.agents/skills/heartbeat` step 1 states that such a draft is not stalled
+  work waiting on an agent.
+- `.agents/skills/heartbeat` step 4 sweeps `tasks/*.md` for a well-formed `status:` line, alongside
+  the two folders it already sweeps.
+- The statuses that sweep accepts are exactly the set the `## Lifecycle` table in
+  `.agents/skills/tasks` lists, and the disagreement between them — five listed, four on the tree,
+  `in_progress` in no file — is settled in that change or before it, by the owner, and not by the
+  sweep.
+- Each sweep prints nothing on the tree as it stands; prints the offending file for a record whose
+  state line is absent, empty, duplicated, malformed, or outside the set, injected one at a time
+  into a scratch copy; and refuses in its own words, non-zero, when run where its folder does not
+  exist. Verified under both `bash` and `zsh`, because a glob matching nothing is fatal in one and
+  empty in the other.
+- Every rule a task under this spec adds to a skill file names, in its own text, what can refuse
+  it.
+- No rule a task under this spec adds or edits is stated in more than one file; every other mention
+  is a pointer.
+
+## Out of scope
+
+- **Writing the rules.** This spec is the contract; the skill text that agents read is the work
+  under it, and lands in its own pull requests. A spec that also wrote the rules would be
+  reviewed as one change with the thing it governs, which is the ordering the two-pull-request rule
+  exists to keep apart.
+- **The content of any one rule.** How many rounds a diff size earns, which reviewer runs, how a
+  review is triggered on an unchanged commit, and whether `in_progress` survives are all decided in
+  the skills and by the owner. This spec says what a rule must have, never what it must say.
+- **A mechanical gate on the chain.** Nothing here asks CI to refuse a pull request that names no
+  task. Both mechanical forms refuse real work — a spec's pull request touches no task file by
+  design, and a body line lives somewhere the hooks cannot read — and a guard that refuses real
+  work teaches everybody to reach for the bypass. The conditions are read by agents and checked
+  again by the heartbeat.
+- **The layers above the chain, and `docs/decisions/`.** Vision and architecture are not work
+  entering the tree, and a decision is not a link in the chain — a task may cite one and it never
+  stands in for the spec the task names.
+- **How much of a goal has been built.** `docs/specs/009-how-much-of-an-intent-is-built.md` owns
+  that question and the field that answers it. This spec is about work entering; that one is about
+  what has landed.
+- **A decision record.** What is argued down here — a size threshold, an exemption the author of a
+  change can widen, a sweep that settles its own vocabulary — is argued in the prose above. The one
+  that will be raised again is the exemption, because every process change meets it and every
+  author has a reason. **If a third shape is proposed a second time, that is the trigger to write
+  the record** rather than to re-run the argument from here.
