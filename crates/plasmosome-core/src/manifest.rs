@@ -189,7 +189,10 @@ impl PlasmidManifest {
             .and_then(|impl_table| impl_table.get("wasm"))
             .and_then(toml::Value::as_str)
             .map(PathBuf::from);
-        let network = raw.get("network").map(parse_network);
+        let network = raw
+            .get("network")
+            .map(|n| parse_network(&id, "network", n))
+            .transpose()?;
         let requires = raw
             .get("requires")
             .map(|r| string_list(r.get("capabilities")))
@@ -210,7 +213,10 @@ impl PlasmidManifest {
             .map(parse_secret_refs)
             .transpose()?
             .unwrap_or_default();
-        let commands = raw.get("commands").map(parse_commands).transpose()?;
+        let commands = raw
+            .get("commands")
+            .map(|c| parse_commands(&id, c))
+            .transpose()?;
         let workspace = raw
             .get("workspace")
             .and_then(|w| w.get("mount"))
@@ -226,30 +232,33 @@ impl PlasmidManifest {
                     .unwrap_or("/workspace")
                     .to_string(),
             });
-        let mock = raw.get("mock").map(|m| {
-            let backend = m.get("backend");
-            let source = backend
-                .and_then(|b| b.get("source"))
-                .and_then(toml::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let kind = backend
-                .and_then(|b| b.get("kind"))
-                .and_then(toml::Value::as_str)
-                .unwrap_or("recorded")
-                .to_string();
-            let api = m
-                .get("api")
-                .and_then(toml::Value::as_str)
-                .unwrap_or("github")
-                .to_string();
-            MockSpec {
-                hosts: string_list(m.get("hosts")),
-                kind,
-                api,
-                source,
-            }
-        });
+        let mock = raw
+            .get("mock")
+            .map(|m| {
+                let backend = m.get("backend");
+                let source = backend
+                    .and_then(|b| b.get("source"))
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let kind = backend
+                    .and_then(|b| b.get("kind"))
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("recorded")
+                    .to_string();
+                let api = m
+                    .get("api")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("github")
+                    .to_string();
+                Ok(MockSpec {
+                    hosts: declared_string_list(&id, "mock", "hosts", m.get("hosts"))?,
+                    kind,
+                    api,
+                    source,
+                })
+            })
+            .transpose()?;
         let model = raw.get("model").map(|m| ModelSpec {
             endpoint: m
                 .get("endpoint")
@@ -285,6 +294,9 @@ impl PlasmidManifest {
                 "plasmid {id} declares [network] without hosts"
             )));
         }
+        if let Some(spec) = &mock {
+            validate_mock(&id, spec, network.as_ref())?;
+        }
         validate_secret_refs(&id, &secrets)?;
         if let Some(commands) = &commands {
             validate_commands(&id, commands)?;
@@ -312,8 +324,13 @@ impl PlasmidManifest {
     }
 }
 
-fn parse_network(n: &toml::Value) -> NetworkSpec {
-    let hosts = string_list(n.get("hosts"));
+fn parse_network(id: &str, section: &str, n: &toml::Value) -> Result<NetworkSpec, ManifestError> {
+    if !n.is_table() {
+        return Err(ManifestError::Invalid(format!(
+            "plasmid {id}: [{section}] must be a table"
+        )));
+    }
+    let hosts = declared_string_list(id, section, "hosts", n.get("hosts"))?;
     let ports = n
         .get("ports")
         .and_then(toml::Value::as_array)
@@ -325,12 +342,12 @@ fn parse_network(n: &toml::Value) -> NetworkSpec {
                 .collect()
         })
         .unwrap_or_default();
-    let pin_cidrs = string_list(n.get("pin_cidrs"));
-    NetworkSpec {
+    let pin_cidrs = declared_string_list(id, section, "pin_cidrs", n.get("pin_cidrs"))?;
+    Ok(NetworkSpec {
         hosts,
         ports,
         pin_cidrs,
-    }
+    })
 }
 
 fn parse_secret_refs(secrets: &toml::Value) -> Result<Vec<SecretRef>, ManifestError> {
@@ -370,7 +387,7 @@ fn normalize_scope(item: &mut toml::Value) {
     }
 }
 
-fn parse_commands(raw: &toml::Value) -> Result<CommandsSpec, ManifestError> {
+fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, ManifestError> {
     let address_plan = raw
         .get("address_plan")
         .and_then(toml::Value::as_str)
@@ -395,7 +412,10 @@ fn parse_commands(raw: &toml::Value) -> Result<CommandsSpec, ManifestError> {
                 .get("subject")
                 .and_then(toml::Value::as_str)
                 .map(String::from),
-            network: decl.get("network").map(parse_network),
+            network: decl
+                .get("network")
+                .map(|n| parse_network(plasmid_id, &format!("commands.{id}.network"), n))
+                .transpose()?,
             secrets: decl
                 .get("secrets")
                 .map(parse_secret_refs)
@@ -457,6 +477,26 @@ fn validate_secret_refs(id: &str, refs: &[SecretRef]) -> Result<(), ManifestErro
     Ok(())
 }
 
+fn validate_mock(
+    id: &str,
+    mock: &MockSpec,
+    network: Option<&NetworkSpec>,
+) -> Result<(), ManifestError> {
+    let Some(network) = network else {
+        return Err(ManifestError::Invalid(format!(
+            "plasmid {id} declares [mock] without the [network] hosts it stands in for"
+        )));
+    };
+    for host in &mock.hosts {
+        if !network.hosts.iter().any(|declared| declared == host) {
+            return Err(ManifestError::Invalid(format!(
+                "plasmid {id}: [mock] names host `{host}`, which its [network] does not declare"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestError> {
     for decl in &commands.commands {
         for secret in &decl.secrets {
@@ -469,6 +509,32 @@ fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestEr
         }
     }
     Ok(())
+}
+
+fn declared_string_list(
+    id: &str,
+    section: &str,
+    field: &str,
+    value: Option<&toml::Value>,
+) -> Result<Vec<String>, ManifestError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        return Err(ManifestError::Invalid(format!(
+            "plasmid {id}: [{section}] `{field}` must be an array of strings"
+        )));
+    };
+    items
+        .iter()
+        .map(|item| {
+            item.as_str().map(String::from).ok_or_else(|| {
+                ManifestError::Invalid(format!(
+                    "plasmid {id}: [{section}] `{field}` holds `{item}`, which is not a string"
+                ))
+            })
+        })
+        .collect()
 }
 
 fn string_list(value: Option<&toml::Value>) -> Vec<String> {
@@ -570,7 +636,22 @@ version = "0.1.0"
 mount = { backend = "virtiofs", dst = "/workspace" }
 "#;
 
-    const MOCK_GITHUB: &str = r#"
+    const GITHUB_PR_WITH_MOCK: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+impl.wasm = "components/github-pr.wasm"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+
+[mock]
+hosts = ["api.github.com"]
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const MOCK_WITHOUT_NETWORK: &str = r#"
 id = "mock-github"
 version = "0.1.0"
 
@@ -578,6 +659,150 @@ version = "0.1.0"
 hosts = ["api.github.com"]
 api = "github"
 backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const MOCK_HOSTS_DRIFTED_FROM_NETWORK: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+
+[mock]
+hosts = ["api.github.example"]
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const MOCK_HOSTS_AS_SCALAR: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+
+[mock]
+hosts = "api.github.com"
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const MOCK_HOSTS_MIXED_TYPES: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+
+[mock]
+hosts = ["api.github.com", 443]
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const NETWORK_PIN_CIDRS_AS_SCALAR: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+pin_cidrs = "140.82.112.0/20"
+"#;
+
+    const NETWORK_PIN_CIDRS_MIXED_TYPES: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+pin_cidrs = ["140.82.112.0/20", 20]
+"#;
+
+    const NETWORK_HOSTS_AS_SCALAR: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = "api.github.com"
+ports = [443]
+"#;
+
+    const NETWORK_PIN_CIDRS_EMPTY: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+pin_cidrs = []
+"#;
+
+    const COMMAND_NETWORK_HOSTS_AS_SCALAR: &str = r#"
+id = "e13-commands-fixture"
+version = "0.1.0"
+
+[network]
+hosts = ["alpha.ak.local"]
+ports = [443]
+
+[commands]
+address_plan = "10.29.0.0/24"
+
+[commands.commands.git]
+exec = ["git"]
+subject = "git"
+
+[commands.commands.git.network]
+hosts = "alpha.ak.local"
+ports = [443]
+"#;
+
+    const NETWORK_SECTION_AS_SCALAR: &str = r#"
+id = "probe"
+version = "0.1.0"
+network = "api.github.com"
+"#;
+
+    const COMMAND_NETWORK_SECTION_AS_SCALAR: &str = r#"
+id = "e13-commands-fixture"
+version = "0.1.0"
+
+[network]
+hosts = ["alpha.ak.local"]
+ports = [443]
+
+[commands]
+address_plan = "10.29.0.0/24"
+
+[commands.commands.git]
+exec = ["git"]
+network = "alpha.ak.local"
+"#;
+
+    const COMMAND_NETWORK_PIN_CIDRS_AS_SCALAR: &str = r#"
+id = "e13-commands-fixture"
+version = "0.1.0"
+
+[network]
+hosts = ["alpha.ak.local"]
+ports = [443]
+
+[commands]
+address_plan = "10.29.0.0/24"
+
+[commands.commands.git]
+exec = ["git"]
+subject = "git"
+
+[commands.commands.git.network]
+hosts = ["alpha.ak.local"]
+ports = [443]
+pin_cidrs = "10.29.0.0/24"
 "#;
 
     const COMMANDS_E13: &str = r#"
@@ -697,13 +922,131 @@ subject = "git"
     }
 
     #[test]
-    fn mock_manifest_carries_hosts_and_backend_shape() {
-        let manifest = PlasmidManifest::parse(MOCK_GITHUB).unwrap();
+    fn a_plasmid_carries_its_own_mock_alongside_the_hosts_it_stands_in_for() {
+        let manifest = PlasmidManifest::parse(GITHUB_PR_WITH_MOCK).unwrap();
+        assert_eq!(manifest.id, "github-pr");
         let mock = manifest.mock.as_ref().unwrap();
         assert_eq!(mock.hosts, vec!["api.github.com".to_string()]);
         assert_eq!(mock.kind, "recorded");
         assert_eq!(mock.api, "github");
         assert_eq!(mock.source, "fixtures/github-pr");
+        assert_eq!(
+            mock.hosts,
+            manifest.network.as_ref().unwrap().hosts,
+            "a mock names the hosts its own manifest declares, so the two lists cannot drift"
+        );
+    }
+
+    #[test]
+    fn a_manifest_whose_whole_content_is_a_mock_is_refused() {
+        let err = PlasmidManifest::parse(MOCK_WITHOUT_NETWORK).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("[network]")),
+            "a mock stands in for hosts a plasmid declares, so it is never a plasmid of its own: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_mock_naming_a_host_its_own_manifest_does_not_declare_is_refused() {
+        let err = PlasmidManifest::parse(MOCK_HOSTS_DRIFTED_FROM_NETWORK).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("api.github.example")),
+            "the refusal names the host that drifted: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_mock_whose_hosts_is_a_bare_string_is_refused() {
+        let err = PlasmidManifest::parse(MOCK_HOSTS_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("hosts")),
+            "a scalar `hosts` declares no host at all, and silently standing in for nothing is \
+             the failure a mock exists to prevent: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_mock_whose_hosts_holds_a_non_string_is_refused() {
+        let err = PlasmidManifest::parse(MOCK_HOSTS_MIXED_TYPES).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("hosts")),
+            "dropping the entry that is not a string would narrow the mock without saying so: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_pin_declared_as_a_bare_string_must_not_parse_to_no_pins_at_all() {
+        let err = PlasmidManifest::parse(NETWORK_PIN_CIDRS_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[network]") && m.contains("pin_cidrs")),
+            "a scalar pin_cidrs read as an empty list is an egress restriction that fails open \
+             — the author declared a pin and nothing was pinned: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_pin_cidrs_holding_a_non_string_is_refused() {
+        let err = PlasmidManifest::parse(NETWORK_PIN_CIDRS_MIXED_TYPES).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("pin_cidrs") && m.contains("not a string")),
+            "dropping the entry that is not a string would widen egress without saying so: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_network_hosts_declared_as_a_bare_string_is_refused_as_a_type_error_naming_the_field() {
+        let err = PlasmidManifest::parse(NETWORK_HOSTS_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("hosts") && m.contains("must be an array of strings")),
+            "a hosts-shaped typo is a type error, not an absence, and reporting it as absence \
+             sends the author looking for a line that is already there: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_network_hosts_declared_as_a_bare_string_is_refused() {
+        let err = PlasmidManifest::parse(COMMAND_NETWORK_HOSTS_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[commands.git.network]") && m.contains("hosts")),
+            "a command whose network hosts read as an empty list carries no host restriction \
+             at all, and nothing behind the parser notices: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_network_section_declared_as_a_scalar_is_refused() {
+        let err = PlasmidManifest::parse(COMMAND_NETWORK_SECTION_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[commands.git.network]") && m.contains("must be a table")),
+            "a network section that is not a table reads every field as absent, so the command \
+             carries a network declaration that restricts nothing: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_network_section_declared_as_a_scalar_is_refused_as_a_type_error_not_an_absence() {
+        let err = PlasmidManifest::parse(NETWORK_SECTION_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[network]") && m.contains("must be a table")),
+            "reporting a section-shaped typo as missing hosts sends the author looking for a \
+             line that is already there: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_pin_cidrs_declared_as_a_bare_string_is_refused() {
+        let err = PlasmidManifest::parse(COMMAND_NETWORK_PIN_CIDRS_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[commands.git.network]") && m.contains("pin_cidrs")),
+            "the fourth cell the criterion claims: a command-level pin that parses to no pins \
+             at all must be refused by a test, not only by a shared helper: {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicitly_empty_pin_cidrs_list_parses_and_pins_nothing() {
+        let manifest = PlasmidManifest::parse(NETWORK_PIN_CIDRS_EMPTY).unwrap();
+        assert!(manifest.network.as_ref().unwrap().pin_cidrs.is_empty());
     }
 
     #[test]

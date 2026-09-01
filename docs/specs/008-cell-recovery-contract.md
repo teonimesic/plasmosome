@@ -71,7 +71,7 @@ durable exists in any older shape — no production writer of per-cell ledgers e
 this spec — so there is no history to stay readable for.
 
 `mock` takes exactly three values, and their wire strings are part of this contract:
-`"simulate"`, `"capture"`, `"passthrough"` — the closed D2 vocabulary spec 001 §3.9 freezes,
+`"simulate"`, `"capture"`, `"passthrough"` — the closed D2 vocabulary spec 001 §3.9 states,
 in the lowercase serde form `plasmosome-core::state::MockMode` already writes. A fourth
 string does not parse, and on the recovery path an unparseable line quarantines the cell.
 

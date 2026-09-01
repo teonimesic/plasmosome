@@ -7,11 +7,12 @@ Every **new** spec names an intent in its `intents:` field, and may not become `
 that intent reads `status: approved`. Writing it before then is fine and is meant to happen: a
 `draft` spec may name a `draft` intent, so a human reading does not idle the queue.
 
-**One accepted spec names no intent, and it is the whole of the exception.**
-`001-control-protocol.md` predates the rule and keeps its place. Any *other* accepted spec with an
+**Every accepted spec names an intent, and the one exception there was is closed and empty.**
+`001-control-protocol.md` predated the rule and once stood `accepted` with an empty `intents:`; it
+now names the intents it serves. Any accepted spec with an
 empty `intents:` is a spec that skipped the gate, not one that predates it — an unbounded "it came
 first" is a permanent excuse, because nothing tells an old file from a new one claiming to be old.
-`.agents/skills/heartbeat` step 4 checks this and hardcodes that one name.
+`.agents/skills/heartbeat` step 4 checks this and exempts no spec by name.
 
 A spec's status flips to `accepted` in the last commit before its pull request merges, so `main`
 never holds a spec whose status lies — **unless the intent it names is still `draft`, in which case

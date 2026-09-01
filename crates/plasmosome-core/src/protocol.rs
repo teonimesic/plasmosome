@@ -564,10 +564,14 @@ mod tests {
         );
         expect_code_and_fields(
             WireError::mock_mode_conflict(
-                "mock-github".to_string(),
+                "model-provider".to_string(),
                 vec![MockMode::Simulate, MockMode::Passthrough],
-                vec!["github-pr".to_string(), "mock-github".to_string()],
-                vec!["force_simulate".to_string()],
+                vec!["github-pr".to_string(), "model-provider".to_string()],
+                vec![
+                    "force_simulate".to_string(),
+                    "force_passthrough".to_string(),
+                    "remove_plasmid".to_string(),
+                ],
             ),
             104,
             &["node", "modes", "plasmids", "resolutions"],

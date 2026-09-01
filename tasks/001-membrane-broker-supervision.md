@@ -4,7 +4,7 @@ title: The membrane supervises its cell's brokers
 status: done
 priority: 1
 specs: [001]
-intents: []
+intents: [003, 004, 009, 012]
 refs:
   [
     crates/plasmosome-membrane/AGENTS.md,
