@@ -3,8 +3,8 @@ id: 029
 title: Four conformance tasks do not name the intent their spec carries
 status: todo
 priority: 3
-specs: [003]
-intents: [002]
+specs: [012]
+intents: [008]
 refs:
   [
     tasks/004-testkit-and-seams.md,
@@ -13,6 +13,7 @@ refs:
     tasks/011-conformance-holds-the-forced-path.md,
     tasks/012-conformance-replays-in-the-order-detach-does.md,
     docs/specs/003-test-architecture.md,
+    docs/specs/012-how-work-enters-the-tree.md,
   ]
 done_when: >-
   tasks 009, 010, 011 and 012 each carry intents: [002], matching the spec they
