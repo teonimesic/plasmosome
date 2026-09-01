@@ -144,24 +144,19 @@ impl Drop for BoundSocket {
 
 /// Runs the controller daemon until `shutdown` is set, then tears it down.
 ///
-/// Binds the control socket first, so a start that cannot bind has done
-/// nothing else. A path already there is refused whether it is a live daemon's
-/// socket or a stale file: the daemon never unlinks a path it did not create,
-/// because unlinking a live daemon's socket is how a half-alive controller is
-/// manufactured. Returning — cleanly, with an error raised after the bind, or
-/// through an unwinding panic — removes the socket path.
+/// Binds the control socket named by `config` first, so a start that cannot
+/// bind has done nothing else. A path already there is refused, whether it
+/// holds a live daemon's socket or a stale file; the daemon never unlinks a
+/// path it did not create, so clearing a stale path is the caller's job.
 ///
-/// Connections are taken one at a time and each is answered in request order.
-/// The flag is checked between accepts and between reads, and both halves of a
-/// connection are bounded by a timeout, so neither an idle client nor one that
-/// never reads its replies holds the daemon open past shutdown. The instance
-/// starts with no cells and at ledger generation zero; nothing here adds one.
+/// Returning — cleanly, on an error raised after the bind, or through an
+/// unwinding panic — removes the socket path. A `SIGKILL` runs no destructor,
+/// so callers must not read the path's absence as the daemon being gone.
 ///
-/// A handler panic is not caught: the connection loop answers `-32603` and
-/// resumes the unwind, which passes through this function and removes the
-/// socket path on the way out. **What no destructor can cover is `SIGKILL` of
-/// the daemon itself** — a killed process runs none, so the socket path stays.
-/// That residue is observed rather than prevented.
+/// Requests on a connection are answered in order, and `shutdown` is honored
+/// against a client that stops reading its replies. The instance starts with
+/// no cells at ledger generation zero. A handler panic answers `-32603` and
+/// then unwinds out of this function.
 pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonError> {
     let listener =
         UnixListener::bind(&config.control_socket).map_err(|source| DaemonError::Bind {

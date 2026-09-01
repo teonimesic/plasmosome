@@ -429,7 +429,7 @@ Item by item, what is true of the tree today. An item that is not yet true says 
 is a claim that the text above may not be corrected.
 
 1. Every verb above has a passing round-trip test against the real controller (ndjson in,
-   typed result out) — **one verb of them**. `plasmosomed` exists: it reads a config naming its
+   typed result out) — **true of one verb**. `plasmosomed` exists: it reads a config naming its
    control socket and its instance, serves the §1 envelope on that socket, and answers
    `plasmosome.status` (§3.3) from an empty cell registry at ledger generation 0. Every other
    verb in §3 is **not yet** — nothing serves them. The socket path in §1 is not yet the one it
