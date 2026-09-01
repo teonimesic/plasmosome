@@ -187,9 +187,26 @@ the scaffold writes the declaration now and still refuses the component, saying 
   nothing its grants allowed passes the boundary — for processes that were already running when
   it happened, not only for ones started after. What detach does not claim is what had already
   crossed into a running process before it: a value a process read, an environment a process was
-  started with. Nothing can unread those, and this contract does not pretend to; what it
-  promises is that nothing so retained reaches past the boundary again. Detach needs nothing
-  from the plasmid throughout — no hook, no veto, no say.
+  started with, a handle a process opened. Nothing can unread those, and this contract does not
+  pretend to; what it promises is that nothing so retained reaches past the boundary again. That
+  a tool no longer *resolves* is a statement about what a name now finds, not a claim that a
+  handle already open stops working. Detach needs nothing from the plasmid throughout — no hook,
+  no veto, no say.
+- **Detach returns when reachability is revoked, and is accountable for a bound after that.**
+  Returning means no new reference to anything the plasmid placed can be obtained. It does not
+  mean every reference is gone: one taken before the detach keeps its object alive, and detach
+  neither waits for it nor destroys it. What the contract holds instead is the bound — every
+  reference that outlives the detach is named, with the owner holding it, until the last one
+  goes. A reference with no owner, or one still held past its bound, is a failure this contract
+  is accountable for. Verification of that is part of the detach it verifies, not a reading
+  taken after success has already been reported: a check that cannot change the outcome it
+  describes is telemetry, and this contract does not rest on one.
+- **What a refusal cannot protect.** A detach that would strand an attached requirer is refused,
+  and that covers dependence some declaration states. It does not cover dependence nothing
+  declared — work the agent did against a tool while it was attached, state it holds that assumes
+  a capability. No declaration in the closure records that, so nothing can refuse on its behalf.
+  Removing a capability is the operation with no declaration standing behind it, and this
+  contract says so rather than implying a protection it does not have.
 
 ### What this amends in spec 001
 
@@ -227,9 +244,9 @@ a change nobody reviewed.
 ### The gate, and what this spec does not decide
 
 Intent 010 names a gate between generating a plasmid and it taking effect, and says outright that
-its shape is undecided. It stays undecided here. Two things about it are already settled — not by
-this spec, but by approved intents and by how the kernel enforces — and stating them is what keeps
-the open question from being answered by accident.
+its shape is undecided. It stays undecided here. Three things about it are already settled — not
+by this spec, but by approved intents and by how the kernel enforces — and stating them is what
+keeps the open question from being answered by accident.
 
 **A cell cannot approve its own widening.** The agent that found the gap is the one asking for the
 capability, and intent 012 puts the agent inside the boundary last on the list of things to rely
@@ -246,6 +263,15 @@ with it.
 
 **Reading bounds reach, not conduct.** A plasmid granted a repository can do anything to that
 repository. The credential grammar's scopes narrow part of the gap and do not close it.
+
+**One approval covers both directions.** A gate approves a declaration. Because the kernel grants
+exactly what that declaration names, and detach revokes exactly what it held, the reverse
+procedure is not a second artifact needing its own approval — it is the same one read backwards.
+This is why nothing signs off on a detach separately: there is nothing to sign that was not
+already signed at attach. The fields that put the strongest authority on removal are the ones
+whose approved artifact carries the reverse procedure alongside the forward one, and a
+declaration is that artifact here. What this does not reach is dependence no declaration
+expresses, which the detach promises above state as a limit rather than leave to be inferred.
 
 **This says what a declaration is sufficient for, not what a gate is limited to.** A gate that
 also reads the code, the diff, or where the declaration came from is ruled out by nothing here,
@@ -308,7 +334,11 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   revoked only with its last requirer; a detach that would strand an attached requirer is
   refused, naming the requirers. Revocation is enforcement rather than erasure: after detach
   nothing the plasmid's grants allowed passes the boundary, and what a running process already
-  read is not claimed back.
+  read is not claimed back. Detach returns when no new reference can be obtained; a reference
+  taken before it keeps its object alive, and every such reference is named with its owner until
+  the last one goes. A reference with no owner, or one held past that bound, is a failure of the
+  detach, and the check that finds it runs where it can still fail the detach rather than after
+  it has been reported done.
 - **`plasmid new <name>` writes exactly one file, the declaration**, grants nothing, attaches
   nothing, and prints the sections the author must add. It writes no component, says that it
   will not until the plasmid interface is frozen, and exits `2` — the code decision 010 fixed
@@ -374,6 +404,11 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   after which a call the provider's grants had allowed is denied.
 - Detaching a provider that an attached plasmid still requires is refused, and the refusal names
   the requirer.
+- A detach whose object outlives it reports that object, with the owner holding it, and the
+  report is reached on a path that can still fail the detach; a detach whose object is gone
+  reports none. A check that only ever runs after the detach has been reported done does not
+  satisfy this clause, and neither does one that finds nothing because the name was destroyed
+  while the object it named is still alive.
 - After a detach, a process that was already running when it happened is denied at the boundary
   on every capability the detached declaration named, and no tool of that plasmid resolves for
   it.
