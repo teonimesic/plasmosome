@@ -521,6 +521,65 @@ fn contradictory_scripted_result_is_cutover_blocked() {
 }
 
 #[test]
+fn stale_base_fence_refuses_an_accepted_initial_stale_push() {
+    let mut runner = RecordingCommandRunner::scripted(vec![
+        Ok(observation(G0)),
+        Ok(observation(G0)),
+        Ok(operation_write("winner")),
+        Ok(operation_commit("winner")),
+        Ok(CommandOutput::success("winner")),
+        Ok(observation(G1)),
+        Ok(CommandOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: "non-fast-forward".into(),
+        }),
+    ]);
+
+    assert_eq!(
+        run_scripted_case("stale-base-fence", &mut runner).unwrap_err(),
+        "cutover_blocked"
+    );
+    assert_eq!(runner.commands().len(), 7);
+    assert!(runner.finish().is_ok());
+}
+
+#[test]
+fn stale_base_fence_refuses_an_accepted_paused_holder_push() {
+    let mut runner = RecordingCommandRunner::scripted(vec![
+        Ok(observation(G0)),
+        Ok(observation(G0)),
+        Ok(operation_write("winner")),
+        Ok(operation_commit("winner")),
+        Ok(CommandOutput::success("winner")),
+        Ok(observation(G1)),
+        Ok(CommandOutput {
+            status: 1,
+            stdout: String::new(),
+            stderr: "non-fast-forward".into(),
+        }),
+        Ok(observation(G1)),
+        Ok(CommandOutput::success("refreshed")),
+        Ok(operation_write("replay")),
+        Ok(operation_commit("replay")),
+        Ok(CommandOutput::success("replayed")),
+        Ok(observation(G2)),
+        Ok(CommandOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: "non-fast-forward".into(),
+        }),
+    ]);
+
+    assert_eq!(
+        run_scripted_case("stale-base-fence", &mut runner).unwrap_err(),
+        "cutover_blocked"
+    );
+    assert_eq!(runner.commands().len(), 14);
+    assert!(runner.finish().is_ok());
+}
+
+#[test]
 fn every_named_transport_case_has_its_own_exact_script() {
     for case in [
         "stale-base-fence",
