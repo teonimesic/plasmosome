@@ -28,7 +28,7 @@ make the promise honest have not been made. They are the owner's, not a planner'
 Decided now, so the spec is buildable the day the decisions land:
 
 - **Publish:** `plasmid-sdk`, `plasmosome-core`, `plasmosome-ledger`, `plasmosome-backend`,
-  `plasmosome-membrane`. **Never publish:** `plasmosome-freeze-checks` and
+  `plasmosome-membrane`. **Never publish:** `plasmosome-guards` and
   `plasmosome-testkit`, which get `publish = false`.
 - Path dependencies gain `version =` fields, which `cargo package` requires.
 - CI gains a `package` job: `cargo package -p <crate>` per publishable **leaf** crate — the ones

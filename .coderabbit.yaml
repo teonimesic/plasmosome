@@ -7,9 +7,9 @@
 #
 #   1. A "simplification" that widens a capability is a vulnerability, not a cleanup. Revocation
 #      paths, deny floors, and reap-on-drop logic are deliberately explicit.
-#   2. The architectural rules in `crates/plasmosome-freeze-checks` are enforced as tests: the
-#      controller must never gain a dependency on virtualization code. A suggestion to "just
-#      import it" is always wrong.
+#   2. The controller must never gain a dependency on virtualization code — a controller that
+#      links a hypervisor dies with the cell it was supposed to outlive. A suggestion to "just
+#      import it" is always wrong. Nothing enforces that mechanically; review is where it holds.
 
 language: en-US
 early_access: false
@@ -35,10 +35,12 @@ reviews:
         Typed reversibility: every effect records its inverse and detach replays them LIFO.
         Flag anything that records an effect without an inverse, or that makes replay
         order-dependent in a way the type system does not enforce.
-    - path: "crates/plasmosome-freeze-checks/**"
+    - path: "crates/plasmosome-guards/**"
       instructions: |
-        These tests encode architectural rules. Do not suggest relaxing them; if a rule
-        blocks a change, the change is wrong.
+        These tests refuse harm that is permanent or public: an unintended publish, a commit
+        crediting a model, the private research corpus reaching this tree. Do not suggest
+        relaxing one to make a change pass. Do flag a new guard here whose subject is a design
+        the project has not built yet — that belongs in a spec, not in a failing build.
     - path: "**/*.rs"
       instructions: |
         House style: no inline `//` comments. Documentation is `///` contract docs on public

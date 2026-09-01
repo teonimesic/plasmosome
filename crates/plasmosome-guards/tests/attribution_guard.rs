@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use plasmosome_freeze_checks::workspace_root;
+use plasmosome_guards::workspace_root;
 use tempfile::TempDir;
 
 fn guard() -> PathBuf {

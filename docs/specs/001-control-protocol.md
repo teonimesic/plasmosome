@@ -396,8 +396,9 @@ The controller drives each cell's `membraned` over a second, private ndjson-UDS
 1. Every verb above has a passing round-trip test against the real controller (ndjson in,
    typed result out) — not yet: the controller daemon is P1 step 3.
 2. The error code table is closed and every code has a structured-field spec — done (§1).
-3. The controller-side wire types are serde and share no memory — enforced by
-   `plasmosome-freeze-checks` (86 §4 rules 1–3 green today).
+3. The controller-side wire types are serde and share no memory — true of the tree today, and
+   held by review rather than by a test: the guards that asserted it were removed with spec 013,
+   which says why.
 4. The D2 mock-mode field appears in every plasmid-carrying response — done (§3).
 5. Ambiguity-as-error with candidate lists is the only selection semantics — done (§2).
 6. Ledger replayable-from-log and residue-empty as standing rows — ledger property green

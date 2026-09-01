@@ -25,5 +25,5 @@ the root `README.md` rather than to whoever publishes it first.
 ## Testing
 
 `cargo test -p plasmosome`. There is nothing here to test; what guards this crate is
-`only_the_held_names_are_publishable_to_a_registry` in `plasmosome-freeze-checks`, which is where
+`only_the_held_names_are_publishable_to_a_registry` in `plasmosome-guards`, which is where
 its publishing metadata is checked.

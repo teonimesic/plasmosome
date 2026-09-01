@@ -2,11 +2,10 @@
 //! controller and whatever enforces capabilities (`Handle`, `Capability`,
 //! `GrantKind::{Hot, GenerationBound}`, `DrainSpec`, `OsState`/`Diff`).
 //!
-//! Contract (86 §4 rule 1): nothing in this crate or anything that depends on
-//! it may name a VMM, netstack, or broker process — enforced by
-//! `plasmosome-freeze-checks` walking `cargo tree`. Contract (86 §4 rule 2):
-//! seam state crosses processes only as serde data, so every wire type derives
-//! `Serialize`/`Deserialize` and none of them holds shared memory.
+//! The seam crosses a process boundary, so its state travels as serde data:
+//! every type here derives `Serialize`/`Deserialize` and holds no shared
+//! memory. Background, and why the crate names no VMM or broker process, is in
+//! `AGENTS.md`.
 
 pub mod backend;
 pub mod composite;

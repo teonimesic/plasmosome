@@ -15,14 +15,14 @@ that it is unfinished. The names are held before anyone else takes them, and no 
 frozen by holding them.
 
 Nothing else in this workspace can reach a registry, including a crate added tomorrow. That
-property exists today as a blanket refusal — the freeze rule
+property exists today as a blanket refusal — the guard
 `no_workspace_crate_is_publishable_to_a_registry` fails if any member allows a registry, and
 panics if any member leaves `publish` unset. This spec turns the blanket refusal into a refusal
 with two named exceptions, and keeps the default for everything else exactly as it was.
 
 Publishing is not part of this. What this spec covers is the state of the repository that makes
 the name claim correct and safe to make: two manifests that carry what crates.io asks for, ship
-no agent working notes, describe themselves honestly, and are the only two the freeze rule lets
+no agent working notes, describe themselves honestly, and are the only two the guard lets
 through. Running `cargo publish` is a separate deliberate act by the owner, and no line below
 waits on it.
 
@@ -61,7 +61,7 @@ the binary. That is what the `readme` field points crates.io at, so it becomes t
 and the sentence would be false the moment it is published. The reasoning that keeps agent notes
 out of the tarball applies here too: what ships must be true for the person reading it.
 
-**The freeze rule becomes an allowlist, not a weakened assertion.** It is renamed to
+**The guard becomes an allowlist, not a weakened assertion.** It is renamed to
 `only_the_held_names_are_publishable_to_a_registry`, because the old name would then describe the
 opposite of what it checks. A constant names exactly `plasmosome` and `plasmid`. The rule checks
 three things, one per member:
@@ -94,7 +94,7 @@ what removing a public name claim should be.
 ## Contract
 
 - Exactly two packages in this workspace may be publishable: `plasmosome` and `plasmid`. They are
-  named in the freeze rule's allowlist and carry `publish = ["crates-io"]`.
+  named in the guard's allowlist and carry `publish = ["crates-io"]`.
 - Every other member carries `publish = false`. A member added later with `publish` unset fails
   the rule.
 - Every name on the allowlist is a member of this workspace. An entry naming no member fails.
@@ -141,7 +141,7 @@ what removing a public name claim should be.
 - **Publishing itself.** No acceptance line requires a crate to be on crates.io. This spec makes
   two manifests publishable; whether and when they are published is the owner's to do.
 - **Every other crate's name.** `plasmid-sdk`, `plasmosome-core`, `plasmosome-backend`,
-  `plasmosome-ledger`, `plasmosome-membrane`, `plasmosome-freeze-checks` and `plasmosome-testkit`
+  `plasmosome-ledger`, `plasmosome-membrane`, `plasmosome-guards` and `plasmosome-testkit`
   stay unpublishable and unclaimed.
 - **Agent notes in the other crates.** Every crate here carries `AGENTS.md` and `CLAUDE.md`, so
   any future publish of any of them would ship those files. The `exclude` above fixes it for the

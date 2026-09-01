@@ -2,7 +2,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-use plasmosome_freeze_checks::workspace_root;
+use plasmosome_guards::workspace_root;
 
 fn guard() -> PathBuf {
     workspace_root().join(".githooks").join("provenance-guard")
