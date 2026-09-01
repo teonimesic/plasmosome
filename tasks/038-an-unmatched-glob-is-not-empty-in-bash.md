@@ -1,7 +1,7 @@
 ---
 id: 038
 title: Spec 012 says an unmatched glob comes back empty in bash, and it does not
-status: in_progress
+status: in_review
 priority: 2
 specs: [012]
 intents: [008]
@@ -25,7 +25,7 @@ done_when: >-
   they take on trust. `git diff origin/main` touches exactly two files, this one and that spec,
   and within the spec exactly the one sentence naming the two shells — no other line of 012 is
   reworded, and the requirement itself is neither weakened, strengthened, nor restructured.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/67
 evidence:
 ---
 
