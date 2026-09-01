@@ -4,4 +4,4 @@ pub mod command;
 pub mod contract;
 pub mod pin;
 
-pub use contract::{run_contract, ContractRequest, ContractResult};
+pub use contract::{ContractRequest, ContractResult, run_contract};

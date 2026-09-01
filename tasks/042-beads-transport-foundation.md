@@ -369,7 +369,11 @@ contract and CLI groups first failed on absent contract APIs, then passed 8 test
 planning test first failed on the absent command builder, then passed after implementation. The
 real v1.1.2 Apple Silicon archive was downloaded and extracted only under `mktemp -d`;
 `./tools/work-state contract-test hermetic` passed after the runner created its isolated HOME/XDG
-directories and supplied PATH to the isolated child environment.
+directories and supplied PATH to the isolated child environment. A first verifier run exposed an
+unexpected relative `~/.config/bd/config.yaml` footprint because `bd --version` had no isolated
+environment; the runner was corrected so verification receives the same isolated environment,
+the footprint was moved recoverably into `mktemp -d`, and the repeated hermetic run passed with no
+checkout footprint.
 
 2026-09-01: No injected disposable public GitHub fixture was supplied. The required real command
 `./tools/work-state contract-test github --archive <verified-temporary-archive> --bd

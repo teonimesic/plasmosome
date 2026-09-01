@@ -13,45 +13,90 @@ pub struct CommandSpec {
 
 impl CommandSpec {
     pub fn display(&self) -> String {
-        let args = self.argv.iter().enumerate().map(|(index, value)| {
-            if self.redacted_argv_positions.contains(&index) { "<redacted>" } else { value }
-        }).collect::<Vec<_>>().join(" ");
+        let args = self
+            .argv
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                if self.redacted_argv_positions.contains(&index) {
+                    "<redacted>"
+                } else {
+                    value
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         format!("{} {args}", self.program.display())
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CommandOutput { pub status: i32, pub stdout: String, pub stderr: String }
-
-impl CommandOutput {
-    pub fn success(stdout: impl Into<String>) -> Self { Self { status: 0, stdout: stdout.into(), stderr: String::new() } }
+pub struct CommandOutput {
+    pub status: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
-pub trait CommandRunner { fn run(&mut self, command: CommandSpec) -> Result<CommandOutput, String>; }
+impl CommandOutput {
+    pub fn success(stdout: impl Into<String>) -> Self {
+        Self {
+            status: 0,
+            stdout: stdout.into(),
+            stderr: String::new(),
+        }
+    }
+}
+
+pub trait CommandRunner {
+    fn run(&mut self, command: CommandSpec) -> Result<CommandOutput, String>;
+}
 
 pub struct SystemCommandRunner;
 
 impl CommandRunner for SystemCommandRunner {
     fn run(&mut self, command: CommandSpec) -> Result<CommandOutput, String> {
         let mut child = Command::new(&command.program);
-        child.args(&command.argv).env_clear().envs(&command.environment);
-        if let Some(cwd) = command.cwd { child.current_dir(cwd); }
+        child
+            .args(&command.argv)
+            .env_clear()
+            .envs(&command.environment);
+        if let Some(cwd) = command.cwd {
+            child.current_dir(cwd);
+        }
         let output = child.output().map_err(|error| error.to_string())?;
-        Ok(CommandOutput { status: output.status.code().unwrap_or(1), stdout: String::from_utf8_lossy(&output.stdout).into_owned(), stderr: String::from_utf8_lossy(&output.stderr).into_owned() })
+        Ok(CommandOutput {
+            status: output.status.code().unwrap_or(1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
     }
 }
 
 #[derive(Default)]
-pub struct RecordingCommandRunner { commands: Vec<CommandSpec>, outputs: Vec<CommandOutput> }
+pub struct RecordingCommandRunner {
+    commands: Vec<CommandSpec>,
+    outputs: Vec<CommandOutput>,
+}
 
 impl RecordingCommandRunner {
-    pub fn with_output(output: CommandOutput) -> Self { Self { commands: Vec::new(), outputs: vec![output] } }
-    pub fn commands(&self) -> &[CommandSpec] { &self.commands }
+    pub fn with_output(output: CommandOutput) -> Self {
+        Self {
+            commands: Vec::new(),
+            outputs: vec![output],
+        }
+    }
+    pub fn commands(&self) -> &[CommandSpec] {
+        &self.commands
+    }
 }
 
 impl CommandRunner for RecordingCommandRunner {
     fn run(&mut self, command: CommandSpec) -> Result<CommandOutput, String> {
         self.commands.push(command);
-        Ok(if self.outputs.is_empty() { CommandOutput::default() } else { self.outputs.remove(0) })
+        Ok(if self.outputs.is_empty() {
+            CommandOutput::default()
+        } else {
+            self.outputs.remove(0)
+        })
     }
 }
