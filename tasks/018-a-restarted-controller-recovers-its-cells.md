@@ -4,7 +4,7 @@ title: A restarted controller recovers the cells it left running
 status: todo
 priority: 1
 specs: [001, 008]
-intents: [003]
+intents: [003, 004, 009, 012]
 refs:
   [
     docs/decisions/002-a-log-per-cell-not-a-database.md,

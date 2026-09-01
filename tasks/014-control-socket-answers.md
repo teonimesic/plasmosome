@@ -4,7 +4,7 @@ title: The controller answers its control socket
 status: done
 priority: 1
 specs: [001]
-intents: []
+intents: [003, 004, 009, 012]
 refs:
   [
     docs/specs/001-control-protocol.md,

@@ -1,7 +1,7 @@
 ---
 id: 017
 title: The freeze scan matches substrings, not code
-status: in_review
+status: done
 priority: 2
 specs: []
 intents: []
@@ -15,7 +15,7 @@ done_when: >-
   or a string naming a forbidden type does not fail the build, and a use of one
   under a different spelling does. Both directions have a test.
 pr: https://github.com/teonimesic/plasmosome/pull/28
-evidence:
+evidence: squash commit 13fafd2 on main; the freeze scan reads the wire files as Rust rather than text, a doc comment naming a forbidden type no longer fails the build, and a use under a different spelling does
 ---
 
 ## Why

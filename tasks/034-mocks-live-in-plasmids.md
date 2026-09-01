@@ -1,7 +1,7 @@
 ---
 id: 034
 title: A mock lives inside the plasmid that owns the hosts, and a spec records what was delivered
-status: in_review
+status: done
 priority: 2
 specs: [001]
 intents: [003, 004, 009, 012]
@@ -37,7 +37,7 @@ done_when: >-
   the same claims, every §5 RESERVED item still reserved, and the
   `plasmosome-freeze-checks` crate untouched.
 pr: 63
-evidence:
+evidence: squash commit 42a8f6c on main; PlasmidManifest::parse refuses a [mock] without [network], a mock host the [network] does not carry, and a hosts that is not an array of strings, and spec 001 records what was delivered
 ---
 
 ## Why

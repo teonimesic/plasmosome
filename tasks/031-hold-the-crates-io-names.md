@@ -1,7 +1,7 @@
 ---
 id: 031
 title: Hold the crates.io names plasmosome and plasmid
-status: in_review
+status: done
 priority: 2
 specs: [010]
 intents: [013]
@@ -26,7 +26,7 @@ done_when: >-
   mutation in spec 010's `## Acceptance` list makes that rule fail and name the
   package or entry it is about; and the gate in the root `AGENTS.md` is green.
 pr: https://github.com/teonimesic/plasmosome/pull/58
-evidence:
+evidence: squash commit 6d6048c on main; crates/plasmosome holds the name beside plasmid, both at 0.0.0 publishable only to crates-io, and the freeze rule only_the_held_names_are_publishable_to_a_registry guards the pair
 ---
 
 ## Why

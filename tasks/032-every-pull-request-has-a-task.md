@@ -1,7 +1,7 @@
 ---
 id: 032
 title: Every pull request has a task, and three review rules that contradicted each other
-status: in_review
+status: done
 priority: 2
 specs: [012]
 intents: [008]
@@ -28,7 +28,7 @@ done_when: >-
   files gains names, in its own text, what can refuse it, and is stated in exactly one of them —
   the other mentions are pointers, carrying no restatement of the rule beside them.
 pr: https://github.com/teonimesic/plasmosome/pull/59
-evidence:
+evidence: squash commit 17221cd on main; pr-review, tasks and heartbeat now state that every pull request has a task, rounds are counted across the pull request's commits, and the merged head is always one a review read
 ---
 
 ## Why

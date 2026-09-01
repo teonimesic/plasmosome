@@ -1,7 +1,7 @@
 ---
 id: 019
 title: ci.yml runs actions from tags anyone upstream can move
-status: in_review
+status: done
 priority: 2
 specs: []
 intents: []
@@ -10,7 +10,7 @@ done_when: >-
   every action in every workflow is pinned, GitHub-authored ones included, to a full commit SHA, and
   a documented way exists to update them together.
 pr: https://github.com/teonimesic/plasmosome/pull/20
-evidence:
+evidence: squash commit b26c80f on main; every workflow action is pinned to a full commit SHA and Dependabot is configured to move the pins together
 ---
 
 ## Why

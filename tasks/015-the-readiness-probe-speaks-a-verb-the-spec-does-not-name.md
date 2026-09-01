@@ -4,7 +4,7 @@ title: The readiness probe sends a verb the control protocol does not define
 status: done
 priority: 2
 specs: [001]
-intents: []
+intents: [003, 004, 009, 012]
 refs:
   [
     crates/plasmosome-membrane/src/readiness.rs,

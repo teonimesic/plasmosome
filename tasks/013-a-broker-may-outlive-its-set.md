@@ -1,7 +1,7 @@
 ---
 id: 013
 title: Two lifecycle gaps with no witness, and a deadline that multiplies
-status: in_review
+status: done
 priority: 2
 specs: []
 intents: []
@@ -16,7 +16,7 @@ done_when: >-
   adapters or one fewer unused one; and either drop's no-signal-after-external-reap path gains a
   witness, or this task records that it cannot have one and why.
 pr: https://github.com/teonimesic/plasmosome/pull/21
-evidence:
+evidence: squash commit 3e180fc on main; one deadline covers a whole broker set's status answer, and drop's no-signal-after-external-reap path gained the witness it lacked
 ---
 
 ## Why
