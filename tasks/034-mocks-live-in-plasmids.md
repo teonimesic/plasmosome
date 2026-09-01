@@ -1,7 +1,7 @@
 ---
 id: 034
 title: A mock lives inside the plasmid that owns the hosts, and a spec records what was delivered
-status: in_progress
+status: in_review
 priority: 2
 specs: [001]
 intents: [004, 009, 012]
@@ -26,7 +26,7 @@ done_when: >-
   that may not be edited, its §6 still carrying six items in the same order with
   the same claims, every §5 RESERVED item still reserved, and the
   `plasmosome-freeze-checks` crate untouched.
-pr:
+pr: 63
 evidence:
 ---
 
