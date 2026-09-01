@@ -4,7 +4,7 @@ title: A member's directory name is assumed to be its package name
 status: todo
 priority: 2
 specs: [003]
-intents: []
+intents: [002]
 refs:
   [
     crates/plasmosome-freeze-checks/tests/freeze_rules.rs,
