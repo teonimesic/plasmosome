@@ -49,11 +49,14 @@ that does not exist, and the script exits zero.
 
 That is not a wording preference. A sweep written by someone reading the old sentence would expect
 `bash` to hand it nothing to iterate, so it would expect its own refusal to fire. What actually
-happens is that the sweep reads one phantom file, finds no fault in a file it cannot open, prints
-nothing, and exits zero — a pass produced by reading nothing at all. Spec 012 names that shape by
-its own name two sentences earlier: it is the same as a green that reviewed nothing, which is the
-failure the empty-input refusal exists to catch. The spec was arguing for the right check out of a
-premise that hands the check its own failure mode back.
+happens is that the loop runs once over a path that does not exist and the refusal never fires.
+What gets printed then depends on the loop body: a sweep finding no fault in a file it cannot open
+stays silent and exits zero, while one that reports the unreadable path prints a fault against a
+file that was never there — task 033 measured that second shape against the merged sweep. Neither
+is the refusal, and the first is a pass produced by reading nothing at all. Spec 012 names that
+shape by its own name two sentences earlier: it is the same as a green that reviewed nothing,
+which is the failure the empty-input refusal exists to catch. The spec was arguing for the right
+check out of a premise that hands the check its own failure mode back.
 
 `tasks/033-nothing-checks-that-a-task-status-is-well-formed.md` had already measured this while
 being written, carries the corrected behaviour in its `done_when`, and its `## Notes` scope the
