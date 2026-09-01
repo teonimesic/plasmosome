@@ -302,8 +302,9 @@ it.
   of empty are tested** — the folder missing, and the folder present but holding nothing the sweep
   would read. The second is the one a missing-folder test walks straight past, and it is the shape a
   file match that has quietly stopped matching produces, which is the failure the refusal exists to
-  catch. Verified under both `bash` and `zsh`, because a glob matching nothing is fatal in one and
-  empty in the other.
+  catch. Verified under both `bash` and `zsh`, because neither shell hands back an empty list:
+  `zsh` aborts on an unmatched glob before the loop runs, while `bash` leaves the pattern standing
+  as a literal, so the loop runs once over a path that does not exist and exits zero.
 - Every rule a task under this spec adds to a skill file names, in its own text, what can refuse
   it.
 - No rule a task under this spec adds or edits is stated in more than one file; every other mention
