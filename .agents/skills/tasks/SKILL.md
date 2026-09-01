@@ -350,11 +350,13 @@ do more: a cross-layer loop that reads specs against intents, and a sweep that r
 status lines are well formed at all. Both live there rather than here, so this list does not
 restate what they catch and cannot fall behind them.
 
-**A selector fails open, and that is why the sweep exists.** Every grep above finds records by
-matching a status line, so a record written `status: draft ` with a trailing space, or saved with
-CRLF endings, matches nothing and leaves the queue silently instead of being reported. A gate
-predicate refuses on a mismatch; an enumeration just stops seeing you. Anything that can opt out of
-being counted has to be caught by asking whether it is well formed, which is a different question.
+**A selector fails open, and that is why the sweep exists.** A grep that finds records by matching
+a line stops seeing one written `status: draft ` with a trailing space, or saved with CRLF endings:
+it leaves the queue silently instead of being reported. A gate predicate refuses on a mismatch; an
+enumeration just stops seeing you. Catching that means asking whether the record is well formed,
+which is a different question — and the sweep asks it of `docs/intents/` and `docs/specs/` only.
+The greps over `tasks/*.md` have no such backstop, so a malformed task still opts out of its own
+queue.
 
 Nothing catches an intent an agent approved on its own judgement, by decision rather than by
 oversight — `docs/decisions/008-approving-an-intent-is-an-instruction.md` says why and what it

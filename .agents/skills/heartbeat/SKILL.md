@@ -140,11 +140,25 @@ for f in $(grep -l '^status: accepted$' docs/specs/*.md); do
 done
 ```
 
-Every check above **selects** files by matching a status line, and a selector fails *open*: a
-record written `status: accepted ` with a trailing space, or saved with CRLF endings, matches
-nothing and leaves the queue silently rather than being reported. That is the opposite direction
-from the gate predicates, which refuse on a mismatch. So one sweep asks whether the status lines
-themselves are well formed, which is what makes the enumerations above trustworthy:
+That loop prints five faults: an accepted spec whose intent is still `draft`, one naming an id no
+intent file carries, one naming an id that several files carry, one naming an intent that declares
+its status twice, and a **new** accepted spec naming no intent at all. Two of them share a message,
+because an id must resolve to **exactly one** file and both zero and several are failures to do
+that. Resolving it by picking the first match would make the gate hold or fail on filename order,
+since the duplicate that sorts first is the one that answers.
+
+Ids are read out of each intent's own `id:` rather than globbed from the filename, so a missing
+intent is reported instead of aborting the loop. The amnesty fault needs the one name hardcoded,
+because `docs/specs/001-control-protocol.md` is the whole of it — see "What predates the rule" in
+`.agents/skills/tasks`. Anything else that line prints is a spec that skipped the gate. Silence is
+the only passing answer: unlike the lists above, output here is a fault, not a queue.
+
+**A selector fails open, and one sweep is what covers that.** Every check that finds records by
+matching a status line — the draft-intent lists above, and the accepted-spec selector this loop
+opens with — stops seeing a record written `status: accepted ` with a trailing space, or saved with
+CRLF endings. It leaves the queue silently rather than being reported, which is the opposite
+direction from a gate predicate, where a mismatch means refusal. So one sweep asks whether those
+status lines are well formed at all:
 
 ```shell
 for f in docs/intents/[0-9]*.md; do
@@ -162,23 +176,16 @@ for f in docs/specs/[0-9]*.md; do
 done
 ```
 
-This is the only check here that reads a file the other loops never selected, which is the point:
-a record can opt out of every enumeration by being slightly malformed, and nothing else would
-notice. Two `status:` lines is the case worth naming — a file declaring both `draft` and
-`approved` gates as approved on any check that asks whether an approved line exists.
+It is the only check here that reads files no other loop selected, which is the point: a record can
+opt out of every enumeration by being slightly malformed, and nothing else would notice. Two
+`status:` lines is the case worth naming — a file declaring both `draft` and `approved` gates as
+approved on any check asking whether an approved line exists.
 
-It prints four faults with one loop: an accepted spec whose intent is still `draft`, one naming an
-id no intent file carries, one naming an id that several files carry, and a **new** accepted spec
-naming no intent at all. The middle two share a message, because an id must resolve to **exactly
-one** file and both zero and several are failures to do that. Resolving it by picking the first
-match would make the gate hold or fail on filename order, since the duplicate that sorts first is
-the one that answers.
-
-Ids are read out of each intent's own `id:` rather than globbed from the filename, so a missing
-intent is reported instead of aborting the loop. The last fault needs the one name hardcoded,
-because `docs/specs/001-control-protocol.md` is the whole of the amnesty — see "What predates the
-rule" in `.agents/skills/tasks`. Anything else that line prints is a spec that skipped the gate.
-Silence is the only passing answer: unlike the lists above, output here is a fault, not a queue.
+**It covers `docs/intents/` and `docs/specs/`, and nothing else.** The greps over `tasks/*.md`
+select on `status:`, `specs:` and `intents:` lines that no sweep validates, so a task written
+`status:todo` still opts out of its queue silently. That gap is real and older than this change;
+closing it means fixing which task statuses are current first, since the lifecycle table above
+lists `in_progress` and no task on the tree uses it.
 
 The first two lists shrinking over sessions is the signal that the queue is being fed by the plan.
 Both growing is the signal it is being fed by the review process instead.
