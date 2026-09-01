@@ -224,12 +224,14 @@ isolated global config. Run the verified binary as:
 bd --sandbox init --stealth --skip-agents --skip-hooks --non-interactive
 ```
 
-Then set and read back `dolt.auto-push=false`. Assert the sentinels, tracked status, hooks and
-global config are unchanged; no file is staged; no metrics queue exists; no daemon, hook or
-background push is configured; and `git ls-remote` was never invoked. A `.beads` directory inside
-the disposable repository and `.git/info/exclude` changes are allowed. Embedded mode has no Dolt
-server process to stop; cleanup drops the store handles before removing the temporary root. This
-proves a safe initialization command only; selecting the eventual
+Pinned Beads 1.1.2 may add exactly `beads.role=maintainer` to local Git config; every other local
+config entry and the isolated global config must remain unchanged. Then set and read back
+`dolt.auto-push=false`. Assert the sentinels, tracked status, hooks and global config are
+unchanged; no file is staged; no metrics queue exists; no daemon, hook or background push is
+configured; and `git ls-remote` was never invoked. A `.beads` directory inside the disposable
+repository and `.git/info/exclude` changes are allowed. Embedded mode has no Dolt server process
+to stop; cleanup drops the store handles before removing the temporary root. This proves a safe
+initialization command only; selecting the eventual
 clone-shared production store is later work.
 
 ### Production command contract
@@ -332,7 +334,7 @@ or relax an assertion while making its implementation pass.
 | `publication_plan_is_non_forcing_and_observes_before_and_after` (contract) | argv includes force or omits one `ls-remote` | Normal publication cannot overwrite and success requires a fresh generation observation |
 | `leased_ref_update_requires_the_exact_expected_generation` (contract) | bare force or missing/wrong lease is accepted | Exceptional CAS commands use only an exact `--force-with-lease` expected SHA |
 | `two_real_pinned_stores_initialize_in_independent_roots` (contract case) | paths share a store or one init is recorded rather than real | The two clients are real isolated Beads stores even though remote outcomes are scripted |
-| `stealth_init_preserves_sentinels_hooks_index_and_global_config` (contract) | fixture snapshot differs | The exact init command has no repository/global integration side effects |
+| `stealth_init_preserves_sentinels_hooks_index_and_global_config` (contract) | an unallowlisted local config delta or fixture snapshot differs | The exact init command preserves repository/global state except for Beads 1.1.2's exact allowlisted local role |
 | `stealth_init_disables_metrics_events_and_auto_push` (contract) | event queue/config exists | No implicit network or background publication is enabled |
 | `stale_contender_is_classified_separately_from_transport_failure` (contract) | both map to one error | Callers may retry transport but must refresh after stale base |
 | `stale_base_fence_uses_two_independent_clone_and_store_paths` (contract) | paths or Beads data roots are shared | The proof has two clients, not one shared local store |
@@ -464,3 +466,44 @@ misses are SystemCommandRunner error paths and CLI process exit paths, which ord
 do not execute, while the real contract commands cover their successful disposable subprocess
 paths. Command safety, stale/transport classification, exact lease base, retry and embedded cleanup
 branches are covered by the recording-script tests.
+
+2026-09-01: Exact-head reviewer-gap completion followed test-first batches. The full stale-base
+winner G0 -> stale G1 -> guarded refresh/replay G2 -> paused stale G2 test first failed against
+the prior canned script, then passed with the full ordered script. Production command-plan tests
+first failed on absent cwd/environment values, then proved every observable Git/Beads plan carries
+the central disposable cwd, HOME/XDG/TMP/global-config isolation and prompt/metrics/event guards.
+Fixture-root, Git hook/index/config snapshot, independent store-root and no-`ls-remote` tests each
+first failed on their missing helpers, then passed. Real pinned `hermetic`, `transport` and `all`
+runs passed after the runner created and explicitly removed the disposable root; embedded cleanup
+planned no `bd dolt stop` and the synchronous runner left no harness child to reap.
+
+2026-09-01: Real Beads 1.1.2 adds `beads.role=maintainer` to local Git config during the exact
+stealth-init command. Plan-author direction clarifies this is the sole allowlisted local-config
+delta: a new test proved it accepts that exact entry and refuses another changed entry; every other
+local entry, sentinels, hook, index and isolated global config remains unchanged. The runner then
+sets and reads back `dolt.auto-push=false`, compares clean tracked status/index, rejects
+metrics/event footprints and records/rejects any hermetic `git ls-remote` plan before execution.
+No user configuration or repository fixture was used or changed.
+
+2026-09-01: Coverage/refactor review: `cargo llvm-cov --workspace --summary-only` reported 53.80%
+lines for `contract.rs` (up from 48.35% in the earlier record), 87.76% for `pin.rs`, and 88.78%
+workspace-wide. Remaining contract misses are defensive real-subprocess/refusal paths; the
+checksum-verified binary exercised successful hermetic/two-store paths. The ordinary
+`/usr/bin/time -p cargo test --workspace` gate passed in 6.84 seconds. No safe refactor reduced
+the deliberately explicit audited command ordering, so no behavior-only cleanup was made.
+
+2026-09-01: Final exact-head remediation added two execution-boundary proofs. Tests first failed
+because the public pre-dispatch validator did not exist, then proved a bare `--force` and a
+force-with-lease for a generation other than the operation's observed 40-hex base are refused
+before the recording runner receives a command. A lost-response test first failed because a G0
+rediscovery returned success; it now retries the same prepared candidate exactly once, while the
+existing G1 rediscovery test still proves no second push. Finally, an alternate-generation scripted
+case first failed on the hard-coded result base, then passed once structured evidence used the
+scenario's actual observation. The real checksum-verified `contract-test all` aggregate passed
+again after these changes.
+
+2026-09-01: Final gate on this exact source: `cargo llvm-cov --workspace --summary-only` reported
+55.92% contract lines and 88.76% workspace lines; `/usr/bin/time -p cargo test --workspace`
+passed in 6.22 seconds. `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `.githooks/provenance-guard` and
+`.githooks/attribution-guard` all exited 0.

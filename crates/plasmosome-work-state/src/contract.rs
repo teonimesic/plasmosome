@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use tempfile::TempDir;
 
 use crate::command::{
     CommandOutput, CommandRunner, CommandSpec, RecordingCommandRunner, SystemCommandRunner,
@@ -90,8 +91,156 @@ pub enum Publication {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScriptEvidence {
+    pub observed_base: String,
     pub final_generation: String,
     pub operation_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StoreFixture {
+    pub label: String,
+    pub clone_root: PathBuf,
+    pub repository: PathBuf,
+    pub store_root: PathBuf,
+    pub environment: BTreeMap<String, String>,
+    sentinels: BTreeMap<PathBuf, Vec<u8>>,
+}
+
+impl StoreFixture {
+    pub fn snapshot_git_state(&mut self) -> Result<(), &'static str> {
+        for path in [
+            self.repository.join(".git/hooks/pre-commit"),
+            self.repository.join(".git/index"),
+            self.repository.join(".git/config"),
+        ] {
+            let contents = std::fs::read(&path).map_err(|_| "cutover_blocked")?;
+            self.sentinels.insert(path, contents);
+        }
+        Ok(())
+    }
+
+    pub fn assert_unchanged(&self) -> Result<(), &'static str> {
+        for (path, expected) in &self.sentinels {
+            if std::fs::read(path).map_err(|_| "cutover_blocked")? != *expected {
+                return Err("cutover_blocked");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn assert_after_stealth_init(&self) -> Result<(), &'static str> {
+        let local_config = self.repository.join(".git/config");
+        for (path, expected) in &self.sentinels {
+            let actual = std::fs::read(path).map_err(|_| "cutover_blocked")?;
+            if path == &local_config {
+                let before = config_entries(expected)?;
+                let mut after = config_entries(&actual)?;
+                after.retain(|(key, value)| !(key == "beads.role" && value == "maintainer"));
+                if before != after {
+                    return Err("cutover_blocked");
+                }
+            } else if actual != *expected {
+                return Err("cutover_blocked");
+            }
+        }
+        Ok(())
+    }
+}
+
+fn config_entries(contents: &[u8]) -> Result<Vec<(String, String)>, &'static str> {
+    let contents = std::str::from_utf8(contents).map_err(|_| "cutover_blocked")?;
+    let mut section = String::new();
+    let mut entries = Vec::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(name) = line
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+        {
+            section = name.trim().to_ascii_lowercase();
+            continue;
+        }
+        let (key, value) = line.split_once('=').ok_or("cutover_blocked")?;
+        entries.push((
+            format!("{section}.{}", key.trim().to_ascii_lowercase()),
+            value.trim().to_owned(),
+        ));
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+pub fn prepare_store_fixture(root: &Path, label: &str) -> Result<StoreFixture, &'static str> {
+    let clone_root = root.join(label);
+    let repository = clone_root.join("repository");
+    std::fs::create_dir_all(&repository).map_err(|_| "cutover_blocked")?;
+    for name in [
+        "home",
+        "xdg_config_home",
+        "xdg_cache_home",
+        "xdg_data_home",
+        "tmpdir",
+    ] {
+        std::fs::create_dir_all(clone_root.join(name)).map_err(|_| "cutover_blocked")?;
+    }
+    let environment = isolated_environment(&clone_root);
+    let files = [
+        (repository.join("AGENTS.md"), b"fixture agents\n".as_slice()),
+        (repository.join("CLAUDE.md"), b"fixture claude\n".as_slice()),
+        (
+            repository.join("tracked.txt"),
+            b"tracked fixture\n".as_slice(),
+        ),
+        (
+            clone_root.join("git_config_global"),
+            b"[user]\n\temail = fixture-global@example.invalid\n".as_slice(),
+        ),
+    ];
+    let mut sentinels = BTreeMap::new();
+    for (path, contents) in files {
+        std::fs::write(&path, contents).map_err(|_| "cutover_blocked")?;
+        sentinels.insert(path, contents.to_vec());
+    }
+    Ok(StoreFixture {
+        label: label.into(),
+        clone_root,
+        repository: repository.clone(),
+        store_root: repository.join(".beads"),
+        environment,
+        sentinels,
+    })
+}
+
+pub fn dispose_fixture_root(root: TempDir) -> Result<(), &'static str> {
+    root.close().map_err(|_| "fixture_cleanup_failed")
+}
+
+pub fn validate_independent_stores(
+    first: &StoreFixture,
+    second: &StoreFixture,
+) -> Result<(), &'static str> {
+    if first.clone_root == second.clone_root
+        || first.repository == second.repository
+        || first.store_root == second.store_root
+    {
+        return Err("cutover_blocked");
+    }
+    for key in [
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "TMPDIR",
+        "GIT_CONFIG_GLOBAL",
+    ] {
+        if first.environment.get(key) == second.environment.get(key) {
+            return Err("cutover_blocked");
+        }
+    }
+    Ok(())
 }
 
 pub fn isolated_environment(root: &Path) -> BTreeMap<String, String> {
@@ -168,66 +317,105 @@ where
     })
 }
 
-pub fn observe_command() -> CommandSpec {
+fn production_command(
+    program: &str,
+    argv: Vec<String>,
+    redacted_argv_positions: Vec<usize>,
+) -> CommandSpec {
+    let root = PathBuf::from("/contract-isolated");
     CommandSpec {
-        program: PathBuf::from("git"),
-        argv: vec![
+        program: PathBuf::from(program),
+        argv,
+        cwd: Some(root.join("repository")),
+        environment: isolated_environment(&root),
+        redacted_argv_positions,
+    }
+}
+
+pub fn observe_command() -> CommandSpec {
+    production_command(
+        "git",
+        vec![
             "ls-remote".into(),
             "--exit-code".into(),
             "origin".into(),
             "refs/dolt/data".into(),
         ],
-        cwd: None,
-        environment: BTreeMap::new(),
-        redacted_argv_positions: vec![2],
-    }
+        vec![2],
+    )
 }
 pub fn publish_command() -> CommandSpec {
-    CommandSpec {
-        program: PathBuf::from("bd"),
-        argv: vec![
+    production_command(
+        "bd",
+        vec![
             "--sandbox".into(),
             "dolt".into(),
             "push".into(),
             "--remote".into(),
             "origin".into(),
         ],
-        cwd: None,
-        environment: BTreeMap::new(),
-        redacted_argv_positions: vec![4],
-    }
+        vec![4],
+    )
 }
 pub fn refresh_command() -> CommandSpec {
-    CommandSpec {
-        program: PathBuf::from("bd"),
-        argv: vec![
+    production_command(
+        "bd",
+        vec![
             "--sandbox".into(),
             "dolt".into(),
             "pull".into(),
             "--remote".into(),
             "origin".into(),
         ],
-        cwd: None,
-        environment: BTreeMap::new(),
-        redacted_argv_positions: vec![4],
-    }
+        vec![4],
+    )
 }
 pub fn leased_ref_update(expected: &str, candidate: &str) -> Result<CommandSpec, String> {
     if !sha(expected) || !sha(candidate) {
         return Err("cutover_blocked".into());
     }
-    Ok(CommandSpec {
-        program: PathBuf::from("git"),
-        argv: vec![
+    Ok(production_command(
+        "git",
+        vec![
             "push".into(),
             "origin".into(),
             format!("--force-with-lease=refs/dolt/data:{expected}"),
             format!("{candidate}:refs/dolt/data"),
         ],
-        cwd: None,
-        environment: BTreeMap::new(),
-        redacted_argv_positions: vec![1, 3],
-    })
+        vec![1, 3],
+    ))
+}
+
+pub fn execute_publication_command<R: CommandRunner>(
+    runner: &mut R,
+    command: CommandSpec,
+    observed_base: &str,
+) -> Result<CommandOutput, String> {
+    if !sha(observed_base) {
+        return Err("cutover_blocked".into());
+    }
+    let expected_lease = format!("--force-with-lease=refs/dolt/data:{observed_base}");
+    for argument in &command.argv {
+        if argument == "--force" || argument.starts_with("--force=") {
+            return Err("cutover_blocked".into());
+        }
+        if argument.starts_with("--force-with-lease") && argument != &expected_lease {
+            return Err("cutover_blocked".into());
+        }
+    }
+    if command
+        .argv
+        .iter()
+        .any(|argument| argument == &expected_lease)
+        && (command.program != Path::new("git")
+            || !command
+                .argv
+                .iter()
+                .any(|argument| argument.strip_suffix(":refs/dolt/data").is_some_and(sha)))
+    {
+        return Err("cutover_blocked".into());
+    }
+    runner.run(command)
 }
 pub fn classify_push(stderr: &str) -> PushFailure {
     if stderr.contains("non-fast-forward") || stderr.contains("stale") {
@@ -246,8 +434,8 @@ pub fn publish_candidate<R: CommandRunner>(
     runner: &mut R,
     operation: &str,
 ) -> Result<Publication, String> {
-    observe(runner)?;
-    match runner.run(publish_command()) {
+    let observed_base = observe(runner)?;
+    match execute_publication_command(runner, publish_command(), &observed_base) {
         Ok(output) if output.status == 0 => Ok(Publication::Published {
             operation: operation.into(),
             generation: observe(runner)?,
@@ -269,38 +457,70 @@ pub fn retry_after_transport<R: CommandRunner>(
     runner: &mut R,
     operation: &str,
 ) -> Result<Publication, String> {
-    observe(runner)?;
-    match runner.run(publish_command()) {
+    retry_after_transport_with_base(runner, operation).map(|(_, publication)| publication)
+}
+fn retry_after_transport_with_base<R: CommandRunner>(
+    runner: &mut R,
+    operation: &str,
+) -> Result<(String, Publication), String> {
+    let observed_base = observe(runner)?;
+    match execute_publication_command(runner, publish_command(), &observed_base) {
         Err(error) if classify_push(&error) == PushFailure::Transport => {}
         Ok(output) if classify_push(&output.stderr) == PushFailure::Transport => {}
         _ => return Err("cutover_blocked".into()),
     }
-    observe(runner)?;
-    let output = runner
-        .run(publish_command())
+    let retry_base = observe(runner)?;
+    let output = execute_publication_command(runner, publish_command(), &retry_base)
         .map_err(|_| "cutover_blocked".to_owned())?;
     if output.status != 0 {
         return Err("cutover_blocked".into());
     }
-    Ok(Publication::Published {
-        operation: operation.into(),
-        generation: observe(runner)?,
-    })
+    Ok((
+        observed_base,
+        Publication::Published {
+            operation: operation.into(),
+            generation: observe(runner)?,
+        },
+    ))
 }
 pub fn recover_after_lost_response<R: CommandRunner>(
     runner: &mut R,
     operation: &str,
 ) -> Result<Publication, String> {
-    observe(runner)?;
-    match runner.run(publish_command()) {
+    recover_after_lost_response_with_base(runner, operation).map(|(_, publication)| publication)
+}
+fn recover_after_lost_response_with_base<R: CommandRunner>(
+    runner: &mut R,
+    operation: &str,
+) -> Result<(String, Publication), String> {
+    let observed_base = observe(runner)?;
+    match execute_publication_command(runner, publish_command(), &observed_base) {
         Err(error) if classify_push(&error) == PushFailure::Transport => {}
         Ok(output) if classify_push(&output.stderr) == PushFailure::Transport => {}
         _ => return Err("cutover_blocked".into()),
     }
-    Ok(Publication::Recovered {
-        operation: operation.into(),
-        generation: observe(runner)?,
-    })
+    let observed_after_failure = observe(runner)?;
+    if observed_after_failure != observed_base {
+        return Ok((
+            observed_base,
+            Publication::Recovered {
+                operation: operation.into(),
+                generation: observed_after_failure,
+            },
+        ));
+    }
+    let output = execute_publication_command(runner, publish_command(), &observed_base)
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    if output.status != 0 {
+        return Err("cutover_blocked".into());
+    }
+    Ok((
+        observed_base,
+        Publication::Published {
+            operation: operation.into(),
+            generation: observe(runner)?,
+        },
+    ))
 }
 fn observe<R: CommandRunner>(runner: &mut R) -> Result<String, String> {
     let output = runner
@@ -323,37 +543,45 @@ fn sha(value: &str) -> bool {
 pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<ContractResult>> {
     let root = tempfile::tempdir()
         .map_err(|_| Box::new(ContractResult::refusal(&request.case, "cutover_blocked")))?;
-    let manifest = PinManifest::load("tools/work-state-beads-1.1.2.toml")
+    let result = (|| {
+        let manifest = PinManifest::load("tools/work-state-beads-1.1.2.toml")
+            .map_err(|error| Box::new(ContractResult::refusal(&request.case, error.code())))?;
+        let mut runner = SystemCommandRunner;
+        VerifiedBeads::verify_with_environment(
+            &manifest,
+            host_target(),
+            &request.archive,
+            &request.binary,
+            isolated_environment(root.path()),
+            &mut runner,
+        )
         .map_err(|error| Box::new(ContractResult::refusal(&request.case, error.code())))?;
-    let mut runner = SystemCommandRunner;
-    VerifiedBeads::verify_with_environment(
-        &manifest,
-        host_target(),
-        &request.archive,
-        &request.binary,
-        isolated_environment(root.path()),
-        &mut runner,
-    )
-    .map_err(|error| Box::new(ContractResult::refusal(&request.case, error.code())))?;
-    if request.case == "version-pin" {
-        return Ok(ContractResult::passed(&request.case, Vec::new()));
-    }
-    if matches!(request.case.as_str(), "stealth-init" | "hermetic") {
-        init_store(&request.binary, root.path(), "clone-a")
+        if request.case == "version-pin" {
+            return Ok(ContractResult::passed(&request.case, Vec::new()));
+        }
+        if matches!(request.case.as_str(), "stealth-init" | "hermetic") {
+            init_store(&request.binary, root.path(), "clone-a")
+                .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
+            return Ok(ContractResult::passed(
+                &request.case,
+                vec!["clone-a".into()],
+            ));
+        }
+        let first = init_store(&request.binary, root.path(), "clone-a")
             .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
-        return Ok(ContractResult::passed(
-            &request.case,
-            vec!["clone-a".into()],
-        ));
+        let second = init_store(&request.binary, root.path(), "clone-b")
+            .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
+        validate_independent_stores(&first, &second)
+            .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
+        let mut result = run_scripts(&request.case)
+            .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
+        result.clone_labels = vec!["clone-a".into(), "clone-b".into()];
+        Ok(result)
+    })();
+    match dispose_fixture_root(root) {
+        Ok(()) => result,
+        Err(code) => Err(Box::new(ContractResult::refusal(&request.case, code))),
     }
-    init_store(&request.binary, root.path(), "clone-a")
-        .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
-    init_store(&request.binary, root.path(), "clone-b")
-        .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
-    let mut result = run_scripts(&request.case)
-        .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
-    result.clone_labels = vec!["clone-a".into(), "clone-b".into()];
-    Ok(result)
 }
 fn run_scripts(case: &str) -> Result<ContractResult, &'static str> {
     let cases: &[&str] = if matches!(case, "transport" | "all") {
@@ -400,12 +628,24 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
     match case {
         "stale-base-fence" => Ok(vec![
             Ok(observation_output(g0)),
+            Ok(observation_output(g0)),
+            Ok(CommandOutput::success("winner")),
+            Ok(observation_output(g1)),
             Ok(CommandOutput {
                 status: 1,
                 stdout: String::new(),
                 stderr: "non-fast-forward".into(),
             }),
             Ok(observation_output(g1)),
+            Ok(CommandOutput::success("refreshed")),
+            Ok(CommandOutput::success("replayed")),
+            Ok(observation_output(g2)),
+            Ok(CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "non-fast-forward".into(),
+            }),
+            Ok(observation_output(g2)),
         ]),
         "push-conflict-recovery" => Ok(vec![
             Ok(observation_output(g0)),
@@ -444,22 +684,15 @@ pub fn run_scripted_case<R: CommandRunner>(
     runner: &mut R,
 ) -> Result<ScriptEvidence, String> {
     match case {
-        "stale-base-fence" => match publish_candidate(runner, "stale")? {
-            Publication::StaleBase { generation, .. } => Ok(ScriptEvidence {
-                final_generation: generation,
-                operation_ids: vec!["winner".into()],
-            }),
-            _ => Err("cutover_blocked".into()),
-        },
+        "stale-base-fence" => full_stale_base_fence(runner),
         "push-conflict-recovery" => {
             let winner_base = observe(runner)?;
             let stale_base = observe(runner)?;
             if winner_base != stale_base {
                 return Err("cutover_blocked".into());
             }
-            let winner_generation = publish_after_observation(runner)?;
-            let stale_push = runner
-                .run(publish_command())
+            let winner_generation = publish_after_observation(runner, &winner_base)?;
+            let stale_push = execute_publication_command(runner, publish_command(), &stale_base)
                 .map_err(|_| "cutover_blocked".to_owned())?;
             if stale_push.status == 0 || classify_push(&stale_push.stderr) != PushFailure::StaleBase
             {
@@ -475,18 +708,19 @@ pub fn run_scripted_case<R: CommandRunner>(
             if refresh.status != 0 {
                 return Err("cutover_blocked".into());
             }
-            let generation = publish_after_observation(runner)?;
+            let generation = publish_after_observation(runner, &observed_after_stale)?;
             Ok(ScriptEvidence {
+                observed_base: winner_base,
                 final_generation: generation,
                 operation_ids: vec!["winner".into(), "replay".into()],
             })
         }
         "transport-retries" => {
-            let result = retry_after_transport(runner, "retry")?;
-            let Publication::Published { generation: _, .. } = result else {
+            let (observed_base, result) = retry_after_transport_with_base(runner, "retry")?;
+            let Publication::Published { .. } = result else {
                 return Err("cutover_blocked".into());
             };
-            let recovered = recover_after_lost_response(runner, "lost-response")?;
+            let (_, recovered) = recover_after_lost_response_with_base(runner, "lost-response")?;
             let Publication::Recovered {
                 generation: recovered_generation,
                 ..
@@ -495,12 +729,50 @@ pub fn run_scripted_case<R: CommandRunner>(
                 return Err("cutover_blocked".into());
             };
             Ok(ScriptEvidence {
+                observed_base,
                 final_generation: recovered_generation,
                 operation_ids: vec!["retry".into(), "lost-response".into()],
             })
         }
         _ => Err("cutover_blocked".into()),
     }
+}
+
+fn full_stale_base_fence<R: CommandRunner>(runner: &mut R) -> Result<ScriptEvidence, String> {
+    let winner_base = observe(runner)?;
+    let stale_base = observe(runner)?;
+    if winner_base != stale_base {
+        return Err("cutover_blocked".into());
+    }
+    let winner_generation = publish_after_observation(runner, &winner_base)?;
+    let stale_push = execute_publication_command(runner, publish_command(), &stale_base)
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    if stale_push.status == 0 || classify_push(&stale_push.stderr) != PushFailure::StaleBase {
+        return Err("cutover_blocked".into());
+    }
+    if observe(runner)? != winner_generation {
+        return Err("cutover_blocked".into());
+    }
+    let refresh = runner
+        .run(refresh_command())
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    if refresh.status != 0 {
+        return Err("cutover_blocked".into());
+    }
+    let recovery_generation = publish_after_observation(runner, &winner_generation)?;
+    let paused_push = execute_publication_command(runner, publish_command(), &winner_generation)
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    if paused_push.status == 0 || classify_push(&paused_push.stderr) != PushFailure::StaleBase {
+        return Err("cutover_blocked".into());
+    }
+    if observe(runner)? != recovery_generation {
+        return Err("cutover_blocked".into());
+    }
+    Ok(ScriptEvidence {
+        observed_base: winner_base,
+        final_generation: recovery_generation,
+        operation_ids: vec!["winner".into(), "replay".into()],
+    })
 }
 
 pub fn run_scripted_contract_case(
@@ -519,16 +791,18 @@ pub fn run_scripted_contract_case(
         code: "ok".into(),
         beads_version: "1.1.2".into(),
         clone_labels: vec!["clone-a".into(), "clone-b".into()],
-        observed_base: Some("0000000000000000000000000000000000000000".into()),
+        observed_base: Some(evidence.observed_base),
         final_generation: Some(evidence.final_generation),
         operation_ids: evidence.operation_ids,
         command_plans,
     })
 }
 
-fn publish_after_observation<R: CommandRunner>(runner: &mut R) -> Result<String, String> {
-    let output = runner
-        .run(publish_command())
+fn publish_after_observation<R: CommandRunner>(
+    runner: &mut R,
+    observed_base: &str,
+) -> Result<String, String> {
+    let output = execute_publication_command(runner, publish_command(), observed_base)
         .map_err(|_| "cutover_blocked".to_owned())?;
     if output.status != 0 {
         return Err("cutover_blocked".into());
@@ -540,21 +814,33 @@ pub fn embedded_cleanup_commands() -> Vec<CommandSpec> {
     Vec::new()
 }
 
-fn init_store(binary: &Path, root: &Path, label: &str) -> Result<(), &'static str> {
-    let clone_root = root.join(label);
-    let repository = clone_root.join("repository");
-    std::fs::create_dir_all(&repository).map_err(|_| "cutover_blocked")?;
-    for name in [
-        "home",
-        "xdg_config_home",
-        "xdg_cache_home",
-        "xdg_data_home",
-        "tmpdir",
-    ] {
-        std::fs::create_dir_all(clone_root.join(name)).map_err(|_| "cutover_blocked")?;
+pub fn assert_no_ls_remote(commands: &[CommandSpec]) -> Result<(), &'static str> {
+    if commands.iter().any(|command| {
+        command.program == Path::new("git")
+            && command.argv.first().map(String::as_str) == Some("ls-remote")
+    }) {
+        Err("cutover_blocked")
+    } else {
+        Ok(())
     }
-    let environment = isolated_environment(&clone_root);
+}
+
+fn run_hermetic_command(
+    runner: &mut SystemCommandRunner,
+    executed: &mut Vec<CommandSpec>,
+    command: CommandSpec,
+) -> Result<CommandOutput, &'static str> {
+    assert_no_ls_remote(std::slice::from_ref(&command))?;
+    executed.push(command.clone());
+    runner.run(command).map_err(|_| "cutover_blocked")
+}
+
+fn init_store(binary: &Path, root: &Path, label: &str) -> Result<StoreFixture, &'static str> {
+    let mut fixture = prepare_store_fixture(root, label)?;
+    let repository = fixture.repository.clone();
+    let environment = fixture.environment.clone();
     let mut runner = SystemCommandRunner;
+    let mut executed = Vec::new();
     for argv in [
         vec!["init".into()],
         vec![
@@ -563,24 +849,49 @@ fn init_store(binary: &Path, root: &Path, label: &str) -> Result<(), &'static st
             "fixture@example.invalid".into(),
         ],
         vec!["config".into(), "user.name".into(), "fixture".into()],
+        vec![
+            "add".into(),
+            "tracked.txt".into(),
+            "AGENTS.md".into(),
+            "CLAUDE.md".into(),
+        ],
+        vec![
+            "commit".into(),
+            "--quiet".into(),
+            "-m".into(),
+            "fixture".into(),
+        ],
     ] {
-        let output = runner
-            .run(CommandSpec {
+        let output = run_hermetic_command(
+            &mut runner,
+            &mut executed,
+            CommandSpec {
                 program: PathBuf::from("git"),
                 argv,
                 cwd: Some(repository.clone()),
                 environment: environment.clone(),
                 redacted_argv_positions: Vec::new(),
-            })
-            .map_err(|_| "cutover_blocked")?;
+            },
+        )?;
         if output.status != 0 {
             return Err("cutover_blocked");
         }
     }
+    let hook = repository.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\nexit 0\n").map_err(|_| "cutover_blocked")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .map_err(|_| "cutover_blocked")?;
+    }
+    fixture.snapshot_git_state()?;
     let mut init_environment = environment.clone();
     init_environment.insert("PWD".into(), repository.display().to_string());
-    let output = runner
-        .run(CommandSpec {
+    let output = run_hermetic_command(
+        &mut runner,
+        &mut executed,
+        CommandSpec {
             program: binary.to_path_buf(),
             argv: vec![
                 "--sandbox".into(),
@@ -593,24 +904,81 @@ fn init_store(binary: &Path, root: &Path, label: &str) -> Result<(), &'static st
             cwd: Some(repository.clone()),
             environment: init_environment,
             redacted_argv_positions: Vec::new(),
-        })
-        .map_err(|_| "cutover_blocked")?;
+        },
+    )?;
     if output.status != 0 {
         return Err("cutover_blocked");
     }
-    let output = runner
-        .run(CommandSpec {
+    fixture.assert_after_stealth_init()?;
+    let output = run_hermetic_command(
+        &mut runner,
+        &mut executed,
+        CommandSpec {
             program: PathBuf::from("git"),
             argv: vec!["config".into(), "dolt.auto-push".into(), "false".into()],
             cwd: Some(repository.clone()),
             environment: environment.clone(),
             redacted_argv_positions: Vec::new(),
-        })
-        .map_err(|_| "cutover_blocked")?;
+        },
+    )?;
     if output.status != 0 {
         return Err("cutover_blocked");
     }
-    Ok(())
+    let output = run_hermetic_command(
+        &mut runner,
+        &mut executed,
+        CommandSpec {
+            program: PathBuf::from("git"),
+            argv: vec!["config".into(), "--get".into(), "dolt.auto-push".into()],
+            cwd: Some(repository.clone()),
+            environment: environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        },
+    )?;
+    if output.status != 0 || output.stdout.trim() != "false" {
+        return Err("cutover_blocked");
+    }
+    for argv in [
+        vec!["status".into(), "--porcelain".into()],
+        vec!["diff".into(), "--cached".into(), "--quiet".into()],
+    ] {
+        let output = run_hermetic_command(
+            &mut runner,
+            &mut executed,
+            CommandSpec {
+                program: PathBuf::from("git"),
+                argv,
+                cwd: Some(repository.clone()),
+                environment: environment.clone(),
+                redacted_argv_positions: Vec::new(),
+            },
+        )?;
+        if output.status != 0 || !output.stdout.is_empty() {
+            return Err("cutover_blocked");
+        }
+    }
+    if !fixture.store_root.is_dir() || contains_metrics_or_events(&fixture.clone_root)? {
+        return Err("cutover_blocked");
+    }
+    assert_no_ls_remote(&executed)?;
+    Ok(fixture)
+}
+
+fn contains_metrics_or_events(root: &Path) -> Result<bool, &'static str> {
+    for entry in std::fs::read_dir(root).map_err(|_| "cutover_blocked")? {
+        let entry = entry.map_err(|_| "cutover_blocked")?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy().to_ascii_lowercase();
+        if name.contains("metrics") || name.contains("event") {
+            return Ok(true);
+        }
+        if entry.file_type().map_err(|_| "cutover_blocked")?.is_dir()
+            && contains_metrics_or_events(&entry.path())?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 fn host_target() -> &'static str {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
