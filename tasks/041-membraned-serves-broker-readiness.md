@@ -1,7 +1,7 @@
 ---
 id: 041
 title: membraned answers membrane.status for its broker set
-status: in_review
+status: done
 priority: 2
 specs: [001]
 intents: [003, 004, 009, 012]
@@ -14,7 +14,7 @@ done_when:
   - All five gate commands exit 0, reported as bare exit codes.
   - The chain walks - this task names spec 001 and intents 003, 004, 009, 012, reaches in_review with pr: set, and the pull request is a draft whose body ends with `task: 041`.
 pr: 70
-evidence:
+evidence: squash commit b0d24e4 on main; membraned answers membrane.status with the broker set's readiness re-probed per call, SIGTERM leaves no socket and no broker running, and the section 1 envelope edges hold
 ---
 
 ## Why
@@ -200,3 +200,6 @@ and not a false green. Five consecutive runs were clean.
 `the_childs_environment_is_the_parents_snapshot` cannot be made red by a stub that exits the
 child 0, because 0 is what it asserts. The red phase used a stub exiting 3 so that every exec
 test fails on its assertion rather than one of them passing vacuously.
+
+2026-09-01 — GitHub reports PR 70 merged at
+`b0d24e47177c898cb38a218abaa28169cb827912`; the heartbeat reconciled the stale task record.
