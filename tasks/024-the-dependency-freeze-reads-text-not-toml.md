@@ -66,8 +66,8 @@ and the whole suite stays green.
 and the rename for every dependency in every table. Either is enough; parsing the manifest by
 hand a second time is not.
 
-Spec 001 §6 item 3 is what this falsifies. Its freeze checklist says the controller-side wire
-rules are "enforced by `plasmosome-freeze-checks` (86 §4 rules 1–3 green today)", and rule 1 is the
+Spec 001 §6 item 3 is what this falsifies. Its delivery record says the controller-side wire
+rules are "held there by `plasmosome-freeze-checks` (86 §4 rules 1–3 green today)", and rule 1 is the
 check above — which announces "86 §4 rule 1 broken" when it fires and admits five ways not to. The
 spec claims an enforcement it does not have.
 

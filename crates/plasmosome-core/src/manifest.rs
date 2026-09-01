@@ -226,30 +226,33 @@ impl PlasmidManifest {
                     .unwrap_or("/workspace")
                     .to_string(),
             });
-        let mock = raw.get("mock").map(|m| {
-            let backend = m.get("backend");
-            let source = backend
-                .and_then(|b| b.get("source"))
-                .and_then(toml::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let kind = backend
-                .and_then(|b| b.get("kind"))
-                .and_then(toml::Value::as_str)
-                .unwrap_or("recorded")
-                .to_string();
-            let api = m
-                .get("api")
-                .and_then(toml::Value::as_str)
-                .unwrap_or("github")
-                .to_string();
-            MockSpec {
-                hosts: string_list(m.get("hosts")),
-                kind,
-                api,
-                source,
-            }
-        });
+        let mock = raw
+            .get("mock")
+            .map(|m| {
+                let backend = m.get("backend");
+                let source = backend
+                    .and_then(|b| b.get("source"))
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let kind = backend
+                    .and_then(|b| b.get("kind"))
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("recorded")
+                    .to_string();
+                let api = m
+                    .get("api")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or("github")
+                    .to_string();
+                Ok(MockSpec {
+                    hosts: declared_string_list(&id, "mock", "hosts", m.get("hosts"))?,
+                    kind,
+                    api,
+                    source,
+                })
+            })
+            .transpose()?;
         let model = raw.get("model").map(|m| ModelSpec {
             endpoint: m
                 .get("endpoint")
@@ -284,6 +287,9 @@ impl PlasmidManifest {
             return Err(ManifestError::Invalid(format!(
                 "plasmid {id} declares [network] without hosts"
             )));
+        }
+        if let Some(spec) = &mock {
+            validate_mock(&id, spec, network.as_ref())?;
         }
         validate_secret_refs(&id, &secrets)?;
         if let Some(commands) = &commands {
@@ -457,6 +463,26 @@ fn validate_secret_refs(id: &str, refs: &[SecretRef]) -> Result<(), ManifestErro
     Ok(())
 }
 
+fn validate_mock(
+    id: &str,
+    mock: &MockSpec,
+    network: Option<&NetworkSpec>,
+) -> Result<(), ManifestError> {
+    let Some(network) = network else {
+        return Err(ManifestError::Invalid(format!(
+            "plasmid {id} declares [mock] without the [network] hosts it stands in for"
+        )));
+    };
+    for host in &mock.hosts {
+        if !network.hosts.iter().any(|declared| declared == host) {
+            return Err(ManifestError::Invalid(format!(
+                "plasmid {id}: [mock] names host `{host}`, which its [network] does not declare"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestError> {
     for decl in &commands.commands {
         for secret in &decl.secrets {
@@ -469,6 +495,32 @@ fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestEr
         }
     }
     Ok(())
+}
+
+fn declared_string_list(
+    id: &str,
+    section: &str,
+    field: &str,
+    value: Option<&toml::Value>,
+) -> Result<Vec<String>, ManifestError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        return Err(ManifestError::Invalid(format!(
+            "plasmid {id}: [{section}] `{field}` must be an array of strings"
+        )));
+    };
+    items
+        .iter()
+        .map(|item| {
+            item.as_str().map(String::from).ok_or_else(|| {
+                ManifestError::Invalid(format!(
+                    "plasmid {id}: [{section}] `{field}` holds `{item}`, which is not a string"
+                ))
+            })
+        })
+        .collect()
 }
 
 fn string_list(value: Option<&toml::Value>) -> Vec<String> {
@@ -570,12 +622,69 @@ version = "0.1.0"
 mount = { backend = "virtiofs", dst = "/workspace" }
 "#;
 
-    const MOCK_GITHUB: &str = r#"
+    const GITHUB_PR_WITH_MOCK: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+impl.wasm = "components/github-pr.wasm"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+
+[mock]
+hosts = ["api.github.com"]
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const MOCK_WITHOUT_NETWORK: &str = r#"
 id = "mock-github"
 version = "0.1.0"
 
 [mock]
 hosts = ["api.github.com"]
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const MOCK_HOSTS_DRIFTED_FROM_NETWORK: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+
+[mock]
+hosts = ["api.github.example"]
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const MOCK_HOSTS_AS_SCALAR: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+
+[mock]
+hosts = "api.github.com"
+api = "github"
+backend = { kind = "recorded", source = "fixtures/github-pr" }
+"#;
+
+    const MOCK_HOSTS_MIXED_TYPES: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+
+[mock]
+hosts = ["api.github.com", 443]
 api = "github"
 backend = { kind = "recorded", source = "fixtures/github-pr" }
 "#;
@@ -697,13 +806,56 @@ subject = "git"
     }
 
     #[test]
-    fn mock_manifest_carries_hosts_and_backend_shape() {
-        let manifest = PlasmidManifest::parse(MOCK_GITHUB).unwrap();
+    fn a_plasmid_carries_its_own_mock_alongside_the_hosts_it_stands_in_for() {
+        let manifest = PlasmidManifest::parse(GITHUB_PR_WITH_MOCK).unwrap();
+        assert_eq!(manifest.id, "github-pr");
         let mock = manifest.mock.as_ref().unwrap();
         assert_eq!(mock.hosts, vec!["api.github.com".to_string()]);
         assert_eq!(mock.kind, "recorded");
         assert_eq!(mock.api, "github");
         assert_eq!(mock.source, "fixtures/github-pr");
+        assert_eq!(
+            mock.hosts,
+            manifest.network.as_ref().unwrap().hosts,
+            "a mock names the hosts its own manifest declares, so the two lists cannot drift"
+        );
+    }
+
+    #[test]
+    fn a_manifest_whose_whole_content_is_a_mock_is_refused() {
+        let err = PlasmidManifest::parse(MOCK_WITHOUT_NETWORK).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("[network]")),
+            "a mock stands in for hosts a plasmid declares, so it is never a plasmid of its own: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_mock_naming_a_host_its_own_manifest_does_not_declare_is_refused() {
+        let err = PlasmidManifest::parse(MOCK_HOSTS_DRIFTED_FROM_NETWORK).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("api.github.example")),
+            "the refusal names the host that drifted: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_mock_whose_hosts_is_a_bare_string_is_refused() {
+        let err = PlasmidManifest::parse(MOCK_HOSTS_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("hosts")),
+            "a scalar `hosts` declares no host at all, and silently standing in for nothing is \
+             the failure a mock exists to prevent: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_mock_whose_hosts_holds_a_non_string_is_refused() {
+        let err = PlasmidManifest::parse(MOCK_HOSTS_MIXED_TYPES).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("hosts")),
+            "dropping the entry that is not a string would narrow the mock without saying so: {err:?}"
+        );
     }
 
     #[test]

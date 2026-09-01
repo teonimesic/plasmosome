@@ -10,6 +10,5 @@
 //! decision-required design; it is intentionally absent from this commit.
 //!
 //! Plasmids become their own crates that build against this SDK once frozen
-//! (plasmid-github-pr, plasmid-workspace, plasmid-model-provider,
-//! plasmid-mock-github per the RENAME-NOTES decomposition). The kernel never
-//! knows which exist.
+//! (plasmid-github-pr, plasmid-workspace, plasmid-model-provider per the
+//! RENAME-NOTES decomposition). The kernel never knows which exist.
