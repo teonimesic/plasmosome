@@ -39,8 +39,11 @@ reviews:
       instructions: |
         These tests refuse harm that is permanent or public: an unintended publish, a commit
         crediting a model, the private research corpus reaching this tree. Do not suggest
-        relaxing one to make a change pass. Do flag a new guard here whose subject is a design
-        the project has not built yet — that belongs in a spec, not in a failing build.
+        relaxing one to make a change pass. Do flag a new guard whose consequence the next
+        commit could undo — whether its subject is a design the project has not built yet, or
+        a built design whose harm is one revert away — unless it falls under spec 013's
+        operational carve-out (a local operational property that costs nothing to check and
+        silently degrades a tool otherwise). Designs belong in a spec, not in a failing build.
     - path: "**/*.rs"
       instructions: |
         House style: no inline `//` comments. Documentation is `///` contract docs on public
