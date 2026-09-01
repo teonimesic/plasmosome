@@ -27,7 +27,16 @@ impl Readiness {
 const READINESS_METHOD: &str = "membrane.status";
 
 pub fn probe(socket: &Path, deadline: Duration) -> Readiness {
-    let stream = match UnixStream::connect(socket) {
+    probe_with(socket, deadline, |it| UnixStream::connect(it))
+}
+
+fn probe_with(
+    socket: &Path,
+    deadline: Duration,
+    connect: impl FnOnce(&Path) -> std::io::Result<UnixStream>,
+) -> Readiness {
+    let started = Instant::now();
+    let stream = match connect(socket) {
         Ok(stream) => stream,
         Err(_) => {
             return Readiness::NotReady(NotReady::Unreachable {
@@ -35,8 +44,13 @@ pub fn probe(socket: &Path, deadline: Duration) -> Readiness {
             });
         }
     };
-    let started = Instant::now();
-    let _ = stream.set_write_timeout(Some(deadline));
+    let Some(to_write) = deadline
+        .checked_sub(started.elapsed())
+        .filter(|it| !it.is_zero())
+    else {
+        return Readiness::NotReady(NotReady::TimedOut);
+    };
+    let _ = stream.set_write_timeout(Some(to_write));
     let mut stream = stream;
     let request = format!("{{\"id\":0,\"method\":\"{READINESS_METHOD}\",\"params\":{{}}}}\n");
     if stream.write_all(request.as_bytes()).is_err() {
@@ -202,6 +216,19 @@ mod tests {
         let verdict = probe(&socket, DEADLINE);
         assert_eq!(verdict, Readiness::NotReady(NotReady::TimedOut));
         assert!(!verdict.is_ready());
+    }
+
+    #[test]
+    fn connecting_spends_the_probe_deadline_so_a_ready_broker_still_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("membraned.control");
+        serve(socket.clone(), Answer::Ready("serving"));
+        let deadline = Duration::from_millis(50);
+        let verdict = probe_with(&socket, deadline, |it| {
+            thread::sleep(deadline);
+            UnixStream::connect(it)
+        });
+        assert_eq!(verdict, Readiness::NotReady(NotReady::TimedOut));
     }
 
     #[test]
