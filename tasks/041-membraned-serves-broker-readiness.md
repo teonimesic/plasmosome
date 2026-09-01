@@ -1,7 +1,7 @@
 ---
 id: 041
 title: membraned answers membrane.status for its broker set
-status: in_progress
+status: in_review
 priority: 2
 specs: [001]
 intents: [003, 004, 009, 012]
@@ -13,7 +13,7 @@ done_when:
   - The section 1 envelope edges hold - -32700 continues, over-cap -32600 closes, at-cap is served, -32601 for an unknown method.
   - All five gate commands exit 0, reported as bare exit codes.
   - The chain walks - this task names spec 001 and intents 003, 004, 009, 012, reaches in_review with pr: set, and the pull request is a draft whose body ends with `task: 041`.
-pr:
+pr: 70
 evidence:
 ---
 
@@ -177,3 +177,26 @@ runtime failure into the commit body before the implementation is written.
 STOP when done — do not start the next piece of work.
 
 ## Notes
+
+### 2026-09-01
+
+The plan asked `a_spawn_refusal_reaps_the_spawned_and_removes_the_socket` to read the first
+broker's pid from a pidfile and assert `ECHILD`. That pid is never recorded: `BrokerSet::spawn`
+does nothing between forking the first broker and refusing the second, so the SIGKILL lands
+before the child finishes exec'ing `sh`. Measured at 0 of 5 checkpoints out to 1000ms, three runs
+running. The test proves the same property differently — the pidfile must be **absent** after a
+settle — and that is falsifiable because a broker left running records its pid within 50ms, which
+was measured the same way. What it does not observe is reaped-versus-zombie; a zombie is not a
+broker left running, and the reap itself is observed by `ECHILD` in
+`the_daemon_answers_status_with_its_brokers_readiness`, where the broker lives long enough to
+record its pid.
+
+The end-to-end SIGTERM test checks the broker is gone with `kill(pid, 0)` returning `ESRCH`. The
+broker is `membraned`'s child, not the test's, so `waitpid` is not available to it. That carries
+a pid-reuse window of about a millisecond: if the pid were reused between the reap and the check,
+the test would read a live unrelated process and fail rather than pass, so the risk is a flake
+and not a false green. Five consecutive runs were clean.
+
+`the_childs_environment_is_the_parents_snapshot` cannot be made red by a stub that exits the
+child 0, because 0 is what it asserts. The red phase used a stub exiting 3 so that every exec
+test fails on its assertion rather than one of them passing vacuously.
