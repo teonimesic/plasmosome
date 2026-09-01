@@ -25,7 +25,9 @@ done_when: >-
   010 and 011 are untouched, because task 029 already owns their backfill; and every passage
   `grep -rni amnesty docs .agents` prints describes the spec-side amnesty as closed and empty,
   with `grep -rn 'intents: \[\]' docs .agents` matching no sentence that asserts spec 001 carries
-  it — the templates' own skeleton lines are the only hits.
+  it — its hits are the two template skeletons, the past-tense clauses in spec 012 recording that
+  the amnesty closed, the clause about what a task carries, and the skills' general rule, none of
+  which asserts it of spec 001 today.
 pr: https://github.com/teonimesic/plasmosome/pull/69
 evidence:
 ---
