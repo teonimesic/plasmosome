@@ -1,7 +1,7 @@
 ---
 id: 014
 title: Local-first work state with one authoritative writer
-status: draft
+status: accepted
 intents: [015]
 ---
 
