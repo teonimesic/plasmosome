@@ -89,16 +89,27 @@ impl RecordingCommandRunner {
         &self.commands
     }
     pub fn scripted(outputs: Vec<Result<CommandOutput, String>>) -> Self {
-        Self { commands: Vec::new(), outputs }
+        Self {
+            commands: Vec::new(),
+            outputs,
+        }
     }
     pub fn finish(self) -> Result<(), String> {
-        if self.outputs.is_empty() { Ok(()) } else { Err("unconsumed_script_result".into()) }
+        if self.outputs.is_empty() {
+            Ok(())
+        } else {
+            Err("unconsumed_script_result".into())
+        }
     }
 }
 
 impl CommandRunner for RecordingCommandRunner {
     fn run(&mut self, command: CommandSpec) -> Result<CommandOutput, String> {
         self.commands.push(command);
-        if self.outputs.is_empty() { Err("unexpected_command".into()) } else { self.outputs.remove(0) }
+        if self.outputs.is_empty() {
+            Err("unexpected_command".into())
+        } else {
+            self.outputs.remove(0)
+        }
     }
 }

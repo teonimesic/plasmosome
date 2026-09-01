@@ -175,11 +175,13 @@ Set `GIT_CONFIG_NOSYSTEM=1`, `BD_DISABLE_METRICS=1`, `BD_DISABLE_EVENT_FLUSH=1`,
 only `PATH` from the caller. Do not inherit a user `HOME`, Git config, credential helper, Beads
 config or telemetry endpoint.
 
-The cleanup guard always attempts `bd dolt stop` for both initialized clones and waits for those
-children before removing its temporary root. A contract test retains the root path outside the
-guard's scope and proves it is absent and no child remains unwaited. Cleanup failure makes the case
-fail as `fixture_cleanup_failed` and names only the clone label or process role, never a
-machine-specific path.
+Embedded mode starts no Dolt server process, so its cleanup closes or drops the store handles and
+removes the temporary root without planning or invoking `bd dolt stop`. The harness waits and reaps
+every child process it actually started; `bd dolt stop` is reserved for a server-mode process the
+harness started, which is out of scope here. A contract test retains the root path outside the
+guard's scope and proves it is absent and no child remains unwaited. An unexpected live child or
+failed removal makes the case fail as `fixture_cleanup_failed` and names only the clone label or
+process role, never a machine-specific path.
 
 ### Command surface
 
@@ -225,15 +227,17 @@ bd --sandbox init --stealth --skip-agents --skip-hooks --non-interactive
 Then set and read back `dolt.auto-push=false`. Assert the sentinels, tracked status, hooks and
 global config are unchanged; no file is staged; no metrics queue exists; no daemon, hook or
 background push is configured; and `git ls-remote` was never invoked. A `.beads` directory inside
-the disposable repository and `.git/info/exclude` changes are allowed. Stop the embedded Dolt
-process before cleanup. This proves a safe initialization command only; selecting the eventual
+the disposable repository and `.git/info/exclude` changes are allowed. Embedded mode has no Dolt
+server process to stop; cleanup drops the store handles before removing the temporary root. This
+proves a safe initialization command only; selecting the eventual
 clone-shared production store is later work.
 
 ### Production command contract
 
 Create two independent temporary Git repositories and initialize each with the real pinned binary
 using the stealth command above. Their `.beads`/Dolt roots and HOME/XDG/TMP/global-config roots must
-be distinct. Stop and reap both embedded processes after the test. Do not configure a live remote;
+be distinct. Embedded mode has no server process; drop both store handles and reap only any child
+the harness actually started after the test. Do not configure a live remote;
 the transport cases inject `RecordingCommandRunner` at the already-existing process boundary and
 feed it an exact ordered script of command outputs.
 
@@ -338,7 +342,7 @@ or relax an assertion while making its implementation pass.
 | `failure_before_publication_retries_the_same_candidate_once` (contract/transport) | script mints a candidate or creates zero/two generations | A failed publication attempt does not consume the semantic operation |
 | `lost_response_is_recovered_without_a_second_push` (contract/transport) | recording runner sees another push after G1 is observed | A published operation is rediscovered instead of republished |
 | `stale_base_is_never_routed_through_transport_retry` (contract) | recording runner invokes a retry after non-fast-forward | Only safely uninducible transport/lost-response failures use the recording seam |
-| `cleanup_stops_reaps_and_removes_both_store_roots` (contract) | Beads child remains unwaited or root exists after scope | Cleanup owns both real local stores and processes |
+| `cleanup_drops_embedded_stores_and_removes_both_roots` (contract) | `bd dolt stop` is planned, a harness child remains unwaited or root exists after scope | Embedded cleanup has no server command and owns every real local store and harness child |
 | `unsafe_configured_command_or_contradictory_result_is_cutover_blocked` (cli) | unsafe plan passes or absence of live test blocks | Only our unsafe command/result is a blocker; no hosted test is required |
 
 The real pinned binary initializes and cleans up both stores. The existing
@@ -437,3 +441,21 @@ guarded recovery to G2, retry before publication and lost-response rediscovery. 
 now means our configured command is unsafe (unleased force or missing expected base) or a supplied
 observation contradicts the documented GitHub/Git contract. No repository, credential, server,
 fake forge or new mock dependency is part of task 042.
+
+2026-09-01: The real pinned embedded mode reported `bd dolt stop` is unsupported because it has no
+Dolt server. Owner direction corrects the cleanup contract: embedded cleanup must not plan or invoke
+that command, instead dropping store handles, reaping only harness-started children and removing
+temporary roots. A new cleanup test first failed on the absent no-stop plan, then passed after the
+embedded cleanup implementation removed the unsupported command. Real hermetic and two-store
+transport commands passed after that correction.
+
+2026-09-01: Revised offline command-contract evidence: tests first failed on the absent offline
+parser, scripted runner, publication/lease/retry APIs; then pin (5), contract (8) and CLI (1)
+tests passed. With the verified temporary Apple Silicon artifact, `hermetic`, `stale-base-fence`,
+`push-conflict-recovery`, `transport-retries`, `transport` and `all` each passed without a hosted
+repository, credential, API call or local server. `cargo llvm-cov` 0.6.21 reported 67.39% lines,
+54.29% functions and 49.69% regions overall: pin.rs was 91.82% lines; the meaningful remaining
+misses are SystemCommandRunner error paths and CLI process exit paths, which ordinary unit tests
+do not execute, while the real contract commands cover their successful disposable subprocess
+paths. Command safety, stale/transport classification, exact lease base, retry and embedded cleanup
+branches are covered by the recording-script tests.
