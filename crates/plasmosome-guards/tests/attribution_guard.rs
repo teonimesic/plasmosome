@@ -282,6 +282,12 @@ fn clears_a_body_larger_than_a_pipe_buffer_whose_first_line_is_trailer_shaped() 
     let output = run_guard_over(&message);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
+        output.status.success(),
+        "the guard refused a commit whose only trailer is well-formed; a guard that refuses a \
+         message for its size refuses at random.\nguard stdout:\n{stdout}\nguard stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
         !stdout.contains("grep exited"),
         "the guard called its own tooling unreadable on a body it can read; a guard that refuses \
          because a writer it spawned took SIGPIPE refuses at random.\nguard said:\n{stdout}",
