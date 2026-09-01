@@ -382,3 +382,16 @@ write. GitHub transport cases, coverage, the full root gate, PR and cutover conc
 remain unrun. Required input: an explicit public, empty, disposable GitHub repository URL whose
 basename starts `plasmosome-work-state-fixture`, with existing caller-provided read/write access,
 and the exact confirmation token `refs/dolt/data`.
+
+2026-09-01: Bounded user-config investigation: `/Users/stefano/.config/bd/config.yaml` had inode
+`296155496`, size `111`, birth time `2026-09-01T11:32:34-0300`, modified and changed time
+`2026-09-01T11:39:23-0300`, and SHA-256
+`7fedc3ead881abaf130e3a6076491521321c2c2da5c50a3997f45d9039fca213`. A repeated real missing-
+fixture command returned `github_fixture_required` with exit 2; before and after metadata and hash
+were identical. The CLI returns that refusal before allocating a temporary root, verification or
+any `bd` child, so this final refusal did not recreate or modify the file. Its creation predates
+the task commits, but no baseline metadata was captured before this task began, so this record
+cannot establish whether an earlier user action or an earlier task run created it. The file was
+not read, changed or removed. All CLI verification paths call `verify_with_environment` with the
+temporary isolated environment; the empty-environment `verify` helper is used only by injected
+unit tests, not by the CLI.
