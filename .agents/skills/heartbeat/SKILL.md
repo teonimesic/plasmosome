@@ -141,11 +141,11 @@ done
 ```
 
 That loop prints five faults: an accepted spec whose intent is still `draft`, one naming an id no
-intent file carries, one naming an id that several files carry, one naming an intent that declares
-its status twice, and a **new** accepted spec naming no intent at all. Two of them share a message,
-because an id must resolve to **exactly one** file and both zero and several are failures to do
-that. Resolving it by picking the first match would make the gate hold or fail on filename order,
-since the duplicate that sorts first is the one that answers.
+intent file carries, one naming an id that several files carry, one naming an intent that does not
+declare its status exactly once, and a **new** accepted spec naming no intent at all. Two of them
+share a message, because an id must resolve to **exactly one** file and both zero and several are
+failures to do that. Resolving it by picking the first match would make the gate hold or fail on
+filename order, since the duplicate that sorts first is the one that answers.
 
 Ids are read out of each intent's own `id:` rather than globbed from the filename, so a missing
 intent is reported instead of aborting the loop. The amnesty fault needs the one name hardcoded,
@@ -184,8 +184,8 @@ approved on any check asking whether an approved line exists.
 **It covers `docs/intents/` and `docs/specs/`, and nothing else.** The greps over `tasks/*.md`
 select on `status:`, `specs:` and `intents:` lines that no sweep validates, so a task written
 `status:todo` still opts out of its queue silently. That gap is real and older than this change;
-closing it means fixing which task statuses are current first, since the lifecycle table above
-lists `in_progress` and no task on the tree uses it.
+closing it means fixing which task statuses are current first, since `## Lifecycle` in
+`.agents/skills/tasks` lists `in_progress` and no task on the tree uses it.
 
 The first two lists shrinking over sessions is the signal that the queue is being fed by the plan.
 Both growing is the signal it is being fed by the review process instead.
