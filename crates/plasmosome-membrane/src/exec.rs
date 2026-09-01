@@ -49,9 +49,10 @@ pub struct ExecCommand {
 impl ExecCommand {
     /// Resolves `argv` into a command, or says why it cannot be one. `argv[0]`
     /// holding a `/` is taken as a path and must exist; otherwise it is looked up
-    /// in `PATH`. A program that exists but cannot be executed is not refused here
-    /// — that failure is only visible to `execve`, and shows up as the child
-    /// exiting 127.
+    /// in `PATH`, skipping entries that exist but cannot be executed, as `execvp`
+    /// does. A named path that exists but cannot be executed is not refused here —
+    /// that failure is only visible to `execve`, and shows up as the child exiting
+    /// 127.
     pub fn new(argv: Vec<String>) -> Result<ExecCommand, ExecError> {
         let Some(name) = argv.first().cloned() else {
             return Err(ExecError::EmptyArgv);
@@ -103,10 +104,25 @@ fn resolve(program: &str) -> Option<CString> {
         return CString::new(program.as_bytes()).ok();
     }
     let search = std::env::var_os("PATH")?;
-    let found = std::env::split_paths(&search)
+    search_path(program, &search)
+}
+
+/// Finds `program` in `search`, a `PATH`-shaped list, skipping entries that exist
+/// but cannot be executed — the same walk `execvp` performs, so a non-executable
+/// file early in the list does not shadow a runnable one later.
+fn search_path(program: &str, search: &std::ffi::OsStr) -> Option<CString> {
+    let found = std::env::split_paths(search)
         .map(|directory| directory.join(program))
-        .find(|candidate| candidate.is_file())?;
+        .find(|candidate| is_executable_file(candidate))?;
     CString::new(found.into_os_string().into_vec()).ok()
+}
+
+fn is_executable_file(candidate: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    candidate.is_file()
+        && candidate
+            .metadata()
+            .is_ok_and(|data| data.permissions().mode() & 0o111 != 0)
 }
 
 impl std::fmt::Debug for ExecCommand {
@@ -206,6 +222,37 @@ mod tests {
         assert_eq!(
             child.wait_terminal(DEADLINE),
             VmmState::Exited { code: 127 }
+        );
+    }
+
+    #[test]
+    fn a_non_executable_file_early_in_path_does_not_shadow_a_runnable_one_later() {
+        let dir = tempfile::tempdir().expect("the test owns its directories");
+        use std::os::unix::fs::PermissionsExt;
+        let shadow = dir.path().join("shadow");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&shadow).expect("the test makes its shadow directory");
+        std::fs::create_dir(&real).expect("the test makes its real directory");
+        std::fs::write(shadow.join("probe"), "not runnable").expect("the test writes the shadow");
+        std::fs::write(real.join("probe"), "#!/bin/sh\nexit 0\n")
+            .expect("the test writes the real one");
+        std::fs::set_permissions(real.join("probe"), std::fs::Permissions::from_mode(0o755))
+            .expect("the test makes the real one executable");
+
+        let search = std::env::join_paths([shadow.as_path(), real.as_path()])
+            .expect("the test builds a PATH-shaped list");
+        let found = search_path("probe", &search)
+            .expect("a runnable probe later in the list is found past an unrunnable one");
+
+        assert_eq!(
+            found
+                .to_str()
+                .expect("the resolved path is UTF-8 in this test"),
+            real.join("probe")
+                .to_str()
+                .expect("the expected path is UTF-8"),
+            "execvp skips a candidate it cannot execute and keeps walking; stopping at the first \
+             file that merely exists resolves a program that can only ever exit 127",
         );
     }
 }

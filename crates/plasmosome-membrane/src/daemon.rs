@@ -1,5 +1,6 @@
 use crate::brokers::{BrokerSet, BrokerSpec, SpawnFailed};
 use crate::control;
+use crate::control::ListenerFailed;
 use crate::exec::{ExecCommand, ExecError};
 use crate::readiness::ControlSocketProbe;
 use crate::vmm::{SpawnError, VmmChild};
@@ -80,6 +81,7 @@ pub enum DaemonError {
         source: ExecError,
     },
     Spawn(SpawnFailed),
+    Listener(ListenerFailed),
 }
 
 impl std::fmt::Display for DaemonError {
@@ -96,6 +98,12 @@ impl std::fmt::Display for DaemonError {
                 write!(f, "broker `{broker}` has no runnable command: {source}")
             }
             DaemonError::Spawn(failure) => write!(f, "{failure}"),
+            DaemonError::Listener(ListenerFailed(source)) => {
+                write!(
+                    f,
+                    "the control socket stopped accepting connections: {source}"
+                )
+            }
         }
     }
 }
@@ -106,6 +114,7 @@ impl std::error::Error for DaemonError {
             DaemonError::Bind { source, .. } => Some(source),
             DaemonError::BrokerCommand { source, .. } => Some(source),
             DaemonError::Spawn(failure) => Some(failure),
+            DaemonError::Listener(ListenerFailed(source)) => Some(source),
         }
     }
 }
@@ -328,7 +337,7 @@ pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonErro
     )
     .map_err(DaemonError::Spawn)?;
 
-    control::serve(listener, shutdown, || set.status(deadline));
+    control::serve(listener, shutdown, || set.status(deadline)).map_err(DaemonError::Listener)?;
     Ok(())
 }
 

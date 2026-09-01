@@ -15,6 +15,7 @@ const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const ACCEPT_POLL: Duration = Duration::from_millis(25);
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
+const WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Answers one request line, returning the response line to send back.
 ///
@@ -66,8 +67,12 @@ fn wire_status(status: SetStatus) -> Value {
             result
         }
         SetStatus::DeadlineSpent { unreached, asked } => {
-            json!({"ready": false, "state": "deadline_spent",
-                   "unreached": unreached, "asked": asked})
+            let mut spent = json!({"ready": false, "state": "deadline_spent",
+                                   "unreached": unreached});
+            if !asked.is_empty() {
+                spent["asked"] = json!(asked);
+            }
+            spent
         }
         SetStatus::Empty => json!({"ready": false, "state": "empty"}),
     }
@@ -85,30 +90,56 @@ fn reason_name(reason: &NotReady) -> &'static str {
 /// Serves ndjson requests on `listener` until `shutdown` is set.
 ///
 /// Connections are taken one at a time and each is answered in request order.
-/// The flag is checked between accepts and between reads, so an idle client
-/// cannot hold the server open past shutdown; the longest a caller waits after
-/// setting it is one poll interval. `status` is called once per
-/// `membrane.status` request, never cached.
+/// The flag is checked between accepts and between reads, and both halves of a
+/// connection are bounded by a timeout, so neither an idle client nor one that
+/// never reads its replies can hold the server open past shutdown. `status` is
+/// called once per `membrane.status` request, never cached.
 ///
-/// Returns when the flag is set, or when the listener stops being usable.
-pub fn serve(listener: UnixListener, shutdown: &AtomicBool, mut status: impl FnMut() -> SetStatus) {
-    if listener.set_nonblocking(true).is_err() {
-        return;
-    }
+/// Returns `Ok` when the flag is set, and `Err` when the listener stopped being
+/// usable — a caller that treats both alike reports a broken socket as a
+/// requested shutdown.
+pub fn serve(
+    listener: UnixListener,
+    shutdown: &AtomicBool,
+    mut status: impl FnMut() -> SetStatus,
+) -> Result<(), ListenerFailed> {
+    listener.set_nonblocking(true).map_err(ListenerFailed)?;
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _)) => converse(stream, shutdown, &mut status),
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                std::thread::sleep(ACCEPT_POLL);
-            }
-            Err(error) if error.kind() == ErrorKind::Interrupted => {}
-            Err(_) => return,
+            Err(error) => match accept_outcome(&error) {
+                Next::Poll => std::thread::sleep(ACCEPT_POLL),
+                Next::Retry => {}
+                Next::Fail => return Err(ListenerFailed(error)),
+            },
         }
+    }
+    Ok(())
+}
+
+/// What the accept loop does with an error the listener returned.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Next {
+    Poll,
+    Retry,
+    Fail,
+}
+
+/// Why `serve` stopped when it did not stop because it was asked to.
+#[derive(Debug)]
+pub struct ListenerFailed(pub std::io::Error);
+
+pub fn accept_outcome(error: &std::io::Error) -> Next {
+    match error.kind() {
+        ErrorKind::WouldBlock => Next::Poll,
+        ErrorKind::Interrupted => Next::Retry,
+        _ => Next::Fail,
     }
 }
 
 enum Request {
     Line(String),
+    NotUtf8,
     TooLong,
     Ended,
 }
@@ -116,6 +147,7 @@ enum Request {
 fn converse(stream: UnixStream, shutdown: &AtomicBool, status: &mut impl FnMut() -> SetStatus) {
     if stream.set_nonblocking(false).is_err()
         || stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
+        || stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err()
     {
         return;
     }
@@ -126,6 +158,7 @@ fn converse(stream: UnixStream, shutdown: &AtomicBool, status: &mut impl FnMut()
     loop {
         let reply = match read_request(&mut reader, shutdown) {
             Request::Line(line) => respond(&line, status),
+            Request::NotUtf8 => failure(Value::Null, PARSE_ERROR, "request line is not UTF-8"),
             Request::TooLong => {
                 let refusal = failure(Value::Null, INVALID_REQUEST, "request line is too long");
                 let _ = writeln!(writer, "{refusal}");
@@ -163,7 +196,10 @@ fn read_request(reader: &mut BufReader<UnixStream>, shutdown: &AtomicBool) -> Re
             return Request::TooLong;
         }
         if newline.is_some() {
-            return Request::Line(String::from_utf8_lossy(&line).into_owned());
+            return match String::from_utf8(line) {
+                Ok(text) => Request::Line(text),
+                Err(_) => Request::NotUtf8,
+            };
         }
     }
 }
@@ -214,7 +250,7 @@ mod tests {
     struct Serving {
         socket: PathBuf,
         shutdown: Arc<AtomicBool>,
-        finished: mpsc::Receiver<()>,
+        finished: mpsc::Receiver<Result<(), ListenerFailed>>,
         handle: Option<thread::JoinHandle<()>>,
         _dir: tempfile::TempDir,
     }
@@ -247,8 +283,8 @@ mod tests {
         let flag = Arc::clone(&shutdown);
         let (done, finished) = mpsc::channel();
         let handle = thread::spawn(move || {
-            serve(listener, &flag, status);
-            let _ = done.send(());
+            let outcome = serve(listener, &flag, status);
+            let _ = done.send(outcome);
         });
         Serving {
             socket,
@@ -480,9 +516,127 @@ mod tests {
         );
 
         served.shutdown.store(true, Ordering::Relaxed);
-        served
-            .finished
-            .recv_timeout(PATIENCE)
-            .expect("serve returns once the flag is set, with the client still connected");
+        assert!(
+            served
+                .finished
+                .recv_timeout(PATIENCE)
+                .expect("serve returns once the flag is set, with the client still connected")
+                .is_ok(),
+            "a shutdown that was asked for reports success",
+        );
+    }
+
+    #[test]
+    fn shutdown_stops_serve_even_with_a_client_that_never_reads_its_replies() {
+        let served = serving(|| SetStatus::Ready);
+        let client = served.client();
+        let mut writer = client
+            .get_ref()
+            .try_clone()
+            .expect("the test clones its own writing half");
+        writer
+            .set_write_timeout(Some(Duration::from_millis(200)))
+            .expect("the test bounds its own writes so a wedged server cannot hang it");
+        for _ in 0..20_000 {
+            if writeln!(writer, "{STATUS_REQUEST}").is_err() {
+                break;
+            }
+        }
+        let _ = writer.flush();
+
+        served.shutdown.store(true, Ordering::Relaxed);
+        assert!(
+            served
+                .finished
+                .recv_timeout(PATIENCE)
+                .expect(
+                    "serve returns once the flag is set even against a client that never reads; \
+                     a write with no timeout blocks forever and turns the covered SIGTERM \
+                     teardown into the uncovered SIGKILL residue path",
+                )
+                .is_ok(),
+            "a shutdown that was asked for reports success",
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_is_answered_32700_rather_than_silently_repaired() {
+        let served = serving(|| SetStatus::Ready);
+        let mut client = served.client();
+        let mut writer = client
+            .get_ref()
+            .try_clone()
+            .expect("the test clones its own writing half");
+        let mut line: Vec<u8> = br#"{"id":1,"method":"membrane.status","params":{"pad":""#.to_vec();
+        line.push(0xFF);
+        line.extend_from_slice(br#""}}"#);
+        line.push(b'\n');
+        writer.write_all(&line).expect("the test sends its bytes");
+        writer.flush().expect("the test flushes");
+
+        let mut reply = String::new();
+        client
+            .read_line(&mut reply)
+            .expect("a reply comes back for a line that is not UTF-8");
+        let value: Value = serde_json::from_str(&reply)
+            .unwrap_or_else(|error| panic!("the reply is JSON, got {reply:?}: {error}"));
+        assert_eq!(
+            value.pointer("/error/code"),
+            Some(&json!(PARSE_ERROR)),
+            "spec 001 answers a line that is not UTF-8 with a parse error; repairing the bytes \
+             into something that happens to parse serves a request nobody sent, got {value}",
+        );
+    }
+
+    #[test]
+    fn an_accept_error_is_classified_by_what_it_means_for_the_loop() {
+        assert_eq!(
+            accept_outcome(&std::io::Error::from(ErrorKind::WouldBlock)),
+            Next::Poll,
+            "a nonblocking listener with nothing pending is the idle case, not a failure",
+        );
+        assert_eq!(
+            accept_outcome(&std::io::Error::from(ErrorKind::Interrupted)),
+            Next::Retry,
+            "a signal interrupting accept is retried, not a failure",
+        );
+        assert_eq!(
+            accept_outcome(&std::io::Error::from(ErrorKind::Other)),
+            Next::Fail,
+            "any other accept error is a listener that stopped working",
+        );
+    }
+
+    #[test]
+    fn a_requested_shutdown_reports_success_and_a_broken_listener_would_not() {
+        let served = serving(|| SetStatus::Ready);
+        let mut client = served.client();
+        assert_eq!(
+            ask(&mut client, STATUS_REQUEST).pointer("/result/ready"),
+            Some(&json!(true)),
+            "the server is serving before the flag is set"
+        );
+        served.shutdown.store(true, Ordering::Relaxed);
+        assert!(
+            served
+                .finished
+                .recv_timeout(PATIENCE)
+                .expect("serve returns once the flag is set")
+                .is_ok(),
+            "a shutdown that was asked for reports success; only that makes a listener failure \
+             distinguishable from it",
+        );
+    }
+
+    #[test]
+    fn a_deadline_spent_before_anything_was_asked_omits_the_empty_list() {
+        assert_eq!(
+            result_of(SetStatus::DeadlineSpent {
+                unreached: "dnsd".to_string(),
+                asked: Vec::new(),
+            }),
+            json!({"ready": false, "state": "deadline_spent", "unreached": "dnsd"}),
+            "spec 001 never sends a field with nothing in it",
+        );
     }
 }

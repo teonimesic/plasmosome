@@ -389,7 +389,7 @@ The controller drives each cell's `membraned` over a second, private ndjson-UDS
   | `state` | further fields |
   | --- | --- |
   | `not_serving` | `broker` — the one that held the set back; `reason`; and `broker_state` when, and only when, `reason` is `reported` |
-  | `deadline_spent` | `unreached` — the first broker never asked; `asked` — those that spent the budget, in probe order |
+  | `deadline_spent` | `unreached` — the first broker never asked; `asked` — those that spent the budget, in probe order, omitted when the deadline was gone before any broker was asked |
   | `empty` | none — a membrane supervising no brokers, which is never ready |
 
   `reason` is one of `unreachable`, `timed_out`, `malformed` or `reported`: the socket was not
