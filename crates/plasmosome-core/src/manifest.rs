@@ -325,6 +325,11 @@ impl PlasmidManifest {
 }
 
 fn parse_network(id: &str, section: &str, n: &toml::Value) -> Result<NetworkSpec, ManifestError> {
+    if !n.is_table() {
+        return Err(ManifestError::Invalid(format!(
+            "plasmid {id}: [{section}] must be a table"
+        )));
+    }
     let hosts = declared_string_list(id, section, "hosts", n.get("hosts"))?;
     let ports = n
         .get("ports")
@@ -757,6 +762,49 @@ hosts = "alpha.ak.local"
 ports = [443]
 "#;
 
+    const NETWORK_SECTION_AS_SCALAR: &str = r#"
+id = "probe"
+version = "0.1.0"
+network = "api.github.com"
+"#;
+
+    const COMMAND_NETWORK_SECTION_AS_SCALAR: &str = r#"
+id = "e13-commands-fixture"
+version = "0.1.0"
+
+[network]
+hosts = ["alpha.ak.local"]
+ports = [443]
+
+[commands]
+address_plan = "10.29.0.0/24"
+
+[commands.commands.git]
+exec = ["git"]
+network = "alpha.ak.local"
+"#;
+
+    const COMMAND_NETWORK_PIN_CIDRS_AS_SCALAR: &str = r#"
+id = "e13-commands-fixture"
+version = "0.1.0"
+
+[network]
+hosts = ["alpha.ak.local"]
+ports = [443]
+
+[commands]
+address_plan = "10.29.0.0/24"
+
+[commands.commands.git]
+exec = ["git"]
+subject = "git"
+
+[commands.commands.git.network]
+hosts = ["alpha.ak.local"]
+ports = [443]
+pin_cidrs = "10.29.0.0/24"
+"#;
+
     const COMMANDS_E13: &str = r#"
 id = "e13-commands-fixture"
 version = "0.1.0"
@@ -962,6 +1010,36 @@ subject = "git"
             matches!(&err, ManifestError::Invalid(m) if m.contains("[commands.git.network]") && m.contains("hosts")),
             "a command whose network hosts read as an empty list carries no host restriction \
              at all, and nothing behind the parser notices: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_network_section_declared_as_a_scalar_is_refused() {
+        let err = PlasmidManifest::parse(COMMAND_NETWORK_SECTION_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[commands.git.network]") && m.contains("must be a table")),
+            "a network section that is not a table reads every field as absent, so the command \
+             carries a network declaration that restricts nothing: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_network_section_declared_as_a_scalar_is_refused_as_a_type_error_not_an_absence() {
+        let err = PlasmidManifest::parse(NETWORK_SECTION_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[network]") && m.contains("must be a table")),
+            "reporting a section-shaped typo as missing hosts sends the author looking for a \
+             line that is already there: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_pin_cidrs_declared_as_a_bare_string_is_refused() {
+        let err = PlasmidManifest::parse(COMMAND_NETWORK_PIN_CIDRS_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[commands.git.network]") && m.contains("pin_cidrs")),
+            "the fourth cell the criterion claims: a command-level pin that parses to no pins \
+             at all must be refused by a test, not only by a shared helper: {err:?}"
         );
     }
 
