@@ -1,7 +1,7 @@
 ---
 id: 035
 title: Cut the freeze checks down to the guards, and name the crate for what is left
-status: in_progress
+status: in_review
 priority: 2
 specs: [013]
 intents: [008]
@@ -21,9 +21,10 @@ done_when: >-
   the shape of a wire type, or shared memory across the seam; `cargo test
   --workspace` is green and reports 231 tests against 261 before; the publish
   guard is shown by mutation to still fail when a member becomes publishable;
-  and the crate name appears nowhere outside the dated records under
-  `docs/decisions/` and `tasks/`.
-pr:
+  and nothing in the tree claims the old crate name enforces anything, the
+  dated records under `docs/decisions/` and `tasks/` and spec 013's own account
+  of the change aside.
+pr: 64
 evidence:
 ---
 

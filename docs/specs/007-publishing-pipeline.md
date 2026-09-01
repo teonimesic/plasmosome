@@ -30,6 +30,13 @@ Decided now, so the spec is buildable the day the decisions land:
 - **Publish:** `plasmid-sdk`, `plasmosome-core`, `plasmosome-ledger`, `plasmosome-backend`,
   `plasmosome-membrane`. **Never publish:** `plasmosome-guards` and
   `plasmosome-testkit`, which get `publish = false`.
+- **Making `plasmid-sdk` publishable re-earns the no-executable guard.** A package has one
+  `[dependencies]` table shared by its library and its binaries, so a binary here makes everything
+  that binary needs a dependency of every plasmid crate built against the library — permanent for
+  any version already on the registry. `the_stability_boundary_ships_no_executable` was removed
+  under spec 013 because an unpublished `plasmid-sdk` has nobody downstream to harm. It returns to
+  `plasmosome-guards` in the same change that adds `plasmid-sdk` to `HELD_NAMES`, and that is an
+  acceptance line of this spec rather than something to remember.
 - Path dependencies gain `version =` fields, which `cargo package` requires.
 - CI gains a `package` job: `cargo package -p <crate>` per publishable **leaf** crate — the ones
   that depend on no other crate in this workspace. This subsumes nothing in spec 004 — the matrix
@@ -68,6 +75,9 @@ Decided now, so the spec is buildable the day the decisions land:
 - The `package` CI job is green for every publishable leaf crate.
 - One tagged release has published every publishable crate to crates.io in dependency order, and
   rerunning that release skips the crates already on the registry instead of failing on them.
+- `the_stability_boundary_ships_no_executable` is back in `plasmosome-guards` and passing, added
+  in the same change that makes `plasmid-sdk` publishable, and it fails when `plasmid-sdk` is
+  given a binary target.
 - The gate in the root `AGENTS.md` is green.
 
 ## Blocked on

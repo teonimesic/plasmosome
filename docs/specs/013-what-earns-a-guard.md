@@ -19,14 +19,33 @@ design belongs in `docs/specs/` and in each crate's `AGENTS.md`, where somebody 
 it in a sentence rather than by editing a test.
 
 The failure this spec is written against is the opposite one, and it already happened here. Five
-of the eight rules in `crates/plasmosome-freeze-checks` held the shape of a controller/supervisor
-seam that has not been built: no crate named `plasmosome-vmm` exists, `membraned` is a reserved
-binary with a readiness contract and no supervisor, and the wire types they pinned belong to a
-protocol whose daemon is still unwritten. They came from a research finding — a list of things a
-kernel like this must not bake in — which is sound as a finding and premature as a build failure.
-A rule that pins an unbuilt design is not conservative. It is a bet that the first shape guessed
-is right, collected from whoever tries the second one, and the guess is never audited because
-nothing distinguishes "the rule held" from "nobody tried".
+of the eight rules in `crates/plasmosome-freeze-checks` came from a research finding — a list of
+things a kernel like this must not bake in — which is sound as a finding and premature as a build
+failure. They fail the bar above: every harm they refused is revertible by the next commit.
+
+**They fail it for two different reasons, and flattening them would leave a false record.** The
+shared-memory scan, the serde round-trip list and the no-executable rule on `plasmid-sdk` were
+about shapes not yet built: no crate named `plasmosome-vmm` exists, `membraned` is a reserved
+binary with a readiness contract and no supervisor, the wire types belong to a protocol whose
+daemon is unwritten, and `plasmid-sdk` is unpublished with no `[dependencies]` section at all. A
+rule of that kind is a bet that the first shape guessed is right, collected from whoever tries the
+second one, and the guess is never audited because nothing distinguishes "the rule held" from
+"nobody tried".
+
+**The two controller-dependency rules were not that**, and they should not be remembered as
+vacuous. `plasmosome-core`, `plasmosome-backend`, `plasmosome-ledger` and `plasmosome-membrane`
+all exist today, and those rules refused dependencies anybody could add today — `libc`, `nix`,
+`rustix`, `plasmosome-membrane` itself. They were cheap, mutation-tested, and guarding a live
+boundary. They go because their subject is a design decision whose cost is one revert, not because
+there was nothing there.
+
+**Removing a check removes its signal, and this spec does not pretend otherwise.** The
+controller-may-not-link-a-hypervisor line now lives in prose and in whoever reads the diff, and a
+review that was skipped reads the same as a review that found nothing — the very audit gap named
+two paragraphs up. That is the accepted cost of the bar, not an oversight in it: a build failure
+is the strongest instrument this repository has, and spending it on every conviction leaves
+nothing louder for the ones that matter. What the bar buys is that the loud instrument still means
+something when it fires.
 
 ## Contract
 
@@ -49,6 +68,13 @@ reverted tomorrow" is yes, the check does not go in the build.
 - The shape of an interface, a seam, or a wire type, for a component not yet built.
 - Any property whose subject is a file that does not exist yet.
 
+**Where an accepted spec already plans a guard, this bar applies to it when it is written, not
+retroactively.** Spec 004 plans `ci_matrix_matches_workspace_members`, whose harm — a crate
+silently dropping out of CI — is revertible, so it does not clear the headline bar and must be
+argued under the operational carve-out above or dropped. That argument belongs in the pull request
+that adds it. Nothing here withdraws spec 004's acceptance, and the guard inventory below counts
+what the crate holds on the day this spec lands, not a ceiling on what it may ever hold.
+
 **A guard states the harm, not the rule.** `no_binary_target_takes_a_name_another_package_owns`
 fails with what breaks — a collision in `target/`, a `cargo install` that refuses — so a reader
 who has never met the rule can judge it. A message that only restates its own name teaches
@@ -65,10 +91,12 @@ name promising otherwise invites the rules this spec refuses.
 
 ## Acceptance
 
-- `crates/plasmosome-guards` exists, is a workspace member, carries `publish = false`, and no
-  path in the tree refers to `plasmosome-freeze-checks` except the dated records under
-  `docs/decisions/` and `tasks/`, which are historical and are not rewritten.
-- The crate holds exactly six guards: `only_the_held_names_are_publishable_to_a_registry`,
+- `crates/plasmosome-guards` exists, is a workspace member, carries `publish = false`, and
+  nothing in the tree claims `plasmosome-freeze-checks` enforces anything. The dated records under
+  `docs/decisions/` and `tasks/`, and this spec's own account of the change, still name it; they
+  are history, not claims of enforcement, and are not rewritten.
+- The crate holds these six guards and no others:
+  `only_the_held_names_are_publishable_to_a_registry`,
   `no_binary_target_takes_a_name_another_package_owns`, `testkit_is_dev_only`, the attribution
   guard, the provenance guard, and skill discovery. Each names a permanent or public consequence.
 - No guard in the crate asserts a property of the controller/supervisor seam, of wire-type shape,
