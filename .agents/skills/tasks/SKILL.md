@@ -59,11 +59,10 @@ Until then, do not create either file. A second copy of the vision would contrad
 
 **Every change that reaches `main` is reachable upward**: the pull request names a task, the task
 names a spec, the spec names an intent. That walk is what answers "was this wanted" without asking
-anybody, and a change it cannot follow to a top has no answer to give. **One named spec ends the
-walk a step early**: `docs/specs/001-control-protocol.md` is `accepted` naming no intent, so a
-change beneath it reaches that spec and stops, and its task's `intents: []` is a correct field
-rather than an unfilled one. That amnesty is one file and closed — "What predates the rule" below
-has it, and no other accepted spec with an empty `intents:` is covered by it.
+anybody, and a change it cannot follow to a top has no answer to give. **Every accepted spec names
+an intent**, so the walk reaches a top from wherever it starts and no spec ends it early. Task files
+merged before the rule may still name nothing above them; "What predates the rule" below is what
+covers those, and it bounds what may stay unmapped rather than where the walk stops.
 
 **There is no size below which a change is exempt from that walk, and no kind of change that is.**
 **A pull request may file the task it needs in the same change** — the task does not have to exist
@@ -213,8 +212,8 @@ on the pull request.
 
 ### What predates the rule
 
-`main` already holds tasks and specs that name nothing above them. They were filed correctly under
-the rule in force at the time, and **this one does not reach back**: they stay valid and they stay
+`main` already holds tasks that name nothing above them. They were filed correctly under the rule
+in force at the time, and **this one does not reach back**: they stay valid and they stay
 merged. **Editing such a file is not gated on backfilling it** — a correction, a rewritten `## Why`,
 a `pr:` or `evidence:` field, a flip to `in_review` or `done`, and any change elsewhere that happens
 to touch an unmapped task file. None of that waits for a mapping.
@@ -226,20 +225,17 @@ terms this keeps coming out ambiguous between the file and the work, and "a stat
 is exactly the sentence that lets `status: planned` through the gate this section exists to hold.
 The greps under "Finding things" are the waiting list that gate creates, not a list of faults.
 
-**The amnesty is a closed set, and it is one file.** `docs/specs/001-control-protocol.md` is the
-only spec that is `accepted` and names no intent, so any *other* accepted spec with an empty
-`intents:` is a spec that skipped the gate rather than one that predates it. Naming the set is what
-makes that difference visible: an unbounded "it predates the rule" is a permanent excuse, because
-nothing distinguishes an old file from a new one claiming to be old. The heartbeat's cross-layer
-loop hardcodes that one name for the same reason.
+**The spec-side amnesty is closed, and it is now empty.** Every `accepted` spec names an intent, so
+an accepted spec with an empty `intents:` is a spec that skipped the gate rather than one that
+predates it. Bounding the set is what makes that difference visible: an unbounded "it predates the
+rule" is a permanent excuse, because nothing distinguishes an old file from a new one claiming to be
+old. The heartbeat's cross-layer loop carries no exception for the same reason.
 
-Two shapes that look like breakage and are not. An **accepted spec with an empty `intents:`** keeps
-its place if it is that one file; only a spec being written has to name one. And a **task whose
-chain closes one layer up** is mapped even while its own `intents:` is blank — if the task names a
-spec and that spec names an intent, the link is sound and the blank field is a missing copy, not a
-missing link. The copy exists
-so a search over tasks and a search over specs return the same answer; filling it in is bookkeeping,
-and the greps print those tasks until someone does.
+One shape that looks like breakage and is not. A **task whose chain closes one layer up** is mapped
+even while its own `intents:` is blank — if the task names a spec and that spec names an intent, the
+link is sound and the blank field is a missing copy, not a missing link. The copy exists so a search
+over tasks and a search over specs return the same answer; filling it in is bookkeeping, and the
+greps print those tasks until someone does.
 
 ### What the gates refuse
 

@@ -49,9 +49,9 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    The first draft intent that acquires a spec and a task is when this starts stopping something,
    and you can tell it is working by whether that pull request is still a draft.
 
-   What the walk does not reach is an incomplete chain. A spec with an empty `intents:` is either
-   the one file the amnesty covers or a spec that skipped the gate, and a task naming no spec is a
-   mapping question; `.agents/skills/tasks` has both rules and this paragraph restates neither.
+   What the walk does not reach is an incomplete chain. A spec with an empty `intents:` is a spec
+   that skipped the gate, and a task naming no spec is a mapping question; `.agents/skills/tasks`
+   has both rules and this paragraph restates neither.
    What matters here is only that none of them is an unapproved goal, so none of them holds a
    pull request in draft.
 3. Two reviewers, not interchangeable:
