@@ -11,10 +11,9 @@ afternoon: **vision**, **architecture**, **decisions**, **intents**, **specs**, 
 bottom four have folders — `docs/decisions/`, `docs/intents/`, `docs/specs/` and `tasks/`. The
 top two already live in `README.md` and in each crate's `AGENTS.md`, and stay there.
 
-**There is no task without a spec, and no spec without an intent.** A trivial change earns no
-task at all, so the chain never forces a spec for a typo. Everything above that line earns a task,
-that task names the spec it serves, and that spec names the intent it came from. Mapping to a spec
-and an intent that already exist is the normal case; writing new ones is the exception.
+**There is no task without a spec, and no spec without an intent.** Every pull request earns a
+task, that task names the spec it serves, and that spec names the intent it came from. Mapping to
+a spec and an intent that already exist is the normal case; writing new ones is the exception.
 
 To pick work up: run the **heartbeat** (`.agents/skills/heartbeat`) top to bottom — it ends by
 handing you the next task. To file something: copy the matching skeleton out of `docs/templates/`
@@ -52,23 +51,114 @@ Until then, do not create either file. A second copy of the vision would contrad
 
 | Change | Intent | Spec | Task |
 | --- | --- | --- | --- |
-| Trivial fix finished in the same session — under ~20 lines, no contract touched | no | no | no — the PR is the record |
 | Code an existing spec already governs, including a bug that spec did not get right | the one that spec names | that spec | yes |
 | Behavior an existing intent wants and no spec yet describes | that intent | a new one | yes |
 | Anything no existing spec and no existing intent reaches | a new one — anyone drafts it, the owner approves it or the work does not happen | a new one | yes |
 
-**The line count that decided whether work needed a spec is gone; the one in the first row is not
-the same rule.** It bounds the trivial exemption from above and does nothing else — it says when a
-change is too small to be worth writing down, never when one is big enough to need a spec. Read the
-other way it would be a bypass, and an unbounded "trivial" is a worse one: without a ceiling, a
-500-line change touching no contract and finished in an afternoon would qualify. Size stopped being
-the question everywhere above that row: a 400-line change to code spec 003 already governs needs no
+### Every pull request has a task
+
+**Every change that reaches `main` is reachable upward**: the pull request names a task, the task
+names a spec, the spec names an intent. That walk is what answers "was this wanted" without asking
+anybody, and a change it cannot follow to a top has no answer to give. **One named spec ends the
+walk a step early**: `docs/specs/001-control-protocol.md` is `accepted` naming no intent, so a
+change beneath it reaches that spec and stops, and its task's `intents: []` is a correct field
+rather than an unfilled one. That amnesty is one file and closed — "What predates the rule" below
+has it, and no other accepted spec with an empty `intents:` is covered by it.
+
+**There is no size below which a change is exempt from that walk, and no kind of change that is.**
+**A pull request may file the task it needs in the same change** — the task does not have to exist
+first, so the friction is one file, written by whoever is already writing the pull request.
+
+**What this replaces failed in both directions at once.** The row that used to sit at the top of
+that table excused a change under ~20 lines. Practice excused something else entirely: an entire
+category, at any size, whenever the change was to the skills or the process — #31 at 173 lines,
+#36 at 65, #42 at 51, none of them carrying a task. A written rule and a practice that disagree do
+not average into a working rule. The next agent applies whichever it read last, and can defend
+either, which is the same as having no rule while paying to maintain one.
+
+**The chain consequence is the part that will bite, so read it before filing.** A task names a
+spec, and nothing below weakens that: "What the gates refuse" gives a task you are filing *now*
+two honest endings, mapping it or dropping it, and filing it with `specs: []` and letting it wait
+is neither of them. Requiring a task of every pull request therefore requires a spec of every
+pull request.
+
+What it does **not** require is that the spec already be **accepted before you start writing**.
+What it does require is that the spec be `accepted` by the time the work branch opens, because
+opening that branch is the task passing through `planned` into `in_progress`:
+
+- A task at `todo` needs `done_when:` and nothing else — read the lifecycle table. `planned` is
+  where `specs:` must name an **accepted** spec, and `in_progress` is where the work starts. A
+  task filed and never planned reaches neither, so it clears neither gate.
+- So a small change may name a spec that is still `draft`. Naming one that **already exists** is
+  free; `grep -l '^status: draft$' docs/specs/*.md` lists the ones there are.
+- **Writing** that draft spec is free as well. The second gate below binds a spec becoming
+  **accepted**, never a spec being written: a `draft` spec may name a `draft` intent. So a change
+  whose spec does not exist yet may author one, at `draft`, and name it. What still needs an
+  approved intent is the acceptance — and the two-PR section further down adds the consequence,
+  that the work branch does not start until that flip happens.
+- **A `todo` task is not a merge ticket, and this is the bullet to read if you skipped the others.**
+  The task riding a pull request that *carries work* is at `in_review`, which is downstream of
+  `planned`, which needs an accepted spec. So filing a `todo` task that names a draft spec and
+  merging code under it clears no gate — it relabels a started change as unstarted while shipping
+  it. **Filing is free; starting is not**, and opening the work branch is starting.
+
+Read together: for a change whose area has no accepted spec yet, the honest cost of this rule is a
+draft spec, an owner approving the intent above it, the spec accepted, and then the work branch.
+That is two pull requests and one person's decision. It is not rounded off here, because a cost
+discovered halfway through is what makes an agent reach for the exemption.
+
+Where nothing above the change reaches it at all, the endings are the two that were already there:
+put the question to the owner, or drop the change and write down why. **A task with `specs: []`,
+filed today, is still not one of them.** A queue filling with work nobody chose is the failure that
+clause exists to stop, and "the merge checklist told me to file something" would be a new reason
+for the same outcome rather than an exception to it.
+
+That is not in tension with `[]` being a legal field value further down. **`[]` describes what a
+file may hold; this describes what you may file.** The empty list stays legal because `main` is
+full of tasks that predate the rule and because a field that could not be empty would have to be
+faked. What is refused is *adding* one today.
+
+**Exactly two shapes carry no task, and the list is closed by
+`docs/specs/012-how-work-enters-the-tree.md` rather than by this file.** Adding a third means
+editing that spec, in a pull request of its own. That placement is the point and not bureaucracy:
+an exemption written where the exempted change is already open has no author but the person it is
+refusing, which is how the last one grew from twenty lines into any size at all. This paragraph is
+exactly the place that would happen again, so the list it describes is not its to widen.
+
+**What the two shapes share is a missing task, not a missing parent, and flattening them is the
+error to avoid.** A pull request filing an **intent** has nothing above it at all — the intent is
+the top of the chain. A pull request filing a **spec** does have a parent: its `intents:` names the
+goal it serves, which `docs/specs/README.md` requires of every new spec. What it lacks is only the
+*task*, which rides the work branch that follows and cannot exist until the spec is accepted. Read
+as one undifferentiated "nothing above it", this refuses a correctly formed spec pull request or
+admits a spec that traces to no goal, depending on which half the reader keeps. Neither can name a
+task governing it without one being invented for the purpose, which is precisely the move the gates
+exist to refuse.
+
+**Those two are structural, and nothing else joins them by resembling them.** A change to an area
+no spec happens to describe yet is *not* one of them: it is the second row of the table above, and
+its answer is a new spec under the intent that wants it. Absence of a governing document is the
+chain not yet reaching something, never permission to step around it. The two shapes qualify
+because the task they would name cannot exist yet, never because naming what is above them would
+be inconvenient or would cost a second pull request — and "no spec describes my area" fails on
+exactly that test, since the spec it lacks is one somebody can sit down and write. Read loosely it
+readmits every change the old size exemption used to let through, and it is the reading an author
+under time pressure will reach for first.
+
+**No line count decides anything here any more.** The threshold that used to say when work needed
+a spec is gone, and the ~20 lines that used to bound the trivial exemption went with the exemption
+itself. Size was never the question: a 400-line change to code spec 003 already governs needs no
 new document, and a 30-line change to something nothing describes needs the same two links as a
-large one. The old
-threshold also could not be cited in review: four merged pull requests crossed it and none had a
-spec — two of them (126 and 218 lines) had no task either, and two (103 and 167) had a task and no
-spec. Every change that did name a spec was one the plan had already routed through one, so the
-number never decided anything.
+large one. Neither number could be cited in review either, and the reason is structural rather than
+a tally that ages: merged pull requests **above** the line include both kinds, some naming a spec
+and most naming none, and those **below** it hold the same mixture. A threshold whose two sides
+look alike separates nothing, and no pull request merged later can make that false — a
+counterexample already on the tree stays one. A number that has never once decided an outcome is
+not a rule that was being broken; it is a rule nobody was reading.
+
+**The failure this prevents, concretely.** A change reaching `main` with nothing on record saying
+what it was for or who wanted it, which is what #31, #36 and #42 each did. You can tell whether
+the rule is working by whether an open pull request without a task survives a heartbeat.
 
 ## The chain, and the two gates
 
@@ -407,7 +497,7 @@ ready.** That is where the owner does the reading, so it is where the waiting is
 `.agents/skills/pr-review` step 2.
 
 Work whose spec already exists skips step 1 and is one PR, which is what most work should look
-like. Trivial work skips the task as well.
+like. Nothing skips the task.
 
 - Filing a task, and every status flip up to `in_review`, rides the work branch itself.
 - `in_review` needs `pr:`, which does not exist until the PR is open. Set it in a second commit

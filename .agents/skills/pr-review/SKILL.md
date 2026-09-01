@@ -23,6 +23,37 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    it on their behalf. It is a convention and not a boundary: an agent *can* mark one ready, just
    as it can write `approved` into a file. See
    `docs/decisions/008-approving-an-intent-is-an-instruction.md`.
+
+   **The same wait reaches one layer down: a change whose chain reaches a goal the owner has not
+   approved is not yours to take out of draft either.** Walk the pull request's task to the spec it
+   names, and that spec to its intent. Where that intent's `status:` is not `approved`, the change
+   descends from something nobody has agreed to want, and it stays a draft until that intent reads
+   `status: approved`. **The wait ends when the owner approves the intent, and in no other way** —
+   not on a conversation an agent judges to have settled it, and not on the agent's own reading of
+   the goal. If the answer is that the goal was never wanted, that is the owner's to say on the
+   intent, not something to settle here. Why nothing mechanical holds any of this is
+   `docs/intents/README.md`, which has the rule in full, and
+   `docs/decisions/008-approving-an-intent-is-an-instruction.md`; this adds only the reach.
+
+   Unlike the rest of this section the walk is mechanical — a walk over `specs:` and `intents:`,
+   both of which are lists and may hold more than one id, ending on an intent's `status:` — so do
+   it rather than assume it. **It binds today and refuses nothing today, and both halves are
+   worth knowing.** It binds because `docs/intents/` carries a real `status:`, `draft` or
+   `approved`, rather than conferring approval by the file existing. It refuses nothing while
+   `grep -L '^status: approved' docs/intents/[0-9]*.md` stays empty, as it is today, because then
+   no chain can reach a draft intent. **The numeric prefix is load-bearing**: `docs/intents/*.md`
+   also matches `README.md`, which carries no `status:` line, so `-L` reports it forever and the
+   check never reads empty. (`grep -l` does not have this problem — a `README.md` simply does not
+   contain the pattern — which is why the neighbouring draft-spec probe needs no such prefix.)
+
+   The first draft intent that acquires a spec and a task is when this starts stopping something,
+   and you can tell it is working by whether that pull request is still a draft.
+
+   What the walk does not reach is an incomplete chain. A spec with an empty `intents:` is either
+   the one file the amnesty covers or a spec that skipped the gate, and a task naming no spec is a
+   mapping question; `.agents/skills/tasks` has both rules and this paragraph restates neither.
+   What matters here is only that none of them is an unapproved goal, so none of them holds a
+   pull request in draft.
 3. Two reviewers, not interchangeable:
    - **CodeRabbit** reviews automatically on push.
    - **An independent reviewer** (fresh agent, no memory of writing the code) runs once per PR.
@@ -93,10 +124,10 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    CodeRabbit starting there is no `CodeRabbit` context at all, so a poll for "not pending" reads
    clear before anything has run.
 
-   **A green has three meanings, and one of them is "no review happened."** The `CodeRabbit`
+   **A green has four meanings, and two of them are "no review happened."** The `CodeRabbit`
    context reports `success` whether it reviewed and found nothing, reviewed and posted findings,
-   or never ran at all — two of that PR's six greens carried the description `Review rate
-   limited`. Only the description tells them apart:
+   never ran at all, or was skipped for a draft — two of that PR's six greens carried the
+   description `Review rate limited`. Only the description tells them apart:
 
    ```shell
    gh api repos/teonimesic/plasmosome/commits/<sha>/status \
@@ -106,16 +137,29 @@ description: How a change reaches main — PR-only workflow, review rounds by di
 
    `Review completed` is the only one that is a review. **`Review rate limited` is not a pass and
    will not become one** — waiting is pointless, because nothing more is coming. Re-trigger with
-   `@coderabbitai review` and wait for a `Review completed` on the current head. Merging on a
+   `@coderabbitai full review`, because the head has not moved since it was rate limited, and wait
+   for a `Review completed` on the current head. Merging on a
    rate-limited green ships a change nobody reviewed, and neither the check state nor an empty
    thread list will ever say so.
 
-   **There is a fourth meaning, and it makes the reviews endpoint useless for this question.** A
-   review that finds nothing creates **no review object at all** — it posts its walkthrough as an
-   issue comment and stops. The endpoint returns zero entries, not an entry with an empty body. PR
-   #39 read `Review completed` with zero reviews and one issue comment; #34 and #36 read the same
-   status with two and four. So zero reviews cannot tell a clean pass from a review that never
-   ran, and to anything that counts them the two are identical.
+   **`Review skipped: draft pull request` is the other green that is not a review**, and a draft
+   collects it per push rather than once per pull request. Measured while this was written: the
+   three drafts open at the time — #44, #52 and #59 — each carried that description with a `Review
+   queued` before it, and on #59 three of four pushed heads collected the pair while the fourth
+   collected no `CodeRabbit` status at all, still none minutes later. So it is not something to
+   wait out and not something to re-trigger; it is what a draft looks like, and marking the pull
+   request ready is what queues a real review. Its absence on a draft is not a fault either, which
+   is the absent-check paragraph below. This matters more than it used to: a pull request that
+   waits in draft for an approval, as step 2 now has some of them do, sits on one of those two
+   states for as long as it waits, and neither of them is a review.
+
+   **The first of those four is invisible to the reviews endpoint, which makes that endpoint
+   useless for this question.** A review that finds nothing creates **no review object at all** —
+   it posts its walkthrough as an issue comment and stops. The endpoint returns zero entries, not
+   an entry with an empty body. PR #39 read `Review completed` with zero reviews and one issue
+   comment; #34 and #36 read the same status with two and four. So zero reviews cannot tell a
+   clean pass from a review that never ran, and to anything that counts them the two are
+   identical.
 
    That settles which signal answers which question. **Did a round happen** is the status
    description on the head you are about to merge, and nothing else — not the check state, not a
@@ -134,6 +178,101 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    The budget is **repo-wide, not per-PR** — roughly ten reviews an hour across everything — so
    the cause is usually somewhere else: another agent's pushes, or your own earlier rounds. Being
    the only one pushing right now is not evidence that there is budget left.
+
+   **`@coderabbitai review` does nothing when the head has not changed.** The reviewer is
+   incremental, and on a commit it has already read it declines:
+
+   > Already reviewed the last commit. Use `@coderabbitai full review` to rerun a review of the
+   > entire changeset.
+
+   **Every surface you would poll reads as though the round happened.** That refusal arrives
+   inside a collapsed `<details>` block in a short bot comment, so nothing about the comment's
+   visible line says it is a refusal. It edits the walkthrough, which moves that comment's
+   `updated_at` — the field `wait_for_quiet` reads issue comments on — so the loop sees activity,
+   then sees it settle, and reports quiet on a content-identical refresh. And the head's status
+   still reads `Review completed`, left there by the round before. Both of step 6's review
+   conditions are satisfied by a round that never ran.
+
+   **So on an unchanged head the command is `@coderabbitai full review`.** Use it whenever you are
+   asking for a round rather than reacting to a push: a second round after a clean first one, a
+   retry after a rate-limited green, and the ten-minute escalation below. Plain
+   `@coderabbitai review` is for a head carrying commits it has not seen, which is the case that
+   triggers itself anyway.
+
+   **Then poll the status history growing, not a timestamp moving.** Take the count before you
+   ask and after:
+
+   ```shell
+   completed_on() {
+     local pages
+     pages=$(gh api "repos/teonimesic/plasmosome/statuses/$1" --paginate --slurp) || return 1
+     printf '%s' "$pages" |
+       jq '[.[][] | select(.context=="CodeRabbit" and .description=="Review completed")] | length'
+   }
+
+   rounds() {
+     local sha total=0 n
+     local url="repos/teonimesic/plasmosome/pulls/$1/commits"
+     for sha in $(gh api "$url" --paginate --jq '.[].sha'); do
+       n=$(completed_on "$sha") || return 1
+       total=$((total + n))
+     done
+     printf '%s\n' "$total"
+   }
+   ```
+
+   **`rounds` takes a pull request number and `completed_on` a commit, and the split is the whole
+   point.** Rounds accumulate across heads; completed statuses accumulate per head. Address a
+   finding and the head moves, so the new head carries the one round that read it and no memory of
+   the ones before. Counting on the merged head alone therefore asks a small pull request that
+   fixed something to show two rounds on a commit that can only ever have one — a condition nothing
+   honest satisfies, whose only escape is re-triggering until the number comes up. That would spend
+   the repo-wide budget to re-prove a round already paid for.
+
+   Measured across merged pull requests, `rounds` against the head each one merged on:
+
+   | PR | Lines | `rounds <pr>` | `completed_on <merged head>` |
+   | --- | --- | --- | --- |
+   | #42 | 51 | 2 | 1 |
+   | #57 | 139 | 2 | 1 |
+   | #58 | 239 | 3 | 1 |
+   | #61 | 337 | 6 | 2 |
+   | #43 | 483 | 6 | 2 |
+
+   The right-hand column is what a head-only count sees: it refuses #57 and #58 outright, both of
+   which owed two rounds and had them. **Force-pushing is the limit of this.** `pulls/<n>/commits`
+   lists the commits the branch holds now, so rounds spent on a head that was later rebased away
+   are not counted and the number reads low. That is the safe direction — it never credits a round
+   that did not happen — but on a heavily rebased branch expect to argue the count up from the
+   status histories rather than down.
+
+   **`--paginate` applies `--jq` per page, which is why this one does not use `--jq`.** A commit
+   with more than one page of statuses would print a count per page and the caller would read the
+   first. `--slurp` returns the pages as an array of arrays — `.[][]` flattens them — and `gh`
+   refuses `--slurp` together with `--jq`, so the filter moves into a separate `jq`. That pipe is
+   why the call is assigned first and its status read bare: a failed poll must return non-zero
+   rather than a number, for the reason `wait_for_quiet` spells out below. A commit is unlikely to
+   reach a second page; none of this costs anything.
+
+   An unknown commit returns an empty list rather than a 404, so `rounds` answers `0` for it. That
+   is the safe direction — nothing merges on a zero — but it does mean a mistyped SHA reads as an
+   unreviewed one rather than as an error.
+
+   `/commits/<sha>/status` collapses a context to its latest value, so a second round leaves it
+   reading exactly like the first; `/statuses/<sha>` lists every entry posted against that commit,
+   so a round that ran adds to it. One head measured while this was written held five entries
+   there and one in the combined status.
+
+   **Count the completed ones, not the entries.** That history also grows on `Review queued`,
+   `Review in progress` and the skipped green, none of which is a round — a count of everything
+   moves when nothing has been reviewed, which is the failure this whole section is about, one
+   endpoint further in.
+
+   **This bites hardest when the first round was clean.** Nothing to fix means nothing pushed,
+   which means an unchanged head, which means the request for the second round is the one that
+   gets declined — so the pull requests that skip a required round are the ones that looked best.
+   A 233-line change owing two rounds came within a step of merging on one round this way, and the
+   second round, once it had actually been obtained, found a real defect.
 
    **When a PR is both behind and unreviewed, rebase before spending the review, never after.** A
    review is spent on one head, and rebasing makes a new one; updating the branch afterwards pays
@@ -212,7 +351,8 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    early. Both are
    the same defect: a check whose non-participation is unobservable. So do not alarm on first
    sight of absence; bound it. If no status has appeared after ten minutes, re-trigger with
-   `@coderabbitai review`; if that produces nothing either, escalate. **Never read absence as a
+   `@coderabbitai full review` — the head has not moved, so the plain form is declined; if that
+   produces nothing either, escalate. **Never read absence as a
    pass** — `mergeStateStatus` will happily say `CLEAN`, because CodeRabbit is not a required
    check. Ten minutes is a guess, not a measurement: the one instance we have seen resolved itself
    once the new head registered.
@@ -263,11 +403,42 @@ description: How a change reaches main — PR-only workflow, review rounds by di
 6. `gh pr merge --squash` once CI is green, the required rounds are done, **the independent
    review is on the PR as an issue comment opening with the literal `Model:` marker and the head
    it read, with nothing changed since that head beyond what that review asked for** (step 3; for
-   a rebase-only move, step 4's diff-of-diffs settles it), the head's `CodeRabbit` status reads
-   `Review completed` rather than `Review rate limited`, the review queue has been quiet for five
-   minutes (step 4), and every review thread is resolved — `main` requires conversation
+   a rebase-only move, step 4's diff-of-diffs settles it), `rounds <pr>` from step 4 returns at
+   least the number "Rounds by diff size" requires **and** `completed_on <head>` is at least 1, so
+   that enough review happened and some of it read the commit you are merging — **read the history
+   for both, never `/commits/<sha>/status`, which collapses the context to its latest value, so a
+   re-trigger that comes back rate limited erases a round that really happened** — the head's
+   `CodeRabbit` status reads
+   `Review completed` rather than `Review rate limited` — **that condition can only add rounds,
+   never remove one**, so where it and the table disagree, take the larger; "Rounds by diff size"
+   says what it costs — the review queue has been quiet for
+   five minutes (step 4), and every review thread is resolved — `main` requires conversation
    resolution, so an open thread is what holds a merge. Resolving a thread by disagreeing with it
    is allowed; merging on a disagreement you did not write down in the thread is not.
+
+   **And the pull request has a task.** `.agents/skills/tasks` has the rule, what it costs, the
+   two shapes that carry no task, and what to do when a pull request arrives here without one.
+
+   **That condition is checked here rather than by a script, and the choice is deliberate.** Two
+   forms of it are mechanical, and neither is honest as a gate. *Touches a file under `tasks/`*
+   refuses two legitimate shapes outright: a spec's pull request touches no task file by design,
+   because the task rides the work branch that follows it, and an intent's touches none either.
+   *Names one in the body* lives somewhere the guards in `.githooks/` cannot read at all, and
+   somewhere the squash-merge run on `main` does not have, so it could only ever answer on one of
+   the two events CI sees. A guard that refuses real work is worse than a rule agents read, and it
+   is worse in a way that is hard to undo: the first false refusal teaches everyone to reach for
+   the bypass.
+
+   So it sits in this list, with the other conditions that need a judgement, and
+   `.agents/skills/heartbeat` step 1 looks for it again on every open pull request — one check at
+   the point of merging, one that repeats. Neither is a boundary. Both are read.
+
+   **Three of the conditions above are what a merged pull request carries, and it is worth naming
+   them as three:** a link upward, a review that read the commit being merged, and an answer to
+   every thread. **The middle two bind to the commit, not to the pull request** — a review that
+   read an earlier head reviewed a different change, and a thread answered on an earlier head may
+   have been reopened by what came after, so neither is a property the pull request keeps once its
+   head moves. The link upward binds to the change instead, and survives a new head.
 
    **Merge the commit you validated, not whatever the head is by then.** `gh pr merge` takes the
    current head, so anything that checks a SHA and merges afterwards — a script, or you across two
@@ -333,14 +504,31 @@ names, and ask what the change is for. If they cannot say, it fails.
 
 ## Rounds by diff size
 
-A round = reviewed → addressed → (beyond the first) re-triggered with `@coderabbitai review`.
+A round = reviewed → addressed → (beyond the first) re-triggered. `@coderabbitai review` is the
+form to use there, because addressing a finding moved the head; where nothing moved it, step 4 has
+the form that is not declined.
 Size is lines changed, excluding lockfiles and generated files.
 
 | Diff size | Rounds |
 | --- | --- |
-| < 100 lines | **1** — do not re-trigger |
+| < 100 lines | **1**, plus one more each time addressing findings moves the head |
 | 100–1000 | **2** |
 | > 1000 | **3** |
+
+**Where this table and the merge gate disagree, the merge gate wins.** Step 6 requires the commit
+you merge to read `Review completed`, and addressing a finding makes a new commit. A small pull
+request whose one round finds something therefore owes a second review, on the head that carries
+the fix — and a third if that one finds something too, for the same reason and with no ceiling
+other than a round that changes nothing. Answering a finding by written disagreement moves no head
+and owes nothing further. The old text told it not to re-trigger, and the two cannot both be
+honoured: an agent following the table merges bytes no review has read, and an agent following
+step 6 spends a round the table forbids. The table is the line that gives way.
+
+**The cost is real and is not being rounded off.** That pull request now spends two reviews out of
+a budget that is repo-wide and roughly ten an hour, and the **1** above is only reachable when the
+round finds nothing — which is to say the number in the table is a floor and not a rule. It is
+chosen anyway, because the alternative is merging a change no review ever read, which is the
+failure the whole of step 4 exists to prevent. A clean small pull request still costs exactly one.
 
 The independent reviewer is separate from the rounds above and runs at least once per PR. Diff
 size never adds an independent pass; a rewrite beyond what that review asked for does — step 6.

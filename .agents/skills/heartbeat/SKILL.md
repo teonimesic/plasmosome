@@ -23,12 +23,23 @@ The formats and the layers those files use are in `.agents/skills/tasks`.
 **1. Pending PRs.**
 
 ```shell
-gh pr list --state open
+gh pr list --state open --json number,isDraft,title
 ```
 
-For each one, answer three questions: is CI green, are the review rounds for its diff size done,
-and are all conversations resolved? `main` requires conversation resolution, so a single
-unresolved thread is what is blocking the merge — not CI, and not a missing approval.
+For each one, answer four questions: does it have a task, is CI green, are the review rounds for
+its diff size done, and are all conversations resolved? `main` requires conversation resolution, so
+a single unresolved thread is what is blocking the merge — not CI, and not a missing approval.
+
+**A pull request with no task is not one to merge, and this is the check that repeats.**
+`.agents/skills/tasks` has the rule, the two shapes that carry no task, and the remedy — which is
+usually work to send back rather than a reason to stall.
+
+**A draft is not automatically stalled work.** One waiting on the owner — because it proposes an
+intent, or because its chain reaches an intent nobody has approved — is in the right place and is
+not waiting on an agent. Do not resume its author to unblock it; say who it is waiting on.
+`.agents/skills/pr-review` step 2 has when that applies. You can tell this is working by whether
+such a draft ever turns up in a session's stalled-work list, or gets its author resumed to unblock
+it: either is the failure, and the session that did it is where both are visible.
 
 **2. Pending reviews.** `gh pr view --json` has no `reviewThreads` field; review threads come
 from the GraphQL API only.
