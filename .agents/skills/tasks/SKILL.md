@@ -198,15 +198,16 @@ the price of not idling, not a failure by whoever wrote it, and it is why a spec
 `draft`, where it is cheap to throw away.
 
 **The second gate binds a spec being accepted, not one already accepted.** A spec that is already
-`accepted` stays usable, and a task naming it may be planned, whether or not anything above it is
-filled in. Otherwise this rule would strand finished work behind a document only the owner can
-approve. Backfilling an empty `intents:` is worth doing: anyone may draft the intent that would
-close the gap, and only the owner can approve it. Nothing waits on either. What the gate stops is a
-*new* spec being committed to on the strength of an intent the owner has not read, which is the
-direction the drift actually runs.
+`accepted` stays usable, and a task naming it may be planned without re-establishing the approval
+above it. Otherwise this rule would strand finished work behind a document only the owner can
+approve. What the gate stops is a *new* spec being committed to on the strength of an intent the
+owner has not read, which is the direction the drift actually runs.
 
-A task's `intents:` is copied from the spec it names, `[]` included. It is there so a search over
-tasks and a search over specs return the same answer, not as a second gate to clear.
+**A blank `intents:` on a task and a blank one on an accepted spec are not the same fact.** On a
+task it is a copy that is behind and never a second gate to clear — "One shape that looks like
+breakage and is not" below has why. On an `accepted` spec the same empty field is a fault, because
+nothing reaches `accepted` without naming the goal it serves. A task that names a spec and carries
+`intents: []` is the first case, whatever its age.
 
 **The owner approves intents. Nobody approves specs.** The planner writes a spec and accepts it,
 once the intent above it is approved. The gate sits where the question is "is this wanted", which

@@ -159,7 +159,7 @@ failures to do that. Resolving it by picking the first match would make the gate
 filename order, since the duplicate that sorts first is the one that answers.
 
 Ids are read out of each intent's own `id:` rather than globbed from the filename, so a missing
-intent is reported instead of aborting the loop. The loop excepts no spec by name: every `accepted`
+intent is reported instead of aborting the loop. The loop exempts no spec by name: every `accepted`
 spec names an intent, so anything that line prints is a spec that skipped the gate. An exception
 hardcoded here would go on suppressing that fault for the named file long after it stopped
 applying. Silence is the only passing answer: unlike the lists above, output here is a fault, not a
