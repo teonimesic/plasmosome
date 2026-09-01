@@ -189,7 +189,10 @@ impl PlasmidManifest {
             .and_then(|impl_table| impl_table.get("wasm"))
             .and_then(toml::Value::as_str)
             .map(PathBuf::from);
-        let network = raw.get("network").map(parse_network);
+        let network = raw
+            .get("network")
+            .map(|n| parse_network(&id, "network", n))
+            .transpose()?;
         let requires = raw
             .get("requires")
             .map(|r| string_list(r.get("capabilities")))
@@ -210,7 +213,10 @@ impl PlasmidManifest {
             .map(parse_secret_refs)
             .transpose()?
             .unwrap_or_default();
-        let commands = raw.get("commands").map(parse_commands).transpose()?;
+        let commands = raw
+            .get("commands")
+            .map(|c| parse_commands(&id, c))
+            .transpose()?;
         let workspace = raw
             .get("workspace")
             .and_then(|w| w.get("mount"))
@@ -318,8 +324,8 @@ impl PlasmidManifest {
     }
 }
 
-fn parse_network(n: &toml::Value) -> NetworkSpec {
-    let hosts = string_list(n.get("hosts"));
+fn parse_network(id: &str, section: &str, n: &toml::Value) -> Result<NetworkSpec, ManifestError> {
+    let hosts = declared_string_list(id, section, "hosts", n.get("hosts"))?;
     let ports = n
         .get("ports")
         .and_then(toml::Value::as_array)
@@ -331,12 +337,12 @@ fn parse_network(n: &toml::Value) -> NetworkSpec {
                 .collect()
         })
         .unwrap_or_default();
-    let pin_cidrs = string_list(n.get("pin_cidrs"));
-    NetworkSpec {
+    let pin_cidrs = declared_string_list(id, section, "pin_cidrs", n.get("pin_cidrs"))?;
+    Ok(NetworkSpec {
         hosts,
         ports,
         pin_cidrs,
-    }
+    })
 }
 
 fn parse_secret_refs(secrets: &toml::Value) -> Result<Vec<SecretRef>, ManifestError> {
@@ -376,7 +382,7 @@ fn normalize_scope(item: &mut toml::Value) {
     }
 }
 
-fn parse_commands(raw: &toml::Value) -> Result<CommandsSpec, ManifestError> {
+fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, ManifestError> {
     let address_plan = raw
         .get("address_plan")
         .and_then(toml::Value::as_str)
@@ -401,7 +407,10 @@ fn parse_commands(raw: &toml::Value) -> Result<CommandsSpec, ManifestError> {
                 .get("subject")
                 .and_then(toml::Value::as_str)
                 .map(String::from),
-            network: decl.get("network").map(parse_network),
+            network: decl
+                .get("network")
+                .map(|n| parse_network(plasmid_id, &format!("commands.{id}.network"), n))
+                .transpose()?,
             secrets: decl
                 .get("secrets")
                 .map(parse_secret_refs)
@@ -689,6 +698,65 @@ api = "github"
 backend = { kind = "recorded", source = "fixtures/github-pr" }
 "#;
 
+    const NETWORK_PIN_CIDRS_AS_SCALAR: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+pin_cidrs = "140.82.112.0/20"
+"#;
+
+    const NETWORK_PIN_CIDRS_MIXED_TYPES: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+pin_cidrs = ["140.82.112.0/20", 20]
+"#;
+
+    const NETWORK_HOSTS_AS_SCALAR: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = "api.github.com"
+ports = [443]
+"#;
+
+    const NETWORK_PIN_CIDRS_EMPTY: &str = r#"
+id = "github-pr"
+version = "0.1.0"
+
+[network]
+hosts = ["api.github.com"]
+ports = [443]
+pin_cidrs = []
+"#;
+
+    const COMMAND_NETWORK_HOSTS_AS_SCALAR: &str = r#"
+id = "e13-commands-fixture"
+version = "0.1.0"
+
+[network]
+hosts = ["alpha.ak.local"]
+ports = [443]
+
+[commands]
+address_plan = "10.29.0.0/24"
+
+[commands.commands.git]
+exec = ["git"]
+subject = "git"
+
+[commands.commands.git.network]
+hosts = "alpha.ak.local"
+ports = [443]
+"#;
+
     const COMMANDS_E13: &str = r#"
 id = "e13-commands-fixture"
 version = "0.1.0"
@@ -856,6 +924,51 @@ subject = "git"
             matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("hosts")),
             "dropping the entry that is not a string would narrow the mock without saying so: {err:?}"
         );
+    }
+
+    #[test]
+    fn a_pin_declared_as_a_bare_string_must_not_parse_to_no_pins_at_all() {
+        let err = PlasmidManifest::parse(NETWORK_PIN_CIDRS_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[network]") && m.contains("pin_cidrs")),
+            "a scalar pin_cidrs read as an empty list is an egress restriction that fails open \
+             — the author declared a pin and nothing was pinned: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_pin_cidrs_holding_a_non_string_is_refused() {
+        let err = PlasmidManifest::parse(NETWORK_PIN_CIDRS_MIXED_TYPES).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("pin_cidrs") && m.contains("not a string")),
+            "dropping the entry that is not a string would widen egress without saying so: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_network_hosts_declared_as_a_bare_string_is_refused_as_a_type_error_naming_the_field() {
+        let err = PlasmidManifest::parse(NETWORK_HOSTS_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("hosts") && m.contains("must be an array of strings")),
+            "a hosts-shaped typo is a type error, not an absence, and reporting it as absence \
+             sends the author looking for a line that is already there: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_network_hosts_declared_as_a_bare_string_is_refused() {
+        let err = PlasmidManifest::parse(COMMAND_NETWORK_HOSTS_AS_SCALAR).unwrap_err();
+        assert!(
+            matches!(&err, ManifestError::Invalid(m) if m.contains("[commands.git.network]") && m.contains("hosts")),
+            "a command whose network hosts read as an empty list carries no host restriction \
+             at all, and nothing behind the parser notices: {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicitly_empty_pin_cidrs_list_parses_and_pins_nothing() {
+        let manifest = PlasmidManifest::parse(NETWORK_PIN_CIDRS_EMPTY).unwrap();
+        assert!(manifest.network.as_ref().unwrap().pin_cidrs.is_empty());
     }
 
     #[test]
