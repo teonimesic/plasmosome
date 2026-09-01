@@ -15,9 +15,16 @@ fn observation(generation: &str) -> CommandOutput {
     CommandOutput::success(format!("{generation}\trefs/dolt/data\n"))
 }
 
-fn observation_with_operation(generation: &str, operation: &str) -> CommandOutput {
+fn history(generations: &[&str], operation: &str) -> CommandOutput {
     CommandOutput::success(format!(
-        "{generation}\trefs/dolt/data\toperation:{operation}\n"
+        "{}\tbase\n{}\toperation:{operation}\n",
+        generations[0], generations[1]
+    ))
+}
+
+fn recovery_history() -> CommandOutput {
+    CommandOutput::success(format!(
+        "{G0}\tbase\n{G1}\toperation:winner\n{G2}\toperation:replay\n"
     ))
 }
 
@@ -119,6 +126,19 @@ fn stale_contender_is_classified_separately_from_transport_failure() {
 }
 
 #[test]
+fn ls_remote_observation_refuses_operation_identity_or_extra_fields() {
+    let mut runner = RecordingCommandRunner::scripted(vec![Ok(CommandOutput::success(format!(
+        "{G0}\trefs/dolt/data\toperation:smuggled\n"
+    )))]);
+    assert_eq!(
+        publish_candidate(&mut runner, "winner"),
+        Err("cutover_blocked".into())
+    );
+    assert_eq!(runner.commands().len(), 1);
+    assert!(runner.finish().is_ok());
+}
+
+#[test]
 fn the_first_stale_push_preserves_the_winners_generation() {
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(observation(G0)),
@@ -127,7 +147,7 @@ fn the_first_stale_push_preserves_the_winners_generation() {
             stdout: String::new(),
             stderr: "non-fast-forward".into(),
         }),
-        Ok(observation_with_operation(G1, "lost-response")),
+        Ok(observation(G1)),
     ]);
     let result = publish_candidate(&mut runner, "stale").unwrap();
     assert_eq!(
@@ -171,6 +191,7 @@ fn failure_before_publication_retries_the_same_candidate_once() {
         Ok(observation(G0)),
         Ok(CommandOutput::success("published")),
         Ok(observation(G1)),
+        Ok(history(&[G0, G1], "same-operation")),
     ]);
     let result = retry_after_transport(&mut runner, "same-operation").unwrap();
     assert_eq!(
@@ -192,11 +213,27 @@ fn failure_before_publication_retries_the_same_candidate_once() {
 }
 
 #[test]
+fn retry_after_transport_refuses_a_generation_that_changed_before_republication() {
+    let mut runner = RecordingCommandRunner::scripted(vec![
+        Ok(observation(G0)),
+        Err("connection reset".into()),
+        Ok(observation(G1)),
+    ]);
+    assert_eq!(
+        retry_after_transport(&mut runner, "same-operation"),
+        Err("cutover_blocked".into())
+    );
+    assert_eq!(runner.commands().len(), 3);
+    assert!(runner.finish().is_ok());
+}
+
+#[test]
 fn lost_response_is_recovered_without_a_second_push() {
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(observation(G0)),
         Err("connection reset".into()),
-        Ok(observation_with_operation(G1, "same-operation")),
+        Ok(observation(G1)),
+        Ok(history(&[G0, G1], "same-operation")),
     ]);
     let result = recover_after_lost_response(&mut runner, "same-operation").unwrap();
     assert_eq!(
@@ -222,7 +259,8 @@ fn lost_response_does_not_claim_an_unrelated_generation_as_our_operation() {
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(observation(G0)),
         Err("connection reset".into()),
-        Ok(observation_with_operation(G1, "another-operation")),
+        Ok(observation(G1)),
+        Ok(history(&[G0, G1], "another-operation")),
     ]);
     assert_eq!(
         recover_after_lost_response(&mut runner, "same-operation"),
@@ -239,6 +277,7 @@ fn lost_response_at_the_same_generation_retries_the_prepared_candidate_once() {
         Ok(observation(G0)),
         Ok(CommandOutput::success("published")),
         Ok(observation(G1)),
+        Ok(history(&[G0, G1], "same-operation")),
     ]);
     let result = recover_after_lost_response(&mut runner, "same-operation").unwrap();
     assert_eq!(
@@ -351,6 +390,7 @@ fn guarded_pull_replay_push_preserves_both_operations_once() {
         Ok(CommandOutput::success("refreshed")),
         Ok(CommandOutput::success("replayed")),
         Ok(observation(G2)),
+        Ok(recovery_history()),
     ]);
     let evidence = run_scripted_case("push-conflict-recovery", &mut runner).unwrap();
     assert_eq!(evidence.final_generation, G2);
@@ -386,6 +426,7 @@ fn stale_base_is_never_routed_through_transport_retry() {
             stderr: "non-fast-forward".into(),
         }),
         Ok(observation(G2)),
+        Ok(recovery_history()),
     ]);
     let evidence = run_scripted_case("stale-base-fence", &mut runner).unwrap();
     assert_eq!(evidence.final_generation, G2);
@@ -443,6 +484,7 @@ fn recovery_observes_both_g0_candidates_before_the_winner_publishes_g1() {
         Ok(CommandOutput::success("refreshed")),
         Ok(CommandOutput::success("replayed")),
         Ok(observation(G2)),
+        Ok(recovery_history()),
     ]);
     let evidence = run_scripted_case("push-conflict-recovery", &mut runner).unwrap();
     assert_eq!(evidence.final_generation, G2);
@@ -461,14 +503,19 @@ fn scripted_result_names_generation_operation_ids_and_redacted_plans() {
     assert_eq!(result.observed_base.as_deref(), Some(G0));
     assert_eq!(result.final_generation.as_deref(), Some(G2));
     assert_eq!(result.operation_ids, vec!["winner", "replay"]);
-    assert_eq!(result.command_plans.len(), 11);
+    assert_eq!(result.command_plans.len(), 12);
     assert!(
         result
             .command_plans
             .iter()
             .all(|plan| !plan.contains("origin"))
     );
-    validate_scripted_history(&mut runner, &[G0, G1, G2], &["winner", "replay"]).unwrap();
+    assert!(
+        result
+            .command_plans
+            .iter()
+            .any(|plan| { plan == "git log --reverse --format=%H%x09%s refs/dolt/data" })
+    );
     assert!(runner.finish().is_ok());
 }
 
@@ -497,6 +544,9 @@ fn scripted_result_derives_its_observed_base_from_the_executed_script() {
             stderr: "non-fast-forward".into(),
         }),
         Ok(observation(h2)),
+        Ok(CommandOutput::success(format!(
+            "{h0}\tbase\n{h1}\toperation:winner\n{h2}\toperation:replay\n"
+        ))),
     ]);
     let result = run_scripted_contract_case("stale-base-fence", &mut runner).unwrap();
     assert_eq!(result.observed_base.as_deref(), Some(h0));
@@ -512,9 +562,11 @@ fn aggregate_transport_retries_runs_lost_response_rediscovery_after_prepublicati
         Ok(observation(G0)),
         Ok(CommandOutput::success("published")),
         Ok(observation(G1)),
+        Ok(history(&[G0, G1], "retry")),
         Ok(observation(G0)),
         Err("connection reset".into()),
-        Ok(observation_with_operation(G1, "lost-response")),
+        Ok(observation(G1)),
+        Ok(history(&[G0, G1], "lost-response")),
     ]);
     let evidence = run_scripted_case("transport-retries", &mut runner).unwrap();
     assert_eq!(evidence.operation_ids, vec!["retry", "lost-response"]);
@@ -562,7 +614,10 @@ fn scripted_history_requires_g0_winner_replay_and_their_contents() {
         "{G0}\tbase\n{G1}\toperation:winner\n{G2}\toperation:replay\n"
     )))]);
     validate_scripted_history(&mut runner, &[G0, G1, G2], &["winner", "replay"]).unwrap();
-    assert_eq!(runner.commands()[0].argv, vec!["log", "--format=%H%x09%s"]);
+    assert_eq!(
+        runner.commands()[0].argv,
+        vec!["log", "--reverse", "--format=%H%x09%s", "refs/dolt/data"]
+    );
     assert!(runner.finish().is_ok());
 }
 
@@ -588,6 +643,7 @@ fn stale_base_fence_keeps_g1_then_g2_across_recovery_and_paused_holder() {
             stderr: "non-fast-forward".into(),
         }),
         Ok(observation(G2)),
+        Ok(recovery_history()),
     ]);
     let evidence = run_scripted_case("stale-base-fence", &mut runner).unwrap();
     assert_eq!(evidence.final_generation, G2);

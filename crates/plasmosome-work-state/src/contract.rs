@@ -335,7 +335,12 @@ pub fn validate_scripted_history<R: CommandRunner>(
 ) -> Result<(), String> {
     let output = runner.run(production_command(
         "git",
-        vec!["log".into(), "--format=%H%x09%s".into()],
+        vec![
+            "log".into(),
+            "--reverse".into(),
+            "--format=%H%x09%s".into(),
+            "refs/dolt/data".into(),
+        ],
         Vec::new(),
     ))?;
     if output.status != 0 {
@@ -600,16 +605,21 @@ fn retry_after_transport_with_base<R: CommandRunner>(
         _ => return Err("cutover_blocked".into()),
     }
     let retry_base = observe(runner)?;
+    if retry_base != observed_base {
+        return Err("cutover_blocked".into());
+    }
     let output = execute_publication_command(runner, publish_command(), &retry_base)
         .map_err(|_| "cutover_blocked".to_owned())?;
     if output.status != 0 {
         return Err("cutover_blocked".into());
     }
+    let generation = observe(runner)?;
+    validate_scripted_history(runner, &[&observed_base, &generation], &[operation])?;
     Ok((
         observed_base,
         Publication::Published {
             operation: operation.into(),
-            generation: observe(runner)?,
+            generation,
         },
     ))
 }
@@ -629,11 +639,13 @@ fn recover_after_lost_response_with_base<R: CommandRunner>(
         Ok(output) if classify_push(&output.stderr) == PushFailure::Transport => {}
         _ => return Err("cutover_blocked".into()),
     }
-    let (observed_after_failure, operations) = observe_with_operations(runner)?;
+    let observed_after_failure = observe(runner)?;
     if observed_after_failure != observed_base {
-        if !operations.iter().any(|value| value == operation) {
-            return Err("cutover_blocked".into());
-        }
+        validate_scripted_history(
+            runner,
+            &[&observed_base, &observed_after_failure],
+            &[operation],
+        )?;
         return Ok((
             observed_base,
             Publication::Recovered {
@@ -647,11 +659,13 @@ fn recover_after_lost_response_with_base<R: CommandRunner>(
     if output.status != 0 {
         return Err("cutover_blocked".into());
     }
+    let generation = observe(runner)?;
+    validate_scripted_history(runner, &[&observed_base, &generation], &[operation])?;
     Ok((
         observed_base,
         Publication::Published {
             operation: operation.into(),
-            generation: observe(runner)?,
+            generation,
         },
     ))
 }
@@ -662,33 +676,19 @@ fn observe<R: CommandRunner>(runner: &mut R) -> Result<String, String> {
     if output.status != 0 {
         return Err("cutover_blocked".into());
     }
-    let generation = output.stdout.split_whitespace().next().unwrap_or("");
-    if sha(generation) {
-        Ok(generation.into())
-    } else {
-        Err("cutover_blocked".into())
-    }
-}
-fn observe_with_operations<R: CommandRunner>(
-    runner: &mut R,
-) -> Result<(String, Vec<String>), String> {
-    let output = runner
-        .run(observe_command())
-        .map_err(|_| "cutover_blocked".to_owned())?;
-    if output.status != 0 {
+    let mut lines = output.stdout.lines();
+    let Some(line) = lines.next() else {
+        return Err("cutover_blocked".into());
+    };
+    if lines.next().is_some() {
         return Err("cutover_blocked".into());
     }
-    let mut fields = output.stdout.split_whitespace();
+    let mut fields = line.split_whitespace();
     let generation = fields.next().unwrap_or("");
-    if !sha(generation) {
+    if !sha(generation) || fields.next() != Some("refs/dolt/data") || fields.next().is_some() {
         return Err("cutover_blocked".into());
     }
-    Ok((
-        generation.into(),
-        fields
-            .filter_map(|field| field.strip_prefix("operation:").map(str::to_owned))
-            .collect(),
-    ))
+    Ok(generation.into())
 }
 fn sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -754,18 +754,6 @@ pub fn run_scripted_cases(case: &str) -> Result<ContractResult, &'static str> {
         );
         let result =
             run_scripted_contract_case(case, &mut runner).map_err(|_| "cutover_blocked")?;
-        if matches!(*case, "stale-base-fence" | "push-conflict-recovery") {
-            validate_scripted_history(
-                &mut runner,
-                &[
-                    "0000000000000000000000000000000000000000",
-                    "1111111111111111111111111111111111111111",
-                    "2222222222222222222222222222222222222222",
-                ],
-                &["winner", "replay"],
-            )
-            .map_err(|_| "cutover_blocked")?;
-        }
         runner.finish().map_err(|_| "cutover_blocked")?;
         results.push(result);
     }
@@ -852,20 +840,21 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
             Ok(observation_output(g0)),
             Ok(CommandOutput::success("published")),
             Ok(observation_output(g1)),
+            Ok(CommandOutput::success(format!(
+                "{g0}\tbase\n{g1}\toperation:retry\n"
+            ))),
             Ok(observation_output(g0)),
             Err("connection reset".into()),
-            Ok(observation_output_with_operation(g1, "lost-response")),
+            Ok(observation_output(g1)),
+            Ok(CommandOutput::success(format!(
+                "{g0}\tbase\n{g1}\toperation:lost-response\n"
+            ))),
         ]),
         _ => Err("cutover_blocked".into()),
     }
 }
 fn observation_output(generation: &str) -> CommandOutput {
     CommandOutput::success(format!("{generation}\trefs/dolt/data\n"))
-}
-fn observation_output_with_operation(generation: &str, operation: &str) -> CommandOutput {
-    CommandOutput::success(format!(
-        "{generation}\trefs/dolt/data\toperation:{operation}\n"
-    ))
 }
 
 pub fn run_scripted_case<R: CommandRunner>(
@@ -899,6 +888,11 @@ pub fn run_scripted_case<R: CommandRunner>(
             }
             let generation = publish_after_observation(runner, &observed_after_stale)?;
             validate_logical_export(&["winner", "replay"], &["winner", "replay"])?;
+            validate_scripted_history(
+                runner,
+                &[&winner_base, &winner_generation, &generation],
+                &["winner", "replay"],
+            )?;
             Ok(ScriptEvidence {
                 observed_base: winner_base,
                 final_generation: generation,
@@ -959,6 +953,11 @@ fn full_stale_base_fence<R: CommandRunner>(runner: &mut R) -> Result<ScriptEvide
         return Err("cutover_blocked".into());
     }
     validate_logical_export(&["winner", "replay"], &["winner", "replay"])?;
+    validate_scripted_history(
+        runner,
+        &[&winner_base, &winner_generation, &recovery_generation],
+        &["winner", "replay"],
+    )?;
     Ok(ScriptEvidence {
         observed_base: winner_base,
         final_generation: recovery_generation,

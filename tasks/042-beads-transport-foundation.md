@@ -526,3 +526,19 @@ the G0 same-candidate retry remain covered.
 failed on the absent validator, then proved a winner/replay export must contain each expected
 operation exactly once and refuses missing or duplicate entries; both stale/recovery scripts apply
 that check before reporting success.
+
+2026-09-01: Final offline transport evidence keeps `ls-remote` limited to the observed generation
+and `refs/dolt/data`; operation identity is separately proven by the scoped command
+`git log --reverse --format=%H%x09%s refs/dolt/data`. Tests first rejected the missing history
+scripts, then proved G0/G1/G2 histories and logical exports contain each winner, replay, retry or
+lost-response operation exactly once. A changed retry base now refuses before a second publication.
+The verified temporary Apple Silicon v1.1.2 artifact passed `hermetic`, `stale-base-fence`,
+`push-conflict-recovery`, `transport-retries`, `transport` and `all` without a hosted service,
+credential, API mock or server. `cargo llvm-cov` 0.6.21 reported 71.64% contract lines, 91.82%
+pin lines and 72.57% package lines; remaining misses are defensive system-runner, fixture-refusal
+and CLI exit paths. No safe refactor reduced the deliberately explicit audited command ordering.
+
+2026-09-01: The final exact-source root gate passed: `/usr/bin/time -p cargo test --workspace`
+exited 0 in 6.77 seconds; `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `.githooks/provenance-guard` and
+`.githooks/attribution-guard` each exited 0.
