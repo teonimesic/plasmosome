@@ -116,7 +116,7 @@ share one `declared_string_list`, and the test exists so a future split of those
 `hosts = 5` were both invisible to it. The replacement matches any assignment whose value does not
 open a list, over `*.toml`, `*.rs` and `*.md`. Its full output over the tree:
 
-```
+```text
 crates/plasmosome-core/src/manifest.rs:687:hosts = "api.github.com"
 crates/plasmosome-core/src/manifest.rs:713:pin_cidrs = "140.82.112.0/20"
 crates/plasmosome-core/src/manifest.rs:731:hosts = "api.github.com"
