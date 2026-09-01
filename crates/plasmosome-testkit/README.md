@@ -52,7 +52,7 @@ and verifies the backend snapshot shows no residue.
 | `tests/clauses_discriminate.rs` | One defective backend per defect, each shown failing the clause that names it |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |
 
-Nothing here ships: the crate is `publish = false`, and a freeze rule keeps it out of every other
+Nothing here ships: the crate is `publish = false`, and a guard keeps it out of every other
 crate's non-dev dependencies.
 
 Tests: `cargo test -p plasmosome-testkit`

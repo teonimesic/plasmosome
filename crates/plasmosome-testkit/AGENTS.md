@@ -6,8 +6,9 @@ Shared test support: builders for the noisy kernel types, the backend conformanc
 `EnforcementBackend` implementation must pass, and the cross-crate scenarios. It is where the
 rules that span crates live; each crate's own `AGENTS.md` stays authoritative for that crate.
 
-Nothing here ships. The crate is `publish = false`, and the freeze rule `testkit_is_dev_only`
-fails the build if another workspace crate names it outside `[dev-dependencies]`.
+Nothing here ships. The crate is `publish = false`, and the guard `testkit_is_dev_only` in
+`plasmosome-guards` fails the build if another workspace crate names it outside
+`[dev-dependencies]`.
 
 ## The four layers
 

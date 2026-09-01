@@ -78,8 +78,8 @@ appears, that is the moment to add a clock trait — not before.
 ### The testkit crate
 
 `crates/plasmosome-testkit`, a workspace member with `publish = false`. It depends on the kernel
-crates; no kernel crate may depend on it outside `dev-dependencies`, and a freeze-checks rule
-enforces that. Layout:
+crates; no kernel crate may depend on it outside `dev-dependencies`, and a guard in
+`plasmosome-guards` enforces that. Layout:
 
 - `src/builders.rs` — construction helpers for the noisy types: a `PlasmidManifest` builder, a
   `Grant`/`Effect` sequence builder, a `DesiredState` builder. Tests state only what they are
@@ -119,8 +119,8 @@ only what spans crates.
   `FakeBackend` passes all of them.
 - At least one integration test in `crates/plasmosome-testkit/tests/` exercises core + backend +
   ledger together through public APIs and asserts an empty residue after replay.
-- A freeze-checks rule fails the build if any kernel crate depends on `plasmosome-testkit`
-  outside dev-dependencies, and the rule is mutation-tested: the violation was added, seen to
-  fail, and reverted.
+- A guard in `plasmosome-guards` fails the build if any kernel crate depends on
+  `plasmosome-testkit` outside dev-dependencies, and the guard is mutation-tested: the violation
+  was added, seen to fail, and reverted.
 - `crates/plasmosome-testkit/AGENTS.md` carries the layer table and the seam rule.
 - The gate in the root `AGENTS.md` is green.

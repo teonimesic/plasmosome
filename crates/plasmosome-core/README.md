@@ -8,8 +8,8 @@ drives a cell toward its declared shape, the credential gatekeeper (secrets live
 the cell), and the append-only session log.
 
 Enforcement happens elsewhere, on purpose. `plasmosome-core` builds and tests without any
-virtualization dependency — an architectural rule enforced by `plasmosome-freeze-checks`, because
-a controller that can boot a VM is a controller that dies with one.
+virtualization dependency, because a controller that can boot a VM is a controller that dies with
+one.
 
 ## What's inside
 

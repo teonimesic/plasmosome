@@ -39,8 +39,8 @@ jobs:
       - name: tests
         run: cargo test --workspace
 
-      - name: architectural freeze rules
-        run: cargo test -p plasmosome-freeze-checks
+      - name: workspace guards
+        run: cargo test -p plasmosome-guards
 
       - name: provenance guard
         run: ./.githooks/provenance-guard

@@ -8,7 +8,7 @@ members = [
     "crates/plasmosome-membrane",
     "crates/plasmid",
     "crates/plasmid-sdk",
-    "crates/plasmosome-freeze-checks",
+    "crates/plasmosome-guards",
     "crates/plasmosome-testkit",
 ]
 
@@ -24,10 +24,7 @@ toml = "0.8"
 proptest = "1"
 tempfile = "3"
 libc = "0.2"
-syn = { version = "2", features = ["full", "visit"] }
-proc-macro2 = "1"
 
 plasmosome-backend = { path = "crates/plasmosome-backend" }
 plasmosome-ledger = { path = "crates/plasmosome-ledger" }
 plasmosome-core = { path = "crates/plasmosome-core" }
-plasmosome-freeze-checks = { path = "crates/plasmosome-freeze-checks" }

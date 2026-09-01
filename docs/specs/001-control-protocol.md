@@ -419,8 +419,9 @@ is a claim that the text above may not be corrected.
    typed result out) — **not yet**: the controller daemon is P1 step 3.
 2. The error code table is closed and every code has a structured-field spec — **delivered**
    (§1).
-3. The controller-side wire types are serde and share no memory — **delivered**, and held there by
-   `plasmosome-freeze-checks` (86 §4 rules 1–3 green today).
+3. The controller-side wire types are serde and share no memory — **delivered**, and true of the
+   tree today, held by review rather than by a test: the guards that asserted it were removed
+   with spec 013, which says why.
 4. The D2 mock-mode field appears in every plasmid-carrying response — **delivered** (§3).
 5. Ambiguity-as-error with candidate lists is the only selection semantics — **delivered** (§2).
 6. Ledger replayable-from-log and residue-empty as standing rows — ledger property green

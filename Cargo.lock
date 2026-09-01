@@ -175,16 +175,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "plasmosome-freeze-checks"
+name = "plasmosome-guards"
 version = "0.1.0"
 dependencies = [
- "plasmosome-backend",
- "plasmosome-core",
- "plasmosome-ledger",
- "proc-macro2",
- "serde",
  "serde_json",
- "syn 2.0.119",
  "tempfile",
 ]
 

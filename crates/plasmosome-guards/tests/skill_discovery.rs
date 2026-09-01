@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use plasmosome_freeze_checks::workspace_root;
+use plasmosome_guards::workspace_root;
 
 const AGENT_SKILLS: &str = ".agents/skills";
 const CLAUDE_SKILLS: &str = ".claude/skills";

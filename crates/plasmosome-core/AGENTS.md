@@ -8,8 +8,9 @@ gatekeeper, session log. It decides capability grants. It does not enforce them.
 ## Hard rules
 
 - **No virtualization dependencies, ever.** No libkrun, no netstack, no VMM crate, not even
-  transitively. `plasmosome-freeze-checks` fails the build if one appears. A controller that
-  links a hypervisor cannot outlive a crashing cell, which is the whole point of splitting it out.
+  transitively. A controller that links a hypervisor cannot outlive a crashing cell, which is the
+  whole point of splitting it out. Nothing fails the build over it: this is a rule review holds,
+  and the reviewer to convince is whoever reads the diff.
 - **State crossing the seam is serde data**, never shared handles. No `Arc`/`Mutex` in wire types.
   The controller and the supervisor are separate processes; anything else is a lie about the
   boundary.

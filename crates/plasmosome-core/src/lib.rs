@@ -6,14 +6,10 @@
 //! connection: the request and reply envelopes, the closed error table, and
 //! `plasmosome.status` built from controller state.
 //!
-//! Contract (86 §4 rule 1): this crate must build and test with no dependency
-//! path to any VMM, netstack, or broker-process crate — `plasmosome-core` is
-//! the controller; VMs, shims, and brokers belong to `plasmosome-membrane`.
-//! `plasmosome-freeze-checks` walks `cargo tree -p plasmosome-core` to hold
-//! that line. Contract (86 §4 rule 2): controller state crosses processes only
-//! as serde types (`state`, `reconciler`, and `manifest` hold no `Arc`/`Rc`
-//! and no locks), and desired state is generation-numbered so a replayed
-//! reconciler converges instead of re-firing.
+//! This crate is the controller: VMs, shims and brokers belong to
+//! `plasmosome-membrane`, and controller state crosses processes as serde
+//! types carrying no shared memory. Both are design rules, held in review and
+//! written down in `AGENTS.md`, not by a test.
 
 pub mod control;
 pub mod gatekeeper;
