@@ -225,7 +225,9 @@ a change nobody reviewed.
   need no longer carry the field.
 - **§1, the error table.** No code is added, removed or renumbered — the closed set stands. The
   refusals an author can reach gain one structured field, `fix`, holding the line the author would
-  write.
+  write. Where the field is list-valued, `fix` holds the entry to add, not the whole line: a
+  replacement line would either drop the entries already there or name them, and naming what is
+  already granted is what the report above forbids.
 - **§3.9 and §3.6, the responses that carry a plasmid as an object.** Each per-plasmid object
   gains one field, `denials` — omitted when empty, per §1's rule that a field with nothing in it
   is never sent. Each entry names one distinct denial: what was reached for, in the
@@ -321,7 +323,10 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 - **Every refusal an author can cause carries the field path in the declaration and a `fix`
   sentence** holding the line the author would write, and carries the plasmid id wherever the
   declaration supplies one. A declaration with no `id` is the single case that cannot name a
-  plasmid; it names the missing `id` instead.
+  plasmid; it names the missing `id` instead. Where a refusal must name more than one plasmid —
+  the requirers a detach would strand — it names them in the message and the `fix`, not in a new
+  structured field: §1's assertion carries a single plasmid, and adding a field to it would be a
+  fourth amendment this spec does not make.
 - **A capability denied at the boundary is reported as a missing declaration.** The report names
   what was denied and the declaration field it belongs in, and names nothing that was granted or
   would have been. It is written to the cell's session log, one line per denial, and to the
