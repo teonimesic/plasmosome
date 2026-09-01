@@ -23,6 +23,7 @@
 
 pub mod brokers;
 pub mod control;
+pub mod daemon;
 pub mod exec;
 pub mod readiness;
 pub mod vmm;
