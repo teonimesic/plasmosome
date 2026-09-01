@@ -130,8 +130,9 @@ for f in $(grep -l '^status: accepted$' docs/specs/*.md); do
     continue
   fi
   echo "$ids" | while read -r i; do
-    n=$(grep -l "^id: $i\$" docs/intents/*.md 2>/dev/null | head -1)
-    [ -n "$n" ] || { echo "$f: names intent $i, which does not exist"; continue; }
+    n=$(grep -l "^id: $i\$" docs/intents/*.md 2>/dev/null)
+    c=$(printf '%s' "$n" | grep -c . )
+    [ "$c" -eq 1 ] || { echo "$f: intent $i matches $c intent files, not 1"; continue; }
     grep -q '^status: approved$' "$n" || echo "$f: names intent $i, which is not approved"
   done
 done
