@@ -174,7 +174,7 @@ hardcoded paths in tests — every socket and config lives in a `tempfile::tempd
 
 ### The gate
 
-```
+```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
@@ -203,7 +203,7 @@ unchanged.
 exists, and nothing used `libc` until the signal handlers, so both landed with `main.rs`.
 
 **serde does not name a mistyped field, and the config test needs it to.** `{"name": 7}` yields
-`invalid type: integer `7`, expected a string` with no mention of `name`; missing and unknown
+``invalid type: integer `7`, expected a string`` with no mention of `name`; missing and unknown
 fields are named, mistyped ones are not. Each field is therefore read through a
 `deserialize_with` that puts the field name back into the message, which keeps the refusal
 naming its offender without hand-rolling the parse.
