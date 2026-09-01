@@ -102,7 +102,9 @@ Create or edit exactly these files:
 - `tools/work-state` and `tools/work-state-beads-1.1.2.toml`;
 - `crates/plasmosome-work-state/Cargo.toml`, `AGENTS.md`, `CLAUDE.md`, `README.md`;
 - `crates/plasmosome-work-state/src/{lib,command,contract,pin,main}.rs`;
-- `crates/plasmosome-work-state/tests/{pin,contract,cli}.rs`; and
+- `crates/plasmosome-work-state/tests/{pin,command,contract,cli}.rs`;
+- `docs/specs/014-local-first-work-state.md` for the owner-directed offline transport and embedded
+  cleanup contract correction; and
 - this task for its lifecycle fields and dated `## Notes` only.
 
 `CLAUDE.md` contains only `@AGENTS.md`. The new package is a workspace member named
@@ -542,3 +544,19 @@ and CLI exit paths. No safe refactor reduced the deliberately explicit audited c
 exited 0 in 6.77 seconds; `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo fmt --all -- --check`, `.githooks/provenance-guard` and
 `.githooks/attribution-guard` each exited 0.
+
+2026-09-01: Exact-head review found that replay/export evidence was disconnected and that pin
+metadata mutations did not fail the named test. Tests first failed when recovery scripts expected
+the real Beads `create`, `dolt commit -m` and JSONL `export` plans; recovery now records those
+plans and parses each observed export row's id, title and description before accepting exact-once
+operations. Malformed history rows now refuse instead of being filtered out. The production-pin
+test now fixes every release URL, checksum, target, archive and binary hash, and added tests cover
+same-version wrong bytes, missing/duplicate platforms, unknown fields and non-HTTPS sources.
+Owner direction explicitly admits the focused command test and spec correction to this task because
+they record the approved offline transport and embedded-cleanup contract; the spec sentence now
+states that the wrapper configures `origin` before describing embedded cleanup.
+
+2026-09-01: After the review fixes, the real checksum-verified Apple Silicon `contract-test all`
+passed again. Coverage reported 74.13% contract lines, 94.55% pin lines and 74.85% package lines;
+the full workspace test gate exited 0 in 7.27 seconds, followed by clean workspace clippy, format,
+provenance and attribution gates.

@@ -304,6 +304,38 @@ pub fn validate_independent_stores(
 }
 
 pub fn validate_logical_export(
+    output: &str,
+    expected_operations: &[&str],
+) -> Result<(), &'static str> {
+    let mut exported_operations = Vec::new();
+    for line in output.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|_| "cutover_blocked")?;
+        let id = value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("cutover_blocked")?;
+        let title = value
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("cutover_blocked")?;
+        let description = value
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("cutover_blocked")?;
+        let operation = title.strip_prefix("operation:").ok_or("cutover_blocked")?;
+        if id != format!("issue-{operation}") || description != format!("issue:{operation}") {
+            return Err("cutover_blocked");
+        }
+        exported_operations.push(operation.to_owned());
+    }
+    let exported_operations = exported_operations
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    validate_operations_once(&exported_operations, expected_operations)
+}
+
+fn validate_operations_once(
     exported_operations: &[&str],
     expected_operations: &[&str],
 ) -> Result<(), &'static str> {
@@ -349,8 +381,8 @@ pub fn validate_scripted_history<R: CommandRunner>(
     let entries = output
         .stdout
         .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .collect::<Vec<_>>();
+        .map(|line| line.split_once('\t').ok_or("cutover_blocked"))
+        .collect::<Result<Vec<_>, _>>()?;
     if entries.iter().map(|(sha, _)| *sha).collect::<Vec<_>>() != expected_generations {
         return Err("cutover_blocked".into());
     }
@@ -358,7 +390,7 @@ pub fn validate_scripted_history<R: CommandRunner>(
         .iter()
         .filter_map(|(_, content)| content.strip_prefix("operation:"))
         .collect::<Vec<_>>();
-    validate_logical_export(&operations, expected_operations).map_err(str::to_owned)
+    validate_operations_once(&operations, expected_operations).map_err(str::to_owned)
 }
 
 pub fn isolated_environment(root: &Path) -> BTreeMap<String, String> {
@@ -487,6 +519,36 @@ pub fn refresh_command() -> CommandSpec {
         ],
         vec![4],
     )
+}
+fn replay_command(operation: &str) -> CommandSpec {
+    production_command(
+        "bd",
+        vec![
+            "--sandbox".into(),
+            "create".into(),
+            "--title".into(),
+            format!("operation:{operation}"),
+            "--description".into(),
+            format!("issue:{operation}"),
+        ],
+        Vec::new(),
+    )
+}
+fn commit_command(operation: &str) -> CommandSpec {
+    production_command(
+        "bd",
+        vec![
+            "--sandbox".into(),
+            "dolt".into(),
+            "commit".into(),
+            "-m".into(),
+            format!("operation:{operation}"),
+        ],
+        Vec::new(),
+    )
+}
+fn logical_export_command() -> CommandSpec {
+    production_command("bd", vec!["--sandbox".into(), "export".into()], Vec::new())
 }
 pub fn leased_ref_update(expected: &str, candidate: &str) -> Result<CommandSpec, String> {
     if !sha(expected) || !sha(candidate) {
@@ -694,6 +756,31 @@ fn sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn replay_operation<R: CommandRunner>(runner: &mut R, operation: &str) -> Result<(), String> {
+    for command in [replay_command(operation), commit_command(operation)] {
+        let output = runner
+            .run(command)
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        if output.status != 0 {
+            return Err("cutover_blocked".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_observed_export<R: CommandRunner>(
+    runner: &mut R,
+    expected_operations: &[&str],
+) -> Result<(), String> {
+    let output = runner
+        .run(logical_export_command())
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    if output.status != 0 {
+        return Err("cutover_blocked".into());
+    }
+    validate_logical_export(&output.stdout, expected_operations).map_err(str::to_owned)
+}
+
 pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<ContractResult>> {
     let root = tempfile::tempdir()
         .map_err(|_| Box::new(ContractResult::refusal(&request.case, "cutover_blocked")))?;
@@ -795,6 +882,8 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
         "stale-base-fence" => Ok(vec![
             Ok(observation_output(g0)),
             Ok(observation_output(g0)),
+            Ok(CommandOutput::success("wrote winner")),
+            Ok(CommandOutput::success("committed winner")),
             Ok(CommandOutput::success("winner")),
             Ok(observation_output(g1)),
             Ok(CommandOutput {
@@ -804,6 +893,8 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
             }),
             Ok(observation_output(g1)),
             Ok(CommandOutput::success("refreshed")),
+            Ok(CommandOutput::success("wrote replay")),
+            Ok(CommandOutput::success("committed replay")),
             Ok(CommandOutput::success("replayed")),
             Ok(observation_output(g2)),
             Ok(CommandOutput {
@@ -812,6 +903,7 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
                 stderr: "non-fast-forward".into(),
             }),
             Ok(observation_output(g2)),
+            Ok(logical_export_output(&["winner", "replay"])),
             Ok(CommandOutput::success(format!(
                 "{g0}\tbase\n{g1}\toperation:winner\n{g2}\toperation:replay\n"
             ))),
@@ -819,6 +911,8 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
         "push-conflict-recovery" => Ok(vec![
             Ok(observation_output(g0)),
             Ok(observation_output(g0)),
+            Ok(CommandOutput::success("wrote winner")),
+            Ok(CommandOutput::success("committed winner")),
             Ok(CommandOutput::success("winner")),
             Ok(observation_output(g1)),
             Ok(CommandOutput {
@@ -828,13 +922,18 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
             }),
             Ok(observation_output(g1)),
             Ok(CommandOutput::success("refreshed")),
+            Ok(CommandOutput::success("wrote replay")),
+            Ok(CommandOutput::success("committed replay")),
             Ok(CommandOutput::success("replayed")),
             Ok(observation_output(g2)),
+            Ok(logical_export_output(&["winner", "replay"])),
             Ok(CommandOutput::success(format!(
                 "{g0}\tbase\n{g1}\toperation:winner\n{g2}\toperation:replay\n"
             ))),
         ]),
         "transport-retries" => Ok(vec![
+            Ok(CommandOutput::success("wrote retry")),
+            Ok(CommandOutput::success("committed retry")),
             Ok(observation_output(g0)),
             Err("connection reset".into()),
             Ok(observation_output(g0)),
@@ -843,18 +942,35 @@ pub fn scripted_outcomes(case: &str) -> Result<Vec<Result<CommandOutput, String>
             Ok(CommandOutput::success(format!(
                 "{g0}\tbase\n{g1}\toperation:retry\n"
             ))),
+            Ok(logical_export_output(&["retry"])),
+            Ok(CommandOutput::success("wrote lost-response")),
+            Ok(CommandOutput::success("committed lost-response")),
             Ok(observation_output(g0)),
             Err("connection reset".into()),
             Ok(observation_output(g1)),
             Ok(CommandOutput::success(format!(
                 "{g0}\tbase\n{g1}\toperation:lost-response\n"
             ))),
+            Ok(logical_export_output(&["lost-response"])),
         ]),
         _ => Err("cutover_blocked".into()),
     }
 }
 fn observation_output(generation: &str) -> CommandOutput {
     CommandOutput::success(format!("{generation}\trefs/dolt/data\n"))
+}
+fn logical_export_output(operations: &[&str]) -> CommandOutput {
+    CommandOutput::success(
+        operations
+            .iter()
+            .map(|operation| {
+                format!(
+                    "{{\"id\":\"issue-{operation}\",\"title\":\"operation:{operation}\",\"description\":\"issue:{operation}\"}}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 pub fn run_scripted_case<R: CommandRunner>(
@@ -869,6 +985,7 @@ pub fn run_scripted_case<R: CommandRunner>(
             if winner_base != stale_base {
                 return Err("cutover_blocked".into());
             }
+            replay_operation(runner, "winner")?;
             let winner_generation = publish_after_observation(runner, &winner_base)?;
             let stale_push = execute_publication_command(runner, publish_command(), &stale_base)
                 .map_err(|_| "cutover_blocked".to_owned())?;
@@ -886,8 +1003,9 @@ pub fn run_scripted_case<R: CommandRunner>(
             if refresh.status != 0 {
                 return Err("cutover_blocked".into());
             }
+            replay_operation(runner, "replay")?;
             let generation = publish_after_observation(runner, &observed_after_stale)?;
-            validate_logical_export(&["winner", "replay"], &["winner", "replay"])?;
+            validate_observed_export(runner, &["winner", "replay"])?;
             validate_scripted_history(
                 runner,
                 &[&winner_base, &winner_generation, &generation],
@@ -900,10 +1018,13 @@ pub fn run_scripted_case<R: CommandRunner>(
             })
         }
         "transport-retries" => {
+            replay_operation(runner, "retry")?;
             let (observed_base, result) = retry_after_transport_with_base(runner, "retry")?;
             let Publication::Published { .. } = result else {
                 return Err("cutover_blocked".into());
             };
+            validate_observed_export(runner, &["retry"])?;
+            replay_operation(runner, "lost-response")?;
             let (_, recovered) = recover_after_lost_response_with_base(runner, "lost-response")?;
             let Publication::Recovered {
                 generation: recovered_generation,
@@ -912,6 +1033,7 @@ pub fn run_scripted_case<R: CommandRunner>(
             else {
                 return Err("cutover_blocked".into());
             };
+            validate_observed_export(runner, &["lost-response"])?;
             Ok(ScriptEvidence {
                 observed_base,
                 final_generation: recovered_generation,
@@ -928,6 +1050,7 @@ fn full_stale_base_fence<R: CommandRunner>(runner: &mut R) -> Result<ScriptEvide
     if winner_base != stale_base {
         return Err("cutover_blocked".into());
     }
+    replay_operation(runner, "winner")?;
     let winner_generation = publish_after_observation(runner, &winner_base)?;
     let stale_push = execute_publication_command(runner, publish_command(), &stale_base)
         .map_err(|_| "cutover_blocked".to_owned())?;
@@ -943,6 +1066,7 @@ fn full_stale_base_fence<R: CommandRunner>(runner: &mut R) -> Result<ScriptEvide
     if refresh.status != 0 {
         return Err("cutover_blocked".into());
     }
+    replay_operation(runner, "replay")?;
     let recovery_generation = publish_after_observation(runner, &winner_generation)?;
     let paused_push = execute_publication_command(runner, publish_command(), &winner_generation)
         .map_err(|_| "cutover_blocked".to_owned())?;
@@ -952,7 +1076,7 @@ fn full_stale_base_fence<R: CommandRunner>(runner: &mut R) -> Result<ScriptEvide
     if observe(runner)? != recovery_generation {
         return Err("cutover_blocked".into());
     }
-    validate_logical_export(&["winner", "replay"], &["winner", "replay"])?;
+    validate_observed_export(runner, &["winner", "replay"])?;
     validate_scripted_history(
         runner,
         &[&winner_base, &winner_generation, &recovery_generation],

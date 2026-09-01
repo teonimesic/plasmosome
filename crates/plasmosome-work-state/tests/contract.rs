@@ -28,6 +28,28 @@ fn recovery_history() -> CommandOutput {
     ))
 }
 
+fn operation_write(operation: &str) -> CommandOutput {
+    CommandOutput::success(format!("wrote {operation}"))
+}
+
+fn operation_commit(operation: &str) -> CommandOutput {
+    CommandOutput::success(format!("committed {operation}"))
+}
+
+fn logical_export(operations: &[&str]) -> CommandOutput {
+    CommandOutput::success(
+        operations
+            .iter()
+            .map(|operation| {
+                format!(
+                    "{{\"id\":\"issue-{operation}\",\"title\":\"operation:{operation}\",\"description\":\"issue:{operation}\"}}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 fn assert_isolated_plan(command: &CommandSpec) {
     assert_eq!(
         command.cwd.as_deref(),
@@ -205,7 +227,10 @@ fn failure_before_publication_retries_the_same_candidate_once() {
         runner
             .commands()
             .iter()
-            .filter(|command| command.argv[2] == "push")
+            .filter(|command| command
+                .argv
+                .get(2)
+                .is_some_and(|argument| argument == "push"))
             .count(),
         2
     );
@@ -247,7 +272,10 @@ fn lost_response_is_recovered_without_a_second_push() {
         runner
             .commands()
             .iter()
-            .filter(|command| command.argv[2] == "push")
+            .filter(|command| command
+                .argv
+                .get(2)
+                .is_some_and(|argument| argument == "push"))
             .count(),
         1
     );
@@ -291,7 +319,10 @@ fn lost_response_at_the_same_generation_retries_the_prepared_candidate_once() {
         runner
             .commands()
             .iter()
-            .filter(|command| command.argv[2] == "push")
+            .filter(|command| command
+                .argv
+                .get(2)
+                .is_some_and(|argument| argument == "push"))
             .count(),
         2
     );
@@ -379,6 +410,8 @@ fn guarded_pull_replay_push_preserves_both_operations_once() {
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(observation(G0)),
         Ok(observation(G0)),
+        Ok(operation_write("winner")),
+        Ok(operation_commit("winner")),
         Ok(CommandOutput::success("winner")),
         Ok(observation(G1)),
         Ok(CommandOutput {
@@ -388,8 +421,11 @@ fn guarded_pull_replay_push_preserves_both_operations_once() {
         }),
         Ok(observation(G1)),
         Ok(CommandOutput::success("refreshed")),
+        Ok(operation_write("replay")),
+        Ok(operation_commit("replay")),
         Ok(CommandOutput::success("replayed")),
         Ok(observation(G2)),
+        Ok(logical_export(&["winner", "replay"])),
         Ok(recovery_history()),
     ]);
     let evidence = run_scripted_case("push-conflict-recovery", &mut runner).unwrap();
@@ -401,6 +437,26 @@ fn guarded_pull_replay_push_preserves_both_operations_once() {
             .iter()
             .any(|command| command.argv == vec!["--sandbox", "dolt", "pull", "--remote", "origin"])
     );
+    assert!(runner.commands().iter().any(|command| {
+        command.argv
+            == vec![
+                "--sandbox",
+                "create",
+                "--title",
+                "operation:replay",
+                "--description",
+                "issue:replay",
+            ]
+    }));
+    assert!(runner.commands().iter().any(|command| {
+        command.argv == vec!["--sandbox", "dolt", "commit", "-m", "operation:replay"]
+    }));
+    assert!(
+        runner
+            .commands()
+            .iter()
+            .any(|command| command.argv == vec!["--sandbox", "export"])
+    );
     assert!(runner.finish().is_ok());
 }
 
@@ -409,6 +465,8 @@ fn stale_base_is_never_routed_through_transport_retry() {
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(observation(G0)),
         Ok(observation(G0)),
+        Ok(operation_write("winner")),
+        Ok(operation_commit("winner")),
         Ok(CommandOutput::success("winner")),
         Ok(observation(G1)),
         Ok(CommandOutput {
@@ -418,6 +476,8 @@ fn stale_base_is_never_routed_through_transport_retry() {
         }),
         Ok(observation(G1)),
         Ok(CommandOutput::success("refreshed")),
+        Ok(operation_write("replay")),
+        Ok(operation_commit("replay")),
         Ok(CommandOutput::success("replayed")),
         Ok(observation(G2)),
         Ok(CommandOutput {
@@ -426,6 +486,7 @@ fn stale_base_is_never_routed_through_transport_retry() {
             stderr: "non-fast-forward".into(),
         }),
         Ok(observation(G2)),
+        Ok(logical_export(&["winner", "replay"])),
         Ok(recovery_history()),
     ]);
     let evidence = run_scripted_case("stale-base-fence", &mut runner).unwrap();
@@ -434,7 +495,10 @@ fn stale_base_is_never_routed_through_transport_retry() {
         runner
             .commands()
             .iter()
-            .filter(|command| command.argv[2] == "push")
+            .filter(|command| command
+                .argv
+                .get(2)
+                .is_some_and(|argument| argument == "push"))
             .count(),
         4
     );
@@ -473,6 +537,8 @@ fn recovery_observes_both_g0_candidates_before_the_winner_publishes_g1() {
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(observation(G0)),
         Ok(observation(G0)),
+        Ok(operation_write("winner")),
+        Ok(operation_commit("winner")),
         Ok(CommandOutput::success("winner")),
         Ok(observation(G1)),
         Ok(CommandOutput {
@@ -482,8 +548,11 @@ fn recovery_observes_both_g0_candidates_before_the_winner_publishes_g1() {
         }),
         Ok(observation(G1)),
         Ok(CommandOutput::success("refreshed")),
+        Ok(operation_write("replay")),
+        Ok(operation_commit("replay")),
         Ok(CommandOutput::success("replayed")),
         Ok(observation(G2)),
+        Ok(logical_export(&["winner", "replay"])),
         Ok(recovery_history()),
     ]);
     let evidence = run_scripted_case("push-conflict-recovery", &mut runner).unwrap();
@@ -491,7 +560,7 @@ fn recovery_observes_both_g0_candidates_before_the_winner_publishes_g1() {
     let commands = runner.commands();
     assert_eq!(commands[0].argv[0], "ls-remote");
     assert_eq!(commands[1].argv[0], "ls-remote");
-    assert_eq!(commands[2].argv[2], "push");
+    assert_eq!(commands[4].argv[2], "push");
     assert!(runner.finish().is_ok());
 }
 
@@ -503,7 +572,7 @@ fn scripted_result_names_generation_operation_ids_and_redacted_plans() {
     assert_eq!(result.observed_base.as_deref(), Some(G0));
     assert_eq!(result.final_generation.as_deref(), Some(G2));
     assert_eq!(result.operation_ids, vec!["winner", "replay"]);
-    assert_eq!(result.command_plans.len(), 12);
+    assert_eq!(result.command_plans.len(), 17);
     assert!(
         result
             .command_plans
@@ -527,6 +596,8 @@ fn scripted_result_derives_its_observed_base_from_the_executed_script() {
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(observation(h0)),
         Ok(observation(h0)),
+        Ok(operation_write("winner")),
+        Ok(operation_commit("winner")),
         Ok(CommandOutput::success("winner")),
         Ok(observation(h1)),
         Ok(CommandOutput {
@@ -536,6 +607,8 @@ fn scripted_result_derives_its_observed_base_from_the_executed_script() {
         }),
         Ok(observation(h1)),
         Ok(CommandOutput::success("refreshed")),
+        Ok(operation_write("replay")),
+        Ok(operation_commit("replay")),
         Ok(CommandOutput::success("replayed")),
         Ok(observation(h2)),
         Ok(CommandOutput {
@@ -544,6 +617,7 @@ fn scripted_result_derives_its_observed_base_from_the_executed_script() {
             stderr: "non-fast-forward".into(),
         }),
         Ok(observation(h2)),
+        Ok(logical_export(&["winner", "replay"])),
         Ok(CommandOutput::success(format!(
             "{h0}\tbase\n{h1}\toperation:winner\n{h2}\toperation:replay\n"
         ))),
@@ -557,16 +631,22 @@ fn scripted_result_derives_its_observed_base_from_the_executed_script() {
 #[test]
 fn aggregate_transport_retries_runs_lost_response_rediscovery_after_prepublication_retry() {
     let mut runner = RecordingCommandRunner::scripted(vec![
+        Ok(operation_write("retry")),
+        Ok(operation_commit("retry")),
         Ok(observation(G0)),
         Err("connection reset".into()),
         Ok(observation(G0)),
         Ok(CommandOutput::success("published")),
         Ok(observation(G1)),
         Ok(history(&[G0, G1], "retry")),
+        Ok(logical_export(&["retry"])),
+        Ok(operation_write("lost-response")),
+        Ok(operation_commit("lost-response")),
         Ok(observation(G0)),
         Err("connection reset".into()),
         Ok(observation(G1)),
         Ok(history(&[G0, G1], "lost-response")),
+        Ok(logical_export(&["lost-response"])),
     ]);
     let evidence = run_scripted_case("transport-retries", &mut runner).unwrap();
     assert_eq!(evidence.operation_ids, vec!["retry", "lost-response"]);
@@ -575,7 +655,10 @@ fn aggregate_transport_retries_runs_lost_response_rediscovery_after_prepublicati
         runner
             .commands()
             .iter()
-            .filter(|command| command.argv[2] == "push")
+            .filter(|command| command
+                .argv
+                .get(2)
+                .is_some_and(|argument| argument == "push"))
             .count(),
         3
     );
@@ -597,13 +680,32 @@ fn aggregate_result_preserves_each_named_scenario_evidence() {
 
 #[test]
 fn logical_export_requires_each_replayed_operation_exactly_once() {
-    assert!(validate_logical_export(&["winner", "replay"], &["winner", "replay"]).is_ok());
+    assert!(
+        validate_logical_export(
+            &logical_export(&["winner", "replay"]).stdout,
+            &["winner", "replay"]
+        )
+        .is_ok()
+    );
     assert_eq!(
-        validate_logical_export(&["winner", "winner"], &["winner", "replay"]),
+        validate_logical_export(
+            &logical_export(&["winner", "winner"]).stdout,
+            &["winner", "replay"]
+        ),
         Err("cutover_blocked")
     );
     assert_eq!(
-        validate_logical_export(&["winner", "replay", "replay"], &["winner", "replay"]),
+        validate_logical_export(
+            &logical_export(&["winner", "replay", "replay"]).stdout,
+            &["winner", "replay"]
+        ),
+        Err("cutover_blocked")
+    );
+    assert_eq!(
+        validate_logical_export(
+            "{\"id\":\"issue-winner\",\"title\":\"operation:winner\",\"description\":\"wrong\"}",
+            &["winner"]
+        ),
         Err("cutover_blocked")
     );
 }
@@ -622,10 +724,24 @@ fn scripted_history_requires_g0_winner_replay_and_their_contents() {
 }
 
 #[test]
+fn scripted_history_refuses_a_malformed_extra_line() {
+    let mut runner = RecordingCommandRunner::scripted(vec![Ok(CommandOutput::success(format!(
+        "{G0}\tbase\nmalformed\n{G1}\toperation:winner\n{G2}\toperation:replay\n"
+    )))]);
+    assert_eq!(
+        validate_scripted_history(&mut runner, &[G0, G1, G2], &["winner", "replay"]),
+        Err("cutover_blocked".into())
+    );
+    assert!(runner.finish().is_ok());
+}
+
+#[test]
 fn stale_base_fence_keeps_g1_then_g2_across_recovery_and_paused_holder() {
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(observation(G0)),
         Ok(observation(G0)),
+        Ok(operation_write("winner")),
+        Ok(operation_commit("winner")),
         Ok(CommandOutput::success("winner")),
         Ok(observation(G1)),
         Ok(CommandOutput {
@@ -635,6 +751,8 @@ fn stale_base_fence_keeps_g1_then_g2_across_recovery_and_paused_holder() {
         }),
         Ok(observation(G1)),
         Ok(CommandOutput::success("refreshed")),
+        Ok(operation_write("replay")),
+        Ok(operation_commit("replay")),
         Ok(CommandOutput::success("replayed")),
         Ok(observation(G2)),
         Ok(CommandOutput {
@@ -643,6 +761,7 @@ fn stale_base_fence_keeps_g1_then_g2_across_recovery_and_paused_holder() {
             stderr: "non-fast-forward".into(),
         }),
         Ok(observation(G2)),
+        Ok(logical_export(&["winner", "replay"])),
         Ok(recovery_history()),
     ]);
     let evidence = run_scripted_case("stale-base-fence", &mut runner).unwrap();
@@ -652,7 +771,10 @@ fn stale_base_fence_keeps_g1_then_g2_across_recovery_and_paused_holder() {
         runner
             .commands()
             .iter()
-            .filter(|command| command.argv[2] == "push")
+            .filter(|command| command
+                .argv
+                .get(2)
+                .is_some_and(|argument| argument == "push"))
             .count(),
         4
     );

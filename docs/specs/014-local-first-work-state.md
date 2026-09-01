@@ -115,11 +115,12 @@ schema upgrade. The pinned release is MIT licensed.
 Each clone has one embedded Dolt store shared by its worktrees. Initialization uses
 `bd init --stealth` or a verified equivalent that installs no hooks, edits no `AGENTS.md`,
 `CLAUDE.md` or skill, and stages no repository file. The wrapper owns the store location and
-embedded cleanup drops its handles and removes its temporary root; it does not invoke `bd dolt
-stop`, because embedded mode starts no Dolt server. The harness reaps only child processes it
-actually started.
 configures the existing GitHub `origin` as the Dolt remote whose authoritative generation is
 `refs/dolt/data`.
+
+Embedded cleanup drops its handles and removes its temporary root; it does not invoke `bd dolt
+stop`, because embedded mode starts no Dolt server. The harness reaps only child processes it
+actually started.
 
 `dolt.auto-push` is false and no daemon, hook or background job performs a Git-protocol push.
 Beads 1.1.2 warns that concurrent automatic pushes can corrupt or strand remote history; all pulls,

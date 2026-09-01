@@ -33,7 +33,44 @@ fn production_manifest_names_the_v1_1_2_release_and_supported_artifacts() {
         "20e493e569c922d1253bdeff068c5e56c94957fb"
     );
     assert_eq!(manifest.license, "MIT");
-    assert_eq!(manifest.targets.len(), 2);
+    assert_eq!(
+        manifest.release,
+        "https://github.com/gastownhall/beads/releases/tag/v1.1.2"
+    );
+    assert_eq!(
+        manifest.checksums_url,
+        "https://github.com/gastownhall/beads/releases/download/v1.1.2/checksums.txt"
+    );
+    assert_eq!(
+        manifest.checksums_sha256,
+        "8ea26179417c8a206b8d18c515b9a7588c1dad5336f6ce1e61b329c2ed7138a5"
+    );
+    assert_eq!(
+        manifest
+            .targets
+            .iter()
+            .map(|target| (
+                target.target.as_str(),
+                target.archive.as_str(),
+                target.archive_sha256.as_str(),
+                target.binary_sha256.as_str(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "aarch64-apple-darwin",
+                "beads_1.1.2_darwin_arm64.tar.gz",
+                "9b0137a83a2afd343e2abd2a506be72ea032721000f76669c2cf81729e78501d",
+                "621b7b6c20c38db27ef4120398eb46dc35ba5b3e6c3611e19e14d33de10ce351",
+            ),
+            (
+                "x86_64-unknown-linux-gnu",
+                "beads_1.1.2_linux_amd64.tar.gz",
+                "a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2",
+                "6d767629e90560506d0ea3de9823aef48386414f5425d8853e2ae3312cad9a82",
+            ),
+        ]
+    );
 }
 
 #[test]
@@ -135,4 +172,79 @@ fn checksum_refusal_runs_no_program_or_store_command() {
         &mut runner,
     );
     assert!(runner.commands().is_empty());
+}
+
+#[test]
+fn a_binary_claiming_1_1_2_with_other_bytes_is_refused() {
+    let root = tempdir().unwrap();
+    let archive = root.path().join("beads_1.1.2_darwin_arm64.tar.gz");
+    let binary = root.path().join("bd");
+    let pin = root.path().join("pin.toml");
+    write(&archive, b"archive");
+    write(&binary, b"other binary");
+    write(&pin, manifest(b"archive", b"binary"));
+    let mut runner = RecordingCommandRunner::default();
+    let error = VerifiedBeads::verify(
+        &PinManifest::load(&pin).unwrap(),
+        "aarch64-apple-darwin",
+        &archive,
+        &binary,
+        &mut runner,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "beads_checksum_mismatch");
+    assert!(runner.commands().is_empty());
+}
+
+#[test]
+fn a_missing_or_duplicate_platform_is_refused() {
+    let root = tempdir().unwrap();
+    let pin = root.path().join("pin.toml");
+    write(&pin, manifest(b"archive", b"binary"));
+    let loaded = PinManifest::load(&pin).unwrap();
+    let mut runner = RecordingCommandRunner::default();
+    let error = VerifiedBeads::verify(
+        &loaded,
+        "x86_64-unknown-linux-gnu",
+        Path::new("missing"),
+        Path::new("missing"),
+        &mut runner,
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "unsupported_beads_platform");
+    let duplicate = format!(
+        "{}\n{}",
+        manifest(b"archive", b"binary"),
+        manifest(b"archive", b"binary")
+            .split_once("\n\n")
+            .unwrap()
+            .1
+    );
+    write(&pin, duplicate);
+    assert_eq!(
+        PinManifest::load(&pin).unwrap_err().code(),
+        "invalid_beads_pin"
+    );
+}
+
+#[test]
+fn unknown_manifest_fields_and_non_https_sources_are_refused() {
+    let root = tempdir().unwrap();
+    let pin = root.path().join("pin.toml");
+    write(
+        &pin,
+        format!("{}unknown = \"value\"\n", manifest(b"archive", b"binary")),
+    );
+    assert_eq!(
+        PinManifest::load(&pin).unwrap_err().code(),
+        "invalid_beads_pin"
+    );
+    write(
+        &pin,
+        manifest(b"archive", b"binary").replace("https://github.com", "http://github.com"),
+    );
+    assert_eq!(
+        PinManifest::load(&pin).unwrap_err().code(),
+        "invalid_beads_pin"
+    );
 }
