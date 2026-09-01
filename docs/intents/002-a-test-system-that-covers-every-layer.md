@@ -1,8 +1,10 @@
 ---
 id: 002
 title: A test system and CI that covers every layer, performance included
+status: approved
 date: 2026-08-30
 originator: Stefano
+outcome:
 ---
 
 This project needs a great test system, not a passing one. Testing should reach every layer:

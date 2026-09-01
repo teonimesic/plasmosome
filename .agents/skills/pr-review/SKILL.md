@@ -15,6 +15,14 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    done and acted on. **CodeRabbit does not review draft PRs**, so nothing you do here spends a
    round. Mark it ready (`gh pr ready <number>`) only when you would be content for someone to
    read it as it stands.
+
+   **One kind of PR you never mark ready: one that proposes an intent, or moves one to
+   `status: approved`.** It stays a draft until the owner has read it here and approved it, and
+   they are who takes it out of draft. This is where their reading actually happens, so the draft
+   flag is where the waiting is visible — `gh pr list` shows it, and no agent has a reason to flip
+   it on their behalf. It is a convention and not a boundary: an agent *can* mark one ready, just
+   as it can write `approved` into a file. See
+   `docs/decisions/008-approving-an-intent-is-an-instruction.md`.
 3. Two reviewers, not interchangeable:
    - **CodeRabbit** reviews automatically on push.
    - **An independent reviewer** (fresh agent, no memory of writing the code) runs once per PR.
@@ -247,6 +255,11 @@ description: How a change reaches main — PR-only workflow, review rounds by di
    `.agents/skills/tasks` says why, under "A review finding that maps to nothing" — the short
    version is that filing was how the queue came to grow with the amount of reviewing rather than
    with what the product needed.
+
+   **Where the finding is not a defect but a goal nobody has written down**, the reasoning can go
+   into a `draft` intent instead of only into the thread. That is still the drop: nothing is
+   started, and it becomes work only if the owner approves it and a spec names it. It is not a
+   route to filing the task anyway.
 6. `gh pr merge --squash` once CI is green, the required rounds are done, **the independent
    review is on the PR as an issue comment opening with the literal `Model:` marker and the head
    it read, with nothing changed since that head beyond what that review asked for** (step 3; for
@@ -372,3 +385,6 @@ missing:
   copy outside the repo; report the observed result either way.
 - A green that was not run.
 - A finding acted on without checking it against the code.
+- An intent moved to `status: approved` in the same change as the work it authorizes, or in a PR
+  that does not say where the owner's approval came from. Nothing mechanical checks either — see
+  `docs/decisions/008-approving-an-intent-is-an-instruction.md`.

@@ -1,8 +1,10 @@
 ---
 id: 010
 title: Plasmids anyone can write, including the agent that needs one
+status: approved
 date: 2026-08-31
 originator: Stefano
+outcome:
 ---
 
 Plasmid authors should be able to extend the kernel without understanding much about it. Writing

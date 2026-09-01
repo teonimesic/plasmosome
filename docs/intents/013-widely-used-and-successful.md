@@ -1,8 +1,10 @@
 ---
 id: 013
 title: Widely used and successful, and the artifacts that get it there
+status: approved
 date: 2026-08-31
 originator: Stefano
+outcome:
 ---
 
 The goal of Plasmosome is to be widely used and successful. Everything else here exists to serve

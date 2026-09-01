@@ -1,8 +1,10 @@
 ---
 id: 012
 title: A capability exists only while it is needed
+status: approved
 date: 2026-08-31
 originator: Stefano
+outcome:
 ---
 
 An agent reads untrusted text all day. Any page it fetches, any response it gets back, any file

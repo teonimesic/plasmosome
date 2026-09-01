@@ -1,8 +1,10 @@
 ---
 id: 009
 title: A command line granular enough for an agent to drive
+status: approved
 date: 2026-08-31
 originator: Stefano
+outcome:
 ---
 
 I want to use Plasmosome from a command line, and I want that command line granular and

@@ -96,18 +96,99 @@ Then read the chain the other way, for work nothing asked for:
 grep -l '^specs: \[\]' tasks/*.md
 grep -l '^intents: \[\]' tasks/*.md
 grep -l '^intents: \[\]' docs/specs/*.md
+grep -l '^status: draft$' docs/intents/*.md
 ```
 
 These are not planner dispatches. A task naming no spec may not be planned and so may not be
 started — so the answer is to map it to a spec that already exists, to put the question to the
-owner in your own words, or to recommend dropping it. The specs the third line prints are a
-weaker signal: an accepted spec with no intent still works, and the line is there so the backfill
-stays visible rather than to stop anything. **Never close the gap by writing an intent yourself**; that is the one move
-`.agents/skills/tasks` rules out, because an intent written to justify a filed task approves the
-work on the owner's behalf.
+owner, or to recommend dropping it. The specs the third line prints are a weaker signal: an
+accepted spec with no intent still works, and the line is there so the backfill stays visible
+rather than to stop anything.
 
-Both lists shrinking over sessions is the signal that the queue is being fed by the plan. Both
-growing is the signal it is being fed by the review process instead.
+**A draft intent is how you raise the gap, not how you close it.** Writing one is the honest way to
+put an unmapped task to the owner, and a proposal in `docs/intents/` outlives the session where one
+in a pull request body does not. It unblocks nothing until the approval actually arrives. The
+fourth line is that queue — a draft the owner has never been shown is the same as one nobody wrote,
+so say out loud which of them a person still has to see. A draft already answered carries a
+non-blank `outcome:` and is not one of them:
+
+```shell
+grep -l '^status: draft$' docs/intents/*.md | while read f; do
+  grep -q '^outcome:[[:space:]]*[^[:space:]]' "$f" || echo "$f"
+done
+```
+
+Every grep so far reads one layer at a time, so all of them find *waiting* work and none of them
+finds a *violation*. This one reads two layers against each other, and it is the only check here
+that can catch the gate being broken rather than unmet:
+
+```shell
+for f in $(grep -l '^status: accepted$' docs/specs/*.md); do
+  ids=$(sed -n 's/^intents: \[\(.*\)\]/\1/p' "$f" | tr -d ' ' | tr ',' '\n' | grep -v '^$')
+  if [ -z "$ids" ]; then
+    [ "$f" = "docs/specs/001-control-protocol.md" ] || echo "$f: accepted, names no intent"
+    continue
+  fi
+  echo "$ids" | while read -r i; do
+    n=$(grep -l "^id: $i\$" docs/intents/*.md 2>/dev/null)
+    c=$(printf '%s' "$n" | grep -c . )
+    [ "$c" -eq 1 ] || { echo "$f: intent $i matches $c intent files, not 1"; continue; }
+    s=$(grep -c '^status:' "$n")
+    [ "$s" -eq 1 ] || { echo "$f: intent $i has $s status lines, not 1"; continue; }
+    grep -q '^status: approved$' "$n" || echo "$f: names intent $i, which is not approved"
+  done
+done
+```
+
+That loop prints five faults: an accepted spec whose intent is still `draft`, one naming an id no
+intent file carries, one naming an id that several files carry, one naming an intent that does not
+declare its status exactly once, and a **new** accepted spec naming no intent at all. Two of them
+share a message, because an id must resolve to **exactly one** file and both zero and several are
+failures to do that. Resolving it by picking the first match would make the gate hold or fail on
+filename order, since the duplicate that sorts first is the one that answers.
+
+Ids are read out of each intent's own `id:` rather than globbed from the filename, so a missing
+intent is reported instead of aborting the loop. The amnesty fault needs the one name hardcoded,
+because `docs/specs/001-control-protocol.md` is the whole of it — see "What predates the rule" in
+`.agents/skills/tasks`. Anything else that line prints is a spec that skipped the gate. Silence is
+the only passing answer: unlike the lists above, output here is a fault, not a queue.
+
+**A selector fails open, and one sweep is what covers that.** Every check that finds records by
+matching a status line — the draft-intent lists above, and the accepted-spec selector this loop
+opens with — stops seeing a record written `status: accepted ` with a trailing space, or saved with
+CRLF endings. It leaves the queue silently rather than being reported, which is the opposite
+direction from a gate predicate, where a mismatch means refusal. So one sweep asks whether those
+status lines are well formed at all:
+
+```shell
+for f in docs/intents/[0-9]*.md; do
+  n=$(grep -c '^status:' "$f")
+  if [ "$n" -ne 1 ] || ! grep -qE '^status: (draft|approved)$' "$f"; then
+    echo "$f: not exactly one status line reading draft or approved"
+  fi
+done
+
+for f in docs/specs/[0-9]*.md; do
+  n=$(grep -c '^status:' "$f")
+  if [ "$n" -ne 1 ] || ! grep -qE '^status: (draft|accepted|superseded)$' "$f"; then
+    echo "$f: not exactly one status line reading draft, accepted or superseded"
+  fi
+done
+```
+
+It is the only check here that reads files no other loop selected, which is the point: a record can
+opt out of every enumeration by being slightly malformed, and nothing else would notice. Two
+`status:` lines is the case worth naming — a file declaring both `draft` and `approved` gates as
+approved on any check asking whether an approved line exists.
+
+**It covers `docs/intents/` and `docs/specs/`, and nothing else.** The greps over `tasks/*.md`
+select on `status:`, `specs:` and `intents:` lines that no sweep validates, so a task written
+`status:todo` still opts out of its queue silently. That gap is real and older than this change;
+closing it means fixing which task statuses are current first, since `## Lifecycle` in
+`.agents/skills/tasks` lists `in_progress` and no task on the tree uses it.
+
+The first two lists shrinking over sessions is the signal that the queue is being fed by the plan.
+Both growing is the signal it is being fed by the review process instead.
 
 **5. Clean up.** Remove the worktrees of branches that have merged, and prune. A worktree left
 behind pins its branch and blocks the next person from deleting it. **This runs before the count
@@ -232,9 +313,10 @@ circulation.
 
 **8. File — only what maps.** Anything you learned this session that must outlive it becomes a
 task file before the session ends **if it maps to a spec** — dispatch a planner to write it. What
-maps to nothing does not become a task: put it to the owner as a question, or write down why it is
-being dropped. `.agents/skills/tasks` has the rule and the reason; this step is where it is easiest
-to break, because everything learned late in a session looks worth keeping.
+maps to nothing does not become a task: put it to the owner as a question, as a `draft` intent if
+it is one, or write down why it is being dropped. `.agents/skills/tasks` has the rule and the
+reason; this step is where it is easiest to break, because everything learned late in a session
+looks worth keeping.
 
 The only writing into `tasks/` you do yourself is step 3's reconciliation, and only for a claim
 whose author is gone: an author still open closes its own task, as `.agents/skills/pr-review` has

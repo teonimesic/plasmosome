@@ -1,8 +1,10 @@
 ---
 id: 011
 title: Isolation the model never has to know about
+status: approved
 date: 2026-08-31
 originator: Stefano
+outcome:
 ---
 
 Models and harnesses are built on the assumption that they are running on real hardware. Making

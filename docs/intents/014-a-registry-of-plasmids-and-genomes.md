@@ -1,8 +1,10 @@
 ---
 id: 014
 title: A registry of plasmids and genomes, the curated ones and your own
+status: approved
 date: 2026-08-31
 originator: Stefano
+outcome:
 ---
 
 Writing a plasmid is one thing; finding one somebody already wrote is another. Right now there is
