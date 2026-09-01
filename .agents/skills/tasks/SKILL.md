@@ -340,7 +340,7 @@ settled carry a non-blank `outcome:` and are not waiting on anybody:
 
 ```shell
 grep -l '^status: draft$' docs/intents/*.md | while read f; do
-  grep -q '^outcome: .' "$f" || echo "$f"
+  grep -q '^outcome:[[:space:]]*[^[:space:]]' "$f" || echo "$f"
 done
 ```
 
