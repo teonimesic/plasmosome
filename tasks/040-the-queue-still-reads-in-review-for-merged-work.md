@@ -29,7 +29,7 @@ done_when: >-
   this: many tasks legitimately carry the empty list, and the prose recording that the amnesty
   closed necessarily quotes it.
 pr: https://github.com/teonimesic/plasmosome/pull/69
-evidence: 441847df6389ccc910600b342d0907570f7b9ba0
+evidence: squash commit 441847d on main; the spec-side amnesty reads closed and empty in every passage that quotes it and spec 001 carries a non-empty intents line, the queue half of the predicate being reconciled again in PR 74
 ---
 
 ## Why

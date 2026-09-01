@@ -25,7 +25,7 @@ done_when: >-
   the old crate name enforces anything, the dated records under
   `docs/decisions/` and `tasks/` and spec 013's own account of the change aside.
 pr: 64
-evidence: db3cea6a54a298b83c894422853b372b13f646b2
+evidence: squash commit db3cea6 on main; plasmosome-freeze-checks is gone and plasmosome-guards holds the six guards that refuse permanent harm, each shown to fail on the violation it names
 ---
 
 ## Why

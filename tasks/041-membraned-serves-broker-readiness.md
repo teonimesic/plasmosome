@@ -14,7 +14,7 @@ done_when:
   - All five gate commands exit 0, reported as bare exit codes.
   - The chain walks - this task names spec 001 and intents 003, 004, 009, 012, reaches in_review with pr: set, and the pull request is a draft whose body ends with `task: 041`.
 pr: 70
-evidence: b0d24e47177c898cb38a218abaa28169cb827912
+evidence: squash commit b0d24e4 on main; membraned answers membrane.status with the broker set's readiness re-probed per call, SIGTERM leaves no socket and no broker running, and the section 1 envelope edges hold
 ---
 
 ## Why
