@@ -1,7 +1,7 @@
 ---
 id: 030
 title: A member's directory name is assumed to be its package name
-status: in_progress
+status: in_review
 priority: 2
 specs: [003]
 intents: [002]
@@ -20,7 +20,7 @@ done_when: >-
   `crates/plasmid-placeholder`, say — and asserts on it that `workspace_members` yields `plasmid`
   and not `plasmid-placeholder`, that `cargo tree -p` resolves that name, and that every test in
   `crates/plasmosome-guards/tests/workspace_guards.rs` passes, `testkit_is_dev_only` among them.
-pr:
+pr: 79
 evidence:
 ---
 
