@@ -71,8 +71,10 @@ impl CommandRunner for SystemCommandRunner {
         let output = child.output().map_err(|error| error.to_string())?;
         Ok(CommandOutput {
             status: output.status.code().unwrap_or(1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stdout: String::from_utf8(output.stdout)
+                .map_err(|_| "command_output_not_utf8".to_owned())?,
+            stderr: String::from_utf8(output.stderr)
+                .map_err(|_| "command_output_not_utf8".to_owned())?,
         })
     }
 }

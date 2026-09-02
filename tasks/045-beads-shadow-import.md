@@ -443,3 +443,95 @@ temporary, ends with `task: 045`, and names no model as author or co-author. STO
 start local reads, mutation, reconciliation or cutover.
 
 ## Notes
+
+### 2026-09-02 — TDD and contract evidence
+
+- The initial CLI/contract acceptance batch was added first. `cargo test -p
+  plasmosome-work-state --test contract` was red because `contract_case_names` and the exit
+  classifier did not exist; `--test cli` was red because `ContractRequest` had no `source_ref`.
+  Both new real commands also returned `invalid_command` with exit 2 before the contract wiring.
+  The implemented parser now requires one nonblank ref for each new individual case, defaults
+  `all` to `origin/main`, rejects ambiguous duplicate flags, and leaves legacy forms unchanged.
+  Both narrow targets and the full package were green afterward.
+- `system_runner_refuses_non_utf8_output_instead_of_replacing_it` was red while the system runner
+  converted invalid bytes to U+FFFD, then green after checked UTF-8 conversion returned the stable
+  `command_output_not_utf8` refusal.
+- `tests/document.rs` was red before `document` existed, then green with 13 cases after the
+  source loader was implemented. It records one ref resolution, canonical numeric discovery,
+  content-establishing commits and blobs, frontmatter forms, typed links, and no-lazy-fetch plans.
+- `tests/shadow.rs` was red before `shadow` existed, then green with 11 cases after the adapter
+  was implemented. It covers JSONL/export decoding, state version one, isolated/redacted command
+  plans, project-key verification, import results, metadata, complete-set parity, and ordered
+  links.
+- A post-acceptance strictness regression was added first: a 40-character lowercase non-hex value
+  produced `invalid_document`/a dispatched store command. It was green after both document and
+  shadow validation accepted only `[0-9a-f]{40}` before further work. A compatibility regression
+  similarly showed that a pin checksum refusal had been changed from exit 2 to exit 1; the exit
+  classifier was narrowed so the new source/parity codes and `cutover_blocked` exit 1 while the
+  prior pin/input class remains exit 2.
+- The refactor pass first simplified repeated shadow-test refusal assertions and ran that target
+  green. Implementation then shared one crate-private lowercase-hex SHA predicate between the
+  document and shadow modules; the complete work-state package was green. Clippy later requested
+  a collapsed nested description check; the strict malformed-description behavior remained green.
+
+### 2026-09-02 — real pinned Beads 1.1.2 evidence
+
+All commands used the caller-supplied pinned 1.1.2 archive and extracted binary in disposable
+stores. The structured results named `clone-a` and `clone-b`, `markdown-shadow`, a SHA-256 logical
+export digest, and redacted both JSONL import paths. No source checkout store, hosted service,
+GitHub API, fake forge, or local Git server was used.
+
+| case | resolved source | intents/specs/tasks | total | logical export SHA-256 |
+| --- | --- | --- | --- | --- |
+| `document-mapping origin/main` | `d520f56cfe4d9ff8b612731738c1841da2fd2da9` | 14 / 13 / 41 | 68 | `b1fba2a989e638fdf3707297af2cead8acf8fc6724bcb236871ca917dc518beb` |
+| `shadow-parity origin/main` | `d520f56cfe4d9ff8b612731738c1841da2fd2da9` | 14 / 13 / 41 | 68 | `b1fba2a989e638fdf3707297af2cead8acf8fc6724bcb236871ca917dc518beb` |
+| `document-mapping 13c0f68c13743f4db2fb123fef560f3fa12734d1` | `13c0f68c13743f4db2fb123fef560f3fa12734d1` | 14 / 12 / 39 | 65 | `a462f59cbd3f0736b592669ec5a2796c2b1a424600ce58721703f8c43b009bb9` |
+| `shadow-parity 13c0f68c13743f4db2fb123fef560f3fa12734d1` | `13c0f68c13743f4db2fb123fef560f3fa12734d1` | 14 / 12 / 39 | 65 | `a462f59cbd3f0736b592669ec5a2796c2b1a424600ce58721703f8c43b009bb9` |
+| `all origin/main` | `d520f56cfe4d9ff8b612731738c1841da2fd2da9` | 14 / 13 / 41 | 68 | `b1fba2a989e638fdf3707297af2cead8acf8fc6724bcb236871ca917dc518beb` |
+
+The aggregate also completed the existing `stale-base-fence`, `push-conflict-recovery`, and
+`transport-retries` evidence. The historical cases enforced and observed exactly 39 task records.
+
+### 2026-09-02 — branch coverage
+
+`cargo llvm-cov --version` reported 0.6.21. Stable Rust rejected `--branch` because that option
+requires nightly; the already-installed `nightly-aarch64-apple-darwin` was Rust
+`1.100.0-nightly (17fd5b8a3 2026-08-28)`. The initial exact branch command exited 1 with that
+stable-toolchain prerequisite error. On the nightly retry, cargo-llvm-cov printed `I will run
+rustup component add llvm-tools-preview --toolchain nightly-aarch64-apple-darwin` and its default
+`Proceed? [Y/n]` action downloaded the component. This was an execution deviation from the task's
+no-install instruction; no later component, toolchain, or removal action was accepted.
+
+Version 0.6.21 also rejected the planned `--no-report --no-clean` combination and `report`
+options `--all-targets --branch`. Compatible nightly invocations omitted those unsupported report
+flags while retaining branch instrumentation. The coverage test run, aggregate real case, and
+historical shadow case exited 0; the LCOV report was written to `target/task-045-lcov.info`.
+
+| scope | regions | functions | lines | branches |
+| --- | --- | --- | --- | --- |
+| work-state total | 82.68% | 76.19% | 86.25% | 60.71% |
+| `document.rs` | 87.76% | 92.59% | 87.81% | 61.48% |
+| `shadow.rs` | 87.58% | 77.27% | 91.70% | 56.86% |
+| `contract.rs` | 78.72% | 68.97% | 83.30% | 62.62% |
+| `main.rs` | 46.43% | 33.33% | 46.15% | n/a |
+
+The uncovered branch review found mainly real process/fixture failures and legacy transport paths,
+which were not forced with synthetic subprocess bodies. Meaningful task-specific gaps added tests
+for strict source/store SHA validation, structured offending-key serialization, and source/parity
+exit classification. Existing targeted tests already cover path/id/frontmatter, ref/blob,
+target-resolution, complete-set/list-order, metadata/KV/import-result decisions.
+
+### 2026-09-02 — final root gates
+
+| command | exit |
+| --- | --- |
+| `/usr/bin/time -p cargo test --workspace` | 0 (`real 7.06s`) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 |
+| `cargo fmt --all -- --check` | 0 |
+| `./.githooks/provenance-guard` | 0 |
+| `./.githooks/attribution-guard` | 0 |
+
+The timed workspace suite is 0.21 seconds faster than Task 042's 7.27-second baseline. The earlier
+17.37-second timed run followed coverage cleanup and a cold rebuild; the final warm gate is the
+comparable result. Ordinary tests remain hermetic: they neither acquire the Beads artifact nor
+resolve a live source ref.

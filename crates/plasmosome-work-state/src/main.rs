@@ -1,4 +1,7 @@
-use plasmosome_work_state::{contract::parse_contract_request, run_contract};
+use plasmosome_work_state::{
+    contract::{contract_refusal_exit_code, parse_contract_request},
+    run_contract,
+};
 
 fn main() {
     let request =
@@ -7,14 +10,7 @@ fn main() {
         Ok(result) => println!("{}", serde_json::to_string(&result).unwrap()),
         Err(result) => {
             println!("{}", serde_json::to_string(&result).unwrap());
-            fail(
-                &result.code,
-                if result.code == "cutover_blocked" {
-                    1
-                } else {
-                    2
-                },
-            );
+            fail(&result.code, contract_refusal_exit_code(&result.code));
         }
     }
 }
