@@ -7,7 +7,14 @@ use tempfile::TempDir;
 use crate::command::{
     CommandOutput, CommandRunner, CommandSpec, RecordingCommandRunner, SystemCommandRunner,
 };
+use crate::document::{
+    DocumentError, DocumentKind, ShadowDocument, SourceDocuments, load_documents,
+};
 use crate::pin::{PinManifest, VerifiedBeads};
+use crate::shadow::{
+    ShadowError, ShadowStore, canonical_logical_export, compare_document_mapping,
+    compare_shadow_parity, decode_logical_export, import_shadow_documents, logical_export_digest,
+};
 
 const ISOLATED: &[(&str, &str)] = &[
     ("GIT_CONFIG_NOSYSTEM", "1"),
@@ -21,8 +28,29 @@ const ISOLATED: &[(&str, &str)] = &[
 #[derive(Clone, Debug)]
 pub struct ContractRequest {
     pub case: String,
+    pub source_ref: Option<String>,
     pub archive: PathBuf,
     pub binary: PathBuf,
+}
+
+/// Counts of reconstructed Markdown documents, grouped by their namespace.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DocumentCounts {
+    /// Number of canonical numeric intent records from the resolved source commit.
+    ///
+    /// Consumers may report this as mapping evidence but must not treat it as migration or cutover
+    /// authority.
+    pub intent: usize,
+    /// Number of canonical numeric spec records from the resolved source commit.
+    ///
+    /// Consumers may report this as mapping evidence but must not treat it as migration or cutover
+    /// authority.
+    pub spec: usize,
+    /// Number of canonical numeric task records from the resolved source commit.
+    ///
+    /// Consumers may report this as mapping evidence but must not treat it as migration or cutover
+    /// authority.
+    pub task: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -37,6 +65,14 @@ pub struct ContractResult {
     pub operation_ids: Vec<String>,
     pub command_plans: Vec<String>,
     pub scenarios: Vec<ScenarioEvidence>,
+    pub source_ref: Option<String>,
+    pub source_commit: Option<String>,
+    pub document_counts: Option<DocumentCounts>,
+    pub total_document_count: Option<usize>,
+    pub logical_export_sha256: Option<String>,
+    pub authority_mode: Option<String>,
+    pub offending_key: Option<String>,
+    pub mismatch: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -61,6 +97,14 @@ impl ContractResult {
             operation_ids: Vec::new(),
             command_plans: Vec::new(),
             scenarios: Vec::new(),
+            source_ref: None,
+            source_commit: None,
+            document_counts: None,
+            total_document_count: None,
+            logical_export_sha256: None,
+            authority_mode: None,
+            offending_key: None,
+            mismatch: None,
         }
     }
     fn refusal(case: &str, code: &str) -> Self {
@@ -75,8 +119,40 @@ impl ContractResult {
             operation_ids: Vec::new(),
             command_plans: Vec::new(),
             scenarios: Vec::new(),
+            source_ref: None,
+            source_commit: None,
+            document_counts: None,
+            total_document_count: None,
+            logical_export_sha256: None,
+            authority_mode: None,
+            offending_key: None,
+            mismatch: None,
         }
     }
+}
+
+/// Returns the process exit code for a structured contract refusal.
+pub fn contract_refusal_exit_code(code: &str) -> i32 {
+    if matches!(
+        code,
+        "cutover_blocked"
+            | "invalid_source_ref"
+            | "invalid_document"
+            | "duplicate_document_id"
+            | "missing_document_target"
+            | "content_commit_mismatch"
+            | "document_mapping_mismatch"
+            | "shadow_parity_mismatch"
+    ) {
+        1
+    } else {
+        2
+    }
+}
+
+/// Returns whether a case must execute the real mapping and shadow-parity round trip.
+pub fn requires_shadow_round_trip(case: &str) -> bool {
+    matches!(case, "document-mapping" | "shadow-parity" | "all")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -443,25 +519,49 @@ where
             | "hermetic"
             | "transport"
             | "all"
+            | "document-mapping"
+            | "shadow-parity"
     ) {
         return Err("invalid_command".into());
     }
     let mut archive = None;
     let mut binary = None;
+    let mut source_ref = None;
     let mut index = 2;
     while index < values.len() {
+        let flag = values
+            .get(index)
+            .ok_or_else(|| "invalid_command".to_owned())?;
         let value = values
             .get(index + 1)
             .ok_or_else(|| "invalid_command".to_owned())?;
-        match values[index].as_str() {
-            "--archive" => archive = Some(PathBuf::from(value)),
-            "--bd" => binary = Some(PathBuf::from(value)),
+        if value.trim().is_empty() || value.starts_with("--") {
+            return Err("invalid_command".into());
+        }
+        match flag.as_str() {
+            "--archive" if archive.is_none() => archive = Some(PathBuf::from(value)),
+            "--bd" if binary.is_none() => binary = Some(PathBuf::from(value)),
+            "--source-ref"
+                if source_ref.is_none()
+                    && matches!(case.as_str(), "all" | "document-mapping" | "shadow-parity") =>
+            {
+                source_ref = Some(value.to_owned())
+            }
             _ => return Err("invalid_command".into()),
         };
         index += 2;
     }
+    let source_ref = match case.as_str() {
+        "document-mapping" | "shadow-parity" => {
+            source_ref.ok_or_else(|| "invalid_command".to_owned())?
+        }
+        "all" => source_ref.unwrap_or_else(|| "origin/main".into()),
+        _ if source_ref.is_none() => String::new(),
+        _ => return Err("invalid_command".into()),
+    };
     Ok(ContractRequest {
         case,
+        source_ref: (!source_ref.is_empty()).then_some(source_ref),
         archive: archive.ok_or_else(|| "invalid_command".to_owned())?,
         binary: binary.ok_or_else(|| "invalid_command".to_owned())?,
     })
@@ -781,6 +881,159 @@ fn validate_observed_export<R: CommandRunner>(
     validate_logical_export(&output.stdout, expected_operations).map_err(str::to_owned)
 }
 
+#[derive(Clone, Debug)]
+struct MigrationEvidence {
+    source_commit: String,
+    document_counts: DocumentCounts,
+    total_document_count: usize,
+    logical_export_sha256: String,
+    clone_labels: Vec<String>,
+    command_plans: Vec<String>,
+}
+
+const HISTORICAL_SOURCE_COMMIT: &str = "13c0f68c13743f4db2fb123fef560f3fa12734d1";
+
+fn document_counts(documents: &[ShadowDocument]) -> DocumentCounts {
+    let mut counts = DocumentCounts {
+        intent: 0,
+        spec: 0,
+        task: 0,
+    };
+    for document in documents {
+        match document.record.kind {
+            DocumentKind::Intent => counts.intent += 1,
+            DocumentKind::Spec => counts.spec += 1,
+            DocumentKind::Task => counts.task += 1,
+        }
+    }
+    counts
+}
+
+fn source_result(case: &str, source_ref: &str, source: &SourceDocuments) -> ContractResult {
+    let counts = document_counts(&source.documents);
+    let total_document_count = counts.intent + counts.spec + counts.task;
+    let mut result = ContractResult::passed(case, Vec::new());
+    result.source_ref = Some(source_ref.into());
+    result.source_commit = Some(source.source_commit.clone());
+    result.document_counts = Some(counts);
+    result.total_document_count = Some(total_document_count);
+    result.authority_mode = Some("markdown-shadow".into());
+    result.command_plans = source.command_plans.clone();
+    result
+}
+
+fn source_refusal(
+    case: &str,
+    source_ref: &str,
+    code: &str,
+    offending_key: Option<String>,
+    mismatch: Option<String>,
+) -> ContractResult {
+    let mut result = ContractResult::refusal(case, code);
+    result.source_ref = Some(source_ref.into());
+    result.offending_key = offending_key;
+    result.mismatch = mismatch;
+    result
+}
+
+fn snapshot_refusal(
+    case: &str,
+    source_ref: &str,
+    source: &SourceDocuments,
+    code: &str,
+    offending_key: Option<String>,
+    mismatch: Option<String>,
+) -> ContractResult {
+    let mut result = source_result(case, source_ref, source);
+    result.outcome = "refused".into();
+    result.code = code.into();
+    result.offending_key = offending_key;
+    result.mismatch = mismatch;
+    result
+}
+
+fn assert_historical_task_count(source: &SourceDocuments) -> Result<(), &'static str> {
+    if source.source_commit == HISTORICAL_SOURCE_COMMIT
+        && document_counts(&source.documents).task != 39
+    {
+        return Err("document_mapping_mismatch");
+    }
+    Ok(())
+}
+
+fn shadow_store(fixture: &StoreFixture, binary: &Path) -> ShadowStore {
+    ShadowStore::new(
+        fixture.label.clone(),
+        fixture.clone_root.clone(),
+        fixture.repository.clone(),
+        fixture.environment.clone(),
+        binary.to_path_buf(),
+    )
+}
+
+fn run_shadow_round_trip<R: CommandRunner>(
+    runner: &mut R,
+    binary: &Path,
+    source: &SourceDocuments,
+    first: &StoreFixture,
+    second: &StoreFixture,
+) -> Result<MigrationEvidence, ShadowError> {
+    let first_import = import_shadow_documents(
+        runner,
+        &shadow_store(first, binary),
+        &source.source_commit,
+        &source.documents,
+    )?;
+    let logical_export = canonical_logical_export(&first_import.documents)?;
+    let logical_documents = decode_logical_export(&logical_export)?;
+    let second_import = import_shadow_documents(
+        runner,
+        &shadow_store(second, binary),
+        &source.source_commit,
+        &logical_documents,
+    )?;
+    for documents in [
+        first_import.documents.as_slice(),
+        logical_documents.as_slice(),
+        second_import.documents.as_slice(),
+    ] {
+        compare_document_mapping(&source.documents, documents)?;
+        compare_shadow_parity(&source.documents, documents)?;
+    }
+    let mut command_plans = source.command_plans.clone();
+    command_plans.extend(first_import.command_plans);
+    command_plans.extend(second_import.command_plans);
+    let document_counts = document_counts(&source.documents);
+    Ok(MigrationEvidence {
+        source_commit: source.source_commit.clone(),
+        total_document_count: document_counts.intent + document_counts.spec + document_counts.task,
+        document_counts,
+        logical_export_sha256: logical_export_digest(&logical_export),
+        clone_labels: vec![first.label.clone(), second.label.clone()],
+        command_plans,
+    })
+}
+
+fn migration_result(
+    case: &str,
+    source_ref: &str,
+    source: &SourceDocuments,
+    evidence: MigrationEvidence,
+) -> ContractResult {
+    let mut result = source_result(case, source_ref, source);
+    result.source_commit = Some(evidence.source_commit);
+    result.document_counts = Some(evidence.document_counts);
+    result.total_document_count = Some(evidence.total_document_count);
+    result.logical_export_sha256 = Some(evidence.logical_export_sha256);
+    result.clone_labels = evidence.clone_labels;
+    result.command_plans = evidence.command_plans;
+    result
+}
+
+fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<ContractResult>> {
     let root = tempfile::tempdir()
         .map_err(|_| Box::new(ContractResult::refusal(&request.case, "cutover_blocked")))?;
@@ -808,6 +1061,89 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
                 vec!["clone-a".into()],
             ));
         }
+        if requires_shadow_round_trip(&request.case) {
+            let source_ref = request.source_ref.as_deref().ok_or_else(|| {
+                Box::new(ContractResult::refusal(&request.case, "invalid_source_ref"))
+            })?;
+            let source = load_documents(
+                &mut runner,
+                &repository_root(),
+                &isolated_environment(root.path()),
+                source_ref,
+            )
+            .map_err(|error: DocumentError| {
+                Box::new(source_refusal(
+                    &request.case,
+                    source_ref,
+                    error.code(),
+                    error.offending_key,
+                    None,
+                ))
+            })?;
+            assert_historical_task_count(&source).map_err(|code| {
+                Box::new(snapshot_refusal(
+                    &request.case,
+                    source_ref,
+                    &source,
+                    code,
+                    None,
+                    Some("different".into()),
+                ))
+            })?;
+            let first = init_store(&request.binary, root.path(), "clone-a").map_err(|code| {
+                Box::new(snapshot_refusal(
+                    &request.case,
+                    source_ref,
+                    &source,
+                    code,
+                    None,
+                    None,
+                ))
+            })?;
+            let second = init_store(&request.binary, root.path(), "clone-b").map_err(|code| {
+                Box::new(snapshot_refusal(
+                    &request.case,
+                    source_ref,
+                    &source,
+                    code,
+                    None,
+                    None,
+                ))
+            })?;
+            validate_independent_stores(&first, &second).map_err(|code| {
+                Box::new(snapshot_refusal(
+                    &request.case,
+                    source_ref,
+                    &source,
+                    code,
+                    None,
+                    None,
+                ))
+            })?;
+            let evidence =
+                run_shadow_round_trip(&mut runner, &request.binary, &source, &first, &second)
+                    .map_err(|error| {
+                        Box::new(snapshot_refusal(
+                            &request.case,
+                            source_ref,
+                            &source,
+                            error.code(),
+                            error.offending_key,
+                            error.mismatch,
+                        ))
+                    })?;
+            let mut result = migration_result(&request.case, source_ref, &source, evidence);
+            if request.case == "all" {
+                let transport = run_scripted_cases("transport")
+                    .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
+                result.observed_base = transport.observed_base;
+                result.final_generation = transport.final_generation;
+                result.operation_ids = transport.operation_ids;
+                result.command_plans.extend(transport.command_plans);
+                result.scenarios = transport.scenarios;
+            }
+            return Ok(result);
+        }
         let first = init_store(&request.binary, root.path(), "clone-a")
             .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
         let second = init_store(&request.binary, root.path(), "clone-b")
@@ -823,9 +1159,7 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
 }
 
 fn manifest_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("tools/work-state-beads-1.1.2.toml")
+    repository_root().join("tools/work-state-beads-1.1.2.toml")
 }
 
 fn finish_contract(
@@ -1095,6 +1429,14 @@ pub fn run_scripted_contract_case(
         operation_ids: evidence.operation_ids,
         command_plans,
         scenarios: Vec::new(),
+        source_ref: None,
+        source_commit: None,
+        document_counts: None,
+        total_document_count: None,
+        logical_export_sha256: None,
+        authority_mode: None,
+        offending_key: None,
+        mismatch: None,
     })
 }
 
@@ -1292,7 +1634,10 @@ fn host_target() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContractRequest, ContractResult, finish_contract, manifest_path, run_contract};
+    use super::{
+        ContractRequest, ContractResult, contract_refusal_exit_code, finish_contract,
+        manifest_path, run_contract, source_refusal,
+    };
     use std::sync::Mutex;
 
     static PROCESS_WORKING_DIRECTORY: Mutex<()> = Mutex::new(());
@@ -1325,6 +1670,22 @@ mod tests {
     }
 
     #[test]
+    fn source_refusal_serializes_an_offending_document_key() {
+        let result = source_refusal(
+            "document-mapping",
+            "selected-ref",
+            "invalid_document",
+            Some("task:045".into()),
+            None,
+        );
+        let value = serde_json::to_value(&result).unwrap();
+
+        assert_eq!(value["source_ref"], "selected-ref");
+        assert_eq!(value["offending_key"], "task:045");
+        assert_eq!(contract_refusal_exit_code(&result.code), 1);
+    }
+
+    #[test]
     fn pin_manifest_path_is_independent_of_the_process_working_directory() {
         let path = manifest_path();
 
@@ -1343,6 +1704,7 @@ mod tests {
         std::env::set_current_dir(root.path()).unwrap();
         let result = run_contract(&ContractRequest {
             case: "version-pin".into(),
+            source_ref: None,
             archive,
             binary: root.path().join("bd"),
         });

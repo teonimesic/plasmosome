@@ -1,10 +1,11 @@
 use plasmosome_work_state::command::{CommandOutput, CommandSpec, RecordingCommandRunner};
 use plasmosome_work_state::contract::{
-    Publication, PushFailure, assert_no_ls_remote, classify_push, dispose_fixture_root,
-    execute_publication_command, leased_ref_update, prepare_store_fixture, publish_candidate,
-    recover_after_lost_response, retry_after_transport, run_scripted_case, run_scripted_cases,
-    run_scripted_contract_case, scripted_outcomes, validate_independent_stores,
-    validate_logical_export, validate_scripted_history,
+    Publication, PushFailure, assert_no_ls_remote, classify_push, contract_refusal_exit_code,
+    dispose_fixture_root, execute_publication_command, leased_ref_update, prepare_store_fixture,
+    publish_candidate, recover_after_lost_response, requires_shadow_round_trip,
+    retry_after_transport, run_scripted_case, run_scripted_cases, run_scripted_contract_case,
+    scripted_outcomes, validate_independent_stores, validate_logical_export,
+    validate_scripted_history,
 };
 
 const G0: &str = "0000000000000000000000000000000000000000";
@@ -921,4 +922,30 @@ fn hermetic_init_rejects_a_planned_ls_remote_but_allows_local_git_commands() {
         assert_no_ls_remote(&[plasmosome_work_state::contract::observe_command()]),
         Err("cutover_blocked")
     );
+}
+
+#[test]
+fn all_dispatches_to_mapping_and_shadow_parity() {
+    assert!(requires_shadow_round_trip("all"));
+    assert!(requires_shadow_round_trip("document-mapping"));
+    assert!(requires_shadow_round_trip("shadow-parity"));
+    assert!(!requires_shadow_round_trip("transport"));
+}
+
+#[test]
+fn source_and_parity_refusals_are_execution_failures_not_cli_failures() {
+    for code in [
+        "cutover_blocked",
+        "invalid_source_ref",
+        "invalid_document",
+        "duplicate_document_id",
+        "missing_document_target",
+        "content_commit_mismatch",
+        "document_mapping_mismatch",
+        "shadow_parity_mismatch",
+    ] {
+        assert_eq!(contract_refusal_exit_code(code), 1, "{code}");
+    }
+    assert_eq!(contract_refusal_exit_code("invalid_command"), 2);
+    assert_eq!(contract_refusal_exit_code("beads_checksum_mismatch"), 2);
 }
