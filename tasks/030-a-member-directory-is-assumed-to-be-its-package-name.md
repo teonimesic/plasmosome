@@ -135,8 +135,9 @@ done nothing wrong. Restoring the resolution returns all 9 to green.
 error: package ID specification `plasmid-placeholder` did not match any packages
 ```
 
-Those counts were taken when the binary held 9 tests; it holds 11 now, because the refusal arms
-are covered too. Skipping any member whose directory holds no `Cargo.toml` — the mutant
+Those counts were taken when the binary held 9 tests; the three mutants that follow were run
+against it at 11, once the refusal arms were covered too. Skipping any member whose directory
+holds no `Cargo.toml` — the mutant
 `if !root.join(path).join("Cargo.toml").exists() { continue; }` inserted in `workspace_members_in`,
 which is exactly the silent drop the refusal prose names — leaves
 `a_member_whose_manifest_is_missing_is_refused_not_skipped` reporting `test did not panic as
@@ -148,5 +149,16 @@ with the nameless arm instead — which is also the reading that the three pinne
 three different arms rather than the long tail all three messages share, since they turn on
 `could not be read`, `is not valid TOML` and `declares no` respectively.
 Skipping any member whose manifest does not parse gives the same `test did not panic as expected`.
-Every mutation was restored from a copy taken beforehand, each restore confirmed exact with `diff`,
-and the binary is back to 11 green.
+The name arm was then mutated a second time, to tell its two routes apart: `as_str()` returns
+`None` both for an absent key and for a value of some other type, so the arm as pinned was reached
+only by the absent route. Coercing a non-string to its display form —
+`.map(|name| name.as_str().map(str::to_string).unwrap_or_else(|| name.to_string())).as_deref()` in
+place of `.and_then(|name| name.as_str())` — resolves `name = 123` to the string `"123"` and takes
+the member on as if it had declared one.
+`a_member_whose_package_name_is_not_a_string_is_refused_not_skipped`, on a fixture whose second
+member declares `name = 123` at `crates/numbered`, reports `test did not panic as expected` under
+that mutant while the other 11 stay green. Its pinned substring carries the member path —
+`` `crates/numbered` declares no `[package].name` `` — so the nameless arm's panic cannot satisfy
+it, that fixture naming `crates/nameless`, and neither can the read or parse arms, whose messages
+turn on different wording and different fixtures again. Every mutation was restored from a copy
+taken beforehand, each restore confirmed exact with `diff`, and the binary is back to 12 green.

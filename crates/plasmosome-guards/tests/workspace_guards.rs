@@ -352,6 +352,19 @@ fn workspace_with_a_member_declaring_no_package() -> tempfile::TempDir {
     directory
 }
 
+fn workspace_with_a_member_whose_package_name_is_not_a_string() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("a scratch directory is created");
+    let root = directory.path();
+    write_workspace_manifest(root, &["crates/straight", "crates/numbered"]);
+    write_member(root, "crates/straight", &member_manifest("straight"));
+    write_member(
+        root,
+        "crates/numbered",
+        "[package]\nname = 123\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    );
+    directory
+}
+
 fn workspace_with_a_member_whose_manifest_is_missing() -> tempfile::TempDir {
     let directory = tempfile::tempdir().expect("a scratch directory is created");
     let root = directory.path();
@@ -418,6 +431,14 @@ fn cargo_tree_resolves_every_name_workspace_members_reports() {
 #[should_panic(expected = "`crates/nameless` declares no `[package].name`")]
 fn a_member_that_declares_no_package_name_is_refused_not_skipped() {
     let workspace = workspace_with_a_member_declaring_no_package();
+
+    workspace_members_in(workspace.path());
+}
+
+#[test]
+#[should_panic(expected = "`crates/numbered` declares no `[package].name`")]
+fn a_member_whose_package_name_is_not_a_string_is_refused_not_skipped() {
+    let workspace = workspace_with_a_member_whose_package_name_is_not_a_string();
 
     workspace_members_in(workspace.path());
 }
