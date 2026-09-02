@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-cd "$root"
-
 json=false
 for argument in "$@"; do
   if [[ "$argument" == "--json" ]]; then
@@ -22,39 +19,64 @@ refuse() {
   exit "$exit_code"
 }
 
+script_dir=${BASH_SOURCE[0]%/*}
+root=$(cd "$script_dir/.." 2>/dev/null && pwd -P) || refuse invalid_store_location
+cd "$root" 2>/dev/null || refuse invalid_store_location
+
 read_launcher() {
-  local top common canonical_top canonical_common state current generations generation wrapper line
-  top=$(env -i \
+  local top common canonical_top canonical_common state current generations generation wrapper exit_code wrapper_stderr
+  top=$(if env -i \
     PATH="$PATH" \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_TERMINAL_PROMPT=0 \
     GIT_NO_LAZY_FETCH=1 \
     GIT_OPTIONAL_LOCKS=0 \
-    git rev-parse --show-toplevel) || refuse invalid_store_location
-  common=$(env -i \
+    git rev-parse --show-toplevel 2>/dev/null; then
+    printf '\036'
+  else
+    exit_code=$?
+    printf '\036'
+    exit "$exit_code"
+  fi) || refuse invalid_store_location
+  common=$(if env -i \
     PATH="$PATH" \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_TERMINAL_PROMPT=0 \
     GIT_NO_LAZY_FETCH=1 \
     GIT_OPTIONAL_LOCKS=0 \
-    git rev-parse --path-format=absolute --git-common-dir) || refuse invalid_store_location
-  [[ "$top" == /* && "$top" != *$'\n'* && -d "$top" && ! -L "$top" ]] || refuse invalid_store_location
-  [[ "$common" == /* && "$common" != *$'\n'* && -d "$common" && ! -L "$common" ]] || refuse invalid_store_location
-  canonical_top=$(cd "$top" && pwd -P) || refuse invalid_store_location
-  canonical_common=$(cd "$common" && pwd -P) || refuse invalid_store_location
+    git rev-parse --path-format=absolute --git-common-dir 2>/dev/null; then
+    printf '\036'
+  else
+    exit_code=$?
+    printf '\036'
+    exit "$exit_code"
+  fi) || refuse invalid_store_location
+  [[ "$top" == *$'\n'$'\036' ]] || refuse invalid_store_location
+  [[ "$common" == *$'\n'$'\036' ]] || refuse invalid_store_location
+  top=${top%$'\036'}
+  common=${common%$'\036'}
+  top=${top%$'\n'}
+  common=${common%$'\n'}
+  [[ "$top" == /* && "$top" != *$'\n'* && "$top" != *$'\r'* && -d "$top" && ! -L "$top" ]] || refuse invalid_store_location
+  [[ "$common" == /* && "$common" != *$'\n'* && "$common" != *$'\r'* && -d "$common" && ! -L "$common" ]] || refuse invalid_store_location
+  canonical_top=$(cd "$top" 2>/dev/null && pwd -P) || refuse invalid_store_location
+  canonical_common=$(cd "$common" 2>/dev/null && pwd -P) || refuse invalid_store_location
   [[ "$canonical_top" == "$top" && "$canonical_common" == "$common" ]] || refuse invalid_store_location
   state="$common/plasmosome-work-state"
   [[ ! -e "$state" && ! -L "$state" ]] && refuse not_initialized
   [[ -d "$state" && ! -L "$state" ]] || refuse invalid_store
   [[ ! -e "$state/current" && ! -L "$state/current" ]] && refuse not_initialized
   [[ -f "$state/current" && ! -L "$state/current" ]] || refuse invalid_store
-  exec 3<"$state/current" || refuse invalid_store
-  IFS= read -r current <&3 || refuse invalid_store
-  if IFS= read -r line <&3; then
-    exec 3<&-
+  { exec 3<"$state/current"; } 2>/dev/null || refuse invalid_store
+  current=
+  if IFS= read -r -d '' current <&3; then
+    { exec 3<&-; } 2>/dev/null || refuse invalid_store
     refuse invalid_store
   fi
-  exec 3<&-
+  { exec 3<&-; } 2>/dev/null || refuse invalid_store
+  [[ "$current" == *$'\n' ]] || refuse invalid_store
+  current=${current%$'\n'}
+  [[ "$current" != *$'\n'* && "$current" != *$'\r'* ]] || refuse invalid_store
   [[ "$current" =~ ^generation-[A-Za-z0-9_-]+$ ]] || refuse invalid_store
   generations="$state/generations"
   [[ -d "$generations" && ! -L "$generations" ]] || refuse invalid_store
@@ -62,7 +84,21 @@ read_launcher() {
   [[ -d "$generation" && ! -L "$generation" ]] || refuse invalid_store
   wrapper="$generation/plasmosome-work-state"
   [[ -f "$wrapper" && ! -L "$wrapper" && -x "$wrapper" ]] || refuse invalid_store
-  exec "$wrapper" "$@"
+  exec 3>&1
+  if wrapper_stderr=$( (exec env -i PATH="$PATH" "$wrapper" "$@") 2>&1 1>&3); then
+    [[ -z "$wrapper_stderr" ]] || printf '%s\n' "$wrapper_stderr" >&2
+    exit 0
+  else
+    exit_code=$?
+  fi
+  [[ "$wrapper_stderr" != *"$wrapper"* && "$wrapper_stderr" != *$'\n'* && "$wrapper_stderr" != *$'\r'* ]] || refuse invalid_store
+  if [[ "$json" == true ]]; then
+    [[ "$wrapper_stderr" == '{"code":'* && "$wrapper_stderr" == *'}' ]] || refuse invalid_store
+  else
+    [[ "$wrapper_stderr" == error\[*\]:\ * ]] || refuse invalid_store
+  fi
+  [[ -z "$wrapper_stderr" ]] || printf '%s\n' "$wrapper_stderr" >&2
+  exit "$exit_code"
 }
 
 case "${1:-}" in

@@ -1,21 +1,64 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use plasmosome_work_state::command::{CommandOutput, CommandSpec, RecordingCommandRunner};
 use plasmosome_work_state::document::parse_document;
+use plasmosome_work_state::freshness::RemoteRelation;
 use plasmosome_work_state::pin::PinManifest;
 use plasmosome_work_state::shadow::{
-    canonical_logical_export, canonical_operational_projection, initial_operational_metadata,
-    logical_export_digest, operational_projection_digest, to_operational_beads_jsonl,
+    canonical_logical_export, canonical_operational_projection, decode_operational_beads_jsonl,
+    initial_operational_metadata, logical_export_digest, operational_projection_digest,
+    to_operational_beads_jsonl,
 };
 use plasmosome_work_state::store::{
     ActivationFault, BootstrapLock, BootstrapRequest, CurrentGeneration, StateManifest,
-    activate_staged_generation, active_generation, bootstrap, current_generation, locate_store,
-    read_disposable_snapshot, validate_bootstrap_command, validate_fenced_snapshot,
-    validate_read_command, validate_read_locator_command,
+    StoreLocation, activate_staged_generation, active_generation, bootstrap, current_generation,
+    generation_for_installed_wrapper, host_target, locate_store, read_disposable_snapshot,
+    validate_bootstrap_command, validate_fenced_snapshot, validate_read_command,
+    validate_read_locator_command,
 };
 use tempfile::tempdir;
+
+#[cfg(unix)]
+use sha2::{Digest, Sha256};
+
+#[cfg(unix)]
+fn regular_tree_snapshot(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, u32, SystemTime)> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn visit(
+        root: &Path,
+        path: &Path,
+        snapshot: &mut BTreeMap<PathBuf, (Vec<u8>, u32, SystemTime)>,
+    ) {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        assert!(!metadata.file_type().is_symlink());
+        let relative = path.strip_prefix(root).unwrap().to_path_buf();
+        let contents = if metadata.file_type().is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                visit(root, &entry.unwrap().path(), snapshot);
+            }
+            Vec::new()
+        } else {
+            assert!(metadata.file_type().is_file());
+            fs::read(path).unwrap()
+        };
+        snapshot.insert(
+            relative,
+            (
+                contents,
+                metadata.permissions().mode(),
+                metadata.modified().unwrap(),
+            ),
+        );
+    }
+
+    let mut snapshot = BTreeMap::new();
+    visit(root, root, &mut snapshot);
+    snapshot
+}
 
 fn git_output(value: impl Into<String>) -> Result<CommandOutput, String> {
     Ok(CommandOutput::success(value))
@@ -265,6 +308,127 @@ fn active_generation_does_not_confuse_a_symlinked_state_root_with_an_uninitializ
     );
 }
 
+#[test]
+fn installed_wrapper_reads_its_selected_generation_after_pointer_flip() {
+    use sha2::{Digest, Sha256};
+
+    let root = tempdir().unwrap();
+    let checkout = root.path().join("checkout");
+    let common = root.path().join("common");
+    fs::create_dir_all(&checkout).unwrap();
+    fs::create_dir_all(&common).unwrap();
+    let location = locate(&checkout, &checkout, &common).unwrap();
+    fs::create_dir_all(&location.generations_dir).unwrap();
+
+    let generation = |name: &str, contents: &str| {
+        let generation = location.generations_dir.join(name);
+        fs::create_dir_all(&generation).unwrap();
+        let wrapper = generation.join("plasmosome-work-state");
+        fs::write(&wrapper, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut manifest: StateManifest = serde_json::from_str(&valid_manifest()).unwrap();
+        manifest.wrapper_sha256 = format!("{:x}", Sha256::digest(contents.as_bytes()));
+        fs::write(
+            generation.join("state.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+        wrapper
+    };
+    let wrapper_a = generation("generation-a", "selected old wrapper");
+    let _wrapper_b = generation("generation-b", "selected new wrapper");
+    fs::write(location.state_root.join("current"), "generation-b\n").unwrap();
+
+    assert_eq!(active_generation(&location).unwrap().name, "generation-b");
+    let selected = generation_for_installed_wrapper(&location, &wrapper_a)
+        .expect("an already selected retained wrapper must bind to its own immutable generation");
+    assert_eq!(selected.name, "generation-a");
+    assert_eq!(selected.root, location.generations_dir.join("generation-a"));
+    assert_eq!(
+        selected.manifest.wrapper_sha256,
+        format!("{:x}", Sha256::digest(b"selected old wrapper"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn installed_wrapper_generation_refuses_unsafe_executable_layouts() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::symlink;
+
+    let root = tempdir().unwrap();
+    let checkout = root.path().join("checkout");
+    let common = root.path().join("common");
+    fs::create_dir_all(&checkout).unwrap();
+    fs::create_dir_all(&common).unwrap();
+    let location = locate(&checkout, &checkout, &common).unwrap();
+    fs::create_dir_all(&location.generations_dir).unwrap();
+    let generation = location.generations_dir.join("generation-safe");
+    fs::create_dir_all(&generation).unwrap();
+    let wrapper = generation.join("plasmosome-work-state");
+    fs::write(&wrapper, "verified wrapper").unwrap();
+    let mut manifest: StateManifest = serde_json::from_str(&valid_manifest()).unwrap();
+    manifest.wrapper_sha256 = format!("{:x}", Sha256::digest(b"verified wrapper"));
+    fs::write(
+        generation.join("state.json"),
+        serde_json::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+    fs::write(location.state_root.join("current"), "generation-safe\n").unwrap();
+
+    let outside = root.path().join("outside/plasmosome-work-state");
+    fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    fs::write(&outside, "verified wrapper").unwrap();
+    let wrong_name = generation.join("not-the-wrapper");
+    fs::write(&wrong_name, "verified wrapper").unwrap();
+    let unsafe_parent = location
+        .generations_dir
+        .join("not-a-generation/plasmosome-work-state");
+    fs::create_dir_all(unsafe_parent.parent().unwrap()).unwrap();
+    fs::write(&unsafe_parent, "verified wrapper").unwrap();
+    let symlinked = location
+        .generations_dir
+        .join("generation-link/plasmosome-work-state");
+    symlink(
+        &generation,
+        location.generations_dir.join("generation-link"),
+    )
+    .unwrap();
+    let directory = location
+        .generations_dir
+        .join("generation-directory/plasmosome-work-state");
+    fs::create_dir_all(&directory).unwrap();
+
+    for executable in [
+        &outside,
+        &wrong_name,
+        &unsafe_parent,
+        &symlinked,
+        &directory,
+    ] {
+        assert_eq!(
+            generation_for_installed_wrapper(&location, executable)
+                .expect_err("only one direct regular immutable generation wrapper is accepted")
+                .code(),
+            "invalid_store",
+            "{executable:?}"
+        );
+    }
+
+    fs::write(&wrapper, "tampered wrapper").unwrap();
+    assert_eq!(
+        generation_for_installed_wrapper(&location, &wrapper)
+            .expect_err("the wrapper hash remains bound to the selected generation")
+            .code(),
+        "invalid_store"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn ordinary_reads_refuse_a_symlinked_runtime_component() {
@@ -293,6 +457,45 @@ fn ordinary_reads_refuse_a_symlinked_runtime_component() {
         "b".repeat(64),
         "c".repeat(64),
         "d".repeat(64),
+    ))
+    .unwrap();
+    let mut runner = RecordingCommandRunner::default();
+
+    assert_eq!(
+        read_disposable_snapshot(&mut runner, &generation, &pin, "aarch64-apple-darwin")
+            .unwrap_err()
+            .code(),
+        "invalid_store"
+    );
+    assert!(runner.commands().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn ordinary_reads_refuse_an_unsafe_installed_binary_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempdir().unwrap();
+    let generation_root = root.path().join("generation-safe");
+    fs::create_dir_all(&generation_root).unwrap();
+    disposable_environment(&generation_root);
+    let binary = generation_root.join("bd");
+    fs::write(&binary, "checksum-valid fixture binary").unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o777)).unwrap();
+    let binary_sha256 = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
+    let mut manifest: StateManifest = serde_json::from_str(&valid_manifest()).unwrap();
+    manifest.beads_binary_sha256 = binary_sha256.clone();
+    let generation = CurrentGeneration {
+        name: "generation-safe".into(),
+        root: generation_root,
+        manifest,
+    };
+    let pin = PinManifest::parse(&format!(
+        "version = \"1.1.2\"\nrelease = \"https://example.invalid/release\"\nsource_commit = \"{}\"\nlicense = \"MIT\"\nchecksums_url = \"https://example.invalid/checksums\"\nchecksums_sha256 = \"{}\"\n\n[[targets]]\ntarget = \"aarch64-apple-darwin\"\narchive = \"beads_1.1.2_darwin_arm64.tar.gz\"\narchive_sha256 = \"{}\"\nbinary_sha256 = \"{}\"\n",
+        "a".repeat(40),
+        "b".repeat(64),
+        "c".repeat(64),
+        binary_sha256,
     ))
     .unwrap();
     let mut runner = RecordingCommandRunner::default();
@@ -346,6 +549,37 @@ fn bootstrap_activation_survives_every_interruption_boundary() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn activation_requires_a_recursively_regular_staged_tree_before_replacing_current() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempdir().unwrap();
+    let checkout = root.path().join("checkout");
+    let common = root.path().join("common");
+    let redirected = root.path().join("redirected");
+    fs::create_dir_all(&checkout).unwrap();
+    fs::create_dir_all(&common).unwrap();
+    let location = locate(&checkout, &checkout, &common).unwrap();
+    fs::create_dir_all(location.generations_dir.join("generation-old")).unwrap();
+    fs::write(location.state_root.join("current"), "generation-old\n").unwrap();
+    let staging = location.generations_dir.join(".staging-new");
+    fs::create_dir_all(staging.join("repository")).unwrap();
+    fs::write(&redirected, "outside staged generation").unwrap();
+    symlink(&redirected, staging.join("repository/escaped")).unwrap();
+
+    let error = activate_staged_generation(&location, &staging, "generation-new", None)
+        .expect_err("a staged tree with a nested symlink must not be activated");
+
+    assert_eq!(error.code(), "invalid_store");
+    assert_eq!(
+        fs::read_to_string(location.state_root.join("current")).unwrap(),
+        "generation-old\n"
+    );
+    assert!(staging.exists());
+    assert!(!location.generations_dir.join("generation-new").exists());
+}
+
 #[test]
 fn activation_pointer_staging_uses_an_unpredictable_safe_name() {
     let root = tempdir().unwrap();
@@ -397,6 +631,32 @@ fn bootstrap_lock_refuses_contention_without_waiting() {
     assert_eq!(error.code(), "bootstrap_busy");
     drop(first);
     BootstrapLock::acquire(&location).expect("process-scoped lock is released on drop");
+}
+
+#[cfg(unix)]
+#[test]
+fn bootstrap_lock_syncs_the_common_directory_when_creating_state_root() {
+    let root = tempdir().unwrap();
+    let state_root = root.path().join("state-root");
+    let location = StoreLocation {
+        worktree_root: root.path().to_path_buf(),
+        common_dir: PathBuf::from("/dev/null"),
+        state_root: state_root.clone(),
+        generations_dir: state_root.join("generations"),
+    };
+
+    let error = BootstrapLock::acquire(&location)
+        .expect_err("first creation must durably sync the state-root parent directory");
+
+    assert_eq!(error.code(), "invalid_store");
+    assert!(
+        state_root.is_dir(),
+        "state-root creation happened before parent sync"
+    );
+
+    let retry = BootstrapLock::acquire(&location)
+        .expect_err("a retry must not bypass the unresolved parent-directory durability barrier");
+    assert_eq!(retry.code(), "invalid_store");
 }
 
 #[cfg(unix)]
@@ -537,6 +797,118 @@ fn snapshot_reads_one_unchanged_committed_generation() {
         "invalid_store",
         "the state manifest and both vc-status fences require one canonical full commit value"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn ordinary_read_uses_and_removes_a_disposable_store_copy() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempdir().unwrap();
+    let generation_root = root.path().join("generation-safe");
+    let repository = generation_root.join("repository");
+    fs::create_dir_all(repository.join("nested")).unwrap();
+    fs::write(
+        repository.join("nested/retained"),
+        "shared repository contents",
+    )
+    .unwrap();
+    disposable_environment(&generation_root);
+    let binary = generation_root.join("bd");
+    fs::write(&binary, "verified binary bytes").unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    let source_commit = "a".repeat(40);
+    let local_generation = "d".repeat(40);
+    let documents = vec![
+        parse_document(
+            "docs/intents/001-intent.md",
+            "---\nid: 001\ntitle: Intent\nstatus: approved\n---\n",
+            &source_commit,
+        )
+        .unwrap(),
+    ];
+    let operational = initial_operational_metadata(&documents).unwrap();
+    let export = to_operational_beads_jsonl(&documents, &operational).unwrap();
+    let operational_documents = decode_operational_beads_jsonl(&export).unwrap();
+    let binary_sha256 = format!("{:x}", Sha256::digest(fs::read(&binary).unwrap()));
+    let pin = PinManifest::parse(&format!(
+        "version = \"1.1.2\"\nrelease = \"https://example.invalid/release\"\nsource_commit = \"{}\"\nlicense = \"MIT\"\nchecksums_url = \"https://example.invalid/checksums\"\nchecksums_sha256 = \"{}\"\n\n[[targets]]\ntarget = \"aarch64-apple-darwin\"\narchive = \"beads_1.1.2_darwin_arm64.tar.gz\"\narchive_sha256 = \"{}\"\nbinary_sha256 = \"{}\"\n",
+        "b".repeat(40),
+        "c".repeat(64),
+        "e".repeat(64),
+        binary_sha256,
+    ))
+    .unwrap();
+    let generation = CurrentGeneration {
+        name: "generation-safe".into(),
+        root: generation_root.clone(),
+        manifest: StateManifest {
+            schema_version: 1,
+            authority_mode: "markdown-shadow".into(),
+            source_commit: source_commit.clone(),
+            logical_export_sha256: logical_export_digest(
+                &canonical_logical_export(&documents).unwrap(),
+            ),
+            operational_projection_sha256: operational_projection_digest(
+                &canonical_operational_projection(&operational_documents).unwrap(),
+            ),
+            local_generation: local_generation.clone(),
+            host_target: "aarch64-apple-darwin".into(),
+            wrapper_sha256: "f".repeat(64),
+            beads_binary_sha256: binary_sha256,
+            remote_relation: RemoteRelation::Unknown,
+            remote_generation: None,
+            remote_observed_at: None,
+            observed_local_generation: None,
+            last_successful_sync_at: None,
+            pending_operation_ids: Vec::new(),
+        },
+    };
+    let status = serde_json::json!({
+        "schema_version": 1,
+        "branch": "main",
+        "commit": local_generation,
+    })
+    .to_string();
+    let keys = serde_json::json!({
+        "schema_version": 1,
+        "plasmosome.authority-mode": "markdown-shadow",
+        "plasmosome.source-commit": source_commit,
+    })
+    .to_string();
+    let before = regular_tree_snapshot(&generation_root);
+    let mut runner = RecordingCommandRunner::scripted(vec![
+        Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+        Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+        Ok(CommandOutput::success(status.clone())),
+        Ok(CommandOutput::success(export)),
+        Ok(CommandOutput::success(keys)),
+        Ok(CommandOutput::success(status)),
+    ]);
+
+    let snapshot = read_disposable_snapshot(&mut runner, &generation, &pin, "aarch64-apple-darwin")
+        .expect("the verified shared generation is read through one disposable copy");
+
+    assert_eq!(snapshot.documents.len(), 1);
+    assert_eq!(runner.commands().len(), 6);
+    assert_eq!(runner.commands()[0].program, generation_root.join("bd"));
+    let temporary_root = runner.commands()[1].program.parent().unwrap().to_path_buf();
+    assert_ne!(temporary_root, generation_root);
+    assert!(
+        runner
+            .commands()
+            .iter()
+            .skip(1)
+            .all(|command| !command.program.starts_with(&generation_root)),
+        "every command after the shared-runtime verification must use copied files"
+    );
+    assert!(
+        !temporary_root.exists(),
+        "the disposable repository, runtime, and copied binary must be removed before returning"
+    );
+    assert_eq!(regular_tree_snapshot(&generation_root), before);
+    assert!(runner.finish().is_ok());
 }
 
 #[test]
@@ -765,4 +1137,274 @@ fn bootstrap_verifies_artifacts_before_opening_clone_state() {
     let error = bootstrap(&request).unwrap_err();
     assert_eq!(error.code(), "beads_checksum_mismatch");
     assert!(!request.checkout.exists());
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum BootstrapSnapshotFault {
+    StoreChanged,
+    SnapshotMismatch,
+    InvalidRepository,
+    CopiedBinary,
+}
+
+#[cfg(unix)]
+struct BootstrapSnapshotFixture {
+    _root: tempfile::TempDir,
+    state_root: PathBuf,
+    supplied_calls: PathBuf,
+    request: BootstrapRequest,
+}
+
+#[cfg(unix)]
+fn fixture_digest(path: &Path) -> String {
+    format!("{:x}", Sha256::digest(fs::read(path).unwrap()))
+}
+
+#[cfg(unix)]
+fn fixture_git(root: &Path, arguments: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[cfg(unix)]
+fn fixture_beads_script(fault: BootstrapSnapshotFault, local_generation: &str) -> String {
+    let status = match fault {
+        BootstrapSnapshotFault::StoreChanged => format!(
+            "printf '%s' '{{\"schema_version\":1,\"branch\":\"main\",\"commit\":\"{}\"}}'\n",
+            "e".repeat(40)
+        ),
+        BootstrapSnapshotFault::SnapshotMismatch => format!(
+            "if [ -e \"${{0}}.status\" ]; then commit={}; else : > \"${{0}}.status\"; commit={}; fi\nprintf '%s' \"{{\\\"schema_version\\\":1,\\\"branch\\\":\\\"main\\\",\\\"commit\\\":\\\"$commit\\\"}}\"\n",
+            "e".repeat(40),
+            local_generation,
+        ),
+        BootstrapSnapshotFault::InvalidRepository | BootstrapSnapshotFault::CopiedBinary => {
+            format!(
+                "printf '%s' '{{\"schema_version\":1,\"branch\":\"main\",\"commit\":\"{local_generation}\"}}'\n"
+            )
+        }
+    };
+    let version = match fault {
+        BootstrapSnapshotFault::CopiedBinary => {
+            "case \"$0\" in\n  */supplied-bd) printf x >> \"$0.calls\" ;;\n  */generations/generation-old/bd) if [ -e \"$0.seen\" ]; then printf '# corrupt copied binary\\n' >> \"$0\"; else : > \"$0.seen\"; fi ;;\nesac\nprintf 'bd version 1.1.2 (fixture)\\n'\n"
+        }
+        _ => {
+            "case \"$0\" in\n  */supplied-bd) printf x >> \"$0.calls\" ;;\nesac\nprintf 'bd version 1.1.2 (fixture)\\n'\n"
+        }
+    };
+    format!(
+        "#!/bin/sh\ncase \"$*\" in\n  \"--version\")\n    {version}    ;;\n  \"--readonly --sandbox --json vc status\")\n    {status}    ;;\n  \"--readonly --sandbox export\")\n    printf ''\n    ;;\n  \"--readonly --sandbox --json kv list\")\n    printf ''\n    ;;\n  *) exit 99 ;;\nesac\n"
+    )
+}
+
+#[cfg(unix)]
+fn bootstrap_snapshot_fixture(fault: BootstrapSnapshotFault) -> BootstrapSnapshotFixture {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempdir().unwrap();
+    let checkout = root.path().join("checkout");
+    fs::create_dir_all(checkout.join("docs/intents")).unwrap();
+    fs::create_dir_all(checkout.join("tools")).unwrap();
+    fs::write(
+        checkout.join("docs/intents/001-intent.md"),
+        "---\nid: 001\ntitle: Intent\nstatus: approved\n---\n",
+    )
+    .unwrap();
+    fixture_git(&checkout, &["init", "--quiet"]);
+
+    let archive = root.path().join("beads_1.1.2_fixture.tar.gz");
+    let supplied_binary = root.path().join("supplied-bd");
+    let supplied_calls = PathBuf::from(format!("{}.calls", supplied_binary.display()));
+    fs::write(&archive, "fixture archive").unwrap();
+    let target = host_target();
+    let local_generation = "d".repeat(40);
+    let beads_script = fixture_beads_script(fault, &local_generation);
+    fs::write(&supplied_binary, &beads_script).unwrap();
+    fs::set_permissions(&supplied_binary, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        checkout.join("tools/work-state-beads-1.1.2.toml"),
+        format!(
+            "version = \"1.1.2\"\nrelease = \"https://example.invalid/release\"\nsource_commit = \"{}\"\nlicense = \"MIT\"\nchecksums_url = \"https://example.invalid/checksums\"\nchecksums_sha256 = \"{}\"\n\n[[targets]]\ntarget = \"{target}\"\narchive = \"beads_1.1.2_fixture.tar.gz\"\narchive_sha256 = \"{}\"\nbinary_sha256 = \"{}\"\n",
+            "a".repeat(40),
+            "b".repeat(64),
+            fixture_digest(&archive),
+            fixture_digest(&supplied_binary),
+        ),
+    )
+    .unwrap();
+    fixture_git(&checkout, &["add", "."]);
+    fixture_git(
+        &checkout,
+        &[
+            "-c",
+            "user.name=Plasmosome fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
+    let source_commit = fixture_git(&checkout, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+
+    let state_root = checkout.join(".git/plasmosome-work-state");
+    let generation = state_root.join("generations/generation-old");
+    fs::create_dir_all(generation.join("repository")).unwrap();
+    fs::write(generation.join("repository/fixture"), "repository fixture").unwrap();
+    if matches!(fault, BootstrapSnapshotFault::InvalidRepository) {
+        fs::rename(
+            generation.join("repository"),
+            generation.join("repository-retired"),
+        )
+        .unwrap();
+        fs::write(generation.join("repository"), "not a repository directory").unwrap();
+    }
+    let wrapper = generation.join("plasmosome-work-state");
+    let requested_wrapper = root.path().join("requested-wrapper");
+    fs::write(&wrapper, "fixture wrapper").unwrap();
+    fs::write(&requested_wrapper, "fixture wrapper").unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&requested_wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    let installed_binary = generation.join("bd");
+    fs::copy(&supplied_binary, &installed_binary).unwrap();
+    fs::set_permissions(&installed_binary, fs::Permissions::from_mode(0o700)).unwrap();
+    disposable_environment(&generation);
+    let manifest = StateManifest {
+        schema_version: 1,
+        authority_mode: "markdown-shadow".into(),
+        source_commit,
+        logical_export_sha256: "b".repeat(64),
+        operational_projection_sha256: "c".repeat(64),
+        local_generation,
+        host_target: target.into(),
+        wrapper_sha256: fixture_digest(&wrapper),
+        beads_binary_sha256: fixture_digest(&installed_binary),
+        remote_relation: RemoteRelation::Unknown,
+        remote_generation: None,
+        remote_observed_at: None,
+        observed_local_generation: None,
+        last_successful_sync_at: None,
+        pending_operation_ids: Vec::new(),
+    };
+    fs::write(
+        generation.join("state.json"),
+        serde_json::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+    fs::write(state_root.join("current"), "generation-old\n").unwrap();
+    BootstrapSnapshotFixture {
+        _root: root,
+        state_root,
+        supplied_calls,
+        request: BootstrapRequest {
+            checkout: checkout.clone(),
+            source_root: checkout,
+            source_ref: "HEAD".into(),
+            archive,
+            binary: supplied_binary,
+            wrapper: requested_wrapper,
+            host_target: target.into(),
+        },
+    }
+}
+
+#[cfg(unix)]
+fn fixture_generation_names(state_root: &Path) -> Vec<String> {
+    let mut names = fs::read_dir(state_root.join("generations"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+#[cfg(unix)]
+fn active_state_snapshot(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, u32, SystemTime)> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let current = root.join("current");
+    let metadata = fs::metadata(&current).unwrap();
+    let mut snapshot = regular_tree_snapshot(&root.join("generations"));
+    snapshot.insert(
+        PathBuf::from("current"),
+        (
+            fs::read(current).unwrap(),
+            metadata.permissions().mode(),
+            metadata.modified().unwrap(),
+        ),
+    );
+    snapshot
+}
+
+#[cfg(unix)]
+fn assert_no_snapshot_recovery(fixture: &BootstrapSnapshotFixture) {
+    assert_eq!(
+        fs::read_to_string(fixture.state_root.join("current")).unwrap(),
+        "generation-old\n"
+    );
+    assert_eq!(
+        fixture_generation_names(&fixture.state_root),
+        ["generation-old"]
+    );
+    assert_eq!(fs::read(&fixture.supplied_calls).unwrap(), b"x");
+}
+
+#[cfg(unix)]
+#[test]
+fn installed_repository_snapshot_failures_are_fatal() {
+    for (fault, expected) in [
+        (BootstrapSnapshotFault::StoreChanged, "store_changed"),
+        (BootstrapSnapshotFault::SnapshotMismatch, "store_changed"),
+        (BootstrapSnapshotFault::InvalidRepository, "invalid_store"),
+        (
+            BootstrapSnapshotFault::CopiedBinary,
+            "beads_checksum_mismatch",
+        ),
+    ] {
+        let fixture = bootstrap_snapshot_fixture(fault);
+        let before = (!matches!(fault, BootstrapSnapshotFault::CopiedBinary))
+            .then(|| active_state_snapshot(&fixture.state_root));
+        let error = bootstrap(&fixture.request).unwrap_err();
+
+        assert_eq!(error.code(), expected);
+        assert_no_snapshot_recovery(&fixture);
+        if let Some(before) = before {
+            assert_eq!(active_state_snapshot(&fixture.state_root), before);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_snapshot_failure_never_activates_a_generation() {
+    let fixture = bootstrap_snapshot_fixture(BootstrapSnapshotFault::InvalidRepository);
+    let installed = fixture.state_root.join("generations/generation-old/bd");
+    fs::rename(&installed, installed.with_file_name("bd-removed")).unwrap();
+    let before = active_state_snapshot(&fixture.state_root);
+    let error = bootstrap(&fixture.request).unwrap_err();
+
+    assert_eq!(error.code(), "invalid_store");
+    assert_eq!(
+        fs::read_to_string(fixture.state_root.join("current")).unwrap(),
+        "generation-old\n"
+    );
+    assert_eq!(
+        fixture_generation_names(&fixture.state_root),
+        ["generation-old"]
+    );
+    assert_eq!(fs::read(&fixture.supplied_calls).unwrap(), b"xx");
+    assert_eq!(active_state_snapshot(&fixture.state_root), before);
 }

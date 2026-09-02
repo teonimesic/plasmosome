@@ -416,6 +416,31 @@ fn displayed_option(value: &Option<String>) -> &str {
     value.as_deref().unwrap_or("unknown")
 }
 
+fn kind_name(kind: &DocumentKind) -> &'static str {
+    match kind {
+        DocumentKind::Intent => "intent",
+        DocumentKind::Spec => "spec",
+        DocumentKind::Task => "task",
+    }
+}
+
+fn displayed_priority(value: Option<u8>) -> String {
+    value
+        .map(|priority| priority.to_string())
+        .unwrap_or_else(|| "none".into())
+}
+
+fn displayed_ids(values: &[String]) -> String {
+    format!("[{}]", values.join(", "))
+}
+
+fn displayed_operational(value: &Option<OperationalMetadata>) -> String {
+    value
+        .as_ref()
+        .map(|metadata| serde_json::to_string(metadata).expect("operational metadata serializes"))
+        .unwrap_or_else(|| "none".into())
+}
+
 fn freshness_name(freshness: &crate::freshness::Freshness) -> &'static str {
     match freshness {
         crate::freshness::Freshness::SynchronizedAsOf => "synchronized_as_of",
@@ -441,6 +466,10 @@ pub fn render_human(response: &ReadResponse) -> String {
         format!("command: {}", response.command),
         format!("authority mode: {}", response.authority_mode),
         format!("source commit: {}", response.source_commit),
+        format!(
+            "last successful sync at: {}",
+            displayed_option(&freshness.last_successful_sync_at)
+        ),
         format!("local generation: {}", freshness.local_generation),
         format!(
             "remote generation: {}",
@@ -460,13 +489,36 @@ pub fn render_human(response: &ReadResponse) -> String {
     if let Some(documents) = &response.documents {
         lines.extend(documents.iter().map(|document| {
             format!(
-                "{} {} {}",
-                document.document_key, document.lifecycle, document.title
+                "{} kind={} id={} lifecycle={} priority={} title={}",
+                document.document_key,
+                kind_name(&document.kind),
+                document.document_id,
+                document.lifecycle,
+                displayed_priority(document.priority),
+                document.title,
             )
         }));
     }
     if let Some(document) = &response.document {
-        lines.push(format!("{} {}", document.document_key, document.title));
+        lines.extend([
+            format!("document key: {}", document.document_key),
+            format!("kind: {}", kind_name(&document.kind)),
+            format!("document id: {}", document.document_id),
+            format!("document path: {}", document.document_path),
+            format!("title: {}", document.title),
+            format!("content commit: {}", document.content_commit_sha),
+            format!("state version: {}", document.state_version),
+            format!("intent ids: {}", displayed_ids(&document.intent_ids)),
+            format!("spec ids: {}", displayed_ids(&document.spec_ids)),
+            format!("lifecycle: {}", document.lifecycle),
+            format!("priority: {}", displayed_priority(document.priority)),
+            format!("pr: {}", displayed_option(&document.pr)),
+            format!("evidence: {}", displayed_option(&document.evidence)),
+            format!(
+                "operational: {}",
+                displayed_operational(&document.operational)
+            ),
+        ]);
     }
     if response.ready.is_some() || response.blocked.is_some() {
         lines.push("local projection; does not authorize start".into());
@@ -476,7 +528,10 @@ pub fn render_human(response: &ReadResponse) -> String {
             let blockers = task
                 .blockers
                 .iter()
-                .map(|blocker| blocker.code.as_str())
+                .map(|blocker| match &blocker.document_key {
+                    Some(document_key) => format!("{} ({document_key})", blocker.code),
+                    None => blocker.code.clone(),
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(

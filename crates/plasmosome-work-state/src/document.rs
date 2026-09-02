@@ -669,7 +669,7 @@ pub fn load_documents<R: CommandRunner>(
             "--end-of-options".into(),
             format!("{source_ref}^{{commit}}"),
         ],
-        "invalid_source_ref",
+        "source_ref_unavailable",
         None,
     )?;
     let source_commit =

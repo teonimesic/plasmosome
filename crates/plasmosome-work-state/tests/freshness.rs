@@ -95,16 +95,37 @@ fn invalid_or_partial_observation_state_is_refused() {
     stale_without_base.observed_local_generation = Some("different".into());
     invalids.push(stale_without_base);
 
-    let mut duplicate_pending = observation(RemoteRelation::Unknown, &["one", "one"]);
-    duplicate_pending
-        .pending_mutations
-        .operation_ids
-        .push(" ".into());
+    let duplicate_pending = observation(RemoteRelation::Unknown, &["one", "one"]);
     invalids.push(duplicate_pending);
+
+    let blank_pending = observation(RemoteRelation::Unknown, &["one", " "]);
+    invalids.push(blank_pending);
 
     for state in invalids {
         assert_eq!(classify(state).unwrap_err().code(), "invalid_freshness");
     }
+}
+
+#[test]
+fn unknown_without_remote_observation_refuses_a_lone_successful_sync_timestamp() {
+    let mut state = observation(RemoteRelation::Unknown, &[]);
+    state.last_successful_sync_at = Some(TIME.into());
+
+    assert_eq!(classify(state).unwrap_err().code(), "invalid_freshness");
+}
+
+#[test]
+fn unknown_preserves_a_complete_observation_with_historical_sync() {
+    let mut state = observation(RemoteRelation::Ahead, &[]);
+    state.remote_relation = RemoteRelation::Unknown;
+    state.last_successful_sync_at = Some("2026-09-01T12:34:56Z".into());
+
+    let freshness = classify(state).expect("a complete historical observation remains valid");
+    assert_eq!(freshness.freshness, Freshness::Unknown);
+    assert_eq!(
+        freshness.last_successful_sync_at.as_deref(),
+        Some("2026-09-01T12:34:56Z")
+    );
 }
 
 #[test]

@@ -25,7 +25,7 @@ use crate::shadow::{
     to_operational_beads_jsonl,
 };
 use crate::store::{
-    BootstrapOutcome, BootstrapRequest, CurrentGeneration, StateManifest,
+    BootstrapLock, BootstrapOutcome, BootstrapRequest, CurrentGeneration, StateManifest,
     activate_staged_generation, bootstrap, current_generation, locate_store, locator_environment,
     read_disposable_snapshot,
 };
@@ -151,6 +151,7 @@ pub fn contract_refusal_exit_code(code: &str) -> i32 {
         code,
         "cutover_blocked"
             | "invalid_source_ref"
+            | "source_ref_unavailable"
             | "invalid_document"
             | "duplicate_document_id"
             | "missing_document_target"
@@ -972,6 +973,11 @@ fn source_refusal(
     offending_key: Option<String>,
     mismatch: Option<String>,
 ) -> ContractResult {
+    let code = if code == "source_ref_unavailable" {
+        "invalid_source_ref"
+    } else {
+        code
+    };
     let mut result = ContractResult::refusal(case, code);
     result.source_ref = Some(source_ref.into());
     result.offending_key = offending_key;
@@ -1319,6 +1325,19 @@ fn copy_contract_launcher(worktree: &Path) -> Result<(), String> {
     if regular_file_digest(&source)? != regular_file_digest(&destination)? {
         return Err("cutover_blocked".into());
     }
+    let source_pin = repository_root().join("tools/work-state-beads-1.1.2.toml");
+    let destination_pin = worktree.join("tools/work-state-beads-1.1.2.toml");
+    let source_pin_metadata =
+        fs::symlink_metadata(&source_pin).map_err(|_| "cutover_blocked".to_owned())?;
+    if !source_pin_metadata.file_type().is_file() || source_pin_metadata.file_type().is_symlink() {
+        return Err("cutover_blocked".into());
+    }
+    fs::copy(&source_pin, &destination_pin).map_err(|_| "cutover_blocked".to_owned())?;
+    fs::set_permissions(&destination_pin, source_pin_metadata.permissions())
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    if regular_file_digest(&source_pin)? != regular_file_digest(&destination_pin)? {
+        return Err("cutover_blocked".into());
+    }
     Ok(())
 }
 
@@ -1515,6 +1534,65 @@ fn assert_launcher_read(
     Ok(())
 }
 
+fn assert_launcher_missing_show(
+    runner: &mut SystemCommandRunner,
+    worktree: &Path,
+) -> Result<(), String> {
+    let launcher = worktree.join("tools/work-state");
+    for json in [true, false] {
+        let output = runner
+            .run(contract_command(
+                &launcher,
+                read_arguments(&ReadCommand::Show("task:999".into()), json),
+                worktree,
+                &launcher_environment(),
+            ))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        let expected_stderr = if json {
+            "{\"code\":\"document_not_found\",\"document_key\":\"task:999\"}\n"
+        } else {
+            "error[document_not_found]: document_not_found (task:999)\n"
+        };
+        if output.status != 1 || !output.stdout.is_empty() || output.stderr != expected_stderr {
+            return Err("cutover_blocked".into());
+        }
+    }
+    Ok(())
+}
+
+fn assert_launcher_read_refusal(
+    runner: &mut SystemCommandRunner,
+    fixture: &MirrorFixture,
+    location: &crate::store::StoreLocation,
+    worktree: &Path,
+    code: &str,
+) -> Result<(), String> {
+    let boundary = capture_read_boundary(fixture, &location.state_root)?;
+    let launcher = worktree.join("tools/work-state");
+    for json in [true, false] {
+        let output = runner
+            .run(contract_command(
+                &launcher,
+                read_arguments(&ReadCommand::List, json),
+                worktree,
+                &launcher_environment(),
+            ))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        let expected_stderr = if json {
+            format!("{{\"code\":\"{code}\"}}\n")
+        } else {
+            format!("error[{code}]: {code}\n")
+        };
+        if output.status != 1 || !output.stdout.is_empty() || output.stderr != expected_stderr {
+            return Err("cutover_blocked".into());
+        }
+    }
+    if capture_read_boundary(fixture, &location.state_root)? != boundary {
+        return Err("cutover_blocked".into());
+    }
+    Ok(())
+}
+
 fn read_commands_for(snapshot: &crate::store::FencedSnapshot) -> Result<Vec<ReadCommand>, String> {
     let show_key = snapshot
         .documents
@@ -1557,6 +1635,7 @@ fn bootstrap_fixture(
         MirrorFixture,
         crate::store::StoreLocation,
         CurrentGeneration,
+        BootstrapRequest,
     ),
     String,
 > {
@@ -1613,7 +1692,224 @@ fn bootstrap_fixture(
     let snapshot = read_disposable_snapshot(runner, &generation, pin, host_target())
         .map_err(|error| error.code().to_owned())?;
     assert_exact_source_projection(source, &snapshot)?;
-    Ok((fixture, first_location, generation))
+    Ok((fixture, first_location, generation, bootstrap_request))
+}
+
+fn assert_runtime_reinstall(
+    runner: &mut SystemCommandRunner,
+    location: &crate::store::StoreLocation,
+    previous: &CurrentGeneration,
+    request: &BootstrapRequest,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+    expected_snapshot: &crate::store::FencedSnapshot,
+) -> Result<CurrentGeneration, String> {
+    let expected_manifest = previous.manifest.clone();
+    let result = bootstrap(request).map_err(|error| error.code().to_owned())?;
+    if result.outcome != BootstrapOutcome::Reinstalled
+        || result.source_commit != expected_manifest.source_commit
+        || result.local_generation != expected_manifest.local_generation
+        || result.logical_export_sha256 != expected_manifest.logical_export_sha256
+    {
+        return Err("cutover_blocked".into());
+    }
+    let repaired = current_generation(location).map_err(|error| error.code().to_owned())?;
+    if repaired.name == previous.name
+        || !previous.root.is_dir()
+        || repaired.manifest != expected_manifest
+        || regular_file_digest(&repaired.root.join("plasmosome-work-state"))?
+            != repaired.manifest.wrapper_sha256
+    {
+        return Err("cutover_blocked".into());
+    }
+    let repaired_snapshot = read_disposable_snapshot(runner, &repaired, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    if repaired_snapshot != *expected_snapshot {
+        return Err("cutover_blocked".into());
+    }
+    assert_exact_source_projection(source, &repaired_snapshot)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let wrapper_metadata = fs::symlink_metadata(repaired.root.join("plasmosome-work-state"))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        if wrapper_metadata.permissions().mode() & 0o7777 != 0o700 {
+            return Err("cutover_blocked".into());
+        }
+    }
+    Ok(repaired)
+}
+
+fn assert_runtime_repair(
+    runner: &mut SystemCommandRunner,
+    fixture: &MirrorFixture,
+    location: &crate::store::StoreLocation,
+    base: &CurrentGeneration,
+    request: &BootstrapRequest,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+) -> Result<(CurrentGeneration, Vec<String>), String> {
+    let before_snapshot = read_disposable_snapshot(runner, base, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    let before_manifest = base.manifest.clone();
+    let has_nondefault_operational_state = before_snapshot.documents.iter().any(|document| {
+        document.operational.as_ref().is_some_and(|operational| {
+            operational.active_owner.is_some() && operational.task_dependencies.len() == 2
+        })
+    });
+    if !has_nondefault_operational_state
+        || before_manifest.remote_relation != RemoteRelation::Ahead
+        || before_manifest.remote_generation.as_deref() != Some(CONTRACT_REMOTE_GENERATION)
+        || before_manifest.remote_observed_at.as_deref() != Some(CONTRACT_OBSERVED_AT)
+        || before_manifest.observed_local_generation.as_deref()
+            == Some(before_manifest.local_generation.as_str())
+        || before_manifest.last_successful_sync_at.is_some()
+        || before_manifest.pending_operation_ids != [CONTRACT_PENDING_OPERATION]
+    {
+        return Err("cutover_blocked".into());
+    }
+    let installed_binary = base.root.join("bd");
+    let missing_binary = base.root.join("bd-removed-for-contract");
+    fs::rename(&installed_binary, &missing_binary).map_err(|_| "cutover_blocked".to_owned())?;
+    assert_launcher_read_refusal(
+        runner,
+        fixture,
+        location,
+        &fixture.first_worktree,
+        "installed_beads_missing",
+    )?;
+    let missing_repaired = assert_runtime_reinstall(
+        runner,
+        location,
+        base,
+        request,
+        source,
+        pin,
+        &before_snapshot,
+    )?;
+
+    let corrupted_binary = missing_repaired.root.join("bd");
+    fs::write(&corrupted_binary, "corrupted installed Beads binary")
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    assert_launcher_read_refusal(
+        runner,
+        fixture,
+        location,
+        &fixture.first_worktree,
+        "beads_checksum_mismatch",
+    )?;
+    let checksum_repaired = assert_runtime_reinstall(
+        runner,
+        location,
+        &missing_repaired,
+        request,
+        source,
+        pin,
+        &before_snapshot,
+    )?;
+    #[cfg(unix)]
+    let repaired = {
+        use std::os::unix::fs::PermissionsExt;
+
+        let wrapper = checksum_repaired.root.join("plasmosome-work-state");
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o600))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        assert_launcher_read_refusal(
+            runner,
+            fixture,
+            location,
+            &fixture.first_worktree,
+            "invalid_store",
+        )?;
+        assert_runtime_reinstall(
+            runner,
+            location,
+            &checksum_repaired,
+            request,
+            source,
+            pin,
+            &before_snapshot,
+        )?
+    };
+    #[cfg(not(unix))]
+    let repaired = checksum_repaired;
+    let mut plans = vec![
+        "installed Beads missing refusal".into(),
+        "bootstrap missing-Beads runtime repair".into(),
+        "installed Beads checksum refusal".into(),
+        "bootstrap checksum runtime repair".into(),
+    ];
+    #[cfg(unix)]
+    plans.extend([
+        "installed wrapper-mode refusal".into(),
+        "bootstrap wrapper-mode repair".into(),
+    ]);
+    plans.extend(exercise_all_local_reads(
+        runner, fixture, location, &repaired, source, pin,
+    )?);
+    Ok((repaired, plans))
+}
+
+fn assert_changed_source_refusal(
+    location: &crate::store::StoreLocation,
+    request: &BootstrapRequest,
+    source: &SourceDocuments,
+) -> Result<(), String> {
+    let alternate_ref = if source.source_commit == HISTORICAL_SOURCE_COMMIT {
+        "origin/main"
+    } else {
+        HISTORICAL_SOURCE_COMMIT
+    };
+    let mut alternate_request = request.clone();
+    alternate_request.source_ref = alternate_ref.into();
+    let before = snapshot_regular_tree(&location.state_root)?;
+    let Err(error) = bootstrap(&alternate_request) else {
+        return Err("cutover_blocked".into());
+    };
+    if error.code() != "source_commit_mismatch"
+        || snapshot_regular_tree(&location.state_root)? != before
+    {
+        return Err("cutover_blocked".into());
+    }
+    Ok(())
+}
+
+fn assert_bootstrap_contention(
+    runner: &mut SystemCommandRunner,
+    location: &crate::store::StoreLocation,
+    worktree: &Path,
+    request: &BootstrapRequest,
+) -> Result<(), String> {
+    let held_lock = BootstrapLock::acquire(location).map_err(|error| error.code().to_owned())?;
+    let before = snapshot_regular_tree(&location.state_root)?;
+    let executable = std::env::current_exe().map_err(|_| "cutover_blocked".to_owned())?;
+    let output = runner.run(CommandSpec {
+        program: executable,
+        argv: vec![
+            "bootstrap".into(),
+            "--source-ref".into(),
+            request.source_ref.clone(),
+            "--archive".into(),
+            request.archive.display().to_string(),
+            "--bd".into(),
+            request.binary.display().to_string(),
+            "--json".into(),
+        ],
+        cwd: Some(worktree.to_path_buf()),
+        environment: launcher_environment(),
+        redacted_argv_positions: Vec::new(),
+    });
+    drop(held_lock);
+    let output = output.map_err(|_| "cutover_blocked".to_owned())?;
+    if output.status != 1
+        || !output.stdout.is_empty()
+        || output.stderr != "{\"code\":\"bootstrap_busy\"}\n"
+        || snapshot_regular_tree(&location.state_root)? != before
+    {
+        return Err("cutover_blocked".into());
+    }
+    Ok(())
 }
 
 fn exercise_all_local_reads(
@@ -1633,6 +1929,7 @@ fn exercise_all_local_reads(
         for command in &commands {
             assert_launcher_read(runner, worktree, command.clone(), generation, &snapshot)?;
         }
+        assert_launcher_missing_show(runner, worktree)?;
     }
     if capture_read_boundary(fixture, &location.state_root)? != boundary {
         return Err("cutover_blocked".into());
@@ -1645,6 +1942,7 @@ fn exercise_all_local_reads(
         ));
         plans.push(format!("tools/work-state {}", read_command_name(command)));
     }
+    plans.push("tools/work-state show task:999 refusal".into());
     Ok(plans)
 }
 
@@ -1825,6 +2123,19 @@ fn commit_pending_fixture_change(
         acquired_at: CONTRACT_OBSERVED_AT.into(),
         expires_at: "2026-09-02T13:34:56Z".into(),
     });
+    operational.task_dependencies = base_snapshot
+        .documents
+        .iter()
+        .filter(|document| {
+            matches!(document.document.record.kind, DocumentKind::Task)
+                && document.document.record.document_key != target.document.record.document_key
+        })
+        .map(|document| document.document.record.document_key.clone())
+        .take(2)
+        .collect();
+    if operational.task_dependencies.len() != 2 {
+        return Err("cutover_blocked".into());
+    }
     let metadata = pending_fixture_metadata(base_snapshot, target, operational)?;
     let update = pending_fixture_update_arguments(&native_id(&target.document.record), &metadata)
         .map_err(str::to_owned)?;
@@ -2004,16 +2315,55 @@ fn local_read_contract_case(
     source: &SourceDocuments,
     pin: &PinManifest,
 ) -> Result<LocalReadEvidence, String> {
-    let (fixture, location, base) = bootstrap_fixture(runner, root, case, request, source, pin)?;
+    let (fixture, location, base, bootstrap_request) =
+        bootstrap_fixture(runner, root, case, request, source, pin)?;
     let mut command_plans = fixture.command_plans.clone();
     command_plans.push("bootstrap installed".into());
     command_plans.push("bootstrap unchanged".into());
     let mut operation_ids = Vec::new();
     match case {
         "local-reads" => {
+            assert_bootstrap_contention(
+                runner,
+                &location,
+                &fixture.first_worktree,
+                &bootstrap_request,
+            )?;
+            command_plans
+                .push("held bootstrap lock refuses a second compiled CLI bootstrap".into());
             command_plans.extend(exercise_all_local_reads(
                 runner, &fixture, &location, &base, source, pin,
             )?);
+            let repair_candidate = activate_freshness_fixture(
+                runner,
+                &location,
+                &base,
+                pin,
+                RemoteRelation::Ahead,
+                false,
+                &[CONTRACT_PENDING_OPERATION],
+            )?;
+            operation_ids.push(CONTRACT_PENDING_OPERATION.into());
+            command_plans.push("committed non-default runtime repair fixture".into());
+            let (repaired, repair_plans) = assert_runtime_repair(
+                runner,
+                &fixture,
+                &location,
+                &repair_candidate,
+                &bootstrap_request,
+                source,
+                pin,
+            )?;
+            command_plans.extend(repair_plans);
+            assert_changed_source_refusal(&location, &bootstrap_request, source)?;
+            command_plans.push("bootstrap changed-source refusal".into());
+            return Ok(LocalReadEvidence {
+                clone_labels: vec![format!("{case}-worktree-a"), format!("{case}-worktree-b")],
+                source_commit: repaired.manifest.source_commit,
+                local_generation: repaired.manifest.local_generation,
+                operation_ids,
+                command_plans,
+            });
         }
         "freshness" => {
             assert_freshness_projection(
@@ -2320,10 +2670,9 @@ fn finish_contract(
     cleanup: Result<(), &'static str>,
     case: &str,
 ) -> Result<ContractResult, Box<ContractResult>> {
-    match (cleanup, result) {
-        (Ok(()), result) => result,
-        (Err(_), Err(result)) => Err(result),
-        (Err(code), Ok(_)) => Err(Box::new(ContractResult::refusal(case, code))),
+    match cleanup {
+        Ok(()) => result,
+        Err(code) => Err(Box::new(ContractResult::refusal(case, code))),
     }
 }
 pub fn run_scripted_cases(case: &str) -> Result<ContractResult, &'static str> {
@@ -2796,7 +3145,7 @@ mod tests {
     static PROCESS_WORKING_DIRECTORY: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn cleanup_failure_preserves_an_earlier_refusal() {
+    fn fixture_cleanup_failure_takes_precedence_over_an_operation_refusal() {
         let result = finish_contract(
             Err(Box::new(ContractResult::refusal(
                 "version-pin",
@@ -2807,7 +3156,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(result.code, "beads_checksum_mismatch");
+        assert_eq!(result.code, "fixture_cleanup_failed");
     }
 
     #[test]
@@ -2835,6 +3184,20 @@ mod tests {
 
         assert_eq!(value["source_ref"], "selected-ref");
         assert_eq!(value["offending_key"], "task:045");
+        assert_eq!(contract_refusal_exit_code(&result.code), 1);
+    }
+
+    #[test]
+    fn legacy_contract_normalizes_an_unavailable_source_ref() {
+        let result = source_refusal(
+            "document-mapping",
+            "refs/heads/definitely-missing",
+            "source_ref_unavailable",
+            None,
+            None,
+        );
+
+        assert_eq!(result.code, "invalid_source_ref");
         assert_eq!(contract_refusal_exit_code(&result.code), 1);
     }
 

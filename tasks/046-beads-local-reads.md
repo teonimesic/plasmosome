@@ -137,10 +137,11 @@ limited to:
   narrow validation/digest operations the durable store reuses;
 - `crates/plasmosome-work-state/src/contract.rs` for temporary real-repository clone/worktree
   fixtures and the three new contract cases;
-- `crates/plasmosome-work-state/src/main.rs` and `src/lib.rs` for the exact command surface and
-  module exports;
+- `crates/plasmosome-work-state/src/document.rs`, `src/main.rs` and `src/lib.rs` for local
+  source-ref refusal, the exact command surface and module exports;
 - new `crates/plasmosome-work-state/tests/store.rs`, `tests/freshness.rs` and `tests/read.rs`, plus
-  focused changes to `tests/pin.rs`, `tests/cli.rs`, `tests/shadow.rs` and `tests/contract.rs`; and
+  focused changes to `tests/pin.rs`, `tests/cli.rs`, `tests/document.rs`, `tests/shadow.rs` and
+  `tests/contract.rs`; and
 - `tools/work-state` so `bootstrap` uses release locked offline Cargo, `contract-test` retains
   debug locked offline Cargo, and ordinary reads select and execute the installed wrapper without
   starting Cargo; and
@@ -167,6 +168,11 @@ single-use, values are nonblank, `--source-ref`, `--archive` and `--bd` are requ
 or positional extras are `invalid_command`. `show` accepts one exact kind-qualified key; a bare id
 is ambiguous and invalid. The read commands never accept a ref, remote, artifact, database path or
 credential option.
+
+A nonblank, single-line local source ref whose exact `git rev-parse --verify` cannot run or resolve
+is `source_ref_unavailable` with exit 1; blank or CR/LF refs, and a successful malformed resolved
+SHA, remain `invalid_source_ref`. The legacy `contract-test` source-ref adapter continues to
+serialize the unavailable-local-ref case as `invalid_source_ref` with exit 1.
 
 For `bootstrap`, the tracked launcher runs exactly
 `cargo run --release --locked --offline --quiet -p plasmosome-work-state -- ...`; for
@@ -251,7 +257,8 @@ generation it names. This lock carries no actor, token, expiry, lifecycle or aut
 
 Create staging and final generation directories on the same filesystem below `generations/`.
 Build only in a `.staging-<unpredictable-safe-suffix>` directory. After both binaries, repository,
-state manifest and real snapshot all validate, sync written files, rename the directory to the
+state manifest and real snapshot all validate, recursively sync every regular file and directory,
+rename the directory to the
 corresponding `generation-...` name, write a same-directory temporary pointer, sync it, and
 atomically rename it over `current`. That last rename is the only activation point. An
 interruption before it leaves the previous pointer intact; an interruption after it can expose
@@ -268,11 +275,11 @@ Task 045's local Git source loader. Preserve its local-only `rev-parse`, NUL-del
 literal-path log and exact `git show` rules; never fetch a missing object or fall back to the
 working tree.
 
-Copy the verified executable into the staging generation as `bd`, set only owner-readable and
-executable permissions needed by the current user, sync it, then verify the copied bytes and exact
+Copy the verified executable into the staging generation as `bd`, set its exact owner-only `0700`
+mode, sync it, then verify the copied bytes and exact
 `bd version 1.1.2 (...)` output again. Extend `pin.rs` with a separate installed-runtime verifier
-that selects the host target, rejects a missing, non-regular or symlinked executable, hashes it
-against `binary_sha256`, and runs only `bd --version` under the isolated environment. Every read
+that selects the host target, rejects a missing, non-regular, symlinked or non-`0700` executable,
+hashes it against `binary_sha256`, and runs only `bd --version` under the isolated environment. Every read
 uses that verifier before its first command whose cwd is the private Beads repository; reads never
 need the original archive or extraction directory.
 
@@ -322,11 +329,19 @@ retired keys or erase the last remote observation. Malformed state, an unreadabl
 repository or a snapshot/state mismatch is a refusal, not a reason to reconstruct over possible
 operational evidence.
 
+Classify the installed runtime before copying any repository data. Only a repository-free wrapper,
+installed-`bd`, runtime-layout or pinned manifest binding defect may require repair. Once an
+installed or recovery disposable snapshot begins, every refusal—including copied-binary
+verification, source/digest parity, store change, runner binding and temporary cleanup—is fatal
+and must not stage or activate a replacement generation.
+
 ### Fenced local snapshot and command safety
 
 The pinned embedded engine opens writable lock/journal files and changes storage mtimes even with
 `--readonly`; therefore it must never run directly against the shared active generation. After the
-launcher selects a generation, the installed wrapper validates and hashes itself and the shared
+launcher selects a generation, the installed wrapper derives that selected immutable generation
+from its canonical own executable path rather than rereading `current`, then validates and hashes
+itself and the shared
 installed Beads file, recursively copies only regular files/directories from that generation's
 private repository and Beads binary into a new per-read `TempDir`, rejects symlinks and special
 files, and hashes the copied binary again. It runs `bd --version` on the copy before opening the
@@ -381,7 +396,8 @@ generation's path/content/mode/mtime tree around real reads. Successful reads ma
 inside their private temporary root; they may create no persistent file, queue, staged entry,
 config change or background child and may not modify the source checkout or shared generation.
 Explicitly close the `TempDir` and fail as `temporary_cleanup_failed` if complete removal fails;
-reap every child first. No read resolves the stored source ref or checks whether the source
+reap every child first. The outer real-contract fixture likewise reports `fixture_cleanup_failed`
+when fixture disposal fails, even if its operation already refused. No read resolves the stored source ref or checks whether the source
 checkout's current HEAD moved; freshness comes only from the stored envelope.
 
 ### Freshness state and classifier
@@ -400,8 +416,9 @@ Use canonical UTC `YYYY-MM-DDTHH:MM:SSZ` strings and validate real calendar/time
 generation. `equivalent` also requires `last_successful_sync_at` equal to its remote observation
 time and, without pending work, is valid only when the observed and current local generations
 match. `ahead` without pending work also requires the current generation to remain the observed
-local base. `unknown` may have no observation or may preserve the last remote generation, timestamp
-and local comparison after a failed synchronization; paired values may not be split.
+local base. `unknown` may have no observation only when `last_successful_sync_at` is absent, or
+may preserve a complete remote generation/timestamp/local comparison with an optional historical
+successful-sync timestamp after a failed synchronization; paired values may not be split.
 Remote generations are lower-case 40-hex `refs/dolt/data` observations; local and observed-local
 generations must match the full nonblank commit form emitted by the pinned `bd vc status` parser.
 Pending operation ids are nonblank, unique and preserved in recorded order.
@@ -512,21 +529,33 @@ failure. Implement only after that failure is observed, then rerun the same comm
 Several tests may be added together only when one production change makes that coherent batch
 pass; never edit a test and its implementation in the same step.
 
+Entries labeled `contract-test` below are physical assertions run with caller-supplied pinned
+artifacts, not Rust symbol names; do not add aliases or mock seams merely to mirror their labels.
+
 | Test added first | Required red observation and eventual proof |
 | --- | --- |
 | `installed_binary_verification_needs_no_archive` (`pin`) | Installed verifier is absent; copied exact bytes/version pass, while missing, symlinked, checksum-changed and wrong-version binaries fail before store commands |
 | `linked_worktrees_resolve_one_common_store` (`store`) | Locator/store model is absent; main and linked worktrees agree, another clone differs, and bare/relative/multiline/symlink cases refuse |
-| `bootstrap_installs_a_complete_shadow_generation` (`store`) | Bootstrap is absent; real source documents, installed wrapper and Beads runtime, committed Dolt generation, export digest and authority/source KV all validate below common-dir only |
-| `bootstrap_same_source_is_a_write_free_noop` (`store`) | Existing path rebuilds; rerun returns unchanged with the same pointer/tree/mtime and no import or commit command against shared state |
-| `bootstrap_reinstalls_runtime_without_reimporting_state` (`store`) | Runtime repair loses ledger facts; a supplied valid runtime copies the validated repository into a new generation, preserves Dolt/freshness/owner/dependency state and never imports Markdown |
+| `contract-test local-reads — complete installed generation` (physical) | Bootstrap is absent; real source documents, installed wrapper and Beads runtime, committed Dolt generation, export digest and authority/source KV all validate below common-dir only |
+| `contract-test local-reads — unchanged rerun` (physical) | Existing path rebuilds; rerun returns unchanged with the same pointer/tree/mtime and no import or commit command against shared state |
+| `requested_wrapper_hash_must_match_the_active_generation` (`store`) plus `contract-test local-reads — runtime repair` (physical) | Runtime repair loses ledger facts; a supplied valid runtime copies the validated repository into a new generation, preserves Dolt/freshness/owner/dependency state and never imports Markdown |
+| `installed_runtime_damage_is_the_only_repair_disposition` and `installed_repository_snapshot_failures_are_fatal` (`store`) | Runtime repair is chosen from an overloaded refusal code; only repository-free runtime damage yields `RepairRequired`, while every installed snapshot refusal remains fatal and cannot stage a generation |
+| `recovery_snapshot_failure_never_activates_a_generation` (`store`) | Recovery can replace the pointer after a supplied-binary snapshot refusal; one permitted recovery attempt leaves the current pointer and generation tree byte-identical |
+| `bootstrap_runner_binds_locator_source_binary_and_environment` and `bootstrap_runner_accepts_only_registered_staging_and_disposable_scopes` (`store`) | Bootstrap commands can escape their bound checkout, source, artifact, environment or temporary roots; the production runner refuses them before dispatch |
+| `ordinary_reads_refuse_an_unsafe_installed_binary_mode` (`store`) | A checksum-valid world-writable installed `bd` can execute; ordinary reads refuse it before any command while bootstrap classifies it as repairable runtime damage |
 | `bootstrap_activation_survives_every_interruption_boundary` (`store`) | Direct writes expose partial state; staged faults and a contending lock leave one complete readable pointer and never overwrite old evidence |
-| `bootstrap_refuses_a_different_source_commit` (`store`) | A changed ref resets records to state 1; every different resolved commit returns `source_commit_mismatch` without staging, import, pointer or observation change |
+| `activation_requires_a_recursively_regular_staged_tree_before_replacing_current` (`store`) | Directory-only syncing can activate an incompletely durable generation; recursive file and directory sync completes before the pointer transition |
+| `contract-test local-reads — changed-source refusal` (physical) | A changed ref resets records to state 1; every different resolved commit returns `source_commit_mismatch` without staging, import, pointer or observation change |
 | `snapshot_reads_one_unchanged_committed_generation` (`store`) | Reader/plan validator is absent; a copied status/export/KV/status agrees, and changed generations, digest/KV/source/schema/path/pin mismatches refuse before output |
+| `installed_wrapper_reads_its_selected_generation_after_pointer_flip` (`store`) | A launcher can reread a changed `current` pointer and mix generations; a running canonical wrapper reads only its own immutable generation |
 | `ordinary_read_uses_and_removes_a_disposable_store_copy` (`store`) | Direct Beads reads change active Dolt mtimes; only the TempDir copy changes and complete cleanup leaves source/shared path-content-mode-mtime snapshots equal |
+| `temporary_cleanup_failure_takes_precedence_over_read_failure` and `bootstrap_cleanup_failure_is_not_a_repairable_runtime_failure` (`store`) | A failed TempDir close is swallowed or converted into repair; `temporary_cleanup_failed` wins and no generation activates |
 | `ordinary_read_plans_are_local_and_write_free` (`command`/`store`) | Unsafe shapes reach the runner; exact temporary cwd/environment/flags pass and every ref-resolution, network, native-ready, output-file, shared-store cwd or write shape is refused before dispatch |
 | `bootstrap_and_read_validators_are_distinct` (`command`/`store`) | One allowlist rejects required bootstrap writes or admits them to reads; exact init/import/KV/commit forms pass only bootstrap and fail read validation |
 | `freshness_classifies_the_six_spec_states` (`freshness`) | Classifier is absent; the six table rows return exactly the accepted enum values and pending ids |
 | `invalid_or_partial_observation_state_is_refused` (`freshness`) | Malformed metadata is accepted; bad UTC, split remote fields, invalid relation/base, duplicate/blank pending ids and impossible clean equality fail |
+| `unknown_without_remote_observation_refuses_a_lone_successful_sync_timestamp` and `unknown_preserves_a_complete_observation_with_historical_sync` (`freshness`) | `unknown` admits an orphan successful-sync timestamp or loses a valid preserved observation; only the none tuple or a complete remote tuple is accepted |
+| `failed_local_source_resolution_is_source_ref_unavailable` (`document`) | Resolver conflates a local Git runner/nonzero failure with malformed ref syntax; exactly one unchanged `rev-parse` becomes `source_ref_unavailable`, while successful malformed SHA output remains `invalid_source_ref` |
 | `list_and_show_preserve_canonical_namespaces` (`read`) | Projections are absent; all records sort canonically, kind-colliding ids remain distinct, exact show returns complete fields and absent keys are stable |
 | `ready_requires_every_governance_gate` (`read`) | Wrapper readiness is absent; planned accepted/approved exact-closure task passes locally and todo, owner, dependency, empty-link, nonaccepted, unapproved, duplicate, missing and reordered closure cases report exact blockers |
 | `active_and_terminal_tasks_are_not_called_blocked` (`read`) | Naive not-ready logic overreports; only todo/planned tasks participate and every ready/blocked item says it cannot authorize start |
@@ -534,9 +563,11 @@ pass; never edit a test and its implementation in the same step.
 | `public_reads_need_no_artifact_arguments` (`cli`) | Parser accepts only contract-test; bootstrap alone requires artifacts/ref, reads reject them, show requires a qualified key, and exit/stdout/stderr behavior is exact |
 | `ordinary_launcher_executes_installed_wrapper_without_cargo` (`cli`) | The script always runs Cargo; reads choose the safe pointer/runtime and no Cargo/rustup/build command, while bootstrap uses release locked/offline Cargo and contracts retain debug locked/offline Cargo |
 | `bootstrap_launcher_uses_release_locked_offline_cargo` (`cli`) | Bootstrap lacks the release profile; fake Cargo records exactly `run --release --locked --offline --quiet -p plasmosome-work-state --` and forwarded bootstrap arguments, while `contract-test` retains the debug locked/offline argv and ordinary reads remain Cargo-free |
-| `real_local_reads_share_one_clone_store` (`contract`) | `local-reads` case is absent; real mirror worktrees install once and return matching shell-entry-point results through disposable copies without checkout/build/shared-store mutation or a disallowed command |
+| `bootstrap_source_ref_syntax_refuses_as_invalid_source_ref` (`cli`) | Blank, whitespace or CR/LF source refs fall through to command parsing; each has empty stdout and exact human/JSON `invalid_source_ref` with exit 2 |
+| `contract-test local-reads — shared clone store and shell reads` (physical) | `local-reads` case is absent; real mirror worktrees install once and return matching shell-entry-point results through disposable copies without checkout/build/shared-store mutation or a disallowed command |
 | `real_freshness_cases_preserve_remote_and_pending_facts` (`contract`) | Cases are absent; real committed stores drive all six states through production readers and renderers without a public state-writing command |
 | `all_includes_local_reads_and_both_freshness_cases` (`contract`) | Aggregate omits new evidence; one supplied real artifact run executes every old and new case without skip or hosted fixture |
+| `fixture_cleanup_failure_takes_precedence_over_an_operation_refusal` (`contract`) | A real fixture cleanup failure is hidden by a prior operation refusal; `fixture_cleanup_failed` is the final contract refusal without changing the schema |
 
 ### Execution order
 
@@ -567,6 +598,8 @@ pass; never edit a test and its implementation in the same step.
    `tools/work-state` without changing old contract behavior and rerun it green. Exercise the real
    script and prove ordinary reads do not start Cargo, bootstrap is release locked/offline, and
    contract development commands remain debug locked/offline.
+   Add the document resolver's unavailable-local-ref test before changing its first source-resolution
+   refusal; preserve malformed-resolution syntax and the legacy contract-test serialized refusal.
 8. Add one contract case at a time in `tests/contract.rs`: `local-reads`, `freshness`, then
    `combined-freshness`. Observe each exact filter red before changing `contract.rs`; implement and
    run that filter with the supplied real pinned artifact before adding the next case. Add the
@@ -671,7 +704,7 @@ five-read debug set also returned 69 documents each: 13.53, 13.21, 13.30, 13.30 
 threshold. This timing evidence does not claim the separate OS no-socket or full
 `offline-reads` acceptance.
 
-### 2026-09-02 — final execution evidence
+### 2026-09-02 — pre-remediation execution evidence
 
 The implementation followed the named test-first batches: installed runtime/pin verification,
 common-directory locator and strict manifest/layout, fenced disposable snapshots, the six-state
@@ -679,7 +712,8 @@ freshness classifier, read projections and rendering, launcher behavior, and rea
 dispatch. Later safety reds showed a symlinked state root being classified as `not_initialized`
 instead of `invalid_store`, and whitespace-padded manifest/local commit values being accepted;
 the corresponding implementation changes made their focused tests green without weakening the
-assertions. The complete crate suite was green at 119 tests.
+assertions. The complete crate suite was then green at 119 tests; later remediation changed the
+runtime, launcher, freshness and cleanup boundaries, so this is not final-head evidence.
 
 Separate real pinned-artifact commands all exited 0 against `origin/main` resolved as
 `66583edc75de0fddcfe441273541850d4631b52d`: `local-reads` (generation
@@ -692,7 +726,7 @@ scenarios. Together, the real production reads cover `unknown`, `synchronized_as
 `unpublished`, `stale_with_unpublished`, and `unknown_with_unpublished`.
 
 Coverage preflight found `cargo-llvm-cov 0.6.21`, an already-installed nightly and
-`llvm-tools`; no toolchain change was made. Final stable coverage was 75.61% regions, 71.25%
+`llvm-tools`; no toolchain change was made. Then stable coverage was 75.61% regions, 71.25%
 functions and 77.31% lines. Final nightly branch coverage was 25.63% regions, 26.39% functions,
 26.93% lines and 42.26% branches; it emitted the pre-existing deprecated `fetch_update` warning in
 `plasmosome-membrane`. Safety/validation, atomicity, local command-plan, readiness, rendering and
@@ -702,9 +736,102 @@ without a broad mock layer; real contracts exercise the successful process bound
 
 The separately run behavior-preserving cleanup simplified the renderer empty-details branch,
 removed needless decoder borrows and returned staged closure results directly; focused read,
-shadow and store tests stayed green. Final gates all exited 0: `/usr/bin/time -p cargo test
+shadow and store tests stayed green. Then gates all exited 0: `/usr/bin/time -p cargo test
 --workspace` (real 6.74s, user 2.55s, sys 3.52s), a separate `cargo test --workspace`, Clippy with
 warnings denied, format check, provenance guard, attribution guard and `git diff --check`.
 
 This evidence covers clone-local local reads and freshness only. It does not claim `heartbeat
 observe`, an OS-level no-socket harness, or full Spec 014 `offline-reads`/cutover acceptance.
+
+### 2026-09-02 — remediation evidence before final rerun
+
+The post-review repairs stayed within this task's installed-runtime and disposable-read boundary.
+`installed_runtime_damage_is_the_only_repair_disposition` first failed because a stale manifest
+host target was treated as usable; it is green after repository-free preflight compares the
+manifest target and Beads digest to the requested verified pin. The same test then failed for
+checksum-valid `0600` and `0777` installed binaries, and
+`ordinary_reads_refuse_an_unsafe_installed_binary_mode` failed by reaching version execution; both
+are green after the existing exact owner-only executable validation is applied before an ordinary
+read. A missing binary still reaches the installed verifier and returns
+`installed_beads_missing`; the exact copied-generation A/B launcher test remains green.
+
+The phase tests `installed_repository_snapshot_failures_are_fatal` (store change, malformed
+repository, snapshot mismatch and copied-binary verification) and
+`recovery_snapshot_failure_never_activates_a_generation` are green. The latter is honest
+post-hoc boundary coverage: it verifies the one permitted supplied-binary recovery snapshot
+attempt leaves the pointer and generation tree unchanged. `temporary_cleanup_failure_takes_precedence_over_read_failure`,
+`bootstrap_cleanup_failure_is_not_a_repairable_runtime_failure`,
+`unknown_without_remote_observation_refuses_a_lone_successful_sync_timestamp`,
+`unknown_preserves_a_complete_observation_with_historical_sync`,
+`bootstrap_source_ref_syntax_refuses_as_invalid_source_ref`, and the two exact bootstrap-runner
+binding tests are green. `fixture_cleanup_failure_takes_precedence_over_an_operation_refusal`
+was red with `beads_checksum_mismatch`, then green with `fixture_cleanup_failed`; fixture cleanup
+now wins without changing the public result schema.
+
+An independent audit confirmed that authenticated checkout provenance and hostile same-user
+descriptor-relative traversal are not partial Task 046 additions: the task trusts the invoking
+checkout/current executable and immutable retained generations, while full hostile-local defense
+requires a separate fd-anchored capability. Abandoned staging/current temporary names and old
+generations remain retained evidence until separately specified GC. `Command::output` is
+synchronous and embedded Beads starts no server, so no stop/kill behavior was added.
+
+The post-remediation physical `local-reads` diagnostic used the same verified
+`aarch64-apple-darwin` archive/binary checksums recorded above, exited 0, and returned 69 source
+documents from `66583edc75de0fddcfe441273541850d4631b52d`. It exercised real lock contention,
+two worktree read matrices, missing-binary repair, checksum repair, wrapper-mode repair and
+changed-source refusal; it retained five generations and removed its fixture temporary root.
+`/usr/bin/time -p` recorded real 1098.89s, user 920.46s, sys 85.01s. This diagnostic predates the
+outer-fixture cleanup change and is deliberately not counted as final acceptance; the final
+physical matrix, coverage and gates are rerun after the frozen source below.
+
+### 2026-09-02 — final frozen-head acceptance and coverage
+
+The frozen-source real-artifact rerun completed before this evidence update, using Beads 1.1.2 for
+`aarch64-apple-darwin`, archive SHA-256
+`9b0137a83a2afd343e2abd2a506be72ea032721000f76669c2cf81729e78501d`, binary SHA-256
+`621b7b6c20c38db27ef4120398eb46dc35ba5b3e6c3611e19e14d33de10ce351`, and source
+`66583edc75de0fddcfe441273541850d4631b52d`. `local-reads` passed in 1097.89s; it retained the
+missing-binary, corrupt-binary, wrapper-mode, contention, A/B-wrapper and changed-source
+subcases. `freshness` passed in 284.89s with `operation-contract-046`; `combined-freshness`
+passed in 217.75s with the two ordered pending ids; and aggregate `all` passed in 1588.52s. Every
+case reported the same 14 intent, 13 spec and 42 task Markdown documents (69 total), the logical
+digest `645de42eecf42b8e00d6eed81bf3f5a5077127cc7bb7afdbc09466cbb9ea74fb`, and Beads 1.1.2.
+
+The fresh detached timing clone received the current tracked launcher and source diff, then the
+actual `tools/work-state bootstrap` release/locked/offline invocation with the pinned local
+artifacts. Its bootstrap installed the same source and a 69-document projection; after one warm
+artifact-free read (3.41s), five sequential `env -i PATH=/usr/bin:/bin ./tools/work-state list
+--json` release reads were 3.26, 3.31, 3.28, 3.24 and 3.28 seconds (median 3.28s), each with 69
+documents. A separately bootstrapped comparable debug generation, also warmed first, measured
+13.26, 13.20, 13.14, 13.15 and 13.19 seconds (median 13.19s), again with 69 documents each. The
+0.249 release/debug median ratio meets the one-third gate, and 3.28s meets the 4.0s gate.
+
+No toolchain change was made: `cargo-llvm-cov 0.6.21`, installed nightly, and installed
+`llvm-tools-aarch64-apple-darwin` were confirmed before coverage. Final
+`cargo llvm-cov --workspace --summary-only` was 77.25% regions, 71.38% functions and 78.46%
+lines. For the changed work-state crate, `store.rs` was 76.15%/53.59%/76.92%, `freshness.rs`
+89.07%/93.75%/92.48%, `read.rs` 93.35%/91.49%/95.93%, `document.rs`
+89.29%/96.30%/89.75%, and `command.rs` 95.51%/92.31%/97.26% (regions/functions/lines).
+Nightly branch coverage completed at 28.55% regions, 28.94% functions, 30.03% lines and 44.13%
+branches across the workspace; the changed safety branches were reviewed and the meaningful
+missing cases added in the named runtime-preflight, disposable-cleanup, freshness, source-ref,
+launcher and fixture-cleanup tests. Remaining lower contract/store paths are filesystem and
+subprocess fault/interruption paths that would require a prohibited broad fault/mock seam; real
+contracts exercise their successful production boundary. The refactor review found no separate
+behavior-preserving cleanup warranted after the last safety changes.
+
+### 2026-09-02 — final quality gate rerun
+
+The first final Clippy run found two code-quality findings, not behavioral failures: the private
+disposable-read helper had nine parameters, and the CLI used a lazy `bool::then` closure. A narrow
+private `DisposableSnapshotRequest` parameter object and `then_some` replacement resolved them
+without suppressing either lint or changing assertions. Focused store/read and CLI tests, then the
+full workspace suite, stayed green; this was a behavior-preserving refactor rather than a new TDD
+behavior batch.
+
+The final code tree was checked with `/usr/bin/time -p cargo test --workspace`
+(exit 0; real 9.92s, user 3.85s, sys 4.00s), a separate `cargo test --workspace` (exit 0),
+`cargo clippy --workspace --all-targets -- -D warnings` (exit 0),
+`cargo fmt --all -- --check` (exit 0), `.githooks/provenance-guard` (clean),
+`.githooks/attribution-guard` (clean), and `git diff --check` (clean). No temporary trace,
+diagnostic, direct `std::process::Command` contract child, author or co-author was added.

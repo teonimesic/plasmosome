@@ -791,18 +791,18 @@ fn validate_import_response(
     Ok(())
 }
 
-/// Imports documents into one fresh store, exports them, and verifies its Markdown-shadow keys.
-pub fn import_shadow_documents<R: CommandRunner>(
+struct ImportedStoreExport {
+    stdout: String,
+    key: Option<String>,
+    command_plans: Vec<String>,
+}
+
+fn import_store_export<R: CommandRunner>(
     runner: &mut R,
     store: &ShadowStore,
-    source_commit: &str,
     documents: &[ShadowDocument],
-) -> Result<ShadowStoreImport, ShadowError> {
-    if !is_lower_hex_sha(source_commit) {
-        return Err(refusal("invalid_source_ref", None));
-    }
-    validate_documents(documents)?;
-    let jsonl = to_beads_jsonl(documents)?;
+    jsonl: String,
+) -> Result<ImportedStoreExport, ShadowError> {
     let mut jsonl_file = NamedTempFile::new_in(&store.temporary_root)
         .map_err(|_| refusal("invalid_document", None))?;
     jsonl_file
@@ -839,7 +839,20 @@ pub fn import_shadow_documents<R: CommandRunner>(
         store_command(store, vec!["--sandbox".into(), "export".into()], Vec::new()),
         key.clone(),
     )?;
-    let exported_documents = decode_beads_jsonl(&exported.stdout)?;
+    Ok(ImportedStoreExport {
+        stdout: exported.stdout,
+        key,
+        command_plans,
+    })
+}
+
+fn verify_store_authority<R: CommandRunner>(
+    runner: &mut R,
+    store: &ShadowStore,
+    source_commit: &str,
+    command_plans: &mut Vec<String>,
+    key: Option<String>,
+) -> Result<(), ShadowError> {
     for (argv, expected) in [
         (
             vec![
@@ -882,7 +895,7 @@ pub fn import_shadow_documents<R: CommandRunner>(
     ] {
         let output = run_store_command(
             runner,
-            &mut command_plans,
+            command_plans,
             store_command(store, argv, Vec::new()),
             key.clone(),
         )?;
@@ -890,10 +903,34 @@ pub fn import_shadow_documents<R: CommandRunner>(
             return Err(refusal("invalid_document", key));
         }
     }
+    Ok(())
+}
+
+/// Imports documents into one fresh store, exports them, and verifies its Markdown-shadow keys.
+pub fn import_shadow_documents<R: CommandRunner>(
+    runner: &mut R,
+    store: &ShadowStore,
+    source_commit: &str,
+    documents: &[ShadowDocument],
+) -> Result<ShadowStoreImport, ShadowError> {
+    if !is_lower_hex_sha(source_commit) {
+        return Err(refusal("invalid_source_ref", None));
+    }
+    validate_documents(documents)?;
+    let jsonl = to_beads_jsonl(documents)?;
+    let mut exported = import_store_export(runner, store, documents, jsonl)?;
+    let exported_documents = decode_beads_jsonl(&exported.stdout)?;
+    verify_store_authority(
+        runner,
+        store,
+        source_commit,
+        &mut exported.command_plans,
+        exported.key.clone(),
+    )?;
     Ok(ShadowStoreImport {
         label: store.label.clone(),
         documents: exported_documents,
-        command_plans,
+        command_plans: exported.command_plans,
     })
 }
 
@@ -909,95 +946,17 @@ pub fn import_operational_shadow_documents<R: CommandRunner>(
         return Err(refusal("invalid_source_ref", None));
     }
     let jsonl = to_operational_beads_jsonl(documents, operational)?;
-    let mut jsonl_file = NamedTempFile::new_in(&store.temporary_root)
-        .map_err(|_| refusal("invalid_document", None))?;
-    jsonl_file
-        .write_all(jsonl.as_bytes())
-        .map_err(|_| refusal("invalid_document", None))?;
-    let jsonl_path = jsonl_file.path().display().to_string();
-    let expected_ids = documents
-        .iter()
-        .map(|document| native_id(&document.record))
-        .collect::<Vec<_>>();
-    let key = documents
-        .first()
-        .map(|document| document.record.document_key.clone());
-    let mut command_plans = Vec::new();
-    let imported = run_store_command(
+    let mut exported = import_store_export(runner, store, documents, jsonl)?;
+    verify_store_authority(
         runner,
-        &mut command_plans,
-        store_command(
-            store,
-            vec![
-                "--sandbox".into(),
-                "import".into(),
-                jsonl_path,
-                "--json".into(),
-            ],
-            vec![2],
-        ),
-        key.clone(),
+        store,
+        source_commit,
+        &mut exported.command_plans,
+        exported.key.clone(),
     )?;
-    validate_import_response(&imported.stdout, &expected_ids, key.clone())?;
-    let exported = run_store_command(
-        runner,
-        &mut command_plans,
-        store_command(store, vec!["--sandbox".into(), "export".into()], Vec::new()),
-        key.clone(),
-    )?;
-    for (argv, expected) in [
-        (
-            vec![
-                "--sandbox".into(),
-                "kv".into(),
-                "set".into(),
-                "plasmosome.authority-mode".into(),
-                "markdown-shadow".into(),
-            ],
-            None,
-        ),
-        (
-            vec![
-                "--sandbox".into(),
-                "kv".into(),
-                "set".into(),
-                "plasmosome.source-commit".into(),
-                source_commit.to_owned(),
-            ],
-            None,
-        ),
-        (
-            vec![
-                "--sandbox".into(),
-                "kv".into(),
-                "get".into(),
-                "plasmosome.authority-mode".into(),
-            ],
-            Some("markdown-shadow"),
-        ),
-        (
-            vec![
-                "--sandbox".into(),
-                "kv".into(),
-                "get".into(),
-                "plasmosome.source-commit".into(),
-            ],
-            Some(source_commit),
-        ),
-    ] {
-        let output = run_store_command(
-            runner,
-            &mut command_plans,
-            store_command(store, argv, Vec::new()),
-            key.clone(),
-        )?;
-        if expected.is_some_and(|expected| output.stdout.trim() != expected) {
-            return Err(refusal("invalid_document", key));
-        }
-    }
     Ok(OperationalShadowStoreImport {
         label: store.label.clone(),
         documents: decode_operational_beads_jsonl(&exported.stdout)?,
-        command_plans,
+        command_plans: exported.command_plans,
     })
 }

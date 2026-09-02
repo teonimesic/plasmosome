@@ -231,13 +231,16 @@ impl BootstrapLock {
     /// Acquires the clone-local bootstrap lock without waiting for another installer.
     pub fn acquire(location: &StoreLocation) -> Result<Self, StoreError> {
         match fs::symlink_metadata(&location.state_root) {
-            Ok(_) => directory_without_symlink(&location.state_root)?,
+            Ok(_) => {
+                directory_without_symlink(&location.state_root)?;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 fs::create_dir_all(&location.state_root).map_err(|_| refusal("invalid_store"))?;
                 directory_without_symlink(&location.state_root)?;
             }
             Err(_) => return Err(refusal("invalid_store")),
         }
+        sync_directory(&location.common_dir)?;
         let path = location.state_root.join("bootstrap.lock");
         if let Ok(metadata) = fs::symlink_metadata(&path)
             && metadata.file_type().is_symlink()
@@ -308,6 +311,23 @@ fn sync_directory(path: &Path) -> Result<(), StoreError> {
         .map_err(|_| refusal("invalid_store"))
 }
 
+fn sync_regular_tree(path: &Path) -> Result<(), StoreError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| refusal("invalid_store"))?;
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        for entry in fs::read_dir(path).map_err(|_| refusal("invalid_store"))? {
+            let entry = entry.map_err(|_| refusal("invalid_store"))?;
+            sync_regular_tree(&entry.path())?;
+        }
+        return sync_directory(path);
+    }
+    if metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+        return File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| refusal("invalid_store"));
+    }
+    Err(refusal("invalid_store"))
+}
+
 /// Activates one complete staged generation by replacing only the `current` pointer atomically.
 pub fn activate_staged_generation(
     location: &StoreLocation,
@@ -330,7 +350,7 @@ pub fn activate_staged_generation(
     if matches!(fault, Some(ActivationFault::BeforeGenerationRename)) {
         return Err(refusal("bootstrap_interrupted"));
     }
-    sync_directory(staging)?;
+    sync_regular_tree(staging)?;
     let final_generation = location.generations_dir.join(generation_name);
     if final_generation.exists() || fs::symlink_metadata(&final_generation).is_ok() {
         return Err(refusal("invalid_store"));
@@ -643,6 +663,22 @@ fn owner_private_executable(path: &Path) -> Result<(), StoreError> {
     #[cfg(not(unix))]
     {
         let _ = path;
+    }
+    Ok(())
+}
+
+fn owner_private_executable_is_valid(path: &Path) -> Result<(), StoreError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| refusal("invalid_store"))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(refusal("invalid_store"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if metadata.permissions().mode() & 0o7777 != 0o700 {
+            return Err(refusal("invalid_store"));
+        }
     }
     Ok(())
 }
@@ -1053,40 +1089,375 @@ fn bootstrap_locator_command(command: &CommandSpec) -> bool {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SourceCommandCapture {
+    ResolvedCommit,
+    ContentCommit,
+    None,
+}
+
+/// The production-only command fence for bootstrap. It binds every dynamic root before it can
+/// reach the system runner; generic recording runners retain their narrow unit-test seam.
 struct BootstrapCommandRunner {
     source_root: PathBuf,
+    checkout: PathBuf,
+    requested_ref: String,
     initial_binary: PathBuf,
+    verification_environment: BTreeMap<String, String>,
+    resolved_source_commit: Option<String>,
+    content_commits: BTreeSet<String>,
+    location: Option<StoreLocation>,
+    staging_roots: BTreeMap<PathBuf, BTreeMap<String, String>>,
+    installed_roots: BTreeMap<PathBuf, BTreeMap<String, String>>,
+    disposable_roots: BTreeMap<PathBuf, BTreeMap<String, String>>,
     inner: SystemCommandRunner,
 }
 
 impl BootstrapCommandRunner {
     fn new(source_root: PathBuf, initial_binary: PathBuf) -> Self {
         Self {
+            checkout: source_root.clone(),
             source_root,
+            requested_ref: "origin/main".into(),
             initial_binary,
+            verification_environment: BTreeMap::new(),
+            resolved_source_commit: None,
+            content_commits: BTreeSet::new(),
+            location: None,
+            staging_roots: BTreeMap::new(),
+            installed_roots: BTreeMap::new(),
+            disposable_roots: BTreeMap::new(),
             inner: SystemCommandRunner,
+        }
+    }
+
+    fn bind_source_inputs(
+        &mut self,
+        requested_ref: String,
+        verification_environment: BTreeMap<String, String>,
+    ) -> Result<(), StoreError> {
+        if requested_ref.trim().is_empty() || requested_ref.contains(['\n', '\r']) {
+            return Err(refusal("invalid_source_ref"));
+        }
+        directory_without_symlink(&self.source_root)?;
+        if fs::canonicalize(&self.source_root).map_err(|_| refusal("invalid_store"))?
+            != self.source_root
+        {
+            return Err(refusal("invalid_store"));
+        }
+        self.requested_ref = requested_ref;
+        self.verification_environment = verification_environment;
+        Ok(())
+    }
+
+    fn bind_checkout(&mut self, checkout: PathBuf) -> Result<(), StoreError> {
+        directory_without_symlink(&checkout)?;
+        if fs::canonicalize(&checkout).map_err(|_| refusal("invalid_store"))? != checkout {
+            return Err(refusal("invalid_store"));
+        }
+        self.checkout = checkout;
+        Ok(())
+    }
+
+    fn bind_location(&mut self, location: StoreLocation) -> Result<(), StoreError> {
+        if location.worktree_root != self.checkout
+            || location.state_root != location.common_dir.join(STORE_DIRECTORY)
+            || location.generations_dir != location.state_root.join(GENERATIONS_DIRECTORY)
+        {
+            return Err(refusal("invalid_store"));
+        }
+        directory_without_symlink(&location.common_dir)?;
+        if fs::canonicalize(&location.common_dir).map_err(|_| refusal("invalid_store"))?
+            != location.common_dir
+        {
+            return Err(refusal("invalid_store"));
+        }
+        self.location = Some(location);
+        Ok(())
+    }
+
+    fn register_staging(
+        &mut self,
+        root: &Path,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<(), StoreError> {
+        let location = self
+            .location
+            .as_ref()
+            .ok_or_else(|| refusal("invalid_store"))?;
+        if root.parent() != Some(location.generations_dir.as_path())
+            || !root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".staging-") && name.len() > ".staging-".len())
+        {
+            return Err(refusal("invalid_store"));
+        }
+        directory_without_symlink(root)?;
+        if fs::canonicalize(root).map_err(|_| refusal("invalid_store"))? != root
+            || environment_for_runtime(&root.join("runtime"), false)? != *environment
+            || self.staging_roots.contains_key(root)
+        {
+            return Err(refusal("invalid_store"));
+        }
+        self.staging_roots
+            .insert(root.to_path_buf(), environment.clone());
+        Ok(())
+    }
+
+    fn register_installed_generation(
+        &mut self,
+        generation: &CurrentGeneration,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<(), StoreError> {
+        let location = self
+            .location
+            .as_ref()
+            .ok_or_else(|| refusal("invalid_store"))?;
+        if generation.root.parent() != Some(location.generations_dir.as_path())
+            || !safe_generation_name(&generation.name)
+            || generation.root.file_name().and_then(|name| name.to_str())
+                != Some(generation.name.as_str())
+            || environment_for_runtime(&generation.root.join("runtime"), false)? != *environment
+        {
+            return Err(refusal("invalid_store"));
+        }
+        directory_without_symlink(&generation.root)?;
+        if fs::canonicalize(&generation.root).map_err(|_| refusal("invalid_store"))?
+            != generation.root
+        {
+            return Err(refusal("invalid_store"));
+        }
+        self.installed_roots
+            .insert(generation.root.clone(), environment.clone());
+        Ok(())
+    }
+
+    fn register_disposable(
+        &mut self,
+        root: &Path,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<(), StoreError> {
+        directory_without_symlink(root)?;
+        fs::canonicalize(root).map_err(|_| refusal("invalid_store"))?;
+        if environment_for_runtime(&root.join("runtime"), false)? != *environment
+            || self.disposable_roots.contains_key(root)
+        {
+            return Err(refusal("invalid_store"));
+        }
+        self.disposable_roots
+            .insert(root.to_path_buf(), environment.clone());
+        Ok(())
+    }
+
+    fn unregister_disposable(&mut self, root: &Path) {
+        self.disposable_roots.remove(root);
+    }
+
+    fn source_environment(&self) -> BTreeMap<String, String> {
+        let mut environment = self.verification_environment.clone();
+        environment.insert("GIT_NO_LAZY_FETCH".into(), "1".into());
+        environment
+    }
+
+    fn locator_environment(&self) -> BTreeMap<String, String> {
+        let mut environment = self.verification_environment.clone();
+        for (key, value) in [
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("GIT_NO_LAZY_FETCH", "1"),
+            ("GIT_OPTIONAL_LOCKS", "0"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ] {
+            environment.insert(key.into(), value.into());
+        }
+        environment
+    }
+
+    fn source_command_capture(&self, command: &CommandSpec) -> Option<SourceCommandCapture> {
+        if command.program != Path::new("git")
+            || command.cwd.as_deref() != Some(self.source_root.as_path())
+            || command.environment != self.source_environment()
+        {
+            return None;
+        }
+        let resolved = self.resolved_source_commit.as_deref();
+        match command.argv.as_slice() {
+            [program, verify, end_of_options, reference]
+                if self.resolved_source_commit.is_none()
+                    && program == "rev-parse"
+                    && verify == "--verify"
+                    && end_of_options == "--end-of-options"
+                    && reference == &format!("{}^{{commit}}", self.requested_ref) =>
+            {
+                Some(SourceCommandCapture::ResolvedCommit)
+            }
+            [
+                program,
+                recursive,
+                names,
+                nul,
+                commit,
+                separator,
+                intents,
+                specs,
+                tasks,
+            ] if program == "ls-tree"
+                && recursive == "-r"
+                && names == "--name-only"
+                && nul == "-z"
+                && Some(commit.as_str()) == resolved
+                && separator == "--"
+                && intents == "docs/intents"
+                && specs == "docs/specs"
+                && tasks == "tasks" =>
+            {
+                Some(SourceCommandCapture::None)
+            }
+            [program, object] if program == "show" => {
+                let (commit, path) = object.split_once(':')?;
+                ((Some(commit) == resolved || self.content_commits.contains(commit))
+                    && !path.is_empty()
+                    && !path.contains(['\n', '\r']))
+                .then_some(SourceCommandCapture::None)
+            }
+            [program, one, format, commit, separator, literal_path]
+                if program == "log"
+                    && one == "-1"
+                    && format == "--format=%H"
+                    && Some(commit.as_str()) == resolved
+                    && separator == "--"
+                    && literal_path.starts_with(":(literal)")
+                    && literal_path.len() > ":(literal)".len()
+                    && !literal_path.contains(['\n', '\r']) =>
+            {
+                Some(SourceCommandCapture::ContentCommit)
+            }
+            _ => None,
+        }
+    }
+
+    fn valid_locator(&self, command: &CommandSpec) -> bool {
+        command.program == Path::new("git")
+            && command.cwd.as_deref() == Some(self.checkout.as_path())
+            && command.environment == self.locator_environment()
+            && bootstrap_locator_command(command)
+    }
+
+    fn valid_initial_version(&self, command: &CommandSpec) -> bool {
+        command.program == self.initial_binary
+            && command.argv == ["--version"]
+            && command.cwd.is_none()
+            && command.environment == self.verification_environment
+    }
+
+    fn valid_staging_command(&self, command: &CommandSpec) -> bool {
+        self.staging_roots.iter().any(|(root, environment)| {
+            let repository = root.join("repository");
+            let binary = root.join("bd");
+            if command.environment != *environment {
+                return false;
+            }
+            if command.program == binary && command.argv == ["--version"] && command.cwd.is_none() {
+                return true;
+            }
+            let valid_repository_command = if command.program == Path::new("git") {
+                command.cwd.as_deref() == Some(repository.as_path())
+                    && bootstrap_repository_git_command(&command.argv)
+            } else {
+                command.program == binary
+                    && command.cwd.as_deref() == Some(repository.as_path())
+                    && bootstrap_beads_command(&command.argv)
+            };
+            if !valid_repository_command {
+                return false;
+            }
+            if matches!(command.argv.as_slice(), [sandbox, import, path, json] if sandbox == "--sandbox" && import == "import" && json == "--json") {
+                let import_path = Path::new(&command.argv[2]);
+                return import_path.parent() == Some(root.join("runtime/tmp").as_path())
+                    && regular_file(import_path).is_ok();
+            }
+            if let [sandbox, dolt, commit, message, value] = command.argv.as_slice()
+                && sandbox == "--sandbox"
+                && dolt == "dolt"
+                && commit == "commit"
+                && message == "-m"
+            {
+                return value
+                    .strip_prefix("bootstrap markdown-shadow ")
+                    .is_some_and(|commit| Some(commit) == self.resolved_source_commit.as_deref());
+            }
+            if let [sandbox, kv, set, key, value] = command.argv.as_slice()
+                && sandbox == "--sandbox"
+                && kv == "kv"
+                && set == "set"
+                && key == "plasmosome.source-commit"
+            {
+                return Some(value.as_str()) == self.resolved_source_commit.as_deref();
+            }
+            true
+        })
+    }
+
+    fn valid_installed_version(&self, command: &CommandSpec) -> bool {
+        self.installed_roots.iter().any(|(root, environment)| {
+            command.program == root.join("bd")
+                && command.argv == ["--version"]
+                && command.cwd.is_none()
+                && command.environment == *environment
+        })
+    }
+
+    fn valid_disposable_command(&self, command: &CommandSpec) -> bool {
+        self.disposable_roots.iter().any(|(root, environment)| {
+            command.environment == *environment
+                && validate_read_command(command, &root.join("repository"), &root.join("bd"))
+                    .is_ok()
+        })
+    }
+
+    fn record_source_output(
+        &mut self,
+        capture: SourceCommandCapture,
+        output: &crate::command::CommandOutput,
+    ) {
+        if output.status != 0 {
+            return;
+        }
+        let value = output
+            .stdout
+            .strip_suffix('\n')
+            .filter(|value| !value.contains(['\n', '\r']))
+            .filter(|value| is_lower_hex_sha(value))
+            .map(str::to_owned);
+        match (capture, value) {
+            (SourceCommandCapture::ResolvedCommit, Some(commit)) => {
+                self.resolved_source_commit = Some(commit);
+            }
+            (SourceCommandCapture::ContentCommit, Some(commit)) => {
+                self.content_commits.insert(commit);
+            }
+            _ => {}
         }
     }
 }
 
 impl CommandRunner for BootstrapCommandRunner {
     fn run(&mut self, command: CommandSpec) -> Result<crate::command::CommandOutput, String> {
-        let valid = if command.argv == ["--version"] && command.cwd.is_none() {
-            command.program == self.initial_binary
-                || command.program.file_name().and_then(|name| name.to_str()) == Some("bd")
-        } else if bootstrap_locator_command(&command) {
-            true
-        } else if let Some(repository) = command.cwd.as_deref() {
-            validate_bootstrap_command(&command, &self.source_root, repository, &command.program)
-                .is_ok()
-                || validate_read_command(&command, repository, &command.program).is_ok()
-        } else {
-            false
-        };
+        let source_capture = self.source_command_capture(&command);
+        let valid = source_capture.is_some()
+            || self.valid_initial_version(&command)
+            || self.valid_locator(&command)
+            || self.valid_staging_command(&command)
+            || self.valid_installed_version(&command)
+            || self.valid_disposable_command(&command);
         if !valid {
             return Err("invalid_bootstrap_command".into());
         }
-        self.inner.run(command)
+        let output = self.inner.run(command)?;
+        if let Some(capture) = source_capture {
+            self.record_source_output(capture, &output);
+        }
+        Ok(output)
     }
 }
 
@@ -1104,94 +1475,187 @@ fn run_read_command<R: CommandRunner>(
     Ok(output.stdout)
 }
 
+struct DisposableSnapshotRequest<'a> {
+    pin: &'a PinManifest,
+    target: &'a str,
+    selected_binary: &'a Path,
+    selected_environment: BTreeMap<String, String>,
+    require_matching_installed_runtime: bool,
+    temporary_root: &'a Path,
+    copied_environment: BTreeMap<String, String>,
+}
+
+fn read_disposable_snapshot_in_root<R: CommandRunner>(
+    runner: &mut R,
+    generation: &CurrentGeneration,
+    request: DisposableSnapshotRequest<'_>,
+) -> Result<FencedSnapshot, StoreError> {
+    let expected_binary_sha = request
+        .pin
+        .targets
+        .iter()
+        .find(|candidate| candidate.target == request.target)
+        .ok_or_else(|| refusal("unsupported_beads_platform"))?
+        .binary_sha256
+        .as_str();
+    if request.require_matching_installed_runtime
+        && (generation.manifest.host_target != request.target
+            || generation.manifest.beads_binary_sha256 != expected_binary_sha)
+    {
+        return Err(refusal("invalid_store"));
+    }
+    if request.require_matching_installed_runtime
+        && !matches!(
+            fs::symlink_metadata(request.selected_binary),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    {
+        owner_private_executable_is_valid(request.selected_binary)?;
+    }
+    InstalledBeads::verify(
+        request.pin,
+        request.target,
+        request.selected_binary,
+        request.selected_environment,
+        runner,
+    )
+    .map_err(pin_refusal)?;
+    let repository = request.temporary_root.join("repository");
+    copy_private_tree(&generation.root.join("repository"), &repository)?;
+    let copied_binary = request.temporary_root.join("bd");
+    copy_regular_file(request.selected_binary, &copied_binary)?;
+    InstalledBeads::verify(
+        request.pin,
+        request.target,
+        &copied_binary,
+        request.copied_environment.clone(),
+        runner,
+    )
+    .map_err(pin_refusal)?;
+    let status_command = || CommandSpec {
+        program: copied_binary.clone(),
+        argv: vec![
+            "--readonly".into(),
+            "--sandbox".into(),
+            "--json".into(),
+            "vc".into(),
+            "status".into(),
+        ],
+        cwd: Some(repository.clone()),
+        environment: request.copied_environment.clone(),
+        redacted_argv_positions: Vec::new(),
+    };
+    let before = run_read_command(runner, status_command(), &repository, &copied_binary)?;
+    let export = run_read_command(
+        runner,
+        CommandSpec {
+            program: copied_binary.clone(),
+            argv: vec!["--readonly".into(), "--sandbox".into(), "export".into()],
+            cwd: Some(repository.clone()),
+            environment: request.copied_environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        },
+        &repository,
+        &copied_binary,
+    )?;
+    let key_values = run_read_command(
+        runner,
+        CommandSpec {
+            program: copied_binary.clone(),
+            argv: vec![
+                "--readonly".into(),
+                "--sandbox".into(),
+                "--json".into(),
+                "kv".into(),
+                "list".into(),
+            ],
+            cwd: Some(repository.clone()),
+            environment: request.copied_environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        },
+        &repository,
+        &copied_binary,
+    )?;
+    let after = run_read_command(runner, status_command(), &repository, &copied_binary)?;
+    validate_fenced_snapshot(&generation.manifest, &before, &export, &key_values, &after)
+}
+
+fn finish_disposable_snapshot(
+    result: Result<FencedSnapshot, StoreError>,
+    cleanup: std::io::Result<()>,
+) -> Result<FencedSnapshot, StoreError> {
+    if cleanup.is_err() {
+        return Err(refusal("temporary_cleanup_failed"));
+    }
+    result
+}
+
 fn read_disposable_snapshot_with_binary<R: CommandRunner>(
     runner: &mut R,
     generation: &CurrentGeneration,
     pin: &PinManifest,
     target: &str,
     selected_binary: &Path,
+    require_matching_installed_runtime: bool,
 ) -> Result<FencedSnapshot, StoreError> {
-    let expected_binary_sha = pin
-        .targets
-        .iter()
-        .find(|candidate| candidate.target == target)
-        .ok_or_else(|| refusal("unsupported_beads_platform"))?
-        .binary_sha256
-        .as_str();
-    if generation.manifest.host_target != target
-        || generation.manifest.beads_binary_sha256 != expected_binary_sha
-    {
-        return Err(refusal("invalid_store"));
-    }
-    let runtime = generation.root.join("runtime");
-    let shared_environment = environment_for_runtime(&runtime, false)?;
-    InstalledBeads::verify(pin, target, selected_binary, shared_environment, runner)
-        .map_err(pin_refusal)?;
+    let shared_environment = environment_for_runtime(&generation.root.join("runtime"), false)?;
     let temporary_root = tempfile::Builder::new()
         .prefix("plasmosome-read-")
         .tempdir()
         .map_err(|_| refusal("invalid_store"))?;
     let result = (|| {
-        let repository = temporary_root.path().join("repository");
-        copy_private_tree(&generation.root.join("repository"), &repository)?;
-        let copied_binary = temporary_root.path().join("bd");
-        copy_regular_file(selected_binary, &copied_binary)?;
-        let copied_runtime = temporary_root.path().join("runtime");
-        let environment = environment_for_runtime(&copied_runtime, true)?;
-        InstalledBeads::verify(pin, target, &copied_binary, environment.clone(), runner)
-            .map_err(pin_refusal)?;
-        let status_command = || CommandSpec {
-            program: copied_binary.clone(),
-            argv: vec![
-                "--readonly".into(),
-                "--sandbox".into(),
-                "--json".into(),
-                "vc".into(),
-                "status".into(),
-            ],
-            cwd: Some(repository.clone()),
-            environment: environment.clone(),
-            redacted_argv_positions: Vec::new(),
-        };
-        let before = run_read_command(runner, status_command(), &repository, &copied_binary)?;
-        let export = run_read_command(
+        let copied_environment =
+            environment_for_runtime(&temporary_root.path().join("runtime"), true)?;
+        read_disposable_snapshot_in_root(
             runner,
-            CommandSpec {
-                program: copied_binary.clone(),
-                argv: vec!["--readonly".into(), "--sandbox".into(), "export".into()],
-                cwd: Some(repository.clone()),
-                environment: environment.clone(),
-                redacted_argv_positions: Vec::new(),
+            generation,
+            DisposableSnapshotRequest {
+                pin,
+                target,
+                selected_binary,
+                selected_environment: shared_environment,
+                require_matching_installed_runtime,
+                temporary_root: temporary_root.path(),
+                copied_environment,
             },
-            &repository,
-            &copied_binary,
-        )?;
-        let key_values = run_read_command(
-            runner,
-            CommandSpec {
-                program: copied_binary.clone(),
-                argv: vec![
-                    "--readonly".into(),
-                    "--sandbox".into(),
-                    "--json".into(),
-                    "kv".into(),
-                    "list".into(),
-                ],
-                cwd: Some(repository.clone()),
-                environment: environment.clone(),
-                redacted_argv_positions: Vec::new(),
-            },
-            &repository,
-            &copied_binary,
-        )?;
-        let after = run_read_command(runner, status_command(), &repository, &copied_binary)?;
-        validate_fenced_snapshot(&generation.manifest, &before, &export, &key_values, &after)
+        )
     })();
-    match (result, temporary_root.close()) {
-        (Ok(snapshot), Ok(())) => Ok(snapshot),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(_)) => Err(refusal("temporary_cleanup_failed")),
-    }
+    finish_disposable_snapshot(result, temporary_root.close())
+}
+
+fn bootstrap_read_disposable_snapshot_with_binary(
+    runner: &mut BootstrapCommandRunner,
+    generation: &CurrentGeneration,
+    pin: &PinManifest,
+    target: &str,
+    selected_binary: &Path,
+    selected_environment: BTreeMap<String, String>,
+    require_matching_installed_runtime: bool,
+) -> Result<FencedSnapshot, StoreError> {
+    let temporary_root = tempfile::Builder::new()
+        .prefix("plasmosome-read-")
+        .tempdir()
+        .map_err(|_| refusal("invalid_store"))?;
+    let result = (|| {
+        let copied_environment =
+            environment_for_runtime(&temporary_root.path().join("runtime"), true)?;
+        runner.register_disposable(temporary_root.path(), &copied_environment)?;
+        read_disposable_snapshot_in_root(
+            runner,
+            generation,
+            DisposableSnapshotRequest {
+                pin,
+                target,
+                selected_binary,
+                selected_environment,
+                require_matching_installed_runtime,
+                temporary_root: temporary_root.path(),
+                copied_environment,
+            },
+        )
+    })();
+    runner.unregister_disposable(temporary_root.path());
+    finish_disposable_snapshot(result, temporary_root.close())
 }
 
 /// Reads one active generation through a private disposable copy and validates both fences.
@@ -1207,6 +1671,7 @@ pub fn read_disposable_snapshot<R: CommandRunner>(
         pin,
         target,
         &generation.root.join("bd"),
+        true,
     )
 }
 
@@ -1300,6 +1765,74 @@ pub fn active_generation(location: &StoreLocation) -> Result<CurrentGeneration, 
     }
 }
 
+/// Binds an installed wrapper to its own immutable generation without reading `current`.
+pub fn generation_for_installed_wrapper(
+    location: &StoreLocation,
+    executable: &Path,
+) -> Result<CurrentGeneration, StoreError> {
+    if location.state_root != location.common_dir.join(STORE_DIRECTORY)
+        || location.generations_dir != location.state_root.join(GENERATIONS_DIRECTORY)
+        || !executable.is_absolute()
+    {
+        return Err(refusal("invalid_store"));
+    }
+    if !safe_state_root_exists(location)? {
+        return Err(refusal("not_initialized"));
+    }
+    for directory in [
+        &location.common_dir,
+        &location.state_root,
+        &location.generations_dir,
+    ] {
+        directory_without_symlink(directory)?;
+        if fs::canonicalize(directory).map_err(|_| refusal("invalid_store"))? != *directory {
+            return Err(refusal("invalid_store"));
+        }
+    }
+    let executable_metadata =
+        fs::symlink_metadata(executable).map_err(|_| refusal("invalid_store"))?;
+    if !executable_metadata.file_type().is_file() || executable_metadata.file_type().is_symlink() {
+        return Err(refusal("invalid_store"));
+    }
+    let canonical_executable =
+        fs::canonicalize(executable).map_err(|_| refusal("invalid_store"))?;
+    if canonical_executable != executable
+        || canonical_executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("plasmosome-work-state")
+    {
+        return Err(refusal("invalid_store"));
+    }
+    let root = canonical_executable
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| refusal("invalid_store"))?;
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| safe_generation_name(name))
+        .ok_or_else(|| refusal("invalid_store"))?;
+    if root.parent() != Some(location.generations_dir.as_path()) {
+        return Err(refusal("invalid_store"));
+    }
+    directory_without_symlink(&root)?;
+    if fs::canonicalize(&root).map_err(|_| refusal("invalid_store"))? != root {
+        return Err(refusal("invalid_store"));
+    }
+    let mut state = String::new();
+    regular_file(&root.join("state.json"))?
+        .read_to_string(&mut state)
+        .map_err(|_| refusal("invalid_store"))?;
+    let generation = CurrentGeneration {
+        name: name.to_owned(),
+        root,
+        manifest: strict_manifest(&state)?,
+    };
+    wrapper_is_valid(&generation)?;
+    Ok(generation)
+}
+
 /// Verifies that this process is the checksum-bound executable selected from the active generation.
 pub fn validate_installed_wrapper(
     generation: &CurrentGeneration,
@@ -1364,8 +1897,8 @@ fn create_generation_staging(location: &StoreLocation) -> Result<(PathBuf, Strin
     Ok((staging, generation_name))
 }
 
-fn install_staged_runtime<R: CommandRunner>(
-    runner: &mut R,
+fn install_staged_runtime(
+    runner: &mut BootstrapCommandRunner,
     staging: &Path,
     request: &BootstrapRequest,
     pin: &PinManifest,
@@ -1373,6 +1906,7 @@ fn install_staged_runtime<R: CommandRunner>(
     let runtime = staging.join("runtime");
     fs::create_dir(&runtime).map_err(|_| refusal("invalid_store"))?;
     let environment = environment_for_runtime(&runtime, true)?;
+    runner.register_staging(staging, &environment)?;
     let wrapper = staging.join("plasmosome-work-state");
     copy_regular_file(&request.wrapper, &wrapper)?;
     owner_private_executable(&wrapper)?;
@@ -1531,8 +2065,8 @@ fn verify_source_snapshot(
     compare_shadow_parity(&source.documents, &documents).map_err(|_| refusal("invalid_store"))
 }
 
-fn stage_generation_from_markdown<R: CommandRunner>(
-    runner: &mut R,
+fn stage_generation_from_markdown(
+    runner: &mut BootstrapCommandRunner,
     location: &StoreLocation,
     request: &BootstrapRequest,
     pin: &PinManifest,
@@ -1576,7 +2110,15 @@ fn stage_generation_from_markdown<R: CommandRunner>(
             root: staging.clone(),
             manifest: manifest.clone(),
         };
-        let snapshot = read_disposable_snapshot(runner, &staged, pin, &request.host_target)?;
+        let snapshot = bootstrap_read_disposable_snapshot_with_binary(
+            runner,
+            &staged,
+            pin,
+            &request.host_target,
+            &staged.root.join("bd"),
+            environment.clone(),
+            true,
+        )?;
         verify_source_snapshot(source, &snapshot)?;
         activate_staged_generation(location, &staging, &generation_name, None)?;
         Ok(BootstrapResult {
@@ -1591,14 +2133,79 @@ fn stage_generation_from_markdown<R: CommandRunner>(
 
 fn wrapper_is_valid(generation: &CurrentGeneration) -> Result<(), StoreError> {
     let wrapper = generation.root.join("plasmosome-work-state");
-    if sha256(&wrapper)? != generation.manifest.wrapper_sha256 {
+    if sha256(&wrapper)? != generation.manifest.wrapper_sha256
+        || owner_private_executable_is_valid(&wrapper).is_err()
+    {
         return Err(refusal("invalid_store"));
     }
     Ok(())
 }
 
-fn stage_runtime_reinstall<R: CommandRunner>(
-    runner: &mut R,
+fn wrapper_matches_requested(
+    generation: &CurrentGeneration,
+    requested_wrapper: &Path,
+) -> Result<(), StoreError> {
+    wrapper_is_valid(generation)?;
+    if sha256(requested_wrapper)? != generation.manifest.wrapper_sha256 {
+        return Err(refusal("invalid_store"));
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum InstalledRuntimePreflight {
+    Usable {
+        environment: BTreeMap<String, String>,
+    },
+    RepairRequired,
+}
+
+fn installed_runtime_preflight(
+    runner: &mut BootstrapCommandRunner,
+    generation: &CurrentGeneration,
+    pin: &PinManifest,
+    target: &str,
+    requested_wrapper: &Path,
+) -> Result<InstalledRuntimePreflight, StoreError> {
+    if wrapper_matches_requested(generation, requested_wrapper).is_err() {
+        return Ok(InstalledRuntimePreflight::RepairRequired);
+    }
+    let expected_binary_sha = pin
+        .targets
+        .iter()
+        .find(|candidate| candidate.target == target)
+        .ok_or_else(|| refusal("unsupported_beads_platform"))?
+        .binary_sha256
+        .as_str();
+    if generation.manifest.host_target != target
+        || generation.manifest.beads_binary_sha256 != expected_binary_sha
+    {
+        return Ok(InstalledRuntimePreflight::RepairRequired);
+    }
+    if owner_private_executable_is_valid(&generation.root.join("bd")).is_err() {
+        return Ok(InstalledRuntimePreflight::RepairRequired);
+    }
+    let environment = match environment_for_runtime(&generation.root.join("runtime"), false) {
+        Ok(environment) => environment,
+        Err(_) => return Ok(InstalledRuntimePreflight::RepairRequired),
+    };
+    runner.register_installed_generation(generation, &environment)?;
+    if InstalledBeads::verify(
+        pin,
+        target,
+        &generation.root.join("bd"),
+        environment.clone(),
+        runner,
+    )
+    .is_err()
+    {
+        return Ok(InstalledRuntimePreflight::RepairRequired);
+    }
+    Ok(InstalledRuntimePreflight::Usable { environment })
+}
+
+fn stage_runtime_reinstall(
+    runner: &mut BootstrapCommandRunner,
     location: &StoreLocation,
     request: &BootstrapRequest,
     pin: &PinManifest,
@@ -1624,12 +2231,19 @@ fn stage_runtime_reinstall<R: CommandRunner>(
             root: staging.clone(),
             manifest: manifest.clone(),
         };
-        let copied_snapshot = read_disposable_snapshot(runner, &staged, pin, &request.host_target)?;
+        let copied_snapshot = bootstrap_read_disposable_snapshot_with_binary(
+            runner,
+            &staged,
+            pin,
+            &request.host_target,
+            &staged.root.join("bd"),
+            environment.clone(),
+            true,
+        )?;
         if copied_snapshot != *snapshot {
             return Err(refusal("invalid_store"));
         }
         verify_source_snapshot(source, &copied_snapshot)?;
-        let _ = environment;
         activate_staged_generation(location, &staging, &generation_name, None)?;
         Ok(BootstrapResult {
             outcome: BootstrapOutcome::Reinstalled,
@@ -1643,16 +2257,13 @@ fn stage_runtime_reinstall<R: CommandRunner>(
 
 /// Performs the only explicit installation path for one clone-local Markdown shadow generation.
 pub fn bootstrap(request: &BootstrapRequest) -> Result<BootstrapResult, StoreError> {
-    let pin = PinManifest::load(
-        request
-            .source_root
-            .join("tools/work-state-beads-1.1.2.toml"),
-    )
-    .map_err(pin_refusal)?;
+    let source_root = canonical_existing_directory(&request.source_root)?;
+    let pin = PinManifest::load(source_root.join("tools/work-state-beads-1.1.2.toml"))
+        .map_err(pin_refusal)?;
     let verification_root = tempfile::tempdir().map_err(|_| refusal("invalid_store"))?;
     let verification_environment = environment_for_runtime(verification_root.path(), true)?;
-    let mut runner =
-        BootstrapCommandRunner::new(request.source_root.clone(), request.binary.clone());
+    let mut runner = BootstrapCommandRunner::new(source_root.clone(), request.binary.clone());
+    runner.bind_source_inputs(request.source_ref.clone(), verification_environment.clone())?;
     VerifiedBeads::verify_with_environment(
         &pin,
         &request.host_target,
@@ -1662,15 +2273,14 @@ pub fn bootstrap(request: &BootstrapRequest) -> Result<BootstrapResult, StoreErr
         &mut runner,
     )
     .map_err(pin_refusal)?;
-    let location = locate_store(
-        &mut runner,
-        &request.checkout,
-        verification_environment.clone(),
-    )?;
+    let checkout = canonical_existing_directory(&request.checkout)?;
+    runner.bind_checkout(checkout.clone())?;
+    let location = locate_store(&mut runner, &checkout, verification_environment.clone())?;
+    runner.bind_location(location.clone())?;
     let _lock = BootstrapLock::acquire(&location)?;
     let source = load_documents(
         &mut runner,
-        &request.source_root,
+        &source_root,
         &verification_environment,
         &request.source_ref,
     )
@@ -1681,18 +2291,37 @@ pub fn bootstrap(request: &BootstrapRequest) -> Result<BootstrapResult, StoreErr
     if existing.manifest.source_commit != source.source_commit {
         return Err(refusal("source_commit_mismatch"));
     }
-    let runtime_valid = wrapper_is_valid(&existing).is_ok()
-        && read_disposable_snapshot(&mut runner, &existing, &pin, &request.host_target).is_ok();
-    let snapshot = if runtime_valid {
-        read_disposable_snapshot(&mut runner, &existing, &pin, &request.host_target)?
-    } else {
-        read_disposable_snapshot_with_binary(
-            &mut runner,
-            &existing,
-            &pin,
-            &request.host_target,
-            &request.binary,
-        )?
+    let (snapshot, runtime_valid) = match installed_runtime_preflight(
+        &mut runner,
+        &existing,
+        &pin,
+        &request.host_target,
+        &request.wrapper,
+    )? {
+        InstalledRuntimePreflight::Usable { environment } => (
+            bootstrap_read_disposable_snapshot_with_binary(
+                &mut runner,
+                &existing,
+                &pin,
+                &request.host_target,
+                &existing.root.join("bd"),
+                environment,
+                true,
+            )?,
+            true,
+        ),
+        InstalledRuntimePreflight::RepairRequired => (
+            bootstrap_read_disposable_snapshot_with_binary(
+                &mut runner,
+                &existing,
+                &pin,
+                &request.host_target,
+                &request.binary,
+                verification_environment.clone(),
+                false,
+            )?,
+            false,
+        ),
     };
     verify_source_snapshot(&source, &snapshot)?;
     if runtime_valid {
@@ -1713,4 +2342,843 @@ pub fn bootstrap(request: &BootstrapRequest) -> Result<BootstrapResult, StoreErr
         &existing,
         &snapshot,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::{CommandOutput, CommandRunner, CommandSpec, RecordingCommandRunner};
+    use crate::document::parse_document;
+    use crate::shadow::{
+        canonical_logical_export, canonical_operational_projection, initial_operational_metadata,
+        operational_projection_digest, to_operational_beads_jsonl,
+    };
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_runner_binds_locator_source_binary_and_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let expected_binary = root.path().join("expected-bd");
+        let unregistered_repository = root.path().join("unregistered-repository");
+        let unregistered_binary = root.path().join("unregistered/bd");
+        let marker = root.path().join("unexpected-command-ran");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&unregistered_repository).unwrap();
+        fs::create_dir_all(unregistered_binary.parent().unwrap()).unwrap();
+        fs::write(&expected_binary, "expected binary").unwrap();
+        fs::write(
+            &unregistered_binary,
+            format!("#!/bin/sh\nprintf unexpected > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&unregistered_binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut runner = BootstrapCommandRunner::new(source, expected_binary);
+
+        let result = runner.run(CommandSpec {
+            program: unregistered_binary,
+            argv: vec!["--sandbox".into(), "export".into()],
+            cwd: Some(unregistered_repository),
+            environment: BTreeMap::new(),
+            redacted_argv_positions: Vec::new(),
+        });
+
+        assert!(
+            result.is_err(),
+            "an unregistered Beads-shaped plan must not dispatch"
+        );
+        assert!(
+            !marker.exists(),
+            "the runner must reject the plan before SystemCommandRunner starts it"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_runner_accepts_only_registered_staging_and_disposable_scopes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let expected_binary = root.path().join("expected-bd");
+        let fake_bin = root.path().join("fake-bin");
+        let fake_git = fake_bin.join("git");
+        let locator_checkout = root.path().join("unregistered-checkout");
+        let disposable_root = root.path().join("unregistered-disposable");
+        let disposable_repository = disposable_root.join("repository");
+        let disposable_binary = disposable_root.join("bd");
+        let locator_marker = root.path().join("unexpected-locator-ran");
+        let disposable_marker = root.path().join("unexpected-disposable-ran");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_bin).unwrap();
+        fs::create_dir_all(&locator_checkout).unwrap();
+        fs::create_dir_all(&disposable_repository).unwrap();
+        fs::write(&expected_binary, "expected binary").unwrap();
+        fs::write(
+            &fake_git,
+            format!(
+                "#!/bin/sh\nprintf locator > '{}'\n",
+                locator_marker.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &disposable_binary,
+            format!(
+                "#!/bin/sh\nprintf disposable > '{}'\n",
+                disposable_marker.display()
+            ),
+        )
+        .unwrap();
+        for path in [&fake_git, &disposable_binary] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let disposable_environment =
+            environment_for_runtime(&disposable_root.join("runtime"), true).unwrap();
+        let mut runner = BootstrapCommandRunner::new(source, expected_binary);
+
+        let locator = runner.run(CommandSpec {
+            program: PathBuf::from("git"),
+            argv: vec!["rev-parse".into(), "--show-toplevel".into()],
+            cwd: Some(locator_checkout),
+            environment: BTreeMap::from([("PATH".into(), fake_bin.display().to_string())]),
+            redacted_argv_positions: Vec::new(),
+        });
+        let disposable = runner.run(CommandSpec {
+            program: disposable_binary,
+            argv: vec![
+                "--readonly".into(),
+                "--sandbox".into(),
+                "--json".into(),
+                "vc".into(),
+                "status".into(),
+            ],
+            cwd: Some(disposable_repository),
+            environment: disposable_environment,
+            redacted_argv_positions: Vec::new(),
+        });
+
+        assert!(
+            locator.is_err(),
+            "an arbitrary locator context must not dispatch"
+        );
+        assert!(
+            disposable.is_err(),
+            "an unregistered disposable root must not dispatch"
+        );
+        assert!(!locator_marker.exists());
+        assert!(!disposable_marker.exists());
+    }
+
+    #[test]
+    fn registered_staging_scope_does_not_admit_source_git_forms() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let common = root.path().join("common");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&common).unwrap();
+        let source = source.canonicalize().unwrap();
+        let common = common.canonicalize().unwrap();
+        let expected_binary = root.path().join("expected-bd");
+        fs::write(&expected_binary, "expected binary").unwrap();
+        let verification_environment =
+            environment_for_runtime(&root.path().join("verification-runtime"), true).unwrap();
+        let state_root = common.join(STORE_DIRECTORY);
+        let generations_dir = state_root.join(GENERATIONS_DIRECTORY);
+        fs::create_dir_all(&generations_dir).unwrap();
+        let mut runner = BootstrapCommandRunner::new(source.clone(), expected_binary);
+        runner
+            .bind_source_inputs("origin/main".into(), verification_environment)
+            .unwrap();
+        runner.bind_checkout(source.clone()).unwrap();
+        runner
+            .bind_location(StoreLocation {
+                worktree_root: source.clone(),
+                common_dir: common,
+                state_root,
+                generations_dir: generations_dir.clone(),
+            })
+            .unwrap();
+        let staging = generations_dir.join(".staging-safe");
+        fs::create_dir(&staging).unwrap();
+        let staging_environment = environment_for_runtime(&staging.join("runtime"), true).unwrap();
+        runner
+            .register_staging(&staging, &staging_environment)
+            .unwrap();
+        runner.resolved_source_commit = Some("a".repeat(40));
+        let attempted_source_read = CommandSpec {
+            program: PathBuf::from("git"),
+            argv: vec![
+                "show".into(),
+                format!("{}:tasks/046-task.md", "a".repeat(40)),
+            ],
+            cwd: Some(source),
+            environment: staging_environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        };
+        let mismatched_authority_commit = CommandSpec {
+            program: staging.join("bd"),
+            argv: vec![
+                "--sandbox".into(),
+                "kv".into(),
+                "set".into(),
+                "plasmosome.source-commit".into(),
+                "b".repeat(40),
+            ],
+            cwd: Some(staging.join("repository")),
+            environment: staging_environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        };
+        let established_authority_commit = CommandSpec {
+            argv: {
+                let mut argv = mismatched_authority_commit.argv.clone();
+                argv[4] = "a".repeat(40);
+                argv
+            },
+            ..mismatched_authority_commit.clone()
+        };
+
+        assert!(
+            !runner.valid_staging_command(&attempted_source_read),
+            "a staging environment may authorize only its exact repository forms"
+        );
+        assert!(
+            !runner.valid_staging_command(&mismatched_authority_commit),
+            "the imported authority marker must be bound to the resolved source commit"
+        );
+        assert!(
+            runner.valid_staging_command(&established_authority_commit),
+            "the exact resolved source commit remains an allowed authority marker"
+        );
+    }
+
+    #[test]
+    fn bootstrap_runner_registers_a_native_tempdir_disposable_root() {
+        let source = tempfile::tempdir().unwrap();
+        let selected_binary = source.path().join("selected-bd");
+        fs::write(&selected_binary, "selected binary").unwrap();
+        let disposable = tempfile::tempdir().unwrap();
+        let environment = environment_for_runtime(&disposable.path().join("runtime"), true)
+            .expect("a newly created disposable runtime is valid");
+        let mut runner =
+            BootstrapCommandRunner::new(source.path().canonicalize().unwrap(), selected_binary);
+
+        runner
+            .register_disposable(disposable.path(), &environment)
+            .expect("a native TempDir spelling must be accepted for bootstrap reads");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_repair_does_not_depend_on_the_installed_runtime_tree() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        fn shell_quote(value: &str) -> String {
+            format!("'{}'", value.replace('\'', "'\"'\"'"))
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let source_root = root.path().join("source");
+        fs::create_dir(&source_root).unwrap();
+        let source_root = source_root.canonicalize().unwrap();
+        let source_commit = "a".repeat(40);
+        let local_generation = "d".repeat(40);
+        let documents = vec![
+            parse_document(
+                "docs/intents/001-intent.md",
+                "---\nid: 001\ntitle: Intent\nstatus: approved\n---\n",
+                &source_commit,
+            )
+            .unwrap(),
+        ];
+        let operational = initial_operational_metadata(&documents).unwrap();
+        let export = to_operational_beads_jsonl(&documents, &operational).unwrap();
+        let operational_documents = decode_operational_beads_jsonl(&export).unwrap();
+        let logical_export_sha256 =
+            logical_export_digest(&canonical_logical_export(&documents).unwrap());
+        let operational_projection_sha256 = operational_projection_digest(
+            &canonical_operational_projection(&operational_documents).unwrap(),
+        );
+        let status = serde_json::json!({
+            "schema_version": 1,
+            "branch": "main",
+            "commit": local_generation,
+        })
+        .to_string();
+        let keys = serde_json::json!({
+            "schema_version": 1,
+            "plasmosome.authority-mode": "markdown-shadow",
+            "plasmosome.source-commit": source_commit,
+        })
+        .to_string();
+        let binary = root.path().join("requested-bd");
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\ncase \"$1:$2:$3:$4:$5\" in\n--version::::) printf 'bd version 1.1.2 (test)\\n' ;;\n--readonly:--sandbox:export::) printf '%s' {} ;;\n--readonly:--sandbox:--json:kv:list) printf '%s' {} ;;\n--readonly:--sandbox:--json:vc:status) printf '%s' {} ;;\n*) exit 47 ;;\nesac\n",
+                shell_quote(&export),
+                shell_quote(&keys),
+                shell_quote(&status),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let pin = PinManifest::parse(&format!(
+            "version = \"1.1.2\"\nrelease = \"https://example.invalid/release\"\nsource_commit = \"{}\"\nlicense = \"MIT\"\nchecksums_url = \"https://example.invalid/checksums\"\nchecksums_sha256 = \"{}\"\n\n[[targets]]\ntarget = \"aarch64-apple-darwin\"\narchive = \"beads_1.1.2_darwin_arm64.tar.gz\"\narchive_sha256 = \"{}\"\nbinary_sha256 = \"{}\"\n",
+            "b".repeat(40),
+            "c".repeat(64),
+            "e".repeat(64),
+            sha256(&binary).unwrap(),
+        ))
+        .unwrap();
+
+        for runtime_shape in ["absent", "malformed", "symlinked"] {
+            let generation = CurrentGeneration {
+                name: format!("generation-{runtime_shape}"),
+                root: root.path().join(format!("generation-{runtime_shape}")),
+                manifest: StateManifest {
+                    schema_version: 1,
+                    authority_mode: "markdown-shadow".into(),
+                    source_commit: source_commit.clone(),
+                    logical_export_sha256: logical_export_sha256.clone(),
+                    operational_projection_sha256: operational_projection_sha256.clone(),
+                    local_generation: local_generation.clone(),
+                    host_target: "retired-target".into(),
+                    wrapper_sha256: "f".repeat(64),
+                    beads_binary_sha256: "0".repeat(64),
+                    remote_relation: RemoteRelation::Unknown,
+                    remote_generation: None,
+                    remote_observed_at: None,
+                    observed_local_generation: None,
+                    last_successful_sync_at: None,
+                    pending_operation_ids: Vec::new(),
+                },
+            };
+            fs::create_dir_all(generation.root.join("repository")).unwrap();
+            match runtime_shape {
+                "absent" => {}
+                "malformed" => fs::write(generation.root.join("runtime"), "not a runtime").unwrap(),
+                "symlinked" => {
+                    let target = root.path().join("runtime-target");
+                    fs::create_dir_all(&target).unwrap();
+                    symlink(target, generation.root.join("runtime")).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let verification_environment = environment_for_runtime(
+                &root
+                    .path()
+                    .join(format!("verification-runtime-{runtime_shape}")),
+                true,
+            )
+            .unwrap();
+            assert_eq!(
+                read_disposable_snapshot_with_binary(
+                    &mut RecordingCommandRunner::default(),
+                    &generation,
+                    &pin,
+                    "aarch64-apple-darwin",
+                    &binary,
+                    false,
+                )
+                .expect_err("ordinary reads must keep rejecting an unhealthy installed runtime")
+                .code(),
+                "invalid_store"
+            );
+            let mut runner = BootstrapCommandRunner::new(source_root.clone(), binary.clone());
+            runner
+                .bind_source_inputs("origin/main".into(), verification_environment.clone())
+                .unwrap();
+            let snapshot = bootstrap_read_disposable_snapshot_with_binary(
+                &mut runner,
+                &generation,
+                &pin,
+                "aarch64-apple-darwin",
+                &binary,
+                verification_environment,
+                false,
+            )
+            .expect("runtime repair must read only the old regular repository with the fresh verified binary");
+            assert_eq!(snapshot.documents.len(), 1, "failed {runtime_shape} case");
+        }
+    }
+
+    #[test]
+    fn requested_wrapper_hash_must_match_the_active_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("installed-wrapper");
+        let requested = root.path().join("requested-wrapper");
+        fs::write(&installed, "installed wrapper").unwrap();
+        fs::write(&requested, "requested wrapper").unwrap();
+        let generation = CurrentGeneration {
+            name: "generation-safe".into(),
+            root: root.path().to_path_buf(),
+            manifest: StateManifest {
+                schema_version: 1,
+                authority_mode: "markdown-shadow".into(),
+                source_commit: "a".repeat(40),
+                logical_export_sha256: "b".repeat(64),
+                operational_projection_sha256: "c".repeat(64),
+                local_generation: "local-generation".into(),
+                host_target: "aarch64-apple-darwin".into(),
+                wrapper_sha256: sha256(&installed).unwrap(),
+                beads_binary_sha256: "d".repeat(64),
+                remote_relation: RemoteRelation::Unknown,
+                remote_generation: None,
+                remote_observed_at: None,
+                observed_local_generation: None,
+                last_successful_sync_at: None,
+                pending_operation_ids: Vec::new(),
+            },
+        };
+        fs::rename(&installed, generation.root.join("plasmosome-work-state")).unwrap();
+        owner_private_executable(&generation.root.join("plasmosome-work-state")).unwrap();
+
+        assert!(wrapper_is_valid(&generation).is_ok());
+        assert_eq!(
+            wrapper_matches_requested(&generation, &requested)
+                .expect_err("a different currently running wrapper must require reinstallation")
+                .code(),
+            "invalid_store"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_requires_owner_private_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let wrapper = root.path().join("plasmosome-work-state");
+        fs::write(&wrapper, "verified wrapper").unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o600)).unwrap();
+        let generation = CurrentGeneration {
+            name: "generation-safe".into(),
+            root: root.path().to_path_buf(),
+            manifest: StateManifest {
+                schema_version: 1,
+                authority_mode: "markdown-shadow".into(),
+                source_commit: "a".repeat(40),
+                logical_export_sha256: "b".repeat(64),
+                operational_projection_sha256: "c".repeat(64),
+                local_generation: "local-generation".into(),
+                host_target: "aarch64-apple-darwin".into(),
+                wrapper_sha256: sha256(&wrapper).unwrap(),
+                beads_binary_sha256: "d".repeat(64),
+                remote_relation: RemoteRelation::Unknown,
+                remote_generation: None,
+                remote_observed_at: None,
+                observed_local_generation: None,
+                last_successful_sync_at: None,
+                pending_operation_ids: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            wrapper_is_valid(&generation)
+                .expect_err("a launcher-inexecutable installed wrapper must trigger repair")
+                .code(),
+            "invalid_store"
+        );
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(wrapper_is_valid(&generation).is_ok());
+    }
+
+    #[test]
+    fn bootstrap_reinstalls_runtime_without_reimporting_state() {
+        let root = tempfile::tempdir().unwrap();
+        let source_commit = "a".repeat(40);
+        let local_generation = "d".repeat(40);
+        let documents = vec![
+            parse_document(
+                "docs/intents/001-intent.md",
+                "---\nid: 001\ntitle: Intent\nstatus: approved\n---\n",
+                &source_commit,
+            )
+            .unwrap(),
+        ];
+        let operational = initial_operational_metadata(&documents).unwrap();
+        let export = to_operational_beads_jsonl(&documents, &operational).unwrap();
+        let operational_documents = decode_operational_beads_jsonl(&export).unwrap();
+        let binary = root.path().join("requested-bd");
+        fs::write(&binary, "requested verified binary").unwrap();
+        let pin = PinManifest::parse(&format!(
+            "version = \"1.1.2\"\nrelease = \"https://example.invalid/release\"\nsource_commit = \"{}\"\nlicense = \"MIT\"\nchecksums_url = \"https://example.invalid/checksums\"\nchecksums_sha256 = \"{}\"\n\n[[targets]]\ntarget = \"aarch64-apple-darwin\"\narchive = \"beads_1.1.2_darwin_arm64.tar.gz\"\narchive_sha256 = \"{}\"\nbinary_sha256 = \"{}\"\n",
+            "b".repeat(40),
+            "c".repeat(64),
+            "e".repeat(64),
+            sha256(&binary).unwrap(),
+        ))
+        .unwrap();
+        let generation = CurrentGeneration {
+            name: "generation-old".into(),
+            root: root.path().join("generation-old"),
+            manifest: StateManifest {
+                schema_version: 1,
+                authority_mode: "markdown-shadow".into(),
+                source_commit: source_commit.clone(),
+                logical_export_sha256: logical_export_digest(
+                    &canonical_logical_export(&documents).unwrap(),
+                ),
+                operational_projection_sha256: operational_projection_digest(
+                    &canonical_operational_projection(&operational_documents).unwrap(),
+                ),
+                local_generation: local_generation.clone(),
+                host_target: "retired-target".into(),
+                wrapper_sha256: "f".repeat(64),
+                beads_binary_sha256: "0".repeat(64),
+                remote_relation: RemoteRelation::Unknown,
+                remote_generation: None,
+                remote_observed_at: None,
+                observed_local_generation: None,
+                last_successful_sync_at: None,
+                pending_operation_ids: Vec::new(),
+            },
+        };
+        fs::create_dir_all(generation.root.join("repository")).unwrap();
+        environment_for_runtime(&generation.root.join("runtime"), true).unwrap();
+        let status = serde_json::json!({
+            "schema_version": 1,
+            "branch": "main",
+            "commit": local_generation,
+        })
+        .to_string();
+        let keys = serde_json::json!({
+            "schema_version": 1,
+            "plasmosome.authority-mode": "markdown-shadow",
+            "plasmosome.source-commit": source_commit,
+        })
+        .to_string();
+
+        assert_eq!(
+            read_disposable_snapshot_with_binary(
+                &mut RecordingCommandRunner::default(),
+                &generation,
+                &pin,
+                "aarch64-apple-darwin",
+                &binary,
+                true,
+            )
+            .expect_err("ordinary reads must still reject mismatched installed runtime metadata")
+            .code(),
+            "invalid_store"
+        );
+        let mut runner = RecordingCommandRunner::scripted(vec![
+            Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+            Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+            Ok(CommandOutput::success(status.clone())),
+            Ok(CommandOutput::success(export)),
+            Ok(CommandOutput::success(keys)),
+            Ok(CommandOutput::success(status)),
+        ]);
+        let snapshot = read_disposable_snapshot_with_binary(
+            &mut runner,
+            &generation,
+            &pin,
+            "aarch64-apple-darwin",
+            &binary,
+            false,
+        )
+        .expect(
+            "bootstrap recovery must validate the old state through the requested verified runtime",
+        );
+        assert_eq!(snapshot.documents.len(), 1);
+        assert!(runner.finish().is_ok());
+    }
+
+    #[test]
+    fn temporary_cleanup_failure_takes_precedence_over_read_failure() {
+        let result = finish_disposable_snapshot(
+            Err(refusal("invalid_store")),
+            Err(std::io::Error::other("unable to remove disposable root")),
+        );
+
+        assert_eq!(
+            result
+                .expect_err("cleanup failure must override the failed disposable read")
+                .code(),
+            "temporary_cleanup_failed"
+        );
+    }
+
+    #[test]
+    fn bootstrap_cleanup_failure_is_not_a_repairable_runtime_failure() {
+        let result = finish_disposable_snapshot(
+            Err(refusal("invalid_store")),
+            Err(std::io::Error::other("unable to remove disposable root")),
+        );
+
+        assert_eq!(
+            result
+                .expect_err("bootstrap must stop rather than attempting runtime repair")
+                .code(),
+            "temporary_cleanup_failed"
+        );
+    }
+
+    #[cfg(unix)]
+    fn installed_runtime_preflight_fixture() -> (
+        tempfile::TempDir,
+        BootstrapCommandRunner,
+        CurrentGeneration,
+        PinManifest,
+        PathBuf,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let checkout = root.path().join("checkout");
+        let common = root.path().join("common");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&checkout).unwrap();
+        fs::create_dir_all(&common).unwrap();
+        let source = source.canonicalize().unwrap();
+        let checkout = checkout.canonicalize().unwrap();
+        let common = common.canonicalize().unwrap();
+        let location = StoreLocation {
+            worktree_root: checkout.clone(),
+            common_dir: common.clone(),
+            state_root: common.join(STORE_DIRECTORY),
+            generations_dir: common.join(STORE_DIRECTORY).join(GENERATIONS_DIRECTORY),
+        };
+        let generation_root = location.generations_dir.join("generation-safe");
+        fs::create_dir_all(&generation_root).unwrap();
+        let wrapper = generation_root.join("plasmosome-work-state");
+        let requested_wrapper = root.path().join("requested-wrapper");
+        fs::write(&wrapper, "installed wrapper").unwrap();
+        fs::write(&requested_wrapper, "installed wrapper").unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&requested_wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        let binary = generation_root.join("bd");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'bd version 1.1.2 (test)\\n'; exit 0; fi\nexit 99\n",
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        environment_for_runtime(&generation_root.join("runtime"), true).unwrap();
+        let target = "aarch64-apple-darwin";
+        let pin = PinManifest::parse(&format!(
+            "version = \"1.1.2\"\nrelease = \"https://example.invalid/release\"\nsource_commit = \"{}\"\nlicense = \"MIT\"\nchecksums_url = \"https://example.invalid/checksums\"\nchecksums_sha256 = \"{}\"\n\n[[targets]]\ntarget = \"{target}\"\narchive = \"beads_1.1.2_test.tar.gz\"\narchive_sha256 = \"{}\"\nbinary_sha256 = \"{}\"\n",
+            "a".repeat(40),
+            "b".repeat(64),
+            "c".repeat(64),
+            sha256(&binary).unwrap(),
+        ))
+        .unwrap();
+        let generation = CurrentGeneration {
+            name: "generation-safe".into(),
+            root: generation_root,
+            manifest: StateManifest {
+                schema_version: 1,
+                authority_mode: "markdown-shadow".into(),
+                source_commit: "a".repeat(40),
+                logical_export_sha256: "b".repeat(64),
+                operational_projection_sha256: "c".repeat(64),
+                local_generation: "d".repeat(40),
+                host_target: target.into(),
+                wrapper_sha256: sha256(&wrapper).unwrap(),
+                beads_binary_sha256: sha256(&binary).unwrap(),
+                remote_relation: RemoteRelation::Unknown,
+                remote_generation: None,
+                remote_observed_at: None,
+                observed_local_generation: None,
+                last_successful_sync_at: None,
+                pending_operation_ids: Vec::new(),
+            },
+        };
+        let selected_binary = root.path().join("selected-bd");
+        fs::write(&selected_binary, "selected binary").unwrap();
+        let verification_environment =
+            environment_for_runtime(&root.path().join("verification-runtime"), true).unwrap();
+        let mut runner = BootstrapCommandRunner::new(source, selected_binary);
+        runner
+            .bind_source_inputs("origin/main".into(), verification_environment)
+            .unwrap();
+        runner.bind_checkout(checkout).unwrap();
+        runner.bind_location(location).unwrap();
+        (root, runner, generation, pin, requested_wrapper)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_runtime_damage_is_the_only_repair_disposition() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_root, mut runner, generation, pin, requested_wrapper) =
+            installed_runtime_preflight_fixture();
+        assert_eq!(
+            sha256(&generation.root.join("plasmosome-work-state")).unwrap(),
+            generation.manifest.wrapper_sha256
+        );
+        assert_eq!(
+            sha256(&requested_wrapper).unwrap(),
+            generation.manifest.wrapper_sha256
+        );
+        assert!(wrapper_matches_requested(&generation, &requested_wrapper).is_ok());
+        let environment = environment_for_runtime(&generation.root.join("runtime"), false).unwrap();
+        runner
+            .register_installed_generation(&generation, &environment)
+            .unwrap();
+        assert!(
+            InstalledBeads::verify(
+                &pin,
+                "aarch64-apple-darwin",
+                &generation.root.join("bd"),
+                environment,
+                &mut runner,
+            )
+            .is_ok()
+        );
+        let preflight = installed_runtime_preflight(
+            &mut runner,
+            &generation,
+            &pin,
+            "aarch64-apple-darwin",
+            &requested_wrapper,
+        );
+        assert!(
+            matches!(preflight, Ok(InstalledRuntimePreflight::Usable { .. })),
+            "{preflight:?}"
+        );
+
+        let (_root, mut runner, generation, pin, requested_wrapper) =
+            installed_runtime_preflight_fixture();
+        fs::rename(
+            generation.root.join("bd"),
+            generation.root.join("bd-removed"),
+        )
+        .unwrap();
+        assert!(matches!(
+            installed_runtime_preflight(
+                &mut runner,
+                &generation,
+                &pin,
+                "aarch64-apple-darwin",
+                &requested_wrapper,
+            ),
+            Ok(InstalledRuntimePreflight::RepairRequired)
+        ));
+
+        let (_root, mut runner, generation, pin, requested_wrapper) =
+            installed_runtime_preflight_fixture();
+        fs::set_permissions(
+            generation.root.join("plasmosome-work-state"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert!(matches!(
+            installed_runtime_preflight(
+                &mut runner,
+                &generation,
+                &pin,
+                "aarch64-apple-darwin",
+                &requested_wrapper,
+            ),
+            Ok(InstalledRuntimePreflight::RepairRequired)
+        ));
+
+        let (_root, mut runner, generation, pin, requested_wrapper) =
+            installed_runtime_preflight_fixture();
+        fs::set_permissions(
+            generation.root.join("bd"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert!(matches!(
+            installed_runtime_preflight(
+                &mut runner,
+                &generation,
+                &pin,
+                "aarch64-apple-darwin",
+                &requested_wrapper,
+            ),
+            Ok(InstalledRuntimePreflight::RepairRequired)
+        ));
+
+        let (_root, mut runner, generation, pin, requested_wrapper) =
+            installed_runtime_preflight_fixture();
+        fs::set_permissions(
+            generation.root.join("bd"),
+            fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        assert!(matches!(
+            installed_runtime_preflight(
+                &mut runner,
+                &generation,
+                &pin,
+                "aarch64-apple-darwin",
+                &requested_wrapper,
+            ),
+            Ok(InstalledRuntimePreflight::RepairRequired)
+        ));
+
+        let (_root, mut runner, generation, pin, requested_wrapper) =
+            installed_runtime_preflight_fixture();
+        fs::rename(
+            generation.root.join("runtime"),
+            generation.root.join("runtime-removed"),
+        )
+        .unwrap();
+        assert!(matches!(
+            installed_runtime_preflight(
+                &mut runner,
+                &generation,
+                &pin,
+                "aarch64-apple-darwin",
+                &requested_wrapper,
+            ),
+            Ok(InstalledRuntimePreflight::RepairRequired)
+        ));
+
+        let (_root, mut runner, mut generation, pin, requested_wrapper) =
+            installed_runtime_preflight_fixture();
+        generation.manifest.host_target = "x86_64-unknown-linux-gnu".into();
+        assert!(matches!(
+            installed_runtime_preflight(
+                &mut runner,
+                &generation,
+                &pin,
+                "aarch64-apple-darwin",
+                &requested_wrapper,
+            ),
+            Ok(InstalledRuntimePreflight::RepairRequired)
+        ));
+
+        let (_root, mut runner, mut generation, pin, requested_wrapper) =
+            installed_runtime_preflight_fixture();
+        generation.manifest.beads_binary_sha256 = "0".repeat(64);
+        assert!(matches!(
+            installed_runtime_preflight(
+                &mut runner,
+                &generation,
+                &pin,
+                "aarch64-apple-darwin",
+                &requested_wrapper,
+            ),
+            Ok(InstalledRuntimePreflight::RepairRequired)
+        ));
+
+        let (root, mut runner, mut generation, pin, requested_wrapper) =
+            installed_runtime_preflight_fixture();
+        let outside = root.path().join("outside-generation");
+        copy_private_tree(&generation.root, &outside).unwrap();
+        generation.root = outside;
+        assert_eq!(
+            installed_runtime_preflight(
+                &mut runner,
+                &generation,
+                &pin,
+                "aarch64-apple-darwin",
+                &requested_wrapper,
+            )
+            .expect_err("an unbound installed root is a fatal policy error")
+            .code(),
+            "invalid_store"
+        );
+    }
 }

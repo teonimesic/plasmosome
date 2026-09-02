@@ -5,9 +5,9 @@ use plasmosome_work_state::{
     read::{ReadCommand, project_read, render_human},
     run_contract,
     store::{
-        BootstrapRequest, active_generation, bootstrap, compiled_pin_manifest, host_target,
-        locate_store, locator_environment, read_disposable_snapshot, render_bootstrap_human,
-        validate_installed_wrapper,
+        BootstrapRequest, bootstrap, compiled_pin_manifest, generation_for_installed_wrapper,
+        host_target, locate_store, locator_environment, read_disposable_snapshot,
+        render_bootstrap_human,
     },
 };
 
@@ -85,13 +85,26 @@ fn parse_bootstrap(values: &[String]) -> Result<Invocation, String> {
                 json = true;
                 index += 1;
             }
-            "--source-ref" | "--archive" | "--bd" => {
+            "--source-ref" => {
+                let value = values
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or_else(|| "invalid_command".to_owned())?;
+                if source_ref.is_some() {
+                    return Err("invalid_command".into());
+                }
+                if value.trim().is_empty() || value.contains(['\n', '\r']) {
+                    return Err("invalid_source_ref".into());
+                }
+                source_ref = Some(value.clone());
+                index += 2;
+            }
+            "--archive" | "--bd" => {
                 let value = values
                     .get(index + 1)
                     .filter(|value| !value.trim().is_empty() && !value.starts_with("--"))
                     .ok_or_else(|| "invalid_command".to_owned())?;
                 match values[index].as_str() {
-                    "--source-ref" if source_ref.is_none() => source_ref = Some(value.clone()),
                     "--archive" if archive.is_none() => archive = Some(PathBuf::from(value)),
                     "--bd" if binary.is_none() => binary = Some(PathBuf::from(value)),
                     _ => return Err("invalid_command".into()),
@@ -102,9 +115,6 @@ fn parse_bootstrap(values: &[String]) -> Result<Invocation, String> {
         }
     }
     let source_ref = source_ref.ok_or_else(|| "invalid_command".to_owned())?;
-    if source_ref.contains(['\n', '\r']) {
-        return Err("invalid_command".into());
-    }
     Ok(Invocation::Bootstrap {
         source_ref,
         archive: archive.ok_or_else(|| "invalid_command".to_owned())?,
@@ -183,10 +193,10 @@ fn run_read(command: ReadCommand, json: bool) {
     let mut runner = plasmosome_work_state::command::SystemCommandRunner;
     let location = locate_store(&mut runner, &checkout, environment)
         .unwrap_or_else(|error| fail(error.code(), json, 1));
-    let generation =
-        active_generation(&location).unwrap_or_else(|error| fail(error.code(), json, 1));
-    let executable = std::env::current_exe().unwrap_or_else(|_| fail("invalid_store", json, 1));
-    validate_installed_wrapper(&generation, &executable)
+    let executable = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .unwrap_or_else(|_| fail("invalid_store", json, 1));
+    let generation = generation_for_installed_wrapper(&location, &executable)
         .unwrap_or_else(|error| fail(error.code(), json, 1));
     let pin = compiled_pin_manifest().unwrap_or_else(|error| fail(error.code(), json, 1));
     let snapshot = read_disposable_snapshot(&mut runner, &generation, &pin, host_target())
@@ -197,7 +207,17 @@ fn run_read(command: ReadCommand, json: bool) {
         &generation.manifest.authority_mode,
         &generation.manifest.source_commit,
     )
-    .unwrap_or_else(|error| fail(error.code(), json, read_exit_code(error.code())));
+    .unwrap_or_else(|error| {
+        let document_key = (error.code() == "document_not_found")
+            .then_some(error.document_key.as_deref())
+            .flatten();
+        fail_with_document_key(
+            error.code(),
+            json,
+            read_exit_code(error.code()),
+            document_key,
+        )
+    });
     if json {
         println!("{}", serde_json::to_string(&response).unwrap());
     } else {
@@ -214,8 +234,21 @@ fn read_exit_code(code: &str) -> i32 {
 }
 
 fn fail(code: &str, json: bool, exit_code: i32) -> ! {
+    fail_with_document_key(code, json, exit_code, None)
+}
+
+fn fail_with_document_key(code: &str, json: bool, exit_code: i32, document_key: Option<&str>) -> ! {
     if json {
-        eprintln!("{}", serde_json::json!({ "code": code }));
+        if let Some(document_key) = document_key {
+            eprintln!(
+                "{}",
+                serde_json::json!({ "code": code, "document_key": document_key })
+            );
+        } else {
+            eprintln!("{}", serde_json::json!({ "code": code }));
+        }
+    } else if let Some(document_key) = document_key {
+        eprintln!("error[{code}]: {code} ({document_key})");
     } else {
         eprintln!("error[{code}]: {code}");
     }

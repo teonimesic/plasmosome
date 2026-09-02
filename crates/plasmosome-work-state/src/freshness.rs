@@ -198,7 +198,7 @@ pub fn validate(state: &ObservationState) -> Result<(), FreshnessError> {
     );
     match state.remote_relation {
         RemoteRelation::Unknown => match observed {
-            (None, None, None) => Ok(()),
+            (None, None, None) if state.last_successful_sync_at.is_none() => Ok(()),
             (Some(remote), Some(_), Some(local))
                 if lower_hex_generation(remote) && full_nonblank_commit(local) =>
             {

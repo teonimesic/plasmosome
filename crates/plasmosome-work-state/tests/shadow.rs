@@ -493,5 +493,34 @@ fn operational_import_preserves_task_siblings_through_the_real_adapter_shape() {
         operational.get("task:001").cloned()
     );
     assert_eq!(runner.commands()[0].argv[..2], ["--sandbox", "import"]);
+    assert_eq!(runner.commands()[1].argv, vec!["--sandbox", "export"]);
+    assert_eq!(
+        runner.commands()[2].argv,
+        vec![
+            "--sandbox",
+            "kv",
+            "set",
+            "plasmosome.authority-mode",
+            "markdown-shadow",
+        ]
+    );
+    assert_eq!(
+        runner.commands()[3].argv,
+        vec![
+            "--sandbox",
+            "kv",
+            "set",
+            "plasmosome.source-commit",
+            &source_commit,
+        ]
+    );
+    assert_eq!(
+        runner.commands()[4].argv,
+        vec!["--sandbox", "kv", "get", "plasmosome.authority-mode"]
+    );
+    assert_eq!(
+        runner.commands()[5].argv,
+        vec!["--sandbox", "kv", "get", "plasmosome.source-commit"]
+    );
     assert!(runner.finish().is_ok());
 }
