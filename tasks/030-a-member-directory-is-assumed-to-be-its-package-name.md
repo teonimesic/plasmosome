@@ -1,13 +1,14 @@
 ---
 id: 030
 title: A member's directory name is assumed to be its package name
-status: todo
+status: in_progress
 priority: 2
 specs: [003]
 intents: [002]
 refs:
   [
-    crates/plasmosome-freeze-checks/tests/freeze_rules.rs,
+    crates/plasmosome-guards/tests/workspace_guards.rs,
+    crates/plasmosome-guards/AGENTS.md,
     tasks/024-the-dependency-freeze-reads-text-not-toml.md,
   ]
 done_when: >-
@@ -18,7 +19,7 @@ done_when: >-
   directory name differs from its package name — a crate named `plasmid` living at
   `crates/plasmid-placeholder`, say — and asserts on it that `workspace_members` yields `plasmid`
   and not `plasmid-placeholder`, that `cargo tree -p` resolves that name, and that every test in
-  `crates/plasmosome-freeze-checks/tests/freeze_rules.rs` passes, `testkit_is_dev_only` among them.
+  `crates/plasmosome-guards/tests/workspace_guards.rs` passes, `testkit_is_dev_only` among them.
 pr:
 evidence:
 ---
@@ -66,4 +67,70 @@ the code should stop depending on it.
 
 ## Plan
 
+Split `workspace_members()` in `crates/plasmosome-guards/tests/workspace_guards.rs` into a
+root-parameterised worker `workspace_members_in(root: &Path)` and the existing zero-argument
+wrapper, which keeps the anti-vacuity assert that the production list contains `plasmosome-testkit`.
+The worker keeps the line scan of the root manifest's `members = [` array exactly as it is; where it
+took the last component of each member path, it now reads that member's own `Cargo.toml` and parses
+`[package].name` with the `toml` crate, per
+[`docs/decisions/004-a-rule-about-code-parses-code.md`](../docs/decisions/004-a-rule-about-code-parses-code.md).
+A member whose manifest cannot be read or parsed, or which declares no `[package].name`, is a
+panic naming that member path, never a silent skip — dropping one would leave the member count and
+every name-based check reporting a workspace smaller than the one on disk. Split `cargo()` the same
+way into `cargo_in(root: &Path)` plus a wrapper, so a fixture can run Cargo in its own root. Both
+production call sites keep calling the zero-argument wrappers, so the real-root default is
+unchanged. Add `toml = { workspace = true }` to the crate's `[dev-dependencies]`.
+
+Three tests, on temp-directory fixture workspaces built with `tempfile`:
+
+- `a_member_directory_that_differs_from_its_package_name_yields_the_declared_name` — a workspace
+  holding `plasmid` at `crates/plasmid-placeholder` and `straight` at `crates/straight`, asserting
+  the exact list `["plasmid", "straight"]`. The mismatched member reaches the resolution branch; the
+  matched one proves the ordinary case is undisturbed; exact-list equality is what stops an empty or
+  shortened list from passing.
+- `cargo_tree_resolves_every_name_workspace_members_reports` — the same fixture, the same pinned
+  list first, then `cargo tree -p <name>` in the fixture root for each name, asserting the command
+  succeeds and roots its graph at that name.
+- `a_member_that_declares_no_package_name_is_refused_not_skipped` — a fixture whose second member
+  holds parseable TOML with no `[package]` table, pinned with `#[should_panic(expected = ...)]` to
+  the refusal message.
+
+`only_the_held_names_are_publishable_to_a_registry` and `testkit_is_dev_only` are neither broken nor
+touched: every member directory in this workspace currently matches its declared package name, so
+the list is the same ten names today and becomes correct rather than lucky the first time one
+differs. In `crates/plasmosome-guards/AGENTS.md`, the second paragraph of "Why the publish guard
+counts members instead of naming them" states a premise this task makes false, and is rewritten to
+give the reason that survives: the refusal to compare names one by one is no longer about those
+names being path-derived, it is that widening what a guard asserts is its own decision with its own
+task.
+
 ## Notes
+
+2026-09-02 — **Re-scoped off a crate that no longer exists.** `refs:` and `done_when:` both named
+`crates/plasmosome-freeze-checks/tests/freeze_rules.rs`, which `db3cea6` (task 035, PR 64) deleted
+along with the rest of that crate. `workspace_members`, `testkit_is_dev_only` and the publish guard
+survived the deletion and now live in `crates/plasmosome-guards/tests/workspace_guards.rs`; the two
+fields were repointed there and nothing else in `done_when:` was changed.
+
+**Landing without task 024, and what 024 still owes.** These two were filed to land together, and
+this one lands first because it is the defect with a reproduction. After it, the root manifest's
+`members = [` array is still found by scanning lines and trimming quotes and commas, while each
+member's own manifest is parsed with `toml`. So 024's subject is unchanged and narrowed to one
+place: the array read in `workspace_members_in`, which still assumes the members are listed one per
+line and is held honest only by the wrapper's assert that the list contains `plasmosome-testkit`.
+
+**Mutation evidence.** With the worker reverted to `path.rsplit('/').next()` and everything else
+left in place, `cargo test -p plasmosome-guards` reports 6 passed and 3 failed:
+`a_member_directory_that_differs_from_its_package_name_yields_the_declared_name` fails
+`assertion left == right failed`, left `["plasmid-placeholder", "straight"]` against the pinned
+right `["plasmid", "straight"]`; `cargo_tree_resolves_every_name_workspace_members_reports` fails on
+the same pinned list, which it checks before running Cargo; and
+`a_member_that_declares_no_package_name_is_refused_not_skipped` reports `test did not panic as
+expected`. Running the arm the second test guards directly against that fixture shows what the
+reversion costs downstream: `cargo tree -p plasmid-placeholder --prefix none` exits 101 with the
+message below, which is the failure `testkit_is_dev_only` would report on a real crate that had
+done nothing wrong. Restoring the resolution returns all 9 to green.
+
+```text
+error: package ID specification `plasmid-placeholder` did not match any packages
+```

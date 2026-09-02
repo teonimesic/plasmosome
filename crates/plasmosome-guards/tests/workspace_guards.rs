@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::process::Command;
 
 use plasmosome_guards::workspace_root;
@@ -10,13 +11,50 @@ const HELD_NAMES: &[&str] = &["plasmosome", "plasmid"];
 const HELD_REGISTRIES: &[&str] = &["crates-io"];
 
 fn cargo() -> Command {
+    cargo_in(&workspace_root())
+}
+
+fn cargo_in(root: &Path) -> Command {
     let mut command = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()));
-    command.current_dir(workspace_root());
+    command.current_dir(root);
     command
 }
 
 fn workspace_members() -> Vec<String> {
-    let manifest = std::fs::read_to_string(workspace_root().join("Cargo.toml"))
+    let members = workspace_members_in(&workspace_root());
+    assert!(
+        members.contains(&TESTKIT.to_string()),
+        "the workspace manifest no longer lists its members one per line: {members:?}"
+    );
+    members
+}
+
+fn declared_package_name(root: &Path, path: &str) -> String {
+    let manifest_path = root.join(path).join("Cargo.toml");
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap_or_else(|error| {
+        panic!(
+            "`{path}` is listed as a workspace member and its manifest at {manifest_path:?} could not be read ({error}); this guard resolves every member path to the package that member declares, and a member it cannot read is refused rather than dropped, because dropping it would leave the member count and every name-based check reporting a workspace smaller than the one on disk"
+        )
+    });
+    let document: toml::Value = manifest.parse().unwrap_or_else(|error| {
+        panic!(
+            "`{path}` is listed as a workspace member and its manifest is not valid TOML ({error}); this guard resolves every member path to the package that member declares, and a member it cannot parse is refused rather than dropped, because dropping it would leave the member count and every name-based check reporting a workspace smaller than the one on disk"
+        )
+    });
+    document
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(|name| name.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "`{path}` declares no `[package].name`; this guard resolves every member path to the package that member declares and refuses to continue on one that declares none, because dropping it would leave the member count and every name-based check reporting a workspace smaller than the one on disk"
+            )
+        })
+        .to_string()
+}
+
+fn workspace_members_in(root: &Path) -> Vec<String> {
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
         .expect("the workspace manifest is readable");
     let mut in_members = false;
     let mut members = Vec::new();
@@ -31,14 +69,9 @@ fn workspace_members() -> Vec<String> {
                 break;
             }
             let path = line.trim_matches(|c: char| c == ',' || c == '"');
-            let name = path.rsplit('/').next().unwrap_or(path);
-            members.push(name.to_string());
+            members.push(declared_package_name(root, path));
         }
     }
-    assert!(
-        members.contains(&TESTKIT.to_string()),
-        "the workspace manifest no longer lists its members one per line: {members:?}"
-    );
     members
 }
 
@@ -272,4 +305,100 @@ fn testkit_is_dev_only() {
             "`{member}` has a non-dev dependency path to `{TESTKIT}`; the testkit is test support and reaches a kernel crate only through `[dev-dependencies]`, or it ships"
         );
     }
+}
+
+fn write_member(root: &Path, directory: &str, manifest: &str) {
+    let member = root.join(directory);
+    std::fs::create_dir_all(member.join("src")).expect("the fixture member directory is created");
+    std::fs::write(member.join("Cargo.toml"), manifest)
+        .expect("the fixture member manifest is written");
+    std::fs::write(member.join("src").join("lib.rs"), "")
+        .expect("the fixture member source is written");
+}
+
+fn write_workspace_manifest(root: &Path, member_paths: &[&str]) {
+    let mut manifest = String::from("[workspace]\nresolver = \"2\"\nmembers = [\n");
+    for member_path in member_paths {
+        manifest.push_str(&format!("    \"{member_path}\",\n"));
+    }
+    manifest.push_str("]\n");
+    std::fs::write(root.join("Cargo.toml"), manifest)
+        .expect("the fixture workspace manifest is written");
+}
+
+fn member_manifest(name: &str) -> String {
+    format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+}
+
+fn fixture_workspace() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("a scratch directory is created");
+    let root = directory.path();
+    write_workspace_manifest(root, &["crates/plasmid-placeholder", "crates/straight"]);
+    write_member(
+        root,
+        "crates/plasmid-placeholder",
+        &member_manifest("plasmid"),
+    );
+    write_member(root, "crates/straight", &member_manifest("straight"));
+    directory
+}
+
+fn workspace_with_a_member_declaring_no_package() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("a scratch directory is created");
+    let root = directory.path();
+    write_workspace_manifest(root, &["crates/straight", "crates/nameless"]);
+    write_member(root, "crates/straight", &member_manifest("straight"));
+    write_member(root, "crates/nameless", "[lib]\n");
+    directory
+}
+
+#[test]
+fn a_member_directory_that_differs_from_its_package_name_yields_the_declared_name() {
+    let workspace = fixture_workspace();
+
+    let members = workspace_members_in(workspace.path());
+
+    assert_eq!(
+        members,
+        vec!["plasmid".to_string(), "straight".to_string()],
+        "`crates/plasmid-placeholder` declares the package `plasmid` and `crates/straight` declares `straight`; a member list that reports a directory in place of the package that directory declares hands every guard built on it a name Cargo cannot resolve, and the guard then fails on the crate that provoked it instead of on the rule it enforces; it reported {members:?}"
+    );
+}
+
+#[test]
+fn cargo_tree_resolves_every_name_workspace_members_reports() {
+    let workspace = fixture_workspace();
+    let names = workspace_members_in(workspace.path());
+
+    assert_eq!(
+        names,
+        vec!["plasmid".to_string(), "straight".to_string()],
+        "the names checked below are the ones this list holds, so an empty or shortened list would let the loop pass having resolved nothing; it reported {names:?}"
+    );
+
+    for name in names {
+        let output = cargo_in(workspace.path())
+            .args(["tree", "-p", &name, "--prefix", "none"])
+            .output()
+            .expect("cargo tree runs");
+        assert!(
+            output.status.success(),
+            "cargo tree -p {name} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let graph = String::from_utf8_lossy(&output.stdout);
+        let root_of_the_graph = graph.lines().next().unwrap_or_default();
+        assert!(
+            root_of_the_graph.starts_with(&format!("{name} v0.1.0")),
+            "`cargo tree -p {name}` succeeded but rooted its graph at {root_of_the_graph:?}; the name this guard reports has to be the package Cargo resolves it to, or a command that merely exits zero would stand in for one that found the crate"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "`crates/nameless` declares no `[package].name`")]
+fn a_member_that_declares_no_package_name_is_refused_not_skipped() {
+    let workspace = workspace_with_a_member_declaring_no_package();
+
+    workspace_members_in(workspace.path());
 }
