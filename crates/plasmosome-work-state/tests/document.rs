@@ -32,10 +32,10 @@ fn source_outputs(
         .iter()
         .map(|(path, _, _)| *path)
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\0");
     let mut outputs = vec![
         Ok(CommandOutput::success(format!("{source_commit}\n"))),
-        Ok(CommandOutput::success(format!("{paths}\n"))),
+        Ok(CommandOutput::success(format!("{paths}\0"))),
     ];
     let mut ordered = documents.to_vec();
     ordered.sort_by_key(|(path, _, _)| {
@@ -171,6 +171,39 @@ fn requested_tree_paths_are_discovered_without_a_configured_count() {
             .map(|document| document.record.document_key.as_str())
             .collect::<Vec<_>>(),
         vec!["intent:001", "spec:001", "task:001"]
+    );
+    assert!(runner.finish().is_ok());
+}
+
+#[test]
+fn source_tree_paths_are_nul_delimited_and_literal() {
+    let source_commit = sha('a');
+    let content_commit = sha('b');
+    let contents = intent("001", "One", "approved");
+    let mut runner = RecordingCommandRunner::scripted(source_outputs(
+        &source_commit,
+        &[("docs/intents/001-µ.md", &contents, &content_commit)],
+    ));
+
+    let source = load(&mut runner, "selected-ref").expect("literal path loads");
+
+    assert_eq!(
+        source.documents[0].record.document_path,
+        "docs/intents/001-µ.md"
+    );
+    assert_eq!(
+        runner.commands()[1].argv,
+        vec![
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "-z",
+            &source_commit,
+            "--",
+            "docs/intents",
+            "docs/specs",
+            "tasks",
+        ]
     );
     assert!(runner.finish().is_ok());
 }
@@ -333,7 +366,7 @@ fn numeric_noncanonical_path_or_path_id_mismatch_refuses() {
     let source_commit = sha('a');
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(CommandOutput::success(format!("{source_commit}\n"))),
-        Ok(CommandOutput::success("tasks/001.md\n")),
+        Ok(CommandOutput::success("tasks/001.md\0")),
     ]);
     let error = load(&mut runner, "selected-ref").unwrap_err();
     assert_eq!(error.code(), "invalid_document");
@@ -382,7 +415,7 @@ fn duplicate_id_within_one_kind_names_the_key_before_import() {
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(CommandOutput::success(format!("{source_commit}\n"))),
         Ok(CommandOutput::success(
-            "tasks/001-first.md\ntasks/001-second.md\n",
+            "tasks/001-first.md\0tasks/001-second.md\0",
         )),
     ]);
 
@@ -417,7 +450,7 @@ fn content_commit_mismatch_names_the_key_before_import() {
     let contents = intent("001", "One", "approved");
     let mut runner = RecordingCommandRunner::scripted(vec![
         Ok(CommandOutput::success(format!("{source_commit}\n"))),
-        Ok(CommandOutput::success("docs/intents/001-one.md\n")),
+        Ok(CommandOutput::success("docs/intents/001-one.md\0")),
         Ok(CommandOutput::success(&contents)),
         Ok(CommandOutput::success(format!("{content_commit}\n"))),
         Ok(CommandOutput::success(intent(

@@ -9,8 +9,8 @@ use tempfile::NamedTempFile;
 
 use crate::command::{CommandOutput, CommandRunner, CommandSpec};
 use crate::document::{
-    DocumentError, DocumentKind, DocumentRecord, MarkdownShadow, ShadowDocument, is_lower_hex_sha,
-    validate_document_targets,
+    DocumentError, DocumentKind, DocumentRecord, MarkdownShadow, ShadowDocument, is_document_id,
+    is_lower_hex_sha, valid_lifecycle, validate_document_targets,
 };
 
 /// A refusal raised while encoding, importing, decoding, or comparing a shadow store.
@@ -127,42 +127,8 @@ fn from_document_error(error: DocumentError) -> ShadowError {
     }
 }
 
-fn kind_name(kind: &DocumentKind) -> &'static str {
-    match kind {
-        DocumentKind::Intent => "intent",
-        DocumentKind::Spec => "spec",
-        DocumentKind::Task => "task",
-    }
-}
-
-fn document_directory(kind: &DocumentKind) -> &'static str {
-    match kind {
-        DocumentKind::Intent => "docs/intents/",
-        DocumentKind::Spec => "docs/specs/",
-        DocumentKind::Task => "tasks/",
-    }
-}
-
-fn is_document_id(value: &str) -> bool {
-    value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn valid_lifecycle(kind: &DocumentKind, lifecycle: &str) -> bool {
-    match kind {
-        DocumentKind::Intent => matches!(lifecycle, "draft" | "approved"),
-        DocumentKind::Spec => matches!(lifecycle, "draft" | "accepted" | "superseded"),
-        DocumentKind::Task => matches!(
-            lifecycle,
-            "todo" | "planned" | "in_progress" | "in_review" | "done"
-        ),
-    }
-}
-
 fn canonical_path(record: &DocumentRecord) -> bool {
-    let Some(suffix) = record
-        .document_path
-        .strip_prefix(document_directory(&record.kind))
-    else {
+    let Some(suffix) = record.document_path.strip_prefix(record.kind.directory()) else {
         return false;
     };
     let prefix = format!("{}-", record.document_id);
@@ -176,7 +142,7 @@ fn validate_document(document: &ShadowDocument) -> Result<(), ShadowError> {
     let record = &document.record;
     let key = Some(record.document_key.clone());
     if !is_document_id(&record.document_id)
-        || record.document_key != format!("{}:{}", kind_name(&record.kind), record.document_id)
+        || record.document_key != format!("{}:{}", record.kind.namespace(), record.document_id)
         || !canonical_path(record)
         || record.title.trim().is_empty()
         || !is_lower_hex_sha(&record.content_commit_sha)
@@ -254,7 +220,7 @@ fn validate_documents(documents: &[ShadowDocument]) -> Result<(), ShadowError> {
 pub fn native_id(record: &DocumentRecord) -> String {
     format!(
         "plasmosome-{}{}",
-        kind_name(&record.kind),
+        record.kind.namespace(),
         record.document_id
     )
 }

@@ -18,7 +18,7 @@ pub enum DocumentKind {
 }
 
 impl DocumentKind {
-    fn namespace(&self) -> &'static str {
+    pub(crate) fn namespace(&self) -> &'static str {
         match self {
             Self::Intent => "intent",
             Self::Spec => "spec",
@@ -26,7 +26,7 @@ impl DocumentKind {
         }
     }
 
-    fn directory(&self) -> &'static str {
+    pub(crate) fn directory(&self) -> &'static str {
         match self {
             Self::Intent => "docs/intents/",
             Self::Spec => "docs/specs/",
@@ -159,7 +159,7 @@ fn key(kind: &DocumentKind, id: &str) -> String {
     format!("{}:{id}", kind.namespace())
 }
 
-fn is_document_id(value: &str) -> bool {
+pub(crate) fn is_document_id(value: &str) -> bool {
     value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
@@ -216,7 +216,7 @@ fn canonical_document_path(path: &str) -> Result<DocumentPath, DocumentError> {
 
 fn discovered_paths(contents: &str) -> Result<Vec<DocumentPath>, DocumentError> {
     let mut documents = Vec::new();
-    for path in contents.lines().filter(|path| !path.is_empty()) {
+    for path in contents.split('\0').filter(|path| !path.is_empty()) {
         let Some(kind) = kind_for_path(path) else {
             continue;
         };
@@ -472,7 +472,7 @@ fn flow_list(
         .collect()
 }
 
-fn valid_lifecycle(kind: &DocumentKind, lifecycle: &str) -> bool {
+pub(crate) fn valid_lifecycle(kind: &DocumentKind, lifecycle: &str) -> bool {
     match kind {
         DocumentKind::Intent => matches!(lifecycle, "draft" | "approved"),
         DocumentKind::Spec => matches!(lifecycle, "draft" | "accepted" | "superseded"),
@@ -683,6 +683,7 @@ pub fn load_documents<R: CommandRunner>(
             "ls-tree".into(),
             "-r".into(),
             "--name-only".into(),
+            "-z".into(),
             source_commit.clone(),
             "--".into(),
             "docs/intents".into(),

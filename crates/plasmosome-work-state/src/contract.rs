@@ -962,8 +962,8 @@ fn shadow_store(fixture: &StoreFixture, binary: &Path) -> ShadowStore {
     )
 }
 
-fn run_shadow_round_trip(
-    runner: &mut SystemCommandRunner,
+fn run_shadow_round_trip<R: CommandRunner>(
+    runner: &mut R,
     binary: &Path,
     source: &SourceDocuments,
     first: &StoreFixture,

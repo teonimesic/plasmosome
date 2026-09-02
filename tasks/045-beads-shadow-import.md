@@ -563,3 +563,36 @@ The final warm suite is 2.49 seconds faster than the 7.27-second Task 042 baseli
 review also demonstrated a pre-fix aggregate-dispatch mutation that the old disconnected test did
 not catch; the replacement is coupled to the predicate `run_contract` actually calls and will be
 mutated again on the remediation head.
+
+### 2026-09-02 — first CodeRabbit remediation
+
+The first completed CodeRabbit round found literal Git-path handling, duplicate source/shadow
+validation rules, a concrete runner parameter, cross-platform test imports, and four
+non-discriminating regression assertions. Tests were changed before the implementation pass:
+NUL-delimited recorded `ls-tree` output made the document target red with six `invalid_document`
+failures until the existing `ls-tree` invocation added `-z` and the parser split on NUL. The new
+literal non-ASCII numeric path and exact command-plan assertion were then green.
+
+The strengthened CLI, stderr, mapping-complement and digest tests were mutation-checked without
+weakening their assertions: returning `invalid_source_ref` for a malformed flag, lossy stderr,
+including shadow fields in document mapping, and a constant digest each made its named target red;
+the checked implementations restored those targets to green. The digest test independently computes
+SHA-256 over the canonical export and also proves reordered input serializes identically. The
+post-green refactor shared the document kind/id/lifecycle rules with the shadow validator and made
+the round-trip helper generic over the existing command seam. `cargo test -p
+plasmosome-work-state` then passed 82 tests; package clippy with warnings denied, formatting, and
+`git diff --check` also passed.
+
+All five real source cases were rerun after the NUL-path change and retained the recorded commits,
+counts, digests, clone labels, `markdown-shadow` mode and aggregate transport scenarios. The final
+root gates were:
+
+| command | exit |
+| --- | --- |
+| `/usr/bin/time -p cargo test --workspace` | 0 (`real 4.59s`; preceding post-edit cold pass 8.46s) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 |
+| `cargo fmt --all -- --check` | 0 |
+| `./.githooks/provenance-guard` | 0 |
+| `./.githooks/attribution-guard` | 0 |
+
+The final warm workspace time is 2.68 seconds faster than the Task 042 7.27-second baseline.

@@ -163,6 +163,9 @@ fn source_flags_are_unambiguous_and_legacy_forms_stay_unchanged() {
             "second",
         ],
     ] {
-        assert!(parse_contract_request(values).is_err());
+        assert_eq!(
+            parse_contract_request(values).unwrap_err(),
+            "invalid_command"
+        );
     }
 }

@@ -10,6 +10,7 @@ use plasmosome_work_state::shadow::{
     logical_export_digest, native_id, to_beads_jsonl,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 fn sha(character: char) -> String {
@@ -345,6 +346,8 @@ fn changed_lifecycle_priority_pr_or_evidence_each_refuses() {
     for mutate in mutations {
         let mut actual = expected.clone();
         mutate(&mut actual[2]);
+        compare_document_mapping(&expected, &actual)
+            .expect("mapping ignores Markdown shadow fields");
         let error = compare_shadow_parity(&expected, &actual).unwrap_err();
         assert_eq!(error.code(), "shadow_parity_mismatch");
         assert_eq!(error.offending_key.as_deref(), Some("task:001"));
@@ -359,8 +362,16 @@ fn canonical_logical_export_round_trips_without_native_ids() {
 
     assert!(!export.contains("plasmosome-task001"));
     assert_eq!(decode_logical_export(&export).unwrap(), documents);
+    let mut reordered = documents.clone();
+    reordered.reverse();
+    let reordered_export = canonical_logical_export(&reordered).unwrap();
+    assert_eq!(reordered_export, export);
     assert_eq!(
         logical_export_digest(&export),
-        logical_export_digest(&export)
+        logical_export_digest(&reordered_export)
+    );
+    assert_eq!(
+        logical_export_digest(&export),
+        format!("{:x}", Sha256::digest(export.as_bytes()))
     );
 }

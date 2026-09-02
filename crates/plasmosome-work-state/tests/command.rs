@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::fs;
 use std::path::PathBuf;
 
@@ -53,6 +54,28 @@ fn system_runner_refuses_non_utf8_output_instead_of_replacing_it() {
     let root = tempdir().unwrap();
     let program = root.path().join("invalid-output");
     fs::write(&program, b"#!/bin/sh\nprintf '\\377'\n").unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut runner = SystemCommandRunner;
+    let result = runner.run(CommandSpec {
+        program,
+        argv: Vec::new(),
+        cwd: None,
+        environment: Default::default(),
+        redacted_argv_positions: Vec::new(),
+    });
+
+    assert_eq!(result, Err("command_output_not_utf8".into()));
+}
+
+#[cfg(unix)]
+#[test]
+fn system_runner_refuses_non_utf8_stderr_instead_of_replacing_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempdir().unwrap();
+    let program = root.path().join("invalid-stderr");
+    fs::write(&program, b"#!/bin/sh\nprintf 'ok\\n'\nprintf '\\377' >&2\n").unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
 
     let mut runner = SystemCommandRunner;
