@@ -74,14 +74,14 @@ fn system_runner_refuses_non_utf8_stderr_instead_of_replacing_it() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = tempdir().unwrap();
-    let program = root.path().join("invalid-stderr");
-    fs::write(&program, b"#!/bin/sh\nprintf 'ok\\n'\nprintf '\\377' >&2\n").unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let script = root.path().join("invalid-stderr");
+    fs::write(&script, b"#!/bin/sh\nprintf 'ok\\n'\nprintf '\\377' >&2\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
     let mut runner = SystemCommandRunner;
     let result = runner.run(CommandSpec {
-        program,
-        argv: Vec::new(),
+        program: PathBuf::from("/bin/sh"),
+        argv: vec![script.to_string_lossy().into_owned()],
         cwd: None,
         environment: Default::default(),
         redacted_argv_positions: Vec::new(),

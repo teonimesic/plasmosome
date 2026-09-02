@@ -712,3 +712,23 @@ migration or cutover.
 ### 2026-09-02 — plan-author literal-path authorization
 
 The Task 045 plan author authorized the corresponding command-allowlist, literal-path explanation, and test-name corrections at exact head `b5707cc4b0e32b4ba78068646f3c0b4dbc0b8160`; they encode the existing exact-path/content-commit requirement and add no source command or capability.
+
+### 2026-09-02 — CI stderr-fixture remediation
+
+GitHub Actions `gates` run `33634707935` was the red evidence for the Linux fixture: the direct
+execution of the just-written temporary shell script in
+`system_runner_refuses_non_utf8_stderr_instead_of_replacing_it` returned `Text file busy (os error
+26)` instead of the required `command_output_not_utf8`. Under the Task 045 authorization, the
+test-only fixture now invokes `/bin/sh` with that temporary script as its argv, retaining the same
+invalid-UTF-8 stderr payload and exact assertion. No production code or assertion was relaxed.
+
+The focused stderr target and `cargo test -p plasmosome-work-state` passed 84 tests. The rerun root
+gates were:
+
+| command | exit |
+| --- | --- |
+| `/usr/bin/time -p cargo test --workspace` | 0 (`real 4.69s`) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 |
+| `cargo fmt --all -- --check` | 0 |
+| `./.githooks/provenance-guard` | 0 |
+| `./.githooks/attribution-guard` | 0 |
