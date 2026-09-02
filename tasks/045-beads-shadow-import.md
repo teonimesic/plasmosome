@@ -149,7 +149,7 @@ fixture, with the actual worktree root as `cwd`. The only source-repository comm
 git rev-parse --verify --end-of-options <source-ref>^{commit}
 git ls-tree -r --name-only -z <resolved-sha> -- docs/intents docs/specs tasks
 git show <resolved-sha>:<document-path>
-git log -1 --format=%H <resolved-sha> -- <document-path>
+git log -1 --format=%H <resolved-sha> -- :(literal)<document-path>
 git show <content-commit-sha>:<document-path>
 ```
 
@@ -180,8 +180,10 @@ record. The id in frontmatter must equal the path prefix. Reject a second path w
 and id, but do not collide equal ids across kinds. Derive the immutable key from kind plus id;
 never derive it from the slug or a Beads row id.
 
-For every path, take `git log -1` as the newest commit on the selected history which established
-that current path/content revision. Require that its second `git show` returns exactly the same
+For every path, pass `:(literal)<document-path>` after `--` to `git log -1` so pathspec
+metacharacters are part of the canonical filename rather than match syntax. Take its result as the
+newest commit on the selected history which established that current path/content revision. Require
+that its second `git show` returns exactly the same
 UTF-8 contents as the file at the resolved source commit. An unrelated later source commit therefore
 does not replace `content_commit_sha`; a moved path or edited file does. Refuse a missing path,
 invalid SHA or different contents before a Beads import command runs.
@@ -706,3 +708,7 @@ aggregate origin/main result also completed `stale-base-fence`, `push-conflict-r
 The final suite is 1.08 seconds slower than Task 042's 7.27-second recorded baseline. Markdown
 remains authoritative: this is still the shadow mapping/import foundation, not a Spec 014
 migration or cutover.
+
+### 2026-09-02 — plan-author literal-path authorization
+
+The Task 045 plan author authorized the corresponding command-allowlist, literal-path explanation, and test-name corrections at exact head `b5707cc4b0e32b4ba78068646f3c0b4dbc0b8160`; they encode the existing exact-path/content-commit requirement and add no source command or capability.
