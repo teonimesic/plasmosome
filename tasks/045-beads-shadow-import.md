@@ -1,7 +1,7 @@
 ---
 id: 045
 title: Import the Markdown work records into two shadow Beads stores
-status: in_review
+status: done
 priority: 1
 specs: [014]
 intents: [015]
@@ -38,7 +38,7 @@ done_when:
   - The pinned Beads 1.1.2 binary performs the two local imports and exports under the existing isolated command seam; no live or fake GitHub repository, GitHub API, hosted fixture, local Git server, broad mock framework or committed repository snapshot is introduced.
   - Tests are written and observed failing before each implementation batch, coverage and uncovered branches are reviewed, the timed workspace suite and all five root gates exit 0, and the change makes no claim about reads, freshness, online mutation, leases, reconciliation, CI acquisition, backup/restore or authority cutover.
 pr: 80
-evidence:
+evidence: "PR #80 squash merge 1b3868e8f5298d2f772fe2fd39b534d8496cb236; Markdown-to-Beads shadow mapping/import foundation delivered while Markdown remains authoritative and no Spec 014 cutover is claimed"
 ---
 
 ## Why
