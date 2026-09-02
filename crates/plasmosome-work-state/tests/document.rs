@@ -242,13 +242,13 @@ fn equal_ids_in_three_namespaces_make_three_distinct_keys() {
 }
 
 #[test]
-fn content_commit_establishes_the_selected_path_and_contents() {
+fn content_commit_establishes_the_selected_literal_path_and_contents() {
     let source_commit = sha('a');
     let content_commit = sha('b');
     let contents = intent("001", "One", "approved");
     let mut runner = RecordingCommandRunner::scripted(source_outputs(
         &source_commit,
-        &[("docs/intents/001-one.md", &contents, &content_commit)],
+        &[("docs/intents/001-a[b].md", &contents, &content_commit)],
     ));
 
     let source = load(&mut runner, "selected-ref").unwrap();
@@ -265,14 +265,14 @@ fn content_commit_establishes_the_selected_path_and_contents() {
             "--format=%H".into(),
             source_commit.clone(),
             "--".into(),
-            "docs/intents/001-one.md".into(),
+            ":(literal)docs/intents/001-a[b].md".into(),
         ]
     );
     assert_eq!(
         runner.commands()[4].argv,
         vec![
             "show".into(),
-            format!("{content_commit}:docs/intents/001-one.md"),
+            format!("{content_commit}:docs/intents/001-a[b].md"),
         ]
     );
     assert!(runner.finish().is_ok());

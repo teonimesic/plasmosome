@@ -668,3 +668,41 @@ All five real pinned cases were rerun. `origin/main` remained
 
 The final suite is 1.81 seconds slower than Task 042's 7.27-second recorded baseline. Markdown
 remains authoritative; this remediation only makes malformed public parser input refuse safely.
+
+### 2026-09-02 — CodeRabbit literal-path and refusal-remediation evidence
+
+The next completed full CodeRabbit review of `4f15b15` found three valid boundary gaps. Tests changed
+first. The content-commit test uses the literal canonical path `docs/intents/001-a[b].md` and was
+red because the recorded `git log` argv ended in the unencoded path rather than
+`:(literal)docs/intents/001-a[b].md`. The existing exit-code table was extended for
+`cutover_blocked`; a temporary removal of that production mapping made its focused assertion red
+with exit `2` rather than `1`, then the exact mapping was restored. A new unexpected-authority-mode
+test was also red under a temporary mutation of the existing authority predicate: it observed a
+sixth source-commit lookup where the refusal must stop after the fifth `kv get` command. That
+predicate was restored before the implementation change.
+
+The production change is limited to passing the existing canonical path to `git log` as a literal
+Git pathspec. The three focused targets and then `cargo test -p plasmosome-work-state` passed 84
+tests. The implementation is one pathspec encoding on an existing command boundary, so the
+post-green review found no further refactor to make.
+
+All five real pinned-Beads cases passed again. `origin/main` resolved to
+`d520f56cfe4d9ff8b612731738c1841da2fd2da9` with 14 / 13 / 41 records (68 total) and logical
+export `b1fba2a989e638fdf3707297af2cead8acf8fc6724bcb236871ca917dc518beb`; historical
+`13c0f68c13743f4db2fb123fef560f3fa12734d1` retained 14 / 12 / 39 records (65 total) and logical
+export `a462f59cbd3f0736b592669ec5a2796c2b1a424600ce58721703f8c43b009bb9`. The two mapping and
+two shadow-parity results reported Beads `1.1.2`, `clone-a`/`clone-b`, and `markdown-shadow`; the
+aggregate origin/main result also completed `stale-base-fence`, `push-conflict-recovery`, and
+`transport-retries` with no mismatch.
+
+| command | exit |
+| --- | --- |
+| `/usr/bin/time -p cargo test --workspace` | 0 (`real 8.35s`) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 |
+| `cargo fmt --all -- --check` | 0 |
+| `./.githooks/provenance-guard` | 0 |
+| `./.githooks/attribution-guard` | 0 |
+
+The final suite is 1.08 seconds slower than Task 042's 7.27-second recorded baseline. Markdown
+remains authoritative: this is still the shadow mapping/import foundation, not a Spec 014
+migration or cutover.

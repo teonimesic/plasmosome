@@ -238,6 +238,29 @@ fn mode_and_source_commit_are_verified_in_each_store() {
 }
 
 #[test]
+fn unexpected_authority_mode_refuses_before_source_commit_lookup() {
+    let root = tempdir().unwrap();
+    let documents = documents();
+    let source_commit = sha('b');
+    let store = store(root.path());
+    let mut outputs = valid_store_outputs(&documents, &source_commit);
+    outputs[4] = Ok(CommandOutput::success("beads-authoritative\n"));
+    outputs.truncate(5);
+    let mut runner = RecordingCommandRunner::scripted(outputs);
+
+    let error = import_shadow_documents(&mut runner, &store, &source_commit, &documents)
+        .expect_err("unexpected authority mode refuses");
+
+    assert_refusal(error, "invalid_document", Some("intent:001"));
+    assert_eq!(runner.commands().len(), 5);
+    assert_eq!(
+        runner.commands()[4].argv,
+        vec!["--sandbox", "kv", "get", "plasmosome.authority-mode"]
+    );
+    assert!(runner.finish().is_ok());
+}
+
+#[test]
 fn duplicate_native_or_logical_ids_refuse_on_export() {
     let documents = documents();
     let jsonl = to_beads_jsonl(&documents).unwrap();

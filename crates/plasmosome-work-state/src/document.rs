@@ -717,7 +717,7 @@ pub fn load_documents<R: CommandRunner>(
                 "--format=%H".into(),
                 source_commit.clone(),
                 "--".into(),
-                path.path.clone(),
+                format!(":(literal){}", path.path),
             ],
             "content_commit_mismatch",
             Some(path.key.clone()),

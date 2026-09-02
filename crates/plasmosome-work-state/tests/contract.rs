@@ -935,6 +935,7 @@ fn all_dispatches_to_mapping_and_shadow_parity() {
 #[test]
 fn source_and_parity_refusals_are_execution_failures_not_cli_failures() {
     for code in [
+        "cutover_blocked",
         "invalid_source_ref",
         "invalid_document",
         "duplicate_document_id",
