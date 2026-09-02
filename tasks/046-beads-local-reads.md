@@ -1,7 +1,7 @@
 ---
 id: 046
 title: Install and query the shared local Beads shadow
-status: planned
+status: in_progress
 priority: 1
 specs: [014]
 intents: [015]
