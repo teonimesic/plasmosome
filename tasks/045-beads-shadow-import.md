@@ -1,7 +1,7 @@
 ---
 id: 045
 title: Import the Markdown work records into two shadow Beads stores
-status: planned
+status: in_progress
 priority: 1
 specs: [014]
 intents: [015]
