@@ -16,6 +16,10 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | --- | --- |
 | `vmm` | The VM process lifecycle: fork, observe, kill, and always reap |
 | `readiness` | Is a broker actually serving? Readiness is an *answered query*, never a running pid or an existing file — a process can be alive and useless |
+| `brokers` | A cell's broker set, each one a `vmm::VmmChild`, asked again on every call |
+| `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
+| `control` | The ndjson control-protocol envelope the daemon serves |
+| `exec` | Spawning a supervised child process |
 
 ## Use
 
@@ -28,3 +32,35 @@ child.kill()?;
 ```
 
 Tests: `cargo test -p plasmosome-membrane`
+
+## Readiness is an answered query
+
+A supervisor is ready when its control socket **answers** a control-`status` request — not when
+the process is alive, and not when a listener accepts. This is measured, not assumed: a
+confinement-profile bug leaves a broker half-alive, its control socket dead while its data
+listener still answers, and every weaker test calls that broker ready. So `readiness::probe`
+treats accept-without-answer as not ready.
+
+The broker set inherits the same rule. It answers ready only once every broker answers its own
+control socket, and it asks again on every call rather than caching a past yes. One `status` call
+spends a single deadline across the whole set: brokers are asked in turn, each given whatever time
+is left, so one unresponsive broker cannot multiply the wait by the size of the set. That bounds
+the worst case, not the happy path — a healthy answer still costs the sum of the probes, so it
+grows with the number of brokers.
+
+## Nothing it starts outlives it
+
+`vmm::VmmChild` owns its forked child end to end — fork, non-blocking state poll, kill, and reap
+on drop — so a dropped handle never leaves an orphaned hypervisor behind. A cell's brokers are one
+`VmmChild` each, which is how they inherit that guarantee rather than restating it.
+
+The division of labour is a design rule held in review, not by a test: VMs, shims and brokers
+belong here, and the controller (`plasmosome-core`) must never own them. Both halves are written
+down per crate — `crates/plasmosome-membrane/AGENTS.md` and `crates/plasmosome-core/AGENTS.md` —
+not in the root file.
+
+## Not here yet
+
+The netstack shim and the vsock bridges belong to this crate by that rule, and none of it is
+built: the modules present are `brokers`, `control`, `daemon`, `exec`, `readiness` and `vmm`.
+They arrive in the next P1 step.
