@@ -18,6 +18,8 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `readiness` | Is a broker actually serving? Readiness is an *answered query*, never a running pid or an existing file — a process can be alive and useless |
 | `brokers` | A cell's broker set, each one a `vmm::VmmChild`, asked again on every call |
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
+| `control` | The ndjson control-protocol envelope the daemon serves |
+| `exec` | Spawning a supervised child process |
 
 ## Use
 
@@ -52,6 +54,13 @@ grows with the number of brokers.
 on drop — so a dropped handle never leaves an orphaned hypervisor behind. A cell's brokers are one
 `VmmChild` each, which is how they inherit that guarantee rather than restating it.
 
-The division of labour is a design rule held in review and written down in `AGENTS.md`, not by a
-test: VMs, shims and brokers belong here, and the controller (`plasmosome-core`) must never own
-them.
+The division of labour is a design rule held in review, not by a test: VMs, shims and brokers
+belong here, and the controller (`plasmosome-core`) must never own them. Both halves are written
+down per crate — `crates/plasmosome-membrane/AGENTS.md` and `crates/plasmosome-core/AGENTS.md` —
+not in the root file.
+
+## Not here yet
+
+The netstack shim and the vsock bridges belong to this crate by that rule, and none of it is
+built: the modules present are `brokers`, `control`, `daemon`, `exec`, `readiness` and `vmm`.
+They arrive in the next P1 step.
