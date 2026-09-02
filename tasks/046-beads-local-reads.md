@@ -1,7 +1,7 @@
 ---
 id: 046
 title: Install and query the shared local Beads shadow
-status: in_progress
+status: in_review
 priority: 1
 specs: [014]
 intents: [015]
@@ -46,7 +46,7 @@ done_when:
   - Missing or corrupt installed state, a changed snapshot during a read, invalid freshness metadata, unsafe paths, an unavailable local ref, and a source commit different from the installed generation are refused with stable codes without changing the active generation.
   - Ordinary reads construct only local `git rev-parse`, installed-wrapper and Beads verification, and pinned `bd --readonly --sandbox` status/export/KV commands under the isolated environment; they never run Cargo, resolve or fetch a source ref, configure or contact a remote, open a credential, sync implicitly, or modify the source checkout or shared generation.
   - Tests are written and observed failing before each implementation batch, real pinned Beads acceptance passes, coverage and uncovered branches are reviewed, the timed workspace suite and all five root gates exit 0, and the task makes no claim that Spec 014's complete `offline-reads` case passes because `heartbeat observe` and the OS-level no-socket harness remain separate work.
-pr:
+pr: https://github.com/teonimesic/plasmosome/pull/82
 evidence:
 ---
 
