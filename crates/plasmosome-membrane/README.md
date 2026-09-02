@@ -41,8 +41,10 @@ treats accept-without-answer as not ready.
 
 The broker set inherits the same rule. It answers ready only once every broker answers its own
 control socket, and it asks again on every call rather than caching a past yes. One `status` call
-spends one deadline across the whole set, so a cell with many brokers answers as fast as a cell
-with one.
+spends a single deadline across the whole set: brokers are asked in turn, each given whatever time
+is left, so one unresponsive broker cannot multiply the wait by the size of the set. That bounds
+the worst case, not the happy path — a healthy answer still costs the sum of the probes, so it
+grows with the number of brokers.
 
 ## Nothing it starts outlives it
 
