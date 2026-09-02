@@ -617,3 +617,21 @@ field contracts; it does not change the already-rerun source mapping or shadow-p
 
 This final suite is 1.16 seconds slower than Task 042's 7.27-second recorded baseline; the prior
 behavioral remediation's 4.59-second warm run remains the comparable implementation result.
+
+### 2026-09-02 — final CodeRabbit wording remediation
+
+The third completed CodeRabbit round correctly noted that a `usize` field is a number of records,
+not a container of records. The three public `DocumentCounts` contracts now use that literal
+wording while retaining their evidence-only, non-cutover boundary. This was documentation-only;
+the source mapping and temporary shadow behavior remain the already-rerun behavior above.
+
+| command | exit |
+| --- | --- |
+| `/usr/bin/time -p cargo test --workspace` | 0 (`real 9.44s`) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 |
+| `cargo fmt --all -- --check` | 0 |
+| `./.githooks/provenance-guard` | 0 |
+| `./.githooks/attribution-guard` | 0 |
+
+The final suite is 2.17 seconds slower than Task 042's 7.27-second recorded baseline; the
+preceding behavioral remediation's 4.59-second run remains the more comparable warm measurement.
