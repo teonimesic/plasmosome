@@ -47,7 +47,7 @@ fn declared_package_name(root: &Path, path: &str) -> String {
         .and_then(|name| name.as_str())
         .unwrap_or_else(|| {
             panic!(
-                "`{path}` declares no `[package].name`; this guard resolves every member path to the package that member declares and refuses to continue on one that declares none, because dropping it would leave the member count and every name-based check reporting a workspace smaller than the one on disk"
+                "`{path}` declares no `[package].name` string (the key is absent, or holds a value that is not a string); this guard resolves every member path to the package that member declares and refuses to continue on a member it cannot take a name from, because dropping it would leave the member count and every name-based check reporting a workspace smaller than the one on disk"
             )
         })
         .to_string()
@@ -352,6 +352,25 @@ fn workspace_with_a_member_declaring_no_package() -> tempfile::TempDir {
     directory
 }
 
+fn workspace_with_a_member_whose_manifest_is_missing() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("a scratch directory is created");
+    let root = directory.path();
+    write_workspace_manifest(root, &["crates/straight", "crates/vanished"]);
+    write_member(root, "crates/straight", &member_manifest("straight"));
+    std::fs::create_dir_all(root.join("crates").join("vanished"))
+        .expect("the fixture member directory is created");
+    directory
+}
+
+fn workspace_with_a_member_whose_manifest_is_not_valid_toml() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("a scratch directory is created");
+    let root = directory.path();
+    write_workspace_manifest(root, &["crates/straight", "crates/garbled"]);
+    write_member(root, "crates/straight", &member_manifest("straight"));
+    write_member(root, "crates/garbled", "[package\nname = \"garbled\"\n");
+    directory
+}
+
 #[test]
 fn a_member_directory_that_differs_from_its_package_name_yields_the_declared_name() {
     let workspace = fixture_workspace();
@@ -399,6 +418,22 @@ fn cargo_tree_resolves_every_name_workspace_members_reports() {
 #[should_panic(expected = "`crates/nameless` declares no `[package].name`")]
 fn a_member_that_declares_no_package_name_is_refused_not_skipped() {
     let workspace = workspace_with_a_member_declaring_no_package();
+
+    workspace_members_in(workspace.path());
+}
+
+#[test]
+#[should_panic(expected = "could not be read")]
+fn a_member_whose_manifest_is_missing_is_refused_not_skipped() {
+    let workspace = workspace_with_a_member_whose_manifest_is_missing();
+
+    workspace_members_in(workspace.path());
+}
+
+#[test]
+#[should_panic(expected = "is not valid TOML")]
+fn a_member_whose_manifest_is_not_valid_toml_is_refused_not_skipped() {
+    let workspace = workspace_with_a_member_whose_manifest_is_not_valid_toml();
 
     workspace_members_in(workspace.path());
 }

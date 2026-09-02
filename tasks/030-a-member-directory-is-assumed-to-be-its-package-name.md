@@ -134,3 +134,19 @@ done nothing wrong. Restoring the resolution returns all 9 to green.
 ```text
 error: package ID specification `plasmid-placeholder` did not match any packages
 ```
+
+Those counts were taken when the binary held 9 tests; it holds 11 now, because the refusal arms
+are covered too. Skipping any member whose directory holds no `Cargo.toml` — the mutant
+`if !root.join(path).join("Cargo.toml").exists() { continue; }` inserted in `workspace_members_in`,
+which is exactly the silent drop the refusal prose names — leaves
+`a_member_whose_manifest_is_missing_is_refused_not_skipped` reporting `test did not panic as
+expected` and the other 10 green. The parse arm was mutated twice. Returning an empty table instead
+of panicking carries the member on to the nameless arm, and
+`a_member_whose_manifest_is_not_valid_toml_is_refused_not_skipped` fails with `panic did not contain
+expected string`, `expected substring: "is not valid TOML"` against a panic message that begins
+with the nameless arm instead — which is also the reading that the three pinned substrings name
+three different arms rather than the long tail all three messages share, since they turn on
+`could not be read`, `is not valid TOML` and `declares no` respectively.
+Skipping any member whose manifest does not parse gives the same `test did not panic as expected`.
+Every mutation was restored from a copy taken beforehand, each restore confirmed exact with `diff`,
+and the binary is back to 11 green.
