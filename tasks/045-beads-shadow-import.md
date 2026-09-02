@@ -469,6 +469,14 @@ start local reads, mutation, reconciliation or cutover.
   similarly showed that a pin checksum refusal had been changed from exit 2 to exit 1; the exit
   classifier was narrowed so the new source/parity codes and `cutover_blocked` exit 1 while the
   prior pin/input class remains exit 2.
+- Independent review found that a whitespace-only `--source-ref` reached source resolution and
+  exited 1 instead of being malformed CLI input. The parser regression was added first and was
+  red; trimming flag values before the empty check made the focused CLI test and the contract suite
+  green, preserving the required `invalid_command`/exit-2 boundary.
+- The same review mutation showed that the aggregate acceptance test only inspected an unused
+  evidence-label helper. Its replacement was red before the production dispatch predicate existed,
+  then green after `run_contract` used that exact predicate; `all` now has no separate declaration
+  that can claim migration/parity while execution skips the round trip.
 - The refactor pass first simplified repeated shadow-test refusal assertions and ran that target
   green. Implementation then shared one crate-private lowercase-hex SHA predicate between the
   document and shadow modules; the complete work-state package was green. Clippy later requested
@@ -535,3 +543,23 @@ The timed workspace suite is 0.21 seconds faster than Task 042's 7.27-second bas
 17.37-second timed run followed coverage cleanup and a cold rebuild; the final warm gate is the
 comparable result. Ordinary tests remain hermetic: they neither acquire the Beads artifact nor
 resolve a live source ref.
+
+### 2026-09-02 — independent-review remediation rerun
+
+The whitespace-only individual source-ref command now printed `invalid_command` and exited 2 before
+pin verification. The full work-state package passed 80 tests. The five real contract cases above
+were rerun after the review fixes with the same source commits, counts, digests, clone labels and
+transport scenario list; all exited 0.
+
+| command | exit |
+| --- | --- |
+| `/usr/bin/time -p cargo test --workspace` | 0 (`real 4.78s`; a preceding post-edit cold pass was 9.61s) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 |
+| `cargo fmt --all -- --check` | 0 |
+| `./.githooks/provenance-guard` | 0 |
+| `./.githooks/attribution-guard` | 0 |
+
+The final warm suite is 2.49 seconds faster than the 7.27-second Task 042 baseline. The independent
+review also demonstrated a pre-fix aggregate-dispatch mutation that the old disconnected test did
+not catch; the replacement is coupled to the predicate `run_contract` actually calls and will be
+mutated again on the remediation head.

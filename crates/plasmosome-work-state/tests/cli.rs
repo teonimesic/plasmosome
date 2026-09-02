@@ -113,6 +113,16 @@ fn source_flags_are_unambiguous_and_legacy_forms_stay_unchanged() {
         ],
         vec![
             "contract-test",
+            "document-mapping",
+            "--source-ref",
+            "   ",
+            "--archive",
+            "archive",
+            "--bd",
+            "bd",
+        ],
+        vec![
+            "contract-test",
             "all",
             "--source-ref",
             "origin/main",

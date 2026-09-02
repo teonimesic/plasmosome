@@ -141,21 +141,9 @@ pub fn contract_refusal_exit_code(code: &str) -> i32 {
     }
 }
 
-/// Lists the evidence categories that a requested contract case must execute.
-pub fn contract_case_names(case: &str) -> Vec<&'static str> {
-    match case {
-        "all" => vec!["hermetic", "transport", "document-mapping", "shadow-parity"],
-        "transport" => vec!["transport"],
-        "document-mapping" => vec!["document-mapping"],
-        "shadow-parity" => vec!["shadow-parity"],
-        "hermetic" => vec!["hermetic"],
-        "version-pin" => vec!["version-pin"],
-        "stealth-init" => vec!["stealth-init"],
-        "stale-base-fence" => vec!["stale-base-fence"],
-        "push-conflict-recovery" => vec!["push-conflict-recovery"],
-        "transport-retries" => vec!["transport-retries"],
-        _ => Vec::new(),
-    }
+/// Returns whether a case must execute the real mapping and shadow-parity round trip.
+pub fn requires_shadow_round_trip(case: &str) -> bool {
+    matches!(case, "document-mapping" | "shadow-parity" | "all")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -538,7 +526,7 @@ where
         let value = values
             .get(index + 1)
             .ok_or_else(|| "invalid_command".to_owned())?;
-        if value.is_empty() || value.starts_with("--") {
+        if value.trim().is_empty() || value.starts_with("--") {
             return Err("invalid_command".into());
         }
         match flag.as_str() {
@@ -1064,10 +1052,7 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
                 vec!["clone-a".into()],
             ));
         }
-        if matches!(
-            request.case.as_str(),
-            "document-mapping" | "shadow-parity" | "all"
-        ) {
+        if requires_shadow_round_trip(&request.case) {
             let source_ref = request.source_ref.as_deref().ok_or_else(|| {
                 Box::new(ContractResult::refusal(&request.case, "invalid_source_ref"))
             })?;

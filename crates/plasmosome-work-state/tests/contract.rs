@@ -1,8 +1,8 @@
 use plasmosome_work_state::command::{CommandOutput, CommandSpec, RecordingCommandRunner};
 use plasmosome_work_state::contract::{
-    Publication, PushFailure, assert_no_ls_remote, classify_push, contract_case_names,
-    contract_refusal_exit_code, dispose_fixture_root, execute_publication_command,
-    leased_ref_update, prepare_store_fixture, publish_candidate, recover_after_lost_response,
+    Publication, PushFailure, assert_no_ls_remote, classify_push, contract_refusal_exit_code,
+    dispose_fixture_root, execute_publication_command, leased_ref_update, prepare_store_fixture,
+    publish_candidate, recover_after_lost_response, requires_shadow_round_trip,
     retry_after_transport, run_scripted_case, run_scripted_cases, run_scripted_contract_case,
     scripted_outcomes, validate_independent_stores, validate_logical_export,
     validate_scripted_history,
@@ -925,11 +925,11 @@ fn hermetic_init_rejects_a_planned_ls_remote_but_allows_local_git_commands() {
 }
 
 #[test]
-fn all_includes_mapping_and_shadow_evidence() {
-    assert_eq!(
-        contract_case_names("all"),
-        vec!["hermetic", "transport", "document-mapping", "shadow-parity",]
-    );
+fn all_dispatches_to_mapping_and_shadow_parity() {
+    assert!(requires_shadow_round_trip("all"));
+    assert!(requires_shadow_round_trip("document-mapping"));
+    assert!(requires_shadow_round_trip("shadow-parity"));
+    assert!(!requires_shadow_round_trip("transport"));
 }
 
 #[test]
