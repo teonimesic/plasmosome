@@ -147,7 +147,7 @@ fixture, with the actual worktree root as `cwd`. The only source-repository comm
 
 ```text
 git rev-parse --verify --end-of-options <source-ref>^{commit}
-git ls-tree -r --name-only <resolved-sha> -- docs/intents docs/specs tasks
+git ls-tree -r --name-only -z <resolved-sha> -- docs/intents docs/specs tasks
 git show <resolved-sha>:<document-path>
 git log -1 --format=%H <resolved-sha> -- <document-path>
 git show <content-commit-sha>:<document-path>
@@ -164,8 +164,9 @@ partial/promisor clone must refuse locally instead of causing `rev-parse`, `log`
 from `origin`. Test the constructed environment explicitly; do not rely on the caller's Git config
 or network state.
 
-Reject a missing, failed, multi-line or non-40-hex resolution. From `ls-tree`, accept only these
-canonical paths and sort by kind in `intent`, `spec`, `task` order, then numeric id:
+Reject a missing, failed, multi-line or non-40-hex resolution. Parse the `-z` `ls-tree` stdout as
+NUL-delimited literal paths, never as lines. Accept only these canonical paths and sort by kind in
+`intent`, `spec`, `task` order, then numeric id:
 
 ```text
 docs/intents/NNN-<non-empty-slug>.md
@@ -596,3 +597,23 @@ root gates were:
 | `./.githooks/attribution-guard` | 0 |
 
 The final warm workspace time is 2.68 seconds faster than the Task 042 7.27-second baseline.
+
+Plan-author authorization permitted this narrowly scoped correction outside the usual Task 045
+lifecycle/Notes boundary: the normative `ls-tree` command and parsing text now state the
+already-tested `-z` NUL protocol; no command family, source scope, or runtime behavior changed.
+
+### 2026-09-02 — final documentation-remediation gates
+
+The final head aligns the authorized normative `-z` protocol text and the public `DocumentCounts`
+field contracts; it does not change the already-rerun source mapping or shadow-parity behavior.
+
+| command | exit |
+| --- | --- |
+| `/usr/bin/time -p cargo test --workspace` | 0 (`real 8.43s`) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 |
+| `cargo fmt --all -- --check` | 0 |
+| `./.githooks/provenance-guard` | 0 |
+| `./.githooks/attribution-guard` | 0 |
+
+This final suite is 1.16 seconds slower than Task 042's 7.27-second recorded baseline; the prior
+behavioral remediation's 4.59-second warm run remains the comparable implementation result.

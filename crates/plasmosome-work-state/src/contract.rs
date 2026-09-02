@@ -36,11 +36,20 @@ pub struct ContractRequest {
 /// Counts of reconstructed Markdown documents, grouped by their namespace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DocumentCounts {
-    /// Numeric intent documents in the selected source commit.
+    /// Contains canonical numeric intent records from the resolved source commit.
+    ///
+    /// Consumers may report this as mapping evidence but must not treat it as migration or cutover
+    /// authority.
     pub intent: usize,
-    /// Numeric spec documents in the selected source commit.
+    /// Contains canonical numeric spec records from the resolved source commit.
+    ///
+    /// Consumers may report this as mapping evidence but must not treat it as migration or cutover
+    /// authority.
     pub spec: usize,
-    /// Numeric task documents in the selected source commit.
+    /// Contains canonical numeric task records from the resolved source commit.
+    ///
+    /// Consumers may report this as mapping evidence but must not treat it as migration or cutover
+    /// authority.
     pub task: usize,
 }
 
