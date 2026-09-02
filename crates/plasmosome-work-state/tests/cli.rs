@@ -9,7 +9,7 @@ fn all_and_transport_accept_no_remote_or_credential_arguments() {
         assert_eq!(request.case, case);
     }
     for forbidden in ["--github-remote", "--confirm-disposable"] {
-        assert!(
+        assert_eq!(
             parse_contract_request([
                 "contract-test",
                 "all",
@@ -20,7 +20,8 @@ fn all_and_transport_accept_no_remote_or_credential_arguments() {
                 forbidden,
                 "value"
             ])
-            .is_err()
+            .unwrap_err(),
+            "invalid_command"
         );
     }
 }
@@ -41,11 +42,12 @@ fn individual_new_cases_require_source_ref_and_all_defaults_to_origin_main() {
         .expect("new document case parses with an explicit source ref");
         assert_eq!(request.source_ref.as_deref(), Some("origin/main"));
 
-        assert!(
+        assert_eq!(
             parse_contract_request(["contract-test", case, "--archive", "archive", "--bd", "bd",])
-                .is_err()
+                .unwrap_err(),
+            "invalid_command"
         );
-        assert!(
+        assert_eq!(
             parse_contract_request([
                 "contract-test",
                 case,
@@ -58,7 +60,8 @@ fn individual_new_cases_require_source_ref_and_all_defaults_to_origin_main() {
                 "--bd",
                 "bd",
             ])
-            .is_err()
+            .unwrap_err(),
+            "invalid_command"
         );
     }
 
@@ -67,7 +70,7 @@ fn individual_new_cases_require_source_ref_and_all_defaults_to_origin_main() {
             .expect("the existing aggregate form remains valid");
     assert_eq!(aggregate.source_ref.as_deref(), Some("origin/main"));
 
-    assert!(
+    assert_eq!(
         parse_contract_request([
             "contract-test",
             "transport",
@@ -78,7 +81,8 @@ fn individual_new_cases_require_source_ref_and_all_defaults_to_origin_main() {
             "--bd",
             "bd",
         ])
-        .is_err()
+        .unwrap_err(),
+        "invalid_command"
     );
 }
 

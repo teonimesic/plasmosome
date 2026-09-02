@@ -375,6 +375,19 @@ fn numeric_noncanonical_path_or_path_id_mismatch_refuses() {
 }
 
 #[test]
+fn non_ascii_path_prefix_refuses_without_panicking() {
+    let error = parse_document(
+        "docs/intents/µµ-x.md",
+        &intent("001", "One", "approved"),
+        &sha('b'),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "invalid_document");
+    assert_eq!(error.offending_key, None);
+}
+
+#[test]
 fn missing_or_duplicate_required_frontmatter_refuses() {
     let content_commit = sha('b');
     for contents in [

@@ -198,8 +198,8 @@ fn canonical_document_path(path: &str) -> Result<DocumentPath, DocumentError> {
     let offending_key = key_from_numeric_path(&kind, path);
     if suffix.contains('/')
         || suffix.len() < 8
-        || !is_document_id(&suffix[..3])
-        || !suffix[3..].starts_with('-')
+        || !starts_with_document_id(suffix)
+        || suffix.as_bytes().get(3) != Some(&b'-')
         || !suffix.ends_with(".md")
         || suffix[4..suffix.len() - 3].is_empty()
     {

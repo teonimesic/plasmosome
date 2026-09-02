@@ -635,3 +635,36 @@ the source mapping and temporary shadow behavior remain the already-rerun behavi
 
 The final suite is 2.17 seconds slower than Task 042's 7.27-second recorded baseline; the
 preceding behavioral remediation's 4.59-second run remains the more comparable warm measurement.
+
+### 2026-09-02 — CodeRabbit parser-remediation evidence
+
+The full review found two valid regressions in the public parser boundary. Tests changed first:
+`non_ascii_path_prefix_refuses_without_panicking` was red with the old
+`end byte index 3 is not a char boundary` panic for `docs/intents/µµ-x.md`; the CLI negative
+cases were strengthened to assert `invalid_command`, and a temporary wildcard
+`invalid_source_ref` mutation made all three CLI targets red. The mutation was restored before
+the production change.
+
+The parser now verifies the leading byte prefix through the existing safe numeric-prefix predicate
+and checks byte four with `as_bytes().get(3)` before any string slicing. The non-ASCII path now
+returns `invalid_document` with no offending key; the focused document and CLI targets, then the
+full work-state package, passed 83 tests.
+
+All five real pinned cases were rerun. `origin/main` remained
+`d520f56cfe4d9ff8b612731738c1841da2fd2da9`, 14 / 13 / 41 (68) with logical export
+`b1fba2a989e638fdf3707297af2cead8acf8fc6724bcb236871ca917dc518beb`; historical
+`13c0f68c13743f4db2fb123fef560f3fa12734d1` remained 14 / 12 / 39 (65) with logical export
+`a462f59cbd3f0736b592669ec5a2796c2b1a424600ce58721703f8c43b009bb9`. Every result reported
+`clone-a`/`clone-b`, `markdown-shadow`, and redacted import paths; `all` also completed
+`stale-base-fence`, `push-conflict-recovery`, and `transport-retries`.
+
+| command | exit |
+| --- | --- |
+| `/usr/bin/time -p cargo test --workspace` | 0 (`real 9.08s`) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 |
+| `cargo fmt --all -- --check` | 0 |
+| `./.githooks/provenance-guard` | 0 |
+| `./.githooks/attribution-guard` | 0 |
+
+The final suite is 1.81 seconds slower than Task 042's 7.27-second recorded baseline. Markdown
+remains authoritative; this remediation only makes malformed public parser input refuse safely.
