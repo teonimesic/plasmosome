@@ -141,8 +141,9 @@ limited to:
   module exports;
 - new `crates/plasmosome-work-state/tests/store.rs`, `tests/freshness.rs` and `tests/read.rs`, plus
   focused changes to `tests/pin.rs`, `tests/cli.rs`, `tests/shadow.rs` and `tests/contract.rs`; and
-- `tools/work-state` so bootstrap/contract development commands use locked offline Cargo while
-  ordinary reads select and execute the installed wrapper without starting Cargo; and
+- `tools/work-state` so `bootstrap` uses release locked offline Cargo, `contract-test` retains
+  debug locked offline Cargo, and ordinary reads select and execute the installed wrapper without
+  starting Cargo; and
 - `crates/plasmosome-work-state/AGENTS.md` and `README.md` to replace their disposable-only claim
   with the precise installed-shadow read boundary and its non-goals.
 
@@ -167,14 +168,16 @@ or positional extras are `invalid_command`. `show` accepts one exact kind-qualif
 is ambiguous and invalid. The read commands never accept a ref, remote, artifact, database path or
 credential option.
 
-For `bootstrap` and `contract-test`, the tracked launcher may run
-`cargo run --locked --offline --quiet`; it must fail locally rather than consult a registry. For
-`list`, `show`, `ready` and `blocked`, the launcher runs only local `git rev-parse` with prompts,
-lazy fetch and optional locks disabled, reads the single safe `current` basename, and `exec`s the
-wrapper inside that generation. It must never start Cargo, rustup or another build tool. Missing,
-malformed or unsafe pointer/runtime state fails in the launcher with the same structured or human
-error contract. The installed wrapper independently revalidates its common-directory placement,
-manifest binding and checksum before serving the request.
+For `bootstrap`, the tracked launcher runs exactly
+`cargo run --release --locked --offline --quiet -p plasmosome-work-state -- ...`; for
+`contract-test`, it retains `cargo run --locked --offline --quiet -p plasmosome-work-state -- ...`.
+Both must fail locally rather than consult a registry. For `list`, `show`, `ready` and `blocked`, the
+launcher runs only local `git rev-parse` with prompts, lazy fetch and optional locks disabled, reads
+the single safe `current` basename, and `exec`s the wrapper inside that generation. It must never
+start Cargo, rustup or another build tool. Missing, malformed or unsafe pointer/runtime state fails
+in the launcher with the same structured or human error contract. The installed wrapper
+independently revalidates its common-directory placement, manifest binding and checksum before
+serving the request.
 
 Default output is human-readable. `--json` emits one JSON object followed by one newline. Every
 successful read response has `command`, `authority_mode`, `source_commit`, `freshness`, and the
@@ -529,7 +532,8 @@ pass; never edit a test and its implementation in the same step.
 | `active_and_terminal_tasks_are_not_called_blocked` (`read`) | Naive not-ready logic overreports; only todo/planned tasks participate and every ready/blocked item says it cannot authorize start |
 | `human_and_json_reads_carry_the_same_envelope` (`read`) | Renderer omits fields/uses “current”; all four commands carry six exact fields, combined pending ids and “synchronized as of” wording without a recency claim |
 | `public_reads_need_no_artifact_arguments` (`cli`) | Parser accepts only contract-test; bootstrap alone requires artifacts/ref, reads reject them, show requires a qualified key, and exit/stdout/stderr behavior is exact |
-| `ordinary_launcher_executes_installed_wrapper_without_cargo` (`cli`) | The script always runs Cargo; reads choose the safe pointer/runtime and no Cargo/rustup/build command, while bootstrap and contracts use locked offline Cargo |
+| `ordinary_launcher_executes_installed_wrapper_without_cargo` (`cli`) | The script always runs Cargo; reads choose the safe pointer/runtime and no Cargo/rustup/build command, while bootstrap uses release locked/offline Cargo and contracts retain debug locked/offline Cargo |
+| `bootstrap_launcher_uses_release_locked_offline_cargo` (`cli`) | Bootstrap lacks the release profile; fake Cargo records exactly `run --release --locked --offline --quiet -p plasmosome-work-state --` and forwarded bootstrap arguments, while `contract-test` retains the debug locked/offline argv and ordinary reads remain Cargo-free |
 | `real_local_reads_share_one_clone_store` (`contract`) | `local-reads` case is absent; real mirror worktrees install once and return matching shell-entry-point results through disposable copies without checkout/build/shared-store mutation or a disallowed command |
 | `real_freshness_cases_preserve_remote_and_pending_facts` (`contract`) | Cases are absent; real committed stores drive all six states through production readers and renderers without a public state-writing command |
 | `all_includes_local_reads_and_both_freshness_cases` (`contract`) | Aggregate omits new evidence; one supplied real artifact run executes every old and new case without skip or hosted fixture |
@@ -561,8 +565,8 @@ pass; never edit a test and its implementation in the same step.
 7. Add CLI parser/process tests in `tests/cli.rs`, run
    `cargo test -p plasmosome-work-state --test cli` red, then extend `main.rs` and
    `tools/work-state` without changing old contract behavior and rerun it green. Exercise the real
-   script and prove ordinary reads do not start Cargo while development commands are locked and
-   offline.
+   script and prove ordinary reads do not start Cargo, bootstrap is release locked/offline, and
+   contract development commands remain debug locked/offline.
 8. Add one contract case at a time in `tests/contract.rs`: `local-reads`, `freshness`, then
    `combined-freshness`. Observe each exact filter red before changing `contract.rs`; implement and
    run that filter with the supplied real pinned artifact before adding the next case. Add the
@@ -615,6 +619,16 @@ Run real acceptance with caller-supplied local artifact paths and the real repos
 ./tools/work-state contract-test all --source-ref origin/main --archive PATH --bd PATH
 ```
 
+Before PR, measure ordinary installed-wrapper latency outside the contract assertion: create a
+fresh disposable clone/generation with the current tracked launcher and source, run the actual
+release locked/offline bootstrap with the caller-supplied pinned artifacts and real source commit,
+warm one artifact-free `list --json` read, then time five sequential
+`env -i PATH=/usr/bin:/bin ./tools/work-state list --json` reads. Each response must exit 0 and
+preserve the 69-document Markdown-shadow projection. This is a manual evidence gate, not a CI
+assertion: its release median must be at most one third of a comparable debug median and at most
+4.0 seconds on the current 13.33-second baseline machine. If it misses, STOP and return profiling;
+do not weaken installed/copied hash or version verification, or the disposable-copy boundary.
+
 Then time the ordinary suite and run all five root gates exactly:
 
 ```text
@@ -627,12 +641,70 @@ cargo fmt --all -- --check
 ```
 
 Record in dated Notes the red/green sequence, exact artifact target and checksums, bootstrap and
-contract evidence, six freshness outcomes, coverage line/function/region and branch findings,
-refactor decision, timed suite result and all gate results. Do not add an author or co-author other
-than the repository owner. The PR description leads with the user-visible outcome: one bootstrap
-gives every worktree artifact-free, network-free local queries, while Markdown remains authority.
-Completion means an agent in any linked worktree can use the installed runtime to obtain honest
-local projections immediately, while every deferred Spec 014 capability remains explicitly
-unclaimed.
+contract evidence, the five-read release/debug timing sets and median ratio, six freshness outcomes,
+coverage line/function/region and branch findings, refactor decision, timed suite result and all
+gate results. Do not add an author or co-author other than the repository owner. The PR description
+leads with the user-visible outcome: one bootstrap gives every worktree artifact-free, network-free
+local queries, while Markdown remains authority. Completion means an agent in any linked worktree
+can use the installed runtime to obtain honest local projections immediately, while every deferred
+Spec 014 capability remains explicitly unclaimed.
 
 ## Notes
+
+### 2026-09-02 — release-bootstrap timing remediation
+
+Added `bootstrap_launcher_uses_release_locked_offline_cargo` before implementation. Its exact
+focused command was red because fake Cargo recorded bootstrap without `--release`; after the
+launcher-only split, the exact test was green and `cargo test -p plasmosome-work-state --test cli`
+was green (9 tests). The test also records that `contract-test` keeps its debug locked/offline argv
+and the existing ordinary-read test remains Cargo-free.
+
+The fresh disposable real bootstrap used Beads 1.1.2 for `aarch64-apple-darwin`, verified archive
+SHA-256 `9b0137a83a2afd343e2abd2a506be72ea032721000f76669c2cf81729e78501d` and binary SHA-256
+`621b7b6c20c38db27ef4120398eb46dc35ba5b3e6c3611e19e14d33de10ce351`, and exited 0 in 22.01s.
+It installed source `66583edc75de0fddcfe441273541850d4631b52d`, generation
+`1ir7q489cu3geen0gmhi5mdu0ebqv9l8`, with 14 intent, 13 spec and 42 task documents. After one warm
+read, five artifact-free ordinary release reads each exited 0 with the same 69-document
+Markdown-shadow projection: 3.15, 3.22, 3.17, 3.25 and 3.19 seconds (median 3.19s). A comparable
+five-read debug set also returned 69 documents each: 13.53, 13.21, 13.30, 13.30 and 13.34 seconds
+(median 13.30s). The release/debug median ratio is 0.240, below one third and the 4.0s manual
+threshold. This timing evidence does not claim the separate OS no-socket or full
+`offline-reads` acceptance.
+
+### 2026-09-02 — final execution evidence
+
+The implementation followed the named test-first batches: installed runtime/pin verification,
+common-directory locator and strict manifest/layout, fenced disposable snapshots, the six-state
+freshness classifier, read projections and rendering, launcher behavior, and real contract
+dispatch. Later safety reds showed a symlinked state root being classified as `not_initialized`
+instead of `invalid_store`, and whitespace-padded manifest/local commit values being accepted;
+the corresponding implementation changes made their focused tests green without weakening the
+assertions. The complete crate suite was green at 119 tests.
+
+Separate real pinned-artifact commands all exited 0 against `origin/main` resolved as
+`66583edc75de0fddcfe441273541850d4631b52d`: `local-reads` (generation
+`1jb0pvodonvfmggh6kov13asm6netv1m`), `freshness` (generation
+`na9u1qd5go3edv1odc0lpfek0kcm6ted`, pending `operation-contract-046`), and
+`combined-freshness` (generation `ihpdldllk21d71lp95s9rik4db9pkvc7`, two pending ids). The final
+aggregate `all` also exited 0 with the same 14 intent, 13 spec and 42 task documents, logical
+digest `645de42eecf42b8e00d6eed81bf3f5a5077127cc7bb7afdbc09466cbb9ea74fb`, and all three new
+scenarios. Together, the real production reads cover `unknown`, `synchronized_as_of`, `stale`,
+`unpublished`, `stale_with_unpublished`, and `unknown_with_unpublished`.
+
+Coverage preflight found `cargo-llvm-cov 0.6.21`, an already-installed nightly and
+`llvm-tools`; no toolchain change was made. Final stable coverage was 75.61% regions, 71.25%
+functions and 77.31% lines. Final nightly branch coverage was 25.63% regions, 26.39% functions,
+26.93% lines and 42.26% branches; it emitted the pre-existing deprecated `fetch_update` warning in
+`plasmosome-membrane`. Safety/validation, atomicity, local command-plan, readiness, rendering and
+new launcher branches are covered. Remaining lower store/contract coverage is primarily failed
+filesystem/subprocess cleanup and interruption I/O that cannot be deterministically induced
+without a broad mock layer; real contracts exercise the successful process boundary.
+
+The separately run behavior-preserving cleanup simplified the renderer empty-details branch,
+removed needless decoder borrows and returned staged closure results directly; focused read,
+shadow and store tests stayed green. Final gates all exited 0: `/usr/bin/time -p cargo test
+--workspace` (real 6.74s, user 2.55s, sys 3.52s), a separate `cargo test --workspace`, Clippy with
+warnings denied, format check, provenance guard, attribution guard and `git diff --check`.
+
+This evidence covers clone-local local reads and freshness only. It does not claim `heartbeat
+observe`, an OS-level no-socket harness, or full Spec 014 `offline-reads`/cutover acceptance.

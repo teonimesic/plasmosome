@@ -1,10 +1,30 @@
 # plasmosome-work-state
 
-This package verifies the repository-pinned Beads 1.1.2 artifact, runs disposable transport
-contract probes, and can build a temporary Markdown-shadow import from one selected Git revision.
-Markdown remains authoritative; the two Beads stores are short-lived migration evidence, not
-production work state.
+`plasmosome-work-state` provides a clone-local, verified Beads 1.1.2 shadow for reading the
+repository's Markdown work records. Markdown at the selected commit remains authoritative.
 
-Use it through `./tools/work-state`; the runner requires an archive and extracted `bd` path from
-the caller. It never installs Beads or writes a store in this checkout. Transport probes use exact
-scripted Git/Beads command outcomes, not a hosted fixture.
+One explicit bootstrap accepts caller-supplied pinned artifacts and installs an immutable shadow
+generation under the clone's Git common directory:
+
+```text
+./tools/work-state bootstrap --source-ref REF --archive PATH --bd PATH
+```
+
+After that, every linked worktree in the clone can use the artifact-free local projections:
+
+```text
+./tools/work-state list [--json]
+./tools/work-state show kind:NNN [--json]
+./tools/work-state ready [--json]
+./tools/work-state blocked [--json]
+```
+
+The launcher executes the installed wrapper rather than Cargo. Each query verifies the installed
+runtime and reads a disposable copy, so Beads' read-side lock and journal activity cannot alter
+the shared generation. Responses include the stored freshness envelope and are local projections;
+they never authorize starting or claiming work.
+
+This package does not synchronize or publish Beads state, manage leases, reconcile GitHub, or
+perform a cutover. It completes the local-read and six-state freshness contracts only. Spec 014's
+complete `offline-reads` acceptance still requires `heartbeat observe` and an operating-system
+no-socket harness, which are deliberately outside this crate's scope.

@@ -1,11 +1,12 @@
 use plasmosome_work_state::command::{CommandOutput, CommandSpec, RecordingCommandRunner};
 use plasmosome_work_state::contract::{
     Publication, PushFailure, assert_no_ls_remote, classify_push, contract_refusal_exit_code,
-    dispose_fixture_root, execute_publication_command, leased_ref_update, prepare_store_fixture,
-    publish_candidate, recover_after_lost_response, requires_shadow_round_trip,
+    dispose_fixture_root, execute_publication_command, leased_ref_update, local_read_cases,
+    pending_fixture_update_arguments, prepare_store_fixture, publish_candidate,
+    recover_after_lost_response, requires_local_read_contract, requires_shadow_round_trip,
     retry_after_transport, run_scripted_case, run_scripted_cases, run_scripted_contract_case,
-    scripted_outcomes, validate_independent_stores, validate_logical_export,
-    validate_scripted_history,
+    scripted_outcomes, validate_freshness_fixture_generations, validate_independent_stores,
+    validate_logical_export, validate_scripted_history,
 };
 
 const G0: &str = "0000000000000000000000000000000000000000";
@@ -123,6 +124,63 @@ fn publication_plan_is_non_forcing_and_observes_before_and_after() {
         assert_isolated_plan(command);
     }
     assert!(runner.finish().is_ok());
+}
+
+#[test]
+fn all_includes_local_reads_and_both_freshness_cases() {
+    for case in ["local-reads", "freshness", "combined-freshness", "all"] {
+        assert!(requires_local_read_contract(case), "missing {case}");
+    }
+    assert!(!requires_local_read_contract("document-mapping"));
+}
+
+#[test]
+fn local_read_cases_are_dispatched_individually_and_by_all() {
+    assert_eq!(local_read_cases("local-reads"), &["local-reads"]);
+    assert_eq!(local_read_cases("freshness"), &["freshness"]);
+    assert_eq!(
+        local_read_cases("combined-freshness"),
+        &["combined-freshness"]
+    );
+    assert_eq!(
+        local_read_cases("all"),
+        &["local-reads", "freshness", "combined-freshness"]
+    );
+    assert!(local_read_cases("transport").is_empty());
+}
+
+#[test]
+fn real_freshness_cases_preserve_remote_and_pending_facts() {
+    assert!(validate_freshness_fixture_generations("base", "base", &[]).is_ok());
+    assert_eq!(
+        validate_freshness_fixture_generations("base", "base", &["operation-046"]),
+        Err("cutover_blocked")
+    );
+    assert!(
+        validate_freshness_fixture_generations(
+            "base",
+            "committed-local-change",
+            &["operation-046"]
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn pending_fixture_change_replaces_the_full_typed_metadata_object() {
+    let metadata = r#"{"plasmosome_document":{},"plasmosome_operational":{}}"#;
+    assert_eq!(
+        pending_fixture_update_arguments("plasmosome-task046", metadata).unwrap(),
+        vec![
+            "--sandbox",
+            "--dolt-auto-commit=batch",
+            "update",
+            "plasmosome-task046",
+            "--metadata",
+            metadata,
+        ]
+    );
+    assert!(pending_fixture_update_arguments("plasmosome-task046", "\"string\"").is_err());
 }
 
 #[test]

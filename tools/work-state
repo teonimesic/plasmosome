@@ -1,5 +1,81 @@
 #!/usr/bin/env bash
 set -euo pipefail
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd "$root"
-exec cargo run --quiet -p plasmosome-work-state -- "$@"
+
+json=false
+for argument in "$@"; do
+  if [[ "$argument" == "--json" ]]; then
+    json=true
+  fi
+done
+
+refuse() {
+  local code=$1
+  local exit_code=${2:-1}
+  if [[ "$json" == true ]]; then
+    printf '{"code":"%s"}\n' "$code" >&2
+  else
+    printf 'error[%s]: %s\n' "$code" "$code" >&2
+  fi
+  exit "$exit_code"
+}
+
+read_launcher() {
+  local top common canonical_top canonical_common state current generations generation wrapper line
+  top=$(env -i \
+    PATH="$PATH" \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_NO_LAZY_FETCH=1 \
+    GIT_OPTIONAL_LOCKS=0 \
+    git rev-parse --show-toplevel) || refuse invalid_store_location
+  common=$(env -i \
+    PATH="$PATH" \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_NO_LAZY_FETCH=1 \
+    GIT_OPTIONAL_LOCKS=0 \
+    git rev-parse --path-format=absolute --git-common-dir) || refuse invalid_store_location
+  [[ "$top" == /* && "$top" != *$'\n'* && -d "$top" && ! -L "$top" ]] || refuse invalid_store_location
+  [[ "$common" == /* && "$common" != *$'\n'* && -d "$common" && ! -L "$common" ]] || refuse invalid_store_location
+  canonical_top=$(cd "$top" && pwd -P) || refuse invalid_store_location
+  canonical_common=$(cd "$common" && pwd -P) || refuse invalid_store_location
+  [[ "$canonical_top" == "$top" && "$canonical_common" == "$common" ]] || refuse invalid_store_location
+  state="$common/plasmosome-work-state"
+  [[ ! -e "$state" && ! -L "$state" ]] && refuse not_initialized
+  [[ -d "$state" && ! -L "$state" ]] || refuse invalid_store
+  [[ ! -e "$state/current" && ! -L "$state/current" ]] && refuse not_initialized
+  [[ -f "$state/current" && ! -L "$state/current" ]] || refuse invalid_store
+  exec 3<"$state/current" || refuse invalid_store
+  IFS= read -r current <&3 || refuse invalid_store
+  if IFS= read -r line <&3; then
+    exec 3<&-
+    refuse invalid_store
+  fi
+  exec 3<&-
+  [[ "$current" =~ ^generation-[A-Za-z0-9_-]+$ ]] || refuse invalid_store
+  generations="$state/generations"
+  [[ -d "$generations" && ! -L "$generations" ]] || refuse invalid_store
+  generation="$generations/$current"
+  [[ -d "$generation" && ! -L "$generation" ]] || refuse invalid_store
+  wrapper="$generation/plasmosome-work-state"
+  [[ -f "$wrapper" && ! -L "$wrapper" && -x "$wrapper" ]] || refuse invalid_store
+  exec "$wrapper" "$@"
+}
+
+case "${1:-}" in
+  list|show|ready|blocked)
+    read_launcher "$@"
+    ;;
+  bootstrap)
+    exec cargo run --release --locked --offline --quiet -p plasmosome-work-state -- "$@"
+    ;;
+  contract-test)
+    exec cargo run --locked --offline --quiet -p plasmosome-work-state -- "$@"
+    ;;
+  *)
+    refuse invalid_command 2
+    ;;
+esac
