@@ -1,7 +1,7 @@
 ---
 id: 045
 title: Import the Markdown work records into two shadow Beads stores
-status: in_progress
+status: in_review
 priority: 1
 specs: [014]
 intents: [015]
@@ -37,7 +37,7 @@ done_when:
   - Duplicate ids within one namespace, unresolved typed link targets, reordered links, and a file whose claimed content commit does not contain the imported path and contents are refused with the offending document key; invalid input cannot be accepted as parity.
   - The pinned Beads 1.1.2 binary performs the two local imports and exports under the existing isolated command seam; no live or fake GitHub repository, GitHub API, hosted fixture, local Git server, broad mock framework or committed repository snapshot is introduced.
   - Tests are written and observed failing before each implementation batch, coverage and uncovered branches are reviewed, the timed workspace suite and all five root gates exit 0, and the change makes no claim about reads, freshness, online mutation, leases, reconciliation, CI acquisition, backup/restore or authority cutover.
-pr:
+pr: 80
 evidence:
 ---
 
