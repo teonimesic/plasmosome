@@ -6,7 +6,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::command::{CommandRunner, CommandSpec, SystemCommandRunner};
-use crate::document::{SourceDocuments, is_lower_hex_sha, load_documents};
+use crate::document::{
+    SourceDocuments, discovered_document_paths, is_lower_hex_sha, load_documents,
+};
 use crate::freshness::{
     FreshnessEnvelope, ObservationState, PendingMutations, RemoteRelation, classify,
     full_nonblank_commit, validate,
@@ -416,18 +418,19 @@ fn locator_command(
     environment: &BTreeMap<String, String>,
     argv: Vec<String>,
 ) -> CommandSpec {
-    let mut environment = environment.clone();
-    environment.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
-    environment.insert("GIT_NO_LAZY_FETCH".into(), "1".into());
-    environment.insert("GIT_OPTIONAL_LOCKS".into(), "0".into());
-    environment.insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
     CommandSpec {
         program: PathBuf::from("git"),
         argv,
         cwd: Some(checkout.to_path_buf()),
-        environment,
+        environment: environment.clone(),
         redacted_argv_positions: Vec::new(),
     }
+}
+
+#[derive(Clone, Copy)]
+enum LocatorScope {
+    OrdinaryRead,
+    Bootstrap,
 }
 
 fn run_locator<R: CommandRunner>(
@@ -435,10 +438,13 @@ fn run_locator<R: CommandRunner>(
     checkout: &Path,
     environment: &BTreeMap<String, String>,
     argv: Vec<String>,
+    scope: LocatorScope,
 ) -> Result<PathBuf, StoreError> {
     let command = locator_command(checkout, environment, argv);
-    validate_read_locator_command(&command, checkout)
-        .map_err(|_| refusal("invalid_store_location"))?;
+    if matches!(scope, LocatorScope::OrdinaryRead) {
+        validate_read_locator_command(&command, checkout)
+            .map_err(|_| refusal("invalid_store_location"))?;
+    }
     let output = runner
         .run(command)
         .map_err(|_| refusal("invalid_store_location"))?;
@@ -449,10 +455,11 @@ fn run_locator<R: CommandRunner>(
 }
 
 /// Resolves the one state root shared by linked worktrees without creating it.
-pub fn locate_store<R: CommandRunner>(
+fn locate_store_for_scope<R: CommandRunner>(
     runner: &mut R,
     checkout: &Path,
     environment: BTreeMap<String, String>,
+    scope: LocatorScope,
 ) -> Result<StoreLocation, StoreError> {
     let supplied_checkout = canonical_existing_directory(checkout)?;
     let top_level = run_locator(
@@ -460,6 +467,7 @@ pub fn locate_store<R: CommandRunner>(
         &supplied_checkout,
         &environment,
         vec!["rev-parse".into(), "--show-toplevel".into()],
+        scope,
     )?;
     let worktree_root = canonical_reported_directory(&top_level)?;
     if worktree_root != supplied_checkout {
@@ -474,6 +482,7 @@ pub fn locate_store<R: CommandRunner>(
             "--path-format=absolute".into(),
             "--git-common-dir".into(),
         ],
+        scope,
     )?;
     let common_dir = canonical_reported_directory(&common)?;
     let state_root = common_dir.join(STORE_DIRECTORY);
@@ -483,6 +492,23 @@ pub fn locate_store<R: CommandRunner>(
         generations_dir: state_root.join(GENERATIONS_DIRECTORY),
         state_root,
     })
+}
+
+/// Resolves the shared store using only the sealed ordinary-read locator environment.
+pub fn locate_store<R: CommandRunner>(
+    runner: &mut R,
+    checkout: &Path,
+    environment: BTreeMap<String, String>,
+) -> Result<StoreLocation, StoreError> {
+    locate_store_for_scope(runner, checkout, environment, LocatorScope::OrdinaryRead)
+}
+
+fn locate_bootstrap_store(
+    runner: &mut BootstrapCommandRunner,
+    checkout: &Path,
+    environment: BTreeMap<String, String>,
+) -> Result<StoreLocation, StoreError> {
+    locate_store_for_scope(runner, checkout, environment, LocatorScope::Bootstrap)
 }
 
 fn regular_file(path: &Path) -> Result<File, StoreError> {
@@ -835,6 +861,51 @@ pub fn validate_fenced_snapshot(
     })
 }
 
+struct ReadVersionRunner<'a, R> {
+    inner: &'a mut R,
+    installed_binary: &'a Path,
+    installed_environment: BTreeMap<String, String>,
+    copied_binary: &'a Path,
+    copied_environment: BTreeMap<String, String>,
+}
+
+impl<'a, R> ReadVersionRunner<'a, R> {
+    fn new(
+        inner: &'a mut R,
+        installed_binary: &'a Path,
+        installed_environment: BTreeMap<String, String>,
+        copied_binary: &'a Path,
+        copied_environment: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            inner,
+            installed_binary,
+            installed_environment,
+            copied_binary,
+            copied_environment,
+        }
+    }
+
+    fn valid(&self, command: &CommandSpec) -> bool {
+        command.argv == ["--version"]
+            && command.cwd.is_none()
+            && command.redacted_argv_positions.is_empty()
+            && ((command.program == self.installed_binary
+                && command.environment == self.installed_environment)
+                || (command.program == self.copied_binary
+                    && command.environment == self.copied_environment))
+    }
+}
+
+impl<R: CommandRunner> CommandRunner for ReadVersionRunner<'_, R> {
+    fn run(&mut self, command: CommandSpec) -> Result<crate::command::CommandOutput, String> {
+        if !self.valid(&command) {
+            return Err("invalid_read_command".into());
+        }
+        self.inner.run(command)
+    }
+}
+
 /// Refuses every command outside the four read-only disposable Beads forms.
 pub fn validate_read_command(
     command: &CommandSpec,
@@ -900,7 +971,13 @@ pub fn validate_read_locator_command(
     command: &CommandSpec,
     checkout: &Path,
 ) -> Result<(), StoreError> {
-    if command.program != Path::new("git") || command.cwd.as_deref() != Some(checkout) {
+    let expected_environment =
+        locator_environment().map_err(|_| refusal("invalid_read_command"))?;
+    if command.program != Path::new("git")
+        || command.cwd.as_deref() != Some(checkout)
+        || command.environment != expected_environment
+        || !command.redacted_argv_positions.is_empty()
+    {
         return Err(refusal("invalid_read_command"));
     }
     let allowed = [
@@ -1089,11 +1166,44 @@ fn bootstrap_locator_command(command: &CommandSpec) -> bool {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum SourceCommandCapture {
     ResolvedCommit,
-    ContentCommit,
-    None,
+    DiscoveredPaths,
+    SelectedContents(String),
+    ContentCommit(String),
+    EstablishedContents(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SourcePathPhase {
+    AwaitSelectedContents,
+    AwaitContentCommit,
+    AwaitEstablishedContents(String),
+    Complete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SourcePathDiscovery {
+    NotRun,
+    Rejected,
+    Paths(BTreeMap<String, SourcePathPhase>),
+}
+
+impl SourcePathDiscovery {
+    fn paths(&self) -> Option<&BTreeMap<String, SourcePathPhase>> {
+        match self {
+            Self::Paths(paths) => Some(paths),
+            Self::NotRun | Self::Rejected => None,
+        }
+    }
+
+    fn paths_mut(&mut self) -> Option<&mut BTreeMap<String, SourcePathPhase>> {
+        match self {
+            Self::Paths(paths) => Some(paths),
+            Self::NotRun | Self::Rejected => None,
+        }
+    }
 }
 
 /// The production-only command fence for bootstrap. It binds every dynamic root before it can
@@ -1105,7 +1215,7 @@ struct BootstrapCommandRunner {
     initial_binary: PathBuf,
     verification_environment: BTreeMap<String, String>,
     resolved_source_commit: Option<String>,
-    content_commits: BTreeSet<String>,
+    source_paths: SourcePathDiscovery,
     location: Option<StoreLocation>,
     staging_roots: BTreeMap<PathBuf, BTreeMap<String, String>>,
     installed_roots: BTreeMap<PathBuf, BTreeMap<String, String>>,
@@ -1122,7 +1232,7 @@ impl BootstrapCommandRunner {
             initial_binary,
             verification_environment: BTreeMap::new(),
             resolved_source_commit: None,
-            content_commits: BTreeSet::new(),
+            source_paths: SourcePathDiscovery::NotRun,
             location: None,
             staging_roots: BTreeMap::new(),
             installed_roots: BTreeMap::new(),
@@ -1305,20 +1415,37 @@ impl BootstrapCommandRunner {
                 && recursive == "-r"
                 && names == "--name-only"
                 && nul == "-z"
+                && matches!(self.source_paths, SourcePathDiscovery::NotRun)
                 && Some(commit.as_str()) == resolved
                 && separator == "--"
                 && intents == "docs/intents"
                 && specs == "docs/specs"
                 && tasks == "tasks" =>
             {
-                Some(SourceCommandCapture::None)
+                Some(SourceCommandCapture::DiscoveredPaths)
             }
             [program, object] if program == "show" => {
                 let (commit, path) = object.split_once(':')?;
-                ((Some(commit) == resolved || self.content_commits.contains(commit))
-                    && !path.is_empty()
-                    && !path.contains(['\n', '\r']))
-                .then_some(SourceCommandCapture::None)
+                let SourcePathDiscovery::Paths(paths) = &self.source_paths else {
+                    return None;
+                };
+                match paths.get(path)? {
+                    SourcePathPhase::AwaitSelectedContents
+                        if Some(commit) == resolved
+                            && !path.is_empty()
+                            && !path.contains(['\n', '\r']) =>
+                    {
+                        Some(SourceCommandCapture::SelectedContents(path.to_owned()))
+                    }
+                    SourcePathPhase::AwaitEstablishedContents(expected)
+                        if expected == commit
+                            && !path.is_empty()
+                            && !path.contains(['\n', '\r']) =>
+                    {
+                        Some(SourceCommandCapture::EstablishedContents(path.to_owned()))
+                    }
+                    _ => None,
+                }
             }
             [program, one, format, commit, separator, literal_path]
                 if program == "log"
@@ -1328,9 +1455,18 @@ impl BootstrapCommandRunner {
                     && separator == "--"
                     && literal_path.starts_with(":(literal)")
                     && literal_path.len() > ":(literal)".len()
-                    && !literal_path.contains(['\n', '\r']) =>
+                    && !literal_path.contains(['\n', '\r'])
+                    && self
+                        .source_paths
+                        .paths()
+                        .and_then(|paths| paths.get(&literal_path[":(literal)".len()..]))
+                        .is_some_and(|phase| {
+                            matches!(phase, SourcePathPhase::AwaitContentCommit)
+                        }) =>
             {
-                Some(SourceCommandCapture::ContentCommit)
+                Some(SourceCommandCapture::ContentCommit(
+                    literal_path[":(literal)".len()..].to_owned(),
+                ))
             }
             _ => None,
         }
@@ -1419,9 +1555,9 @@ impl BootstrapCommandRunner {
         &mut self,
         capture: SourceCommandCapture,
         output: &crate::command::CommandOutput,
-    ) {
+    ) -> Result<(), String> {
         if output.status != 0 {
-            return;
+            return Ok(());
         }
         let value = output
             .stdout
@@ -1429,15 +1565,67 @@ impl BootstrapCommandRunner {
             .filter(|value| !value.contains(['\n', '\r']))
             .filter(|value| is_lower_hex_sha(value))
             .map(str::to_owned);
-        match (capture, value) {
-            (SourceCommandCapture::ResolvedCommit, Some(commit)) => {
-                self.resolved_source_commit = Some(commit);
+        match capture {
+            SourceCommandCapture::ResolvedCommit => {
+                if let Some(commit) = value {
+                    self.resolved_source_commit = Some(commit);
+                }
             }
-            (SourceCommandCapture::ContentCommit, Some(commit)) => {
-                self.content_commits.insert(commit);
+            SourceCommandCapture::DiscoveredPaths => {
+                self.source_paths = match discovered_document_paths(&output.stdout) {
+                    Ok(paths) => SourcePathDiscovery::Paths(
+                        paths
+                            .into_iter()
+                            .map(|path| (path, SourcePathPhase::AwaitSelectedContents))
+                            .collect(),
+                    ),
+                    Err(_) => SourcePathDiscovery::Rejected,
+                };
             }
-            _ => {}
+            SourceCommandCapture::SelectedContents(path) => {
+                let Some(phase) = self
+                    .source_paths
+                    .paths_mut()
+                    .and_then(|paths| paths.get_mut(&path))
+                else {
+                    return Err("invalid_bootstrap_command".into());
+                };
+                if !matches!(phase, SourcePathPhase::AwaitSelectedContents) {
+                    return Err("invalid_bootstrap_command".into());
+                }
+                *phase = SourcePathPhase::AwaitContentCommit;
+            }
+            SourceCommandCapture::ContentCommit(path) => {
+                let Some(commit) = value else {
+                    return Ok(());
+                };
+                let Some(phase) = self
+                    .source_paths
+                    .paths_mut()
+                    .and_then(|paths| paths.get_mut(&path))
+                else {
+                    return Err("invalid_bootstrap_command".into());
+                };
+                if !matches!(phase, SourcePathPhase::AwaitContentCommit) {
+                    return Err("invalid_bootstrap_command".into());
+                }
+                *phase = SourcePathPhase::AwaitEstablishedContents(commit);
+            }
+            SourceCommandCapture::EstablishedContents(path) => {
+                let Some(phase) = self
+                    .source_paths
+                    .paths_mut()
+                    .and_then(|paths| paths.get_mut(&path))
+                else {
+                    return Err("invalid_bootstrap_command".into());
+                };
+                if !matches!(phase, SourcePathPhase::AwaitEstablishedContents(_)) {
+                    return Err("invalid_bootstrap_command".into());
+                }
+                *phase = SourcePathPhase::Complete;
+            }
         }
+        Ok(())
     }
 }
 
@@ -1455,7 +1643,7 @@ impl CommandRunner for BootstrapCommandRunner {
         }
         let output = self.inner.run(command)?;
         if let Some(capture) = source_capture {
-            self.record_source_output(capture, &output);
+            self.record_source_output(capture, &output)?;
         }
         Ok(output)
     }
@@ -1512,26 +1700,35 @@ fn read_disposable_snapshot_in_root<R: CommandRunner>(
     {
         owner_private_executable_is_valid(request.selected_binary)?;
     }
-    InstalledBeads::verify(
-        request.pin,
-        request.target,
-        request.selected_binary,
-        request.selected_environment,
-        runner,
-    )
-    .map_err(pin_refusal)?;
     let repository = request.temporary_root.join("repository");
-    copy_private_tree(&generation.root.join("repository"), &repository)?;
     let copied_binary = request.temporary_root.join("bd");
-    copy_regular_file(request.selected_binary, &copied_binary)?;
-    InstalledBeads::verify(
-        request.pin,
-        request.target,
-        &copied_binary,
-        request.copied_environment.clone(),
-        runner,
-    )
-    .map_err(pin_refusal)?;
+    {
+        let mut version_runner = ReadVersionRunner::new(
+            runner,
+            request.selected_binary,
+            request.selected_environment.clone(),
+            &copied_binary,
+            request.copied_environment.clone(),
+        );
+        InstalledBeads::verify(
+            request.pin,
+            request.target,
+            request.selected_binary,
+            request.selected_environment.clone(),
+            &mut version_runner,
+        )
+        .map_err(pin_refusal)?;
+        copy_private_tree(&generation.root.join("repository"), &repository)?;
+        copy_regular_file(request.selected_binary, &copied_binary)?;
+        InstalledBeads::verify(
+            request.pin,
+            request.target,
+            &copied_binary,
+            request.copied_environment.clone(),
+            &mut version_runner,
+        )
+        .map_err(pin_refusal)?;
+    }
     let status_command = || CommandSpec {
         program: copied_binary.clone(),
         argv: vec![
@@ -1717,10 +1914,13 @@ pub fn current_generation(location: &StoreLocation) -> Result<CurrentGeneration,
 /// Builds the minimal cleared environment used for the two local Git locator calls.
 pub fn locator_environment() -> Result<BTreeMap<String, String>, StoreError> {
     let path = std::env::var_os("PATH").ok_or_else(|| refusal("invalid_store_location"))?;
-    Ok(BTreeMap::from([(
-        "PATH".to_owned(),
-        path.to_string_lossy().into_owned(),
-    )]))
+    Ok(BTreeMap::from([
+        ("PATH".to_owned(), path.to_string_lossy().into_owned()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+        ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+    ]))
 }
 
 /// Loads the release pin compiled into the installed wrapper, not a mutable source checkout file.
@@ -2255,93 +2455,167 @@ fn stage_runtime_reinstall(
     })()
 }
 
+struct PreparedInstall {
+    runner: BootstrapCommandRunner,
+    location: StoreLocation,
+    pin: PinManifest,
+    source: SourceDocuments,
+}
+
+struct PreparedReinstall {
+    runner: BootstrapCommandRunner,
+    location: StoreLocation,
+    pin: PinManifest,
+    source: SourceDocuments,
+    existing: CurrentGeneration,
+    snapshot: FencedSnapshot,
+}
+
+enum PreparedBootstrap {
+    Install(Box<PreparedInstall>),
+    Unchanged(BootstrapResult),
+    Reinstall(Box<PreparedReinstall>),
+}
+
+fn finish_verification_cleanup<T>(
+    preparation: Result<T, StoreError>,
+    cleanup: Result<(), std::io::Error>,
+) -> Result<T, StoreError> {
+    if cleanup.is_err() {
+        Err(refusal("temporary_cleanup_failed"))
+    } else {
+        preparation
+    }
+}
+
 /// Performs the only explicit installation path for one clone-local Markdown shadow generation.
 pub fn bootstrap(request: &BootstrapRequest) -> Result<BootstrapResult, StoreError> {
     let source_root = canonical_existing_directory(&request.source_root)?;
     let pin = PinManifest::load(source_root.join("tools/work-state-beads-1.1.2.toml"))
         .map_err(pin_refusal)?;
     let verification_root = tempfile::tempdir().map_err(|_| refusal("invalid_store"))?;
-    let verification_environment = environment_for_runtime(verification_root.path(), true)?;
-    let mut runner = BootstrapCommandRunner::new(source_root.clone(), request.binary.clone());
-    runner.bind_source_inputs(request.source_ref.clone(), verification_environment.clone())?;
-    VerifiedBeads::verify_with_environment(
-        &pin,
-        &request.host_target,
-        &request.archive,
-        &request.binary,
-        verification_environment.clone(),
-        &mut runner,
-    )
-    .map_err(pin_refusal)?;
-    let checkout = canonical_existing_directory(&request.checkout)?;
-    runner.bind_checkout(checkout.clone())?;
-    let location = locate_store(&mut runner, &checkout, verification_environment.clone())?;
-    runner.bind_location(location.clone())?;
-    let _lock = BootstrapLock::acquire(&location)?;
-    let source = load_documents(
-        &mut runner,
-        &source_root,
-        &verification_environment,
-        &request.source_ref,
-    )
-    .map_err(source_refusal)?;
-    let Some(existing) = optional_current_generation(&location)? else {
-        return stage_generation_from_markdown(&mut runner, &location, request, &pin, &source);
-    };
-    if existing.manifest.source_commit != source.source_commit {
-        return Err(refusal("source_commit_mismatch"));
-    }
-    let (snapshot, runtime_valid) = match installed_runtime_preflight(
-        &mut runner,
-        &existing,
-        &pin,
-        &request.host_target,
-        &request.wrapper,
-    )? {
-        InstalledRuntimePreflight::Usable { environment } => (
-            bootstrap_read_disposable_snapshot_with_binary(
-                &mut runner,
-                &existing,
-                &pin,
-                &request.host_target,
-                &existing.root.join("bd"),
-                environment,
+    let mut lock = None;
+    let preparation = (|| {
+        let verification_environment = environment_for_runtime(verification_root.path(), true)?;
+        let mut runner = BootstrapCommandRunner::new(source_root.clone(), request.binary.clone());
+        runner.bind_source_inputs(request.source_ref.clone(), verification_environment.clone())?;
+        VerifiedBeads::verify_with_environment(
+            &pin,
+            &request.host_target,
+            &request.archive,
+            &request.binary,
+            verification_environment.clone(),
+            &mut runner,
+        )
+        .map_err(pin_refusal)?;
+        let checkout = canonical_existing_directory(&request.checkout)?;
+        runner.bind_checkout(checkout.clone())?;
+        let location =
+            locate_bootstrap_store(&mut runner, &checkout, verification_environment.clone())?;
+        runner.bind_location(location.clone())?;
+        lock = Some(BootstrapLock::acquire(&location)?);
+        let source = load_documents(
+            &mut runner,
+            &source_root,
+            &verification_environment,
+            &request.source_ref,
+        )
+        .map_err(source_refusal)?;
+        let Some(existing) = optional_current_generation(&location)? else {
+            return Ok(PreparedBootstrap::Install(Box::new(PreparedInstall {
+                runner,
+                location,
+                pin,
+                source,
+            })));
+        };
+        if existing.manifest.source_commit != source.source_commit {
+            return Err(refusal("source_commit_mismatch"));
+        }
+        let (snapshot, runtime_valid) = match installed_runtime_preflight(
+            &mut runner,
+            &existing,
+            &pin,
+            &request.host_target,
+            &request.wrapper,
+        )? {
+            InstalledRuntimePreflight::Usable { environment } => (
+                bootstrap_read_disposable_snapshot_with_binary(
+                    &mut runner,
+                    &existing,
+                    &pin,
+                    &request.host_target,
+                    &existing.root.join("bd"),
+                    environment,
+                    true,
+                )?,
                 true,
-            )?,
-            true,
-        ),
-        InstalledRuntimePreflight::RepairRequired => (
-            bootstrap_read_disposable_snapshot_with_binary(
-                &mut runner,
-                &existing,
-                &pin,
-                &request.host_target,
-                &request.binary,
-                verification_environment.clone(),
+            ),
+            InstalledRuntimePreflight::RepairRequired => (
+                bootstrap_read_disposable_snapshot_with_binary(
+                    &mut runner,
+                    &existing,
+                    &pin,
+                    &request.host_target,
+                    &request.binary,
+                    verification_environment.clone(),
+                    false,
+                )?,
                 false,
-            )?,
-            false,
-        ),
-    };
-    verify_source_snapshot(&source, &snapshot)?;
-    if runtime_valid {
-        return Ok(BootstrapResult {
-            outcome: BootstrapOutcome::Unchanged,
-            source_commit: existing.manifest.source_commit,
-            local_generation: existing.manifest.local_generation,
-            document_counts: bootstrap_counts(&source),
-            logical_export_sha256: existing.manifest.logical_export_sha256,
-        });
+            ),
+        };
+        verify_source_snapshot(&source, &snapshot)?;
+        if runtime_valid {
+            return Ok(PreparedBootstrap::Unchanged(BootstrapResult {
+                outcome: BootstrapOutcome::Unchanged,
+                source_commit: existing.manifest.source_commit,
+                local_generation: existing.manifest.local_generation,
+                document_counts: bootstrap_counts(&source),
+                logical_export_sha256: existing.manifest.logical_export_sha256,
+            }));
+        }
+        Ok(PreparedBootstrap::Reinstall(Box::new(PreparedReinstall {
+            runner,
+            location,
+            pin,
+            source,
+            existing,
+            snapshot,
+        })))
+    })();
+    let prepared = finish_verification_cleanup(preparation, verification_root.close())?;
+    let _lock = lock;
+    match prepared {
+        PreparedBootstrap::Install(prepared) => {
+            let PreparedInstall {
+                mut runner,
+                location,
+                pin,
+                source,
+            } = *prepared;
+            stage_generation_from_markdown(&mut runner, &location, request, &pin, &source)
+        }
+        PreparedBootstrap::Unchanged(result) => Ok(result),
+        PreparedBootstrap::Reinstall(prepared) => {
+            let PreparedReinstall {
+                mut runner,
+                location,
+                pin,
+                source,
+                existing,
+                snapshot,
+            } = *prepared;
+            stage_runtime_reinstall(
+                &mut runner,
+                &location,
+                request,
+                &pin,
+                &source,
+                &existing,
+                &snapshot,
+            )
+        }
     }
-    stage_runtime_reinstall(
-        &mut runner,
-        &location,
-        request,
-        &pin,
-        &source,
-        &existing,
-        &snapshot,
-    )
 }
 
 #[cfg(test)]
@@ -2472,6 +2746,234 @@ mod tests {
         assert!(!disposable_marker.exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_runner_binds_each_content_commit_to_its_discovered_literal_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let fake_bin = root.path().join("fake-bin");
+        let fake_git = fake_bin.join("git");
+        let calls = root.path().join("git-calls");
+        let initial_binary = root.path().join("initial-bd");
+        let resolved = "a".repeat(40);
+        let first_commit = "b".repeat(40);
+        let second_commit = "c".repeat(40);
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&fake_bin).unwrap();
+        fs::write(&initial_binary, "initial binary").unwrap();
+        fs::write(
+            &fake_git,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"rev-parse --verify --end-of-options origin/main^{{commit}}\") printf '{}\\n' ;;\n  \"ls-tree -r --name-only -z {} -- docs/intents docs/specs tasks\") printf 'docs/intents/001-one.md\\0docs/intents/002-two.md\\0' ;;\n  \"show {}:docs/intents/001-one.md\") printf selected-one ;;\n  \"log -1 --format=%H {} -- :(literal)docs/intents/001-one.md\") printf '{}\\n' ;;\n  \"show {}:docs/intents/001-one.md\") printf selected-one ;;\n  \"show {}:docs/intents/002-two.md\") printf selected-two ;;\n  \"log -1 --format=%H {} -- :(literal)docs/intents/002-two.md\") printf '{}\\n' ;;\n  \"show {}:docs/intents/002-two.md\") printf selected-two ;;\n  *) exit 77 ;;\nesac\n",
+                calls.display(),
+                resolved,
+                resolved,
+                resolved,
+                resolved,
+                first_commit,
+                first_commit,
+                resolved,
+                resolved,
+                second_commit,
+                second_commit,
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+        let source = source.canonicalize().unwrap();
+        let mut environment =
+            environment_for_runtime(&root.path().join("verification-runtime"), true).unwrap();
+        environment.insert("PATH".into(), fake_bin.display().to_string());
+        let mut runner = BootstrapCommandRunner::new(source.clone(), initial_binary);
+        runner
+            .bind_source_inputs("origin/main".into(), environment.clone())
+            .unwrap();
+        let source_environment = runner.source_environment();
+        let command = |argv: Vec<String>| CommandSpec {
+            program: PathBuf::from("git"),
+            argv,
+            cwd: Some(source.clone()),
+            environment: source_environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        };
+        let source_show =
+            |commit: &str, path: &str| command(vec!["show".into(), format!("{commit}:{path}")]);
+        let literal_log = |path: &str| {
+            command(vec![
+                "log".into(),
+                "-1".into(),
+                "--format=%H".into(),
+                resolved.clone(),
+                "--".into(),
+                format!(":(literal){path}"),
+            ])
+        };
+
+        runner
+            .run(command(vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                "--end-of-options".into(),
+                "origin/main^{commit}".into(),
+            ]))
+            .unwrap();
+        runner
+            .run(command(vec![
+                "ls-tree".into(),
+                "-r".into(),
+                "--name-only".into(),
+                "-z".into(),
+                resolved.clone(),
+                "--".into(),
+                "docs/intents".into(),
+                "docs/specs".into(),
+                "tasks".into(),
+            ]))
+            .unwrap();
+
+        for invalid in [
+            source_show(&resolved, "tasks/999-undiscovered.md"),
+            literal_log("docs/intents/001-one.md"),
+            source_show(&first_commit, "docs/intents/001-one.md"),
+        ] {
+            let calls_before = fs::read_to_string(&calls).unwrap();
+            assert!(
+                runner.run(invalid).is_err(),
+                "an undiscovered or wrong-phase source command must not dispatch"
+            );
+            assert_eq!(fs::read_to_string(&calls).unwrap(), calls_before);
+        }
+
+        runner
+            .run(source_show(&resolved, "docs/intents/001-one.md"))
+            .unwrap();
+        runner.run(literal_log("docs/intents/001-one.md")).unwrap();
+        for invalid in [
+            source_show(&first_commit, "docs/intents/002-two.md"),
+            source_show(&resolved, "docs/intents/001-one.md"),
+            literal_log("docs/intents/001-one.md"),
+        ] {
+            let calls_before = fs::read_to_string(&calls).unwrap();
+            assert!(
+                runner.run(invalid).is_err(),
+                "a content commit cannot authorize another path or a replay"
+            );
+            assert_eq!(fs::read_to_string(&calls).unwrap(), calls_before);
+        }
+
+        runner
+            .run(source_show(&first_commit, "docs/intents/001-one.md"))
+            .unwrap();
+        let calls_before = fs::read_to_string(&calls).unwrap();
+        assert!(
+            runner
+                .run(source_show(&first_commit, "docs/intents/001-one.md"))
+                .is_err(),
+            "an established content read cannot replay"
+        );
+        assert_eq!(fs::read_to_string(&calls).unwrap(), calls_before);
+
+        runner
+            .run(source_show(&resolved, "docs/intents/002-two.md"))
+            .unwrap();
+        runner.run(literal_log("docs/intents/002-two.md")).unwrap();
+        runner
+            .run(source_show(&second_commit, "docs/intents/002-two.md"))
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(&calls).unwrap().lines().count(),
+            8,
+            "only the selected, literal-log, and matching establishing commands dispatch"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_discovery_preserves_loader_error_and_authorizes_no_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn run_case(tree: &str, expected_code: &str, expected_key: &str) {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source");
+            let fake_bin = root.path().join("fake-bin");
+            let fake_git = fake_bin.join("git");
+            let calls = root.path().join("git-calls");
+            let initial_binary = root.path().join("initial-bd");
+            let resolved = "a".repeat(40);
+            fs::create_dir_all(&source).unwrap();
+            fs::create_dir_all(&fake_bin).unwrap();
+            fs::write(&initial_binary, "initial binary").unwrap();
+            fs::write(
+                &fake_git,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  \"rev-parse --verify --end-of-options origin/main^{{commit}}\") printf '{}\\n' ;;\n  \"ls-tree -r --name-only -z {} -- docs/intents docs/specs tasks\") printf '{}' ;;\n  *) exit 77 ;;\nesac\n",
+                    calls.display(),
+                    resolved,
+                    resolved,
+                    tree,
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+            let source = source.canonicalize().unwrap();
+            let mut environment =
+                environment_for_runtime(&root.path().join("verification-runtime"), true).unwrap();
+            environment.insert("PATH".into(), fake_bin.display().to_string());
+            let mut runner = BootstrapCommandRunner::new(source.clone(), initial_binary);
+            runner
+                .bind_source_inputs("origin/main".into(), environment.clone())
+                .unwrap();
+
+            let error = load_documents(&mut runner, &source, &environment, "origin/main")
+                .expect_err("the strict loader must retain its own malformed-tree refusal");
+            assert_eq!(error.code(), expected_code);
+            assert_eq!(error.offending_key.as_deref(), Some(expected_key));
+            assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 2);
+
+            let source_environment = runner.source_environment();
+            let repeated_tree = CommandSpec {
+                program: PathBuf::from("git"),
+                argv: vec![
+                    "ls-tree".into(),
+                    "-r".into(),
+                    "--name-only".into(),
+                    "-z".into(),
+                    resolved.clone(),
+                    "--".into(),
+                    "docs/intents".into(),
+                    "docs/specs".into(),
+                    "tasks".into(),
+                ],
+                cwd: Some(source.clone()),
+                environment: source_environment.clone(),
+                redacted_argv_positions: Vec::new(),
+            };
+            let show = CommandSpec {
+                program: PathBuf::from("git"),
+                argv: vec!["show".into(), format!("{resolved}:tasks/001-first.md")],
+                cwd: Some(source),
+                environment: source_environment,
+                redacted_argv_positions: Vec::new(),
+            };
+            let calls_before = fs::read_to_string(&calls).unwrap();
+            assert_eq!(
+                runner.run(repeated_tree).unwrap_err(),
+                "invalid_bootstrap_command"
+            );
+            assert_eq!(runner.run(show).unwrap_err(), "invalid_bootstrap_command");
+            assert_eq!(fs::read_to_string(&calls).unwrap(), calls_before);
+        }
+
+        run_case("tasks/001.md\\0", "invalid_document", "task:001");
+        run_case(
+            "tasks/001-first.md\\0tasks/001-second.md\\0",
+            "duplicate_document_id",
+            "task:001",
+        );
+    }
+
     #[test]
     fn registered_staging_scope_does_not_admit_source_git_forms() {
         let root = tempfile::tempdir().unwrap();
@@ -2568,6 +3070,87 @@ mod tests {
         runner
             .register_disposable(disposable.path(), &environment)
             .expect("a native TempDir spelling must be accepted for bootstrap reads");
+    }
+
+    #[test]
+    fn ordinary_version_checks_are_bound_before_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let installed_binary = root.path().join("generation/bd");
+        let copied_binary = root.path().join("disposable/bd");
+        fs::create_dir_all(installed_binary.parent().unwrap()).unwrap();
+        fs::create_dir_all(copied_binary.parent().unwrap()).unwrap();
+        let installed_environment =
+            environment_for_runtime(&root.path().join("generation/runtime"), true).unwrap();
+        let copied_environment =
+            environment_for_runtime(&root.path().join("disposable/runtime"), true).unwrap();
+        let installed = CommandSpec {
+            program: installed_binary.clone(),
+            argv: vec!["--version".into()],
+            cwd: None,
+            environment: installed_environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        };
+        let copied = CommandSpec {
+            program: copied_binary.clone(),
+            argv: vec!["--version".into()],
+            cwd: None,
+            environment: copied_environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        };
+        let mut inner = RecordingCommandRunner::scripted(vec![
+            Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+            Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+        ]);
+        {
+            let mut runner = ReadVersionRunner::new(
+                &mut inner,
+                &installed_binary,
+                installed_environment.clone(),
+                &copied_binary,
+                copied_environment.clone(),
+            );
+            runner.run(installed.clone()).unwrap();
+            runner.run(copied.clone()).unwrap();
+        }
+        assert_eq!(inner.commands(), &[installed.clone(), copied.clone()]);
+        assert!(inner.finish().is_ok());
+
+        for invalid in [
+            CommandSpec {
+                program: root.path().join("unbound-bd"),
+                ..installed.clone()
+            },
+            CommandSpec {
+                argv: vec!["--readonly".into(), "--version".into()],
+                ..installed.clone()
+            },
+            CommandSpec {
+                cwd: Some(root.path().to_path_buf()),
+                ..installed.clone()
+            },
+            CommandSpec {
+                environment: BTreeMap::new(),
+                ..installed.clone()
+            },
+            CommandSpec {
+                redacted_argv_positions: vec![0],
+                ..installed
+            },
+        ] {
+            let mut sentinel = RecordingCommandRunner::default();
+            let mut runner = ReadVersionRunner::new(
+                &mut sentinel,
+                &installed_binary,
+                installed_environment.clone(),
+                &copied_binary,
+                copied_environment.clone(),
+            );
+            assert_eq!(runner.run(invalid).unwrap_err(), "invalid_read_command");
+            assert!(
+                sentinel.commands().is_empty(),
+                "an invalid version plan must be refused before dispatch"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -2915,6 +3498,46 @@ mod tests {
                 .expect_err("bootstrap must stop rather than attempting runtime repair")
                 .code(),
             "temporary_cleanup_failed"
+        );
+    }
+
+    #[test]
+    fn bootstrap_verification_cleanup_failure_takes_precedence() {
+        let result = finish_verification_cleanup(
+            Err::<(), _>(refusal("source_ref_unavailable")),
+            Err(std::io::Error::other("unable to remove verification root")),
+        );
+
+        assert_eq!(
+            result
+                .expect_err("verification cleanup must override preparation refusal")
+                .code(),
+            "temporary_cleanup_failed"
+        );
+    }
+
+    #[test]
+    fn bootstrap_verification_cleanup_failure_precedes_activation() {
+        let root = tempfile::tempdir().unwrap();
+        let activation = root.path().join("activation");
+        let result = (|| -> Result<(), StoreError> {
+            finish_verification_cleanup(
+                Ok(()),
+                Err(std::io::Error::other("unable to remove verification root")),
+            )?;
+            fs::write(&activation, "activated").map_err(|_| refusal("invalid_store"))?;
+            Ok(())
+        })();
+
+        assert_eq!(
+            result
+                .expect_err("verification cleanup must block activation")
+                .code(),
+            "temporary_cleanup_failed"
+        );
+        assert!(
+            !activation.exists(),
+            "the activation continuation must not run after verification cleanup failure"
         );
     }
 

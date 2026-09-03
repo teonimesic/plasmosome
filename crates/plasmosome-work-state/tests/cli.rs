@@ -5,8 +5,33 @@ use plasmosome_work_state::store::{
 };
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 use tempfile::tempdir;
+
+#[cfg(unix)]
+fn run_without_root_file_bypass(command: &mut Command, root: &Path) -> std::process::Output {
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+
+    if unsafe { libc::geteuid() } == 0 {
+        for directory in [
+            root.to_path_buf(),
+            root.join("tools"),
+            root.join("fake-bin"),
+            root.join("common"),
+            root.join("common/plasmosome-work-state"),
+            root.join("common/plasmosome-work-state/generations"),
+            root.join("common/plasmosome-work-state/generations/generation-safe"),
+        ] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o755))
+                .expect("root descriptor fixture must be traversable after privilege drop");
+        }
+        command.uid(65534).gid(65534);
+    }
+    command
+        .output()
+        .expect("nonroot descriptor child must start")
+}
 
 #[test]
 fn all_and_transport_accept_no_remote_or_credential_arguments() {
@@ -646,13 +671,13 @@ fn ordinary_launcher_refusals_emit_one_stable_error_without_underlying_diagnosti
     fs::set_permissions(fake_bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
 
     fs::set_permissions(state.join("current"), fs::Permissions::from_mode(0o000)).unwrap();
+    let mut descriptor_failure = Command::new(&launcher);
+    descriptor_failure
+        .current_dir(root.path())
+        .env("PATH", &path)
+        .args(["list", "--json"]);
     assert_json_refusal(
-        Command::new(&launcher)
-            .current_dir(root.path())
-            .env("PATH", &path)
-            .args(["list", "--json"])
-            .output()
-            .unwrap(),
+        run_without_root_file_bypass(&mut descriptor_failure, root.path()),
         "current descriptor failure",
         "invalid_store",
     );

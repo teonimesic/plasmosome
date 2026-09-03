@@ -244,6 +244,11 @@ fn discovered_paths(contents: &str) -> Result<Vec<DocumentPath>, DocumentError> 
     Ok(documents)
 }
 
+pub(crate) fn discovered_document_paths(contents: &str) -> Result<Vec<String>, DocumentError> {
+    discovered_paths(contents)
+        .map(|paths| paths.into_iter().map(|document| document.path).collect())
+}
+
 fn block_style(value: &str) -> Option<BlockStyle> {
     let value = value.trim();
     let mut characters = value.chars();

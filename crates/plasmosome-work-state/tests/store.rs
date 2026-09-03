@@ -15,9 +15,9 @@ use plasmosome_work_state::shadow::{
 use plasmosome_work_state::store::{
     ActivationFault, BootstrapLock, BootstrapRequest, CurrentGeneration, StateManifest,
     StoreLocation, activate_staged_generation, active_generation, bootstrap, current_generation,
-    generation_for_installed_wrapper, host_target, locate_store, read_disposable_snapshot,
-    validate_bootstrap_command, validate_fenced_snapshot, validate_read_command,
-    validate_read_locator_command,
+    generation_for_installed_wrapper, host_target, locate_store, locator_environment,
+    read_disposable_snapshot, validate_bootstrap_command, validate_fenced_snapshot,
+    validate_read_command, validate_read_locator_command,
 };
 use tempfile::tempdir;
 
@@ -75,7 +75,7 @@ fn locate(
         git_output(format!("{}\n", top_level.display())),
         git_output(format!("{}\n", common_dir.display())),
     ]);
-    let result = locate_store(&mut runner, checkout, BTreeMap::new())
+    let result = locate_store(&mut runner, checkout, locator_environment().unwrap())
         .map_err(|error| error.code().to_owned());
     assert!(runner.finish().is_ok(), "{result:?}");
     result
@@ -203,7 +203,8 @@ fn linked_worktrees_resolve_one_common_store() {
             git_output(format!("{top_level}\n")),
             git_output(format!("{common_dir}\n")),
         ]);
-        let error = locate_store(&mut runner, &checkout_a, BTreeMap::new()).unwrap_err();
+        let error =
+            locate_store(&mut runner, &checkout_a, locator_environment().unwrap()).unwrap_err();
         assert_eq!(error.code(), "invalid_store_location");
         assert_eq!(runner.commands().len(), command_count);
     }
@@ -218,7 +219,8 @@ fn linked_worktrees_resolve_one_common_store() {
             git_output(format!("{}\n", canonical_checkout.display())),
             git_output(format!("{}\n", redirected.display())),
         ]);
-        let error = locate_store(&mut runner, &checkout_a, BTreeMap::new()).unwrap_err();
+        let error =
+            locate_store(&mut runner, &checkout_a, locator_environment().unwrap()).unwrap_err();
         assert_eq!(error.code(), "invalid_store_location");
         assert!(runner.finish().is_ok());
     }
@@ -981,11 +983,12 @@ fn ordinary_read_locator_plans_are_exact_and_local() {
     let root = tempdir().unwrap();
     let checkout = root.path().join("checkout");
     fs::create_dir_all(&checkout).unwrap();
+    let environment = locator_environment().unwrap();
     let command = |argv: &[&str]| CommandSpec {
         program: PathBuf::from("git"),
         argv: argv.iter().map(|value| (*value).into()).collect(),
         cwd: Some(checkout.clone()),
-        environment: BTreeMap::new(),
+        environment: environment.clone(),
         redacted_argv_positions: Vec::new(),
     };
 
@@ -1007,6 +1010,54 @@ fn ordinary_read_locator_plans_are_exact_and_local() {
                 .unwrap_err()
                 .code(),
             "invalid_read_command"
+        );
+    }
+}
+
+#[test]
+fn ordinary_read_locator_refuses_unsealed_environment_before_dispatch() {
+    let root = tempdir().unwrap();
+    let checkout = root.path().join("checkout");
+    fs::create_dir_all(&checkout).unwrap();
+    let expected_environment = BTreeMap::from([
+        ("PATH".into(), std::env::var("PATH").unwrap()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+        ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+    ]);
+    let exact = CommandSpec {
+        program: PathBuf::from("git"),
+        argv: vec!["rev-parse".into(), "--show-toplevel".into()],
+        cwd: Some(checkout.clone()),
+        environment: expected_environment.clone(),
+        redacted_argv_positions: Vec::new(),
+    };
+    validate_read_locator_command(&exact, &checkout)
+        .expect("the independently constructed ordinary locator environment is exact");
+
+    let mut missing_safety_flag = expected_environment.clone();
+    missing_safety_flag.remove("GIT_NO_LAZY_FETCH");
+    let mut candidates = vec![missing_safety_flag];
+    for (key, value) in [
+        ("GITHUB_TOKEN", "sentinel"),
+        ("GIT_CONFIG_GLOBAL", "/private/global-gitconfig"),
+        ("HTTPS_PROXY", "http://proxy.invalid"),
+        ("SSH_AUTH_SOCK", "/private/agent.sock"),
+    ] {
+        let mut environment = expected_environment.clone();
+        environment.insert(key.into(), value.into());
+        candidates.push(environment);
+    }
+
+    for environment in candidates {
+        let mut runner = RecordingCommandRunner::default();
+        let error = locate_store(&mut runner, &checkout, environment)
+            .expect_err("an unsealed ordinary locator must refuse before Git dispatch");
+        assert_eq!(error.code(), "invalid_store_location");
+        assert!(
+            runner.commands().is_empty(),
+            "the rejected ordinary locator environment must not reach the command runner"
         );
     }
 }
@@ -1162,10 +1213,62 @@ fn fixture_digest(path: &Path) -> String {
 }
 
 #[cfg(unix)]
+fn fixture_git_environment(root: &Path) -> BTreeMap<String, String> {
+    let fixture_root = root
+        .parent()
+        .expect("fixture checkout must have a containing root");
+    let disposable = disposable_environment(fixture_root);
+    [
+        "PATH",
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "TMPDIR",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_TERMINAL_PROMPT",
+        "GIT_NO_LAZY_FETCH",
+        "GIT_OPTIONAL_LOCKS",
+    ]
+    .into_iter()
+    .map(|key| {
+        (
+            key.to_owned(),
+            disposable
+                .get(key)
+                .expect("disposable Git fixture environment must include the key")
+                .clone(),
+        )
+    })
+    .collect()
+}
+
+#[cfg(unix)]
 fn fixture_git(root: &Path, arguments: &[&str]) -> String {
+    let fixture_root = root
+        .parent()
+        .expect("fixture checkout must have a containing root");
+    let hooks = fixture_root.join("empty-git-hooks");
+    let templates = fixture_root.join("empty-git-templates");
+    fs::create_dir_all(&hooks).unwrap();
+    fs::create_dir_all(&templates).unwrap();
+    let mut command_arguments = vec![
+        "-c".to_owned(),
+        format!("core.hooksPath={}", hooks.display()),
+        "-c".to_owned(),
+        format!("init.templateDir={}", templates.display()),
+        "-c".to_owned(),
+        "user.name=Plasmosome fixture".to_owned(),
+        "-c".to_owned(),
+        "user.email=fixture@example.invalid".to_owned(),
+    ];
+    command_arguments.extend(arguments.iter().map(|argument| (*argument).to_owned()));
     let output = std::process::Command::new("git")
-        .args(arguments)
+        .args(command_arguments)
         .current_dir(root)
+        .env_clear()
+        .envs(fixture_git_environment(root))
         .output()
         .unwrap();
     assert!(
@@ -1174,6 +1277,55 @@ fn fixture_git(root: &Path, arguments: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_git_is_hermetic_and_does_not_run_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempdir().unwrap();
+    let checkout = root.path().join("checkout");
+    let sentinel = root.path().join("pre-commit-ran");
+    fs::create_dir_all(&checkout).unwrap();
+    fs::write(checkout.join("fixture"), "fixture\n").unwrap();
+    fixture_git(&checkout, &["init", "--quiet"]);
+
+    let hook = checkout.join(".git/hooks/pre-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\nprintf hook > '{}'\n", sentinel.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    fixture_git(
+        &checkout,
+        &[
+            "config",
+            "core.hooksPath",
+            hook.parent().unwrap().to_str().unwrap(),
+        ],
+    );
+    fixture_git(&checkout, &["add", "."]);
+    fixture_git(
+        &checkout,
+        &[
+            "-c",
+            "user.name=Plasmosome fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
+
+    assert!(
+        !sentinel.exists(),
+        "fixture Git commands must not inherit a repository hook"
+    );
 }
 
 #[cfg(unix)]

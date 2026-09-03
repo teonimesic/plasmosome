@@ -12,7 +12,7 @@ use crate::command::{
     CommandOutput, CommandRunner, CommandSpec, RecordingCommandRunner, SystemCommandRunner,
 };
 use crate::document::{
-    DocumentError, DocumentKind, ShadowDocument, SourceDocuments, load_documents,
+    DocumentError, DocumentKind, ShadowDocument, SourceDocuments, is_lower_hex_sha, load_documents,
 };
 use crate::freshness::{Freshness, RemoteRelation};
 use crate::pin::{PinManifest, VerifiedBeads};
@@ -1851,18 +1851,55 @@ fn assert_runtime_repair(
     Ok((repaired, plans))
 }
 
-fn assert_changed_source_refusal(
-    location: &crate::store::StoreLocation,
-    request: &BootstrapRequest,
-    source: &SourceDocuments,
-) -> Result<(), String> {
-    let alternate_ref = if source.source_commit == HISTORICAL_SOURCE_COMMIT {
+fn resolve_changed_source_ref<R: CommandRunner>(
+    runner: &mut R,
+    source_root: &Path,
+    selected_source_commit: &str,
+) -> Result<String, String> {
+    let preferred = if selected_source_commit == HISTORICAL_SOURCE_COMMIT {
         "origin/main"
     } else {
         HISTORICAL_SOURCE_COMMIT
     };
+    let mut environment = isolated_environment(source_root);
+    environment.insert("GIT_NO_LAZY_FETCH".into(), "1".into());
+    environment.insert("GIT_OPTIONAL_LOCKS".into(), "0".into());
+    let output = runner
+        .run(contract_command(
+            "git",
+            vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                "--end-of-options".into(),
+                format!("{preferred}^{{commit}}"),
+            ],
+            source_root,
+            &environment,
+        ))
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    let resolved = output
+        .stdout
+        .strip_suffix('\n')
+        .filter(|value| !value.contains(['\n', '\r']))
+        .filter(|value| is_lower_hex_sha(value))
+        .filter(|value| *value != selected_source_commit)
+        .map(str::to_owned);
+    if output.status != 0 {
+        return Err("cutover_blocked".into());
+    }
+    resolved.ok_or_else(|| "cutover_blocked".into())
+}
+
+fn assert_changed_source_refusal(
+    runner: &mut SystemCommandRunner,
+    location: &crate::store::StoreLocation,
+    request: &BootstrapRequest,
+    source: &SourceDocuments,
+) -> Result<(), String> {
+    let alternate_ref =
+        resolve_changed_source_ref(runner, &request.source_root, &source.source_commit)?;
     let mut alternate_request = request.clone();
-    alternate_request.source_ref = alternate_ref.into();
+    alternate_request.source_ref = alternate_ref;
     let before = snapshot_regular_tree(&location.state_root)?;
     let Err(error) = bootstrap(&alternate_request) else {
         return Err("cutover_blocked".into());
@@ -2355,7 +2392,7 @@ fn local_read_contract_case(
                 pin,
             )?;
             command_plans.extend(repair_plans);
-            assert_changed_source_refusal(&location, &bootstrap_request, source)?;
+            assert_changed_source_refusal(runner, &location, &bootstrap_request, source)?;
             command_plans.push("bootstrap changed-source refusal".into());
             return Ok(LocalReadEvidence {
                 clone_labels: vec![format!("{case}-worktree-a"), format!("{case}-worktree-b")],
@@ -3137,12 +3174,111 @@ fn host_target() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContractRequest, ContractResult, contract_refusal_exit_code, finish_contract,
-        manifest_path, run_contract, source_refusal,
+        ContractRequest, ContractResult, HISTORICAL_SOURCE_COMMIT, contract_refusal_exit_code,
+        finish_contract, manifest_path, resolve_changed_source_ref, run_contract, source_refusal,
     };
+    use crate::command::{CommandOutput, CommandSpec, RecordingCommandRunner};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     static PROCESS_WORKING_DIRECTORY: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn changed_source_refusal_requires_a_locally_available_different_commit() {
+        let source_root = PathBuf::from("/contract-source");
+        let selected = "a".repeat(40);
+        let alternate = "b".repeat(40);
+        let mut runner = RecordingCommandRunner::scripted(vec![Ok(CommandOutput::success(
+            format!("{alternate}\n"),
+        ))]);
+
+        assert_eq!(
+            resolve_changed_source_ref(&mut runner, &source_root, &selected).unwrap(),
+            alternate
+        );
+        assert_eq!(
+            runner.commands(),
+            &[CommandSpec {
+                program: PathBuf::from("git"),
+                argv: vec![
+                    "rev-parse".into(),
+                    "--verify".into(),
+                    "--end-of-options".into(),
+                    format!("{HISTORICAL_SOURCE_COMMIT}^{{commit}}"),
+                ],
+                cwd: Some(source_root.clone()),
+                environment: BTreeMap::from([
+                    ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                    ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+                    ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+                    ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                    ("BD_DISABLE_METRICS".into(), "1".into()),
+                    ("BD_DISABLE_EVENT_FLUSH".into(), "1".into()),
+                    ("BD_NON_INTERACTIVE".into(), "1".into()),
+                    ("CI".into(), "true".into()),
+                    ("HOME".into(), "/contract-source/home".into()),
+                    (
+                        "XDG_CONFIG_HOME".into(),
+                        "/contract-source/xdg_config_home".into(),
+                    ),
+                    (
+                        "XDG_CACHE_HOME".into(),
+                        "/contract-source/xdg_cache_home".into(),
+                    ),
+                    (
+                        "XDG_DATA_HOME".into(),
+                        "/contract-source/xdg_data_home".into(),
+                    ),
+                    ("TMPDIR".into(), "/contract-source/tmpdir".into()),
+                    (
+                        "GIT_CONFIG_GLOBAL".into(),
+                        "/contract-source/git_config_global".into(),
+                    ),
+                    ("PATH".into(), std::env::var("PATH").unwrap()),
+                ]),
+                redacted_argv_positions: Vec::new(),
+            }],
+        );
+        assert!(runner.finish().is_ok());
+
+        let mut selected_historical = RecordingCommandRunner::scripted(vec![Ok(
+            CommandOutput::success(format!("{alternate}\n")),
+        )]);
+        assert_eq!(
+            resolve_changed_source_ref(
+                &mut selected_historical,
+                &source_root,
+                HISTORICAL_SOURCE_COMMIT,
+            )
+            .unwrap(),
+            alternate
+        );
+        assert_eq!(
+            selected_historical.commands()[0].argv.last(),
+            Some(&"origin/main^{commit}".to_owned())
+        );
+        assert!(selected_historical.finish().is_ok());
+
+        for output in [
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "missing".into(),
+            },
+            CommandOutput::success(format!("{selected}\n")),
+            CommandOutput::success(format!("{}\n", "B".repeat(40))),
+            CommandOutput::success(format!("{alternate}\nextra\n")),
+        ] {
+            let mut refusal = RecordingCommandRunner::scripted(vec![Ok(output)]);
+            assert_eq!(
+                resolve_changed_source_ref(&mut refusal, &source_root, &selected).unwrap_err(),
+                "cutover_blocked"
+            );
+            assert_eq!(refusal.commands().len(), 1);
+            assert!(refusal.finish().is_ok());
+        }
+    }
 
     #[test]
     fn fixture_cleanup_failure_takes_precedence_over_an_operation_refusal() {
