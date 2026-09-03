@@ -1343,6 +1343,55 @@ fn snapshot_regular_tree_with_cached_digests_at(
     Ok(())
 }
 
+/// A contract-only owner for one canonical shared-state tree's snapshot cache.
+///
+/// It deliberately exposes no tree path to callers: each contract inventory helper can only
+/// snapshot the single state root that was bound at construction.
+struct StateTreeSnapshots {
+    state_root: PathBuf,
+    cache: CachedTreeDigestCache,
+}
+
+impl StateTreeSnapshots {
+    fn new(state_root: &Path) -> Result<Self, String> {
+        let metadata =
+            fs::symlink_metadata(state_root).map_err(|_| "cutover_blocked".to_owned())?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err("cutover_blocked".into());
+        }
+        let state_root = fs::canonicalize(state_root).map_err(|_| "cutover_blocked".to_owned())?;
+        if !state_root.is_absolute() {
+            return Err("cutover_blocked".into());
+        }
+        Ok(Self {
+            state_root,
+            cache: CachedTreeDigestCache::default(),
+        })
+    }
+
+    fn require_state_root(&self, state_root: &Path) -> Result<(), String> {
+        let metadata =
+            fs::symlink_metadata(state_root).map_err(|_| "cutover_blocked".to_owned())?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err("cutover_blocked".into());
+        }
+        let canonical = fs::canonicalize(state_root).map_err(|_| "cutover_blocked".to_owned())?;
+        if canonical != self.state_root {
+            return Err("cutover_blocked".into());
+        }
+        Ok(())
+    }
+
+    fn snapshot(&mut self) -> Result<TreeSnapshot, String> {
+        snapshot_regular_tree_with_cached_digests(&self.state_root, &mut self.cache)
+    }
+
+    #[cfg(test)]
+    fn digest_reads(&self) -> usize {
+        self.cache.digest_reads()
+    }
+}
+
 fn snapshot_regular_tree(root: &Path) -> Result<TreeSnapshot, String> {
     snapshot_tree(root, false)
 }
@@ -1839,6 +1888,28 @@ fn bootstrap_fixture(
     ),
     String,
 > {
+    let (fixture, location, generation, bootstrap_request, _) =
+        bootstrap_fixture_with_state_snapshots(runner, root, label, request, source, pin)?;
+    Ok((fixture, location, generation, bootstrap_request))
+}
+
+fn bootstrap_fixture_with_state_snapshots(
+    runner: &mut SystemCommandRunner,
+    root: &Path,
+    label: &str,
+    request: &ContractRequest,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+) -> Result<
+    (
+        MirrorFixture,
+        crate::store::StoreLocation,
+        CurrentGeneration,
+        BootstrapRequest,
+        StateTreeSnapshots,
+    ),
+    String,
+> {
     let fixture = create_mirror_fixture(runner, root, label, &source.source_commit)?;
     let environment = locator_environment().map_err(|error| error.code().to_owned())?;
     let first_location = locate_store(runner, &fixture.first_worktree, environment.clone())
@@ -1870,12 +1941,14 @@ fn bootstrap_fixture(
     if first.outcome != BootstrapOutcome::Installed || first.source_commit != source.source_commit {
         return Err("cutover_blocked".into());
     }
-    let before_second = snapshot_regular_tree(&first_location.state_root)?;
+    let mut state_snapshots = StateTreeSnapshots::new(&first_location.state_root)?;
+    state_snapshots.require_state_root(&second_location.state_root)?;
+    let before_second = state_snapshots.snapshot()?;
     let second = bootstrap(&bootstrap_request).map_err(|error| error.code().to_owned())?;
     if second.outcome != BootstrapOutcome::Unchanged
         || second.source_commit != first.source_commit
         || second.local_generation != first.local_generation
-        || snapshot_regular_tree(&first_location.state_root)? != before_second
+        || state_snapshots.snapshot()? != before_second
     {
         return Err("cutover_blocked".into());
     }
@@ -1892,7 +1965,13 @@ fn bootstrap_fixture(
     let snapshot = read_disposable_snapshot(runner, &generation, pin, host_target())
         .map_err(|error| error.code().to_owned())?;
     assert_exact_source_projection(source, &snapshot)?;
-    Ok((fixture, first_location, generation, bootstrap_request))
+    Ok((
+        fixture,
+        first_location,
+        generation,
+        bootstrap_request,
+        state_snapshots,
+    ))
 }
 
 fn assert_runtime_reinstall(
@@ -3255,10 +3334,11 @@ fn assert_representative_parity_inventory(
     selected: &CurrentGeneration,
     snapshot: &crate::store::FencedSnapshot,
     pin: &PinManifest,
+    state_snapshots: &mut StateTreeSnapshots,
 ) -> Result<(), String> {
     let project = compiled_project_config().map_err(|_| "cutover_blocked".to_owned())?;
+    state_snapshots.require_state_root(&location.state_root)?;
     let mut selected = selected.clone();
-    let mut digest_cache = CachedTreeDigestCache::default();
     for (mismatch, label) in [
         (ContractParityMismatch::Authority, "authority"),
         (ContractParityMismatch::Source, "source"),
@@ -3278,8 +3358,7 @@ fn assert_representative_parity_inventory(
         )?;
         let candidate_marker = candidate.repository.join("candidate-only");
         fs::write(&candidate_marker, label).map_err(|_| "cutover_blocked".to_owned())?;
-        let before =
-            snapshot_regular_tree_with_cached_digests(&location.state_root, &mut digest_cache)?;
+        let before = state_snapshots.snapshot()?;
         let mut transport = OnlineSyncContractTransport::stable(
             project.clone(),
             candidate.repository.clone(),
@@ -3307,19 +3386,14 @@ fn assert_representative_parity_inventory(
             let activated_snapshot =
                 read_disposable_snapshot(runner, &activated, pin, host_target())
                     .map_err(|error| error.code().to_owned())?;
-            if snapshot_regular_tree_with_cached_digests(&location.state_root, &mut digest_cache)?
-                == before
+            if state_snapshots.snapshot()? == before
                 || activated.root.join("repository/candidate-only").exists()
                 || activated_snapshot.documents != snapshot.documents
             {
                 return Err("cutover_blocked".into());
             }
             selected = activated;
-        } else if snapshot_regular_tree_with_cached_digests(
-            &location.state_root,
-            &mut digest_cache,
-        )? != before
-        {
+        } else if state_snapshots.snapshot()? != before {
             return Err("cutover_blocked".into());
         }
     }
@@ -3331,11 +3405,13 @@ fn assert_cleanup_before_remote_inventory(
     location: &crate::store::StoreLocation,
     selected: &CurrentGeneration,
     pin: &PinManifest,
+    state_snapshots: &mut StateTreeSnapshots,
 ) -> Result<(), String> {
     let candidate = root.join("online-sync-cleanup-candidate");
     fs::create_dir(&candidate).map_err(|_| "cutover_blocked".to_owned())?;
     let project = compiled_project_config().map_err(|_| "cutover_blocked".to_owned())?;
-    let before = snapshot_regular_tree(&location.state_root)?;
+    state_snapshots.require_state_root(&location.state_root)?;
+    let before = state_snapshots.snapshot()?;
     let mut transport = OnlineSyncContractTransport::for_scenario(
         project,
         candidate,
@@ -3353,7 +3429,7 @@ fn assert_cleanup_before_remote_inventory(
         || error.state_changed()
         || transport.phase != OnlineSyncContractPhase::AwaitFirstObservation
         || !transport.commands.is_empty()
-        || snapshot_regular_tree(&location.state_root)? != before
+        || state_snapshots.snapshot()? != before
     {
         return Err("cutover_blocked".into());
     }
@@ -3584,23 +3660,39 @@ fn online_sync_contract_case(
     source: &SourceDocuments,
     pin: &PinManifest,
 ) -> Result<LocalReadEvidence, String> {
-    let (fixture, location, base, _bootstrap_request) =
-        bootstrap_fixture(runner, root, "online-sync", request, source, pin)?;
+    let (fixture, location, base, _bootstrap_request, mut state_snapshots) =
+        bootstrap_fixture_with_state_snapshots(runner, root, "online-sync", request, source, pin)?;
     let baseline = read_disposable_snapshot(runner, &base, pin, host_target())
         .map_err(|_| "cutover_blocked".to_owned())?;
-    assert_installed_sync_config_and_lock(runner, root, &fixture, &location, &base, &baseline)
-        .map_err(|_| "cutover_blocked".to_owned())?;
+    assert_installed_sync_config_and_lock(
+        runner,
+        root,
+        &fixture,
+        &location,
+        &base,
+        &baseline,
+        &mut state_snapshots,
+    )
+    .map_err(|_| "cutover_blocked".to_owned())?;
     let remote_candidate = root.join("online-sync-recorded-remote-candidate");
     fs::create_dir(&remote_candidate).map_err(|_| "cutover_blocked".to_owned())?;
     copy_regular_tree_contents(&base.root.join("repository"), &remote_candidate, None)?;
     let selected = assert_recorded_remote_failure_inventory(root, &location, &base, pin)
         .map_err(|_| "cutover_blocked".to_owned())?;
-    assert_representative_parity_inventory(runner, root, &location, &selected, &baseline, pin)
-        .map_err(|_| "cutover_blocked".to_owned())?;
+    assert_representative_parity_inventory(
+        runner,
+        root,
+        &location,
+        &selected,
+        &baseline,
+        pin,
+        &mut state_snapshots,
+    )
+    .map_err(|_| "cutover_blocked".to_owned())?;
     let selected = current_generation(&location).map_err(|_| "cutover_blocked".to_owned())?;
-    assert_cleanup_before_remote_inventory(root, &location, &selected, pin)
+    assert_cleanup_before_remote_inventory(root, &location, &selected, pin, &mut state_snapshots)
         .map_err(|_| "cutover_blocked".to_owned())?;
-    let active_state_before = snapshot_regular_tree(&location.state_root)?;
+    let active_state_before = state_snapshots.snapshot()?;
     let project = compiled_project_config().map_err(|_| "cutover_blocked".to_owned())?;
     let remote_generation = CONTRACT_REMOTE_GENERATION.to_owned();
     let mut transport =
@@ -3638,7 +3730,7 @@ fn online_sync_contract_case(
         .map_err(|error| error.code().to_owned())?;
     if activated_snapshot.documents != baseline.documents
         || activated_snapshot.freshness.freshness != Freshness::SynchronizedAsOf
-        || snapshot_regular_tree(&location.state_root)? == active_state_before
+        || state_snapshots.snapshot()? == active_state_before
     {
         return Err("cutover_blocked".into());
     }
@@ -4022,16 +4114,26 @@ fn assert_installed_sync_config_and_lock(
     location: &crate::store::StoreLocation,
     base: &CurrentGeneration,
     baseline: &crate::store::FencedSnapshot,
+    state_snapshots: &mut StateTreeSnapshots,
 ) -> Result<(), String> {
     #[cfg(not(unix))]
     {
-        let _ = (runner, root, fixture, location, base, baseline);
+        let _ = (
+            runner,
+            root,
+            fixture,
+            location,
+            base,
+            baseline,
+            state_snapshots,
+        );
         return Err("cutover_blocked".into());
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
+        state_snapshots.require_state_root(&location.state_root)?;
         let project = compiled_project_config().map_err(|_| "cutover_blocked".to_owned())?;
         let worktree = &fixture.first_worktree;
         let poison = worktree.join("tools/work-state-project.toml");
@@ -4137,7 +4239,7 @@ fn assert_installed_sync_config_and_lock(
         {
             return Err("installed-current-change".into());
         }
-        let state_before_busy = snapshot_regular_tree(&location.state_root)?;
+        let state_before_busy = state_snapshots.snapshot()?;
         let held = GenerationActivationLock::acquire_for_sync(location)
             .map_err(|error| error.code().to_owned())?;
         let records_before_busy = records.len();
@@ -4162,13 +4264,13 @@ fn assert_installed_sync_config_and_lock(
                 &binding,
             )
             .is_err()
-            || snapshot_regular_tree(&location.state_root)? != state_before_busy
+            || state_snapshots.snapshot()? != state_before_busy
         {
             return Err("cutover_blocked".into());
         }
         assert_launcher_read(runner, worktree, ReadCommand::List, base, baseline)?;
         if read_installed_git_shim_records(&binding.capture)? != post_lock_records
-            || snapshot_regular_tree(&location.state_root)? != state_before_busy
+            || state_snapshots.snapshot()? != state_before_busy
         {
             return Err("cutover_blocked".into());
         }
@@ -5491,6 +5593,51 @@ mod tests {
         let socket = UnixListener::bind(tree.join("socket")).unwrap();
         assert!(snapshot_regular_tree_with_cached_digests(&tree, &mut cache).is_err());
         drop(socket);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn online_sync_state_snapshots_reuse_digests_across_inventory_boundaries_and_bind_one_state_root()
+     {
+        use super::StateTreeSnapshots;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let state_root = fixture.path().join("state");
+        let other_state_root = fixture.path().join("other-state");
+        fs::create_dir(&state_root).unwrap();
+        fs::create_dir(&other_state_root).unwrap();
+        let binary = state_root.join("bd");
+        let metadata = state_root.join("state.json");
+        fs::write(&binary, b"first-binary-contents").unwrap();
+        let mut binary_mode = fs::metadata(&binary).unwrap().permissions();
+        binary_mode.set_mode(0o700);
+        fs::set_permissions(&binary, binary_mode).unwrap();
+        fs::write(&metadata, b"first-state-contents").unwrap();
+
+        let mut snapshots = StateTreeSnapshots::new(&state_root).unwrap();
+        let first = snapshots.snapshot().unwrap();
+        assert_eq!(snapshots.digest_reads(), 2);
+        assert_eq!(snapshots.snapshot().unwrap(), first);
+        assert_eq!(snapshots.digest_reads(), 2);
+
+        fs::write(&metadata, b"changed-state-contents-with-a-different-length").unwrap();
+        let changed_metadata = snapshots.snapshot().unwrap();
+        assert_ne!(changed_metadata, first);
+        assert_eq!(snapshots.digest_reads(), 3);
+
+        let replacement = state_root.join("replacement-bd");
+        fs::write(&replacement, b"replacement-binary-contents").unwrap();
+        let mut replacement_mode = fs::metadata(&replacement).unwrap().permissions();
+        replacement_mode.set_mode(0o700);
+        fs::set_permissions(&replacement, replacement_mode).unwrap();
+        fs::rename(&replacement, &binary).unwrap();
+        let replaced_binary = snapshots.snapshot().unwrap();
+        assert_ne!(replaced_binary, changed_metadata);
+        assert_eq!(snapshots.digest_reads(), 4);
+
+        assert!(snapshots.require_state_root(&other_state_root).is_err());
     }
 
     #[cfg(unix)]
