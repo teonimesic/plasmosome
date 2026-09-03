@@ -109,7 +109,7 @@ case "${1:-}" in
     exec cargo run --release --locked --offline --quiet -p plasmosome-work-state -- "$@"
     ;;
   contract-test)
-    exec cargo run --locked --offline --quiet -p plasmosome-work-state -- "$@"
+    exec cargo run --release --locked --offline --quiet -p plasmosome-work-state -- "$@"
     ;;
   *)
     refuse invalid_command 2

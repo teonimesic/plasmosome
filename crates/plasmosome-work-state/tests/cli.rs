@@ -1024,7 +1024,7 @@ fn ordinary_launcher_clears_sensitive_environment_before_wrapper_execution() {
 
 #[cfg(unix)]
 #[test]
-fn bootstrap_launcher_uses_release_locked_offline_cargo() {
+fn bootstrap_and_contract_test_launchers_use_release_locked_offline_cargo() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = tempdir().unwrap();
@@ -1094,7 +1094,7 @@ fn bootstrap_launcher_uses_release_locked_offline_cargo() {
     );
     assert_eq!(
         fs::read_to_string(record).unwrap(),
-        "run\n--locked\n--offline\n--quiet\n-p\nplasmosome-work-state\n--\ncontract-test\nall\n--archive\narchive\n--bd\nbd\n"
+        "run\n--release\n--locked\n--offline\n--quiet\n-p\nplasmosome-work-state\n--\ncontract-test\nall\n--archive\narchive\n--bd\nbd\n"
     );
 }
 
