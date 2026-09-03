@@ -1161,6 +1161,188 @@ fn regular_file_digest(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// A contract-only cache for repeated immutable-tree evidence within one parity inventory.
+///
+/// Unix lookups still validate the path and the opened descriptor before returning a cache hit;
+/// the cache only avoids re-reading unchanged file bytes during the seven representative cases.
+#[derive(Default)]
+struct CachedTreeDigestCache {
+    #[cfg(unix)]
+    entries: BTreeMap<CachedTreeDigestIdentity, String>,
+    #[cfg(test)]
+    digest_reads: usize,
+}
+
+impl CachedTreeDigestCache {
+    #[cfg(test)]
+    fn digest_reads(&self) -> usize {
+        self.digest_reads
+    }
+
+    #[cfg(test)]
+    fn record_digest_read(&mut self) {
+        self.digest_reads += 1;
+    }
+
+    #[cfg(not(test))]
+    fn record_digest_read(&mut self) {}
+
+    fn regular_file_digest(&mut self, path: &Path) -> Result<String, String> {
+        #[cfg(unix)]
+        {
+            let before = CachedTreeDigestIdentity::from_lstat(path)?;
+            let mut file = File::open(path).map_err(|_| "cutover_blocked".to_owned())?;
+            let opened = CachedTreeDigestIdentity::from_open_file(path, &file)?;
+            let after_open = CachedTreeDigestIdentity::from_lstat(path)?;
+            if before != opened || opened != after_open {
+                return Err("cutover_blocked".into());
+            }
+            if let Some(digest) = self.entries.get(&after_open) {
+                return Ok(digest.clone());
+            }
+            self.record_digest_read();
+            let mut hasher = Sha256::new();
+            std::io::copy(&mut file, &mut hasher).map_err(|_| "cutover_blocked".to_owned())?;
+            let after_hash_open = CachedTreeDigestIdentity::from_open_file(path, &file)?;
+            let after_hash_lstat = CachedTreeDigestIdentity::from_lstat(path)?;
+            if after_hash_open != after_open || after_hash_lstat != after_open {
+                return Err("cutover_blocked".into());
+            }
+            let digest = format!("{:x}", hasher.finalize());
+            self.entries.insert(after_open, digest.clone());
+            Ok(digest)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self;
+            regular_file_digest(path)
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CachedTreeDigestIdentity {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    length: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    links: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+#[cfg(unix)]
+impl CachedTreeDigestIdentity {
+    fn from_lstat(path: &Path) -> Result<Self, String> {
+        let metadata = fs::symlink_metadata(path).map_err(|_| "cutover_blocked".to_owned())?;
+        Self::from_metadata(path, &metadata)
+    }
+
+    fn from_open_file(path: &Path, file: &File) -> Result<Self, String> {
+        let metadata = file.metadata().map_err(|_| "cutover_blocked".to_owned())?;
+        Self::from_metadata(path, &metadata)
+    }
+
+    fn from_metadata(path: &Path, metadata: &fs::Metadata) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt;
+
+        if !path.is_absolute()
+            || !metadata.file_type().is_file()
+            || metadata.file_type().is_symlink()
+        {
+            return Err("cutover_blocked".into());
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            length: metadata.size(),
+            mode: metadata.mode(),
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            links: metadata.nlink(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanoseconds: metadata.ctime_nsec(),
+        })
+    }
+}
+
+fn snapshot_regular_tree_with_cached_digests(
+    root: &Path,
+    cache: &mut CachedTreeDigestCache,
+) -> Result<TreeSnapshot, String> {
+    #[cfg(not(unix))]
+    {
+        let _ = cache;
+        return snapshot_regular_tree(root);
+    }
+    #[cfg(unix)]
+    {
+        let metadata = fs::symlink_metadata(root).map_err(|_| "cutover_blocked".to_owned())?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err("cutover_blocked".into());
+        }
+        let mut entries = BTreeMap::new();
+        snapshot_regular_tree_with_cached_digests_at(root, Path::new(""), &mut entries, cache)?;
+        Ok(entries)
+    }
+}
+
+#[cfg(unix)]
+fn snapshot_regular_tree_with_cached_digests_at(
+    root: &Path,
+    relative: &Path,
+    entries: &mut TreeSnapshot,
+    cache: &mut CachedTreeDigestCache,
+) -> Result<(), String> {
+    let directory = if relative.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(relative)
+    };
+    let mut children = fs::read_dir(&directory)
+        .map_err(|_| "cutover_blocked".to_owned())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    children.sort_by_key(|entry| entry.file_name());
+    for child in children {
+        let path = child.path();
+        let child_relative = relative.join(child.file_name());
+        let metadata = fs::symlink_metadata(&path).map_err(|_| "cutover_blocked".to_owned())?;
+        if metadata.file_type().is_symlink() {
+            return Err("cutover_blocked".into());
+        }
+        let entry = TreeEntry {
+            directory: metadata.file_type().is_dir(),
+            mode: tree_mode(&metadata),
+            modified: metadata
+                .modified()
+                .map_err(|_| "cutover_blocked".to_owned())?,
+            digest: metadata
+                .file_type()
+                .is_file()
+                .then(|| cache.regular_file_digest(&path))
+                .transpose()?,
+        };
+        if !entry.directory && entry.digest.is_none() {
+            return Err("cutover_blocked".into());
+        }
+        entries.insert(child_relative.clone(), entry);
+        if metadata.file_type().is_dir() {
+            snapshot_regular_tree_with_cached_digests_at(root, &child_relative, entries, cache)?;
+        }
+    }
+    Ok(())
+}
+
 fn snapshot_regular_tree(root: &Path) -> Result<TreeSnapshot, String> {
     snapshot_tree(root, false)
 }
@@ -3076,6 +3258,7 @@ fn assert_representative_parity_inventory(
 ) -> Result<(), String> {
     let project = compiled_project_config().map_err(|_| "cutover_blocked".to_owned())?;
     let mut selected = selected.clone();
+    let mut digest_cache = CachedTreeDigestCache::default();
     for (mismatch, label) in [
         (ContractParityMismatch::Authority, "authority"),
         (ContractParityMismatch::Source, "source"),
@@ -3095,7 +3278,8 @@ fn assert_representative_parity_inventory(
         )?;
         let candidate_marker = candidate.repository.join("candidate-only");
         fs::write(&candidate_marker, label).map_err(|_| "cutover_blocked".to_owned())?;
-        let before = snapshot_regular_tree(&location.state_root)?;
+        let before =
+            snapshot_regular_tree_with_cached_digests(&location.state_root, &mut digest_cache)?;
         let mut transport = OnlineSyncContractTransport::stable(
             project.clone(),
             candidate.repository.clone(),
@@ -3123,14 +3307,19 @@ fn assert_representative_parity_inventory(
             let activated_snapshot =
                 read_disposable_snapshot(runner, &activated, pin, host_target())
                     .map_err(|error| error.code().to_owned())?;
-            if snapshot_regular_tree(&location.state_root)? == before
+            if snapshot_regular_tree_with_cached_digests(&location.state_root, &mut digest_cache)?
+                == before
                 || activated.root.join("repository/candidate-only").exists()
                 || activated_snapshot.documents != snapshot.documents
             {
                 return Err("cutover_blocked".into());
             }
             selected = activated;
-        } else if snapshot_regular_tree(&location.state_root)? != before {
+        } else if snapshot_regular_tree_with_cached_digests(
+            &location.state_root,
+            &mut digest_cache,
+        )? != before
+        {
             return Err("cutover_blocked".into());
         }
     }
@@ -5234,6 +5423,74 @@ mod tests {
             installed_config_locator_path(&fake_bin, &original).unwrap(),
             expected
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_tree_snapshot_rehashes_on_identity_change_and_reuses_only_unchanged_regular_files() {
+        use super::{CachedTreeDigestCache, snapshot_regular_tree_with_cached_digests};
+        use std::fs;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::tempdir().unwrap();
+        let tree = root.path().join("tree");
+        let binary = tree.join("bd");
+        fs::create_dir(&tree).unwrap();
+        fs::write(&binary, b"first-binary-contents").unwrap();
+        let mut initial_mode = fs::metadata(&binary).unwrap().permissions();
+        initial_mode.set_mode(0o700);
+        fs::set_permissions(&binary, initial_mode).unwrap();
+        let mut cache = CachedTreeDigestCache::default();
+
+        let first = snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap();
+        assert_eq!(cache.digest_reads(), 1);
+        assert_eq!(
+            snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap(),
+            first
+        );
+        assert_eq!(cache.digest_reads(), 1);
+
+        fs::write(&binary, b"changed-binary-contents-with-a-different-length").unwrap();
+        let changed_contents =
+            snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap();
+        assert_ne!(changed_contents, first);
+        assert_eq!(cache.digest_reads(), 2);
+
+        let replacement = tree.join("replacement");
+        fs::write(&replacement, b"replacement-binary").unwrap();
+        let mut replacement_mode = fs::metadata(&replacement).unwrap().permissions();
+        replacement_mode.set_mode(0o700);
+        fs::set_permissions(&replacement, replacement_mode).unwrap();
+        fs::rename(&replacement, &binary).unwrap();
+        let replaced = snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap();
+        assert_ne!(replaced, changed_contents);
+        assert_eq!(cache.digest_reads(), 3);
+
+        let mut mode = fs::metadata(&binary).unwrap().permissions();
+        mode.set_mode(0o600);
+        fs::set_permissions(&binary, mode).unwrap();
+        let chmodded = snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap();
+        assert_ne!(chmodded, replaced);
+        assert_eq!(cache.digest_reads(), 4);
+
+        let added = tree.join("added");
+        fs::write(&added, b"added-file").unwrap();
+        let with_added = snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap();
+        assert_ne!(with_added, chmodded);
+        assert_eq!(cache.digest_reads(), 5);
+        fs::remove_file(&added).unwrap();
+        let without_added = snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap();
+        assert_ne!(without_added, with_added);
+        assert_eq!(cache.digest_reads(), 5);
+
+        let link = tree.join("link");
+        symlink("bd", &link).unwrap();
+        assert!(snapshot_regular_tree_with_cached_digests(&tree, &mut cache).is_err());
+        fs::remove_file(&link).unwrap();
+        let socket = UnixListener::bind(tree.join("socket")).unwrap();
+        assert!(snapshot_regular_tree_with_cached_digests(&tree, &mut cache).is_err());
+        drop(socket);
     }
 
     #[cfg(unix)]
