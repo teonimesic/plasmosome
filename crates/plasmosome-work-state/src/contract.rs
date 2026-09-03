@@ -16,6 +16,7 @@ use crate::document::{
 };
 use crate::freshness::{Freshness, RemoteRelation};
 use crate::pin::{PinManifest, VerifiedBeads};
+use crate::project::compiled_project_config;
 use crate::read::{ReadCommand, project_read, render_human};
 use crate::shadow::{
     ActiveOwner, OperationalDocument, OperationalMetadata, ShadowError, ShadowStore,
@@ -25,10 +26,11 @@ use crate::shadow::{
     to_operational_beads_jsonl,
 };
 use crate::store::{
-    BootstrapLock, BootstrapOutcome, BootstrapRequest, CurrentGeneration, StateManifest,
-    activate_staged_generation, bootstrap, current_generation, locate_store, locator_environment,
-    read_disposable_snapshot,
+    BootstrapLock, BootstrapOutcome, BootstrapRequest, CurrentGeneration, GenerationActivationLock,
+    StateManifest, activate_staged_generation, bootstrap, current_generation, locate_store,
+    locator_environment, prepare_sync_staging, read_disposable_snapshot,
 };
+use crate::sync::{SyncCommandBinding, SyncCommandRunner};
 
 const ISOLATED: &[(&str, &str)] = &[
     ("GIT_CONFIG_NOSYSTEM", "1"),
@@ -167,7 +169,10 @@ pub fn contract_refusal_exit_code(code: &str) -> i32 {
 
 /// Returns whether a case must execute the real mapping and shadow-parity round trip.
 pub fn requires_shadow_round_trip(case: &str) -> bool {
-    matches!(case, "document-mapping" | "shadow-parity" | "all")
+    matches!(
+        case,
+        "document-mapping" | "shadow-parity" | "online-sync" | "all"
+    )
 }
 
 /// Returns whether a contract case exercises the installed local read projection.
@@ -185,6 +190,15 @@ pub fn local_read_cases(case: &str) -> &'static [&'static str] {
         "freshness" => &["freshness"],
         "combined-freshness" => &["combined-freshness"],
         "all" => &["local-reads", "freshness", "combined-freshness"],
+        _ => &[],
+    }
+}
+
+/// Returns the explicit online synchronization contract selected by an individual or aggregate
+/// invocation. The aggregate uses this one enumeration so the case cannot be duplicated.
+pub fn online_sync_contract_cases(case: &str) -> &'static [&'static str] {
+    match case {
+        "online-sync" | "all" => &["online-sync"],
         _ => &[],
     }
 }
@@ -2501,6 +2515,301 @@ fn local_read_contract_result(
     result
 }
 
+struct OnlineSyncFenceOutputs {
+    version: String,
+    before_status: String,
+    export: String,
+    key_values: String,
+    after_status: String,
+}
+
+fn capture_online_sync_output(
+    runner: &mut SystemCommandRunner,
+    program: &Path,
+    argv: Vec<String>,
+    cwd: Option<&Path>,
+    environment: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let output = runner
+        .run(CommandSpec {
+            program: program.to_path_buf(),
+            argv,
+            cwd: cwd.map(Path::to_path_buf),
+            environment: environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        })
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    if output.status != 0 {
+        return Err("cutover_blocked".into());
+    }
+    Ok(output.stdout)
+}
+
+fn capture_online_sync_fence(
+    runner: &mut SystemCommandRunner,
+    generation: &CurrentGeneration,
+) -> Result<OnlineSyncFenceOutputs, String> {
+    let binary = generation.root.join("bd");
+    let repository = generation.root.join("repository");
+    let environment = fixture_runtime_environment(&generation.root)?;
+    Ok(OnlineSyncFenceOutputs {
+        version: capture_online_sync_output(
+            runner,
+            &binary,
+            vec!["--version".into()],
+            None,
+            &environment,
+        )?,
+        before_status: capture_online_sync_output(
+            runner,
+            &binary,
+            vec![
+                "--readonly".into(),
+                "--sandbox".into(),
+                "--json".into(),
+                "vc".into(),
+                "status".into(),
+            ],
+            Some(&repository),
+            &environment,
+        )?,
+        export: capture_online_sync_output(
+            runner,
+            &binary,
+            vec!["--readonly".into(), "--sandbox".into(), "export".into()],
+            Some(&repository),
+            &environment,
+        )?,
+        key_values: capture_online_sync_output(
+            runner,
+            &binary,
+            vec![
+                "--readonly".into(),
+                "--sandbox".into(),
+                "--json".into(),
+                "kv".into(),
+                "list".into(),
+            ],
+            Some(&repository),
+            &environment,
+        )?,
+        after_status: capture_online_sync_output(
+            runner,
+            &binary,
+            vec![
+                "--readonly".into(),
+                "--sandbox".into(),
+                "--json".into(),
+                "vc".into(),
+                "status".into(),
+            ],
+            Some(&repository),
+            &environment,
+        )?,
+    })
+}
+
+fn online_sync_observation_command(
+    project: &crate::project::ProjectConfig,
+    root: &Path,
+    environment: &BTreeMap<String, String>,
+) -> CommandSpec {
+    CommandSpec {
+        program: "git".into(),
+        argv: vec![
+            "ls-remote".into(),
+            "--exit-code".into(),
+            project.git_observation_url().into(),
+            project.data_ref().into(),
+        ],
+        cwd: Some(root.to_path_buf()),
+        environment: environment.clone(),
+        redacted_argv_positions: vec![2],
+    }
+}
+
+fn online_sync_init_command(
+    project: &crate::project::ProjectConfig,
+    repository: &Path,
+    binary: &Path,
+    environment: &BTreeMap<String, String>,
+) -> CommandSpec {
+    CommandSpec {
+        program: binary.to_path_buf(),
+        argv: vec![
+            "--sandbox".into(),
+            "init".into(),
+            "--remote".into(),
+            project.dolt_remote_url().into(),
+            "--stealth".into(),
+            "--skip-agents".into(),
+            "--skip-hooks".into(),
+            "--non-interactive".into(),
+        ],
+        cwd: Some(repository.to_path_buf()),
+        environment: environment.clone(),
+        redacted_argv_positions: vec![3],
+    }
+}
+
+fn online_sync_remote_list_command(
+    repository: &Path,
+    binary: &Path,
+    environment: &BTreeMap<String, String>,
+) -> CommandSpec {
+    CommandSpec {
+        program: binary.to_path_buf(),
+        argv: vec![
+            "--sandbox".into(),
+            "--json".into(),
+            "dolt".into(),
+            "remote".into(),
+            "list".into(),
+        ],
+        cwd: Some(repository.to_path_buf()),
+        environment: environment.clone(),
+        redacted_argv_positions: Vec::new(),
+    }
+}
+
+fn online_sync_contract_case(
+    runner: &mut SystemCommandRunner,
+    root: &Path,
+    request: &ContractRequest,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+) -> Result<LocalReadEvidence, String> {
+    let (_fixture, location, base, _bootstrap_request) =
+        bootstrap_fixture(runner, root, "online-sync", request, source, pin)?;
+    let baseline = read_disposable_snapshot(runner, &base, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    let fence_outputs = capture_online_sync_fence(runner, &base)?;
+    let active_state_before = snapshot_regular_tree(&location.state_root)?;
+    let project = compiled_project_config().map_err(|_| "cutover_blocked".to_owned())?;
+    let lock = GenerationActivationLock::acquire_for_sync(&location)
+        .map_err(|error| error.code().to_owned())?;
+    let staging = prepare_sync_staging(&location, &base, &baseline, pin, host_target(), &lock)
+        .map_err(|error| error.code().to_owned())?;
+    let binding = SyncCommandBinding::new(
+        project.clone(),
+        staging.root().to_path_buf(),
+        staging.repository(),
+        staging.binary(),
+        staging.environment().clone(),
+    )
+    .map_err(|error| error.code().to_owned())?;
+    let remote_generation = CONTRACT_REMOTE_GENERATION.to_owned();
+    let remote_list = format!(
+        "[{{\"name\":\"{}\",\"url\":\"{}\",\"sql_url\":\"{}\",\"status\":\"ok\"}}]",
+        project.remote_name(),
+        project.dolt_remote_url(),
+        project.dolt_remote_url(),
+    );
+    let mut recorded = RecordingCommandRunner::scripted(vec![
+        Ok(CommandOutput::success(format!(
+            "{remote_generation}\trefs/dolt/data\n"
+        ))),
+        Ok(CommandOutput::success("")),
+        Ok(CommandOutput::success(remote_list)),
+        Ok(CommandOutput::success(format!(
+            "{remote_generation}\trefs/dolt/data\n"
+        ))),
+        Ok(CommandOutput::success(fence_outputs.version)),
+        Ok(CommandOutput::success(fence_outputs.before_status)),
+        Ok(CommandOutput::success(fence_outputs.export)),
+        Ok(CommandOutput::success(fence_outputs.key_values)),
+        Ok(CommandOutput::success(fence_outputs.after_status)),
+    ]);
+    let candidate = {
+        let mut fenced = SyncCommandRunner::new(&mut recorded, binding);
+        fenced
+            .run(online_sync_observation_command(
+                &project,
+                staging.root(),
+                staging.environment(),
+            ))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        fenced
+            .authorize_fresh_clone(&[])
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        let candidate = staging
+            .create_fresh_repository()
+            .map_err(|error| error.code().to_owned())?;
+        // The contract records the remote-clone boundary rather than contacting a hosted remote.
+        // It then puts a real prebuilt local candidate in the fresh directory so the ensuing
+        // version/fence/parity/activation evidence remains physical and inspectable.
+        copy_regular_tree_contents(&base.root.join("repository"), &candidate.repository(), None)?;
+        fenced
+            .run(online_sync_init_command(
+                &project,
+                &candidate.repository(),
+                &candidate.binary(),
+                candidate.environment(),
+            ))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        fenced
+            .run(online_sync_remote_list_command(
+                &candidate.repository(),
+                &candidate.binary(),
+                candidate.environment(),
+            ))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        fenced
+            .run(online_sync_observation_command(
+                &project,
+                candidate.root(),
+                candidate.environment(),
+            ))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        let stable = fenced
+            .require_stable_observation()
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        candidate
+            .validate_and_finalize(&mut fenced, &stable, CONTRACT_OBSERVED_AT)
+            .map_err(|error| error.code().to_owned())?
+    };
+    let activated = candidate
+        .activate()
+        .map_err(|error| error.code().to_owned())?;
+    if recorded.finish().is_err()
+        || activated.name == base.name
+        || !base.root.is_dir()
+        || activated.manifest.source_commit != base.manifest.source_commit
+        || activated.manifest.logical_export_sha256 != base.manifest.logical_export_sha256
+        || activated.manifest.operational_projection_sha256
+            != base.manifest.operational_projection_sha256
+        || activated.manifest.remote_generation.as_deref() != Some(CONTRACT_REMOTE_GENERATION)
+        || activated.manifest.remote_observed_at.as_deref() != Some(CONTRACT_OBSERVED_AT)
+        || activated.manifest.last_successful_sync_at.as_deref() != Some(CONTRACT_OBSERVED_AT)
+        || activated.manifest.pending_operation_ids != Vec::<String>::new()
+    {
+        return Err("cutover_blocked".into());
+    }
+    let activated_snapshot = read_disposable_snapshot(runner, &activated, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    if activated_snapshot.documents != baseline.documents
+        || activated_snapshot.freshness.freshness != Freshness::SynchronizedAsOf
+        || snapshot_regular_tree(&location.state_root)? == active_state_before
+    {
+        return Err("cutover_blocked".into());
+    }
+    assert_exact_source_projection(source, &activated_snapshot)?;
+    Ok(LocalReadEvidence {
+        clone_labels: vec![
+            "online-sync-worktree-a".into(),
+            "online-sync-worktree-b".into(),
+        ],
+        source_commit: activated.manifest.source_commit,
+        local_generation: activated.manifest.local_generation,
+        operation_ids: Vec::new(),
+        command_plans: vec![
+            "real local bootstrap/current/runtime/fence/parity/activation".into(),
+            "recorded Git observation and remote-clone boundary".into(),
+            "no remote add/pull/bootstrap/push/fetch/force/update-ref".into(),
+        ],
+    })
+}
+
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -2604,6 +2913,31 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
                         ))
                     })?;
             let mut result = migration_result(&request.case, source_ref, &source, evidence);
+            if request.case == "online-sync" {
+                let online = online_sync_contract_case(
+                    &mut runner,
+                    root.path(),
+                    request,
+                    &source,
+                    &manifest,
+                )
+                .map_err(|code| {
+                    Box::new(snapshot_refusal(
+                        &request.case,
+                        source_ref,
+                        &source,
+                        &code,
+                        None,
+                        None,
+                    ))
+                })?;
+                return Ok(local_read_contract_result(
+                    &request.case,
+                    source_ref,
+                    &source,
+                    online,
+                ));
+            }
             if request.case == "all" {
                 for case in local_read_cases(&request.case) {
                     let local = local_read_contract_case(
@@ -2632,6 +2966,34 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
                         final_generation: local.local_generation,
                         operation_ids: local.operation_ids,
                         command_plans: local.command_plans,
+                    });
+                }
+                for case in online_sync_contract_cases(&request.case) {
+                    let online = online_sync_contract_case(
+                        &mut runner,
+                        root.path(),
+                        request,
+                        &source,
+                        &manifest,
+                    )
+                    .map_err(|code| {
+                        Box::new(snapshot_refusal(
+                            &request.case,
+                            source_ref,
+                            &source,
+                            &code,
+                            None,
+                            None,
+                        ))
+                    })?;
+                    result.clone_labels.extend(online.clone_labels.clone());
+                    result.command_plans.extend(online.command_plans.clone());
+                    result.scenarios.push(ScenarioEvidence {
+                        case: (*case).into(),
+                        observed_base: online.source_commit,
+                        final_generation: online.local_generation,
+                        operation_ids: online.operation_ids,
+                        command_plans: online.command_plans,
                     });
                 }
                 let transport = run_scripted_cases("transport")
