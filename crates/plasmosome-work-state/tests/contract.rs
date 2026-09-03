@@ -2,11 +2,11 @@ use plasmosome_work_state::command::{CommandOutput, CommandSpec, RecordingComman
 use plasmosome_work_state::contract::{
     Publication, PushFailure, assert_no_ls_remote, classify_push, contract_refusal_exit_code,
     dispose_fixture_root, execute_publication_command, leased_ref_update, local_read_cases,
-    pending_fixture_update_arguments, prepare_store_fixture, publish_candidate,
-    recover_after_lost_response, requires_local_read_contract, requires_shadow_round_trip,
-    retry_after_transport, run_scripted_case, run_scripted_cases, run_scripted_contract_case,
-    scripted_outcomes, validate_freshness_fixture_generations, validate_independent_stores,
-    validate_logical_export, validate_scripted_history,
+    online_sync_contract_cases, pending_fixture_update_arguments, prepare_store_fixture,
+    publish_candidate, recover_after_lost_response, requires_local_read_contract,
+    requires_shadow_round_trip, retry_after_transport, run_scripted_case, run_scripted_cases,
+    run_scripted_contract_case, scripted_outcomes, validate_freshness_fixture_generations,
+    validate_independent_stores, validate_logical_export, validate_scripted_history,
 };
 
 const G0: &str = "0000000000000000000000000000000000000000";
@@ -132,6 +132,13 @@ fn all_includes_local_reads_and_both_freshness_cases() {
         assert!(requires_local_read_contract(case), "missing {case}");
     }
     assert!(!requires_local_read_contract("document-mapping"));
+}
+
+#[test]
+fn all_includes_online_sync_once() {
+    assert_eq!(online_sync_contract_cases("online-sync"), &["online-sync"]);
+    assert_eq!(online_sync_contract_cases("all"), &["online-sync"]);
+    assert!(online_sync_contract_cases("local-reads").is_empty());
 }
 
 #[test]
@@ -987,6 +994,7 @@ fn all_dispatches_to_mapping_and_shadow_parity() {
     assert!(requires_shadow_round_trip("all"));
     assert!(requires_shadow_round_trip("document-mapping"));
     assert!(requires_shadow_round_trip("shadow-parity"));
+    assert!(requires_shadow_round_trip("online-sync"));
     assert!(!requires_shadow_round_trip("transport"));
 }
 

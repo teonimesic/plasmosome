@@ -10,8 +10,8 @@ use crate::document::{
     SourceDocuments, discovered_document_paths, is_lower_hex_sha, load_documents,
 };
 use crate::freshness::{
-    FreshnessEnvelope, ObservationState, PendingMutations, RemoteRelation, classify,
-    full_nonblank_commit, validate,
+    FreshnessEnvelope, ObservationState, PendingMutations, RemoteRelation, canonical_utc, classify,
+    full_nonblank_commit, record_failed_sync_observation, validate,
 };
 use crate::pin::{InstalledBeads, PinManifest, VerifiedBeads};
 use crate::shadow::{
@@ -223,15 +223,19 @@ pub enum ActivationFault {
     BeforePointerRename,
 }
 
-/// A process-scoped nonblocking lock that serializes bootstrap preparation only.
+/// A process-scoped nonblocking lock that serializes immutable-generation activation.
 #[derive(Debug)]
-pub struct BootstrapLock {
+pub struct GenerationActivationLock {
     file: File,
+    state_root: PathBuf,
+    lock_path: PathBuf,
 }
 
-impl BootstrapLock {
-    /// Acquires the clone-local bootstrap lock without waiting for another installer.
-    pub fn acquire(location: &StoreLocation) -> Result<Self, StoreError> {
+impl GenerationActivationLock {
+    fn acquire_with_busy_code(
+        location: &StoreLocation,
+        busy_code: &'static str,
+    ) -> Result<Self, StoreError> {
         match fs::symlink_metadata(&location.state_root) {
             Ok(_) => {
                 directory_without_symlink(&location.state_root)?;
@@ -258,7 +262,7 @@ impl BootstrapLock {
                 .read(true)
                 .write(true)
                 .custom_flags(libc::O_NOFOLLOW)
-                .open(path)
+                .open(&path)
                 .map_err(|_| refusal("invalid_store"))?
         };
         #[cfg(not(unix))]
@@ -277,18 +281,32 @@ impl BootstrapLock {
                 let code = std::io::Error::last_os_error().raw_os_error();
                 return Err(
                     if code == Some(libc::EAGAIN) || code == Some(libc::EWOULDBLOCK) {
-                        refusal("bootstrap_busy")
+                        refusal(busy_code)
                     } else {
                         refusal("invalid_store")
                     },
                 );
             }
         }
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            state_root: location.state_root.clone(),
+            lock_path: path,
+        })
+    }
+
+    /// Acquires the clone-local activation lock for one synchronization without waiting.
+    pub fn acquire_for_sync(location: &StoreLocation) -> Result<Self, StoreError> {
+        Self::acquire_with_busy_code(location, "sync_busy")
+    }
+
+    fn binds_location(&self, location: &StoreLocation) -> bool {
+        self.state_root == location.state_root
+            && self.lock_path == location.state_root.join("bootstrap.lock")
     }
 }
 
-impl Drop for BootstrapLock {
+impl Drop for GenerationActivationLock {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
@@ -297,6 +315,377 @@ impl Drop for BootstrapLock {
             let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
         }
     }
+}
+
+/// The bootstrap-facing adapter for the shared generation-activation lock.
+#[derive(Debug)]
+pub struct BootstrapLock {
+    _activation_lock: GenerationActivationLock,
+}
+
+impl BootstrapLock {
+    /// Acquires the clone-local activation lock for bootstrap without waiting for sync.
+    pub fn acquire(location: &StoreLocation) -> Result<Self, StoreError> {
+        GenerationActivationLock::acquire_with_busy_code(location, "bootstrap_busy")
+            .map(|_activation_lock| Self { _activation_lock })
+    }
+}
+
+/// One lock-bound pre-observation synchronization staging root.
+///
+/// Its fields intentionally remain private: only the synchronization state machine may turn this
+/// verified runtime-only root into a candidate repository.
+pub(crate) struct SyncStaging<'lock> {
+    location: StoreLocation,
+    selected: CurrentGeneration,
+    selected_snapshot: FencedSnapshot,
+    pin: PinManifest,
+    target: String,
+    generation_name: String,
+    root: PathBuf,
+    environment: BTreeMap<String, String>,
+    wrapper_sha256: String,
+    beads_binary_sha256: String,
+    lock: &'lock GenerationActivationLock,
+}
+
+/// One fresh staged repository that can only exist after a valid first remote observation.
+pub(crate) struct FreshSyncCandidate<'lock> {
+    staging: SyncStaging<'lock>,
+}
+
+/// The only staged synchronization form permitted to write a manifest and activate `current`.
+pub(crate) struct ValidatedSyncCandidate<'lock> {
+    candidate: FreshSyncCandidate<'lock>,
+    manifest: StateManifest,
+}
+
+/// A valid remote fact used only to preserve a failed synchronization observation.
+pub(crate) enum FailedSyncObservation {
+    /// No trustworthy remote generation was observed.
+    BeforeR0,
+    /// A complete first remote observation was made before the failure.
+    AfterR0 {
+        remote_generation: String,
+        observed_at: String,
+    },
+}
+
+impl<'lock> SyncStaging<'lock> {
+    /// Returns the one private staging root bound to this synchronization attempt.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Returns the repository location that may be created only after a valid R0 observation.
+    pub(crate) fn repository(&self) -> PathBuf {
+        self.root.join("repository")
+    }
+
+    /// Returns the exact copied pinned Beads executable for this staging root.
+    pub(crate) fn binary(&self) -> PathBuf {
+        self.root.join("bd")
+    }
+
+    /// Returns the sealed runtime environment bound to this staging root.
+    pub(crate) fn environment(&self) -> &BTreeMap<String, String> {
+        &self.environment
+    }
+
+    fn selected_current(&self) -> Result<(), StoreError> {
+        if !self.lock.binds_location(&self.location)
+            || current_generation(&self.location)? != self.selected
+        {
+            return Err(refusal("store_changed"));
+        }
+        Ok(())
+    }
+
+    /// Creates the one empty repository directory after the remote runner has admitted R0.
+    pub(crate) fn create_fresh_repository(self) -> Result<FreshSyncCandidate<'lock>, StoreError> {
+        self.selected_current()?;
+        let repository = self.repository();
+        match fs::symlink_metadata(&repository) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) | Err(_) => return Err(refusal("invalid_store")),
+        }
+        fs::create_dir(&repository).map_err(|_| refusal("invalid_store"))?;
+        sync_directory(&self.root)?;
+        Ok(FreshSyncCandidate { staging: self })
+    }
+
+    /// Persists one changed, valid failed-sync observation without reusing a clone candidate.
+    pub(crate) fn activate_unknown_if_changed<R: CommandRunner>(
+        self,
+        runner: &mut R,
+        observation: FailedSyncObservation,
+    ) -> Result<Option<CurrentGeneration>, StoreError> {
+        self.selected_current()?;
+        let manifest = failed_sync_manifest(&self.selected.manifest, observation)?;
+        if manifest == self.selected.manifest {
+            return Ok(None);
+        }
+        let repository = self.repository();
+        copy_private_tree(&self.selected.root.join("repository"), &repository)?;
+        InstalledBeads::verify(
+            &self.pin,
+            &self.target,
+            &self.binary(),
+            &self.root,
+            self.environment.clone(),
+            runner,
+        )
+        .map_err(pin_refusal)?;
+        let raw =
+            read_fenced_snapshot_in_place(runner, &repository, &self.binary(), self.environment())?;
+        let copied = validate_fenced_snapshot(
+            &manifest,
+            &raw.before_status,
+            &raw.export,
+            &raw.key_values,
+            &raw.after_status,
+        )?;
+        if copied.documents != self.selected_snapshot.documents {
+            return Err(refusal("store_changed"));
+        }
+        self.selected_current()?;
+        write_staged_manifest(&self.root, &manifest)?;
+        self.selected_current()?;
+        activate_staged_generation(&self.location, &self.root, &self.generation_name, None)?;
+        let activated = current_generation(&self.location)?;
+        if activated.manifest != manifest {
+            return Err(refusal("invalid_store"));
+        }
+        wrapper_is_valid(&activated)?;
+        Ok(Some(activated))
+    }
+}
+
+impl FreshSyncCandidate<'_> {
+    /// Returns the immutable staging root for the fresh candidate.
+    pub(crate) fn root(&self) -> &Path {
+        self.staging.root()
+    }
+
+    /// Returns the exactly-once fresh repository directory.
+    pub(crate) fn repository(&self) -> PathBuf {
+        self.staging.repository()
+    }
+
+    /// Returns the checksum-bound staged Beads executable.
+    pub(crate) fn binary(&self) -> PathBuf {
+        self.staging.binary()
+    }
+
+    /// Returns the sealed candidate runtime environment.
+    pub(crate) fn environment(&self) -> &BTreeMap<String, String> {
+        self.staging.environment()
+    }
+}
+
+impl<'lock> FreshSyncCandidate<'lock> {
+    /// Validates the fresh candidate's readonly fence and exact active-shadow parity.
+    pub(crate) fn validate_and_finalize<R: CommandRunner>(
+        self,
+        runner: &mut R,
+        remote_generation: &str,
+        synchronized_at: &str,
+    ) -> Result<ValidatedSyncCandidate<'lock>, StoreError> {
+        self.staging.selected_current()?;
+        if !is_lower_hex_sha(remote_generation)
+            || !canonical_utc(synchronized_at)
+            || !self
+                .staging
+                .selected
+                .manifest
+                .pending_operation_ids
+                .is_empty()
+            || self
+                .staging
+                .selected
+                .manifest
+                .remote_observed_at
+                .as_deref()
+                .is_some_and(|prior| synchronized_at < prior)
+            || self
+                .staging
+                .selected
+                .manifest
+                .last_successful_sync_at
+                .as_deref()
+                .is_some_and(|prior| synchronized_at < prior)
+        {
+            return Err(refusal("remote_shadow_mismatch"));
+        }
+        let repository = self.repository();
+        directory_without_symlink(&repository).map_err(|_| refusal("remote_shadow_mismatch"))?;
+        InstalledBeads::verify(
+            &self.staging.pin,
+            &self.staging.target,
+            &self.binary(),
+            self.staging.root(),
+            self.environment().clone(),
+            runner,
+        )
+        .map_err(pin_refusal)?;
+        let raw =
+            read_fenced_snapshot_in_place(runner, &repository, &self.binary(), self.environment())
+                .map_err(|_| refusal("remote_shadow_mismatch"))?;
+        let manifest =
+            sync_manifest_for_raw_fence(&self.staging, &raw, remote_generation, synchronized_at)?;
+        self.staging.selected_current()?;
+        Ok(ValidatedSyncCandidate {
+            candidate: self,
+            manifest,
+        })
+    }
+}
+
+impl ValidatedSyncCandidate<'_> {
+    /// Persists and atomically activates the one already-fenced compatible candidate.
+    pub(crate) fn activate(self) -> Result<CurrentGeneration, StoreError> {
+        self.activate_with_fault(None)
+    }
+
+    fn activate_with_fault(
+        self,
+        fault: Option<ActivationFault>,
+    ) -> Result<CurrentGeneration, StoreError> {
+        self.candidate.staging.selected_current()?;
+        write_staged_manifest(self.candidate.root(), &self.manifest)?;
+        self.candidate.staging.selected_current()?;
+        activate_staged_generation(
+            &self.candidate.staging.location,
+            self.candidate.root(),
+            &self.candidate.staging.generation_name,
+            fault,
+        )?;
+        let activated = current_generation(&self.candidate.staging.location)?;
+        if activated.manifest != self.manifest {
+            return Err(refusal("invalid_store"));
+        }
+        wrapper_is_valid(&activated)?;
+        Ok(activated)
+    }
+
+    #[cfg(test)]
+    fn activate_for_test(
+        self,
+        fault: Option<ActivationFault>,
+    ) -> Result<CurrentGeneration, StoreError> {
+        self.activate_with_fault(fault)
+    }
+}
+
+/// Prepares a synchronization stage containing only the checksum-bound runtime before R0.
+pub(crate) fn prepare_sync_staging<'lock>(
+    location: &StoreLocation,
+    selected: &CurrentGeneration,
+    selected_snapshot: &FencedSnapshot,
+    pin: &PinManifest,
+    target: &str,
+    lock: &'lock GenerationActivationLock,
+) -> Result<SyncStaging<'lock>, StoreError> {
+    if !lock.binds_location(location)
+        || selected.root != location.generations_dir.join(&selected.name)
+        || current_generation(location)? != *selected
+    {
+        return Err(refusal("store_changed"));
+    }
+    wrapper_is_valid(selected)?;
+    let pin_target = pin
+        .targets
+        .iter()
+        .find(|candidate| candidate.target == target)
+        .ok_or_else(|| refusal("unsupported_beads_platform"))?;
+    let selected_binary = selected.root.join("bd");
+    if selected.manifest.host_target != target
+        || selected.manifest.beads_binary_sha256 != pin_target.binary_sha256
+    {
+        return Err(refusal("invalid_store"));
+    }
+    owner_private_executable_is_valid(&selected_binary)?;
+    if sha256(&selected_binary)? != pin_target.binary_sha256 {
+        return Err(refusal("beads_checksum_mismatch"));
+    }
+    environment_for_runtime(&selected.root.join("runtime"), false)?;
+    selected_snapshot_matches_manifest(selected, selected_snapshot)?;
+
+    let (root, generation_name) = create_generation_staging(location)?;
+    let staged_environment = environment_for_runtime(&root.join("runtime"), true)?;
+    let wrapper = root.join("plasmosome-work-state");
+    copy_regular_file(&selected.root.join("plasmosome-work-state"), &wrapper)?;
+    owner_private_executable(&wrapper)?;
+    File::open(&wrapper)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| refusal("invalid_store"))?;
+    let binary = root.join("bd");
+    copy_regular_file(&selected_binary, &binary)?;
+    owner_private_executable(&binary)?;
+    File::open(&binary)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| refusal("invalid_store"))?;
+    if sha256(&wrapper)? != selected.manifest.wrapper_sha256
+        || sha256(&binary)? != pin_target.binary_sha256
+    {
+        return Err(refusal("invalid_store"));
+    }
+    Ok(SyncStaging {
+        location: location.clone(),
+        selected: selected.clone(),
+        selected_snapshot: selected_snapshot.clone(),
+        pin: pin.clone(),
+        target: target.to_owned(),
+        generation_name,
+        root,
+        environment: staged_environment,
+        wrapper_sha256: selected.manifest.wrapper_sha256.clone(),
+        beads_binary_sha256: pin_target.binary_sha256.clone(),
+        lock,
+    })
+}
+
+fn selected_snapshot_matches_manifest(
+    selected: &CurrentGeneration,
+    selected_snapshot: &FencedSnapshot,
+) -> Result<(), StoreError> {
+    let expected_freshness = classify(ObservationState {
+        last_successful_sync_at: selected.manifest.last_successful_sync_at.clone(),
+        local_generation: selected.manifest.local_generation.clone(),
+        remote_generation: selected.manifest.remote_generation.clone(),
+        remote_observed_at: selected.manifest.remote_observed_at.clone(),
+        observed_local_generation: selected.manifest.observed_local_generation.clone(),
+        remote_relation: selected.manifest.remote_relation.clone(),
+        pending_mutations: PendingMutations {
+            operation_ids: selected.manifest.pending_operation_ids.clone(),
+        },
+    })
+    .map_err(|_| refusal("invalid_store"))?;
+    if selected_snapshot.freshness != expected_freshness {
+        return Err(refusal("store_changed"));
+    }
+    let mut documents = selected_snapshot.documents.clone();
+    documents.sort_by(|left, right| {
+        left.document
+            .record
+            .document_key
+            .cmp(&right.document.record.document_key)
+    });
+    let logical_documents = documents
+        .iter()
+        .map(|document| document.document.clone())
+        .collect::<Vec<_>>();
+    let logical =
+        canonical_logical_export(&logical_documents).map_err(|_| refusal("store_changed"))?;
+    let operational =
+        canonical_operational_projection(&documents).map_err(|_| refusal("store_changed"))?;
+    if logical_export_digest(&logical) != selected.manifest.logical_export_sha256
+        || operational_projection_digest(&operational)
+            != selected.manifest.operational_projection_sha256
+    {
+        return Err(refusal("store_changed"));
+    }
+    Ok(())
 }
 
 fn directory_without_symlink(path: &Path) -> Result<(), StoreError> {
@@ -580,6 +969,7 @@ fn environment_for_runtime(
     root: &Path,
     create: bool,
 ) -> Result<BTreeMap<String, String>, StoreError> {
+    let owner = root.parent().ok_or_else(|| refusal("invalid_store"))?;
     if create {
         match fs::symlink_metadata(root) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -620,6 +1010,10 @@ fn environment_for_runtime(
         environment.insert(key.to_owned(), path.display().to_string());
     }
     environment.insert("GIT_CONFIG_GLOBAL".into(), git_config.display().to_string());
+    environment.insert(
+        "BEADS_DIR".into(),
+        owner.join("repository/.beads").display().to_string(),
+    );
     for (key, value) in [
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_TERMINAL_PROMPT", "0"),
@@ -628,6 +1022,7 @@ fn environment_for_runtime(
         ("BD_DISABLE_METRICS", "1"),
         ("BD_DISABLE_EVENT_FLUSH", "1"),
         ("BD_NON_INTERACTIVE", "1"),
+        ("BD_BACKUP_ENABLED", "false"),
         ("CI", "true"),
     ] {
         environment.insert(key.into(), value.into());
@@ -635,6 +1030,27 @@ fn environment_for_runtime(
     let path = std::env::var_os("PATH").ok_or_else(|| refusal("invalid_store"))?;
     environment.insert("PATH".into(), path.to_string_lossy().into_owned());
     Ok(environment)
+}
+
+fn runtime_owner_from_environment(
+    environment: &BTreeMap<String, String>,
+) -> Result<PathBuf, StoreError> {
+    let beads_dir = PathBuf::from(
+        environment
+            .get("BEADS_DIR")
+            .ok_or_else(|| refusal("invalid_store"))?,
+    );
+    let repository = beads_dir.parent().ok_or_else(|| refusal("invalid_store"))?;
+    let owner = repository
+        .parent()
+        .ok_or_else(|| refusal("invalid_store"))?;
+    if !owner.is_absolute()
+        || beads_dir != owner.join("repository/.beads")
+        || environment.get("BD_BACKUP_ENABLED") != Some(&"false".to_owned())
+    {
+        return Err(refusal("invalid_store"));
+    }
+    Ok(owner.to_path_buf())
 }
 
 fn copy_regular_file(source: &Path, destination: &Path) -> Result<(), StoreError> {
@@ -887,12 +1303,19 @@ impl<'a, R> ReadVersionRunner<'a, R> {
     }
 
     fn valid(&self, command: &CommandSpec) -> bool {
+        let (Ok(installed_root), Ok(copied_root)) = (
+            runtime_owner_from_environment(&self.installed_environment),
+            runtime_owner_from_environment(&self.copied_environment),
+        ) else {
+            return false;
+        };
         command.argv == ["--version"]
-            && command.cwd.is_none()
             && command.redacted_argv_positions.is_empty()
             && ((command.program == self.installed_binary
+                && command.cwd.as_deref() == Some(installed_root.as_path())
                 && command.environment == self.installed_environment)
                 || (command.program == self.copied_binary
+                    && command.cwd.as_deref() == Some(copied_root.as_path())
                     && command.environment == self.copied_environment))
     }
 }
@@ -920,14 +1343,18 @@ pub fn validate_read_command(
     }
     let expected_environment = environment_for_runtime(&temporary_root.join("runtime"), false)
         .map_err(|_| refusal("invalid_read_command"))?;
-    if command.environment != expected_environment {
+    if command.environment != expected_environment
+        || runtime_owner_from_environment(&expected_environment)
+            .map_err(|_| refusal("invalid_read_command"))?
+            != temporary_root
+    {
         return Err(refusal("invalid_read_command"));
     }
     if command.program != copied_binary {
         return Err(refusal("invalid_read_command"));
     }
     if command.argv == ["--version"] {
-        return if command.cwd.is_none() {
+        return if command.cwd.as_deref() == Some(temporary_root) {
             Ok(())
         } else {
             Err(refusal("invalid_read_command"))
@@ -1480,9 +1907,13 @@ impl BootstrapCommandRunner {
     }
 
     fn valid_initial_version(&self, command: &CommandSpec) -> bool {
+        let Ok(verification_root) = runtime_owner_from_environment(&self.verification_environment)
+        else {
+            return false;
+        };
         command.program == self.initial_binary
             && command.argv == ["--version"]
-            && command.cwd.is_none()
+            && command.cwd.as_deref() == Some(verification_root.as_path())
             && command.environment == self.verification_environment
     }
 
@@ -1493,7 +1924,10 @@ impl BootstrapCommandRunner {
             if command.environment != *environment {
                 return false;
             }
-            if command.program == binary && command.argv == ["--version"] && command.cwd.is_none() {
+            if command.program == binary
+                && command.argv == ["--version"]
+                && command.cwd.as_deref() == Some(root.as_path())
+            {
                 return true;
             }
             let valid_repository_command = if command.program == Path::new("git") {
@@ -1538,7 +1972,7 @@ impl BootstrapCommandRunner {
         self.installed_roots.iter().any(|(root, environment)| {
             command.program == root.join("bd")
                 && command.argv == ["--version"]
-                && command.cwd.is_none()
+                && command.cwd.as_deref() == Some(root.as_path())
                 && command.environment == *environment
         })
     }
@@ -1663,6 +2097,198 @@ fn run_read_command<R: CommandRunner>(
     Ok(output.stdout)
 }
 
+struct RawFencedSnapshot {
+    before_status: String,
+    export: String,
+    key_values: String,
+    after_status: String,
+}
+
+fn readonly_status_command(
+    repository: &Path,
+    binary: &Path,
+    environment: &BTreeMap<String, String>,
+) -> CommandSpec {
+    CommandSpec {
+        program: binary.to_path_buf(),
+        argv: vec![
+            "--readonly".into(),
+            "--sandbox".into(),
+            "--json".into(),
+            "vc".into(),
+            "status".into(),
+        ],
+        cwd: Some(repository.to_path_buf()),
+        environment: environment.clone(),
+        redacted_argv_positions: Vec::new(),
+    }
+}
+
+/// Executes the one readonly `status/export/KV/status` fence in an already-private repository.
+fn read_fenced_snapshot_in_place<R: CommandRunner>(
+    runner: &mut R,
+    repository: &Path,
+    binary: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<RawFencedSnapshot, StoreError> {
+    let before_status = run_read_command(
+        runner,
+        readonly_status_command(repository, binary, environment),
+        repository,
+        binary,
+    )?;
+    let export = run_read_command(
+        runner,
+        CommandSpec {
+            program: binary.to_path_buf(),
+            argv: vec!["--readonly".into(), "--sandbox".into(), "export".into()],
+            cwd: Some(repository.to_path_buf()),
+            environment: environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        },
+        repository,
+        binary,
+    )?;
+    let key_values = run_read_command(
+        runner,
+        CommandSpec {
+            program: binary.to_path_buf(),
+            argv: vec![
+                "--readonly".into(),
+                "--sandbox".into(),
+                "--json".into(),
+                "kv".into(),
+                "list".into(),
+            ],
+            cwd: Some(repository.to_path_buf()),
+            environment: environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        },
+        repository,
+        binary,
+    )?;
+    let after_status = run_read_command(
+        runner,
+        readonly_status_command(repository, binary, environment),
+        repository,
+        binary,
+    )?;
+    Ok(RawFencedSnapshot {
+        before_status,
+        export,
+        key_values,
+        after_status,
+    })
+}
+
+fn sync_manifest_for_raw_fence(
+    staging: &SyncStaging<'_>,
+    raw: &RawFencedSnapshot,
+    remote_generation: &str,
+    synchronized_at: &str,
+) -> Result<StateManifest, StoreError> {
+    let local_generation = version_control_commit(&raw.before_status)
+        .map_err(|_| refusal("remote_shadow_mismatch"))?;
+    if version_control_commit(&raw.after_status).map_err(|_| refusal("remote_shadow_mismatch"))?
+        != local_generation
+    {
+        return Err(refusal("remote_shadow_mismatch"));
+    }
+    let key_values =
+        key_value_list(&raw.key_values).map_err(|_| refusal("remote_shadow_mismatch"))?;
+    if key_values.authority_mode != "markdown-shadow"
+        || key_values.source_commit != staging.selected.manifest.source_commit
+    {
+        return Err(refusal("remote_shadow_mismatch"));
+    }
+    let mut documents = decode_operational_beads_jsonl(&raw.export)
+        .map_err(|_| refusal("remote_shadow_mismatch"))?;
+    documents.sort_by(|left, right| {
+        left.document
+            .record
+            .document_key
+            .cmp(&right.document.record.document_key)
+    });
+    let logical_documents = documents
+        .iter()
+        .map(|document| document.document.clone())
+        .collect::<Vec<_>>();
+    let logical = canonical_logical_export(&logical_documents)
+        .map_err(|_| refusal("remote_shadow_mismatch"))?;
+    let operational = canonical_operational_projection(&documents)
+        .map_err(|_| refusal("remote_shadow_mismatch"))?;
+    if logical_export_digest(&logical) != staging.selected.manifest.logical_export_sha256
+        || operational_projection_digest(&operational)
+            != staging.selected.manifest.operational_projection_sha256
+        || documents != staging.selected_snapshot.documents
+    {
+        return Err(refusal("remote_shadow_mismatch"));
+    }
+    let manifest = StateManifest {
+        schema_version: 1,
+        authority_mode: "markdown-shadow".into(),
+        source_commit: staging.selected.manifest.source_commit.clone(),
+        logical_export_sha256: staging.selected.manifest.logical_export_sha256.clone(),
+        operational_projection_sha256: staging
+            .selected
+            .manifest
+            .operational_projection_sha256
+            .clone(),
+        local_generation: local_generation.clone(),
+        host_target: staging.target.clone(),
+        wrapper_sha256: staging.wrapper_sha256.clone(),
+        beads_binary_sha256: staging.beads_binary_sha256.clone(),
+        remote_relation: RemoteRelation::Equivalent,
+        remote_generation: Some(remote_generation.to_owned()),
+        remote_observed_at: Some(synchronized_at.to_owned()),
+        observed_local_generation: Some(local_generation),
+        last_successful_sync_at: Some(synchronized_at.to_owned()),
+        pending_operation_ids: Vec::new(),
+    };
+    strict_manifest(
+        &serde_json::to_string(&manifest).map_err(|_| refusal("remote_shadow_mismatch"))?,
+    )
+    .map_err(|_| refusal("remote_shadow_mismatch"))
+}
+
+fn failed_sync_manifest(
+    selected: &StateManifest,
+    observation: FailedSyncObservation,
+) -> Result<StateManifest, StoreError> {
+    let prior = ObservationState {
+        last_successful_sync_at: selected.last_successful_sync_at.clone(),
+        local_generation: selected.local_generation.clone(),
+        remote_generation: selected.remote_generation.clone(),
+        remote_observed_at: selected.remote_observed_at.clone(),
+        observed_local_generation: selected.observed_local_generation.clone(),
+        remote_relation: selected.remote_relation.clone(),
+        pending_mutations: PendingMutations {
+            operation_ids: selected.pending_operation_ids.clone(),
+        },
+    };
+    let observed = match observation {
+        FailedSyncObservation::BeforeR0 => ObservationState {
+            remote_relation: RemoteRelation::Unknown,
+            ..prior
+        },
+        FailedSyncObservation::AfterR0 {
+            remote_generation,
+            observed_at,
+        } => record_failed_sync_observation(&prior, &remote_generation, &observed_at)
+            .map_err(|_| refusal("invalid_store"))?,
+    };
+    let manifest = StateManifest {
+        remote_relation: observed.remote_relation,
+        remote_generation: observed.remote_generation,
+        remote_observed_at: observed.remote_observed_at,
+        observed_local_generation: observed.observed_local_generation,
+        last_successful_sync_at: observed.last_successful_sync_at,
+        pending_operation_ids: observed.pending_mutations.operation_ids,
+        ..selected.clone()
+    };
+    strict_manifest(&serde_json::to_string(&manifest).map_err(|_| refusal("invalid_store"))?)
+}
+
 struct DisposableSnapshotRequest<'a> {
     pin: &'a PinManifest,
     target: &'a str,
@@ -1702,6 +2328,10 @@ fn read_disposable_snapshot_in_root<R: CommandRunner>(
     }
     let repository = request.temporary_root.join("repository");
     let copied_binary = request.temporary_root.join("bd");
+    let selected_runtime_owner = runtime_owner_from_environment(&request.selected_environment)?;
+    if runtime_owner_from_environment(&request.copied_environment)? != request.temporary_root {
+        return Err(refusal("invalid_store"));
+    }
     {
         let mut version_runner = ReadVersionRunner::new(
             runner,
@@ -1714,6 +2344,7 @@ fn read_disposable_snapshot_in_root<R: CommandRunner>(
             request.pin,
             request.target,
             request.selected_binary,
+            &selected_runtime_owner,
             request.selected_environment.clone(),
             &mut version_runner,
         )
@@ -1724,57 +2355,25 @@ fn read_disposable_snapshot_in_root<R: CommandRunner>(
             request.pin,
             request.target,
             &copied_binary,
+            request.temporary_root,
             request.copied_environment.clone(),
             &mut version_runner,
         )
         .map_err(pin_refusal)?;
     }
-    let status_command = || CommandSpec {
-        program: copied_binary.clone(),
-        argv: vec![
-            "--readonly".into(),
-            "--sandbox".into(),
-            "--json".into(),
-            "vc".into(),
-            "status".into(),
-        ],
-        cwd: Some(repository.clone()),
-        environment: request.copied_environment.clone(),
-        redacted_argv_positions: Vec::new(),
-    };
-    let before = run_read_command(runner, status_command(), &repository, &copied_binary)?;
-    let export = run_read_command(
+    let raw = read_fenced_snapshot_in_place(
         runner,
-        CommandSpec {
-            program: copied_binary.clone(),
-            argv: vec!["--readonly".into(), "--sandbox".into(), "export".into()],
-            cwd: Some(repository.clone()),
-            environment: request.copied_environment.clone(),
-            redacted_argv_positions: Vec::new(),
-        },
         &repository,
         &copied_binary,
+        &request.copied_environment,
     )?;
-    let key_values = run_read_command(
-        runner,
-        CommandSpec {
-            program: copied_binary.clone(),
-            argv: vec![
-                "--readonly".into(),
-                "--sandbox".into(),
-                "--json".into(),
-                "kv".into(),
-                "list".into(),
-            ],
-            cwd: Some(repository.clone()),
-            environment: request.copied_environment.clone(),
-            redacted_argv_positions: Vec::new(),
-        },
-        &repository,
-        &copied_binary,
-    )?;
-    let after = run_read_command(runner, status_command(), &repository, &copied_binary)?;
-    validate_fenced_snapshot(&generation.manifest, &before, &export, &key_values, &after)
+    validate_fenced_snapshot(
+        &generation.manifest,
+        &raw.before_status,
+        &raw.export,
+        &raw.key_values,
+        &raw.after_status,
+    )
 }
 
 fn finish_disposable_snapshot(
@@ -2123,6 +2722,7 @@ fn install_staged_runtime(
         pin,
         &request.host_target,
         &binary,
+        staging,
         environment.clone(),
         runner,
     )
@@ -2394,6 +2994,7 @@ fn installed_runtime_preflight(
         pin,
         target,
         &generation.root.join("bd"),
+        &generation.root,
         environment.clone(),
         runner,
     )
@@ -2496,7 +3097,8 @@ pub fn bootstrap(request: &BootstrapRequest) -> Result<BootstrapResult, StoreErr
     let verification_root = tempfile::tempdir().map_err(|_| refusal("invalid_store"))?;
     let mut lock = None;
     let preparation = (|| {
-        let verification_environment = environment_for_runtime(verification_root.path(), true)?;
+        let verification_environment =
+            environment_for_runtime(&verification_root.path().join("runtime"), true)?;
         let mut runner = BootstrapCommandRunner::new(source_root.clone(), request.binary.clone());
         runner.bind_source_inputs(request.source_ref.clone(), verification_environment.clone())?;
         VerifiedBeads::verify_with_environment(
@@ -2504,6 +3106,7 @@ pub fn bootstrap(request: &BootstrapRequest) -> Result<BootstrapResult, StoreErr
             &request.host_target,
             &request.archive,
             &request.binary,
+            verification_root.path(),
             verification_environment.clone(),
             &mut runner,
         )
@@ -2624,7 +3227,8 @@ mod tests {
     use crate::command::{CommandOutput, CommandRunner, CommandSpec, RecordingCommandRunner};
     use crate::document::parse_document;
     use crate::shadow::{
-        canonical_logical_export, canonical_operational_projection, initial_operational_metadata,
+        ActiveOwner, canonical_logical_export, canonical_operational_projection,
+        decode_operational_beads_jsonl, initial_operational_metadata, logical_export_digest,
         operational_projection_digest, to_operational_beads_jsonl,
     };
 
@@ -3073,7 +3677,25 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_version_checks_are_bound_before_dispatch() {
+    fn runtime_environment_binds_private_beads_dir_and_disables_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = root.path().join("private-owner");
+        fs::create_dir(&owner).unwrap();
+
+        let environment = environment_for_runtime(&owner.join("runtime"), true).unwrap();
+
+        assert_eq!(
+            environment.get("BEADS_DIR"),
+            Some(&owner.join("repository/.beads").display().to_string())
+        );
+        assert_eq!(
+            environment.get("BD_BACKUP_ENABLED"),
+            Some(&"false".to_owned())
+        );
+    }
+
+    #[test]
+    fn version_checks_use_explicit_private_cwd() {
         let root = tempfile::tempdir().unwrap();
         let installed_binary = root.path().join("generation/bd");
         let copied_binary = root.path().join("disposable/bd");
@@ -3086,14 +3708,14 @@ mod tests {
         let installed = CommandSpec {
             program: installed_binary.clone(),
             argv: vec!["--version".into()],
-            cwd: None,
+            cwd: Some(installed_binary.parent().unwrap().to_path_buf()),
             environment: installed_environment.clone(),
             redacted_argv_positions: Vec::new(),
         };
         let copied = CommandSpec {
             program: copied_binary.clone(),
             argv: vec!["--version".into()],
-            cwd: None,
+            cwd: Some(copied_binary.parent().unwrap().to_path_buf()),
             environment: copied_environment.clone(),
             redacted_argv_positions: Vec::new(),
         };
@@ -3125,6 +3747,18 @@ mod tests {
                 ..installed.clone()
             },
             CommandSpec {
+                cwd: None,
+                ..installed.clone()
+            },
+            CommandSpec {
+                cwd: Some(root.path().join("invoking-checkout")),
+                ..installed.clone()
+            },
+            CommandSpec {
+                cwd: Some(root.path().join("generation/repository")),
+                ..installed.clone()
+            },
+            CommandSpec {
                 cwd: Some(root.path().to_path_buf()),
                 ..installed.clone()
             },
@@ -3151,6 +3785,65 @@ mod tests {
                 "an invalid version plan must be refused before dispatch"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_runtime_environment_cannot_admit_a_none_cwd_version() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let installed_binary = root.path().join("generation/bd");
+        let copied_binary = root.path().join("disposable/bd");
+        fs::create_dir_all(installed_binary.parent().unwrap()).unwrap();
+        fs::create_dir_all(copied_binary.parent().unwrap()).unwrap();
+        fs::write(&installed_binary, "installed").unwrap();
+        fs::write(&copied_binary, "copied").unwrap();
+        let mut malformed =
+            environment_for_runtime(&root.path().join("generation/runtime"), true).unwrap();
+        malformed.remove("BEADS_DIR");
+        let copied_environment =
+            environment_for_runtime(&root.path().join("disposable/runtime"), true).unwrap();
+        let none_cwd = CommandSpec {
+            program: installed_binary.clone(),
+            argv: vec!["--version".into()],
+            cwd: None,
+            environment: malformed.clone(),
+            redacted_argv_positions: Vec::new(),
+        };
+        let mut read_inner = RecordingCommandRunner::default();
+        let mut read_runner = ReadVersionRunner::new(
+            &mut read_inner,
+            &installed_binary,
+            malformed.clone(),
+            &copied_binary,
+            copied_environment,
+        );
+        assert_eq!(
+            read_runner.run(none_cwd.clone()).unwrap_err(),
+            "invalid_read_command"
+        );
+        assert!(read_inner.commands().is_empty());
+
+        let source_root = root.path().join("source");
+        let marker = root.path().join("bootstrap-version-ran");
+        fs::create_dir(&source_root).unwrap();
+        let source_root = source_root.canonicalize().unwrap();
+        fs::write(
+            &installed_binary,
+            format!("#!/bin/sh\nprintf dispatched > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&installed_binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut bootstrap_runner = BootstrapCommandRunner::new(source_root, installed_binary);
+        bootstrap_runner
+            .bind_source_inputs("origin/main".into(), malformed)
+            .unwrap();
+        assert_eq!(
+            bootstrap_runner.run(none_cwd).unwrap_err(),
+            "invalid_bootstrap_command"
+        );
+        assert!(!marker.exists());
     }
 
     #[cfg(unix)]
@@ -3627,6 +4320,905 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn sync_staging_fixture() -> (
+        tempfile::TempDir,
+        StoreLocation,
+        CurrentGeneration,
+        PinManifest,
+        FencedSnapshot,
+        GenerationActivationLock,
+    ) {
+        let (_root, _runner, mut generation, pin, _requested_wrapper) =
+            installed_runtime_preflight_fixture();
+        let empty_documents = Vec::new();
+        let empty_operational_documents: Vec<OperationalDocument> = Vec::new();
+        generation.manifest.logical_export_sha256 =
+            logical_export_digest(&canonical_logical_export(&empty_documents).unwrap());
+        generation.manifest.operational_projection_sha256 = operational_projection_digest(
+            &canonical_operational_projection(&empty_operational_documents).unwrap(),
+        );
+        let generations_dir = generation
+            .root
+            .parent()
+            .expect("fixture generation has its generations parent")
+            .to_path_buf();
+        let state_root = generations_dir
+            .parent()
+            .expect("fixture generations has its state parent")
+            .to_path_buf();
+        let common_dir = state_root
+            .parent()
+            .expect("fixture state has its common parent")
+            .to_path_buf();
+        let location = StoreLocation {
+            worktree_root: common_dir.clone(),
+            common_dir,
+            state_root,
+            generations_dir,
+        };
+        fs::write(
+            location.state_root.join(CURRENT_POINTER),
+            format!("{}\n", generation.name),
+        )
+        .unwrap();
+        fs::write(
+            generation.root.join("state.json"),
+            serde_json::to_vec(&generation.manifest).unwrap(),
+        )
+        .unwrap();
+        let selected_snapshot = FencedSnapshot {
+            documents: Vec::new(),
+            freshness: classify(ObservationState {
+                last_successful_sync_at: None,
+                local_generation: generation.manifest.local_generation.clone(),
+                remote_generation: None,
+                remote_observed_at: None,
+                observed_local_generation: None,
+                remote_relation: RemoteRelation::Unknown,
+                pending_mutations: PendingMutations {
+                    operation_ids: Vec::new(),
+                },
+            })
+            .unwrap(),
+        };
+        let lock = GenerationActivationLock::acquire_for_sync(&location).unwrap();
+
+        (_root, location, generation, pin, selected_snapshot, lock)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_staging_contains_only_verified_runtime_before_r0() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+
+        let staging = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .expect("the selected generation has a verified runtime to stage before R0");
+
+        let entries = fs::read_dir(staging.root())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            entries,
+            BTreeSet::from([
+                "bd".into(),
+                "plasmosome-work-state".into(),
+                "runtime".into()
+            ])
+        );
+        assert!(!staging.repository().exists());
+        assert!(!staging.root().join(".beads").exists());
+        assert!(!staging.root().join("state.json").exists());
+        assert_eq!(
+            fs::metadata(staging.binary()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(staging.root().join("plasmosome-work-state"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            staging.environment(),
+            &environment_for_runtime(&staging.root().join("runtime"), false).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_staging_rejects_a_snapshot_not_equal_to_the_selected_manifest() {
+        let (_root, location, generation, pin, mut selected_snapshot, lock) =
+            sync_staging_fixture();
+        let documents = vec![
+            parse_document(
+                "docs/intents/001-intent.md",
+                "---\nid: 001\ntitle: unexpected\nstatus: approved\n---\n",
+                &generation.manifest.source_commit,
+            )
+            .unwrap(),
+        ];
+        let operational = initial_operational_metadata(&documents).unwrap();
+        selected_snapshot.documents = decode_operational_beads_jsonl(
+            &to_operational_beads_jsonl(&documents, &operational).unwrap(),
+        )
+        .unwrap();
+
+        let error = match prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        ) {
+            Ok(_) => panic!("an unchecked selected snapshot cannot stage a remote candidate"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "store_changed");
+        assert!(
+            fs::read_dir(&location.generations_dir)
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".staging-")),
+            "the mismatched snapshot must refuse before creating staging"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_sync_repository_is_empty_and_created_exactly_once() {
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        let staging = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap();
+        assert!(!staging.repository().exists());
+
+        let candidate = staging
+            .create_fresh_repository()
+            .expect("a valid R0 transition creates one empty staged repository");
+        assert!(candidate.repository().is_dir());
+        assert!(
+            fs::read_dir(candidate.repository())
+                .unwrap()
+                .next()
+                .is_none(),
+            "the fresh candidate must not copy the selected Dolt history"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_candidate_finalizes_only_after_exact_readonly_fence_and_shadow_parity() {
+        fn status(commit: &str) -> String {
+            serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": commit,
+            })
+            .to_string()
+        }
+
+        let remote_generation = "e".repeat(40);
+        let synchronized_at = "2026-09-02T00:00:00Z";
+        let (root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        let candidate = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap()
+        .create_fresh_repository()
+        .unwrap();
+        let candidate_root = candidate.root().to_path_buf();
+        let current_before = fs::read(location.state_root.join(CURRENT_POINTER)).unwrap();
+        let matching_keys = serde_json::json!({
+            "schema_version": 1,
+            "plasmosome.authority-mode": "markdown-shadow",
+            "plasmosome.source-commit": generation.manifest.source_commit,
+        })
+        .to_string();
+        let candidate_generation = "f".repeat(40);
+        let mut runner = RecordingCommandRunner::scripted(vec![
+            Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+            Ok(CommandOutput::success(status(&candidate_generation))),
+            Ok(CommandOutput::success("")),
+            Ok(CommandOutput::success(matching_keys)),
+            Ok(CommandOutput::success(status(&candidate_generation))),
+        ]);
+        let finalized =
+            candidate.validate_and_finalize(&mut runner, &remote_generation, synchronized_at);
+        assert!(
+            finalized.is_ok(),
+            "matching fenced candidate should finalize"
+        );
+        assert!(runner.finish().is_ok());
+        assert_eq!(
+            fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+            current_before,
+            "finalization cannot replace current before the opaque candidate activates"
+        );
+        assert!(
+            !candidate_root.join("state.json").exists(),
+            "only the validated activation capability may write the staged manifest"
+        );
+        drop(root);
+
+        for (remote, observed_at) in [
+            ("E".repeat(40), synchronized_at.to_owned()),
+            (remote_generation.clone(), "not-a-time".to_owned()),
+        ] {
+            let (_root, location, generation, pin, selected_snapshot, lock) =
+                sync_staging_fixture();
+            let candidate = prepare_sync_staging(
+                &location,
+                &generation,
+                &selected_snapshot,
+                &pin,
+                "aarch64-apple-darwin",
+                &lock,
+            )
+            .unwrap()
+            .create_fresh_repository()
+            .unwrap();
+            let candidate_root = candidate.root().to_path_buf();
+            let current_before = fs::read(location.state_root.join(CURRENT_POINTER)).unwrap();
+            let mut runner = RecordingCommandRunner::default();
+            let error = match candidate.validate_and_finalize(&mut runner, &remote, &observed_at) {
+                Ok(_) => panic!("malformed remote facts cannot finalize a candidate"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code(), "remote_shadow_mismatch");
+            assert!(runner.commands().is_empty());
+            assert_eq!(
+                fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+                current_before
+            );
+            assert!(!candidate_root.join("state.json").exists());
+        }
+
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        let candidate = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap()
+        .create_fresh_repository()
+        .unwrap();
+        let candidate_root = candidate.root().to_path_buf();
+        let current_before = fs::read(location.state_root.join(CURRENT_POINTER)).unwrap();
+        let keys = serde_json::json!({
+            "schema_version": 1,
+            "plasmosome.authority-mode": "markdown-shadow",
+            "plasmosome.source-commit": generation.manifest.source_commit,
+        })
+        .to_string();
+        let mut runner = RecordingCommandRunner::scripted(vec![
+            Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+            Ok(CommandOutput::success(status("1".repeat(40).as_str()))),
+            Ok(CommandOutput::success("")),
+            Ok(CommandOutput::success(keys)),
+            Ok(CommandOutput::success(status("2".repeat(40).as_str()))),
+        ]);
+        let error =
+            match candidate.validate_and_finalize(&mut runner, &remote_generation, synchronized_at)
+            {
+                Ok(_) => panic!("a moving staged Dolt status cannot finalize"),
+                Err(error) => error,
+            };
+        assert_eq!(error.code(), "remote_shadow_mismatch");
+        assert!(runner.finish().is_ok());
+        assert_eq!(
+            fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+            current_before
+        );
+        assert!(!candidate_root.join("state.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_sync_requires_complete_shadow_parity() {
+        fn row_for<'a>(rows: &'a mut [serde_json::Value], key: &str) -> &'a mut serde_json::Value {
+            rows.iter_mut()
+                .find(|row| {
+                    row["metadata"]["plasmosome_document"]["document_key"].as_str() == Some(key)
+                })
+                .unwrap_or_else(|| panic!("missing fixture row {key}"))
+        }
+
+        fn populated_fixture() -> (
+            tempfile::TempDir,
+            StoreLocation,
+            CurrentGeneration,
+            PinManifest,
+            FencedSnapshot,
+            GenerationActivationLock,
+            Vec<serde_json::Value>,
+            serde_json::Value,
+        ) {
+            let (root, location, mut generation, pin, mut snapshot, lock) = sync_staging_fixture();
+            let source = generation.manifest.source_commit.clone();
+            let documents = vec![
+                parse_document(
+                    "docs/intents/001-first.md",
+                    "---\nid: 001\ntitle: Intent One\nstatus: approved\n---\n",
+                    &source,
+                )
+                .unwrap(),
+                parse_document(
+                    "docs/intents/002-second.md",
+                    "---\nid: 002\ntitle: Intent Two\nstatus: approved\n---\n",
+                    &source,
+                )
+                .unwrap(),
+                parse_document(
+                    "docs/specs/001-first.md",
+                    "---\nid: 001\ntitle: Spec One\nstatus: accepted\nintents: [001]\n---\n",
+                    &source,
+                )
+                .unwrap(),
+                parse_document(
+                    "docs/specs/002-second.md",
+                    "---\nid: 002\ntitle: Spec Two\nstatus: accepted\nintents: [002]\n---\n",
+                    &source,
+                )
+                .unwrap(),
+                parse_document(
+                    "tasks/001-first.md",
+                    "---\nid: 001\ntitle: Task One\nstatus: planned\npriority: 1\nintents: [001]\nspecs: [001]\n---\n",
+                    &source,
+                )
+                .unwrap(),
+                parse_document(
+                    "tasks/002-second.md",
+                    "---\nid: 002\ntitle: Task Two\nstatus: planned\npriority: 2\nintents: [002]\nspecs: [002]\n---\n",
+                    &source,
+                )
+                .unwrap(),
+                parse_document(
+                    "tasks/003-third.md",
+                    "---\nid: 003\ntitle: Task Three\nstatus: in_review\npriority: 3\nintents: [001, 002]\nspecs: [001, 002]\npr: 84\nevidence: reviewed\n---\n",
+                    &source,
+                )
+                .unwrap(),
+            ];
+            let mut operational = initial_operational_metadata(&documents).unwrap();
+            let third = operational.get_mut("task:003").unwrap();
+            third.active_owner = Some(ActiveOwner {
+                actor: "owner".into(),
+                session_id: "session".into(),
+                ownership_token: "token".into(),
+                claim_operation_id: "claim".into(),
+                acquired_at: "2026-09-02T00:00:00Z".into(),
+                expires_at: "2026-09-02T01:00:00Z".into(),
+            });
+            third.task_dependencies = vec!["task:001".into(), "task:002".into()];
+            let export = to_operational_beads_jsonl(&documents, &operational).unwrap();
+            let operational_documents = decode_operational_beads_jsonl(&export).unwrap();
+            generation.manifest.logical_export_sha256 =
+                logical_export_digest(&canonical_logical_export(&documents).unwrap());
+            generation.manifest.operational_projection_sha256 = operational_projection_digest(
+                &canonical_operational_projection(&operational_documents).unwrap(),
+            );
+            fs::write(
+                generation.root.join("state.json"),
+                serde_json::to_vec(&generation.manifest).unwrap(),
+            )
+            .unwrap();
+            snapshot.documents = operational_documents;
+            let rows = export
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let key_values = serde_json::json!({
+                "schema_version": 1,
+                "plasmosome.authority-mode": "markdown-shadow",
+                "plasmosome.source-commit": source,
+            });
+            (
+                root, location, generation, pin, snapshot, lock, rows, key_values,
+            )
+        }
+
+        fn assert_parity_refusal<F>(case: &str, mutate: F)
+        where
+            F: FnOnce(&mut Vec<serde_json::Value>, &mut serde_json::Value),
+        {
+            let (_root, location, generation, pin, snapshot, lock, mut rows, mut key_values) =
+                populated_fixture();
+            mutate(&mut rows, &mut key_values);
+            let export = rows
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n");
+            let candidate = prepare_sync_staging(
+                &location,
+                &generation,
+                &snapshot,
+                &pin,
+                "aarch64-apple-darwin",
+                &lock,
+            )
+            .unwrap()
+            .create_fresh_repository()
+            .unwrap();
+            let candidate_root = candidate.root().to_path_buf();
+            let current_before = fs::read(location.state_root.join(CURRENT_POINTER)).unwrap();
+            let candidate_generation = "f".repeat(40);
+            let status = serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": candidate_generation,
+            })
+            .to_string();
+            let mut runner = RecordingCommandRunner::scripted(vec![
+                Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+                Ok(CommandOutput::success(status.clone())),
+                Ok(CommandOutput::success(export)),
+                Ok(CommandOutput::success(key_values.to_string())),
+                Ok(CommandOutput::success(status)),
+            ]);
+            let error = match candidate.validate_and_finalize(
+                &mut runner,
+                &"e".repeat(40),
+                "2026-09-02T02:00:00Z",
+            ) {
+                Ok(_) => panic!("{case} must not finalize a mismatched remote shadow"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code(), "remote_shadow_mismatch", "case {case}");
+            runner.finish().unwrap();
+            assert_eq!(
+                fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+                current_before,
+                "case {case} cannot replace current"
+            );
+            assert!(
+                !candidate_root.join("state.json").exists(),
+                "case {case} cannot write a candidate manifest"
+            );
+        }
+
+        assert_parity_refusal("authority key", |_, key_values| {
+            key_values["plasmosome.authority-mode"] = serde_json::json!("ledger");
+        });
+        assert_parity_refusal("source key", |_, key_values| {
+            key_values["plasmosome.source-commit"] = serde_json::json!("b".repeat(40));
+        });
+        assert_parity_refusal("logical document key", |rows, _| {
+            let row = row_for(rows, "task:003");
+            row["metadata"]["plasmosome_document"]["document_key"] = serde_json::json!("task:002");
+            row["external_ref"] = serde_json::json!("task:002");
+        });
+        assert_parity_refusal("logical document kind", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["kind"] =
+                serde_json::json!("spec");
+        });
+        assert_parity_refusal("logical document id", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["document_id"] =
+                serde_json::json!("999");
+        });
+        assert_parity_refusal("logical document path", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["document_path"] =
+                serde_json::json!("tasks/999-other.md");
+        });
+        assert_parity_refusal("logical document title", |rows, _| {
+            let row = row_for(rows, "task:003");
+            row["metadata"]["plasmosome_document"]["title"] = serde_json::json!("Changed");
+            row["title"] = serde_json::json!("Changed");
+        });
+        assert_parity_refusal("content establishing sha", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["content_commit_sha"] =
+                serde_json::json!("b".repeat(40));
+        });
+        assert_parity_refusal("state version", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["state_version"] =
+                serde_json::json!(2);
+        });
+        assert_parity_refusal("ordered upward links", |rows, _| {
+            let metadata = &mut row_for(rows, "task:003")["metadata"]["plasmosome_document"];
+            metadata["intent_ids"] = serde_json::json!(["002", "001"]);
+            metadata["spec_ids"] = serde_json::json!(["002", "001"]);
+        });
+        assert_parity_refusal("lifecycle", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["lifecycle"] =
+                serde_json::json!("planned");
+        });
+        assert_parity_refusal("priority", |rows, _| {
+            let row = row_for(rows, "task:003");
+            row["metadata"]["plasmosome_document"]["priority"] = serde_json::json!(1);
+            row["priority"] = serde_json::json!(1);
+        });
+        assert_parity_refusal("pr", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["pr"] =
+                serde_json::json!("85");
+        });
+        assert_parity_refusal("evidence", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["evidence"] =
+                serde_json::json!("changed evidence");
+        });
+        assert_parity_refusal("operational owner", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_operational"]["active_owner"]["actor"] =
+                serde_json::json!("other-owner");
+        });
+        assert_parity_refusal("operational dependency order", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_operational"]["task_dependencies"] =
+                serde_json::json!(["task:002", "task:001"]);
+        });
+        assert_parity_refusal("missing row", |rows, _| {
+            rows.retain(|row| {
+                row["metadata"]["plasmosome_document"]["document_key"].as_str() != Some("task:003")
+            });
+        });
+        assert_parity_refusal("extra row", |rows, _| {
+            let mut extra = rows[0].clone();
+            extra["id"] = serde_json::json!("plasmosome-intent999");
+            extra["title"] = serde_json::json!("Extra Intent");
+            extra["external_ref"] = serde_json::json!("intent:999");
+            let metadata = &mut extra["metadata"]["plasmosome_document"];
+            metadata["document_key"] = serde_json::json!("intent:999");
+            metadata["document_id"] = serde_json::json!("999");
+            metadata["document_path"] = serde_json::json!("docs/intents/999-extra.md");
+            metadata["title"] = serde_json::json!("Extra Intent");
+            rows.push(extra);
+        });
+        assert_parity_refusal("duplicate row", |rows, _| rows.push(rows[0].clone()));
+        for unknown in [
+            "plasmosome.receipt",
+            "plasmosome.lease",
+            "plasmosome.writer",
+        ] {
+            assert_parity_refusal(unknown, |_, key_values| {
+                key_values[unknown] = serde_json::json!("forbidden");
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_activation_survives_every_interruption_boundary() {
+        for (fault, label) in [
+            (
+                Some(ActivationFault::BeforeGenerationRename),
+                "before generation rename",
+            ),
+            (
+                Some(ActivationFault::BeforePointerWrite),
+                "before pointer write",
+            ),
+            (
+                Some(ActivationFault::BeforePointerRename),
+                "before pointer rename",
+            ),
+            (None, "success"),
+        ] {
+            let (_root, location, generation, pin, selected_snapshot, lock) =
+                sync_staging_fixture();
+            let candidate = prepare_sync_staging(
+                &location,
+                &generation,
+                &selected_snapshot,
+                &pin,
+                "aarch64-apple-darwin",
+                &lock,
+            )
+            .unwrap()
+            .create_fresh_repository()
+            .unwrap();
+            let candidate_generation = "f".repeat(40);
+            let status = serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": candidate_generation,
+            })
+            .to_string();
+            let keys = serde_json::json!({
+                "schema_version": 1,
+                "plasmosome.authority-mode": "markdown-shadow",
+                "plasmosome.source-commit": generation.manifest.source_commit,
+            })
+            .to_string();
+            let mut runner = RecordingCommandRunner::scripted(vec![
+                Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+                Ok(CommandOutput::success(status.clone())),
+                Ok(CommandOutput::success("")),
+                Ok(CommandOutput::success(keys)),
+                Ok(CommandOutput::success(status)),
+            ]);
+            let validated = candidate
+                .validate_and_finalize(&mut runner, &"e".repeat(40), "2026-09-02T00:00:00Z")
+                .unwrap();
+            runner.finish().unwrap();
+            let current_before = fs::read(location.state_root.join(CURRENT_POINTER)).unwrap();
+
+            match (fault, validated.activate_for_test(fault)) {
+                (Some(_), Err(error)) => {
+                    assert_eq!(error.code(), "bootstrap_interrupted", "{label}");
+                    assert_eq!(
+                        current_generation(&location).unwrap(),
+                        generation,
+                        "{label} keeps readers on the old complete generation"
+                    );
+                    assert_eq!(
+                        fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+                        current_before,
+                        "{label} cannot replace current"
+                    );
+                }
+                (None, Ok(activated)) => {
+                    assert_ne!(activated.name, generation.name);
+                    assert_eq!(
+                        fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+                        format!("{}\n", activated.name).into_bytes()
+                    );
+                    assert_eq!(
+                        current_generation(&location).unwrap(),
+                        activated,
+                        "success exposes only the complete validated generation"
+                    );
+                }
+                (Some(_), Ok(_)) => panic!("{label} must interrupt activation"),
+                (None, Err(error)) => panic!("success must activate: {}", error.code()),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_only_unknown_generation_copies_active_repository_only_for_a_changed_valid_observation()
+     {
+        fn status(commit: &str) -> String {
+            serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": commit,
+            })
+            .to_string()
+        }
+
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        fs::create_dir(generation.root.join("repository")).unwrap();
+        fs::write(
+            generation.root.join("repository/sentinel"),
+            "active repository",
+        )
+        .unwrap();
+        let staging = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap();
+        let staging_root = staging.root().to_path_buf();
+        let current_before = fs::read(location.state_root.join(CURRENT_POINTER)).unwrap();
+        let mut no_commands = RecordingCommandRunner::default();
+        assert!(
+            staging
+                .activate_unknown_if_changed(&mut no_commands, FailedSyncObservation::BeforeR0)
+                .unwrap()
+                .is_none(),
+            "an identical unknown observation must not replace current"
+        );
+        assert!(no_commands.commands().is_empty());
+        assert_eq!(
+            fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+            current_before
+        );
+        assert!(
+            !staging_root.join("repository").exists(),
+            "the identical observation must not copy the active repository"
+        );
+
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        fs::create_dir(generation.root.join("repository")).unwrap();
+        fs::write(
+            generation.root.join("repository/sentinel"),
+            "active repository",
+        )
+        .unwrap();
+        let original_manifest = generation.manifest.clone();
+        let staging = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap();
+        let matching_keys = serde_json::json!({
+            "schema_version": 1,
+            "plasmosome.authority-mode": "markdown-shadow",
+            "plasmosome.source-commit": generation.manifest.source_commit,
+        })
+        .to_string();
+        let mut runner = RecordingCommandRunner::scripted(vec![
+            Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+            Ok(CommandOutput::success(status(
+                &generation.manifest.local_generation,
+            ))),
+            Ok(CommandOutput::success("")),
+            Ok(CommandOutput::success(matching_keys)),
+            Ok(CommandOutput::success(status(
+                &generation.manifest.local_generation,
+            ))),
+        ]);
+        let activated = staging
+            .activate_unknown_if_changed(
+                &mut runner,
+                FailedSyncObservation::AfterR0 {
+                    remote_generation: "e".repeat(40),
+                    observed_at: "2026-09-02T00:00:00Z".into(),
+                },
+            )
+            .unwrap()
+            .expect("a changed complete observation activates metadata only");
+        assert!(runner.finish().is_ok());
+        assert_ne!(activated.name, generation.name);
+        assert_eq!(
+            fs::read(activated.root.join("repository/sentinel")).unwrap(),
+            b"active repository"
+        );
+        assert_eq!(
+            activated.manifest.source_commit,
+            original_manifest.source_commit
+        );
+        assert_eq!(
+            activated.manifest.logical_export_sha256,
+            original_manifest.logical_export_sha256
+        );
+        assert_eq!(
+            activated.manifest.operational_projection_sha256,
+            original_manifest.operational_projection_sha256
+        );
+        assert_eq!(
+            activated.manifest.local_generation,
+            original_manifest.local_generation
+        );
+        assert_eq!(activated.manifest.remote_relation, RemoteRelation::Unknown);
+        assert_eq!(
+            activated.manifest.remote_generation.as_deref(),
+            Some("e".repeat(40).as_str())
+        );
+        assert_eq!(
+            activated.manifest.remote_observed_at.as_deref(),
+            Some("2026-09-02T00:00:00Z")
+        );
+        assert_eq!(
+            activated.manifest.observed_local_generation.as_deref(),
+            Some(original_manifest.local_generation.as_str())
+        );
+
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        fs::create_dir(generation.root.join("repository")).unwrap();
+        let staging = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap();
+        let staging_root = staging.root().to_path_buf();
+        let mut no_commands = RecordingCommandRunner::default();
+        let error = match staging.activate_unknown_if_changed(
+            &mut no_commands,
+            FailedSyncObservation::AfterR0 {
+                remote_generation: "not-a-sha".into(),
+                observed_at: "not-a-time".into(),
+            },
+        ) {
+            Ok(_) => panic!("invalid remote facts cannot create a metadata generation"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "invalid_store");
+        assert!(no_commands.commands().is_empty());
+        assert!(!staging_root.join("repository").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_staging_requires_the_lock_for_the_same_unchanged_current() {
+        let (root, location, generation, pin, selected_snapshot, held_lock) =
+            sync_staging_fixture();
+        let other_common = root.path().join("other-common");
+        fs::create_dir_all(&other_common).unwrap();
+        let other_common = other_common.canonicalize().unwrap();
+        let other_location = StoreLocation {
+            worktree_root: other_common.clone(),
+            common_dir: other_common.clone(),
+            state_root: other_common.join(STORE_DIRECTORY),
+            generations_dir: other_common
+                .join(STORE_DIRECTORY)
+                .join(GENERATIONS_DIRECTORY),
+        };
+        let wrong_lock = GenerationActivationLock::acquire_for_sync(&other_location).unwrap();
+        let error = match prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &wrong_lock,
+        ) {
+            Ok(_) => panic!("a lock from another store cannot stage this current generation"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "store_changed");
+        assert!(
+            fs::read_dir(&location.generations_dir)
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".staging-")),
+            "a mismatched lock must refuse before staging"
+        );
+        drop(wrong_lock);
+        drop(held_lock);
+
+        let alternate = location.generations_dir.join("generation-alternate");
+        fs::create_dir(&alternate).unwrap();
+        fs::write(
+            alternate.join("state.json"),
+            serde_json::to_vec(&generation.manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            location.state_root.join(CURRENT_POINTER),
+            "generation-alternate\n",
+        )
+        .unwrap();
+        let lock = GenerationActivationLock::acquire_for_sync(&location).unwrap();
+        let error = match prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        ) {
+            Ok(_) => panic!("a changed current pointer cannot reuse the selected snapshot"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "store_changed");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn installed_runtime_damage_is_the_only_repair_disposition() {
         use std::os::unix::fs::PermissionsExt;
@@ -3651,6 +5243,7 @@ mod tests {
                 &pin,
                 "aarch64-apple-darwin",
                 &generation.root.join("bd"),
+                &generation.root,
                 environment,
                 &mut runner,
             )

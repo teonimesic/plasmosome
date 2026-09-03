@@ -16,19 +16,21 @@ use crate::document::{
 };
 use crate::freshness::{Freshness, RemoteRelation};
 use crate::pin::{PinManifest, VerifiedBeads};
+use crate::project::{ProjectConfig, compiled_project_config};
 use crate::read::{ReadCommand, project_read, render_human};
 use crate::shadow::{
     ActiveOwner, OperationalDocument, OperationalMetadata, ShadowError, ShadowStore,
     canonical_logical_export, canonical_operational_projection, compare_document_mapping,
     compare_shadow_parity, decode_logical_export, decode_operational_beads_jsonl,
-    import_shadow_documents, logical_export_digest, native_id, operational_projection_digest,
-    to_operational_beads_jsonl,
+    import_operational_shadow_documents, import_shadow_documents, logical_export_digest, native_id,
+    operational_projection_digest, to_operational_beads_jsonl,
 };
 use crate::store::{
-    BootstrapLock, BootstrapOutcome, BootstrapRequest, CurrentGeneration, StateManifest,
-    activate_staged_generation, bootstrap, current_generation, locate_store, locator_environment,
-    read_disposable_snapshot,
+    ActivationFault, BootstrapLock, BootstrapOutcome, BootstrapRequest, CurrentGeneration,
+    GenerationActivationLock, StateManifest, activate_staged_generation, bootstrap,
+    current_generation, locate_store, locator_environment, read_disposable_snapshot,
 };
+use crate::sync::{synchronize, synchronize_after_disposable_cleanup_failure_for_contract};
 
 const ISOLATED: &[(&str, &str)] = &[
     ("GIT_CONFIG_NOSYSTEM", "1"),
@@ -167,7 +169,10 @@ pub fn contract_refusal_exit_code(code: &str) -> i32 {
 
 /// Returns whether a case must execute the real mapping and shadow-parity round trip.
 pub fn requires_shadow_round_trip(case: &str) -> bool {
-    matches!(case, "document-mapping" | "shadow-parity" | "all")
+    matches!(
+        case,
+        "document-mapping" | "shadow-parity" | "online-sync" | "all"
+    )
 }
 
 /// Returns whether a contract case exercises the installed local read projection.
@@ -185,6 +190,15 @@ pub fn local_read_cases(case: &str) -> &'static [&'static str] {
         "freshness" => &["freshness"],
         "combined-freshness" => &["combined-freshness"],
         "all" => &["local-reads", "freshness", "combined-freshness"],
+        _ => &[],
+    }
+}
+
+/// Returns the explicit online synchronization contract selected by an individual or aggregate
+/// invocation. The aggregate uses this one enumeration so the case cannot be duplicated.
+pub fn online_sync_contract_cases(case: &str) -> &'static [&'static str] {
+    match case {
+        "online-sync" | "all" => &["online-sync"],
         _ => &[],
     }
 }
@@ -558,6 +572,7 @@ where
             | "local-reads"
             | "freshness"
             | "combined-freshness"
+            | "online-sync"
     ) {
         return Err("invalid_command".into());
     }
@@ -588,6 +603,7 @@ where
                             | "local-reads"
                             | "freshness"
                             | "combined-freshness"
+                            | "online-sync"
                     ) =>
             {
                 source_ref = Some(value.to_owned())
@@ -598,7 +614,9 @@ where
     }
     let source_ref = match case.as_str() {
         "document-mapping" | "shadow-parity" | "local-reads" | "freshness"
-        | "combined-freshness" => source_ref.ok_or_else(|| "invalid_command".to_owned())?,
+        | "combined-freshness" | "online-sync" => {
+            source_ref.ok_or_else(|| "invalid_command".to_owned())?
+        }
         "all" => source_ref.unwrap_or_else(|| "origin/main".into()),
         _ if source_ref.is_none() => String::new(),
         _ => return Err("invalid_command".into()),
@@ -1143,6 +1161,237 @@ fn regular_file_digest(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// A contract-only cache for repeated immutable-tree evidence within one parity inventory.
+///
+/// Unix lookups still validate the path and the opened descriptor before returning a cache hit;
+/// the cache only avoids re-reading unchanged file bytes during the seven representative cases.
+#[derive(Default)]
+struct CachedTreeDigestCache {
+    #[cfg(unix)]
+    entries: BTreeMap<CachedTreeDigestIdentity, String>,
+    #[cfg(test)]
+    digest_reads: usize,
+}
+
+impl CachedTreeDigestCache {
+    #[cfg(test)]
+    fn digest_reads(&self) -> usize {
+        self.digest_reads
+    }
+
+    #[cfg(test)]
+    fn record_digest_read(&mut self) {
+        self.digest_reads += 1;
+    }
+
+    #[cfg(not(test))]
+    fn record_digest_read(&mut self) {}
+
+    fn regular_file_digest(&mut self, path: &Path) -> Result<String, String> {
+        #[cfg(unix)]
+        {
+            let before = CachedTreeDigestIdentity::from_lstat(path)?;
+            let mut file = File::open(path).map_err(|_| "cutover_blocked".to_owned())?;
+            let opened = CachedTreeDigestIdentity::from_open_file(path, &file)?;
+            let after_open = CachedTreeDigestIdentity::from_lstat(path)?;
+            if before != opened || opened != after_open {
+                return Err("cutover_blocked".into());
+            }
+            if let Some(digest) = self.entries.get(&after_open) {
+                return Ok(digest.clone());
+            }
+            self.record_digest_read();
+            let mut hasher = Sha256::new();
+            std::io::copy(&mut file, &mut hasher).map_err(|_| "cutover_blocked".to_owned())?;
+            let after_hash_open = CachedTreeDigestIdentity::from_open_file(path, &file)?;
+            let after_hash_lstat = CachedTreeDigestIdentity::from_lstat(path)?;
+            if after_hash_open != after_open || after_hash_lstat != after_open {
+                return Err("cutover_blocked".into());
+            }
+            let digest = format!("{:x}", hasher.finalize());
+            self.entries.insert(after_open, digest.clone());
+            Ok(digest)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self;
+            regular_file_digest(path)
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CachedTreeDigestIdentity {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    length: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    links: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+#[cfg(unix)]
+impl CachedTreeDigestIdentity {
+    fn from_lstat(path: &Path) -> Result<Self, String> {
+        let metadata = fs::symlink_metadata(path).map_err(|_| "cutover_blocked".to_owned())?;
+        Self::from_metadata(path, &metadata)
+    }
+
+    fn from_open_file(path: &Path, file: &File) -> Result<Self, String> {
+        let metadata = file.metadata().map_err(|_| "cutover_blocked".to_owned())?;
+        Self::from_metadata(path, &metadata)
+    }
+
+    fn from_metadata(path: &Path, metadata: &fs::Metadata) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt;
+
+        if !path.is_absolute()
+            || !metadata.file_type().is_file()
+            || metadata.file_type().is_symlink()
+        {
+            return Err("cutover_blocked".into());
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            length: metadata.size(),
+            mode: metadata.mode(),
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            links: metadata.nlink(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanoseconds: metadata.ctime_nsec(),
+        })
+    }
+}
+
+fn snapshot_regular_tree_with_cached_digests(
+    root: &Path,
+    cache: &mut CachedTreeDigestCache,
+) -> Result<TreeSnapshot, String> {
+    #[cfg(not(unix))]
+    {
+        let _ = cache;
+        return snapshot_regular_tree(root);
+    }
+    #[cfg(unix)]
+    {
+        let metadata = fs::symlink_metadata(root).map_err(|_| "cutover_blocked".to_owned())?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err("cutover_blocked".into());
+        }
+        let mut entries = BTreeMap::new();
+        snapshot_regular_tree_with_cached_digests_at(root, Path::new(""), &mut entries, cache)?;
+        Ok(entries)
+    }
+}
+
+#[cfg(unix)]
+fn snapshot_regular_tree_with_cached_digests_at(
+    root: &Path,
+    relative: &Path,
+    entries: &mut TreeSnapshot,
+    cache: &mut CachedTreeDigestCache,
+) -> Result<(), String> {
+    let directory = if relative.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(relative)
+    };
+    let mut children = fs::read_dir(&directory)
+        .map_err(|_| "cutover_blocked".to_owned())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    children.sort_by_key(|entry| entry.file_name());
+    for child in children {
+        let path = child.path();
+        let child_relative = relative.join(child.file_name());
+        let metadata = fs::symlink_metadata(&path).map_err(|_| "cutover_blocked".to_owned())?;
+        if metadata.file_type().is_symlink() {
+            return Err("cutover_blocked".into());
+        }
+        let entry = TreeEntry {
+            directory: metadata.file_type().is_dir(),
+            mode: tree_mode(&metadata),
+            modified: metadata
+                .modified()
+                .map_err(|_| "cutover_blocked".to_owned())?,
+            digest: metadata
+                .file_type()
+                .is_file()
+                .then(|| cache.regular_file_digest(&path))
+                .transpose()?,
+        };
+        if !entry.directory && entry.digest.is_none() {
+            return Err("cutover_blocked".into());
+        }
+        entries.insert(child_relative.clone(), entry);
+        if metadata.file_type().is_dir() {
+            snapshot_regular_tree_with_cached_digests_at(root, &child_relative, entries, cache)?;
+        }
+    }
+    Ok(())
+}
+
+/// A contract-only owner for one canonical shared-state tree's snapshot cache.
+///
+/// It deliberately exposes no tree path to callers: each contract inventory helper can only
+/// snapshot the single state root that was bound at construction.
+struct StateTreeSnapshots {
+    state_root: PathBuf,
+    cache: CachedTreeDigestCache,
+}
+
+impl StateTreeSnapshots {
+    fn new(state_root: &Path) -> Result<Self, String> {
+        let metadata =
+            fs::symlink_metadata(state_root).map_err(|_| "cutover_blocked".to_owned())?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err("cutover_blocked".into());
+        }
+        let state_root = fs::canonicalize(state_root).map_err(|_| "cutover_blocked".to_owned())?;
+        if !state_root.is_absolute() {
+            return Err("cutover_blocked".into());
+        }
+        Ok(Self {
+            state_root,
+            cache: CachedTreeDigestCache::default(),
+        })
+    }
+
+    fn require_state_root(&self, state_root: &Path) -> Result<(), String> {
+        let metadata =
+            fs::symlink_metadata(state_root).map_err(|_| "cutover_blocked".to_owned())?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err("cutover_blocked".into());
+        }
+        let canonical = fs::canonicalize(state_root).map_err(|_| "cutover_blocked".to_owned())?;
+        if canonical != self.state_root {
+            return Err("cutover_blocked".into());
+        }
+        Ok(())
+    }
+
+    fn snapshot(&mut self) -> Result<TreeSnapshot, String> {
+        snapshot_regular_tree_with_cached_digests(&self.state_root, &mut self.cache)
+    }
+
+    #[cfg(test)]
+    fn digest_reads(&self) -> usize {
+        self.cache.digest_reads()
+    }
+}
+
 fn snapshot_regular_tree(root: &Path) -> Result<TreeSnapshot, String> {
     snapshot_tree(root, false)
 }
@@ -1639,6 +1888,28 @@ fn bootstrap_fixture(
     ),
     String,
 > {
+    let (fixture, location, generation, bootstrap_request, _) =
+        bootstrap_fixture_with_state_snapshots(runner, root, label, request, source, pin)?;
+    Ok((fixture, location, generation, bootstrap_request))
+}
+
+fn bootstrap_fixture_with_state_snapshots(
+    runner: &mut SystemCommandRunner,
+    root: &Path,
+    label: &str,
+    request: &ContractRequest,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+) -> Result<
+    (
+        MirrorFixture,
+        crate::store::StoreLocation,
+        CurrentGeneration,
+        BootstrapRequest,
+        StateTreeSnapshots,
+    ),
+    String,
+> {
     let fixture = create_mirror_fixture(runner, root, label, &source.source_commit)?;
     let environment = locator_environment().map_err(|error| error.code().to_owned())?;
     let first_location = locate_store(runner, &fixture.first_worktree, environment.clone())
@@ -1670,12 +1941,14 @@ fn bootstrap_fixture(
     if first.outcome != BootstrapOutcome::Installed || first.source_commit != source.source_commit {
         return Err("cutover_blocked".into());
     }
-    let before_second = snapshot_regular_tree(&first_location.state_root)?;
+    let mut state_snapshots = StateTreeSnapshots::new(&first_location.state_root)?;
+    state_snapshots.require_state_root(&second_location.state_root)?;
+    let before_second = state_snapshots.snapshot()?;
     let second = bootstrap(&bootstrap_request).map_err(|error| error.code().to_owned())?;
     if second.outcome != BootstrapOutcome::Unchanged
         || second.source_commit != first.source_commit
         || second.local_generation != first.local_generation
-        || snapshot_regular_tree(&first_location.state_root)? != before_second
+        || state_snapshots.snapshot()? != before_second
     {
         return Err("cutover_blocked".into());
     }
@@ -1692,7 +1965,13 @@ fn bootstrap_fixture(
     let snapshot = read_disposable_snapshot(runner, &generation, pin, host_target())
         .map_err(|error| error.code().to_owned())?;
     assert_exact_source_projection(source, &snapshot)?;
-    Ok((fixture, first_location, generation, bootstrap_request))
+    Ok((
+        fixture,
+        first_location,
+        generation,
+        bootstrap_request,
+        state_snapshots,
+    ))
 }
 
 fn assert_runtime_reinstall(
@@ -1985,7 +2264,92 @@ fn exercise_all_local_reads(
 
 const CONTRACT_OBSERVED_AT: &str = "2026-09-02T12:34:56Z";
 const CONTRACT_REMOTE_GENERATION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const CONTRACT_MOVED_REMOTE_GENERATION: &str = "cccccccccccccccccccccccccccccccccccccccc";
 const CONTRACT_PENDING_OPERATION: &str = "operation-contract-046";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContractParityMismatch {
+    Authority,
+    Source,
+    Logical,
+    Operational,
+    Missing,
+    Extra,
+    UnknownKeyValue,
+}
+
+type ContractParityProjection = (
+    Vec<ShadowDocument>,
+    BTreeMap<String, OperationalMetadata>,
+    Option<(&'static str, String)>,
+);
+
+fn parity_candidate_projection(
+    mismatch: ContractParityMismatch,
+    documents: &[ShadowDocument],
+    operational: &BTreeMap<String, OperationalMetadata>,
+) -> Result<ContractParityProjection, String> {
+    let mut documents = documents.to_vec();
+    let mut operational = operational.clone();
+    let mut key_value = None;
+    match mismatch {
+        ContractParityMismatch::Authority => {
+            key_value = Some(("plasmosome.authority-mode", "ledger".into()));
+        }
+        ContractParityMismatch::Source => {
+            key_value = Some(("plasmosome.source-commit", "b".repeat(40)));
+        }
+        ContractParityMismatch::Logical => {
+            let document = documents
+                .iter_mut()
+                .find(|document| document.record.document_key == "task:001")
+                .ok_or_else(|| "cutover_blocked".to_owned())?;
+            document.record.title = "Changed remotely".into();
+        }
+        ContractParityMismatch::Operational => {
+            let metadata = operational
+                .get_mut("task:001")
+                .ok_or_else(|| "cutover_blocked".to_owned())?;
+            metadata.active_owner = Some(ActiveOwner {
+                actor: "remote-owner".into(),
+                session_id: "remote-session".into(),
+                ownership_token: "remote-token".into(),
+                claim_operation_id: "remote-claim".into(),
+                acquired_at: "2026-09-02T12:00:00Z".into(),
+                expires_at: "2026-09-02T13:00:00Z".into(),
+            });
+        }
+        ContractParityMismatch::Missing => {
+            let index = documents
+                .iter()
+                .position(|document| document.record.document_key == "task:002")
+                .ok_or_else(|| "cutover_blocked".to_owned())?;
+            documents.remove(index);
+            operational.remove("task:002");
+        }
+        ContractParityMismatch::Extra => {
+            let mut extra = documents
+                .iter()
+                .find(|document| document.record.document_key == "task:002")
+                .cloned()
+                .ok_or_else(|| "cutover_blocked".to_owned())?;
+            extra.record.document_key = "task:999".into();
+            extra.record.document_id = "999".into();
+            extra.record.document_path = "tasks/999-extra.md".into();
+            extra.record.title = "Extra remote task".into();
+            let metadata = operational
+                .get("task:002")
+                .cloned()
+                .ok_or_else(|| "cutover_blocked".to_owned())?;
+            operational.insert("task:999".into(), metadata);
+            documents.push(extra);
+        }
+        ContractParityMismatch::UnknownKeyValue => {
+            key_value = Some(("plasmosome.writer", "forbidden".into()));
+        }
+    }
+    Ok((documents, operational, key_value))
+}
 
 fn contract_generation_name(label: &str) -> Result<String, String> {
     let nanos = SystemTime::now()
@@ -2102,6 +2466,10 @@ fn fixture_runtime_environment(staging: &Path) -> Result<BTreeMap<String, String
         return Err("cutover_blocked".into());
     }
     environment.insert("GIT_CONFIG_GLOBAL".into(), git_config.display().to_string());
+    environment.insert(
+        "BEADS_DIR".into(),
+        staging.join("repository/.beads").display().to_string(),
+    );
     for (key, value) in [
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_TERMINAL_PROMPT", "0"),
@@ -2110,6 +2478,7 @@ fn fixture_runtime_environment(staging: &Path) -> Result<BTreeMap<String, String
         ("BD_DISABLE_METRICS", "1"),
         ("BD_DISABLE_EVENT_FLUSH", "1"),
         ("BD_NON_INTERACTIVE", "1"),
+        ("BD_BACKUP_ENABLED", "false"),
         ("CI", "true"),
     ] {
         environment.insert(key.into(), value.into());
@@ -2497,6 +2866,1435 @@ fn local_read_contract_result(
     result
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OnlineSyncContractPhase {
+    AwaitFirstObservation,
+    AwaitInit,
+    AwaitRemoteList,
+    AwaitSecondObservation,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OnlineSyncContractScenario {
+    Stable,
+    FirstTransport,
+    FirstMalformed,
+    FirstMoved,
+    InitTransport,
+    RemoteListTransport,
+    RemoteListMismatch,
+    SecondTransport,
+    SecondNoMatch,
+    SecondMalformed,
+    SecondMoved,
+}
+
+struct OnlineSyncContractTransport {
+    local: SystemCommandRunner,
+    project: ProjectConfig,
+    remote_candidate: PathBuf,
+    remote_generation: String,
+    scenario: OnlineSyncContractScenario,
+    phase: OnlineSyncContractPhase,
+    staging_root: Option<PathBuf>,
+    environment: Option<BTreeMap<String, String>>,
+    commands: Vec<CommandSpec>,
+}
+
+impl OnlineSyncContractTransport {
+    fn stable(
+        project: ProjectConfig,
+        remote_candidate: PathBuf,
+        remote_generation: String,
+    ) -> Self {
+        Self {
+            local: SystemCommandRunner,
+            project,
+            remote_candidate,
+            remote_generation,
+            scenario: OnlineSyncContractScenario::Stable,
+            phase: OnlineSyncContractPhase::AwaitFirstObservation,
+            staging_root: None,
+            environment: None,
+            commands: Vec::new(),
+        }
+    }
+
+    fn for_scenario(
+        project: ProjectConfig,
+        remote_candidate: PathBuf,
+        scenario: OnlineSyncContractScenario,
+    ) -> Self {
+        Self {
+            local: SystemCommandRunner,
+            project,
+            remote_candidate,
+            remote_generation: CONTRACT_REMOTE_GENERATION.into(),
+            scenario,
+            phase: OnlineSyncContractPhase::AwaitFirstObservation,
+            staging_root: None,
+            environment: None,
+            commands: Vec::new(),
+        }
+    }
+
+    fn is_first_observation(&self, command: &CommandSpec) -> bool {
+        command.program == Path::new("git")
+            && command.argv
+                == [
+                    "ls-remote",
+                    "--exit-code",
+                    self.project.git_observation_url(),
+                    self.project.data_ref(),
+                ]
+            && command
+                .cwd
+                .as_ref()
+                .is_some_and(|root| root.is_absolute() && root.file_name().is_some())
+            && !command.environment.is_empty()
+            && command.redacted_argv_positions == [2]
+    }
+
+    fn is_init(&self, command: &CommandSpec) -> bool {
+        let Some(staging_root) = self.staging_root.as_deref() else {
+            return false;
+        };
+        command.program == staging_root.join("bd")
+            && command.argv
+                == [
+                    "--sandbox",
+                    "init",
+                    "--remote",
+                    self.project.dolt_remote_url(),
+                    "--stealth",
+                    "--skip-agents",
+                    "--skip-hooks",
+                    "--non-interactive",
+                ]
+            && command.cwd.as_deref() == Some(staging_root.join("repository").as_path())
+            && self.environment.as_ref() == Some(&command.environment)
+            && command.redacted_argv_positions == [3]
+    }
+
+    fn is_remote_list(&self, command: &CommandSpec) -> bool {
+        let Some(staging_root) = self.staging_root.as_deref() else {
+            return false;
+        };
+        command.program == staging_root.join("bd")
+            && command.argv == ["--sandbox", "--json", "dolt", "remote", "list"]
+            && command.cwd.as_deref() == Some(staging_root.join("repository").as_path())
+            && self.environment.as_ref() == Some(&command.environment)
+            && command.redacted_argv_positions.is_empty()
+    }
+
+    fn is_second_observation(&self, command: &CommandSpec) -> bool {
+        let Some(staging_root) = self.staging_root.as_deref() else {
+            return false;
+        };
+        command.program == Path::new("git")
+            && command.argv
+                == [
+                    "ls-remote",
+                    "--exit-code",
+                    self.project.git_observation_url(),
+                    self.project.data_ref(),
+                ]
+            && command.cwd.as_deref() == Some(staging_root)
+            && self.environment.as_ref() == Some(&command.environment)
+            && command.redacted_argv_positions == [2]
+    }
+
+    fn is_metadata_version_transition(&self, command: &CommandSpec) -> bool {
+        let Some(staging_root) = self.staging_root.as_deref() else {
+            return false;
+        };
+        let Some(generations) = staging_root.parent() else {
+            return false;
+        };
+        let Some(metadata_stage) = command.program.parent() else {
+            return false;
+        };
+        let Some(stage_name) = metadata_stage.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let Some(stage_suffix) = stage_name.strip_prefix(".staging-") else {
+            return false;
+        };
+        if !metadata_stage.is_absolute()
+            || metadata_stage == staging_root
+            || metadata_stage.parent() != Some(generations)
+            || stage_suffix.is_empty()
+            || command.program != metadata_stage.join("bd")
+            || command.argv != ["--version"]
+            || command.cwd.as_deref() != Some(metadata_stage)
+            || !command.redacted_argv_positions.is_empty()
+        {
+            return false;
+        }
+        fixture_runtime_environment(metadata_stage)
+            .is_ok_and(|environment| command.environment == environment)
+    }
+
+    fn remote_list(&self) -> String {
+        format!(
+            "[{{\"name\":\"{}\",\"url\":\"{}\",\"sql_url\":\"{}\",\"status\":\"ok\"}}]",
+            self.project.remote_name(),
+            self.project.dolt_remote_url(),
+            self.project.dolt_remote_url(),
+        )
+    }
+
+    fn materialize_candidate(&self, repository: &Path) -> Result<(), String> {
+        if fs::read_dir(repository)
+            .map_err(|_| "cutover_blocked".to_owned())?
+            .next()
+            .is_some()
+        {
+            return Err("cutover_blocked".into());
+        }
+        copy_regular_tree_contents(&self.remote_candidate, repository, None)
+    }
+
+    fn observation_output(&self, generation: &str) -> CommandOutput {
+        CommandOutput::success(format!("{generation}\trefs/dolt/data\n"))
+    }
+}
+
+impl CommandRunner for OnlineSyncContractTransport {
+    fn run(&mut self, command: CommandSpec) -> Result<CommandOutput, String> {
+        match self.phase {
+            OnlineSyncContractPhase::AwaitFirstObservation
+                if command.program == Path::new("git") =>
+            {
+                if !self.is_first_observation(&command) {
+                    return Err("cutover_blocked".into());
+                }
+                self.staging_root = command.cwd.clone();
+                self.environment = Some(command.environment.clone());
+                self.commands.push(command);
+                match self.scenario {
+                    OnlineSyncContractScenario::FirstTransport => {
+                        self.phase = OnlineSyncContractPhase::Complete;
+                        Ok(CommandOutput {
+                            status: 1,
+                            stdout: String::new(),
+                            stderr: "recorded first-observation transport failure".into(),
+                        })
+                    }
+                    OnlineSyncContractScenario::FirstMalformed => {
+                        self.phase = OnlineSyncContractPhase::Complete;
+                        Ok(CommandOutput::success("recorded malformed observation\n"))
+                    }
+                    OnlineSyncContractScenario::FirstMoved => {
+                        self.phase = OnlineSyncContractPhase::AwaitInit;
+                        Ok(self.observation_output(CONTRACT_MOVED_REMOTE_GENERATION))
+                    }
+                    _ => {
+                        self.phase = OnlineSyncContractPhase::AwaitInit;
+                        Ok(self.observation_output(&self.remote_generation))
+                    }
+                }
+            }
+            OnlineSyncContractPhase::AwaitFirstObservation => self.local.run(command),
+            OnlineSyncContractPhase::AwaitInit => {
+                if self.is_metadata_version_transition(&command) {
+                    self.phase = OnlineSyncContractPhase::Complete;
+                    return self.local.run(command);
+                }
+                if !self.is_init(&command) {
+                    return Err("cutover_blocked".into());
+                }
+                let repository = command
+                    .cwd
+                    .clone()
+                    .ok_or_else(|| "cutover_blocked".to_owned())?;
+                self.commands.push(command);
+                if self.scenario == OnlineSyncContractScenario::InitTransport {
+                    self.phase = OnlineSyncContractPhase::Complete;
+                    return Ok(CommandOutput {
+                        status: 1,
+                        stdout: String::new(),
+                        stderr: "recorded init transport failure".into(),
+                    });
+                }
+                self.materialize_candidate(&repository)?;
+                self.phase = OnlineSyncContractPhase::AwaitRemoteList;
+                Ok(CommandOutput::success(""))
+            }
+            OnlineSyncContractPhase::AwaitRemoteList => {
+                if !self.is_remote_list(&command) {
+                    return Err("cutover_blocked".into());
+                }
+                self.commands.push(command);
+                match self.scenario {
+                    OnlineSyncContractScenario::RemoteListTransport => {
+                        self.phase = OnlineSyncContractPhase::Complete;
+                        Ok(CommandOutput {
+                            status: 1,
+                            stdout: String::new(),
+                            stderr: "recorded remote-list transport failure".into(),
+                        })
+                    }
+                    OnlineSyncContractScenario::RemoteListMismatch => {
+                        self.phase = OnlineSyncContractPhase::Complete;
+                        Ok(CommandOutput::success("[]"))
+                    }
+                    _ => {
+                        self.phase = OnlineSyncContractPhase::AwaitSecondObservation;
+                        Ok(CommandOutput::success(self.remote_list()))
+                    }
+                }
+            }
+            OnlineSyncContractPhase::AwaitSecondObservation => {
+                if !self.is_second_observation(&command) {
+                    return Err("cutover_blocked".into());
+                }
+                self.phase = OnlineSyncContractPhase::Complete;
+                self.commands.push(command);
+                match self.scenario {
+                    OnlineSyncContractScenario::SecondTransport => Ok(CommandOutput {
+                        status: 1,
+                        stdout: String::new(),
+                        stderr: "recorded second-observation transport failure".into(),
+                    }),
+                    OnlineSyncContractScenario::SecondNoMatch => Ok(CommandOutput {
+                        status: 2,
+                        stdout: String::new(),
+                        stderr: "recorded second-observation no-match".into(),
+                    }),
+                    OnlineSyncContractScenario::SecondMalformed => {
+                        Ok(CommandOutput::success("recorded malformed observation\n"))
+                    }
+                    OnlineSyncContractScenario::SecondMoved => {
+                        Ok(self.observation_output(CONTRACT_MOVED_REMOTE_GENERATION))
+                    }
+                    _ => Ok(self.observation_output(&self.remote_generation)),
+                }
+            }
+            OnlineSyncContractPhase::Complete if command.program == Path::new("git") => {
+                Err("cutover_blocked".into())
+            }
+            OnlineSyncContractPhase::Complete => self.local.run(command),
+        }
+    }
+}
+
+fn assert_recorded_remote_failure_inventory(
+    root: &Path,
+    location: &crate::store::StoreLocation,
+    selected: &CurrentGeneration,
+    pin: &PinManifest,
+) -> Result<CurrentGeneration, String> {
+    let project = compiled_project_config().map_err(|_| "cutover_blocked".to_owned())?;
+    let marker_name = "active-only";
+    let marker_contents = "the recorded remote candidate must never replace active local history";
+    let mut selected = selected.clone();
+    fs::write(
+        selected.root.join("repository").join(marker_name),
+        marker_contents,
+    )
+    .map_err(|_| "cutover_blocked".to_owned())?;
+    let cases = [
+        (
+            OnlineSyncContractScenario::FirstTransport,
+            "remote_transport",
+            1,
+        ),
+        (
+            OnlineSyncContractScenario::FirstMalformed,
+            "invalid_remote_observation",
+            1,
+        ),
+        (
+            OnlineSyncContractScenario::InitTransport,
+            "remote_transport",
+            2,
+        ),
+        (
+            OnlineSyncContractScenario::RemoteListTransport,
+            "remote_transport",
+            3,
+        ),
+        (
+            OnlineSyncContractScenario::RemoteListMismatch,
+            "remote_configuration_mismatch",
+            3,
+        ),
+        (
+            OnlineSyncContractScenario::SecondTransport,
+            "remote_transport",
+            4,
+        ),
+        (
+            OnlineSyncContractScenario::SecondNoMatch,
+            "remote_changed",
+            4,
+        ),
+        (
+            OnlineSyncContractScenario::SecondMalformed,
+            "invalid_remote_observation",
+            4,
+        ),
+        (OnlineSyncContractScenario::SecondMoved, "remote_changed", 4),
+    ];
+    for (scenario, expected_code, expected_remote_commands) in cases {
+        let current_before = fs::read(location.state_root.join("current"))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        let candidate = root.join(format!("online-sync-recorded-{scenario:?}"));
+        fs::create_dir(&candidate).map_err(|_| "cutover_blocked".to_owned())?;
+        copy_regular_tree_contents(&selected.root.join("repository"), &candidate, None)?;
+        let mut transport =
+            OnlineSyncContractTransport::for_scenario(project.clone(), candidate, scenario);
+        let error = synchronize(&mut transport, location, &selected, pin, host_target())
+            .expect_err("the recorded remote failure scenario must refuse");
+        if error.code() != expected_code
+            || transport.phase != OnlineSyncContractPhase::Complete
+            || transport.commands.len() != expected_remote_commands
+            || transport.commands.iter().any(|command| {
+                command.argv.iter().any(|argument| {
+                    matches!(
+                        argument.as_str(),
+                        "add" | "pull" | "bootstrap" | "push" | "fetch" | "force" | "update-ref"
+                    )
+                })
+            })
+        {
+            return Err("cutover_blocked".into());
+        }
+        let current_after = fs::read(location.state_root.join("current"))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        if error.state_changed() {
+            if current_after == current_before {
+                return Err("cutover_blocked".into());
+            }
+            let activated =
+                current_generation(location).map_err(|error| error.code().to_owned())?;
+            if activated.name == selected.name
+                || fs::read_to_string(activated.root.join("repository").join(marker_name))
+                    .map_err(|_| "cutover_blocked".to_owned())?
+                    != marker_contents
+            {
+                return Err("cutover_blocked".into());
+            }
+            selected = activated;
+        } else if current_after != current_before
+            || fs::read_to_string(selected.root.join("repository").join(marker_name))
+                .map_err(|_| "cutover_blocked".to_owned())?
+                != marker_contents
+        {
+            return Err("cutover_blocked".into());
+        }
+    }
+    Ok(selected)
+}
+
+fn parity_candidate_fixture(
+    runner: &mut SystemCommandRunner,
+    root: &Path,
+    label: &str,
+    selected: &CurrentGeneration,
+    snapshot: &crate::store::FencedSnapshot,
+    mismatch: ContractParityMismatch,
+) -> Result<StoreFixture, String> {
+    let candidate = init_store(&selected.root.join("bd"), root, label).map_err(str::to_owned)?;
+    let documents = snapshot
+        .documents
+        .iter()
+        .map(|document| document.document.clone())
+        .collect::<Vec<_>>();
+    let operational = snapshot
+        .documents
+        .iter()
+        .filter_map(|document| {
+            document
+                .operational
+                .clone()
+                .map(|metadata| (document.document.record.document_key.clone(), metadata))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let (documents, operational, key_value) =
+        parity_candidate_projection(mismatch, &documents, &operational)?;
+    import_operational_shadow_documents(
+        runner,
+        &shadow_store(&candidate, &selected.root.join("bd")),
+        &selected.manifest.source_commit,
+        &documents,
+        &operational,
+    )
+    .map_err(|_| "cutover_blocked".to_owned())?;
+    if let Some((key, value)) = key_value {
+        run_contract_command(
+            runner,
+            contract_command(
+                selected.root.join("bd"),
+                vec![
+                    "--sandbox".into(),
+                    "kv".into(),
+                    "set".into(),
+                    key.into(),
+                    value,
+                ],
+                &candidate.repository,
+                &candidate.environment,
+            ),
+        )?;
+    }
+    Ok(candidate)
+}
+
+fn assert_representative_parity_inventory(
+    runner: &mut SystemCommandRunner,
+    root: &Path,
+    location: &crate::store::StoreLocation,
+    selected: &CurrentGeneration,
+    snapshot: &crate::store::FencedSnapshot,
+    pin: &PinManifest,
+    state_snapshots: &mut StateTreeSnapshots,
+) -> Result<(), String> {
+    let project = compiled_project_config().map_err(|_| "cutover_blocked".to_owned())?;
+    state_snapshots.require_state_root(&location.state_root)?;
+    let mut selected = selected.clone();
+    for (mismatch, label) in [
+        (ContractParityMismatch::Authority, "authority"),
+        (ContractParityMismatch::Source, "source"),
+        (ContractParityMismatch::Logical, "logical"),
+        (ContractParityMismatch::Operational, "operational"),
+        (ContractParityMismatch::Missing, "missing"),
+        (ContractParityMismatch::Extra, "extra"),
+        (ContractParityMismatch::UnknownKeyValue, "unknown-key-value"),
+    ] {
+        let candidate = parity_candidate_fixture(
+            runner,
+            root,
+            &format!("online-sync-parity-{label}"),
+            &selected,
+            snapshot,
+            mismatch,
+        )?;
+        let candidate_marker = candidate.repository.join("candidate-only");
+        fs::write(&candidate_marker, label).map_err(|_| "cutover_blocked".to_owned())?;
+        let before = state_snapshots.snapshot()?;
+        let mut transport = OnlineSyncContractTransport::stable(
+            project.clone(),
+            candidate.repository.clone(),
+            CONTRACT_REMOTE_GENERATION.into(),
+        );
+        let error = synchronize(&mut transport, location, &selected, pin, host_target())
+            .expect_err("a remote projection mismatch must never activate");
+        if error.code() != "remote_shadow_mismatch"
+            || transport.phase != OnlineSyncContractPhase::Complete
+            || transport.commands.len() != 4
+            || transport.commands.iter().any(|command| {
+                command.argv.iter().any(|argument| {
+                    matches!(
+                        argument.as_str(),
+                        "add" | "pull" | "bootstrap" | "push" | "fetch" | "force" | "update-ref"
+                    )
+                })
+            })
+        {
+            return Err("cutover_blocked".into());
+        }
+        if error.state_changed() {
+            let activated =
+                current_generation(location).map_err(|error| error.code().to_owned())?;
+            let activated_snapshot =
+                read_disposable_snapshot(runner, &activated, pin, host_target())
+                    .map_err(|error| error.code().to_owned())?;
+            if state_snapshots.snapshot()? == before
+                || activated.root.join("repository/candidate-only").exists()
+                || activated_snapshot.documents != snapshot.documents
+            {
+                return Err("cutover_blocked".into());
+            }
+            selected = activated;
+        } else if state_snapshots.snapshot()? != before {
+            return Err("cutover_blocked".into());
+        }
+    }
+    Ok(())
+}
+
+fn assert_cleanup_before_remote_inventory(
+    root: &Path,
+    location: &crate::store::StoreLocation,
+    selected: &CurrentGeneration,
+    pin: &PinManifest,
+    state_snapshots: &mut StateTreeSnapshots,
+) -> Result<(), String> {
+    let candidate = root.join("online-sync-cleanup-candidate");
+    fs::create_dir(&candidate).map_err(|_| "cutover_blocked".to_owned())?;
+    let project = compiled_project_config().map_err(|_| "cutover_blocked".to_owned())?;
+    state_snapshots.require_state_root(&location.state_root)?;
+    let before = state_snapshots.snapshot()?;
+    let mut transport = OnlineSyncContractTransport::for_scenario(
+        project,
+        candidate,
+        OnlineSyncContractScenario::FirstTransport,
+    );
+    let error = synchronize_after_disposable_cleanup_failure_for_contract(
+        &mut transport,
+        location,
+        selected,
+        pin,
+        host_target(),
+    )
+    .expect_err("the disposable cleanup refusal must precede remote observation");
+    if error.code() != "temporary_cleanup_failed"
+        || error.state_changed()
+        || transport.phase != OnlineSyncContractPhase::AwaitFirstObservation
+        || !transport.commands.is_empty()
+        || state_snapshots.snapshot()? != before
+    {
+        return Err("cutover_blocked".into());
+    }
+    Ok(())
+}
+
+fn assert_activation_boundary_inventory(
+    runner: &mut SystemCommandRunner,
+    root: &Path,
+    request: &ContractRequest,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+) -> Result<(), String> {
+    let (_fixture, location, base, _bootstrap_request) =
+        bootstrap_fixture(runner, root, "online-sync-activation", request, source, pin)?;
+    let baseline = read_disposable_snapshot(runner, &base, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    let original_pointer =
+        fs::read(location.state_root.join("current")).map_err(|_| "cutover_blocked".to_owned())?;
+    let lock = GenerationActivationLock::acquire_for_sync(&location)
+        .map_err(|error| error.code().to_owned())?;
+    for (fault, label) in [
+        (
+            ActivationFault::BeforeGenerationRename,
+            "before-generation-rename",
+        ),
+        (ActivationFault::BeforePointerWrite, "before-pointer-write"),
+        (
+            ActivationFault::BeforePointerRename,
+            "before-pointer-rename",
+        ),
+    ] {
+        let generation_name = contract_generation_name(&format!("activation-{label}"))?;
+        let staging = location.generations_dir.join(format!(
+            ".staging-{}",
+            generation_name
+                .strip_prefix("generation-")
+                .ok_or_else(|| "cutover_blocked".to_owned())?
+        ));
+        fs::create_dir(&staging).map_err(|_| "cutover_blocked".to_owned())?;
+        copy_regular_tree_contents(&base.root, &staging, None)?;
+        let error = activate_staged_generation(&location, &staging, &generation_name, Some(fault))
+            .expect_err("an injected activation interruption must preserve the old reader state");
+        if error.code() != "bootstrap_interrupted"
+            || current_generation(&location).map_err(|error| error.code().to_owned())? != base
+            || fs::read(location.state_root.join("current"))
+                .map_err(|_| "cutover_blocked".to_owned())?
+                != original_pointer
+        {
+            return Err("cutover_blocked".into());
+        }
+    }
+    let generation_name = contract_generation_name("activation-success")?;
+    let staging = location.generations_dir.join(format!(
+        ".staging-{}",
+        generation_name
+            .strip_prefix("generation-")
+            .ok_or_else(|| "cutover_blocked".to_owned())?
+    ));
+    fs::create_dir(&staging).map_err(|_| "cutover_blocked".to_owned())?;
+    copy_regular_tree_contents(&base.root, &staging, None)?;
+    activate_staged_generation(&location, &staging, &generation_name, None)
+        .map_err(|error| error.code().to_owned())?;
+    let activated = current_generation(&location).map_err(|error| error.code().to_owned())?;
+    let activated_snapshot = read_disposable_snapshot(runner, &activated, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    if activated.name == base.name
+        || fs::read(location.state_root.join("current"))
+            .map_err(|_| "cutover_blocked".to_owned())?
+            != format!("{generation_name}\n").into_bytes()
+        || activated_snapshot != baseline
+    {
+        return Err("cutover_blocked".into());
+    }
+    drop(lock);
+    Ok(())
+}
+
+fn assert_pending_remote_observation_inventory(
+    runner: &mut SystemCommandRunner,
+    root: &Path,
+    request: &ContractRequest,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+) -> Result<(), String> {
+    let (_fixture, location, base, _bootstrap_request) =
+        bootstrap_fixture(runner, root, "online-sync-pending", request, source, pin)?;
+    let project = compiled_project_config().map_err(|_| "cutover_blocked".to_owned())?;
+    let pending = [CONTRACT_PENDING_OPERATION];
+    let equivalent = activate_freshness_fixture(
+        runner,
+        &location,
+        &base,
+        pin,
+        RemoteRelation::Equivalent,
+        true,
+        &pending,
+    )?;
+    let same_candidate = root.join("online-sync-pending-same-candidate");
+    fs::create_dir(&same_candidate).map_err(|_| "cutover_blocked".to_owned())?;
+    copy_regular_tree_contents(&equivalent.root.join("repository"), &same_candidate, None)?;
+    let same_before =
+        fs::read(location.state_root.join("current")).map_err(|_| "cutover_blocked".to_owned())?;
+    let mut same_transport = OnlineSyncContractTransport::for_scenario(
+        project.clone(),
+        same_candidate,
+        OnlineSyncContractScenario::Stable,
+    );
+    let same_error = synchronize(
+        &mut same_transport,
+        &location,
+        &equivalent,
+        pin,
+        host_target(),
+    )
+    .expect_err("pending work must stop before the remote clone");
+    if same_error.code() != "pending_mutations"
+        || !same_error.state_changed()
+        || same_transport.commands.len() != 1
+        || same_transport.commands.iter().any(|command| {
+            command.argv.iter().any(|argument| {
+                matches!(
+                    argument.as_str(),
+                    "init"
+                        | "add"
+                        | "pull"
+                        | "bootstrap"
+                        | "push"
+                        | "fetch"
+                        | "force"
+                        | "update-ref"
+                )
+            })
+        })
+        || fs::read(location.state_root.join("current"))
+            .map_err(|_| "cutover_blocked".to_owned())?
+            == same_before
+    {
+        return Err("cutover_blocked".into());
+    }
+    let same = current_generation(&location).map_err(|error| error.code().to_owned())?;
+    let same_snapshot = read_disposable_snapshot(runner, &same, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    if same.manifest.remote_relation != RemoteRelation::Equivalent
+        || same.manifest.remote_generation.as_deref() != Some(CONTRACT_REMOTE_GENERATION)
+        || same.manifest.last_successful_sync_at.as_deref() != Some(CONTRACT_OBSERVED_AT)
+        || same.manifest.pending_operation_ids != pending
+        || same_snapshot.freshness.freshness != Freshness::Unpublished
+        || same_snapshot.freshness.pending_mutations.operation_ids != pending
+    {
+        return Err("cutover_blocked".into());
+    }
+
+    let different_seed = activate_freshness_fixture(
+        runner,
+        &location,
+        &same,
+        pin,
+        RemoteRelation::Equivalent,
+        true,
+        &pending,
+    )?;
+    let different_candidate = root.join("online-sync-pending-different-candidate");
+    fs::create_dir(&different_candidate).map_err(|_| "cutover_blocked".to_owned())?;
+    copy_regular_tree_contents(
+        &different_seed.root.join("repository"),
+        &different_candidate,
+        None,
+    )?;
+    let different_before =
+        fs::read(location.state_root.join("current")).map_err(|_| "cutover_blocked".to_owned())?;
+    let mut different_transport = OnlineSyncContractTransport::for_scenario(
+        project,
+        different_candidate,
+        OnlineSyncContractScenario::FirstMoved,
+    );
+    let different_error = synchronize(
+        &mut different_transport,
+        &location,
+        &different_seed,
+        pin,
+        host_target(),
+    )
+    .expect_err("pending work at a changed remote must stop before the remote clone");
+    if different_error.code() != "pending_mutations"
+        || !different_error.state_changed()
+        || different_transport.commands.len() != 1
+        || different_transport.commands.iter().any(|command| {
+            command.argv.iter().any(|argument| {
+                matches!(
+                    argument.as_str(),
+                    "init"
+                        | "add"
+                        | "pull"
+                        | "bootstrap"
+                        | "push"
+                        | "fetch"
+                        | "force"
+                        | "update-ref"
+                )
+            })
+        })
+        || fs::read(location.state_root.join("current"))
+            .map_err(|_| "cutover_blocked".to_owned())?
+            == different_before
+    {
+        return Err("cutover_blocked".into());
+    }
+    let different = current_generation(&location).map_err(|error| error.code().to_owned())?;
+    let different_snapshot = read_disposable_snapshot(runner, &different, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    if different.manifest.remote_relation != RemoteRelation::Unknown
+        || different.manifest.remote_generation.as_deref() != Some(CONTRACT_MOVED_REMOTE_GENERATION)
+        || different.manifest.last_successful_sync_at.as_deref() != Some(CONTRACT_OBSERVED_AT)
+        || different.manifest.pending_operation_ids != pending
+        || different_snapshot.freshness.freshness != Freshness::UnknownWithUnpublished
+        || different_snapshot.freshness.pending_mutations.operation_ids != pending
+    {
+        return Err("cutover_blocked".into());
+    }
+    Ok(())
+}
+
+fn online_sync_contract_case(
+    runner: &mut SystemCommandRunner,
+    root: &Path,
+    request: &ContractRequest,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+) -> Result<LocalReadEvidence, String> {
+    let (fixture, location, base, _bootstrap_request, mut state_snapshots) =
+        bootstrap_fixture_with_state_snapshots(runner, root, "online-sync", request, source, pin)?;
+    let baseline = read_disposable_snapshot(runner, &base, pin, host_target())
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    assert_installed_sync_config_and_lock(
+        runner,
+        root,
+        &fixture,
+        &location,
+        &base,
+        &baseline,
+        &mut state_snapshots,
+    )
+    .map_err(|_| "cutover_blocked".to_owned())?;
+    let remote_candidate = root.join("online-sync-recorded-remote-candidate");
+    fs::create_dir(&remote_candidate).map_err(|_| "cutover_blocked".to_owned())?;
+    copy_regular_tree_contents(&base.root.join("repository"), &remote_candidate, None)?;
+    let selected = assert_recorded_remote_failure_inventory(root, &location, &base, pin)
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    assert_representative_parity_inventory(
+        runner,
+        root,
+        &location,
+        &selected,
+        &baseline,
+        pin,
+        &mut state_snapshots,
+    )
+    .map_err(|_| "cutover_blocked".to_owned())?;
+    let selected = current_generation(&location).map_err(|_| "cutover_blocked".to_owned())?;
+    assert_cleanup_before_remote_inventory(root, &location, &selected, pin, &mut state_snapshots)
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    let active_state_before = state_snapshots.snapshot()?;
+    let project = compiled_project_config().map_err(|_| "cutover_blocked".to_owned())?;
+    let remote_generation = CONTRACT_REMOTE_GENERATION.to_owned();
+    let mut transport =
+        OnlineSyncContractTransport::stable(project, remote_candidate, remote_generation.clone());
+    let result = synchronize(&mut transport, &location, &selected, pin, host_target())
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    let activated = current_generation(&location).map_err(|_| "cutover_blocked".to_owned())?;
+    if transport.phase != OnlineSyncContractPhase::Complete
+        || transport.commands.len() != 4
+        || transport.commands.iter().any(|command| {
+            command.argv.iter().any(|argument| {
+                matches!(
+                    argument.as_str(),
+                    "add" | "pull" | "bootstrap" | "push" | "fetch" | "force" | "update-ref"
+                )
+            })
+        })
+        || !result.state_changed
+        || activated.name == selected.name
+        || !base.root.is_dir()
+        || activated.root.join("repository/active-only").exists()
+        || !selected.root.join("repository/active-only").is_file()
+        || activated.manifest.source_commit != selected.manifest.source_commit
+        || activated.manifest.logical_export_sha256 != selected.manifest.logical_export_sha256
+        || activated.manifest.operational_projection_sha256
+            != selected.manifest.operational_projection_sha256
+        || activated.manifest.remote_generation.as_deref() != Some(remote_generation.as_str())
+        || activated.manifest.remote_observed_at.is_none()
+        || activated.manifest.remote_observed_at != activated.manifest.last_successful_sync_at
+        || activated.manifest.pending_operation_ids != Vec::<String>::new()
+    {
+        return Err("cutover_blocked".into());
+    }
+    let activated_snapshot = read_disposable_snapshot(runner, &activated, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    if activated_snapshot.documents != baseline.documents
+        || activated_snapshot.freshness.freshness != Freshness::SynchronizedAsOf
+        || state_snapshots.snapshot()? == active_state_before
+    {
+        return Err("cutover_blocked".into());
+    }
+    assert_exact_source_projection(source, &activated_snapshot)?;
+    assert_pending_remote_observation_inventory(runner, root, request, source, pin)
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    assert_activation_boundary_inventory(runner, root, request, source, pin)
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    Ok(LocalReadEvidence {
+        clone_labels: vec![
+            "online-sync-worktree-a".into(),
+            "online-sync-worktree-b".into(),
+        ],
+        source_commit: activated.manifest.source_commit,
+        local_generation: activated.manifest.local_generation,
+        operation_ids: Vec::new(),
+        command_plans: vec![
+            "real local bootstrap/current/runtime/fence/parity/activation".into(),
+            "recorded Git observation and exact remote-clone failure boundary".into(),
+            "recorded R0/init/list/R1 refusal inventory with real local metadata fencing".into(),
+            "real representative authority/source/logical/operational/missing/extra/unknown-KV parity refusals".into(),
+            "real pending local generations with recorded same/different R0 observations".into(),
+            "contract cleanup-before-remote and activation-boundary inventory".into(),
+            "no remote add/pull/bootstrap/push/fetch/force/update-ref".into(),
+        ],
+    })
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GitShimCategory {
+    LocatorTop,
+    LocatorCommon,
+    Observation,
+    LocalBeadsDiscovery,
+    LocalBeadsRepoContext,
+    LocalBeadsActor,
+    Unexpected,
+}
+
+#[cfg(unix)]
+impl GitShimCategory {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "locator_top" => Ok(Self::LocatorTop),
+            "locator_common" => Ok(Self::LocatorCommon),
+            "observation" => Ok(Self::Observation),
+            "local_beads_discovery" => Ok(Self::LocalBeadsDiscovery),
+            "local_beads_repo_context" => Ok(Self::LocalBeadsRepoContext),
+            "local_beads_actor" => Ok(Self::LocalBeadsActor),
+            "unexpected" => Ok(Self::Unexpected),
+            _ => Err("cutover_blocked".into()),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GitShimRecord {
+    cwd: PathBuf,
+    argv: Vec<String>,
+    category: GitShimCategory,
+}
+
+#[cfg(unix)]
+struct InstalledGitShimBinding {
+    real_git: PathBuf,
+    capture: PathBuf,
+    worktree: PathBuf,
+    common_dir: PathBuf,
+    locator_path: String,
+    project: ProjectConfig,
+}
+
+#[cfg(unix)]
+fn resolve_absolute_git(path: &std::ffi::OsStr) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    for directory in std::env::split_paths(path) {
+        let candidate = directory.join("git");
+        let Ok(metadata) = fs::metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+            continue;
+        }
+        let canonical = fs::canonicalize(&candidate).map_err(|_| "cutover_blocked".to_owned())?;
+        let metadata = fs::metadata(&canonical).map_err(|_| "cutover_blocked".to_owned())?;
+        if canonical.is_absolute()
+            && metadata.is_file()
+            && metadata.permissions().mode() & 0o111 != 0
+        {
+            return Ok(canonical);
+        }
+    }
+    Err("cutover_blocked".into())
+}
+
+#[cfg(unix)]
+fn installed_config_locator_path(
+    fake_bin: &Path,
+    original_path: &std::ffi::OsStr,
+) -> Result<std::ffi::OsString, String> {
+    std::env::join_paths(
+        std::iter::once(fake_bin.as_os_str().to_os_string())
+            .chain(std::env::split_paths(original_path).map(|path| path.into_os_string())),
+    )
+    .map_err(|_| "cutover_blocked".to_owned())
+}
+
+#[cfg(unix)]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(unix)]
+fn shell_quote_path(path: &Path) -> Result<String, String> {
+    path.to_str()
+        .map(shell_quote)
+        .ok_or_else(|| "cutover_blocked".into())
+}
+
+#[cfg(unix)]
+fn write_installed_config_git_shim(
+    shim: &Path,
+    binding: &InstalledGitShimBinding,
+) -> Result<(), String> {
+    let replacements = [
+        ("@@CAPTURE@@", shell_quote_path(&binding.capture)?),
+        ("@@REAL_GIT@@", shell_quote_path(&binding.real_git)?),
+        ("@@WORKTREE@@", shell_quote_path(&binding.worktree)?),
+        ("@@COMMON@@", shell_quote_path(&binding.common_dir)?),
+        ("@@LOCATOR_PATH@@", shell_quote(&binding.locator_path)),
+        (
+            "@@OBSERVATION_URL@@",
+            shell_quote(binding.project.git_observation_url()),
+        ),
+        ("@@DATA_REF@@", shell_quote(binding.project.data_ref())),
+    ];
+    let mut script = r#"#!/usr/bin/env bash
+set -eu
+capture=@@CAPTURE@@
+real_git=@@REAL_GIT@@
+worktree=@@WORKTREE@@
+common_dir=@@COMMON@@
+locator_path=@@LOCATOR_PATH@@
+observation_url=@@OBSERVATION_URL@@
+data_ref=@@DATA_REF@@
+cwd=$(pwd -P)
+
+record() {
+  local category=$1
+  shift
+  {
+    printf '%s\0' "$#"
+    printf '%s\0' "$cwd"
+    for argument in "$@"; do
+      printf '%s\0' "$argument"
+    done
+    printf '%s\0' "$category"
+  } >> "$capture"
+}
+
+forbidden_environment_is_absent() {
+  [[ -z "${GIT_ASKPASS+x}" && -z "${SSH_ASKPASS+x}" && -z "${SSH_AUTH_SOCK+x}" && -z "${GIT_SSH+x}" && -z "${GIT_SSH_COMMAND+x}" && -z "${GIT_PROXY_COMMAND+x}" && -z "${GIT_CREDENTIAL_HELPER+x}" && -z "${GIT_CONFIG_SYSTEM+x}" && -z "${GIT_CONFIG_COUNT+x}" && -z "${GIT_CONFIG_PARAMETERS+x}" && -z "${HTTP_PROXY+x}" && -z "${HTTPS_PROXY+x}" && -z "${ALL_PROXY+x}" && -z "${NO_PROXY+x}" && -z "${http_proxy+x}" && -z "${https_proxy+x}" && -z "${all_proxy+x}" && -z "${no_proxy+x}" && -z "${GITHUB_TOKEN+x}" && -z "${GH_TOKEN+x}" && -z "${BEADS_TOKEN+x}" && -z "${BEADS_API_KEY+x}" && -z "${DOLT_TOKEN+x}" && -z "${DOLT_CREDENTIAL+x}" ]]
+}
+
+locator_environment_is_bound() {
+  [[ "$PATH" == "$locator_path" && "${GIT_CONFIG_NOSYSTEM-}" == 1 && "${GIT_TERMINAL_PROMPT-}" == 0 && "${GIT_NO_LAZY_FETCH-}" == 1 && "${GIT_OPTIONAL_LOCKS-}" == 0 && -z "${HOME+x}" && -z "${XDG_CONFIG_HOME+x}" && -z "${XDG_CACHE_HOME+x}" && -z "${XDG_DATA_HOME+x}" && -z "${TMPDIR+x}" && -z "${GIT_CONFIG_GLOBAL+x}" ]] && forbidden_environment_is_absent
+}
+
+runtime_root() {
+  case "${TMPDIR-}" in
+    */runtime/tmp) ;;
+    *) return 1 ;;
+  esac
+  local root=${TMPDIR%/runtime/tmp}
+  [[ -n "$root" ]] || return 1
+  local physical tmp
+  physical=$(cd "$root" 2>/dev/null && pwd -P) || return 1
+  tmp=$(cd "$TMPDIR" 2>/dev/null && pwd -P) || return 1
+  [[ "$tmp" == "$physical/runtime/tmp" ]] || return 1
+  printf '%s\n' "$physical"
+}
+
+runtime_environment_is_bound() {
+  local root=$1
+  local home config cache data tmp config_parent config_name beads_dir beads_root
+  home=$(cd "${HOME-}" 2>/dev/null && pwd -P) || return 1
+  config=$(cd "${XDG_CONFIG_HOME-}" 2>/dev/null && pwd -P) || return 1
+  cache=$(cd "${XDG_CACHE_HOME-}" 2>/dev/null && pwd -P) || return 1
+  data=$(cd "${XDG_DATA_HOME-}" 2>/dev/null && pwd -P) || return 1
+  tmp=$(cd "${TMPDIR-}" 2>/dev/null && pwd -P) || return 1
+  config_parent=${GIT_CONFIG_GLOBAL%/*}
+  config_name=${GIT_CONFIG_GLOBAL##*/}
+  config_parent=$(cd "$config_parent" 2>/dev/null && pwd -P) || return 1
+  beads_dir=${BEADS_DIR-}
+  beads_root=${beads_dir%/repository/.beads}
+  [[ "$beads_dir" == "$beads_root/repository/.beads" ]] || return 1
+  beads_root=$(cd "$beads_root" 2>/dev/null && pwd -P) || return 1
+  [[ "$PATH" == "$locator_path" && "$home" == "$root/runtime/home" && "$config" == "$root/runtime/xdg_config" && "$cache" == "$root/runtime/xdg_cache" && "$data" == "$root/runtime/xdg_data" && "$tmp" == "$root/runtime/tmp" && "$config_parent/$config_name" == "$root/runtime/git_config_global" && "$beads_root" == "$root" && "${GIT_CONFIG_NOSYSTEM-}" == 1 && "${GIT_TERMINAL_PROMPT-}" == 0 && "${GIT_NO_LAZY_FETCH-}" == 1 && "${GIT_OPTIONAL_LOCKS-}" == 0 && "${BD_DISABLE_METRICS-}" == 1 && "${BD_DISABLE_EVENT_FLUSH-}" == 1 && "${BD_NON_INTERACTIVE-}" == 1 && "${BD_BACKUP_ENABLED-}" == false && "${CI-}" == true ]] && forbidden_environment_is_absent
+}
+
+if [[ "$cwd" == "$worktree" ]] && locator_environment_is_bound; then
+  if [[ "$#" -eq 2 && "$1" == rev-parse && "$2" == --show-toplevel ]]; then
+    record locator_top "$@"
+    printf '%s\n' "$worktree"
+    exit 0
+  fi
+  if [[ "$#" -eq 3 && "$1" == rev-parse && "$2" == --path-format=absolute && "$3" == --git-common-dir ]]; then
+    record locator_common "$@"
+    printf '%s\n' "$common_dir"
+    exit 0
+  fi
+fi
+
+root=
+if root=$(runtime_root) && runtime_environment_is_bound "$root"; then
+  if [[ "$#" -eq 4 && "$1" == ls-remote && "$2" == --exit-code && "$3" == "$observation_url" && "$4" == "$data_ref" && "$cwd" == "$root" ]]; then
+    record observation "$@"
+    exit 2
+  fi
+  if [[ "$#" -eq 4 && "$1" == rev-parse && "$2" == --git-dir && "$3" == --git-common-dir && "$4" == --show-toplevel && "$cwd" == "$root/repository" ]]; then
+    record local_beads_repo_context "$@"
+    exec "$real_git" "$@"
+  fi
+  if [[ "$#" -eq 2 && "$1" == config && "$2" == user.name && "$cwd" == "$root/repository" ]]; then
+    record local_beads_actor "$@"
+    exec "$real_git" "$@"
+  fi
+fi
+
+record unexpected "$@"
+exit 97
+"#
+    .to_owned();
+    for (needle, value) in replacements {
+        script = script.replace(needle, &value);
+    }
+    fs::write(shim, script).map_err(|_| "cutover_blocked".to_owned())
+}
+
+#[cfg(unix)]
+fn read_installed_git_shim_records(path: &Path) -> Result<Vec<GitShimRecord>, String> {
+    fn field(bytes: &[u8], cursor: &mut usize) -> Result<String, String> {
+        let end = bytes[*cursor..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .map(|offset| *cursor + offset)
+            .ok_or_else(|| "cutover_blocked".to_owned())?;
+        let value = String::from_utf8(bytes[*cursor..end].to_vec())
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        *cursor = end + 1;
+        Ok(value)
+    }
+
+    let bytes = fs::read(path).map_err(|_| "cutover_blocked".to_owned())?;
+    let mut cursor = 0;
+    let mut records = Vec::new();
+    while cursor < bytes.len() {
+        let argc = field(&bytes, &mut cursor)?
+            .parse::<usize>()
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        let cwd = PathBuf::from(field(&bytes, &mut cursor)?);
+        let mut argv = Vec::with_capacity(argc);
+        for _ in 0..argc {
+            argv.push(field(&bytes, &mut cursor)?);
+        }
+        let category = GitShimCategory::parse(&field(&bytes, &mut cursor)?)?;
+        records.push(GitShimRecord {
+            cwd,
+            argv,
+            category,
+        });
+    }
+    Ok(records)
+}
+
+#[cfg(unix)]
+fn assert_installed_git_shim_records(
+    records: &[GitShimRecord],
+    binding: &InstalledGitShimBinding,
+) -> Result<(), String> {
+    let locator_top = ["rev-parse", "--show-toplevel"];
+    let locator_common = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+    let observation = [
+        "ls-remote",
+        "--exit-code",
+        binding.project.git_observation_url(),
+        binding.project.data_ref(),
+    ];
+    let repo_context = [
+        "rev-parse",
+        "--git-dir",
+        "--git-common-dir",
+        "--show-toplevel",
+    ];
+    let actor_lookup = ["config", "user.name"];
+    let matches = |category: &GitShimCategory, argv: &[&str], cwd: Option<&Path>| {
+        records
+            .iter()
+            .filter(|record| {
+                &record.category == category
+                    && cwd.is_none_or(|expected| record.cwd == expected)
+                    && record
+                        .argv
+                        .iter()
+                        .map(String::as_str)
+                        .eq(argv.iter().copied())
+            })
+            .count()
+    };
+    let category_count = |category: &GitShimCategory| {
+        records
+            .iter()
+            .filter(|record| &record.category == category)
+            .count()
+    };
+    let no_unexpected = category_count(&GitShimCategory::Unexpected) == 0;
+    let no_discovery = category_count(&GitShimCategory::LocalBeadsDiscovery) == 0;
+    let initial = records.len() == 26
+        && no_unexpected
+        && no_discovery
+        && matches(
+            &GitShimCategory::LocatorTop,
+            &locator_top,
+            Some(&binding.worktree),
+        ) == 4
+        && matches(
+            &GitShimCategory::LocatorCommon,
+            &locator_common,
+            Some(&binding.worktree),
+        ) == 4
+        && matches(&GitShimCategory::Observation, &observation, None) == 2
+        && matches(&GitShimCategory::LocalBeadsRepoContext, &repo_context, None) == 8
+        && matches(&GitShimCategory::LocalBeadsActor, &actor_lookup, None) == 8;
+    let busy_local_cwd = records.iter().find_map(|record| {
+        matches!(
+            record.category,
+            GitShimCategory::LocalBeadsRepoContext | GitShimCategory::LocalBeadsActor
+        )
+        .then_some(&record.cwd)
+    });
+    let busy = records.len() == 12
+        && no_unexpected
+        && no_discovery
+        && category_count(&GitShimCategory::Observation) == 0
+        && matches(
+            &GitShimCategory::LocatorTop,
+            &locator_top,
+            Some(&binding.worktree),
+        ) == 2
+        && matches(
+            &GitShimCategory::LocatorCommon,
+            &locator_common,
+            Some(&binding.worktree),
+        ) == 2
+        && matches(&GitShimCategory::LocalBeadsRepoContext, &repo_context, None) == 4
+        && matches(&GitShimCategory::LocalBeadsActor, &actor_lookup, None) == 4
+        && busy_local_cwd.is_some_and(|private_repository| {
+            private_repository.is_absolute()
+                && private_repository != &binding.worktree
+                && private_repository != &binding.common_dir
+                && records.iter().all(|record| {
+                    !matches!(
+                        record.category,
+                        GitShimCategory::LocalBeadsRepoContext | GitShimCategory::LocalBeadsActor
+                    ) || record.cwd == *private_repository
+                })
+        });
+    if !initial && !busy {
+        return Err("cutover_blocked".into());
+    }
+    Ok(())
+}
+
+fn assert_installed_sync_config_and_lock(
+    runner: &mut SystemCommandRunner,
+    root: &Path,
+    fixture: &MirrorFixture,
+    location: &crate::store::StoreLocation,
+    base: &CurrentGeneration,
+    baseline: &crate::store::FencedSnapshot,
+    state_snapshots: &mut StateTreeSnapshots,
+) -> Result<(), String> {
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            runner,
+            root,
+            fixture,
+            location,
+            base,
+            baseline,
+            state_snapshots,
+        );
+        return Err("cutover_blocked".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        state_snapshots.require_state_root(&location.state_root)?;
+        let project = compiled_project_config().map_err(|_| "cutover_blocked".to_owned())?;
+        let worktree = &fixture.first_worktree;
+        let poison = worktree.join("tools/work-state-project.toml");
+        fs::write(
+            &poison,
+            "schema_version = 1\nproject_id = \"poisoned\"\nremote_name = \"other\"\ngit_observation_url = \"https://example.invalid/poisoned.git\"\ndolt_remote_url = \"git+https://example.invalid/poisoned.git\"\ndata_ref = \"refs/poisoned/data\"\n",
+        )
+        .map_err(|_| "cutover_blocked".to_owned())?;
+        let fake_bin = root.join("online-sync-installed-bin");
+        fs::create_dir(&fake_bin).map_err(|_| "cutover_blocked".to_owned())?;
+        let cargo_marker = root.join("online-sync-cargo-marker");
+        let rustup_marker = root.join("online-sync-rustup-marker");
+        let original_path = std::env::var_os("PATH").ok_or_else(|| "cutover_blocked".to_owned())?;
+        let real_git = resolve_absolute_git(&original_path)?;
+        let locator_path = installed_config_locator_path(&fake_bin, &original_path)?
+            .into_string()
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        let canonical_worktree =
+            fs::canonicalize(worktree).map_err(|_| "cutover_blocked".to_owned())?;
+        let canonical_common =
+            fs::canonicalize(&location.common_dir).map_err(|_| "cutover_blocked".to_owned())?;
+        let git = fake_bin.join("git");
+        let binding = InstalledGitShimBinding {
+            real_git,
+            capture: root.join("online-sync-installed-git-capture"),
+            worktree: canonical_worktree,
+            common_dir: canonical_common,
+            locator_path,
+            project: project.clone(),
+        };
+        write_installed_config_git_shim(&git, &binding)?;
+        for (name, marker_path) in [("cargo", &cargo_marker), ("rustup", &rustup_marker)] {
+            let path = fake_bin.join(name);
+            fs::write(
+                &path,
+                format!(
+                    "#!/usr/bin/env bash\nprintf '{name}\\n' > '{}'\nexit 97\n",
+                    marker_path.display()
+                ),
+            )
+            .map_err(|_| "cutover_blocked".to_owned())?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                .map_err(|_| "cutover_blocked".to_owned())?;
+        }
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        let environment = BTreeMap::from([("PATH".into(), binding.locator_path.clone())]);
+        let launcher = worktree.join("tools/work-state");
+        let current_before = fs::read(location.state_root.join("current"))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        if regular_file_digest(&base.root.join("plasmosome-work-state"))?
+            != base.manifest.wrapper_sha256
+        {
+            return Err("cutover_blocked".into());
+        }
+        for json in [false, true] {
+            let argv = if json {
+                vec!["sync".into(), "--json".into()]
+            } else {
+                vec!["sync".into()]
+            };
+            let output = runner
+                .run(contract_command(&launcher, argv, worktree, &environment))
+                .map_err(|_| "cutover_blocked".to_owned())?;
+            let expected = if json {
+                "{\"code\":\"remote_uninitialized\",\"state_changed\":false}\n"
+            } else {
+                "error[remote_uninitialized]: remote_uninitialized state_changed=false\n"
+            };
+            if output.status != 1 {
+                return Err(if json {
+                    "installed-json-status"
+                } else {
+                    "installed-human-status"
+                }
+                .into());
+            }
+            if !output.stdout.is_empty() {
+                return Err(if json {
+                    "installed-json-stdout"
+                } else {
+                    "installed-human-stdout"
+                }
+                .into());
+            }
+            if output.stderr != expected {
+                return Err(if json {
+                    "installed-json-stderr"
+                } else {
+                    "installed-human-stderr"
+                }
+                .into());
+            }
+        }
+        let records = read_installed_git_shim_records(&binding.capture)?;
+        assert_installed_git_shim_records(&records, &binding)?;
+        if cargo_marker.exists() || rustup_marker.exists() {
+            return Err("installed-cargo-route".into());
+        }
+        if fs::read(location.state_root.join("current"))
+            .map_err(|_| "installed-current-read".to_owned())?
+            != current_before
+        {
+            return Err("installed-current-change".into());
+        }
+        let state_before_busy = state_snapshots.snapshot()?;
+        let held = GenerationActivationLock::acquire_for_sync(location)
+            .map_err(|error| error.code().to_owned())?;
+        let records_before_busy = records.len();
+        let busy = runner
+            .run(contract_command(
+                &launcher,
+                vec!["sync".into(), "--json".into()],
+                worktree,
+                &environment,
+            ))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        if busy.status != 1
+            || !busy.stdout.is_empty()
+            || busy.stderr != "{\"code\":\"sync_busy\",\"state_changed\":false}\n"
+        {
+            return Err("cutover_blocked".into());
+        }
+        let post_lock_records = read_installed_git_shim_records(&binding.capture)?;
+        if post_lock_records.len() < records_before_busy
+            || assert_installed_git_shim_records(
+                &post_lock_records[records_before_busy..],
+                &binding,
+            )
+            .is_err()
+            || state_snapshots.snapshot()? != state_before_busy
+        {
+            return Err("cutover_blocked".into());
+        }
+        assert_launcher_read(runner, worktree, ReadCommand::List, base, baseline)?;
+        if read_installed_git_shim_records(&binding.capture)? != post_lock_records
+            || state_snapshots.snapshot()? != state_before_busy
+        {
+            return Err("cutover_blocked".into());
+        }
+        drop(held);
+        Ok(())
+    }
+}
+
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -2513,6 +4311,7 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
             host_target(),
             &request.archive,
             &request.binary,
+            root.path(),
             isolated_environment(root.path()),
             &mut runner,
         )
@@ -2600,6 +4399,31 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
                         ))
                     })?;
             let mut result = migration_result(&request.case, source_ref, &source, evidence);
+            if request.case == "online-sync" {
+                let online = online_sync_contract_case(
+                    &mut runner,
+                    root.path(),
+                    request,
+                    &source,
+                    &manifest,
+                )
+                .map_err(|code| {
+                    Box::new(snapshot_refusal(
+                        &request.case,
+                        source_ref,
+                        &source,
+                        &code,
+                        None,
+                        None,
+                    ))
+                })?;
+                return Ok(local_read_contract_result(
+                    &request.case,
+                    source_ref,
+                    &source,
+                    online,
+                ));
+            }
             if request.case == "all" {
                 for case in local_read_cases(&request.case) {
                     let local = local_read_contract_case(
@@ -2628,6 +4452,34 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
                         final_generation: local.local_generation,
                         operation_ids: local.operation_ids,
                         command_plans: local.command_plans,
+                    });
+                }
+                for case in online_sync_contract_cases(&request.case) {
+                    let online = online_sync_contract_case(
+                        &mut runner,
+                        root.path(),
+                        request,
+                        &source,
+                        &manifest,
+                    )
+                    .map_err(|code| {
+                        Box::new(snapshot_refusal(
+                            &request.case,
+                            source_ref,
+                            &source,
+                            &code,
+                            None,
+                            None,
+                        ))
+                    })?;
+                    result.clone_labels.extend(online.clone_labels.clone());
+                    result.command_plans.extend(online.command_plans.clone());
+                    result.scenarios.push(ScenarioEvidence {
+                        case: (*case).into(),
+                        observed_base: online.source_commit,
+                        final_generation: online.local_generation,
+                        operation_ids: online.operation_ids,
+                        command_plans: online.command_plans,
                     });
                 }
                 let transport = run_scripted_cases("transport")
@@ -3174,10 +5026,14 @@ fn host_target() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContractRequest, ContractResult, HISTORICAL_SOURCE_COMMIT, contract_refusal_exit_code,
-        finish_contract, manifest_path, resolve_changed_source_ref, run_contract, source_refusal,
+        ContractParityMismatch, ContractRequest, ContractResult, HISTORICAL_SOURCE_COMMIT,
+        OnlineSyncContractPhase, OnlineSyncContractScenario, OnlineSyncContractTransport,
+        contract_refusal_exit_code, finish_contract, manifest_path, parity_candidate_projection,
+        resolve_changed_source_ref, run_contract, source_refusal,
     };
-    use crate::command::{CommandOutput, CommandSpec, RecordingCommandRunner};
+    use crate::command::{CommandOutput, CommandRunner, CommandSpec, RecordingCommandRunner};
+    use crate::document::parse_document;
+    use crate::shadow::{ActiveOwner, initial_operational_metadata, to_operational_beads_jsonl};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -3363,5 +5219,1042 @@ mod tests {
         std::env::set_current_dir(original).unwrap();
 
         assert_eq!(result.unwrap_err().code, "beads_checksum_mismatch");
+    }
+
+    #[test]
+    fn online_sync_contract_transport_materializes_only_an_exact_fresh_init() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        let repository = staging.join("repository");
+        let binary = staging.join("bd");
+        let candidate = root.path().join("recorded-remote-candidate");
+        std::fs::create_dir_all(&repository).unwrap();
+        std::fs::create_dir_all(&candidate).unwrap();
+        std::fs::write(&binary, "staged bd").unwrap();
+        std::fs::write(candidate.join("remote-only"), "recorded candidate").unwrap();
+        let project = crate::project::compiled_project_config().unwrap();
+        let mut transport =
+            OnlineSyncContractTransport::stable(project.clone(), candidate, "b".repeat(40));
+        let environment = BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]);
+        let observation = CommandSpec {
+            program: PathBuf::from("git"),
+            argv: vec![
+                "ls-remote".into(),
+                "--exit-code".into(),
+                project.git_observation_url().into(),
+                project.data_ref().into(),
+            ],
+            cwd: Some(staging.clone()),
+            environment: environment.clone(),
+            redacted_argv_positions: vec![2],
+        };
+        assert_eq!(
+            transport.run(observation).unwrap(),
+            CommandOutput::success(format!("{}\trefs/dolt/data\n", "b".repeat(40)))
+        );
+        let mut argv = vec![
+            "--sandbox".into(),
+            "init".into(),
+            "--remote".into(),
+            "git+https://example.invalid/plasmosome.git".into(),
+            "--stealth".into(),
+            "--skip-agents".into(),
+            "--skip-hooks".into(),
+            "--non-interactive".into(),
+        ];
+        let wrong = CommandSpec {
+            program: binary.clone(),
+            argv: argv.clone(),
+            cwd: Some(repository.clone()),
+            environment: environment.clone(),
+            redacted_argv_positions: vec![3],
+        };
+        assert!(transport.run(wrong).is_err());
+        assert!(std::fs::read_dir(&repository).unwrap().next().is_none());
+
+        argv[3] = project.dolt_remote_url().into();
+        let exact = CommandSpec {
+            program: binary,
+            argv,
+            cwd: Some(repository.clone()),
+            environment,
+            redacted_argv_positions: vec![3],
+        };
+        assert_eq!(transport.run(exact).unwrap(), CommandOutput::success(""));
+        assert_eq!(
+            std::fs::read_to_string(repository.join("remote-only")).unwrap(),
+            "recorded candidate"
+        );
+    }
+
+    #[test]
+    fn online_sync_contract_transport_records_only_fixed_admitted_remote_outcomes() {
+        fn command(
+            program: PathBuf,
+            argv: Vec<String>,
+            cwd: PathBuf,
+            environment: BTreeMap<String, String>,
+            redacted_argv_positions: Vec<usize>,
+        ) -> CommandSpec {
+            CommandSpec {
+                program,
+                argv,
+                cwd: Some(cwd),
+                environment,
+                redacted_argv_positions,
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let project = crate::project::compiled_project_config().unwrap();
+        let environment = BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]);
+        for (scenario, expected_first_status, expected_init_status, expected_list, expected_r1) in [
+            (
+                OnlineSyncContractScenario::FirstTransport,
+                1,
+                None,
+                None,
+                None,
+            ),
+            (
+                OnlineSyncContractScenario::FirstMalformed,
+                0,
+                None,
+                None,
+                None,
+            ),
+            (OnlineSyncContractScenario::FirstMoved, 0, None, None, None),
+            (
+                OnlineSyncContractScenario::InitTransport,
+                0,
+                Some(1),
+                None,
+                None,
+            ),
+            (
+                OnlineSyncContractScenario::RemoteListTransport,
+                0,
+                Some(0),
+                Some(1),
+                None,
+            ),
+            (
+                OnlineSyncContractScenario::RemoteListMismatch,
+                0,
+                Some(0),
+                Some(0),
+                None,
+            ),
+            (
+                OnlineSyncContractScenario::SecondTransport,
+                0,
+                Some(0),
+                Some(0),
+                Some(1),
+            ),
+            (
+                OnlineSyncContractScenario::SecondNoMatch,
+                0,
+                Some(0),
+                Some(0),
+                Some(2),
+            ),
+            (
+                OnlineSyncContractScenario::SecondMalformed,
+                0,
+                Some(0),
+                Some(0),
+                Some(0),
+            ),
+            (
+                OnlineSyncContractScenario::SecondMoved,
+                0,
+                Some(0),
+                Some(0),
+                Some(0),
+            ),
+        ] {
+            let staging = root.path().join(format!("staging-{scenario:?}"));
+            let repository = staging.join("repository");
+            let binary = staging.join("bd");
+            let candidate = root.path().join(format!("candidate-{scenario:?}"));
+            std::fs::create_dir_all(&repository).unwrap();
+            std::fs::create_dir_all(&candidate).unwrap();
+            std::fs::write(&binary, "staged bd").unwrap();
+            std::fs::write(candidate.join("remote-only"), "recorded candidate").unwrap();
+            let mut transport =
+                OnlineSyncContractTransport::for_scenario(project.clone(), candidate, scenario);
+            let observation = || {
+                command(
+                    PathBuf::from("git"),
+                    vec![
+                        "ls-remote".into(),
+                        "--exit-code".into(),
+                        project.git_observation_url().into(),
+                        project.data_ref().into(),
+                    ],
+                    staging.clone(),
+                    environment.clone(),
+                    vec![2],
+                )
+            };
+            let first = transport.run(observation()).unwrap();
+            assert_eq!(first.status, expected_first_status, "{scenario:?}");
+            if expected_init_status.is_none() {
+                assert!(transport.run(observation()).is_err(), "{scenario:?}");
+                assert!(std::fs::read_dir(&repository).unwrap().next().is_none());
+                continue;
+            }
+            let init = command(
+                binary.clone(),
+                vec![
+                    "--sandbox".into(),
+                    "init".into(),
+                    "--remote".into(),
+                    project.dolt_remote_url().into(),
+                    "--stealth".into(),
+                    "--skip-agents".into(),
+                    "--skip-hooks".into(),
+                    "--non-interactive".into(),
+                ],
+                repository.clone(),
+                environment.clone(),
+                vec![3],
+            );
+            let init_output = transport.run(init).unwrap();
+            assert_eq!(
+                init_output.status,
+                expected_init_status.unwrap(),
+                "{scenario:?}"
+            );
+            if expected_list.is_none() {
+                assert!(transport.run(observation()).is_err(), "{scenario:?}");
+                assert!(std::fs::read_dir(&repository).unwrap().next().is_none());
+                continue;
+            }
+            let list = command(
+                binary,
+                vec![
+                    "--sandbox".into(),
+                    "--json".into(),
+                    "dolt".into(),
+                    "remote".into(),
+                    "list".into(),
+                ],
+                repository.clone(),
+                environment.clone(),
+                Vec::new(),
+            );
+            let list_output = transport.run(list).unwrap();
+            assert_eq!(list_output.status, expected_list.unwrap(), "{scenario:?}");
+            if expected_r1.is_none() {
+                assert!(transport.run(observation()).is_err(), "{scenario:?}");
+                continue;
+            }
+            let second = transport.run(observation()).unwrap();
+            assert_eq!(second.status, expected_r1.unwrap(), "{scenario:?}");
+            assert!(std::fs::read_dir(&repository).unwrap().next().is_some());
+        }
+    }
+
+    #[test]
+    fn fixture_runtime_environment_binds_private_beads_state_and_disables_backup() {
+        use super::fixture_runtime_environment;
+        use std::fs;
+
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join(".staging-fixture-runtime");
+        let runtime = staging.join("runtime");
+        for name in ["home", "xdg_config", "xdg_cache", "xdg_data", "tmp"] {
+            fs::create_dir_all(runtime.join(name)).unwrap();
+        }
+        fs::create_dir_all(staging.join("repository/.beads")).unwrap();
+        fs::write(runtime.join("git_config_global"), "").unwrap();
+
+        assert_eq!(
+            fixture_runtime_environment(&staging).unwrap(),
+            BTreeMap::from([
+                ("PATH".into(), std::env::var("PATH").unwrap()),
+                ("HOME".into(), runtime.join("home").display().to_string()),
+                (
+                    "XDG_CONFIG_HOME".into(),
+                    runtime.join("xdg_config").display().to_string(),
+                ),
+                (
+                    "XDG_CACHE_HOME".into(),
+                    runtime.join("xdg_cache").display().to_string(),
+                ),
+                (
+                    "XDG_DATA_HOME".into(),
+                    runtime.join("xdg_data").display().to_string(),
+                ),
+                ("TMPDIR".into(), runtime.join("tmp").display().to_string()),
+                (
+                    "GIT_CONFIG_GLOBAL".into(),
+                    runtime.join("git_config_global").display().to_string(),
+                ),
+                (
+                    "BEADS_DIR".into(),
+                    staging.join("repository/.beads").display().to_string(),
+                ),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+                ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                ("BD_DISABLE_METRICS".into(), "1".into()),
+                ("BD_DISABLE_EVENT_FLUSH".into(), "1".into()),
+                ("BD_NON_INTERACTIVE".into(), "1".into()),
+                ("BD_BACKUP_ENABLED".into(), "false".into()),
+                ("CI".into(), "true".into()),
+            ])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn online_sync_contract_transport_admits_only_metadata_version_after_pending_refusal() {
+        use super::fixture_runtime_environment;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
+
+        let _working_directory = PROCESS_WORKING_DIRECTORY.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let generations = root.path().join("generations");
+        let first_stage = generations.join(".staging-observation");
+        let metadata_stage = generations.join(".staging-pending-metadata");
+        let empty_metadata_stage = generations.join(".staging-");
+        let outside_stage = root.path().join("outside/.staging-pending-metadata");
+        let candidate = root.path().join("recorded-remote-candidate");
+
+        fn create_stage(stage: &Path) {
+            let runtime = stage.join("runtime");
+            for name in ["home", "xdg_config", "xdg_cache", "xdg_data", "tmp"] {
+                fs::create_dir_all(runtime.join(name)).unwrap();
+            }
+            fs::create_dir_all(stage.join("repository/.beads")).unwrap();
+            fs::write(runtime.join("git_config_global"), "").unwrap();
+            let binary = stage.join("bd");
+            fs::write(&binary, "#!/bin/sh\nprintf 'bd version 1.1.2 (test)\\n'\n").unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        create_stage(&first_stage);
+        create_stage(&metadata_stage);
+        create_stage(&empty_metadata_stage);
+        create_stage(&outside_stage);
+        fs::create_dir_all(&candidate).unwrap();
+        let project = crate::project::compiled_project_config().unwrap();
+        let first_environment = fixture_runtime_environment(&first_stage).unwrap();
+        let metadata_environment = fixture_runtime_environment(&metadata_stage).unwrap();
+
+        let prepare = || {
+            let mut transport = OnlineSyncContractTransport::for_scenario(
+                project.clone(),
+                candidate.clone(),
+                OnlineSyncContractScenario::FirstMoved,
+            );
+            let observation = CommandSpec {
+                program: PathBuf::from("git"),
+                argv: vec![
+                    "ls-remote".into(),
+                    "--exit-code".into(),
+                    project.git_observation_url().into(),
+                    project.data_ref().into(),
+                ],
+                cwd: Some(first_stage.clone()),
+                environment: first_environment.clone(),
+                redacted_argv_positions: vec![2],
+            };
+            assert_eq!(transport.run(observation).unwrap().status, 0);
+            transport
+        };
+
+        let valid = CommandSpec {
+            program: metadata_stage.join("bd"),
+            argv: vec!["--version".into()],
+            cwd: Some(metadata_stage.clone()),
+            environment: metadata_environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        };
+
+        let required = prepare();
+        assert!(required.is_metadata_version_transition(&valid));
+
+        let mut invalid = Vec::new();
+        let mut missing_beads_dir = valid.clone();
+        missing_beads_dir.environment.remove("BEADS_DIR");
+        invalid.push(missing_beads_dir);
+        let mut altered_beads_dir = valid.clone();
+        altered_beads_dir.environment.insert(
+            "BEADS_DIR".into(),
+            first_stage.join("repository/.beads").display().to_string(),
+        );
+        invalid.push(altered_beads_dir);
+        let mut missing_backup = valid.clone();
+        missing_backup.environment.remove("BD_BACKUP_ENABLED");
+        invalid.push(missing_backup);
+        let mut true_backup = valid.clone();
+        true_backup
+            .environment
+            .insert("BD_BACKUP_ENABLED".into(), "true".into());
+        invalid.push(true_backup);
+        let mut changed_path = valid.clone();
+        changed_path
+            .environment
+            .insert("PATH".into(), "/wrong/path".into());
+        invalid.push(changed_path);
+        let mut changed_ci = valid.clone();
+        changed_ci.environment.insert("CI".into(), "false".into());
+        invalid.push(changed_ci);
+        let mut extra_environment = valid.clone();
+        extra_environment
+            .environment
+            .insert("EXTRA".into(), "forbidden".into());
+        invalid.push(extra_environment);
+        let mut none_cwd = valid.clone();
+        none_cwd.cwd = None;
+        invalid.push(none_cwd);
+        let mut first_stage_command = valid.clone();
+        first_stage_command.program = first_stage.join("bd");
+        first_stage_command.cwd = Some(first_stage.clone());
+        first_stage_command.environment = first_environment.clone();
+        invalid.push(first_stage_command);
+        let mut repository_cwd = valid.clone();
+        repository_cwd.cwd = Some(metadata_stage.join("repository"));
+        invalid.push(repository_cwd);
+        let mut empty_stage = valid.clone();
+        empty_stage.program = empty_metadata_stage.join("bd");
+        empty_stage.cwd = Some(empty_metadata_stage.clone());
+        invalid.push(empty_stage);
+        let mut outside = valid.clone();
+        outside.program = outside_stage.join("bd");
+        outside.cwd = Some(outside_stage.clone());
+        invalid.push(outside);
+        let mut wrong_argv = valid.clone();
+        wrong_argv.argv = vec!["--readonly".into(), "--version".into()];
+        invalid.push(wrong_argv);
+        let mut redacted = valid.clone();
+        redacted.redacted_argv_positions = vec![0];
+        invalid.push(redacted);
+
+        for command in invalid {
+            let mut transport = prepare();
+            assert_eq!(transport.run(command), Err("cutover_blocked".into()));
+            assert_eq!(transport.phase, OnlineSyncContractPhase::AwaitInit);
+        }
+
+        let mut transport = prepare();
+        assert_eq!(
+            transport.run(valid).unwrap(),
+            CommandOutput::success("bd version 1.1.2 (test)\n")
+        );
+        assert_eq!(transport.phase, OnlineSyncContractPhase::Complete);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_config_locator_path_preserves_a_multi_entry_path() {
+        use super::installed_config_locator_path;
+        use std::ffi::OsStr;
+
+        let fake_bin = PathBuf::from("/contract-fake-bin");
+        let original = std::env::join_paths([OsStr::new("/usr/bin"), OsStr::new("/bin")]).unwrap();
+        let expected = std::env::join_paths([
+            fake_bin.as_os_str(),
+            OsStr::new("/usr/bin"),
+            OsStr::new("/bin"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            installed_config_locator_path(&fake_bin, &original).unwrap(),
+            expected
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_tree_snapshot_rehashes_on_identity_change_and_reuses_only_unchanged_regular_files() {
+        use super::{CachedTreeDigestCache, snapshot_regular_tree_with_cached_digests};
+        use std::fs;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::tempdir().unwrap();
+        let tree = root.path().join("tree");
+        let binary = tree.join("bd");
+        fs::create_dir(&tree).unwrap();
+        fs::write(&binary, b"first-binary-contents").unwrap();
+        let mut initial_mode = fs::metadata(&binary).unwrap().permissions();
+        initial_mode.set_mode(0o700);
+        fs::set_permissions(&binary, initial_mode).unwrap();
+        let mut cache = CachedTreeDigestCache::default();
+
+        let first = snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap();
+        assert_eq!(cache.digest_reads(), 1);
+        assert_eq!(
+            snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap(),
+            first
+        );
+        assert_eq!(cache.digest_reads(), 1);
+
+        fs::write(&binary, b"changed-binary-contents-with-a-different-length").unwrap();
+        let changed_contents =
+            snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap();
+        assert_ne!(changed_contents, first);
+        assert_eq!(cache.digest_reads(), 2);
+
+        let replacement = tree.join("replacement");
+        fs::write(&replacement, b"replacement-binary").unwrap();
+        let mut replacement_mode = fs::metadata(&replacement).unwrap().permissions();
+        replacement_mode.set_mode(0o700);
+        fs::set_permissions(&replacement, replacement_mode).unwrap();
+        fs::rename(&replacement, &binary).unwrap();
+        let replaced = snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap();
+        assert_ne!(replaced, changed_contents);
+        assert_eq!(cache.digest_reads(), 3);
+
+        let mut mode = fs::metadata(&binary).unwrap().permissions();
+        mode.set_mode(0o600);
+        fs::set_permissions(&binary, mode).unwrap();
+        let chmodded = snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap();
+        assert_ne!(chmodded, replaced);
+        assert_eq!(cache.digest_reads(), 4);
+
+        let added = tree.join("added");
+        fs::write(&added, b"added-file").unwrap();
+        let with_added = snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap();
+        assert_ne!(with_added, chmodded);
+        assert_eq!(cache.digest_reads(), 5);
+        fs::remove_file(&added).unwrap();
+        let without_added = snapshot_regular_tree_with_cached_digests(&tree, &mut cache).unwrap();
+        assert_ne!(without_added, with_added);
+        assert_eq!(cache.digest_reads(), 5);
+
+        let link = tree.join("link");
+        symlink("bd", &link).unwrap();
+        assert!(snapshot_regular_tree_with_cached_digests(&tree, &mut cache).is_err());
+        fs::remove_file(&link).unwrap();
+        let socket = UnixListener::bind(tree.join("socket")).unwrap();
+        assert!(snapshot_regular_tree_with_cached_digests(&tree, &mut cache).is_err());
+        drop(socket);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn online_sync_state_snapshots_reuse_digests_across_inventory_boundaries_and_bind_one_state_root()
+     {
+        use super::StateTreeSnapshots;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let state_root = fixture.path().join("state");
+        let other_state_root = fixture.path().join("other-state");
+        fs::create_dir(&state_root).unwrap();
+        fs::create_dir(&other_state_root).unwrap();
+        let binary = state_root.join("bd");
+        let metadata = state_root.join("state.json");
+        fs::write(&binary, b"first-binary-contents").unwrap();
+        let mut binary_mode = fs::metadata(&binary).unwrap().permissions();
+        binary_mode.set_mode(0o700);
+        fs::set_permissions(&binary, binary_mode).unwrap();
+        fs::write(&metadata, b"first-state-contents").unwrap();
+
+        let mut snapshots = StateTreeSnapshots::new(&state_root).unwrap();
+        let first = snapshots.snapshot().unwrap();
+        assert_eq!(snapshots.digest_reads(), 2);
+        assert_eq!(snapshots.snapshot().unwrap(), first);
+        assert_eq!(snapshots.digest_reads(), 2);
+
+        fs::write(&metadata, b"changed-state-contents-with-a-different-length").unwrap();
+        let changed_metadata = snapshots.snapshot().unwrap();
+        assert_ne!(changed_metadata, first);
+        assert_eq!(snapshots.digest_reads(), 3);
+
+        let replacement = state_root.join("replacement-bd");
+        fs::write(&replacement, b"replacement-binary-contents").unwrap();
+        let mut replacement_mode = fs::metadata(&replacement).unwrap().permissions();
+        replacement_mode.set_mode(0o700);
+        fs::set_permissions(&replacement, replacement_mode).unwrap();
+        fs::rename(&replacement, &binary).unwrap();
+        let replaced_binary = snapshots.snapshot().unwrap();
+        assert_ne!(replaced_binary, changed_metadata);
+        assert_eq!(snapshots.digest_reads(), 4);
+
+        assert!(snapshots.require_state_root(&other_state_root).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn busy_sync_git_records_are_exact_preflight_reads() {
+        use super::{
+            GitShimCategory, GitShimRecord, InstalledGitShimBinding,
+            assert_installed_git_shim_records,
+        };
+        use std::fs;
+
+        fn record(
+            category: GitShimCategory,
+            cwd: &std::path::Path,
+            argv: &[&str],
+        ) -> GitShimRecord {
+            GitShimRecord {
+                cwd: cwd.to_path_buf(),
+                argv: argv.iter().map(|value| (*value).to_owned()).collect(),
+                category,
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("worktree");
+        let common_dir = root.path().join("common");
+        let repository = root.path().join("disposable/repository");
+        let other_repository = root.path().join("other/repository");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&common_dir).unwrap();
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(&other_repository).unwrap();
+        let worktree = fs::canonicalize(worktree).unwrap();
+        let repository = fs::canonicalize(repository).unwrap();
+        let other_repository = fs::canonicalize(other_repository).unwrap();
+        let binding = InstalledGitShimBinding {
+            real_git: PathBuf::from("/usr/bin/git"),
+            capture: root.path().join("capture"),
+            worktree: worktree.clone(),
+            common_dir: fs::canonicalize(common_dir).unwrap(),
+            locator_path: "/contract-private-bin".into(),
+            project: crate::project::compiled_project_config().unwrap(),
+        };
+        let top = ["rev-parse", "--show-toplevel"];
+        let common = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+        let context = [
+            "rev-parse",
+            "--git-dir",
+            "--git-common-dir",
+            "--show-toplevel",
+        ];
+        let actor = ["config", "user.name"];
+        let mut records = vec![
+            record(GitShimCategory::LocatorTop, &worktree, &top),
+            record(GitShimCategory::LocatorTop, &worktree, &top),
+            record(GitShimCategory::LocatorCommon, &worktree, &common),
+            record(GitShimCategory::LocatorCommon, &worktree, &common),
+        ];
+        records.extend((0..4).map(|_| {
+            record(
+                GitShimCategory::LocalBeadsRepoContext,
+                &repository,
+                &context,
+            )
+        }));
+        records
+            .extend((0..4).map(|_| record(GitShimCategory::LocalBeadsActor, &repository, &actor)));
+
+        assert_eq!(
+            assert_installed_git_shim_records(&records, &binding),
+            Ok(())
+        );
+
+        let assert_refused = |invalid: &[GitShimRecord]| {
+            assert_eq!(
+                assert_installed_git_shim_records(invalid, &binding),
+                Err("cutover_blocked".into())
+            );
+        };
+        let mut observation = records.clone();
+        observation.push(record(
+            GitShimCategory::Observation,
+            &repository,
+            &[
+                "ls-remote",
+                "--exit-code",
+                "https://github.com/teonimesic/plasmosome.git",
+                "refs/dolt/data",
+            ],
+        ));
+        assert_refused(&observation);
+        let mut unexpected = records.clone();
+        unexpected[4].category = GitShimCategory::Unexpected;
+        assert_refused(&unexpected);
+        let mut extra = records.clone();
+        extra.push(records[0].clone());
+        assert_refused(&extra);
+        let mut wrong_argv = records.clone();
+        wrong_argv[4].argv = vec![
+            "rev-parse".into(),
+            "--git-dir".into(),
+            "--show-toplevel".into(),
+            "--git-common-dir".into(),
+        ];
+        assert_refused(&wrong_argv);
+        let mut wrong_cwd = records;
+        wrong_cwd[8].cwd = other_repository;
+        assert_refused(&wrong_cwd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_config_git_shim_admits_only_bound_local_beads_discovery() {
+        use super::{
+            GitShimCategory, InstalledGitShimBinding, read_installed_git_shim_records,
+            resolve_absolute_git, write_installed_config_git_shim,
+        };
+        use crate::command::SystemCommandRunner;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn runtime_environment(root: &std::path::Path, path: String) -> BTreeMap<String, String> {
+            let runtime = root.join("runtime");
+            for name in ["home", "xdg_config", "xdg_cache", "xdg_data", "tmp"] {
+                fs::create_dir_all(runtime.join(name)).unwrap();
+            }
+            fs::write(runtime.join("git_config_global"), "").unwrap();
+            BTreeMap::from([
+                ("PATH".into(), path),
+                ("HOME".into(), runtime.join("home").display().to_string()),
+                (
+                    "XDG_CONFIG_HOME".into(),
+                    runtime.join("xdg_config").display().to_string(),
+                ),
+                (
+                    "XDG_CACHE_HOME".into(),
+                    runtime.join("xdg_cache").display().to_string(),
+                ),
+                (
+                    "XDG_DATA_HOME".into(),
+                    runtime.join("xdg_data").display().to_string(),
+                ),
+                ("TMPDIR".into(), runtime.join("tmp").display().to_string()),
+                (
+                    "GIT_CONFIG_GLOBAL".into(),
+                    runtime.join("git_config_global").display().to_string(),
+                ),
+                (
+                    "BEADS_DIR".into(),
+                    root.join("repository/.beads").display().to_string(),
+                ),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+                ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                ("BD_DISABLE_METRICS".into(), "1".into()),
+                ("BD_DISABLE_EVENT_FLUSH".into(), "1".into()),
+                ("BD_NON_INTERACTIVE".into(), "1".into()),
+                ("BD_BACKUP_ENABLED".into(), "false".into()),
+                ("CI".into(), "true".into()),
+            ])
+        }
+
+        fn command(
+            argv: Vec<String>,
+            cwd: PathBuf,
+            environment: BTreeMap<String, String>,
+        ) -> CommandSpec {
+            CommandSpec {
+                program: PathBuf::from("git"),
+                argv,
+                cwd: Some(cwd),
+                environment,
+                redacted_argv_positions: Vec::new(),
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let fake_bin = root.path().join("bin");
+        let worktree = root.path().join("worktree");
+        let common = root.path().join("common");
+        let disposable = root.path().join("disposable");
+        let repository = disposable.join("repository");
+        fs::create_dir_all(&fake_bin).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&common).unwrap();
+        fs::create_dir_all(&repository).unwrap();
+        let original_path = std::env::var_os("PATH").unwrap();
+        let real_git = resolve_absolute_git(&original_path).unwrap();
+        let original_path = original_path.to_string_lossy().into_owned();
+        let path = format!("{}:{original_path}", fake_bin.display());
+        let mut runner = SystemCommandRunner;
+        assert_eq!(
+            runner
+                .run(CommandSpec {
+                    program: real_git.clone(),
+                    argv: vec!["init".into(), "--quiet".into()],
+                    cwd: Some(repository.clone()),
+                    environment: BTreeMap::from([("PATH".into(), original_path.clone())]),
+                    redacted_argv_positions: Vec::new(),
+                })
+                .unwrap()
+                .status,
+            0
+        );
+        assert_eq!(
+            runner
+                .run(CommandSpec {
+                    program: real_git.clone(),
+                    argv: vec!["config".into(), "user.name".into(), "Private User".into()],
+                    cwd: Some(repository.clone()),
+                    environment: BTreeMap::from([("PATH".into(), original_path.clone())]),
+                    redacted_argv_positions: Vec::new(),
+                })
+                .unwrap()
+                .status,
+            0
+        );
+        let environment = runtime_environment(&disposable, path.clone());
+        let shim = fake_bin.join("git");
+        let capture = root.path().join("capture");
+        let binding = InstalledGitShimBinding {
+            real_git,
+            capture: capture.clone(),
+            worktree: fs::canonicalize(&worktree).unwrap(),
+            common_dir: fs::canonicalize(&common).unwrap(),
+            locator_path: path,
+            project: crate::project::compiled_project_config().unwrap(),
+        };
+        write_installed_config_git_shim(&shim, &binding).unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let repo_context = vec![
+            "rev-parse".into(),
+            "--git-dir".into(),
+            "--git-common-dir".into(),
+            "--show-toplevel".into(),
+        ];
+        let actor_lookup = vec!["config".into(), "user.name".into()];
+        let discovery = vec![
+            "-C".into(),
+            repository.display().to_string(),
+            "rev-parse".into(),
+            "--git-dir".into(),
+            "--git-common-dir".into(),
+        ];
+        let repo_context_output = runner
+            .run(command(
+                repo_context.clone(),
+                repository.clone(),
+                environment.clone(),
+            ))
+            .unwrap();
+        assert_eq!(repo_context_output.status, 0);
+        assert!(!repo_context_output.stdout.is_empty());
+        let actor_output = runner
+            .run(command(
+                actor_lookup.clone(),
+                repository.clone(),
+                environment.clone(),
+            ))
+            .unwrap();
+        assert_eq!(actor_output.status, 0);
+        assert_eq!(actor_output.stdout, "Private User\n");
+
+        let mut wrong_environment = environment.clone();
+        wrong_environment.remove("CI");
+        let mut wrong_runtime = environment.clone();
+        wrong_runtime.insert(
+            "TMPDIR".into(),
+            root.path().join("other/runtime/tmp").display().to_string(),
+        );
+        let mut proxy_environment = environment.clone();
+        proxy_environment.insert("HTTPS_PROXY".into(), "sentinel".into());
+        let mut missing_beads_dir = environment.clone();
+        missing_beads_dir.remove("BEADS_DIR");
+        let mut altered_backup = environment.clone();
+        altered_backup.insert("BD_BACKUP_ENABLED".into(), "true".into());
+        let cases = vec![
+            command(discovery.clone(), repository.clone(), environment.clone()),
+            command(
+                repo_context.clone(),
+                disposable.clone(),
+                environment.clone(),
+            ),
+            command(
+                actor_lookup.clone(),
+                disposable.clone(),
+                environment.clone(),
+            ),
+            command(
+                vec![
+                    "-C".into(),
+                    disposable.join("other").display().to_string(),
+                    "rev-parse".into(),
+                    "--git-dir".into(),
+                    "--git-common-dir".into(),
+                ],
+                repository.clone(),
+                environment.clone(),
+            ),
+            command(
+                repo_context[..3].to_vec(),
+                repository.clone(),
+                environment.clone(),
+            ),
+            command(
+                vec![
+                    "rev-parse".into(),
+                    "--git-common-dir".into(),
+                    "--git-dir".into(),
+                    "--show-toplevel".into(),
+                ],
+                repository.clone(),
+                environment.clone(),
+            ),
+            command(
+                [repo_context.clone(), vec!["extra".into()]].concat(),
+                repository.clone(),
+                environment.clone(),
+            ),
+            command(
+                [actor_lookup.clone(), vec!["extra".into()]].concat(),
+                repository.clone(),
+                environment.clone(),
+            ),
+            command(repo_context.clone(), repository.clone(), wrong_environment),
+            command(repo_context.clone(), repository.clone(), wrong_runtime),
+            command(repo_context.clone(), repository.clone(), proxy_environment),
+            command(repo_context.clone(), repository.clone(), missing_beads_dir),
+            command(actor_lookup.clone(), repository.clone(), altered_backup),
+            command(
+                vec![
+                    "ls-remote".into(),
+                    "--exit-code".into(),
+                    "https://example.invalid/plasmosome.git".into(),
+                    "refs/dolt/data".into(),
+                ],
+                disposable.clone(),
+                environment.clone(),
+            ),
+            command(
+                vec!["config".into(), "user.email".into()],
+                repository.clone(),
+                environment.clone(),
+            ),
+            command(
+                vec!["config".into(), "--get".into(), "remote.origin.url".into()],
+                repository.clone(),
+                environment.clone(),
+            ),
+            command(
+                vec!["remote".into()],
+                repository.clone(),
+                environment.clone(),
+            ),
+            command(
+                vec!["fetch".into()],
+                repository.clone(),
+                environment.clone(),
+            ),
+            command(vec!["pull".into()], repository.clone(), environment.clone()),
+            command(vec!["push".into()], repository.clone(), environment.clone()),
+            command(
+                vec!["update-ref".into(), "refs/dolt/data".into(), "a".repeat(40)],
+                repository.clone(),
+                environment,
+            ),
+        ];
+        let rejected = cases.len();
+        for case in cases {
+            assert_eq!(runner.run(case).unwrap().status, 97);
+        }
+        let records = read_installed_git_shim_records(&capture).unwrap();
+        assert_eq!(records.len(), 2 + rejected);
+        assert_ne!(records[0].category, GitShimCategory::Unexpected);
+        assert_ne!(records[1].category, GitShimCategory::Unexpected);
+        assert_ne!(records[0].category, GitShimCategory::LocalBeadsDiscovery);
+        assert_ne!(records[1].category, GitShimCategory::LocalBeadsDiscovery);
+        assert_ne!(records[0].category, records[1].category);
+        assert_eq!(records[0].cwd, fs::canonicalize(&repository).unwrap());
+        assert_eq!(records[0].argv, repo_context);
+        assert_eq!(records[1].cwd, fs::canonicalize(&repository).unwrap());
+        assert_eq!(records[1].argv, actor_lookup);
+        assert!(
+            records[2..]
+                .iter()
+                .all(|record| record.category == GitShimCategory::Unexpected)
+        );
+    }
+
+    #[test]
+    fn contract_parity_candidates_are_valid_shadows_with_one_representative_difference() {
+        let source = "a".repeat(40);
+        let documents = vec![
+            parse_document(
+                "docs/intents/001-intent.md",
+                "---\nid: 001\ntitle: Intent\nstatus: approved\n---\n",
+                &source,
+            )
+            .unwrap(),
+            parse_document(
+                "docs/specs/001-spec.md",
+                "---\nid: 001\ntitle: Spec\nstatus: accepted\nintents: [001]\n---\n",
+                &source,
+            )
+            .unwrap(),
+            parse_document(
+                "tasks/001-first.md",
+                "---\nid: 001\ntitle: First Task\nstatus: planned\npriority: 1\nintents: [001]\nspecs: [001]\n---\n",
+                &source,
+            )
+            .unwrap(),
+            parse_document(
+                "tasks/002-second.md",
+                "---\nid: 002\ntitle: Second Task\nstatus: planned\npriority: 2\nintents: [001]\nspecs: [001]\n---\n",
+                &source,
+            )
+            .unwrap(),
+        ];
+        let operational = initial_operational_metadata(&documents).unwrap();
+        for mismatch in [
+            ContractParityMismatch::Authority,
+            ContractParityMismatch::Source,
+            ContractParityMismatch::Logical,
+            ContractParityMismatch::Operational,
+            ContractParityMismatch::Missing,
+            ContractParityMismatch::Extra,
+            ContractParityMismatch::UnknownKeyValue,
+        ] {
+            let (candidate_documents, candidate_operational, key_value) =
+                parity_candidate_projection(mismatch, &documents, &operational).unwrap();
+            to_operational_beads_jsonl(&candidate_documents, &candidate_operational).unwrap();
+            match mismatch {
+                ContractParityMismatch::Authority => assert_eq!(
+                    key_value,
+                    Some(("plasmosome.authority-mode", "ledger".into()))
+                ),
+                ContractParityMismatch::Source => assert_eq!(
+                    key_value,
+                    Some(("plasmosome.source-commit", "b".repeat(40)))
+                ),
+                ContractParityMismatch::Logical => {
+                    assert_eq!(candidate_documents[2].record.title, "Changed remotely")
+                }
+                ContractParityMismatch::Operational => assert_eq!(
+                    candidate_operational["task:001"].active_owner,
+                    Some(ActiveOwner {
+                        actor: "remote-owner".into(),
+                        session_id: "remote-session".into(),
+                        ownership_token: "remote-token".into(),
+                        claim_operation_id: "remote-claim".into(),
+                        acquired_at: "2026-09-02T12:00:00Z".into(),
+                        expires_at: "2026-09-02T13:00:00Z".into(),
+                    })
+                ),
+                ContractParityMismatch::Missing => assert_eq!(
+                    candidate_documents
+                        .iter()
+                        .map(|document| document.record.document_key.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["intent:001", "spec:001", "task:001"]
+                ),
+                ContractParityMismatch::Extra => assert_eq!(
+                    candidate_documents.last().unwrap().record.document_key,
+                    "task:999"
+                ),
+                ContractParityMismatch::UnknownKeyValue => {
+                    assert_eq!(key_value, Some(("plasmosome.writer", "forbidden".into())))
+                }
+            }
+        }
     }
 }

@@ -89,9 +89,55 @@ fn verified_release_binary_is_accepted() {
         "aarch64-apple-darwin",
         &archive,
         &binary,
+        root.path(),
         &mut runner,
     );
     assert!(verified.is_ok(), "{verified:?}");
+}
+
+#[test]
+fn version_checks_use_explicit_private_cwd() {
+    let root = tempdir().unwrap();
+    let private_root = root.path().join("private-runtime-owner");
+    let archive = root.path().join("beads_1.1.2_darwin_arm64.tar.gz");
+    let binary = private_root.join("bd");
+    let pin = root.path().join("pin.toml");
+    fs::create_dir(&private_root).unwrap();
+    write(&archive, b"archive");
+    write(&binary, b"binary");
+    write(&pin, manifest(b"archive", b"binary"));
+    let manifest = PinManifest::load(&pin).unwrap();
+    let mut verified_runner =
+        RecordingCommandRunner::with_output(CommandOutput::success("bd version 1.1.2 (abc)\n"));
+    VerifiedBeads::verify(
+        &manifest,
+        "aarch64-apple-darwin",
+        &archive,
+        &binary,
+        &private_root,
+        &mut verified_runner,
+    )
+    .unwrap();
+    assert_eq!(
+        verified_runner.commands()[0].cwd.as_deref(),
+        Some(private_root.as_path())
+    );
+
+    let mut installed_runner =
+        RecordingCommandRunner::with_output(CommandOutput::success("bd version 1.1.2 (abc)\n"));
+    InstalledBeads::verify(
+        &manifest,
+        "aarch64-apple-darwin",
+        &binary,
+        &private_root,
+        Default::default(),
+        &mut installed_runner,
+    )
+    .unwrap();
+    assert_eq!(
+        installed_runner.commands()[0].cwd.as_deref(),
+        Some(private_root.as_path())
+    );
 }
 
 #[test]
@@ -114,6 +160,7 @@ fn lower_higher_and_unparsable_versions_are_refused() {
             "aarch64-apple-darwin",
             &archive,
             &binary,
+            root.path(),
             &mut runner,
         )
         .unwrap_err();
@@ -137,6 +184,7 @@ fn wrong_archive_and_wrong_binary_checksums_are_refused() {
         "aarch64-apple-darwin",
         &archive,
         &binary,
+        root.path(),
         &mut runner,
     )
     .unwrap_err();
@@ -148,6 +196,7 @@ fn wrong_archive_and_wrong_binary_checksums_are_refused() {
         "aarch64-apple-darwin",
         &archive,
         &binary,
+        root.path(),
         &mut runner,
     )
     .unwrap_err();
@@ -169,6 +218,7 @@ fn checksum_refusal_runs_no_program_or_store_command() {
         "aarch64-apple-darwin",
         &archive,
         &binary,
+        root.path(),
         &mut runner,
     );
     assert!(runner.commands().is_empty());
@@ -189,6 +239,7 @@ fn a_binary_claiming_1_1_2_with_other_bytes_is_refused() {
         "aarch64-apple-darwin",
         &archive,
         &binary,
+        root.path(),
         &mut runner,
     )
     .unwrap_err();
@@ -208,6 +259,7 @@ fn a_missing_or_duplicate_platform_is_refused() {
         "x86_64-unknown-linux-gnu",
         Path::new("missing"),
         Path::new("missing"),
+        root.path(),
         &mut runner,
     )
     .unwrap_err();
@@ -275,6 +327,7 @@ fn installed_binary_verification_needs_no_archive() {
         &manifest,
         "aarch64-apple-darwin",
         &installed,
+        root.path(),
         Default::default(),
         &mut runner,
     );
@@ -325,6 +378,7 @@ fn installed_binary_verification_needs_no_archive() {
             &manifest,
             "aarch64-apple-darwin",
             &candidate,
+            root.path(),
             Default::default(),
             &mut runner,
         )

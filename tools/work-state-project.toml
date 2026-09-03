@@ -1,0 +1,6 @@
+schema_version = 1
+project_id = "plasmosome"
+remote_name = "origin"
+git_observation_url = "https://github.com/teonimesic/plasmosome.git"
+dolt_remote_url = "git+https://github.com/teonimesic/plasmosome.git"
+data_ref = "refs/dolt/data"

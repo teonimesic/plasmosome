@@ -102,14 +102,14 @@ read_launcher() {
 }
 
 case "${1:-}" in
-  list|show|ready|blocked)
+  list|show|ready|blocked|sync)
     read_launcher "$@"
     ;;
   bootstrap)
     exec cargo run --release --locked --offline --quiet -p plasmosome-work-state -- "$@"
     ;;
   contract-test)
-    exec cargo run --locked --offline --quiet -p plasmosome-work-state -- "$@"
+    exec cargo run --release --locked --offline --quiet -p plasmosome-work-state -- "$@"
     ;;
   *)
     refuse invalid_command 2
