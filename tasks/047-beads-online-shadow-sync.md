@@ -1,7 +1,7 @@
 ---
 id: 047
 title: Synchronize the installed Beads shadow online
-status: in_review
+status: in_progress
 priority: 1
 specs: [014]
 intents: [015]
