@@ -10,8 +10,8 @@ use crate::document::{
     SourceDocuments, discovered_document_paths, is_lower_hex_sha, load_documents,
 };
 use crate::freshness::{
-    FreshnessEnvelope, ObservationState, PendingMutations, RemoteRelation, classify,
-    full_nonblank_commit, validate,
+    FreshnessEnvelope, ObservationState, PendingMutations, RemoteRelation, canonical_utc, classify,
+    full_nonblank_commit, record_failed_sync_observation, validate,
 };
 use crate::pin::{InstalledBeads, PinManifest, VerifiedBeads};
 use crate::shadow::{
@@ -227,6 +227,8 @@ pub enum ActivationFault {
 #[derive(Debug)]
 pub struct GenerationActivationLock {
     file: File,
+    state_root: PathBuf,
+    lock_path: PathBuf,
 }
 
 impl GenerationActivationLock {
@@ -260,7 +262,7 @@ impl GenerationActivationLock {
                 .read(true)
                 .write(true)
                 .custom_flags(libc::O_NOFOLLOW)
-                .open(path)
+                .open(&path)
                 .map_err(|_| refusal("invalid_store"))?
         };
         #[cfg(not(unix))]
@@ -286,12 +288,21 @@ impl GenerationActivationLock {
                 );
             }
         }
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            state_root: location.state_root.clone(),
+            lock_path: path,
+        })
     }
 
     /// Acquires the clone-local activation lock for one synchronization without waiting.
     pub fn acquire_for_sync(location: &StoreLocation) -> Result<Self, StoreError> {
         Self::acquire_with_busy_code(location, "sync_busy")
+    }
+
+    fn binds_location(&self, location: &StoreLocation) -> bool {
+        self.state_root == location.state_root
+            && self.lock_path == location.state_root.join("bootstrap.lock")
     }
 }
 
@@ -318,6 +329,346 @@ impl BootstrapLock {
         GenerationActivationLock::acquire_with_busy_code(location, "bootstrap_busy")
             .map(|_activation_lock| Self { _activation_lock })
     }
+}
+
+/// One lock-bound pre-observation synchronization staging root.
+///
+/// Its fields intentionally remain private: only the synchronization state machine may turn this
+/// verified runtime-only root into a candidate repository.
+pub(crate) struct SyncStaging<'lock> {
+    location: StoreLocation,
+    selected: CurrentGeneration,
+    selected_snapshot: FencedSnapshot,
+    pin: PinManifest,
+    target: String,
+    generation_name: String,
+    root: PathBuf,
+    environment: BTreeMap<String, String>,
+    wrapper_sha256: String,
+    beads_binary_sha256: String,
+    lock: &'lock GenerationActivationLock,
+}
+
+/// One fresh staged repository that can only exist after a valid first remote observation.
+pub(crate) struct FreshSyncCandidate<'lock> {
+    staging: SyncStaging<'lock>,
+}
+
+/// The only staged synchronization form permitted to write a manifest and activate `current`.
+pub(crate) struct ValidatedSyncCandidate<'lock> {
+    candidate: FreshSyncCandidate<'lock>,
+    manifest: StateManifest,
+}
+
+/// A valid remote fact used only to preserve a failed synchronization observation.
+pub(crate) enum FailedSyncObservation {
+    /// No trustworthy remote generation was observed.
+    BeforeR0,
+    /// A complete first remote observation was made before the failure.
+    AfterR0 {
+        remote_generation: String,
+        observed_at: String,
+    },
+}
+
+impl<'lock> SyncStaging<'lock> {
+    /// Returns the one private staging root bound to this synchronization attempt.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Returns the repository location that may be created only after a valid R0 observation.
+    pub(crate) fn repository(&self) -> PathBuf {
+        self.root.join("repository")
+    }
+
+    /// Returns the exact copied pinned Beads executable for this staging root.
+    pub(crate) fn binary(&self) -> PathBuf {
+        self.root.join("bd")
+    }
+
+    /// Returns the sealed runtime environment bound to this staging root.
+    pub(crate) fn environment(&self) -> &BTreeMap<String, String> {
+        &self.environment
+    }
+
+    fn selected_current(&self) -> Result<(), StoreError> {
+        if !self.lock.binds_location(&self.location)
+            || current_generation(&self.location)? != self.selected
+        {
+            return Err(refusal("store_changed"));
+        }
+        Ok(())
+    }
+
+    /// Creates the one empty repository directory after the remote runner has admitted R0.
+    pub(crate) fn create_fresh_repository(self) -> Result<FreshSyncCandidate<'lock>, StoreError> {
+        self.selected_current()?;
+        let repository = self.repository();
+        match fs::symlink_metadata(&repository) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) | Err(_) => return Err(refusal("invalid_store")),
+        }
+        fs::create_dir(&repository).map_err(|_| refusal("invalid_store"))?;
+        sync_directory(&self.root)?;
+        Ok(FreshSyncCandidate { staging: self })
+    }
+
+    /// Persists one changed, valid failed-sync observation without reusing a clone candidate.
+    pub(crate) fn activate_unknown_if_changed<R: CommandRunner>(
+        self,
+        runner: &mut R,
+        observation: FailedSyncObservation,
+    ) -> Result<Option<CurrentGeneration>, StoreError> {
+        self.selected_current()?;
+        let manifest = failed_sync_manifest(&self.selected.manifest, observation)?;
+        if manifest == self.selected.manifest {
+            return Ok(None);
+        }
+        let repository = self.repository();
+        copy_private_tree(&self.selected.root.join("repository"), &repository)?;
+        InstalledBeads::verify(
+            &self.pin,
+            &self.target,
+            &self.binary(),
+            self.environment.clone(),
+            runner,
+        )
+        .map_err(pin_refusal)?;
+        let raw =
+            read_fenced_snapshot_in_place(runner, &repository, &self.binary(), self.environment())?;
+        let copied = validate_fenced_snapshot(
+            &manifest,
+            &raw.before_status,
+            &raw.export,
+            &raw.key_values,
+            &raw.after_status,
+        )?;
+        if copied.documents != self.selected_snapshot.documents {
+            return Err(refusal("store_changed"));
+        }
+        self.selected_current()?;
+        write_staged_manifest(&self.root, &manifest)?;
+        self.selected_current()?;
+        activate_staged_generation(&self.location, &self.root, &self.generation_name, None)?;
+        let activated = current_generation(&self.location)?;
+        if activated.manifest != manifest {
+            return Err(refusal("invalid_store"));
+        }
+        wrapper_is_valid(&activated)?;
+        Ok(Some(activated))
+    }
+}
+
+impl FreshSyncCandidate<'_> {
+    /// Returns the immutable staging root for the fresh candidate.
+    pub(crate) fn root(&self) -> &Path {
+        self.staging.root()
+    }
+
+    /// Returns the exactly-once fresh repository directory.
+    pub(crate) fn repository(&self) -> PathBuf {
+        self.staging.repository()
+    }
+
+    /// Returns the checksum-bound staged Beads executable.
+    pub(crate) fn binary(&self) -> PathBuf {
+        self.staging.binary()
+    }
+
+    /// Returns the sealed candidate runtime environment.
+    pub(crate) fn environment(&self) -> &BTreeMap<String, String> {
+        self.staging.environment()
+    }
+}
+
+impl<'lock> FreshSyncCandidate<'lock> {
+    /// Validates the fresh candidate's readonly fence and exact active-shadow parity.
+    pub(crate) fn validate_and_finalize<R: CommandRunner>(
+        self,
+        runner: &mut R,
+        remote_generation: &str,
+        synchronized_at: &str,
+    ) -> Result<ValidatedSyncCandidate<'lock>, StoreError> {
+        self.staging.selected_current()?;
+        if !is_lower_hex_sha(remote_generation)
+            || !canonical_utc(synchronized_at)
+            || !self
+                .staging
+                .selected
+                .manifest
+                .pending_operation_ids
+                .is_empty()
+            || self
+                .staging
+                .selected
+                .manifest
+                .remote_observed_at
+                .as_deref()
+                .is_some_and(|prior| synchronized_at < prior)
+            || self
+                .staging
+                .selected
+                .manifest
+                .last_successful_sync_at
+                .as_deref()
+                .is_some_and(|prior| synchronized_at < prior)
+        {
+            return Err(refusal("remote_shadow_mismatch"));
+        }
+        let repository = self.repository();
+        directory_without_symlink(&repository).map_err(|_| refusal("remote_shadow_mismatch"))?;
+        InstalledBeads::verify(
+            &self.staging.pin,
+            &self.staging.target,
+            &self.binary(),
+            self.environment().clone(),
+            runner,
+        )
+        .map_err(pin_refusal)?;
+        let raw =
+            read_fenced_snapshot_in_place(runner, &repository, &self.binary(), self.environment())
+                .map_err(|_| refusal("remote_shadow_mismatch"))?;
+        let manifest =
+            sync_manifest_for_raw_fence(&self.staging, &raw, remote_generation, synchronized_at)?;
+        self.staging.selected_current()?;
+        Ok(ValidatedSyncCandidate {
+            candidate: self,
+            manifest,
+        })
+    }
+}
+
+impl ValidatedSyncCandidate<'_> {
+    /// Persists and atomically activates the one already-fenced compatible candidate.
+    pub(crate) fn activate(self) -> Result<CurrentGeneration, StoreError> {
+        self.candidate.staging.selected_current()?;
+        write_staged_manifest(self.candidate.root(), &self.manifest)?;
+        self.candidate.staging.selected_current()?;
+        activate_staged_generation(
+            &self.candidate.staging.location,
+            self.candidate.root(),
+            &self.candidate.staging.generation_name,
+            None,
+        )?;
+        let activated = current_generation(&self.candidate.staging.location)?;
+        if activated.manifest != self.manifest {
+            return Err(refusal("invalid_store"));
+        }
+        wrapper_is_valid(&activated)?;
+        Ok(activated)
+    }
+}
+
+/// Prepares a synchronization stage containing only the checksum-bound runtime before R0.
+pub(crate) fn prepare_sync_staging<'lock>(
+    location: &StoreLocation,
+    selected: &CurrentGeneration,
+    selected_snapshot: &FencedSnapshot,
+    pin: &PinManifest,
+    target: &str,
+    lock: &'lock GenerationActivationLock,
+) -> Result<SyncStaging<'lock>, StoreError> {
+    if !lock.binds_location(location)
+        || selected.root != location.generations_dir.join(&selected.name)
+        || current_generation(location)? != *selected
+    {
+        return Err(refusal("store_changed"));
+    }
+    wrapper_is_valid(selected)?;
+    let pin_target = pin
+        .targets
+        .iter()
+        .find(|candidate| candidate.target == target)
+        .ok_or_else(|| refusal("unsupported_beads_platform"))?;
+    let selected_binary = selected.root.join("bd");
+    if selected.manifest.host_target != target
+        || selected.manifest.beads_binary_sha256 != pin_target.binary_sha256
+    {
+        return Err(refusal("invalid_store"));
+    }
+    owner_private_executable_is_valid(&selected_binary)?;
+    if sha256(&selected_binary)? != pin_target.binary_sha256 {
+        return Err(refusal("beads_checksum_mismatch"));
+    }
+    environment_for_runtime(&selected.root.join("runtime"), false)?;
+    selected_snapshot_matches_manifest(selected, selected_snapshot)?;
+
+    let (root, generation_name) = create_generation_staging(location)?;
+    let staged_environment = environment_for_runtime(&root.join("runtime"), true)?;
+    let wrapper = root.join("plasmosome-work-state");
+    copy_regular_file(&selected.root.join("plasmosome-work-state"), &wrapper)?;
+    owner_private_executable(&wrapper)?;
+    File::open(&wrapper)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| refusal("invalid_store"))?;
+    let binary = root.join("bd");
+    copy_regular_file(&selected_binary, &binary)?;
+    owner_private_executable(&binary)?;
+    File::open(&binary)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| refusal("invalid_store"))?;
+    if sha256(&wrapper)? != selected.manifest.wrapper_sha256
+        || sha256(&binary)? != pin_target.binary_sha256
+    {
+        return Err(refusal("invalid_store"));
+    }
+    Ok(SyncStaging {
+        location: location.clone(),
+        selected: selected.clone(),
+        selected_snapshot: selected_snapshot.clone(),
+        pin: pin.clone(),
+        target: target.to_owned(),
+        generation_name,
+        root,
+        environment: staged_environment,
+        wrapper_sha256: selected.manifest.wrapper_sha256.clone(),
+        beads_binary_sha256: pin_target.binary_sha256.clone(),
+        lock,
+    })
+}
+
+fn selected_snapshot_matches_manifest(
+    selected: &CurrentGeneration,
+    selected_snapshot: &FencedSnapshot,
+) -> Result<(), StoreError> {
+    let expected_freshness = classify(ObservationState {
+        last_successful_sync_at: selected.manifest.last_successful_sync_at.clone(),
+        local_generation: selected.manifest.local_generation.clone(),
+        remote_generation: selected.manifest.remote_generation.clone(),
+        remote_observed_at: selected.manifest.remote_observed_at.clone(),
+        observed_local_generation: selected.manifest.observed_local_generation.clone(),
+        remote_relation: selected.manifest.remote_relation.clone(),
+        pending_mutations: PendingMutations {
+            operation_ids: selected.manifest.pending_operation_ids.clone(),
+        },
+    })
+    .map_err(|_| refusal("invalid_store"))?;
+    if selected_snapshot.freshness != expected_freshness {
+        return Err(refusal("store_changed"));
+    }
+    let mut documents = selected_snapshot.documents.clone();
+    documents.sort_by(|left, right| {
+        left.document
+            .record
+            .document_key
+            .cmp(&right.document.record.document_key)
+    });
+    let logical_documents = documents
+        .iter()
+        .map(|document| document.document.clone())
+        .collect::<Vec<_>>();
+    let logical =
+        canonical_logical_export(&logical_documents).map_err(|_| refusal("store_changed"))?;
+    let operational =
+        canonical_operational_projection(&documents).map_err(|_| refusal("store_changed"))?;
+    if logical_export_digest(&logical) != selected.manifest.logical_export_sha256
+        || operational_projection_digest(&operational)
+            != selected.manifest.operational_projection_sha256
+    {
+        return Err(refusal("store_changed"));
+    }
+    Ok(())
 }
 
 fn directory_without_symlink(path: &Path) -> Result<(), StoreError> {
@@ -1684,6 +2035,198 @@ fn run_read_command<R: CommandRunner>(
     Ok(output.stdout)
 }
 
+struct RawFencedSnapshot {
+    before_status: String,
+    export: String,
+    key_values: String,
+    after_status: String,
+}
+
+fn readonly_status_command(
+    repository: &Path,
+    binary: &Path,
+    environment: &BTreeMap<String, String>,
+) -> CommandSpec {
+    CommandSpec {
+        program: binary.to_path_buf(),
+        argv: vec![
+            "--readonly".into(),
+            "--sandbox".into(),
+            "--json".into(),
+            "vc".into(),
+            "status".into(),
+        ],
+        cwd: Some(repository.to_path_buf()),
+        environment: environment.clone(),
+        redacted_argv_positions: Vec::new(),
+    }
+}
+
+/// Executes the one readonly `status/export/KV/status` fence in an already-private repository.
+fn read_fenced_snapshot_in_place<R: CommandRunner>(
+    runner: &mut R,
+    repository: &Path,
+    binary: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<RawFencedSnapshot, StoreError> {
+    let before_status = run_read_command(
+        runner,
+        readonly_status_command(repository, binary, environment),
+        repository,
+        binary,
+    )?;
+    let export = run_read_command(
+        runner,
+        CommandSpec {
+            program: binary.to_path_buf(),
+            argv: vec!["--readonly".into(), "--sandbox".into(), "export".into()],
+            cwd: Some(repository.to_path_buf()),
+            environment: environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        },
+        repository,
+        binary,
+    )?;
+    let key_values = run_read_command(
+        runner,
+        CommandSpec {
+            program: binary.to_path_buf(),
+            argv: vec![
+                "--readonly".into(),
+                "--sandbox".into(),
+                "--json".into(),
+                "kv".into(),
+                "list".into(),
+            ],
+            cwd: Some(repository.to_path_buf()),
+            environment: environment.clone(),
+            redacted_argv_positions: Vec::new(),
+        },
+        repository,
+        binary,
+    )?;
+    let after_status = run_read_command(
+        runner,
+        readonly_status_command(repository, binary, environment),
+        repository,
+        binary,
+    )?;
+    Ok(RawFencedSnapshot {
+        before_status,
+        export,
+        key_values,
+        after_status,
+    })
+}
+
+fn sync_manifest_for_raw_fence(
+    staging: &SyncStaging<'_>,
+    raw: &RawFencedSnapshot,
+    remote_generation: &str,
+    synchronized_at: &str,
+) -> Result<StateManifest, StoreError> {
+    let local_generation = version_control_commit(&raw.before_status)
+        .map_err(|_| refusal("remote_shadow_mismatch"))?;
+    if version_control_commit(&raw.after_status).map_err(|_| refusal("remote_shadow_mismatch"))?
+        != local_generation
+    {
+        return Err(refusal("remote_shadow_mismatch"));
+    }
+    let key_values =
+        key_value_list(&raw.key_values).map_err(|_| refusal("remote_shadow_mismatch"))?;
+    if key_values.authority_mode != "markdown-shadow"
+        || key_values.source_commit != staging.selected.manifest.source_commit
+    {
+        return Err(refusal("remote_shadow_mismatch"));
+    }
+    let mut documents = decode_operational_beads_jsonl(&raw.export)
+        .map_err(|_| refusal("remote_shadow_mismatch"))?;
+    documents.sort_by(|left, right| {
+        left.document
+            .record
+            .document_key
+            .cmp(&right.document.record.document_key)
+    });
+    let logical_documents = documents
+        .iter()
+        .map(|document| document.document.clone())
+        .collect::<Vec<_>>();
+    let logical = canonical_logical_export(&logical_documents)
+        .map_err(|_| refusal("remote_shadow_mismatch"))?;
+    let operational = canonical_operational_projection(&documents)
+        .map_err(|_| refusal("remote_shadow_mismatch"))?;
+    if logical_export_digest(&logical) != staging.selected.manifest.logical_export_sha256
+        || operational_projection_digest(&operational)
+            != staging.selected.manifest.operational_projection_sha256
+        || documents != staging.selected_snapshot.documents
+    {
+        return Err(refusal("remote_shadow_mismatch"));
+    }
+    let manifest = StateManifest {
+        schema_version: 1,
+        authority_mode: "markdown-shadow".into(),
+        source_commit: staging.selected.manifest.source_commit.clone(),
+        logical_export_sha256: staging.selected.manifest.logical_export_sha256.clone(),
+        operational_projection_sha256: staging
+            .selected
+            .manifest
+            .operational_projection_sha256
+            .clone(),
+        local_generation: local_generation.clone(),
+        host_target: staging.target.clone(),
+        wrapper_sha256: staging.wrapper_sha256.clone(),
+        beads_binary_sha256: staging.beads_binary_sha256.clone(),
+        remote_relation: RemoteRelation::Equivalent,
+        remote_generation: Some(remote_generation.to_owned()),
+        remote_observed_at: Some(synchronized_at.to_owned()),
+        observed_local_generation: Some(local_generation),
+        last_successful_sync_at: Some(synchronized_at.to_owned()),
+        pending_operation_ids: Vec::new(),
+    };
+    strict_manifest(
+        &serde_json::to_string(&manifest).map_err(|_| refusal("remote_shadow_mismatch"))?,
+    )
+    .map_err(|_| refusal("remote_shadow_mismatch"))
+}
+
+fn failed_sync_manifest(
+    selected: &StateManifest,
+    observation: FailedSyncObservation,
+) -> Result<StateManifest, StoreError> {
+    let prior = ObservationState {
+        last_successful_sync_at: selected.last_successful_sync_at.clone(),
+        local_generation: selected.local_generation.clone(),
+        remote_generation: selected.remote_generation.clone(),
+        remote_observed_at: selected.remote_observed_at.clone(),
+        observed_local_generation: selected.observed_local_generation.clone(),
+        remote_relation: selected.remote_relation.clone(),
+        pending_mutations: PendingMutations {
+            operation_ids: selected.pending_operation_ids.clone(),
+        },
+    };
+    let observed = match observation {
+        FailedSyncObservation::BeforeR0 => ObservationState {
+            remote_relation: RemoteRelation::Unknown,
+            ..prior
+        },
+        FailedSyncObservation::AfterR0 {
+            remote_generation,
+            observed_at,
+        } => record_failed_sync_observation(&prior, &remote_generation, &observed_at)
+            .map_err(|_| refusal("invalid_store"))?,
+    };
+    let manifest = StateManifest {
+        remote_relation: observed.remote_relation,
+        remote_generation: observed.remote_generation,
+        remote_observed_at: observed.remote_observed_at,
+        observed_local_generation: observed.observed_local_generation,
+        last_successful_sync_at: observed.last_successful_sync_at,
+        pending_operation_ids: observed.pending_mutations.operation_ids,
+        ..selected.clone()
+    };
+    strict_manifest(&serde_json::to_string(&manifest).map_err(|_| refusal("invalid_store"))?)
+}
+
 struct DisposableSnapshotRequest<'a> {
     pin: &'a PinManifest,
     target: &'a str,
@@ -1750,52 +2293,19 @@ fn read_disposable_snapshot_in_root<R: CommandRunner>(
         )
         .map_err(pin_refusal)?;
     }
-    let status_command = || CommandSpec {
-        program: copied_binary.clone(),
-        argv: vec![
-            "--readonly".into(),
-            "--sandbox".into(),
-            "--json".into(),
-            "vc".into(),
-            "status".into(),
-        ],
-        cwd: Some(repository.clone()),
-        environment: request.copied_environment.clone(),
-        redacted_argv_positions: Vec::new(),
-    };
-    let before = run_read_command(runner, status_command(), &repository, &copied_binary)?;
-    let export = run_read_command(
+    let raw = read_fenced_snapshot_in_place(
         runner,
-        CommandSpec {
-            program: copied_binary.clone(),
-            argv: vec!["--readonly".into(), "--sandbox".into(), "export".into()],
-            cwd: Some(repository.clone()),
-            environment: request.copied_environment.clone(),
-            redacted_argv_positions: Vec::new(),
-        },
         &repository,
         &copied_binary,
+        &request.copied_environment,
     )?;
-    let key_values = run_read_command(
-        runner,
-        CommandSpec {
-            program: copied_binary.clone(),
-            argv: vec![
-                "--readonly".into(),
-                "--sandbox".into(),
-                "--json".into(),
-                "kv".into(),
-                "list".into(),
-            ],
-            cwd: Some(repository.clone()),
-            environment: request.copied_environment.clone(),
-            redacted_argv_positions: Vec::new(),
-        },
-        &repository,
-        &copied_binary,
-    )?;
-    let after = run_read_command(runner, status_command(), &repository, &copied_binary)?;
-    validate_fenced_snapshot(&generation.manifest, &before, &export, &key_values, &after)
+    validate_fenced_snapshot(
+        &generation.manifest,
+        &raw.before_status,
+        &raw.export,
+        &raw.key_values,
+        &raw.after_status,
+    )
 }
 
 fn finish_disposable_snapshot(
@@ -3645,6 +4155,613 @@ mod tests {
         runner.bind_checkout(checkout).unwrap();
         runner.bind_location(location).unwrap();
         (root, runner, generation, pin, requested_wrapper)
+    }
+
+    #[cfg(unix)]
+    fn sync_staging_fixture() -> (
+        tempfile::TempDir,
+        StoreLocation,
+        CurrentGeneration,
+        PinManifest,
+        FencedSnapshot,
+        GenerationActivationLock,
+    ) {
+        let (_root, _runner, mut generation, pin, _requested_wrapper) =
+            installed_runtime_preflight_fixture();
+        let empty_documents = Vec::new();
+        let empty_operational_documents: Vec<OperationalDocument> = Vec::new();
+        generation.manifest.logical_export_sha256 =
+            logical_export_digest(&canonical_logical_export(&empty_documents).unwrap());
+        generation.manifest.operational_projection_sha256 = operational_projection_digest(
+            &canonical_operational_projection(&empty_operational_documents).unwrap(),
+        );
+        let generations_dir = generation
+            .root
+            .parent()
+            .expect("fixture generation has its generations parent")
+            .to_path_buf();
+        let state_root = generations_dir
+            .parent()
+            .expect("fixture generations has its state parent")
+            .to_path_buf();
+        let common_dir = state_root
+            .parent()
+            .expect("fixture state has its common parent")
+            .to_path_buf();
+        let location = StoreLocation {
+            worktree_root: common_dir.clone(),
+            common_dir,
+            state_root,
+            generations_dir,
+        };
+        fs::write(
+            location.state_root.join(CURRENT_POINTER),
+            format!("{}\n", generation.name),
+        )
+        .unwrap();
+        fs::write(
+            generation.root.join("state.json"),
+            serde_json::to_vec(&generation.manifest).unwrap(),
+        )
+        .unwrap();
+        let selected_snapshot = FencedSnapshot {
+            documents: Vec::new(),
+            freshness: classify(ObservationState {
+                last_successful_sync_at: None,
+                local_generation: generation.manifest.local_generation.clone(),
+                remote_generation: None,
+                remote_observed_at: None,
+                observed_local_generation: None,
+                remote_relation: RemoteRelation::Unknown,
+                pending_mutations: PendingMutations {
+                    operation_ids: Vec::new(),
+                },
+            })
+            .unwrap(),
+        };
+        let lock = GenerationActivationLock::acquire_for_sync(&location).unwrap();
+
+        (_root, location, generation, pin, selected_snapshot, lock)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_staging_contains_only_verified_runtime_before_r0() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+
+        let staging = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .expect("the selected generation has a verified runtime to stage before R0");
+
+        let entries = fs::read_dir(staging.root())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            entries,
+            BTreeSet::from([
+                "bd".into(),
+                "plasmosome-work-state".into(),
+                "runtime".into()
+            ])
+        );
+        assert!(!staging.repository().exists());
+        assert!(!staging.root().join(".beads").exists());
+        assert!(!staging.root().join("state.json").exists());
+        assert_eq!(
+            fs::metadata(staging.binary()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(staging.root().join("plasmosome-work-state"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            staging.environment(),
+            &environment_for_runtime(&staging.root().join("runtime"), false).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_staging_rejects_a_snapshot_not_equal_to_the_selected_manifest() {
+        let (_root, location, generation, pin, mut selected_snapshot, lock) =
+            sync_staging_fixture();
+        let documents = vec![
+            parse_document(
+                "docs/intents/001-intent.md",
+                "---\nid: 001\ntitle: unexpected\nstatus: approved\n---\n",
+                &generation.manifest.source_commit,
+            )
+            .unwrap(),
+        ];
+        let operational = initial_operational_metadata(&documents).unwrap();
+        selected_snapshot.documents = decode_operational_beads_jsonl(
+            &to_operational_beads_jsonl(&documents, &operational).unwrap(),
+        )
+        .unwrap();
+
+        let error = match prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        ) {
+            Ok(_) => panic!("an unchecked selected snapshot cannot stage a remote candidate"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "store_changed");
+        assert!(
+            fs::read_dir(&location.generations_dir)
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".staging-")),
+            "the mismatched snapshot must refuse before creating staging"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_sync_repository_is_empty_and_created_exactly_once() {
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        let staging = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap();
+        assert!(!staging.repository().exists());
+
+        let candidate = staging
+            .create_fresh_repository()
+            .expect("a valid R0 transition creates one empty staged repository");
+        assert!(candidate.repository().is_dir());
+        assert!(
+            fs::read_dir(candidate.repository())
+                .unwrap()
+                .next()
+                .is_none(),
+            "the fresh candidate must not copy the selected Dolt history"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_candidate_finalizes_only_after_exact_readonly_fence_and_shadow_parity() {
+        fn status(commit: &str) -> String {
+            serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": commit,
+            })
+            .to_string()
+        }
+
+        let remote_generation = "e".repeat(40);
+        let synchronized_at = "2026-09-02T00:00:00Z";
+        let (root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        let candidate = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap()
+        .create_fresh_repository()
+        .unwrap();
+        let candidate_root = candidate.root().to_path_buf();
+        let current_before = fs::read(location.state_root.join(CURRENT_POINTER)).unwrap();
+        let matching_keys = serde_json::json!({
+            "schema_version": 1,
+            "plasmosome.authority-mode": "markdown-shadow",
+            "plasmosome.source-commit": generation.manifest.source_commit,
+        })
+        .to_string();
+        let candidate_generation = "f".repeat(40);
+        let mut runner = RecordingCommandRunner::scripted(vec![
+            Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+            Ok(CommandOutput::success(status(&candidate_generation))),
+            Ok(CommandOutput::success("")),
+            Ok(CommandOutput::success(matching_keys)),
+            Ok(CommandOutput::success(status(&candidate_generation))),
+        ]);
+        let finalized =
+            candidate.validate_and_finalize(&mut runner, &remote_generation, synchronized_at);
+        assert!(
+            finalized.is_ok(),
+            "matching fenced candidate should finalize"
+        );
+        assert!(runner.finish().is_ok());
+        assert_eq!(
+            fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+            current_before,
+            "finalization cannot replace current before the opaque candidate activates"
+        );
+        assert!(
+            !candidate_root.join("state.json").exists(),
+            "only the validated activation capability may write the staged manifest"
+        );
+        drop(root);
+
+        for (remote, observed_at) in [
+            ("E".repeat(40), synchronized_at.to_owned()),
+            (remote_generation.clone(), "not-a-time".to_owned()),
+        ] {
+            let (_root, location, generation, pin, selected_snapshot, lock) =
+                sync_staging_fixture();
+            let candidate = prepare_sync_staging(
+                &location,
+                &generation,
+                &selected_snapshot,
+                &pin,
+                "aarch64-apple-darwin",
+                &lock,
+            )
+            .unwrap()
+            .create_fresh_repository()
+            .unwrap();
+            let candidate_root = candidate.root().to_path_buf();
+            let current_before = fs::read(location.state_root.join(CURRENT_POINTER)).unwrap();
+            let mut runner = RecordingCommandRunner::default();
+            let error = match candidate.validate_and_finalize(&mut runner, &remote, &observed_at) {
+                Ok(_) => panic!("malformed remote facts cannot finalize a candidate"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code(), "remote_shadow_mismatch");
+            assert!(runner.commands().is_empty());
+            assert_eq!(
+                fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+                current_before
+            );
+            assert!(!candidate_root.join("state.json").exists());
+        }
+
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        let candidate = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap()
+        .create_fresh_repository()
+        .unwrap();
+        let candidate_root = candidate.root().to_path_buf();
+        let current_before = fs::read(location.state_root.join(CURRENT_POINTER)).unwrap();
+        let keys = serde_json::json!({
+            "schema_version": 1,
+            "plasmosome.authority-mode": "markdown-shadow",
+            "plasmosome.source-commit": generation.manifest.source_commit,
+        })
+        .to_string();
+        let mut runner = RecordingCommandRunner::scripted(vec![
+            Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+            Ok(CommandOutput::success(status("1".repeat(40).as_str()))),
+            Ok(CommandOutput::success("")),
+            Ok(CommandOutput::success(keys)),
+            Ok(CommandOutput::success(status("2".repeat(40).as_str()))),
+        ]);
+        let error =
+            match candidate.validate_and_finalize(&mut runner, &remote_generation, synchronized_at)
+            {
+                Ok(_) => panic!("a moving staged Dolt status cannot finalize"),
+                Err(error) => error,
+            };
+        assert_eq!(error.code(), "remote_shadow_mismatch");
+        assert!(runner.finish().is_ok());
+        assert_eq!(
+            fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+            current_before
+        );
+        assert!(!candidate_root.join("state.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_activation_survives_every_interruption_boundary() {
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        let candidate = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap()
+        .create_fresh_repository()
+        .unwrap();
+        let remote_generation = "e".repeat(40);
+        let candidate_generation = "f".repeat(40);
+        let status = |commit: &str| {
+            serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": commit,
+            })
+            .to_string()
+        };
+        let keys = serde_json::json!({
+            "schema_version": 1,
+            "plasmosome.authority-mode": "markdown-shadow",
+            "plasmosome.source-commit": generation.manifest.source_commit,
+        })
+        .to_string();
+        let mut runner = RecordingCommandRunner::scripted(vec![
+            Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+            Ok(CommandOutput::success(status(&candidate_generation))),
+            Ok(CommandOutput::success("")),
+            Ok(CommandOutput::success(keys)),
+            Ok(CommandOutput::success(status(&candidate_generation))),
+        ]);
+        let validated = candidate
+            .validate_and_finalize(&mut runner, &remote_generation, "2026-09-02T00:00:00Z")
+            .unwrap();
+        assert!(runner.finish().is_ok());
+
+        let activated = validated
+            .activate()
+            .expect("only a complete validated candidate may replace current");
+        assert_ne!(activated.name, generation.name);
+        assert_eq!(
+            fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+            format!("{}\n", activated.name).into_bytes()
+        );
+        assert_eq!(
+            current_generation(&location).unwrap(),
+            activated,
+            "activation exposes a complete immutable generation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_only_unknown_generation_copies_active_repository_only_for_a_changed_valid_observation()
+     {
+        fn status(commit: &str) -> String {
+            serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": commit,
+            })
+            .to_string()
+        }
+
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        fs::create_dir(generation.root.join("repository")).unwrap();
+        fs::write(
+            generation.root.join("repository/sentinel"),
+            "active repository",
+        )
+        .unwrap();
+        let staging = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap();
+        let staging_root = staging.root().to_path_buf();
+        let current_before = fs::read(location.state_root.join(CURRENT_POINTER)).unwrap();
+        let mut no_commands = RecordingCommandRunner::default();
+        assert!(
+            staging
+                .activate_unknown_if_changed(&mut no_commands, FailedSyncObservation::BeforeR0)
+                .unwrap()
+                .is_none(),
+            "an identical unknown observation must not replace current"
+        );
+        assert!(no_commands.commands().is_empty());
+        assert_eq!(
+            fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+            current_before
+        );
+        assert!(
+            !staging_root.join("repository").exists(),
+            "the identical observation must not copy the active repository"
+        );
+
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        fs::create_dir(generation.root.join("repository")).unwrap();
+        fs::write(
+            generation.root.join("repository/sentinel"),
+            "active repository",
+        )
+        .unwrap();
+        let original_manifest = generation.manifest.clone();
+        let staging = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap();
+        let matching_keys = serde_json::json!({
+            "schema_version": 1,
+            "plasmosome.authority-mode": "markdown-shadow",
+            "plasmosome.source-commit": generation.manifest.source_commit,
+        })
+        .to_string();
+        let mut runner = RecordingCommandRunner::scripted(vec![
+            Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+            Ok(CommandOutput::success(status(
+                &generation.manifest.local_generation,
+            ))),
+            Ok(CommandOutput::success("")),
+            Ok(CommandOutput::success(matching_keys)),
+            Ok(CommandOutput::success(status(
+                &generation.manifest.local_generation,
+            ))),
+        ]);
+        let activated = staging
+            .activate_unknown_if_changed(
+                &mut runner,
+                FailedSyncObservation::AfterR0 {
+                    remote_generation: "e".repeat(40),
+                    observed_at: "2026-09-02T00:00:00Z".into(),
+                },
+            )
+            .unwrap()
+            .expect("a changed complete observation activates metadata only");
+        assert!(runner.finish().is_ok());
+        assert_ne!(activated.name, generation.name);
+        assert_eq!(
+            fs::read(activated.root.join("repository/sentinel")).unwrap(),
+            b"active repository"
+        );
+        assert_eq!(
+            activated.manifest.source_commit,
+            original_manifest.source_commit
+        );
+        assert_eq!(
+            activated.manifest.logical_export_sha256,
+            original_manifest.logical_export_sha256
+        );
+        assert_eq!(
+            activated.manifest.operational_projection_sha256,
+            original_manifest.operational_projection_sha256
+        );
+        assert_eq!(
+            activated.manifest.local_generation,
+            original_manifest.local_generation
+        );
+        assert_eq!(activated.manifest.remote_relation, RemoteRelation::Unknown);
+        assert_eq!(
+            activated.manifest.remote_generation.as_deref(),
+            Some("e".repeat(40).as_str())
+        );
+        assert_eq!(
+            activated.manifest.remote_observed_at.as_deref(),
+            Some("2026-09-02T00:00:00Z")
+        );
+        assert_eq!(
+            activated.manifest.observed_local_generation.as_deref(),
+            Some(original_manifest.local_generation.as_str())
+        );
+
+        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
+        fs::create_dir(generation.root.join("repository")).unwrap();
+        let staging = prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        )
+        .unwrap();
+        let staging_root = staging.root().to_path_buf();
+        let mut no_commands = RecordingCommandRunner::default();
+        let error = match staging.activate_unknown_if_changed(
+            &mut no_commands,
+            FailedSyncObservation::AfterR0 {
+                remote_generation: "not-a-sha".into(),
+                observed_at: "not-a-time".into(),
+            },
+        ) {
+            Ok(_) => panic!("invalid remote facts cannot create a metadata generation"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "invalid_store");
+        assert!(no_commands.commands().is_empty());
+        assert!(!staging_root.join("repository").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_staging_requires_the_lock_for_the_same_unchanged_current() {
+        let (root, location, generation, pin, selected_snapshot, held_lock) =
+            sync_staging_fixture();
+        let other_common = root.path().join("other-common");
+        fs::create_dir_all(&other_common).unwrap();
+        let other_common = other_common.canonicalize().unwrap();
+        let other_location = StoreLocation {
+            worktree_root: other_common.clone(),
+            common_dir: other_common.clone(),
+            state_root: other_common.join(STORE_DIRECTORY),
+            generations_dir: other_common
+                .join(STORE_DIRECTORY)
+                .join(GENERATIONS_DIRECTORY),
+        };
+        let wrong_lock = GenerationActivationLock::acquire_for_sync(&other_location).unwrap();
+        let error = match prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &wrong_lock,
+        ) {
+            Ok(_) => panic!("a lock from another store cannot stage this current generation"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "store_changed");
+        assert!(
+            fs::read_dir(&location.generations_dir)
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".staging-")),
+            "a mismatched lock must refuse before staging"
+        );
+        drop(wrong_lock);
+        drop(held_lock);
+
+        let alternate = location.generations_dir.join("generation-alternate");
+        fs::create_dir(&alternate).unwrap();
+        fs::write(
+            alternate.join("state.json"),
+            serde_json::to_vec(&generation.manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            location.state_root.join(CURRENT_POINTER),
+            "generation-alternate\n",
+        )
+        .unwrap();
+        let lock = GenerationActivationLock::acquire_for_sync(&location).unwrap();
+        let error = match prepare_sync_staging(
+            &location,
+            &generation,
+            &selected_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &lock,
+        ) {
+            Ok(_) => panic!("a changed current pointer cannot reuse the selected snapshot"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "store_changed");
     }
 
     #[cfg(unix)]

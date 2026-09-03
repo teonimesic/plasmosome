@@ -9,6 +9,7 @@ use plasmosome_work_state::{
         host_target, locate_store, locator_environment, read_disposable_snapshot,
         render_bootstrap_human,
     },
+    sync::{render_sync_human, synchronize},
 };
 
 enum Invocation {
@@ -20,6 +21,9 @@ enum Invocation {
     },
     Read {
         command: ReadCommand,
+        json: bool,
+    },
+    Sync {
         json: bool,
     },
 }
@@ -40,6 +44,7 @@ fn main() {
             json,
         } => run_bootstrap(source_ref, archive, binary, json),
         Invocation::Read { command, json } => run_read(command, json),
+        Invocation::Sync { json } => run_sync(json),
     }
 }
 
@@ -69,6 +74,17 @@ fn parse_invocation(values: &[String]) -> Result<Invocation, String> {
         "ready" => parse_read(values, ReadCommand::Ready),
         "blocked" => parse_read(values, ReadCommand::Blocked),
         "show" => parse_show(values),
+        "sync" => parse_sync(values),
+        _ => Err("invalid_command".into()),
+    }
+}
+
+fn parse_sync(values: &[String]) -> Result<Invocation, String> {
+    match values {
+        [command] if command == "sync" => Ok(Invocation::Sync { json: false }),
+        [command, json] if command == "sync" && json == "--json" => {
+            Ok(Invocation::Sync { json: true })
+        }
         _ => Err("invalid_command".into()),
     }
 }
@@ -222,6 +238,35 @@ fn run_read(command: ReadCommand, json: bool) {
         println!("{}", serde_json::to_string(&response).unwrap());
     } else {
         print!("{}", render_human(&response));
+    }
+}
+
+fn run_sync(json: bool) {
+    let checkout =
+        std::env::current_dir().unwrap_or_else(|_| fail("invalid_store_location", json, 1));
+    let environment = locator_environment().unwrap_or_else(|error| fail(error.code(), json, 1));
+    let mut runner = plasmosome_work_state::command::SystemCommandRunner;
+    let location = locate_store(&mut runner, &checkout, environment)
+        .unwrap_or_else(|error| fail(error.code(), json, 1));
+    let executable = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .unwrap_or_else(|_| fail("invalid_store", json, 1));
+    let generation = generation_for_installed_wrapper(&location, &executable)
+        .unwrap_or_else(|error| fail(error.code(), json, 1));
+    let pin = compiled_pin_manifest().unwrap_or_else(|error| fail(error.code(), json, 1));
+    let snapshot = read_disposable_snapshot(&mut runner, &generation, &pin, host_target())
+        .unwrap_or_else(|error| fail(error.code(), json, 1));
+    match synchronize(
+        &mut runner,
+        &location,
+        &generation,
+        &snapshot,
+        &pin,
+        host_target(),
+    ) {
+        Ok(result) if json => println!("{}", serde_json::to_string(&result).unwrap()),
+        Ok(result) => print!("{}", render_sync_human(&result)),
+        Err(error) => fail(error.code(), json, 1),
     }
 }
 

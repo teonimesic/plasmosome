@@ -67,6 +67,7 @@ fn individual_new_cases_require_source_ref_and_all_defaults_to_origin_main() {
         "local-reads",
         "freshness",
         "combined-freshness",
+        "online-sync",
     ] {
         let request = parse_contract_request([
             "contract-test",
@@ -293,6 +294,60 @@ fn public_reads_need_no_artifact_arguments() {
 }
 
 #[test]
+fn sync_cli_accepts_only_optional_json() {
+    let binary = env!("CARGO_BIN_EXE_plasmosome-work-state");
+    let fixture = tempdir().unwrap();
+    let initialized = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(fixture.path())
+        .output()
+        .unwrap();
+    assert!(initialized.status.success());
+
+    for forbidden in [
+        vec!["sync", "--remote", "origin"],
+        vec!["sync", "--source-ref", "origin/main"],
+        vec!["sync", "--archive", "/artifact"],
+        vec!["sync", "--bd", "/bd"],
+        vec!["sync", "--token", "secret"],
+        vec!["sync", "--json", "--json"],
+        vec!["sync", "unexpected"],
+    ] {
+        let output = Command::new(binary)
+            .current_dir(fixture.path())
+            .args(&forbidden)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{forbidden:?}");
+        assert!(output.stdout.is_empty(), "{forbidden:?}");
+        let expected = if forbidden.contains(&"--json") {
+            b"{\"code\":\"invalid_command\"}\n".as_slice()
+        } else {
+            b"error[invalid_command]: invalid_command\n".as_slice()
+        };
+        assert_eq!(output.stderr, expected, "{forbidden:?}");
+    }
+
+    let human = Command::new(binary)
+        .current_dir(fixture.path())
+        .arg("sync")
+        .output()
+        .unwrap();
+    assert_eq!(human.status.code(), Some(1));
+    assert!(human.stdout.is_empty());
+    assert_eq!(human.stderr, b"error[not_initialized]: not_initialized\n");
+
+    let json = Command::new(binary)
+        .current_dir(fixture.path())
+        .args(["sync", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(json.status.code(), Some(1));
+    assert!(json.stdout.is_empty());
+    assert_eq!(json.stderr, b"{\"code\":\"not_initialized\"}\n");
+}
+
+#[test]
 fn bootstrap_source_ref_syntax_refuses_as_invalid_source_ref() {
     let binary = env!("CARGO_BIN_EXE_plasmosome-work-state");
 
@@ -445,6 +500,77 @@ fn ordinary_launcher_executes_installed_wrapper_without_cargo() {
     );
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "wrapper:list\n");
     assert!(!root.path().join("cargo-ran").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_launcher_executes_only_the_installed_wrapper() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempdir().unwrap();
+    let tools = root.path().join("tools");
+    let fake_bin = root.path().join("fake-bin");
+    let common = root.path().join("common");
+    let generation = common.join("plasmosome-work-state/generations/generation-safe");
+    fs::create_dir_all(&tools).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::create_dir_all(&generation).unwrap();
+    fs::write(
+        common.join("plasmosome-work-state/current"),
+        "generation-safe\n",
+    )
+    .unwrap();
+    let launcher = tools.join("work-state");
+    fs::copy(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/work-state"),
+        &launcher,
+    )
+    .unwrap();
+    let wrapper = generation.join("plasmosome-work-state");
+    fs::write(
+        &wrapper,
+        "#!/usr/bin/env bash\nprintf 'wrapper:%s\\n' \"$*\"\n",
+    )
+    .unwrap();
+    let canonical_root = root.path().canonicalize().unwrap();
+    let canonical_common = common.canonicalize().unwrap();
+    let git = fake_bin.join("git");
+    fs::write(
+        &git,
+        format!(
+            "#!/usr/bin/env bash\nif [[ \"$*\" == *\"--show-toplevel\"* ]]; then printf '%s\\n' '{}'; else printf '%s\\n' '{}'; fi\n",
+            canonical_root.display(),
+            canonical_common.display()
+        ),
+    )
+    .unwrap();
+    let cargo = fake_bin.join("cargo");
+    fs::write(
+        &cargo,
+        format!(
+            "#!/usr/bin/env bash\nprintf cargo > '{}'\nexit 97\n",
+            root.path().join("cargo-ran").display()
+        ),
+    )
+    .unwrap();
+    for path in [&launcher, &wrapper, &git, &cargo] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
+    let output = Command::new(&launcher)
+        .current_dir(root.path())
+        .env("PATH", path)
+        .args(["sync", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"wrapper:sync --json\n");
+    assert!(output.stderr.is_empty());
+    assert!(
+        !root.path().join("cargo-ran").exists(),
+        "the installed sync route must never invoke Cargo"
+    );
 }
 
 #[cfg(all(

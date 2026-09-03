@@ -558,6 +558,7 @@ where
             | "local-reads"
             | "freshness"
             | "combined-freshness"
+            | "online-sync"
     ) {
         return Err("invalid_command".into());
     }
@@ -588,6 +589,7 @@ where
                             | "local-reads"
                             | "freshness"
                             | "combined-freshness"
+                            | "online-sync"
                     ) =>
             {
                 source_ref = Some(value.to_owned())
@@ -598,7 +600,9 @@ where
     }
     let source_ref = match case.as_str() {
         "document-mapping" | "shadow-parity" | "local-reads" | "freshness"
-        | "combined-freshness" => source_ref.ok_or_else(|| "invalid_command".to_owned())?,
+        | "combined-freshness" | "online-sync" => {
+            source_ref.ok_or_else(|| "invalid_command".to_owned())?
+        }
         "all" => source_ref.unwrap_or_else(|| "origin/main".into()),
         _ if source_ref.is_none() => String::new(),
         _ => return Err("invalid_command".into()),

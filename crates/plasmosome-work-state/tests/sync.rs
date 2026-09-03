@@ -92,6 +92,58 @@ fn remote_list(root: &std::path::Path) -> CommandSpec {
     }
 }
 
+fn readonly_status(root: &std::path::Path) -> CommandSpec {
+    CommandSpec {
+        program: root.join("bd"),
+        argv: vec![
+            "--readonly".into(),
+            "--sandbox".into(),
+            "--json".into(),
+            "vc".into(),
+            "status".into(),
+        ],
+        cwd: Some(root.join("repository")),
+        environment: environment(),
+        redacted_argv_positions: Vec::new(),
+    }
+}
+
+fn staged_version(root: &std::path::Path) -> CommandSpec {
+    CommandSpec {
+        program: root.join("bd"),
+        argv: vec!["--version".into()],
+        cwd: None,
+        environment: environment(),
+        redacted_argv_positions: Vec::new(),
+    }
+}
+
+fn readonly_export(root: &std::path::Path) -> CommandSpec {
+    CommandSpec {
+        program: root.join("bd"),
+        argv: vec!["--readonly".into(), "--sandbox".into(), "export".into()],
+        cwd: Some(root.join("repository")),
+        environment: environment(),
+        redacted_argv_positions: Vec::new(),
+    }
+}
+
+fn readonly_key_values(root: &std::path::Path) -> CommandSpec {
+    CommandSpec {
+        program: root.join("bd"),
+        argv: vec![
+            "--readonly".into(),
+            "--sandbox".into(),
+            "--json".into(),
+            "kv".into(),
+            "list".into(),
+        ],
+        cwd: Some(root.join("repository")),
+        environment: environment(),
+        redacted_argv_positions: Vec::new(),
+    }
+}
+
 #[test]
 fn sync_runner_binds_every_command_before_dispatch() {
     let root = tempdir().unwrap();
@@ -255,6 +307,109 @@ fn sync_runner_rejects_every_remote_write_shape() {
         }
     }
     assert!(inner.commands().is_empty());
+    inner.finish().unwrap();
+}
+
+#[test]
+fn stable_sync_runner_admits_only_the_exact_readonly_fence_after_r1() {
+    let root = tempdir().unwrap();
+    let remote = "a".repeat(40);
+    let remote_json = r#"[{"name":"origin","url":"git+https://github.com/teonimesic/plasmosome.git","sql_url":"git+https://github.com/teonimesic/plasmosome.git","status":"ok"}]"#;
+    let status = serde_json::json!({
+        "schema_version": 1,
+        "branch": "main",
+        "commit": "b".repeat(40),
+    })
+    .to_string();
+    let keys = serde_json::json!({
+        "schema_version": 1,
+        "plasmosome.authority-mode": "markdown-shadow",
+        "plasmosome.source-commit": "c".repeat(40),
+    })
+    .to_string();
+    let mut inner = RecordingCommandRunner::scripted(vec![
+        Ok(CommandOutput::success(format!(
+            "{remote}\trefs/dolt/data\n"
+        ))),
+        Ok(CommandOutput::success("")),
+        Ok(CommandOutput::success(remote_json)),
+        Ok(CommandOutput::success(format!(
+            "{remote}\trefs/dolt/data\n"
+        ))),
+        Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+        Ok(CommandOutput::success(status.clone())),
+        Ok(CommandOutput::success("")),
+        Ok(CommandOutput::success(keys)),
+        Ok(CommandOutput::success(status)),
+    ]);
+    {
+        let mut runner = SyncCommandRunner::new(&mut inner, binding(root.path()));
+        runner.run(observation(root.path())).unwrap();
+        runner.authorize_fresh_clone(&[]).unwrap();
+        runner.run(init(root.path())).unwrap();
+        runner.run(remote_list(root.path())).unwrap();
+        runner.run(observation(root.path())).unwrap();
+        assert_eq!(runner.require_stable_observation().unwrap(), remote);
+
+        let wrong_order = readonly_export(root.path());
+        assert_eq!(runner.run(wrong_order).unwrap_err(), "invalid_sync_command");
+        runner.run(staged_version(root.path())).unwrap();
+        runner.run(readonly_status(root.path())).unwrap();
+        runner.run(readonly_export(root.path())).unwrap();
+        runner.run(readonly_key_values(root.path())).unwrap();
+        runner.run(readonly_status(root.path())).unwrap();
+        assert_eq!(
+            runner.run(readonly_status(root.path())).unwrap_err(),
+            "invalid_sync_command"
+        );
+    }
+    assert_eq!(inner.commands().len(), 9);
+    inner.finish().unwrap();
+}
+
+#[test]
+fn failed_observation_runner_admits_only_metadata_readonly_fence() {
+    let root = tempdir().unwrap();
+    let status = serde_json::json!({
+        "schema_version": 1,
+        "branch": "main",
+        "commit": "a".repeat(40),
+    })
+    .to_string();
+    let keys = serde_json::json!({
+        "schema_version": 1,
+        "plasmosome.authority-mode": "markdown-shadow",
+        "plasmosome.source-commit": "b".repeat(40),
+    })
+    .to_string();
+    let mut inner = RecordingCommandRunner::scripted(vec![
+        Ok(CommandOutput {
+            status: 1,
+            stdout: String::new(),
+            stderr: "transport lost".into(),
+        }),
+        Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+        Ok(CommandOutput::success(status.clone())),
+        Ok(CommandOutput::success("")),
+        Ok(CommandOutput::success(keys)),
+        Ok(CommandOutput::success(status)),
+    ]);
+    {
+        let mut runner = SyncCommandRunner::new(&mut inner, binding(root.path()));
+        runner.run(observation(root.path())).unwrap();
+        assert_eq!(runner.first_outcome(), Some(&RemoteObservation::Transport));
+        runner.authorize_failed_observation_fence().unwrap();
+        assert_eq!(
+            runner.run(readonly_export(root.path())).unwrap_err(),
+            "invalid_sync_command"
+        );
+        runner.run(staged_version(root.path())).unwrap();
+        runner.run(readonly_status(root.path())).unwrap();
+        runner.run(readonly_export(root.path())).unwrap();
+        runner.run(readonly_key_values(root.path())).unwrap();
+        runner.run(readonly_status(root.path())).unwrap();
+    }
+    assert_eq!(inner.commands().len(), 6);
     inner.finish().unwrap();
 }
 

@@ -102,7 +102,7 @@ read_launcher() {
 }
 
 case "${1:-}" in
-  list|show|ready|blocked)
+  list|show|ready|blocked|sync)
     read_launcher "$@"
     ;;
   bootstrap)
