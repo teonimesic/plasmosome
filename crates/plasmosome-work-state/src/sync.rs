@@ -138,11 +138,17 @@ impl<'a, R> SyncCommandRunner<'a, R> {
     }
 
     /// Allows the exact fresh-clone commands only after a valid R0 generation is observed.
-    pub fn authorize_fresh_clone(&mut self) -> Result<(), SyncError> {
+    pub fn authorize_fresh_clone(
+        &mut self,
+        pending_operation_ids: &[String],
+    ) -> Result<(), SyncError> {
         if self.phase != Phase::AwaitCloneDecision
             || !matches!(self.first, Some(RemoteObservation::Found(_)))
         {
             return Err(refusal("invalid_sync_command"));
+        }
+        if !pending_operation_ids.is_empty() {
+            return Err(refusal("pending_mutations"));
         }
         self.phase = Phase::AwaitInit;
         Ok(())

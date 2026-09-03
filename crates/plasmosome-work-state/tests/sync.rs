@@ -151,7 +151,7 @@ fn sync_runner_binds_every_command_before_dispatch() {
             "invalid_sync_command",
             "an explicit clone decision is required after R0"
         );
-        runner.authorize_fresh_clone().unwrap();
+        runner.authorize_fresh_clone(&[]).unwrap();
         let wrong_staged_binary = CommandSpec {
             program: root.path().join("other/bd"),
             ..init(root.path())
@@ -360,7 +360,7 @@ fn remote_list_accepts_only_the_exact_canonical_git_transport_binding() {
         {
             let mut runner = SyncCommandRunner::new(&mut inner, binding(root.path()));
             runner.run(observation(root.path())).unwrap();
-            runner.authorize_fresh_clone().unwrap();
+            runner.authorize_fresh_clone(&[]).unwrap();
             runner.run(init(root.path())).unwrap();
             assert_eq!(
                 runner.run(remote_list(root.path())).unwrap_err(),
@@ -383,9 +383,35 @@ fn remote_list_accepts_only_the_exact_canonical_git_transport_binding() {
     {
         let mut runner = SyncCommandRunner::new(&mut inner, binding(root.path()));
         runner.run(observation(root.path())).unwrap();
-        runner.authorize_fresh_clone().unwrap();
+        runner.authorize_fresh_clone(&[]).unwrap();
         runner.run(init(root.path())).unwrap();
         runner.run(remote_list(root.path())).unwrap();
     }
+    inner.finish().unwrap();
+}
+
+#[test]
+fn pending_mutations_are_observed_but_never_cloned_over() {
+    let root = tempdir().unwrap();
+    let mut inner = RecordingCommandRunner::with_output(CommandOutput::success(format!(
+        "{}\trefs/dolt/data\n",
+        "a".repeat(40)
+    )));
+    {
+        let mut runner = SyncCommandRunner::new(&mut inner, binding(root.path()));
+        runner.run(observation(root.path())).unwrap();
+        assert_eq!(
+            runner
+                .authorize_fresh_clone(&["pending-1".to_owned()])
+                .unwrap_err()
+                .code(),
+            "pending_mutations"
+        );
+        assert_eq!(
+            runner.run(init(root.path())).unwrap_err(),
+            "invalid_sync_command"
+        );
+    }
+    assert_eq!(inner.commands().len(), 1);
     inner.finish().unwrap();
 }
