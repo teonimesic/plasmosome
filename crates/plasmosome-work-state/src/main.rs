@@ -9,7 +9,7 @@ use plasmosome_work_state::{
         host_target, locate_store, locator_environment, read_disposable_snapshot,
         render_bootstrap_human,
     },
-    sync::{render_sync_human, synchronize},
+    sync::{SyncError, render_sync_human, synchronize},
 };
 
 enum Invocation {
@@ -243,30 +243,22 @@ fn run_read(command: ReadCommand, json: bool) {
 
 fn run_sync(json: bool) {
     let checkout =
-        std::env::current_dir().unwrap_or_else(|_| fail("invalid_store_location", json, 1));
-    let environment = locator_environment().unwrap_or_else(|error| fail(error.code(), json, 1));
+        std::env::current_dir().unwrap_or_else(|_| fail_sync_code("invalid_store_location", json));
+    let environment =
+        locator_environment().unwrap_or_else(|error| fail_sync_code(error.code(), json));
     let mut runner = plasmosome_work_state::command::SystemCommandRunner;
     let location = locate_store(&mut runner, &checkout, environment)
-        .unwrap_or_else(|error| fail(error.code(), json, 1));
+        .unwrap_or_else(|error| fail_sync_code(error.code(), json));
     let executable = std::env::current_exe()
         .and_then(std::fs::canonicalize)
-        .unwrap_or_else(|_| fail("invalid_store", json, 1));
+        .unwrap_or_else(|_| fail_sync_code("invalid_store", json));
     let generation = generation_for_installed_wrapper(&location, &executable)
-        .unwrap_or_else(|error| fail(error.code(), json, 1));
-    let pin = compiled_pin_manifest().unwrap_or_else(|error| fail(error.code(), json, 1));
-    let snapshot = read_disposable_snapshot(&mut runner, &generation, &pin, host_target())
-        .unwrap_or_else(|error| fail(error.code(), json, 1));
-    match synchronize(
-        &mut runner,
-        &location,
-        &generation,
-        &snapshot,
-        &pin,
-        host_target(),
-    ) {
+        .unwrap_or_else(|error| fail_sync_code(error.code(), json));
+    let pin = compiled_pin_manifest().unwrap_or_else(|error| fail_sync_code(error.code(), json));
+    match synchronize(&mut runner, &location, &generation, &pin, host_target()) {
         Ok(result) if json => println!("{}", serde_json::to_string(&result).unwrap()),
         Ok(result) => print!("{}", render_sync_human(&result)),
-        Err(error) => fail(error.code(), json, 1),
+        Err(error) => fail_sync(error, json),
     }
 }
 
@@ -280,6 +272,34 @@ fn read_exit_code(code: &str) -> i32 {
 
 fn fail(code: &str, json: bool, exit_code: i32) -> ! {
     fail_with_document_key(code, json, exit_code, None)
+}
+
+fn fail_sync(error: SyncError, json: bool) -> ! {
+    fail_sync_refusal(error.code(), error.state_changed(), json)
+}
+
+fn fail_sync_code(code: &str, json: bool) -> ! {
+    fail_sync_refusal(code, false, json)
+}
+
+fn fail_sync_refusal(code: &str, state_changed: bool, json: bool) -> ! {
+    eprint!("{}", render_sync_refusal(code, state_changed, json));
+    std::process::exit(1)
+}
+
+fn render_sync_refusal(code: &str, state_changed: bool, json: bool) -> String {
+    if json {
+        format!(
+            "{}\n",
+            serde_json::to_string(&serde_json::json!({
+                "code": code,
+                "state_changed": state_changed,
+            }))
+            .unwrap()
+        )
+    } else {
+        format!("error[{code}]: {code} state_changed={state_changed}\n")
+    }
 }
 
 fn fail_with_document_key(code: &str, json: bool, exit_code: i32, document_key: Option<&str>) -> ! {
@@ -298,4 +318,37 @@ fn fail_with_document_key(code: &str, json: bool, exit_code: i32, document_key: 
         eprintln!("error[{code}]: {code}");
     }
     std::process::exit(exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_sync_refusal;
+
+    #[test]
+    fn sync_runtime_refusals_render_state_changed_without_leaks() {
+        let human = render_sync_refusal("remote_transport", true, false);
+        let json = render_sync_refusal("remote_transport", true, true);
+
+        assert_eq!(
+            human,
+            "error[remote_transport]: remote_transport state_changed=true\n"
+        );
+        assert_eq!(
+            json,
+            "{\"code\":\"remote_transport\",\"state_changed\":true}\n"
+        );
+        for leaked in [
+            "https://",
+            "git+https://",
+            "/Users/",
+            "/tmp/",
+            "HOME=",
+            "PATH=",
+            "credential",
+            "archive",
+        ] {
+            assert!(!human.contains(leaked));
+            assert!(!json.contains(leaked));
+        }
+    }
 }

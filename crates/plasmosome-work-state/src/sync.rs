@@ -12,19 +12,30 @@ use crate::freshness::{
 use crate::project::{ProjectConfig, compiled_project_config};
 use crate::store::{
     CurrentGeneration, FailedSyncObservation, FencedSnapshot, GenerationActivationLock, StoreError,
-    StoreLocation, prepare_sync_staging,
+    StoreLocation, prepare_sync_staging, read_disposable_snapshot,
 };
 
 /// A stable refusal raised while validating the online-sync command sequence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncError {
     code: &'static str,
+    state_changed: bool,
 }
 
 impl SyncError {
     /// Returns the stable machine-readable refusal code.
     pub fn code(&self) -> &'static str {
         self.code
+    }
+
+    /// Returns whether this refusal atomically activated a justified metadata-only generation.
+    pub fn state_changed(&self) -> bool {
+        self.state_changed
+    }
+
+    fn with_state_changed(mut self, state_changed: bool) -> Self {
+        self.state_changed = state_changed;
+        self
     }
 }
 
@@ -37,7 +48,10 @@ impl std::fmt::Display for SyncError {
 impl std::error::Error for SyncError {}
 
 fn refusal(code: &'static str) -> SyncError {
-    SyncError { code }
+    SyncError {
+        code,
+        state_changed: false,
+    }
 }
 
 /// The complete successful response emitted by the explicit installed-wrapper sync command.
@@ -707,7 +721,7 @@ fn activate_failed_observation<R: CommandRunner>(
     runner: &mut R,
     context: &SynchronizationContext<'_>,
     observation: FailedSyncObservation,
-) -> Result<(), SyncError> {
+) -> Result<bool, SyncError> {
     let staging = prepare_sync_staging(
         context.location,
         context.selected,
@@ -725,10 +739,10 @@ fn activate_failed_observation<R: CommandRunner>(
         staging.environment().clone(),
     )?;
     let mut fenced = SyncCommandRunner::new_for_failed_observation(runner, binding);
-    staging
+    let activated = staging
         .activate_unknown_if_changed(&mut fenced, observation)
         .map_err(store_refusal)?;
-    Ok(())
+    Ok(activated.is_some())
 }
 
 fn failure_after_observation<R: CommandRunner, C: SyncClock>(
@@ -739,7 +753,7 @@ fn failure_after_observation<R: CommandRunner, C: SyncClock>(
     failure: SyncError,
 ) -> Result<SyncResult, SyncError> {
     let observed_at = clock.now_utc()?;
-    activate_failed_observation(
+    let state_changed = activate_failed_observation(
         runner,
         context,
         FailedSyncObservation::AfterR0 {
@@ -747,7 +761,29 @@ fn failure_after_observation<R: CommandRunner, C: SyncClock>(
             observed_at,
         },
     )?;
-    Err(failure)
+    Err(failure.with_state_changed(state_changed))
+}
+
+/// Exercises the production preflight continuation with the exact disposable-cleanup refusal.
+///
+/// The online-sync contract uses this narrow adapter to prove that a completed disposable read
+/// cleanup failure prevents every remote command before the normal orchestration begins.
+pub(crate) fn synchronize_after_disposable_cleanup_failure_for_contract<R: CommandRunner>(
+    runner: &mut R,
+    location: &StoreLocation,
+    selected: &CurrentGeneration,
+    pin: &crate::pin::PinManifest,
+    target: &str,
+) -> Result<SyncResult, SyncError> {
+    continue_sync_after_preflight(
+        Err(refusal("temporary_cleanup_failed")),
+        runner,
+        location,
+        selected,
+        pin,
+        target,
+        &SystemSyncClock,
+    )
 }
 
 /// Performs one explicit zero-remote-write synchronization using the system clock.
@@ -755,21 +791,22 @@ pub fn synchronize<R: CommandRunner>(
     runner: &mut R,
     location: &StoreLocation,
     selected: &CurrentGeneration,
-    selected_snapshot: &FencedSnapshot,
     pin: &crate::pin::PinManifest,
     target: &str,
 ) -> Result<SyncResult, SyncError> {
-    synchronize_with_clock(
+    let preflight = read_disposable_snapshot(runner, selected, pin, target).map_err(store_refusal);
+    continue_sync_after_preflight(
+        preflight,
         runner,
         location,
         selected,
-        selected_snapshot,
         pin,
         target,
         &SystemSyncClock,
     )
 }
 
+#[cfg(test)]
 fn synchronize_with_clock<R: CommandRunner, C: SyncClock>(
     runner: &mut R,
     location: &StoreLocation,
@@ -779,13 +816,34 @@ fn synchronize_with_clock<R: CommandRunner, C: SyncClock>(
     target: &str,
     clock: &C,
 ) -> Result<SyncResult, SyncError> {
+    continue_sync_after_preflight(
+        Ok(selected_snapshot.clone()),
+        runner,
+        location,
+        selected,
+        pin,
+        target,
+        clock,
+    )
+}
+
+fn continue_sync_after_preflight<R: CommandRunner, C: SyncClock>(
+    preflight: Result<FencedSnapshot, SyncError>,
+    runner: &mut R,
+    location: &StoreLocation,
+    selected: &CurrentGeneration,
+    pin: &crate::pin::PinManifest,
+    target: &str,
+    clock: &C,
+) -> Result<SyncResult, SyncError> {
+    let selected_snapshot = preflight?;
     let project = compiled_project_config().map_err(|_| refusal("invalid_project_config"))?;
     let lock = GenerationActivationLock::acquire_for_sync(location).map_err(store_refusal)?;
     let context = SynchronizationContext {
         project: &project,
         location,
         selected,
-        selected_snapshot,
+        selected_snapshot: &selected_snapshot,
         pin,
         target,
         lock: &lock,
@@ -816,8 +874,9 @@ fn synchronize_with_clock<R: CommandRunner, C: SyncClock>(
         Err(error) => {
             drop(fenced);
             drop(staging);
-            activate_failed_observation(runner, &context, FailedSyncObservation::BeforeR0)?;
-            return Err(command_refusal(error));
+            let state_changed =
+                activate_failed_observation(runner, &context, FailedSyncObservation::BeforeR0)?;
+            return Err(command_refusal(error).with_state_changed(state_changed));
         }
     }
     let r0 = match fenced.first_outcome().cloned() {
@@ -825,20 +884,23 @@ fn synchronize_with_clock<R: CommandRunner, C: SyncClock>(
         Some(RemoteObservation::NoMatch) => {
             drop(fenced);
             drop(staging);
-            activate_failed_observation(runner, &context, FailedSyncObservation::BeforeR0)?;
-            return Err(refusal("remote_uninitialized"));
+            let state_changed =
+                activate_failed_observation(runner, &context, FailedSyncObservation::BeforeR0)?;
+            return Err(refusal("remote_uninitialized").with_state_changed(state_changed));
         }
         Some(RemoteObservation::Transport) => {
             drop(fenced);
             drop(staging);
-            activate_failed_observation(runner, &context, FailedSyncObservation::BeforeR0)?;
-            return Err(refusal("remote_transport"));
+            let state_changed =
+                activate_failed_observation(runner, &context, FailedSyncObservation::BeforeR0)?;
+            return Err(refusal("remote_transport").with_state_changed(state_changed));
         }
         None => {
             drop(fenced);
             drop(staging);
-            activate_failed_observation(runner, &context, FailedSyncObservation::BeforeR0)?;
-            return Err(refusal("invalid_remote_observation"));
+            let state_changed =
+                activate_failed_observation(runner, &context, FailedSyncObservation::BeforeR0)?;
+            return Err(refusal("invalid_remote_observation").with_state_changed(state_changed));
         }
     };
     if let Err(error) =
@@ -956,8 +1018,10 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
-    use crate::command::{CommandOutput, RecordingCommandRunner};
-    use crate::freshness::{ObservationState, PendingMutations, RemoteRelation, classify};
+    use crate::command::{CommandOutput, CommandRunner, CommandSpec, RecordingCommandRunner};
+    use crate::freshness::{
+        Freshness, ObservationState, PendingMutations, RemoteRelation, classify,
+    };
     use crate::pin::PinManifest;
     use crate::shadow::{
         canonical_logical_export, canonical_operational_projection, logical_export_digest,
@@ -1138,6 +1202,355 @@ mod tests {
     }
 
     #[test]
+    fn existing_remote_is_cloned_into_fresh_staging_not_pulled_into_local_history() {
+        struct MaterializingCloneRunner {
+            scripted: RecordingCommandRunner,
+            commands: Vec<CommandSpec>,
+            remote_candidate: PathBuf,
+            active_repository: PathBuf,
+            init_count: usize,
+        }
+
+        impl MaterializingCloneRunner {
+            fn finish(self) {
+                assert_eq!(
+                    self.init_count, 1,
+                    "only the admitted init materializes a candidate"
+                );
+                self.scripted.finish().unwrap();
+            }
+        }
+
+        impl CommandRunner for MaterializingCloneRunner {
+            fn run(&mut self, command: CommandSpec) -> Result<CommandOutput, String> {
+                let is_init = command.argv.get(1).map(String::as_str) == Some("init");
+                if is_init {
+                    assert_eq!(
+                        command.argv,
+                        [
+                            "--sandbox",
+                            "init",
+                            "--remote",
+                            "git+https://github.com/teonimesic/plasmosome.git",
+                            "--stealth",
+                            "--skip-agents",
+                            "--skip-hooks",
+                            "--non-interactive",
+                        ]
+                    );
+                    let repository = command
+                        .cwd
+                        .as_deref()
+                        .expect("the admitted init has the fresh staging repository cwd");
+                    assert!(
+                        fs::read_dir(repository).unwrap().next().is_none(),
+                        "the staged repository is empty before the remote clone materializes"
+                    );
+                    assert_eq!(
+                        command.program,
+                        repository.parent().unwrap().join("bd"),
+                        "init uses only the copied staged binary"
+                    );
+                    assert_eq!(command.redacted_argv_positions, vec![3]);
+                    assert!(
+                        !repository.join("active-only").exists(),
+                        "a fresh candidate cannot inherit active local history"
+                    );
+                    fs::copy(
+                        self.remote_candidate.join("remote-only"),
+                        repository.join("remote-only"),
+                    )
+                    .map_err(|_| "candidate materialization failed".to_owned())?;
+                    assert!(
+                        self.active_repository.join("active-only").exists(),
+                        "the test keeps the active repository separate from the materialized candidate"
+                    );
+                    self.init_count += 1;
+                    self.commands.push(command);
+                    return Ok(CommandOutput::success(""));
+                }
+                let output = self.scripted.run(command.clone())?;
+                self.commands.push(command);
+                Ok(output)
+            }
+        }
+
+        let (root, location, selected, _snapshot, pin) = sync_fixture();
+        let active_repository = selected.root.join("repository");
+        fs::write(active_repository.join("active-only"), "active history").unwrap();
+        let remote_candidate = root.path().join("recorded-remote-candidate");
+        fs::create_dir(&remote_candidate).unwrap();
+        fs::write(remote_candidate.join("remote-only"), "remote candidate").unwrap();
+        let remote = "e".repeat(40);
+        let candidate_generation = "f".repeat(40);
+        let status = |commit: &str| {
+            serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": commit,
+            })
+            .to_string()
+        };
+        let keys = serde_json::json!({
+            "schema_version": 1,
+            "plasmosome.authority-mode": "markdown-shadow",
+            "plasmosome.source-commit": selected.manifest.source_commit,
+        })
+        .to_string();
+        let selected_status = status(&selected.manifest.local_generation);
+        let mut runner = MaterializingCloneRunner {
+            scripted: RecordingCommandRunner::scripted(vec![
+                Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+                Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+                Ok(CommandOutput::success(selected_status.clone())),
+                Ok(CommandOutput::success("")),
+                Ok(CommandOutput::success(keys.clone())),
+                Ok(CommandOutput::success(selected_status)),
+                Ok(CommandOutput::success(format!(
+                    "{remote}\trefs/dolt/data\n"
+                ))),
+                Ok(CommandOutput::success(
+                    r#"[{"name":"origin","url":"git+https://github.com/teonimesic/plasmosome.git","sql_url":"git+https://github.com/teonimesic/plasmosome.git","status":"ok"}]"#,
+                )),
+                Ok(CommandOutput::success(format!(
+                    "{remote}\trefs/dolt/data\n"
+                ))),
+                Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+                Ok(CommandOutput::success(status(&candidate_generation))),
+                Ok(CommandOutput::success("")),
+                Ok(CommandOutput::success(keys)),
+                Ok(CommandOutput::success(status(&candidate_generation))),
+            ]),
+            commands: Vec::new(),
+            remote_candidate,
+            active_repository,
+            init_count: 0,
+        };
+
+        let result = synchronize(
+            &mut runner,
+            &location,
+            &selected,
+            &pin,
+            "aarch64-apple-darwin",
+        )
+        .expect("the exact existing remote may activate only the materialized fresh candidate");
+
+        assert!(result.state_changed);
+        let activated = current_generation(&location).unwrap();
+        assert_ne!(activated.name, selected.name);
+        assert!(activated.root.join("repository/remote-only").exists());
+        assert!(!activated.root.join("repository/active-only").exists());
+        assert!(selected.root.join("repository/active-only").exists());
+        assert_eq!(runner.commands.len(), 15);
+        assert_eq!(runner.commands[6].program, PathBuf::from("git"));
+        assert!(runner.commands.iter().all(|command| {
+            !command.argv.iter().any(|argument| {
+                matches!(
+                    argument.as_str(),
+                    "add" | "pull" | "push" | "fetch" | "force"
+                )
+            })
+        }));
+        runner.finish();
+    }
+
+    #[test]
+    fn sync_failure_activation_is_idempotent() {
+        fn snapshot_for(generation: &CurrentGeneration) -> FencedSnapshot {
+            FencedSnapshot {
+                documents: Vec::new(),
+                freshness: classify(ObservationState {
+                    last_successful_sync_at: generation.manifest.last_successful_sync_at.clone(),
+                    local_generation: generation.manifest.local_generation.clone(),
+                    remote_generation: generation.manifest.remote_generation.clone(),
+                    remote_observed_at: generation.manifest.remote_observed_at.clone(),
+                    observed_local_generation: generation
+                        .manifest
+                        .observed_local_generation
+                        .clone(),
+                    remote_relation: generation.manifest.remote_relation.clone(),
+                    pending_mutations: PendingMutations {
+                        operation_ids: generation.manifest.pending_operation_ids.clone(),
+                    },
+                })
+                .unwrap(),
+            }
+        }
+
+        fn metadata_fence_outputs(local: &str, source: &str) -> Vec<Result<CommandOutput, String>> {
+            let status = serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": local,
+            })
+            .to_string();
+            let keys = serde_json::json!({
+                "schema_version": 1,
+                "plasmosome.authority-mode": "markdown-shadow",
+                "plasmosome.source-commit": source,
+            })
+            .to_string();
+            vec![
+                Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+                Ok(CommandOutput::success(status.clone())),
+                Ok(CommandOutput::success("")),
+                Ok(CommandOutput::success(keys)),
+                Ok(CommandOutput::success(status)),
+            ]
+        }
+
+        let (_root, location, selected, snapshot, pin) = sync_fixture();
+        let remote = "e".repeat(40);
+        let observed_at = "2026-09-02T00:00:00Z";
+        let mut first_script = vec![
+            Ok(CommandOutput::success(format!(
+                "{remote}\trefs/dolt/data\n"
+            ))),
+            Ok(CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "remote init failed".into(),
+            }),
+        ];
+        first_script.extend(metadata_fence_outputs(
+            &selected.manifest.local_generation,
+            &selected.manifest.source_commit,
+        ));
+        let mut first_runner = RecordingCommandRunner::scripted(first_script);
+        let first = synchronize_with_clock(
+            &mut first_runner,
+            &location,
+            &selected,
+            &snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &FixedClock(observed_at),
+        )
+        .unwrap_err();
+        assert_eq!(first.code(), "remote_transport");
+        assert!(
+            first.state_changed(),
+            "the first complete Unknown observation atomically activates metadata"
+        );
+        first_runner.finish().unwrap();
+
+        let first_activated = current_generation(&location).unwrap();
+        let current_after_first = fs::read(location.state_root.join("current")).unwrap();
+        assert_ne!(first_activated.name, selected.name);
+        assert_eq!(
+            first_activated.manifest.remote_relation,
+            RemoteRelation::Unknown
+        );
+        assert_eq!(
+            first_activated.manifest.remote_generation.as_deref(),
+            Some(remote.as_str())
+        );
+        assert_eq!(
+            first_activated.manifest.remote_observed_at.as_deref(),
+            Some(observed_at)
+        );
+
+        let mut second_runner = RecordingCommandRunner::scripted(vec![
+            Ok(CommandOutput::success(format!(
+                "{remote}\trefs/dolt/data\n"
+            ))),
+            Ok(CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "remote init failed again".into(),
+            }),
+        ]);
+        let second = synchronize_with_clock(
+            &mut second_runner,
+            &location,
+            &first_activated,
+            &snapshot_for(&first_activated),
+            &pin,
+            "aarch64-apple-darwin",
+            &FixedClock(observed_at),
+        )
+        .unwrap_err();
+        assert_eq!(second.code(), "remote_transport");
+        assert!(
+            !second.state_changed(),
+            "an identical post-R0 failure cannot replace current again"
+        );
+        assert_eq!(
+            second_runner.commands().len(),
+            2,
+            "the retry performs no metadata repository copy or readonly fence"
+        );
+        second_runner.finish().unwrap();
+        assert_eq!(
+            fs::read(location.state_root.join("current")).unwrap(),
+            current_after_first
+        );
+        assert_eq!(current_generation(&location).unwrap(), first_activated);
+    }
+
+    #[test]
+    fn sync_cleanup_failure_precedes_remote_refusal() {
+        let (_root, location, selected, _snapshot, pin) = sync_fixture();
+        let current_before = fs::read(location.state_root.join("current")).unwrap();
+        let mut runner = RecordingCommandRunner::with_output(CommandOutput {
+            status: 1,
+            stdout: String::new(),
+            stderr: "remote transport would fail if dispatched".into(),
+        });
+
+        let error = continue_sync_after_preflight(
+            Err(refusal("temporary_cleanup_failed")),
+            &mut runner,
+            &location,
+            &selected,
+            &pin,
+            "aarch64-apple-darwin",
+            &FixedClock("2026-09-02T00:00:00Z"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "temporary_cleanup_failed");
+        assert!(!error.state_changed());
+        assert!(
+            runner.commands().is_empty(),
+            "a failed disposable cleanup must stop before Git observation or staging"
+        );
+        assert_eq!(
+            fs::read(location.state_root.join("current")).unwrap(),
+            current_before
+        );
+    }
+
+    #[test]
+    fn contract_cleanup_inventory_stops_before_remote_dispatch() {
+        let (_root, location, selected, _snapshot, pin) = sync_fixture();
+        let current_before = fs::read(location.state_root.join("current")).unwrap();
+        let mut runner = RecordingCommandRunner::with_output(CommandOutput {
+            status: 1,
+            stdout: String::new(),
+            stderr: "the recorded remote refusal must stay undispatched".into(),
+        });
+
+        let error = synchronize_after_disposable_cleanup_failure_for_contract(
+            &mut runner,
+            &location,
+            &selected,
+            &pin,
+            "aarch64-apple-darwin",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "temporary_cleanup_failed");
+        assert!(!error.state_changed());
+        assert!(runner.commands().is_empty());
+        assert_eq!(
+            fs::read(location.state_root.join("current")).unwrap(),
+            current_before
+        );
+    }
+
+    #[test]
     fn remote_no_match_stops_before_any_beads_remote_command() {
         let (_root, location, selected, snapshot, pin) = sync_fixture();
         let current_before = fs::read(location.state_root.join("current")).unwrap();
@@ -1171,6 +1584,309 @@ mod tests {
             "a no-match cannot replace the active generation"
         );
         runner.finish().unwrap();
+    }
+
+    #[test]
+    fn moving_remote_never_activates_the_cloned_candidate() {
+        fn metadata_fence_outputs(local: &str, source: &str) -> Vec<Result<CommandOutput, String>> {
+            let status = serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": local,
+            })
+            .to_string();
+            let keys = serde_json::json!({
+                "schema_version": 1,
+                "plasmosome.authority-mode": "markdown-shadow",
+                "plasmosome.source-commit": source,
+            })
+            .to_string();
+            vec![
+                Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+                Ok(CommandOutput::success(status.clone())),
+                Ok(CommandOutput::success("")),
+                Ok(CommandOutput::success(keys)),
+                Ok(CommandOutput::success(status)),
+            ]
+        }
+
+        let (_root, location, selected, snapshot, pin) = sync_fixture();
+        let current_before = fs::read(location.state_root.join("current")).unwrap();
+        fs::write(
+            selected.root.join("repository/active-only"),
+            "the selected repository is not the remote candidate",
+        )
+        .unwrap();
+        let r0 = "e".repeat(40);
+        let r1 = "f".repeat(40);
+        let remote_list = r#"[{"name":"origin","url":"git+https://github.com/teonimesic/plasmosome.git","sql_url":"git+https://github.com/teonimesic/plasmosome.git","status":"ok"}]"#;
+        let mut script = vec![
+            Ok(CommandOutput::success(format!("{r0}\trefs/dolt/data\n"))),
+            Ok(CommandOutput::success("")),
+            Ok(CommandOutput::success(remote_list)),
+            Ok(CommandOutput::success(format!("{r1}\trefs/dolt/data\n"))),
+        ];
+        script.extend(metadata_fence_outputs(
+            &selected.manifest.local_generation,
+            &selected.manifest.source_commit,
+        ));
+        let mut runner = RecordingCommandRunner::scripted(script);
+
+        let error = synchronize_with_clock(
+            &mut runner,
+            &location,
+            &selected,
+            &snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &FixedClock("2026-09-02T00:00:00Z"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "remote_changed");
+        assert!(
+            error.state_changed(),
+            "the justified R1 observation is persisted separately from the rejected candidate"
+        );
+        let activated = current_generation(&location).unwrap();
+        assert_ne!(activated.name, selected.name);
+        assert!(activated.root.join("repository/active-only").is_file());
+        assert!(
+            !activated.root.join("repository/remote-only").exists(),
+            "a moved remote cannot expose the fresh clone candidate"
+        );
+        assert_eq!(activated.manifest.remote_relation, RemoteRelation::Unknown);
+        assert_eq!(
+            activated.manifest.remote_generation.as_deref(),
+            Some(r1.as_str())
+        );
+        assert_ne!(
+            fs::read(location.state_root.join("current")).unwrap(),
+            current_before,
+            "only a metadata-only Unknown observation may replace the pointer"
+        );
+        assert!(runner.commands().iter().all(|command| {
+            !command.argv.iter().any(|argument| {
+                matches!(
+                    argument.as_str(),
+                    "add" | "pull" | "push" | "fetch" | "force"
+                )
+            })
+        }));
+        runner.finish().unwrap();
+    }
+
+    #[test]
+    fn remote_failure_phases_never_expose_the_fresh_candidate() {
+        fn metadata_fence_outputs(local: &str, source: &str) -> Vec<Result<CommandOutput, String>> {
+            let status = serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": local,
+            })
+            .to_string();
+            let keys = serde_json::json!({
+                "schema_version": 1,
+                "plasmosome.authority-mode": "markdown-shadow",
+                "plasmosome.source-commit": source,
+            })
+            .to_string();
+            vec![
+                Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+                Ok(CommandOutput::success(status.clone())),
+                Ok(CommandOutput::success("")),
+                Ok(CommandOutput::success(keys)),
+                Ok(CommandOutput::success(status)),
+            ]
+        }
+
+        let r0 = "e".repeat(40);
+        let r1 = "f".repeat(40);
+        let found = |generation: &str| {
+            Ok(CommandOutput::success(format!(
+                "{generation}\trefs/dolt/data\n"
+            )))
+        };
+        let remote_list = || {
+            Ok(CommandOutput::success(
+                r#"[{"name":"origin","url":"git+https://github.com/teonimesic/plasmosome.git","sql_url":"git+https://github.com/teonimesic/plasmosome.git","status":"ok"}]"#,
+            ))
+        };
+        let transport = |message: &str| {
+            Ok(CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: message.into(),
+            })
+        };
+        let no_match = || {
+            Ok(CommandOutput {
+                status: 2,
+                stdout: String::new(),
+                stderr: "the data ref disappeared".into(),
+            })
+        };
+        let malformed = || Ok(CommandOutput::success("not-a-lowercase-data-ref\n"));
+        let remote_mismatch = || Ok(CommandOutput::success("[]"));
+        let cases = vec![
+            (
+                "transport before R0",
+                vec![transport("R0 transport")],
+                "remote_transport",
+                false,
+                None,
+            ),
+            (
+                "malformed R0",
+                vec![malformed()],
+                "invalid_remote_observation",
+                false,
+                None,
+            ),
+            (
+                "init transport",
+                vec![found(&r0), transport("init transport")],
+                "remote_transport",
+                true,
+                Some(r0.clone()),
+            ),
+            (
+                "remote-list transport",
+                vec![
+                    found(&r0),
+                    Ok(CommandOutput::success("")),
+                    transport("remote-list transport"),
+                ],
+                "remote_transport",
+                true,
+                Some(r0.clone()),
+            ),
+            (
+                "remote-list mismatch",
+                vec![
+                    found(&r0),
+                    Ok(CommandOutput::success("")),
+                    remote_mismatch(),
+                ],
+                "remote_configuration_mismatch",
+                true,
+                Some(r0.clone()),
+            ),
+            (
+                "R1 transport",
+                vec![
+                    found(&r0),
+                    Ok(CommandOutput::success("")),
+                    remote_list(),
+                    transport("R1 transport"),
+                ],
+                "remote_transport",
+                true,
+                Some(r0.clone()),
+            ),
+            (
+                "R1 no-match",
+                vec![
+                    found(&r0),
+                    Ok(CommandOutput::success("")),
+                    remote_list(),
+                    no_match(),
+                ],
+                "remote_changed",
+                true,
+                Some(r0.clone()),
+            ),
+            (
+                "malformed R1",
+                vec![
+                    found(&r0),
+                    Ok(CommandOutput::success("")),
+                    remote_list(),
+                    malformed(),
+                ],
+                "invalid_remote_observation",
+                true,
+                Some(r0.clone()),
+            ),
+            (
+                "moved R1",
+                vec![
+                    found(&r0),
+                    Ok(CommandOutput::success("")),
+                    remote_list(),
+                    found(&r1),
+                ],
+                "remote_changed",
+                true,
+                Some(r1.clone()),
+            ),
+        ];
+
+        for (label, mut script, expected_code, expected_state_changed, expected_remote) in cases {
+            let (_root, location, selected, snapshot, pin) = sync_fixture();
+            let current_before = fs::read(location.state_root.join("current")).unwrap();
+            fs::write(
+                selected.root.join("repository/active-only"),
+                "the remote candidate may never replace this repository on refusal",
+            )
+            .unwrap();
+            if expected_state_changed {
+                script.extend(metadata_fence_outputs(
+                    &selected.manifest.local_generation,
+                    &selected.manifest.source_commit,
+                ));
+            }
+            let mut runner = RecordingCommandRunner::scripted(script);
+
+            let error = synchronize_with_clock(
+                &mut runner,
+                &location,
+                &selected,
+                &snapshot,
+                &pin,
+                "aarch64-apple-darwin",
+                &FixedClock("2026-09-02T00:00:00Z"),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code(), expected_code, "{label}");
+            assert_eq!(error.state_changed(), expected_state_changed, "{label}");
+            let current = fs::read(location.state_root.join("current")).unwrap();
+            if expected_state_changed {
+                let activated = current_generation(&location).unwrap();
+                assert_ne!(activated.name, selected.name, "{label}");
+                assert!(
+                    activated.root.join("repository/active-only").is_file(),
+                    "{label}"
+                );
+                assert!(
+                    !activated.root.join("repository/remote-only").exists(),
+                    "{label}: a rejected clone cannot become active"
+                );
+                assert_eq!(
+                    activated.manifest.remote_generation.as_deref(),
+                    expected_remote.as_deref(),
+                    "{label}"
+                );
+                assert_eq!(
+                    activated.manifest.remote_relation,
+                    RemoteRelation::Unknown,
+                    "{label}"
+                );
+                assert_ne!(current, current_before, "{label}");
+            } else {
+                assert_eq!(current, current_before, "{label}");
+            }
+            assert!(runner.commands().iter().all(|command| {
+                !command.argv.iter().any(|argument| {
+                    matches!(
+                        argument.as_str(),
+                        "add" | "pull" | "push" | "fetch" | "force"
+                    )
+                })
+            }));
+            runner.finish().unwrap();
+        }
     }
 
     #[test]
@@ -1252,6 +1968,174 @@ mod tests {
             Some("2026-09-02T00:00:00Z")
         );
         runner.finish().unwrap();
+    }
+
+    #[test]
+    fn pending_same_equivalent_observation_stays_unpublished_through_later_reobservation() {
+        fn readonly_outputs(local: &str, source: &str) -> Vec<Result<CommandOutput, String>> {
+            let status = serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": local,
+            })
+            .to_string();
+            let keys = serde_json::json!({
+                "schema_version": 1,
+                "plasmosome.authority-mode": "markdown-shadow",
+                "plasmosome.source-commit": source,
+            })
+            .to_string();
+            vec![
+                Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+                Ok(CommandOutput::success(status.clone())),
+                Ok(CommandOutput::success("")),
+                Ok(CommandOutput::success(keys)),
+                Ok(CommandOutput::success(status)),
+            ]
+        }
+
+        let (_root, location, mut selected, mut snapshot, pin) = sync_fixture();
+        let remote = "e".repeat(40);
+        let first_observed_at = "2026-09-02T00:00:00Z";
+        let second_observed_at = "2026-09-02T00:01:00Z";
+        let pending = vec!["pending-first".to_owned(), "pending-second".to_owned()];
+        selected.manifest.remote_relation = RemoteRelation::Equivalent;
+        selected.manifest.remote_generation = Some(remote.clone());
+        selected.manifest.remote_observed_at = Some(first_observed_at.into());
+        selected.manifest.observed_local_generation =
+            Some(selected.manifest.local_generation.clone());
+        selected.manifest.last_successful_sync_at = Some(first_observed_at.into());
+        selected.manifest.pending_operation_ids = pending.clone();
+        fs::write(
+            selected.root.join("state.json"),
+            serde_json::to_vec(&selected.manifest).unwrap(),
+        )
+        .unwrap();
+        snapshot.freshness = classify(ObservationState {
+            last_successful_sync_at: selected.manifest.last_successful_sync_at.clone(),
+            local_generation: selected.manifest.local_generation.clone(),
+            remote_generation: selected.manifest.remote_generation.clone(),
+            remote_observed_at: selected.manifest.remote_observed_at.clone(),
+            observed_local_generation: selected.manifest.observed_local_generation.clone(),
+            remote_relation: selected.manifest.remote_relation.clone(),
+            pending_mutations: PendingMutations {
+                operation_ids: pending.clone(),
+            },
+        })
+        .unwrap();
+
+        let mut first_script = vec![Ok(CommandOutput::success(format!(
+            "{remote}\trefs/dolt/data\n"
+        )))];
+        first_script.extend(readonly_outputs(
+            &selected.manifest.local_generation,
+            &selected.manifest.source_commit,
+        ));
+        let mut first_runner = RecordingCommandRunner::scripted(first_script);
+        let first = synchronize_with_clock(
+            &mut first_runner,
+            &location,
+            &selected,
+            &snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &FixedClock(second_observed_at),
+        )
+        .unwrap_err();
+        assert_eq!(first.code(), "pending_mutations");
+        first_runner.finish().unwrap();
+
+        let activated = current_generation(&location).unwrap();
+        assert_ne!(activated.name, selected.name);
+        assert_eq!(
+            activated.manifest.remote_relation,
+            RemoteRelation::Equivalent
+        );
+        assert_eq!(
+            activated.manifest.remote_generation.as_deref(),
+            Some(remote.as_str())
+        );
+        assert_eq!(
+            activated.manifest.remote_observed_at.as_deref(),
+            Some(second_observed_at)
+        );
+        assert_eq!(
+            activated.manifest.last_successful_sync_at.as_deref(),
+            Some(first_observed_at)
+        );
+        assert_eq!(activated.manifest.pending_operation_ids, pending);
+        let activated_snapshot = FencedSnapshot {
+            documents: Vec::new(),
+            freshness: classify(ObservationState {
+                last_successful_sync_at: activated.manifest.last_successful_sync_at.clone(),
+                local_generation: activated.manifest.local_generation.clone(),
+                remote_generation: activated.manifest.remote_generation.clone(),
+                remote_observed_at: activated.manifest.remote_observed_at.clone(),
+                observed_local_generation: activated.manifest.observed_local_generation.clone(),
+                remote_relation: activated.manifest.remote_relation.clone(),
+                pending_mutations: PendingMutations {
+                    operation_ids: activated.manifest.pending_operation_ids.clone(),
+                },
+            })
+            .unwrap(),
+        };
+        assert_eq!(
+            activated_snapshot.freshness.freshness,
+            Freshness::Unpublished
+        );
+
+        let third_observed_at = "2026-09-02T00:02:00Z";
+        let mut second_script = vec![Ok(CommandOutput::success(format!(
+            "{remote}\trefs/dolt/data\n"
+        )))];
+        second_script.extend(readonly_outputs(
+            &activated.manifest.local_generation,
+            &activated.manifest.source_commit,
+        ));
+        let mut second_runner = RecordingCommandRunner::scripted(second_script);
+        let second = synchronize_with_clock(
+            &mut second_runner,
+            &location,
+            &activated,
+            &activated_snapshot,
+            &pin,
+            "aarch64-apple-darwin",
+            &FixedClock(third_observed_at),
+        )
+        .unwrap_err();
+        assert_eq!(second.code(), "pending_mutations");
+        second_runner.finish().unwrap();
+
+        let reobserved = current_generation(&location).unwrap();
+        assert_eq!(
+            reobserved.manifest.remote_relation,
+            RemoteRelation::Equivalent
+        );
+        assert_eq!(
+            reobserved.manifest.last_successful_sync_at.as_deref(),
+            Some(first_observed_at)
+        );
+        assert_eq!(
+            reobserved.manifest.remote_observed_at.as_deref(),
+            Some(third_observed_at)
+        );
+        assert_eq!(reobserved.manifest.pending_operation_ids, pending);
+        assert_eq!(
+            classify(ObservationState {
+                last_successful_sync_at: reobserved.manifest.last_successful_sync_at,
+                local_generation: reobserved.manifest.local_generation,
+                remote_generation: reobserved.manifest.remote_generation,
+                remote_observed_at: reobserved.manifest.remote_observed_at,
+                observed_local_generation: reobserved.manifest.observed_local_generation,
+                remote_relation: reobserved.manifest.remote_relation,
+                pending_mutations: PendingMutations {
+                    operation_ids: reobserved.manifest.pending_operation_ids,
+                },
+            })
+            .unwrap()
+            .freshness,
+            Freshness::Unpublished
+        );
     }
 
     #[test]

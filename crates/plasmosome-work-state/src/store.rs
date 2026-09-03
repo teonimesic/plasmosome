@@ -542,6 +542,13 @@ impl<'lock> FreshSyncCandidate<'lock> {
 impl ValidatedSyncCandidate<'_> {
     /// Persists and atomically activates the one already-fenced compatible candidate.
     pub(crate) fn activate(self) -> Result<CurrentGeneration, StoreError> {
+        self.activate_with_fault(None)
+    }
+
+    fn activate_with_fault(
+        self,
+        fault: Option<ActivationFault>,
+    ) -> Result<CurrentGeneration, StoreError> {
         self.candidate.staging.selected_current()?;
         write_staged_manifest(self.candidate.root(), &self.manifest)?;
         self.candidate.staging.selected_current()?;
@@ -549,7 +556,7 @@ impl ValidatedSyncCandidate<'_> {
             &self.candidate.staging.location,
             self.candidate.root(),
             &self.candidate.staging.generation_name,
-            None,
+            fault,
         )?;
         let activated = current_generation(&self.candidate.staging.location)?;
         if activated.manifest != self.manifest {
@@ -557,6 +564,14 @@ impl ValidatedSyncCandidate<'_> {
         }
         wrapper_is_valid(&activated)?;
         Ok(activated)
+    }
+
+    #[cfg(test)]
+    fn activate_for_test(
+        self,
+        fault: Option<ActivationFault>,
+    ) -> Result<CurrentGeneration, StoreError> {
+        self.activate_with_fault(fault)
     }
 }
 
@@ -3155,7 +3170,8 @@ mod tests {
     use crate::command::{CommandOutput, CommandRunner, CommandSpec, RecordingCommandRunner};
     use crate::document::parse_document;
     use crate::shadow::{
-        canonical_logical_export, canonical_operational_projection, initial_operational_metadata,
+        ActiveOwner, canonical_logical_export, canonical_operational_projection,
+        decode_operational_beads_jsonl, initial_operational_metadata, logical_export_digest,
         operational_projection_digest, to_operational_beads_jsonl,
     };
 
@@ -4482,60 +4498,352 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn sync_activation_survives_every_interruption_boundary() {
-        let (_root, location, generation, pin, selected_snapshot, lock) = sync_staging_fixture();
-        let candidate = prepare_sync_staging(
-            &location,
-            &generation,
-            &selected_snapshot,
-            &pin,
-            "aarch64-apple-darwin",
-            &lock,
-        )
-        .unwrap()
-        .create_fresh_repository()
-        .unwrap();
-        let remote_generation = "e".repeat(40);
-        let candidate_generation = "f".repeat(40);
-        let status = |commit: &str| {
-            serde_json::json!({
+    fn stable_sync_requires_complete_shadow_parity() {
+        fn row_for<'a>(rows: &'a mut [serde_json::Value], key: &str) -> &'a mut serde_json::Value {
+            rows.iter_mut()
+                .find(|row| {
+                    row["metadata"]["plasmosome_document"]["document_key"].as_str() == Some(key)
+                })
+                .unwrap_or_else(|| panic!("missing fixture row {key}"))
+        }
+
+        fn populated_fixture() -> (
+            tempfile::TempDir,
+            StoreLocation,
+            CurrentGeneration,
+            PinManifest,
+            FencedSnapshot,
+            GenerationActivationLock,
+            Vec<serde_json::Value>,
+            serde_json::Value,
+        ) {
+            let (root, location, mut generation, pin, mut snapshot, lock) = sync_staging_fixture();
+            let source = generation.manifest.source_commit.clone();
+            let documents = vec![
+                parse_document(
+                    "docs/intents/001-first.md",
+                    "---\nid: 001\ntitle: Intent One\nstatus: approved\n---\n",
+                    &source,
+                )
+                .unwrap(),
+                parse_document(
+                    "docs/intents/002-second.md",
+                    "---\nid: 002\ntitle: Intent Two\nstatus: approved\n---\n",
+                    &source,
+                )
+                .unwrap(),
+                parse_document(
+                    "docs/specs/001-first.md",
+                    "---\nid: 001\ntitle: Spec One\nstatus: accepted\nintents: [001]\n---\n",
+                    &source,
+                )
+                .unwrap(),
+                parse_document(
+                    "docs/specs/002-second.md",
+                    "---\nid: 002\ntitle: Spec Two\nstatus: accepted\nintents: [002]\n---\n",
+                    &source,
+                )
+                .unwrap(),
+                parse_document(
+                    "tasks/001-first.md",
+                    "---\nid: 001\ntitle: Task One\nstatus: planned\npriority: 1\nintents: [001]\nspecs: [001]\n---\n",
+                    &source,
+                )
+                .unwrap(),
+                parse_document(
+                    "tasks/002-second.md",
+                    "---\nid: 002\ntitle: Task Two\nstatus: planned\npriority: 2\nintents: [002]\nspecs: [002]\n---\n",
+                    &source,
+                )
+                .unwrap(),
+                parse_document(
+                    "tasks/003-third.md",
+                    "---\nid: 003\ntitle: Task Three\nstatus: in_review\npriority: 3\nintents: [001, 002]\nspecs: [001, 002]\npr: 84\nevidence: reviewed\n---\n",
+                    &source,
+                )
+                .unwrap(),
+            ];
+            let mut operational = initial_operational_metadata(&documents).unwrap();
+            let third = operational.get_mut("task:003").unwrap();
+            third.active_owner = Some(ActiveOwner {
+                actor: "owner".into(),
+                session_id: "session".into(),
+                ownership_token: "token".into(),
+                claim_operation_id: "claim".into(),
+                acquired_at: "2026-09-02T00:00:00Z".into(),
+                expires_at: "2026-09-02T01:00:00Z".into(),
+            });
+            third.task_dependencies = vec!["task:001".into(), "task:002".into()];
+            let export = to_operational_beads_jsonl(&documents, &operational).unwrap();
+            let operational_documents = decode_operational_beads_jsonl(&export).unwrap();
+            generation.manifest.logical_export_sha256 =
+                logical_export_digest(&canonical_logical_export(&documents).unwrap());
+            generation.manifest.operational_projection_sha256 = operational_projection_digest(
+                &canonical_operational_projection(&operational_documents).unwrap(),
+            );
+            fs::write(
+                generation.root.join("state.json"),
+                serde_json::to_vec(&generation.manifest).unwrap(),
+            )
+            .unwrap();
+            snapshot.documents = operational_documents;
+            let rows = export
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let key_values = serde_json::json!({
+                "schema_version": 1,
+                "plasmosome.authority-mode": "markdown-shadow",
+                "plasmosome.source-commit": source,
+            });
+            (
+                root, location, generation, pin, snapshot, lock, rows, key_values,
+            )
+        }
+
+        fn assert_parity_refusal<F>(case: &str, mutate: F)
+        where
+            F: FnOnce(&mut Vec<serde_json::Value>, &mut serde_json::Value),
+        {
+            let (_root, location, generation, pin, snapshot, lock, mut rows, mut key_values) =
+                populated_fixture();
+            mutate(&mut rows, &mut key_values);
+            let export = rows
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n");
+            let candidate = prepare_sync_staging(
+                &location,
+                &generation,
+                &snapshot,
+                &pin,
+                "aarch64-apple-darwin",
+                &lock,
+            )
+            .unwrap()
+            .create_fresh_repository()
+            .unwrap();
+            let candidate_root = candidate.root().to_path_buf();
+            let current_before = fs::read(location.state_root.join(CURRENT_POINTER)).unwrap();
+            let candidate_generation = "f".repeat(40);
+            let status = serde_json::json!({
                 "schema_version": 1,
                 "branch": "main",
-                "commit": commit,
+                "commit": candidate_generation,
             })
-            .to_string()
-        };
-        let keys = serde_json::json!({
-            "schema_version": 1,
-            "plasmosome.authority-mode": "markdown-shadow",
-            "plasmosome.source-commit": generation.manifest.source_commit,
-        })
-        .to_string();
-        let mut runner = RecordingCommandRunner::scripted(vec![
-            Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
-            Ok(CommandOutput::success(status(&candidate_generation))),
-            Ok(CommandOutput::success("")),
-            Ok(CommandOutput::success(keys)),
-            Ok(CommandOutput::success(status(&candidate_generation))),
-        ]);
-        let validated = candidate
-            .validate_and_finalize(&mut runner, &remote_generation, "2026-09-02T00:00:00Z")
-            .unwrap();
-        assert!(runner.finish().is_ok());
+            .to_string();
+            let mut runner = RecordingCommandRunner::scripted(vec![
+                Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+                Ok(CommandOutput::success(status.clone())),
+                Ok(CommandOutput::success(export)),
+                Ok(CommandOutput::success(key_values.to_string())),
+                Ok(CommandOutput::success(status)),
+            ]);
+            let error = match candidate.validate_and_finalize(
+                &mut runner,
+                &"e".repeat(40),
+                "2026-09-02T02:00:00Z",
+            ) {
+                Ok(_) => panic!("{case} must not finalize a mismatched remote shadow"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code(), "remote_shadow_mismatch", "case {case}");
+            runner.finish().unwrap();
+            assert_eq!(
+                fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+                current_before,
+                "case {case} cannot replace current"
+            );
+            assert!(
+                !candidate_root.join("state.json").exists(),
+                "case {case} cannot write a candidate manifest"
+            );
+        }
 
-        let activated = validated
-            .activate()
-            .expect("only a complete validated candidate may replace current");
-        assert_ne!(activated.name, generation.name);
-        assert_eq!(
-            fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
-            format!("{}\n", activated.name).into_bytes()
-        );
-        assert_eq!(
-            current_generation(&location).unwrap(),
-            activated,
-            "activation exposes a complete immutable generation"
-        );
+        assert_parity_refusal("authority key", |_, key_values| {
+            key_values["plasmosome.authority-mode"] = serde_json::json!("ledger");
+        });
+        assert_parity_refusal("source key", |_, key_values| {
+            key_values["plasmosome.source-commit"] = serde_json::json!("b".repeat(40));
+        });
+        assert_parity_refusal("logical document key", |rows, _| {
+            let row = row_for(rows, "task:003");
+            row["metadata"]["plasmosome_document"]["document_key"] = serde_json::json!("task:002");
+            row["external_ref"] = serde_json::json!("task:002");
+        });
+        assert_parity_refusal("logical document kind", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["kind"] =
+                serde_json::json!("spec");
+        });
+        assert_parity_refusal("logical document id", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["document_id"] =
+                serde_json::json!("999");
+        });
+        assert_parity_refusal("logical document path", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["document_path"] =
+                serde_json::json!("tasks/999-other.md");
+        });
+        assert_parity_refusal("logical document title", |rows, _| {
+            let row = row_for(rows, "task:003");
+            row["metadata"]["plasmosome_document"]["title"] = serde_json::json!("Changed");
+            row["title"] = serde_json::json!("Changed");
+        });
+        assert_parity_refusal("content establishing sha", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["content_commit_sha"] =
+                serde_json::json!("b".repeat(40));
+        });
+        assert_parity_refusal("state version", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["state_version"] =
+                serde_json::json!(2);
+        });
+        assert_parity_refusal("ordered upward links", |rows, _| {
+            let metadata = &mut row_for(rows, "task:003")["metadata"]["plasmosome_document"];
+            metadata["intent_ids"] = serde_json::json!(["002", "001"]);
+            metadata["spec_ids"] = serde_json::json!(["002", "001"]);
+        });
+        assert_parity_refusal("lifecycle", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["lifecycle"] =
+                serde_json::json!("planned");
+        });
+        assert_parity_refusal("priority", |rows, _| {
+            let row = row_for(rows, "task:003");
+            row["metadata"]["plasmosome_document"]["priority"] = serde_json::json!(1);
+            row["priority"] = serde_json::json!(1);
+        });
+        assert_parity_refusal("pr", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["pr"] =
+                serde_json::json!("85");
+        });
+        assert_parity_refusal("evidence", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_document"]["evidence"] =
+                serde_json::json!("changed evidence");
+        });
+        assert_parity_refusal("operational owner", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_operational"]["active_owner"]["actor"] =
+                serde_json::json!("other-owner");
+        });
+        assert_parity_refusal("operational dependency order", |rows, _| {
+            row_for(rows, "task:003")["metadata"]["plasmosome_operational"]["task_dependencies"] =
+                serde_json::json!(["task:002", "task:001"]);
+        });
+        assert_parity_refusal("missing row", |rows, _| {
+            rows.retain(|row| {
+                row["metadata"]["plasmosome_document"]["document_key"].as_str() != Some("task:003")
+            });
+        });
+        assert_parity_refusal("extra row", |rows, _| {
+            let mut extra = rows[0].clone();
+            extra["id"] = serde_json::json!("plasmosome-intent999");
+            extra["title"] = serde_json::json!("Extra Intent");
+            extra["external_ref"] = serde_json::json!("intent:999");
+            let metadata = &mut extra["metadata"]["plasmosome_document"];
+            metadata["document_key"] = serde_json::json!("intent:999");
+            metadata["document_id"] = serde_json::json!("999");
+            metadata["document_path"] = serde_json::json!("docs/intents/999-extra.md");
+            metadata["title"] = serde_json::json!("Extra Intent");
+            rows.push(extra);
+        });
+        assert_parity_refusal("duplicate row", |rows, _| rows.push(rows[0].clone()));
+        for unknown in [
+            "plasmosome.receipt",
+            "plasmosome.lease",
+            "plasmosome.writer",
+        ] {
+            assert_parity_refusal(unknown, |_, key_values| {
+                key_values[unknown] = serde_json::json!("forbidden");
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_activation_survives_every_interruption_boundary() {
+        for (fault, label) in [
+            (
+                Some(ActivationFault::BeforeGenerationRename),
+                "before generation rename",
+            ),
+            (
+                Some(ActivationFault::BeforePointerWrite),
+                "before pointer write",
+            ),
+            (
+                Some(ActivationFault::BeforePointerRename),
+                "before pointer rename",
+            ),
+            (None, "success"),
+        ] {
+            let (_root, location, generation, pin, selected_snapshot, lock) =
+                sync_staging_fixture();
+            let candidate = prepare_sync_staging(
+                &location,
+                &generation,
+                &selected_snapshot,
+                &pin,
+                "aarch64-apple-darwin",
+                &lock,
+            )
+            .unwrap()
+            .create_fresh_repository()
+            .unwrap();
+            let candidate_generation = "f".repeat(40);
+            let status = serde_json::json!({
+                "schema_version": 1,
+                "branch": "main",
+                "commit": candidate_generation,
+            })
+            .to_string();
+            let keys = serde_json::json!({
+                "schema_version": 1,
+                "plasmosome.authority-mode": "markdown-shadow",
+                "plasmosome.source-commit": generation.manifest.source_commit,
+            })
+            .to_string();
+            let mut runner = RecordingCommandRunner::scripted(vec![
+                Ok(CommandOutput::success("bd version 1.1.2 (test)\n")),
+                Ok(CommandOutput::success(status.clone())),
+                Ok(CommandOutput::success("")),
+                Ok(CommandOutput::success(keys)),
+                Ok(CommandOutput::success(status)),
+            ]);
+            let validated = candidate
+                .validate_and_finalize(&mut runner, &"e".repeat(40), "2026-09-02T00:00:00Z")
+                .unwrap();
+            runner.finish().unwrap();
+            let current_before = fs::read(location.state_root.join(CURRENT_POINTER)).unwrap();
+
+            match (fault, validated.activate_for_test(fault)) {
+                (Some(_), Err(error)) => {
+                    assert_eq!(error.code(), "bootstrap_interrupted", "{label}");
+                    assert_eq!(
+                        current_generation(&location).unwrap(),
+                        generation,
+                        "{label} keeps readers on the old complete generation"
+                    );
+                    assert_eq!(
+                        fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+                        current_before,
+                        "{label} cannot replace current"
+                    );
+                }
+                (None, Ok(activated)) => {
+                    assert_ne!(activated.name, generation.name);
+                    assert_eq!(
+                        fs::read(location.state_root.join(CURRENT_POINTER)).unwrap(),
+                        format!("{}\n", activated.name).into_bytes()
+                    );
+                    assert_eq!(
+                        current_generation(&location).unwrap(),
+                        activated,
+                        "success exposes only the complete validated generation"
+                    );
+                }
+                (Some(_), Ok(_)) => panic!("{label} must interrupt activation"),
+                (None, Err(error)) => panic!("success must activate: {}", error.code()),
+            }
+        }
     }
 
     #[cfg(unix)]

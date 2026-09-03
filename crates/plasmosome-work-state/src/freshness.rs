@@ -256,13 +256,20 @@ pub fn record_failed_sync_observation(
     {
         return Err(refusal());
     }
+    let retains_equivalent_pending_base = !prior.pending_mutations.operation_ids.is_empty()
+        && matches!(prior.remote_relation, RemoteRelation::Equivalent)
+        && prior.remote_generation.as_deref() == Some(remote_generation);
     let updated = ObservationState {
         last_successful_sync_at: prior.last_successful_sync_at.clone(),
         local_generation: prior.local_generation.clone(),
         remote_generation: Some(remote_generation.to_owned()),
         remote_observed_at: Some(remote_observed_at.to_owned()),
         observed_local_generation: Some(prior.local_generation.clone()),
-        remote_relation: RemoteRelation::Unknown,
+        remote_relation: if retains_equivalent_pending_base {
+            RemoteRelation::Equivalent
+        } else {
+            RemoteRelation::Unknown
+        },
         pending_mutations: prior.pending_mutations.clone(),
     };
     validate(&updated)?;

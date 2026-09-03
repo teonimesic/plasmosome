@@ -335,7 +335,10 @@ fn sync_cli_accepts_only_optional_json() {
         .unwrap();
     assert_eq!(human.status.code(), Some(1));
     assert!(human.stdout.is_empty());
-    assert_eq!(human.stderr, b"error[not_initialized]: not_initialized\n");
+    assert_eq!(
+        human.stderr,
+        b"error[not_initialized]: not_initialized state_changed=false\n"
+    );
 
     let json = Command::new(binary)
         .current_dir(fixture.path())
@@ -344,7 +347,10 @@ fn sync_cli_accepts_only_optional_json() {
         .unwrap();
     assert_eq!(json.status.code(), Some(1));
     assert!(json.stdout.is_empty());
-    assert_eq!(json.stderr, b"{\"code\":\"not_initialized\"}\n");
+    assert_eq!(
+        json.stderr,
+        b"{\"code\":\"not_initialized\",\"state_changed\":false}\n"
+    );
 }
 
 #[test]
