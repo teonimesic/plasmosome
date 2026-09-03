@@ -3545,6 +3545,18 @@ fn resolve_absolute_git(path: &std::ffi::OsStr) -> Result<PathBuf, String> {
 }
 
 #[cfg(unix)]
+fn installed_config_locator_path(
+    fake_bin: &Path,
+    original_path: &std::ffi::OsStr,
+) -> Result<std::ffi::OsString, String> {
+    std::env::join_paths(
+        std::iter::once(fake_bin.as_os_str().to_os_string())
+            .chain(std::env::split_paths(original_path).map(|path| path.into_os_string())),
+    )
+    .map_err(|_| "cutover_blocked".to_owned())
+}
+
+#[cfg(unix)]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -3781,8 +3793,7 @@ fn assert_installed_sync_config_and_lock(
         let rustup_marker = root.join("online-sync-rustup-marker");
         let original_path = std::env::var_os("PATH").ok_or_else(|| "cutover_blocked".to_owned())?;
         let real_git = resolve_absolute_git(&original_path)?;
-        let locator_path = std::env::join_paths([fake_bin.as_os_str(), original_path.as_os_str()])
-            .map_err(|_| "cutover_blocked".to_owned())?
+        let locator_path = installed_config_locator_path(&fake_bin, &original_path)?
             .into_string()
             .map_err(|_| "cutover_blocked".to_owned())?;
         let canonical_worktree =
@@ -5135,6 +5146,27 @@ mod tests {
         assert_eq!(
             transport.run(version).unwrap(),
             CommandOutput::success("bd version 1.1.2 (test)\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_config_locator_path_preserves_a_multi_entry_path() {
+        use super::installed_config_locator_path;
+        use std::ffi::OsStr;
+
+        let fake_bin = PathBuf::from("/contract-fake-bin");
+        let original = std::env::join_paths([OsStr::new("/usr/bin"), OsStr::new("/bin")]).unwrap();
+        let expected = std::env::join_paths([
+            fake_bin.as_os_str(),
+            OsStr::new("/usr/bin"),
+            OsStr::new("/bin"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            installed_config_locator_path(&fake_bin, &original).unwrap(),
+            expected
         );
     }
 
