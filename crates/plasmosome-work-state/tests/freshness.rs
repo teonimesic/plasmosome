@@ -1,5 +1,6 @@
 use plasmosome_work_state::freshness::{
     Freshness, ObservationState, PendingMutations, RemoteRelation, classify,
+    record_failed_sync_observation,
 };
 
 const LOCAL: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -125,6 +126,70 @@ fn unknown_preserves_a_complete_observation_with_historical_sync() {
     assert_eq!(
         freshness.last_successful_sync_at.as_deref(),
         Some("2026-09-01T12:34:56Z")
+    );
+}
+
+#[test]
+fn equivalent_reobservation_may_postdate_successful_sync() {
+    let mut state = observation(RemoteRelation::Equivalent, &[]);
+    state.last_successful_sync_at = Some("2026-09-01T12:34:56Z".into());
+
+    let freshness = classify(state).expect("later equivalent observation remains valid");
+    assert_eq!(freshness.freshness, Freshness::SynchronizedAsOf);
+    assert_eq!(
+        freshness.last_successful_sync_at.as_deref(),
+        Some("2026-09-01T12:34:56Z")
+    );
+    assert_eq!(freshness.remote_observed_at.as_deref(), Some(TIME));
+}
+
+#[test]
+fn failed_sync_records_unknown_without_erasing_history() {
+    let prior = observation(RemoteRelation::Equivalent, &["operation-1"]);
+    let updated = record_failed_sync_observation(
+        &prior,
+        "cccccccccccccccccccccccccccccccccccccccc",
+        "2026-09-02T12:35:00Z",
+    )
+    .expect("a complete failed-sync observation is valid");
+
+    assert_eq!(
+        updated.last_successful_sync_at,
+        prior.last_successful_sync_at
+    );
+    assert_eq!(updated.local_generation, prior.local_generation);
+    assert_eq!(updated.pending_mutations, prior.pending_mutations);
+    assert_eq!(
+        updated.remote_generation.as_deref(),
+        Some("cccccccccccccccccccccccccccccccccccccccc")
+    );
+    assert_eq!(
+        updated.remote_observed_at.as_deref(),
+        Some("2026-09-02T12:35:00Z")
+    );
+    assert_eq!(updated.observed_local_generation.as_deref(), Some(LOCAL));
+    assert_eq!(updated.remote_relation, RemoteRelation::Unknown);
+    assert_eq!(
+        classify(updated)
+            .expect("updated observation classifies")
+            .freshness,
+        Freshness::UnknownWithUnpublished
+    );
+}
+
+#[test]
+fn failed_sync_observation_refuses_a_regressing_timestamp() {
+    let prior = observation(RemoteRelation::Equivalent, &[]);
+
+    assert_eq!(
+        record_failed_sync_observation(
+            &prior,
+            "cccccccccccccccccccccccccccccccccccccccc",
+            "2026-09-01T12:34:56Z",
+        )
+        .unwrap_err()
+        .code(),
+        "invalid_freshness"
     );
 }
 

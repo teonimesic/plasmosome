@@ -217,7 +217,10 @@ pub fn validate(state: &ObservationState) -> Result<(), FreshnessError> {
                 return Err(refusal());
             }
             if matches!(state.remote_relation, RemoteRelation::Equivalent)
-                && state.last_successful_sync_at.as_deref() != Some(observed_at)
+                && state
+                    .last_successful_sync_at
+                    .as_deref()
+                    .is_none_or(|successful_at| successful_at > observed_at)
             {
                 return Err(refusal());
             }
@@ -229,6 +232,41 @@ pub fn validate(state: &ObservationState) -> Result<(), FreshnessError> {
             Ok(())
         }
     }
+}
+
+/// Records a complete remote observation after a sync failed after observing its first remote
+/// generation. Existing successful-sync and pending-operation facts are intentionally retained.
+pub fn record_failed_sync_observation(
+    prior: &ObservationState,
+    remote_generation: &str,
+    remote_observed_at: &str,
+) -> Result<ObservationState, FreshnessError> {
+    validate(prior)?;
+    if !lower_hex_generation(remote_generation) || !canonical_utc(remote_observed_at) {
+        return Err(refusal());
+    }
+    if prior
+        .remote_observed_at
+        .as_deref()
+        .is_some_and(|previous| remote_observed_at < previous)
+        || prior
+            .last_successful_sync_at
+            .as_deref()
+            .is_some_and(|successful| remote_observed_at < successful)
+    {
+        return Err(refusal());
+    }
+    let updated = ObservationState {
+        last_successful_sync_at: prior.last_successful_sync_at.clone(),
+        local_generation: prior.local_generation.clone(),
+        remote_generation: Some(remote_generation.to_owned()),
+        remote_observed_at: Some(remote_observed_at.to_owned()),
+        observed_local_generation: Some(prior.local_generation.clone()),
+        remote_relation: RemoteRelation::Unknown,
+        pending_mutations: prior.pending_mutations.clone(),
+    };
+    validate(&updated)?;
+    Ok(updated)
 }
 
 /// Validates one persisted observation and returns its six-state local freshness envelope.

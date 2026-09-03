@@ -170,3 +170,7 @@ The corrected isolated probe then ran exact `bd --sandbox init --remote git+http
 ### 2026-09-02 — TDD: compiled project binding
 
 Test-only `project_config_accepts_only_the_compiled_plasmosome_remote_pair` first failed to compile because `plasmosome_work_state::project` did not exist. The implementation then added the checksum-bound `include_str!` configuration and exact parser; the focused command passed with 1 test. The parser accepts only the compiled schema/project/name/observation URL/Dolt URL/ref tuple and rejects alternate, duplicate, or unknown fields as `invalid_project_config`.
+
+### 2026-09-02 — TDD: online freshness facts
+
+Test-only `equivalent_reobservation_may_postdate_successful_sync` first failed with `invalid_freshness`; the old validator required equality between successful-sync and observation timestamps. Test-only `failed_sync_records_unknown_without_erasing_history` then failed to compile because `record_failed_sync_observation` did not exist. The minimum freshness implementation preserves prior successful-sync/local/pending facts, records a complete post-R0 Unknown observation, and permits a later equivalent re-observation without moving the successful-sync timestamp. `cargo test -p plasmosome-work-state --test freshness` then passed all 7 tests. Post-hoc boundary coverage `failed_sync_observation_refuses_a_regressing_timestamp` passed, confirming that a new failure observation cannot move canonical UTC time backward.
