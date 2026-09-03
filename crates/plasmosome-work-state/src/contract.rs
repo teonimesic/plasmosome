@@ -2466,6 +2466,10 @@ fn fixture_runtime_environment(staging: &Path) -> Result<BTreeMap<String, String
         return Err("cutover_blocked".into());
     }
     environment.insert("GIT_CONFIG_GLOBAL".into(), git_config.display().to_string());
+    environment.insert(
+        "BEADS_DIR".into(),
+        staging.join("repository/.beads").display().to_string(),
+    );
     for (key, value) in [
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_TERMINAL_PROMPT", "0"),
@@ -2474,6 +2478,7 @@ fn fixture_runtime_environment(staging: &Path) -> Result<BTreeMap<String, String
         ("BD_DISABLE_METRICS", "1"),
         ("BD_DISABLE_EVENT_FLUSH", "1"),
         ("BD_NON_INTERACTIVE", "1"),
+        ("BD_BACKUP_ENABLED", "false"),
         ("CI", "true"),
     ] {
         environment.insert(key.into(), value.into());
@@ -3010,14 +3015,25 @@ impl OnlineSyncContractTransport {
         let Some(metadata_stage) = command.program.parent() else {
             return false;
         };
-        command.program.file_name().is_some_and(|name| name == "bd")
-            && metadata_stage.parent() == Some(generations)
-            && metadata_stage
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(".staging-"))
-            && command.argv == ["--version"]
-            && command.cwd.is_none()
-            && command.redacted_argv_positions.is_empty()
+        let Some(stage_name) = metadata_stage.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let Some(stage_suffix) = stage_name.strip_prefix(".staging-") else {
+            return false;
+        };
+        if !metadata_stage.is_absolute()
+            || metadata_stage == staging_root
+            || metadata_stage.parent() != Some(generations)
+            || stage_suffix.is_empty()
+            || command.program != metadata_stage.join("bd")
+            || command.argv != ["--version"]
+            || command.cwd.as_deref() != Some(metadata_stage)
+            || !command.redacted_argv_positions.is_empty()
+        {
+            return false;
+        }
+        fixture_runtime_environment(metadata_stage)
+            .is_ok_and(|environment| command.environment == environment)
     }
 
     fn remote_list(&self) -> String {
@@ -5011,9 +5027,9 @@ fn host_target() -> &'static str {
 mod tests {
     use super::{
         ContractParityMismatch, ContractRequest, ContractResult, HISTORICAL_SOURCE_COMMIT,
-        OnlineSyncContractScenario, OnlineSyncContractTransport, contract_refusal_exit_code,
-        finish_contract, manifest_path, parity_candidate_projection, resolve_changed_source_ref,
-        run_contract, source_refusal,
+        OnlineSyncContractPhase, OnlineSyncContractScenario, OnlineSyncContractTransport,
+        contract_refusal_exit_code, finish_contract, manifest_path, parity_candidate_projection,
+        resolve_changed_source_ref, run_contract, source_refusal,
     };
     use crate::command::{CommandOutput, CommandRunner, CommandSpec, RecordingCommandRunner};
     use crate::document::parse_document;
@@ -5441,69 +5457,199 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fixture_runtime_environment_binds_private_beads_state_and_disables_backup() {
+        use super::fixture_runtime_environment;
+        use std::fs;
+
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join(".staging-fixture-runtime");
+        let runtime = staging.join("runtime");
+        for name in ["home", "xdg_config", "xdg_cache", "xdg_data", "tmp"] {
+            fs::create_dir_all(runtime.join(name)).unwrap();
+        }
+        fs::create_dir_all(staging.join("repository/.beads")).unwrap();
+        fs::write(runtime.join("git_config_global"), "").unwrap();
+
+        assert_eq!(
+            fixture_runtime_environment(&staging).unwrap(),
+            BTreeMap::from([
+                ("PATH".into(), std::env::var("PATH").unwrap()),
+                ("HOME".into(), runtime.join("home").display().to_string()),
+                (
+                    "XDG_CONFIG_HOME".into(),
+                    runtime.join("xdg_config").display().to_string(),
+                ),
+                (
+                    "XDG_CACHE_HOME".into(),
+                    runtime.join("xdg_cache").display().to_string(),
+                ),
+                (
+                    "XDG_DATA_HOME".into(),
+                    runtime.join("xdg_data").display().to_string(),
+                ),
+                ("TMPDIR".into(), runtime.join("tmp").display().to_string()),
+                (
+                    "GIT_CONFIG_GLOBAL".into(),
+                    runtime.join("git_config_global").display().to_string(),
+                ),
+                (
+                    "BEADS_DIR".into(),
+                    staging.join("repository/.beads").display().to_string(),
+                ),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+                ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                ("BD_DISABLE_METRICS".into(), "1".into()),
+                ("BD_DISABLE_EVENT_FLUSH".into(), "1".into()),
+                ("BD_NON_INTERACTIVE".into(), "1".into()),
+                ("BD_BACKUP_ENABLED".into(), "false".into()),
+                ("CI".into(), "true".into()),
+            ])
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn online_sync_contract_transport_admits_only_metadata_version_after_pending_refusal() {
+        use super::fixture_runtime_environment;
+        use std::fs;
         use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
 
         let _working_directory = PROCESS_WORKING_DIRECTORY.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let generations = root.path().join("generations");
-        let staging = generations.join(".staging-observation");
-        let repository = staging.join("repository");
-        let binary = staging.join("bd");
+        let first_stage = generations.join(".staging-observation");
+        let metadata_stage = generations.join(".staging-pending-metadata");
+        let empty_metadata_stage = generations.join(".staging-");
+        let outside_stage = root.path().join("outside/.staging-pending-metadata");
         let candidate = root.path().join("recorded-remote-candidate");
-        std::fs::create_dir_all(&repository).unwrap();
-        std::fs::create_dir_all(&candidate).unwrap();
-        std::fs::write(&binary, "staged bd").unwrap();
-        let project = crate::project::compiled_project_config().unwrap();
-        let environment = BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]);
-        let mut transport = OnlineSyncContractTransport::for_scenario(
-            project.clone(),
-            candidate,
-            OnlineSyncContractScenario::FirstMoved,
-        );
-        let observation = CommandSpec {
-            program: PathBuf::from("git"),
-            argv: vec![
-                "ls-remote".into(),
-                "--exit-code".into(),
-                project.git_observation_url().into(),
-                project.data_ref().into(),
-            ],
-            cwd: Some(staging),
-            environment: environment.clone(),
-            redacted_argv_positions: vec![2],
-        };
-        assert_eq!(transport.run(observation).unwrap().status, 0);
 
-        let metadata_binary = generations.join(".staging-pending-metadata/bd");
-        std::fs::create_dir_all(metadata_binary.parent().unwrap()).unwrap();
-        std::fs::write(
-            &metadata_binary,
-            "#!/bin/sh\nprintf 'bd version 1.1.2 (test)\\n'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&metadata_binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let wrong = CommandSpec {
-            program: metadata_binary.clone(),
-            argv: vec!["--readonly".into(), "--sandbox".into(), "export".into()],
-            cwd: None,
-            environment: environment.clone(),
-            redacted_argv_positions: Vec::new(),
+        fn create_stage(stage: &Path) {
+            let runtime = stage.join("runtime");
+            for name in ["home", "xdg_config", "xdg_cache", "xdg_data", "tmp"] {
+                fs::create_dir_all(runtime.join(name)).unwrap();
+            }
+            fs::create_dir_all(stage.join("repository/.beads")).unwrap();
+            fs::write(runtime.join("git_config_global"), "").unwrap();
+            let binary = stage.join("bd");
+            fs::write(&binary, "#!/bin/sh\nprintf 'bd version 1.1.2 (test)\\n'\n").unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        create_stage(&first_stage);
+        create_stage(&metadata_stage);
+        create_stage(&empty_metadata_stage);
+        create_stage(&outside_stage);
+        fs::create_dir_all(&candidate).unwrap();
+        let project = crate::project::compiled_project_config().unwrap();
+        let first_environment = fixture_runtime_environment(&first_stage).unwrap();
+        let metadata_environment = fixture_runtime_environment(&metadata_stage).unwrap();
+
+        let prepare = || {
+            let mut transport = OnlineSyncContractTransport::for_scenario(
+                project.clone(),
+                candidate.clone(),
+                OnlineSyncContractScenario::FirstMoved,
+            );
+            let observation = CommandSpec {
+                program: PathBuf::from("git"),
+                argv: vec![
+                    "ls-remote".into(),
+                    "--exit-code".into(),
+                    project.git_observation_url().into(),
+                    project.data_ref().into(),
+                ],
+                cwd: Some(first_stage.clone()),
+                environment: first_environment.clone(),
+                redacted_argv_positions: vec![2],
+            };
+            assert_eq!(transport.run(observation).unwrap().status, 0);
+            transport
         };
-        assert!(transport.run(wrong).is_err());
-        let version = CommandSpec {
-            program: metadata_binary,
+
+        let valid = CommandSpec {
+            program: metadata_stage.join("bd"),
             argv: vec!["--version".into()],
-            cwd: None,
-            environment,
+            cwd: Some(metadata_stage.clone()),
+            environment: metadata_environment.clone(),
             redacted_argv_positions: Vec::new(),
         };
+
+        let required = prepare();
+        assert!(required.is_metadata_version_transition(&valid));
+
+        let mut invalid = Vec::new();
+        let mut missing_beads_dir = valid.clone();
+        missing_beads_dir.environment.remove("BEADS_DIR");
+        invalid.push(missing_beads_dir);
+        let mut altered_beads_dir = valid.clone();
+        altered_beads_dir.environment.insert(
+            "BEADS_DIR".into(),
+            first_stage.join("repository/.beads").display().to_string(),
+        );
+        invalid.push(altered_beads_dir);
+        let mut missing_backup = valid.clone();
+        missing_backup.environment.remove("BD_BACKUP_ENABLED");
+        invalid.push(missing_backup);
+        let mut true_backup = valid.clone();
+        true_backup
+            .environment
+            .insert("BD_BACKUP_ENABLED".into(), "true".into());
+        invalid.push(true_backup);
+        let mut changed_path = valid.clone();
+        changed_path
+            .environment
+            .insert("PATH".into(), "/wrong/path".into());
+        invalid.push(changed_path);
+        let mut changed_ci = valid.clone();
+        changed_ci.environment.insert("CI".into(), "false".into());
+        invalid.push(changed_ci);
+        let mut extra_environment = valid.clone();
+        extra_environment
+            .environment
+            .insert("EXTRA".into(), "forbidden".into());
+        invalid.push(extra_environment);
+        let mut none_cwd = valid.clone();
+        none_cwd.cwd = None;
+        invalid.push(none_cwd);
+        let mut first_stage_command = valid.clone();
+        first_stage_command.program = first_stage.join("bd");
+        first_stage_command.cwd = Some(first_stage.clone());
+        first_stage_command.environment = first_environment.clone();
+        invalid.push(first_stage_command);
+        let mut repository_cwd = valid.clone();
+        repository_cwd.cwd = Some(metadata_stage.join("repository"));
+        invalid.push(repository_cwd);
+        let mut empty_stage = valid.clone();
+        empty_stage.program = empty_metadata_stage.join("bd");
+        empty_stage.cwd = Some(empty_metadata_stage.clone());
+        invalid.push(empty_stage);
+        let mut outside = valid.clone();
+        outside.program = outside_stage.join("bd");
+        outside.cwd = Some(outside_stage.clone());
+        invalid.push(outside);
+        let mut wrong_argv = valid.clone();
+        wrong_argv.argv = vec!["--readonly".into(), "--version".into()];
+        invalid.push(wrong_argv);
+        let mut redacted = valid.clone();
+        redacted.redacted_argv_positions = vec![0];
+        invalid.push(redacted);
+
+        for command in invalid {
+            let mut transport = prepare();
+            assert_eq!(transport.run(command), Err("cutover_blocked".into()));
+            assert_eq!(transport.phase, OnlineSyncContractPhase::AwaitInit);
+        }
+
+        let mut transport = prepare();
         assert_eq!(
-            transport.run(version).unwrap(),
+            transport.run(valid).unwrap(),
             CommandOutput::success("bd version 1.1.2 (test)\n")
         );
+        assert_eq!(transport.phase, OnlineSyncContractPhase::Complete);
     }
 
     #[cfg(unix)]
