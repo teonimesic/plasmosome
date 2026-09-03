@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,8 +7,10 @@ use plasmosome_work_state::contract::isolated_environment;
 use plasmosome_work_state::document::{ShadowDocument, parse_document};
 use plasmosome_work_state::shadow::{
     ShadowError, ShadowStore, canonical_logical_export, compare_document_mapping,
-    compare_shadow_parity, decode_beads_jsonl, decode_logical_export, import_shadow_documents,
-    logical_export_digest, native_id, to_beads_jsonl,
+    compare_shadow_parity, decode_beads_jsonl, decode_logical_export,
+    decode_operational_beads_jsonl, import_operational_shadow_documents, import_shadow_documents,
+    initial_operational_metadata, logical_export_digest, native_id, to_beads_jsonl,
+    to_operational_beads_jsonl,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -397,4 +400,127 @@ fn canonical_logical_export_round_trips_without_native_ids() {
         logical_export_digest(&export),
         format!("{:x}", Sha256::digest(export.as_bytes()))
     );
+}
+
+#[test]
+fn task_operational_siblings_are_initialized_and_strictly_decoded() {
+    let documents = documents();
+    let operational = initial_operational_metadata(&documents).unwrap();
+    assert_eq!(operational.len(), 1);
+    let jsonl = to_operational_beads_jsonl(&documents, &operational).unwrap();
+    let rows = jsonl
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(rows[0]["metadata"].get("plasmosome_operational").is_none());
+    assert!(rows[1]["metadata"].get("plasmosome_operational").is_none());
+    assert_eq!(
+        rows[2]["metadata"]["plasmosome_operational"],
+        serde_json::json!({
+            "schema_version": 1,
+            "active_owner": null,
+            "task_dependencies": []
+        })
+    );
+    let decoded = decode_operational_beads_jsonl(&jsonl).unwrap();
+    assert_eq!(decoded.len(), 3);
+    assert_eq!(decoded[2].operational, operational.get("task:001").cloned());
+
+    let mut invalid = rows[2].clone();
+    invalid["metadata"]["plasmosome_operational"]["active_owner"] = serde_json::json!({
+        "actor": "agent",
+        "session_id": "session",
+        "ownership_token": "token",
+        "claim_operation_id": "operation",
+        "acquired_at": "not-a-time",
+        "expires_at": "2026-09-02T13:00:00Z"
+    });
+    let mut invalid_rows = rows;
+    invalid_rows[2] = invalid;
+    let invalid_jsonl = invalid_rows
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    assert_eq!(
+        decode_operational_beads_jsonl(&invalid_jsonl)
+            .unwrap_err()
+            .code(),
+        "invalid_store"
+    );
+
+    let missing = BTreeMap::new();
+    assert_eq!(
+        to_operational_beads_jsonl(&documents, &missing)
+            .unwrap_err()
+            .code(),
+        "invalid_store"
+    );
+}
+
+#[test]
+fn operational_import_preserves_task_siblings_through_the_real_adapter_shape() {
+    let root = tempdir().unwrap();
+    let documents = documents();
+    let operational = initial_operational_metadata(&documents).unwrap();
+    let source_commit = sha('b');
+    let store = store(root.path());
+    let mut runner = RecordingCommandRunner::scripted(vec![
+        Ok(import_output(&documents)),
+        Ok(CommandOutput::success(
+            to_operational_beads_jsonl(&documents, &operational).unwrap(),
+        )),
+        Ok(CommandOutput::success("")),
+        Ok(CommandOutput::success("")),
+        Ok(CommandOutput::success("markdown-shadow\n")),
+        Ok(CommandOutput::success(format!("{source_commit}\n"))),
+    ]);
+
+    let imported = import_operational_shadow_documents(
+        &mut runner,
+        &store,
+        &source_commit,
+        &documents,
+        &operational,
+    )
+    .expect("operational rows import through the existing fresh-store adapter");
+
+    assert_eq!(imported.documents.len(), documents.len());
+    assert_eq!(
+        imported.documents[2].operational,
+        operational.get("task:001").cloned()
+    );
+    assert_eq!(runner.commands()[0].argv[..2], ["--sandbox", "import"]);
+    assert_eq!(runner.commands()[1].argv, vec!["--sandbox", "export"]);
+    assert_eq!(
+        runner.commands()[2].argv,
+        vec![
+            "--sandbox",
+            "kv",
+            "set",
+            "plasmosome.authority-mode",
+            "markdown-shadow",
+        ]
+    );
+    assert_eq!(
+        runner.commands()[3].argv,
+        vec![
+            "--sandbox",
+            "kv",
+            "set",
+            "plasmosome.source-commit",
+            &source_commit,
+        ]
+    );
+    assert_eq!(
+        runner.commands()[4].argv,
+        vec!["--sandbox", "kv", "get", "plasmosome.authority-mode"]
+    );
+    assert_eq!(
+        runner.commands()[5].argv,
+        vec!["--sandbox", "kv", "get", "plasmosome.source-commit"]
+    );
+    assert!(runner.finish().is_ok());
 }

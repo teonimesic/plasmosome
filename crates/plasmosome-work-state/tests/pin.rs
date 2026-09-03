@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use plasmosome_work_state::command::{CommandOutput, RecordingCommandRunner};
-use plasmosome_work_state::pin::{PinManifest, VerifiedBeads};
+use plasmosome_work_state::pin::{InstalledBeads, PinManifest, VerifiedBeads};
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
@@ -247,4 +247,93 @@ fn unknown_manifest_fields_and_non_https_sources_are_refused() {
         PinManifest::load(&pin).unwrap_err().code(),
         "invalid_beads_pin"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn installed_binary_verification_needs_no_archive() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempdir().unwrap();
+    let source = root.path().join("verified-bd");
+    let installed = root.path().join("installed-bd");
+    let pin = root.path().join("pin.toml");
+    write(&source, b"verified installed binary");
+    fs::copy(&source, &installed).unwrap();
+    write(
+        &pin,
+        manifest(
+            b"archive that is intentionally absent",
+            b"verified installed binary",
+        ),
+    );
+    let manifest = PinManifest::load(&pin).unwrap();
+
+    let mut runner =
+        RecordingCommandRunner::with_output(CommandOutput::success("bd version 1.1.2 (abc)\n"));
+    let verified = InstalledBeads::verify(
+        &manifest,
+        "aarch64-apple-darwin",
+        &installed,
+        Default::default(),
+        &mut runner,
+    );
+    assert!(verified.is_ok(), "{verified:?}");
+    assert_eq!(runner.commands().len(), 1);
+    assert_eq!(runner.commands()[0].program, installed);
+    assert_eq!(runner.commands()[0].argv, ["--version"]);
+    assert!(runner.finish().is_ok());
+
+    for (name, prepare, version, code) in [
+        (
+            "missing",
+            None,
+            "bd version 1.1.2 (abc)\n",
+            "installed_beads_missing",
+        ),
+        (
+            "symlink",
+            Some("symlink"),
+            "bd version 1.1.2 (abc)\n",
+            "installed_beads_invalid",
+        ),
+        (
+            "changed",
+            Some("changed"),
+            "bd version 1.1.2 (abc)\n",
+            "beads_checksum_mismatch",
+        ),
+        (
+            "wrong-version",
+            Some("copied"),
+            "bd version 1.1.3 (abc)\n",
+            "unsupported_beads_version",
+        ),
+    ] {
+        let candidate = root.path().join(name);
+        match prepare {
+            Some("symlink") => symlink(&installed, &candidate).unwrap(),
+            Some("changed") => write(&candidate, b"changed installed binary"),
+            Some("copied") => {
+                fs::copy(&installed, &candidate).unwrap();
+            }
+            None => {}
+            Some(_) => unreachable!(),
+        }
+        let mut runner = RecordingCommandRunner::with_output(CommandOutput::success(version));
+        let error = InstalledBeads::verify(
+            &manifest,
+            "aarch64-apple-darwin",
+            &candidate,
+            Default::default(),
+            &mut runner,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), code, "{name}");
+        if name == "wrong-version" {
+            assert_eq!(runner.commands().len(), 1);
+        } else {
+            assert!(runner.commands().is_empty(), "{name}");
+        }
+    }
 }

@@ -1,19 +1,33 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::command::{
     CommandOutput, CommandRunner, CommandSpec, RecordingCommandRunner, SystemCommandRunner,
 };
 use crate::document::{
-    DocumentError, DocumentKind, ShadowDocument, SourceDocuments, load_documents,
+    DocumentError, DocumentKind, ShadowDocument, SourceDocuments, is_lower_hex_sha, load_documents,
 };
+use crate::freshness::{Freshness, RemoteRelation};
 use crate::pin::{PinManifest, VerifiedBeads};
+use crate::read::{ReadCommand, project_read, render_human};
 use crate::shadow::{
-    ShadowError, ShadowStore, canonical_logical_export, compare_document_mapping,
-    compare_shadow_parity, decode_logical_export, import_shadow_documents, logical_export_digest,
+    ActiveOwner, OperationalDocument, OperationalMetadata, ShadowError, ShadowStore,
+    canonical_logical_export, canonical_operational_projection, compare_document_mapping,
+    compare_shadow_parity, decode_logical_export, decode_operational_beads_jsonl,
+    import_shadow_documents, logical_export_digest, native_id, operational_projection_digest,
+    to_operational_beads_jsonl,
+};
+use crate::store::{
+    BootstrapLock, BootstrapOutcome, BootstrapRequest, CurrentGeneration, StateManifest,
+    activate_staged_generation, bootstrap, current_generation, locate_store, locator_environment,
+    read_disposable_snapshot,
 };
 
 const ISOLATED: &[(&str, &str)] = &[
@@ -137,6 +151,7 @@ pub fn contract_refusal_exit_code(code: &str) -> i32 {
         code,
         "cutover_blocked"
             | "invalid_source_ref"
+            | "source_ref_unavailable"
             | "invalid_document"
             | "duplicate_document_id"
             | "missing_document_target"
@@ -153,6 +168,25 @@ pub fn contract_refusal_exit_code(code: &str) -> i32 {
 /// Returns whether a case must execute the real mapping and shadow-parity round trip.
 pub fn requires_shadow_round_trip(case: &str) -> bool {
     matches!(case, "document-mapping" | "shadow-parity" | "all")
+}
+
+/// Returns whether a contract case exercises the installed local read projection.
+pub fn requires_local_read_contract(case: &str) -> bool {
+    matches!(
+        case,
+        "local-reads" | "freshness" | "combined-freshness" | "all"
+    )
+}
+
+/// Returns the concrete installed-local-read scenarios selected by one contract invocation.
+pub fn local_read_cases(case: &str) -> &'static [&'static str] {
+    match case {
+        "local-reads" => &["local-reads"],
+        "freshness" => &["freshness"],
+        "combined-freshness" => &["combined-freshness"],
+        "all" => &["local-reads", "freshness", "combined-freshness"],
+        _ => &[],
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -521,6 +555,9 @@ where
             | "all"
             | "document-mapping"
             | "shadow-parity"
+            | "local-reads"
+            | "freshness"
+            | "combined-freshness"
     ) {
         return Err("invalid_command".into());
     }
@@ -543,7 +580,15 @@ where
             "--bd" if binary.is_none() => binary = Some(PathBuf::from(value)),
             "--source-ref"
                 if source_ref.is_none()
-                    && matches!(case.as_str(), "all" | "document-mapping" | "shadow-parity") =>
+                    && matches!(
+                        case.as_str(),
+                        "all"
+                            | "document-mapping"
+                            | "shadow-parity"
+                            | "local-reads"
+                            | "freshness"
+                            | "combined-freshness"
+                    ) =>
             {
                 source_ref = Some(value.to_owned())
             }
@@ -552,9 +597,8 @@ where
         index += 2;
     }
     let source_ref = match case.as_str() {
-        "document-mapping" | "shadow-parity" => {
-            source_ref.ok_or_else(|| "invalid_command".to_owned())?
-        }
+        "document-mapping" | "shadow-parity" | "local-reads" | "freshness"
+        | "combined-freshness" => source_ref.ok_or_else(|| "invalid_command".to_owned())?,
         "all" => source_ref.unwrap_or_else(|| "origin/main".into()),
         _ if source_ref.is_none() => String::new(),
         _ => return Err("invalid_command".into()),
@@ -929,6 +973,11 @@ fn source_refusal(
     offending_key: Option<String>,
     mismatch: Option<String>,
 ) -> ContractResult {
+    let code = if code == "source_ref_unavailable" {
+        "invalid_source_ref"
+    } else {
+        code
+    };
     let mut result = ContractResult::refusal(case, code);
     result.source_ref = Some(source_ref.into());
     result.offending_key = offending_key;
@@ -1027,6 +1076,1424 @@ fn migration_result(
     result.logical_export_sha256 = Some(evidence.logical_export_sha256);
     result.clone_labels = evidence.clone_labels;
     result.command_plans = evidence.command_plans;
+    result
+}
+
+type TreeSnapshot = BTreeMap<PathBuf, TreeEntry>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TreeEntry {
+    directory: bool,
+    mode: u32,
+    modified: SystemTime,
+    digest: Option<String>,
+}
+
+#[derive(Debug)]
+struct MirrorFixture {
+    mirror: PathBuf,
+    first_worktree: PathBuf,
+    second_worktree: PathBuf,
+    other_worktree: PathBuf,
+    command_plans: Vec<String>,
+}
+
+#[derive(Debug)]
+struct LocalReadEvidence {
+    clone_labels: Vec<String>,
+    source_commit: String,
+    local_generation: String,
+    operation_ids: Vec<String>,
+    command_plans: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ReadBoundary {
+    first_worktree: TreeSnapshot,
+    second_worktree: TreeSnapshot,
+    first_git: TreeSnapshot,
+    second_git: TreeSnapshot,
+    shared_state: TreeSnapshot,
+    mirror_config: TreeEntry,
+    mirror_hooks: TreeSnapshot,
+}
+
+fn tree_mode(metadata: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        metadata.mode()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+fn regular_file_digest(path: &Path) -> Result<String, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| "cutover_blocked".to_owned())?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err("cutover_blocked".into());
+    }
+    let mut file = File::open(path).map_err(|_| "cutover_blocked".to_owned())?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|_| "cutover_blocked".to_owned())?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn snapshot_regular_tree(root: &Path) -> Result<TreeSnapshot, String> {
+    snapshot_tree(root, false)
+}
+
+fn snapshot_source_tree(root: &Path) -> Result<TreeSnapshot, String> {
+    snapshot_tree(root, true)
+}
+
+fn snapshot_tree(root: &Path, allow_symlinks: bool) -> Result<TreeSnapshot, String> {
+    let metadata = fs::symlink_metadata(root).map_err(|_| "cutover_blocked".to_owned())?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err("cutover_blocked".into());
+    }
+    let mut entries = BTreeMap::new();
+    snapshot_tree_at(root, Path::new(""), allow_symlinks, &mut entries)?;
+    Ok(entries)
+}
+
+fn snapshot_tree_at(
+    root: &Path,
+    relative: &Path,
+    allow_symlinks: bool,
+    entries: &mut TreeSnapshot,
+) -> Result<(), String> {
+    let directory = if relative.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(relative)
+    };
+    let mut children = fs::read_dir(&directory)
+        .map_err(|_| "cutover_blocked".to_owned())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    children.sort_by_key(|entry| entry.file_name());
+    for child in children {
+        let path = child.path();
+        let child_relative = relative.join(child.file_name());
+        let metadata = fs::symlink_metadata(&path).map_err(|_| "cutover_blocked".to_owned())?;
+        if metadata.file_type().is_symlink() {
+            if !allow_symlinks {
+                return Err("cutover_blocked".into());
+            }
+            let target = fs::read_link(&path).map_err(|_| "cutover_blocked".to_owned())?;
+            entries.insert(
+                child_relative,
+                TreeEntry {
+                    directory: false,
+                    mode: tree_mode(&metadata),
+                    modified: metadata
+                        .modified()
+                        .map_err(|_| "cutover_blocked".to_owned())?,
+                    digest: Some(format!("symlink:{}", target.display())),
+                },
+            );
+            continue;
+        }
+        let entry = TreeEntry {
+            directory: metadata.file_type().is_dir(),
+            mode: tree_mode(&metadata),
+            modified: metadata
+                .modified()
+                .map_err(|_| "cutover_blocked".to_owned())?,
+            digest: metadata
+                .file_type()
+                .is_file()
+                .then(|| regular_file_digest(&path))
+                .transpose()?,
+        };
+        if !entry.directory && entry.digest.is_none() {
+            return Err("cutover_blocked".into());
+        }
+        entries.insert(child_relative.clone(), entry);
+        if metadata.file_type().is_dir() {
+            snapshot_tree_at(root, &child_relative, allow_symlinks, entries)?;
+        }
+    }
+    Ok(())
+}
+
+fn snapshot_regular_file(path: &Path) -> Result<TreeEntry, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| "cutover_blocked".to_owned())?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err("cutover_blocked".into());
+    }
+    Ok(TreeEntry {
+        directory: false,
+        mode: tree_mode(&metadata),
+        modified: metadata
+            .modified()
+            .map_err(|_| "cutover_blocked".to_owned())?,
+        digest: Some(regular_file_digest(path)?),
+    })
+}
+
+fn copy_regular_tree_contents(
+    source: &Path,
+    destination: &Path,
+    omitted_root_file: Option<&str>,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source).map_err(|_| "cutover_blocked".to_owned())?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err("cutover_blocked".into());
+    }
+    let mut entries = fs::read_dir(source)
+        .map_err(|_| "cutover_blocked".to_owned())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        if omitted_root_file.is_some_and(|omitted| name == omitted) {
+            continue;
+        }
+        let source_entry = entry.path();
+        let destination_entry = destination.join(&name);
+        let metadata =
+            fs::symlink_metadata(&source_entry).map_err(|_| "cutover_blocked".to_owned())?;
+        if metadata.file_type().is_symlink() {
+            return Err("cutover_blocked".into());
+        }
+        if metadata.file_type().is_dir() {
+            fs::create_dir(&destination_entry).map_err(|_| "cutover_blocked".to_owned())?;
+            fs::set_permissions(&destination_entry, metadata.permissions())
+                .map_err(|_| "cutover_blocked".to_owned())?;
+            copy_regular_tree_contents(&source_entry, &destination_entry, None)?;
+        } else if metadata.file_type().is_file() {
+            fs::copy(&source_entry, &destination_entry)
+                .map_err(|_| "cutover_blocked".to_owned())?;
+            fs::set_permissions(&destination_entry, metadata.permissions())
+                .map_err(|_| "cutover_blocked".to_owned())?;
+            File::open(&destination_entry)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| "cutover_blocked".to_owned())?;
+        } else {
+            return Err("cutover_blocked".into());
+        }
+    }
+    Ok(())
+}
+
+fn contract_command(
+    program: impl Into<PathBuf>,
+    argv: Vec<String>,
+    cwd: &Path,
+    environment: &BTreeMap<String, String>,
+) -> CommandSpec {
+    CommandSpec {
+        program: program.into(),
+        argv,
+        cwd: Some(cwd.to_path_buf()),
+        environment: environment.clone(),
+        redacted_argv_positions: Vec::new(),
+    }
+}
+
+fn run_contract_command(
+    runner: &mut SystemCommandRunner,
+    command: CommandSpec,
+) -> Result<CommandOutput, String> {
+    let output = runner
+        .run(command)
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    if output.status != 0 {
+        return Err("cutover_blocked".into());
+    }
+    Ok(output)
+}
+
+fn copy_contract_launcher(worktree: &Path) -> Result<(), String> {
+    let source = repository_root().join("tools/work-state");
+    let destination = worktree.join("tools/work-state");
+    let source_metadata =
+        fs::symlink_metadata(&source).map_err(|_| "cutover_blocked".to_owned())?;
+    if !source_metadata.file_type().is_file() || source_metadata.file_type().is_symlink() {
+        return Err("cutover_blocked".into());
+    }
+    fs::copy(&source, &destination).map_err(|_| "cutover_blocked".to_owned())?;
+    fs::set_permissions(&destination, source_metadata.permissions())
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    if regular_file_digest(&source)? != regular_file_digest(&destination)? {
+        return Err("cutover_blocked".into());
+    }
+    let source_pin = repository_root().join("tools/work-state-beads-1.1.2.toml");
+    let destination_pin = worktree.join("tools/work-state-beads-1.1.2.toml");
+    let source_pin_metadata =
+        fs::symlink_metadata(&source_pin).map_err(|_| "cutover_blocked".to_owned())?;
+    if !source_pin_metadata.file_type().is_file() || source_pin_metadata.file_type().is_symlink() {
+        return Err("cutover_blocked".into());
+    }
+    fs::copy(&source_pin, &destination_pin).map_err(|_| "cutover_blocked".to_owned())?;
+    fs::set_permissions(&destination_pin, source_pin_metadata.permissions())
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    if regular_file_digest(&source_pin)? != regular_file_digest(&destination_pin)? {
+        return Err("cutover_blocked".into());
+    }
+    Ok(())
+}
+
+fn create_mirror_fixture(
+    runner: &mut SystemCommandRunner,
+    root: &Path,
+    label: &str,
+    source_commit: &str,
+) -> Result<MirrorFixture, String> {
+    let fixture_root = root.join(label);
+    fs::create_dir(&fixture_root).map_err(|_| "cutover_blocked".to_owned())?;
+    let environment = isolated_environment(&fixture_root);
+    let source = repository_root();
+    let mirror = fixture_root.join("mirror");
+    let other_mirror = fixture_root.join("other-mirror");
+    let first_worktree = fixture_root.join("worktree-a");
+    let second_worktree = fixture_root.join("worktree-b");
+    let other_worktree = fixture_root.join("other-worktree");
+    for destination in [&mirror, &other_mirror] {
+        run_contract_command(
+            runner,
+            contract_command(
+                "git",
+                vec![
+                    "clone".into(),
+                    "--mirror".into(),
+                    "--no-local".into(),
+                    source.display().to_string(),
+                    destination.display().to_string(),
+                ],
+                &fixture_root,
+                &environment,
+            ),
+        )?;
+    }
+    for (mirror_root, worktree) in [
+        (&mirror, &first_worktree),
+        (&mirror, &second_worktree),
+        (&other_mirror, &other_worktree),
+    ] {
+        run_contract_command(
+            runner,
+            contract_command(
+                "git",
+                vec![
+                    "worktree".into(),
+                    "add".into(),
+                    "--detach".into(),
+                    worktree.display().to_string(),
+                    source_commit.into(),
+                ],
+                mirror_root,
+                &environment,
+            ),
+        )?;
+    }
+    copy_contract_launcher(&first_worktree)?;
+    copy_contract_launcher(&second_worktree)?;
+    Ok(MirrorFixture {
+        mirror,
+        first_worktree,
+        second_worktree,
+        other_worktree,
+        command_plans: vec![
+            "git clone --mirror --no-local".into(),
+            "git worktree add --detach".into(),
+        ],
+    })
+}
+
+fn worktree_git_directory(worktree: &Path) -> Result<PathBuf, String> {
+    let dot_git = worktree.join(".git");
+    let metadata = fs::symlink_metadata(&dot_git).map_err(|_| "cutover_blocked".to_owned())?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err("cutover_blocked".into());
+    }
+    let contents = fs::read_to_string(dot_git).map_err(|_| "cutover_blocked".to_owned())?;
+    let path = contents
+        .strip_prefix("gitdir: ")
+        .and_then(|value| value.strip_suffix('\n'))
+        .filter(|value| !value.is_empty() && !value.contains(['\n', '\r']))
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| "cutover_blocked".to_owned())?;
+    let metadata = fs::symlink_metadata(&path).map_err(|_| "cutover_blocked".to_owned())?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err("cutover_blocked".into());
+    }
+    fs::canonicalize(path).map_err(|_| "cutover_blocked".to_owned())
+}
+
+fn capture_read_boundary(
+    fixture: &MirrorFixture,
+    shared_state: &Path,
+) -> Result<ReadBoundary, String> {
+    Ok(ReadBoundary {
+        first_worktree: snapshot_source_tree(&fixture.first_worktree)?,
+        second_worktree: snapshot_source_tree(&fixture.second_worktree)?,
+        first_git: snapshot_regular_tree(&worktree_git_directory(&fixture.first_worktree)?)?,
+        second_git: snapshot_regular_tree(&worktree_git_directory(&fixture.second_worktree)?)?,
+        shared_state: snapshot_regular_tree(shared_state)?,
+        mirror_config: snapshot_regular_file(&fixture.mirror.join("config"))?,
+        mirror_hooks: snapshot_regular_tree(&fixture.mirror.join("hooks"))?,
+    })
+}
+
+fn launcher_environment() -> BTreeMap<String, String> {
+    BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())])
+}
+
+fn read_arguments(command: &ReadCommand, json: bool) -> Vec<String> {
+    let mut arguments = match command {
+        ReadCommand::List => vec!["list".into()],
+        ReadCommand::Show(key) => vec!["show".into(), key.clone()],
+        ReadCommand::Ready => vec!["ready".into()],
+        ReadCommand::Blocked => vec!["blocked".into()],
+    };
+    if json {
+        arguments.push("--json".into());
+    }
+    arguments
+}
+
+fn read_command_name(command: &ReadCommand) -> &'static str {
+    match command {
+        ReadCommand::List => "list",
+        ReadCommand::Show(_) => "show",
+        ReadCommand::Ready => "ready",
+        ReadCommand::Blocked => "blocked",
+    }
+}
+
+fn run_launcher_read(
+    runner: &mut SystemCommandRunner,
+    worktree: &Path,
+    command: &ReadCommand,
+    json: bool,
+) -> Result<String, String> {
+    let launcher = worktree.join("tools/work-state");
+    let metadata = fs::symlink_metadata(&launcher).map_err(|_| "cutover_blocked".to_owned())?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err("cutover_blocked".into());
+    }
+    let output = run_contract_command(
+        runner,
+        contract_command(
+            launcher,
+            read_arguments(command, json),
+            worktree,
+            &launcher_environment(),
+        ),
+    )?;
+    if !output.stderr.is_empty() || !output.stdout.ends_with('\n') {
+        return Err("cutover_blocked".into());
+    }
+    Ok(output.stdout)
+}
+
+fn expected_read_response(
+    command: ReadCommand,
+    generation: &CurrentGeneration,
+    snapshot: &crate::store::FencedSnapshot,
+) -> Result<(serde_json::Value, String), String> {
+    let response = project_read(
+        command,
+        snapshot,
+        &generation.manifest.authority_mode,
+        &generation.manifest.source_commit,
+    )
+    .map_err(|_| "cutover_blocked".to_owned())?;
+    let value = serde_json::to_value(&response).map_err(|_| "cutover_blocked".to_owned())?;
+    Ok((value, render_human(&response)))
+}
+
+fn assert_launcher_read(
+    runner: &mut SystemCommandRunner,
+    worktree: &Path,
+    command: ReadCommand,
+    generation: &CurrentGeneration,
+    snapshot: &crate::store::FencedSnapshot,
+) -> Result<(), String> {
+    let (expected_json, expected_human) =
+        expected_read_response(command.clone(), generation, snapshot)?;
+    let json = run_launcher_read(runner, worktree, &command, true)?;
+    let observed_json: serde_json::Value =
+        serde_json::from_str(&json).map_err(|_| "cutover_blocked".to_owned())?;
+    if observed_json != expected_json {
+        return Err("cutover_blocked".into());
+    }
+    let human = run_launcher_read(runner, worktree, &command, false)?;
+    if human != expected_human {
+        return Err("cutover_blocked".into());
+    }
+    Ok(())
+}
+
+fn assert_launcher_missing_show(
+    runner: &mut SystemCommandRunner,
+    worktree: &Path,
+) -> Result<(), String> {
+    let launcher = worktree.join("tools/work-state");
+    for json in [true, false] {
+        let output = runner
+            .run(contract_command(
+                &launcher,
+                read_arguments(&ReadCommand::Show("task:999".into()), json),
+                worktree,
+                &launcher_environment(),
+            ))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        let expected_stderr = if json {
+            "{\"code\":\"document_not_found\",\"document_key\":\"task:999\"}\n"
+        } else {
+            "error[document_not_found]: document_not_found (task:999)\n"
+        };
+        if output.status != 1 || !output.stdout.is_empty() || output.stderr != expected_stderr {
+            return Err("cutover_blocked".into());
+        }
+    }
+    Ok(())
+}
+
+fn assert_launcher_read_refusal(
+    runner: &mut SystemCommandRunner,
+    fixture: &MirrorFixture,
+    location: &crate::store::StoreLocation,
+    worktree: &Path,
+    code: &str,
+) -> Result<(), String> {
+    let boundary = capture_read_boundary(fixture, &location.state_root)?;
+    let launcher = worktree.join("tools/work-state");
+    for json in [true, false] {
+        let output = runner
+            .run(contract_command(
+                &launcher,
+                read_arguments(&ReadCommand::List, json),
+                worktree,
+                &launcher_environment(),
+            ))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        let expected_stderr = if json {
+            format!("{{\"code\":\"{code}\"}}\n")
+        } else {
+            format!("error[{code}]: {code}\n")
+        };
+        if output.status != 1 || !output.stdout.is_empty() || output.stderr != expected_stderr {
+            return Err("cutover_blocked".into());
+        }
+    }
+    if capture_read_boundary(fixture, &location.state_root)? != boundary {
+        return Err("cutover_blocked".into());
+    }
+    Ok(())
+}
+
+fn read_commands_for(snapshot: &crate::store::FencedSnapshot) -> Result<Vec<ReadCommand>, String> {
+    let show_key = snapshot
+        .documents
+        .iter()
+        .find(|document| matches!(document.document.record.kind, DocumentKind::Task))
+        .or_else(|| snapshot.documents.first())
+        .map(|document| document.document.record.document_key.clone())
+        .ok_or_else(|| "cutover_blocked".to_owned())?;
+    Ok(vec![
+        ReadCommand::List,
+        ReadCommand::Show(show_key),
+        ReadCommand::Ready,
+        ReadCommand::Blocked,
+    ])
+}
+
+fn assert_exact_source_projection(
+    source: &SourceDocuments,
+    snapshot: &crate::store::FencedSnapshot,
+) -> Result<(), String> {
+    let documents = snapshot
+        .documents
+        .iter()
+        .map(|document| document.document.clone())
+        .collect::<Vec<_>>();
+    compare_document_mapping(&source.documents, &documents)
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    compare_shadow_parity(&source.documents, &documents).map_err(|_| "cutover_blocked".to_owned())
+}
+
+fn bootstrap_fixture(
+    runner: &mut SystemCommandRunner,
+    root: &Path,
+    label: &str,
+    request: &ContractRequest,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+) -> Result<
+    (
+        MirrorFixture,
+        crate::store::StoreLocation,
+        CurrentGeneration,
+        BootstrapRequest,
+    ),
+    String,
+> {
+    let fixture = create_mirror_fixture(runner, root, label, &source.source_commit)?;
+    let environment = locator_environment().map_err(|error| error.code().to_owned())?;
+    let first_location = locate_store(runner, &fixture.first_worktree, environment.clone())
+        .map_err(|error| error.code().to_owned())?;
+    let second_location = locate_store(runner, &fixture.second_worktree, environment.clone())
+        .map_err(|error| error.code().to_owned())?;
+    let other_location = locate_store(runner, &fixture.other_worktree, environment)
+        .map_err(|error| error.code().to_owned())?;
+    if first_location.common_dir != second_location.common_dir
+        || first_location.state_root != second_location.state_root
+        || first_location.state_root == other_location.state_root
+    {
+        return Err("cutover_blocked".into());
+    }
+    let wrapper = std::env::current_exe().map_err(|_| "cutover_blocked".to_owned())?;
+    let bootstrap_request = BootstrapRequest {
+        checkout: fixture.first_worktree.clone(),
+        source_root: repository_root(),
+        source_ref: request
+            .source_ref
+            .clone()
+            .ok_or_else(|| "invalid_source_ref".to_owned())?,
+        archive: request.archive.clone(),
+        binary: request.binary.clone(),
+        wrapper,
+        host_target: host_target().into(),
+    };
+    let first = bootstrap(&bootstrap_request).map_err(|error| error.code().to_owned())?;
+    if first.outcome != BootstrapOutcome::Installed || first.source_commit != source.source_commit {
+        return Err("cutover_blocked".into());
+    }
+    let before_second = snapshot_regular_tree(&first_location.state_root)?;
+    let second = bootstrap(&bootstrap_request).map_err(|error| error.code().to_owned())?;
+    if second.outcome != BootstrapOutcome::Unchanged
+        || second.source_commit != first.source_commit
+        || second.local_generation != first.local_generation
+        || snapshot_regular_tree(&first_location.state_root)? != before_second
+    {
+        return Err("cutover_blocked".into());
+    }
+    let generation =
+        current_generation(&first_location).map_err(|error| error.code().to_owned())?;
+    let second_generation =
+        current_generation(&second_location).map_err(|error| error.code().to_owned())?;
+    if generation != second_generation
+        || generation.manifest.source_commit != source.source_commit
+        || generation.manifest.local_generation != first.local_generation
+    {
+        return Err("cutover_blocked".into());
+    }
+    let snapshot = read_disposable_snapshot(runner, &generation, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    assert_exact_source_projection(source, &snapshot)?;
+    Ok((fixture, first_location, generation, bootstrap_request))
+}
+
+fn assert_runtime_reinstall(
+    runner: &mut SystemCommandRunner,
+    location: &crate::store::StoreLocation,
+    previous: &CurrentGeneration,
+    request: &BootstrapRequest,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+    expected_snapshot: &crate::store::FencedSnapshot,
+) -> Result<CurrentGeneration, String> {
+    let expected_manifest = previous.manifest.clone();
+    let result = bootstrap(request).map_err(|error| error.code().to_owned())?;
+    if result.outcome != BootstrapOutcome::Reinstalled
+        || result.source_commit != expected_manifest.source_commit
+        || result.local_generation != expected_manifest.local_generation
+        || result.logical_export_sha256 != expected_manifest.logical_export_sha256
+    {
+        return Err("cutover_blocked".into());
+    }
+    let repaired = current_generation(location).map_err(|error| error.code().to_owned())?;
+    if repaired.name == previous.name
+        || !previous.root.is_dir()
+        || repaired.manifest != expected_manifest
+        || regular_file_digest(&repaired.root.join("plasmosome-work-state"))?
+            != repaired.manifest.wrapper_sha256
+    {
+        return Err("cutover_blocked".into());
+    }
+    let repaired_snapshot = read_disposable_snapshot(runner, &repaired, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    if repaired_snapshot != *expected_snapshot {
+        return Err("cutover_blocked".into());
+    }
+    assert_exact_source_projection(source, &repaired_snapshot)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let wrapper_metadata = fs::symlink_metadata(repaired.root.join("plasmosome-work-state"))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        if wrapper_metadata.permissions().mode() & 0o7777 != 0o700 {
+            return Err("cutover_blocked".into());
+        }
+    }
+    Ok(repaired)
+}
+
+fn assert_runtime_repair(
+    runner: &mut SystemCommandRunner,
+    fixture: &MirrorFixture,
+    location: &crate::store::StoreLocation,
+    base: &CurrentGeneration,
+    request: &BootstrapRequest,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+) -> Result<(CurrentGeneration, Vec<String>), String> {
+    let before_snapshot = read_disposable_snapshot(runner, base, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    let before_manifest = base.manifest.clone();
+    let has_nondefault_operational_state = before_snapshot.documents.iter().any(|document| {
+        document.operational.as_ref().is_some_and(|operational| {
+            operational.active_owner.is_some() && operational.task_dependencies.len() == 2
+        })
+    });
+    if !has_nondefault_operational_state
+        || before_manifest.remote_relation != RemoteRelation::Ahead
+        || before_manifest.remote_generation.as_deref() != Some(CONTRACT_REMOTE_GENERATION)
+        || before_manifest.remote_observed_at.as_deref() != Some(CONTRACT_OBSERVED_AT)
+        || before_manifest.observed_local_generation.as_deref()
+            == Some(before_manifest.local_generation.as_str())
+        || before_manifest.last_successful_sync_at.is_some()
+        || before_manifest.pending_operation_ids != [CONTRACT_PENDING_OPERATION]
+    {
+        return Err("cutover_blocked".into());
+    }
+    let installed_binary = base.root.join("bd");
+    let missing_binary = base.root.join("bd-removed-for-contract");
+    fs::rename(&installed_binary, &missing_binary).map_err(|_| "cutover_blocked".to_owned())?;
+    assert_launcher_read_refusal(
+        runner,
+        fixture,
+        location,
+        &fixture.first_worktree,
+        "installed_beads_missing",
+    )?;
+    let missing_repaired = assert_runtime_reinstall(
+        runner,
+        location,
+        base,
+        request,
+        source,
+        pin,
+        &before_snapshot,
+    )?;
+
+    let corrupted_binary = missing_repaired.root.join("bd");
+    fs::write(&corrupted_binary, "corrupted installed Beads binary")
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    assert_launcher_read_refusal(
+        runner,
+        fixture,
+        location,
+        &fixture.first_worktree,
+        "beads_checksum_mismatch",
+    )?;
+    let checksum_repaired = assert_runtime_reinstall(
+        runner,
+        location,
+        &missing_repaired,
+        request,
+        source,
+        pin,
+        &before_snapshot,
+    )?;
+    #[cfg(unix)]
+    let repaired = {
+        use std::os::unix::fs::PermissionsExt;
+
+        let wrapper = checksum_repaired.root.join("plasmosome-work-state");
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o600))
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        assert_launcher_read_refusal(
+            runner,
+            fixture,
+            location,
+            &fixture.first_worktree,
+            "invalid_store",
+        )?;
+        assert_runtime_reinstall(
+            runner,
+            location,
+            &checksum_repaired,
+            request,
+            source,
+            pin,
+            &before_snapshot,
+        )?
+    };
+    #[cfg(not(unix))]
+    let repaired = checksum_repaired;
+    let mut plans = vec![
+        "installed Beads missing refusal".into(),
+        "bootstrap missing-Beads runtime repair".into(),
+        "installed Beads checksum refusal".into(),
+        "bootstrap checksum runtime repair".into(),
+    ];
+    #[cfg(unix)]
+    plans.extend([
+        "installed wrapper-mode refusal".into(),
+        "bootstrap wrapper-mode repair".into(),
+    ]);
+    plans.extend(exercise_all_local_reads(
+        runner, fixture, location, &repaired, source, pin,
+    )?);
+    Ok((repaired, plans))
+}
+
+fn resolve_changed_source_ref<R: CommandRunner>(
+    runner: &mut R,
+    source_root: &Path,
+    selected_source_commit: &str,
+) -> Result<String, String> {
+    let preferred = if selected_source_commit == HISTORICAL_SOURCE_COMMIT {
+        "origin/main"
+    } else {
+        HISTORICAL_SOURCE_COMMIT
+    };
+    let mut environment = isolated_environment(source_root);
+    environment.insert("GIT_NO_LAZY_FETCH".into(), "1".into());
+    environment.insert("GIT_OPTIONAL_LOCKS".into(), "0".into());
+    let output = runner
+        .run(contract_command(
+            "git",
+            vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                "--end-of-options".into(),
+                format!("{preferred}^{{commit}}"),
+            ],
+            source_root,
+            &environment,
+        ))
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    let resolved = output
+        .stdout
+        .strip_suffix('\n')
+        .filter(|value| !value.contains(['\n', '\r']))
+        .filter(|value| is_lower_hex_sha(value))
+        .filter(|value| *value != selected_source_commit)
+        .map(str::to_owned);
+    if output.status != 0 {
+        return Err("cutover_blocked".into());
+    }
+    resolved.ok_or_else(|| "cutover_blocked".into())
+}
+
+fn assert_changed_source_refusal(
+    runner: &mut SystemCommandRunner,
+    location: &crate::store::StoreLocation,
+    request: &BootstrapRequest,
+    source: &SourceDocuments,
+) -> Result<(), String> {
+    let alternate_ref =
+        resolve_changed_source_ref(runner, &request.source_root, &source.source_commit)?;
+    let mut alternate_request = request.clone();
+    alternate_request.source_ref = alternate_ref;
+    let before = snapshot_regular_tree(&location.state_root)?;
+    let Err(error) = bootstrap(&alternate_request) else {
+        return Err("cutover_blocked".into());
+    };
+    if error.code() != "source_commit_mismatch"
+        || snapshot_regular_tree(&location.state_root)? != before
+    {
+        return Err("cutover_blocked".into());
+    }
+    Ok(())
+}
+
+fn assert_bootstrap_contention(
+    runner: &mut SystemCommandRunner,
+    location: &crate::store::StoreLocation,
+    worktree: &Path,
+    request: &BootstrapRequest,
+) -> Result<(), String> {
+    let held_lock = BootstrapLock::acquire(location).map_err(|error| error.code().to_owned())?;
+    let before = snapshot_regular_tree(&location.state_root)?;
+    let executable = std::env::current_exe().map_err(|_| "cutover_blocked".to_owned())?;
+    let output = runner.run(CommandSpec {
+        program: executable,
+        argv: vec![
+            "bootstrap".into(),
+            "--source-ref".into(),
+            request.source_ref.clone(),
+            "--archive".into(),
+            request.archive.display().to_string(),
+            "--bd".into(),
+            request.binary.display().to_string(),
+            "--json".into(),
+        ],
+        cwd: Some(worktree.to_path_buf()),
+        environment: launcher_environment(),
+        redacted_argv_positions: Vec::new(),
+    });
+    drop(held_lock);
+    let output = output.map_err(|_| "cutover_blocked".to_owned())?;
+    if output.status != 1
+        || !output.stdout.is_empty()
+        || output.stderr != "{\"code\":\"bootstrap_busy\"}\n"
+        || snapshot_regular_tree(&location.state_root)? != before
+    {
+        return Err("cutover_blocked".into());
+    }
+    Ok(())
+}
+
+fn exercise_all_local_reads(
+    runner: &mut SystemCommandRunner,
+    fixture: &MirrorFixture,
+    location: &crate::store::StoreLocation,
+    generation: &CurrentGeneration,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+) -> Result<Vec<String>, String> {
+    let snapshot = read_disposable_snapshot(runner, generation, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    assert_exact_source_projection(source, &snapshot)?;
+    let boundary = capture_read_boundary(fixture, &location.state_root)?;
+    let commands = read_commands_for(&snapshot)?;
+    for worktree in [&fixture.first_worktree, &fixture.second_worktree] {
+        for command in &commands {
+            assert_launcher_read(runner, worktree, command.clone(), generation, &snapshot)?;
+        }
+        assert_launcher_missing_show(runner, worktree)?;
+    }
+    if capture_read_boundary(fixture, &location.state_root)? != boundary {
+        return Err("cutover_blocked".into());
+    }
+    let mut plans = Vec::new();
+    for command in &commands {
+        plans.push(format!(
+            "tools/work-state {} --json",
+            read_command_name(command)
+        ));
+        plans.push(format!("tools/work-state {}", read_command_name(command)));
+    }
+    plans.push("tools/work-state show task:999 refusal".into());
+    Ok(plans)
+}
+
+const CONTRACT_OBSERVED_AT: &str = "2026-09-02T12:34:56Z";
+const CONTRACT_REMOTE_GENERATION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const CONTRACT_PENDING_OPERATION: &str = "operation-contract-046";
+
+fn contract_generation_name(label: &str) -> Result<String, String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "cutover_blocked".to_owned())?
+        .as_nanos();
+    Ok(format!(
+        "generation-contract-{label}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+/// Requires a real new embedded generation whenever a fixture reports pending local work.
+///
+/// This makes the freshness contract evidence distinguish a committed local change from a
+/// manifest-only pending-operation marker.
+pub fn validate_freshness_fixture_generations(
+    base_generation: &str,
+    fixture_generation: &str,
+    pending_operation_ids: &[&str],
+) -> Result<(), &'static str> {
+    if pending_operation_ids.is_empty() || base_generation != fixture_generation {
+        Ok(())
+    } else {
+        Err("cutover_blocked")
+    }
+}
+
+/// Builds the sole real Beads update plan used to create a committed pending-local fixture.
+///
+/// The full metadata object is deliberate: `--set-metadata` serializes nested JSON as a string,
+/// which would corrupt the typed task operational sibling in a subsequent export.
+pub fn pending_fixture_update_arguments(
+    native_issue_id: &str,
+    full_metadata: &str,
+) -> Result<Vec<String>, &'static str> {
+    if native_issue_id.trim().is_empty() || native_issue_id.contains(['\n', '\r']) {
+        return Err("cutover_blocked");
+    }
+    if !serde_json::from_str::<serde_json::Value>(full_metadata)
+        .ok()
+        .is_some_and(|metadata| metadata.is_object())
+    {
+        return Err("cutover_blocked");
+    }
+    Ok(vec![
+        "--sandbox".into(),
+        "--dolt-auto-commit=batch".into(),
+        "update".into(),
+        native_issue_id.into(),
+        "--metadata".into(),
+        full_metadata.into(),
+    ])
+}
+
+fn pending_fixture_metadata(
+    base_snapshot: &crate::store::FencedSnapshot,
+    target: &OperationalDocument,
+    replacement: OperationalMetadata,
+) -> Result<String, String> {
+    let logical_documents = base_snapshot
+        .documents
+        .iter()
+        .map(|document| document.document.clone())
+        .collect::<Vec<_>>();
+    let mut operational = base_snapshot
+        .documents
+        .iter()
+        .filter_map(|document| {
+            document
+                .operational
+                .as_ref()
+                .cloned()
+                .map(|metadata| (document.document.record.document_key.clone(), metadata))
+        })
+        .collect::<BTreeMap<_, _>>();
+    operational.insert(target.document.record.document_key.clone(), replacement);
+    let encoded = to_operational_beads_jsonl(&logical_documents, &operational)
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    let native = native_id(&target.document.record);
+    let metadata = encoded
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find_map(|row| {
+            (row.get("id").and_then(serde_json::Value::as_str) == Some(native.as_str()))
+                .then(|| row.get("metadata").cloned())
+                .flatten()
+        })
+        .filter(serde_json::Value::is_object)
+        .ok_or_else(|| "cutover_blocked".to_owned())?;
+    serde_json::to_string(&metadata).map_err(|_| "cutover_blocked".to_owned())
+}
+
+fn fixture_runtime_environment(staging: &Path) -> Result<BTreeMap<String, String>, String> {
+    let runtime = staging.join("runtime");
+    let directories = [
+        ("HOME", runtime.join("home")),
+        ("XDG_CONFIG_HOME", runtime.join("xdg_config")),
+        ("XDG_CACHE_HOME", runtime.join("xdg_cache")),
+        ("XDG_DATA_HOME", runtime.join("xdg_data")),
+        ("TMPDIR", runtime.join("tmp")),
+    ];
+    let mut environment = BTreeMap::new();
+    for (key, path) in directories {
+        let metadata = fs::symlink_metadata(&path).map_err(|_| "cutover_blocked".to_owned())?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err("cutover_blocked".into());
+        }
+        environment.insert(key.into(), path.display().to_string());
+    }
+    let git_config = runtime.join("git_config_global");
+    let metadata = fs::symlink_metadata(&git_config).map_err(|_| "cutover_blocked".to_owned())?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err("cutover_blocked".into());
+    }
+    environment.insert("GIT_CONFIG_GLOBAL".into(), git_config.display().to_string());
+    for (key, value) in [
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("GIT_NO_LAZY_FETCH", "1"),
+        ("GIT_OPTIONAL_LOCKS", "0"),
+        ("BD_DISABLE_METRICS", "1"),
+        ("BD_DISABLE_EVENT_FLUSH", "1"),
+        ("BD_NON_INTERACTIVE", "1"),
+        ("CI", "true"),
+    ] {
+        environment.insert(key.into(), value.into());
+    }
+    let path = std::env::var_os("PATH").ok_or_else(|| "cutover_blocked".to_owned())?;
+    environment.insert("PATH".into(), path.to_string_lossy().into_owned());
+    Ok(environment)
+}
+
+fn fixture_status_commit(value: &str) -> Result<String, String> {
+    let status: serde_json::Value =
+        serde_json::from_str(value).map_err(|_| "cutover_blocked".to_owned())?;
+    let commit = status
+        .get("commit")
+        .and_then(serde_json::Value::as_str)
+        .filter(|commit| !commit.trim().is_empty() && *commit == commit.trim())
+        .ok_or_else(|| "cutover_blocked".to_owned())?;
+    if status
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || status.get("branch").and_then(serde_json::Value::as_str) != Some("main")
+    {
+        return Err("cutover_blocked".into());
+    }
+    Ok(commit.into())
+}
+
+fn commit_pending_fixture_change(
+    runner: &mut SystemCommandRunner,
+    staging: &Path,
+    base_snapshot: &crate::store::FencedSnapshot,
+) -> Result<(String, Vec<OperationalDocument>), String> {
+    let target = base_snapshot
+        .documents
+        .iter()
+        .find(|document| matches!(document.document.record.kind, DocumentKind::Task))
+        .ok_or_else(|| "cutover_blocked".to_owned())?;
+    let mut operational: OperationalMetadata = target
+        .operational
+        .clone()
+        .ok_or_else(|| "cutover_blocked".to_owned())?;
+    operational.active_owner = Some(ActiveOwner {
+        actor: "contract-fixture".into(),
+        session_id: "freshness-fixture".into(),
+        ownership_token: "fixture-token".into(),
+        claim_operation_id: CONTRACT_PENDING_OPERATION.into(),
+        acquired_at: CONTRACT_OBSERVED_AT.into(),
+        expires_at: "2026-09-02T13:34:56Z".into(),
+    });
+    operational.task_dependencies = base_snapshot
+        .documents
+        .iter()
+        .filter(|document| {
+            matches!(document.document.record.kind, DocumentKind::Task)
+                && document.document.record.document_key != target.document.record.document_key
+        })
+        .map(|document| document.document.record.document_key.clone())
+        .take(2)
+        .collect();
+    if operational.task_dependencies.len() != 2 {
+        return Err("cutover_blocked".into());
+    }
+    let metadata = pending_fixture_metadata(base_snapshot, target, operational)?;
+    let update = pending_fixture_update_arguments(&native_id(&target.document.record), &metadata)
+        .map_err(str::to_owned)?;
+    let repository = staging.join("repository");
+    let binary = staging.join("bd");
+    let environment = fixture_runtime_environment(staging)?;
+    run_contract_command(
+        runner,
+        contract_command(&binary, update, &repository, &environment),
+    )?;
+    run_contract_command(
+        runner,
+        contract_command(
+            &binary,
+            vec![
+                "--sandbox".into(),
+                "dolt".into(),
+                "commit".into(),
+                "-m".into(),
+                "contract committed pending local change".into(),
+            ],
+            &repository,
+            &environment,
+        ),
+    )?;
+    let status = run_contract_command(
+        runner,
+        contract_command(
+            &binary,
+            vec![
+                "--readonly".into(),
+                "--sandbox".into(),
+                "--json".into(),
+                "vc".into(),
+                "status".into(),
+            ],
+            &repository,
+            &environment,
+        ),
+    )?;
+    let export = run_contract_command(
+        runner,
+        contract_command(
+            &binary,
+            vec!["--readonly".into(), "--sandbox".into(), "export".into()],
+            &repository,
+            &environment,
+        ),
+    )?;
+    let generation = fixture_status_commit(&status.stdout)?;
+    let documents =
+        decode_operational_beads_jsonl(&export.stdout).map_err(|_| "cutover_blocked".to_owned())?;
+    Ok((generation, documents))
+}
+
+fn activate_freshness_fixture(
+    runner: &mut SystemCommandRunner,
+    location: &crate::store::StoreLocation,
+    base: &CurrentGeneration,
+    pin: &PinManifest,
+    relation: RemoteRelation,
+    preserve_remote_observation: bool,
+    pending_operation_ids: &[&str],
+) -> Result<CurrentGeneration, String> {
+    let generation_name = contract_generation_name("freshness")?;
+    let staging = location.generations_dir.join(format!(
+        ".staging-{}",
+        generation_name
+            .strip_prefix("generation-")
+            .unwrap_or_default()
+    ));
+    fs::create_dir(&staging).map_err(|_| "cutover_blocked".to_owned())?;
+    copy_regular_tree_contents(&base.root, &staging, Some("state.json"))?;
+    let mut manifest: StateManifest = base.manifest.clone();
+    let observed_local_base = manifest.local_generation.clone();
+    if !pending_operation_ids.is_empty() {
+        let base_snapshot = read_disposable_snapshot(runner, base, pin, host_target())
+            .map_err(|error| error.code().to_owned())?;
+        let (local_generation, documents) =
+            commit_pending_fixture_change(runner, &staging, &base_snapshot)?;
+        validate_freshness_fixture_generations(
+            &observed_local_base,
+            &local_generation,
+            pending_operation_ids,
+        )?;
+        let logical_documents = documents
+            .iter()
+            .map(|document| document.document.clone())
+            .collect::<Vec<_>>();
+        let logical = canonical_logical_export(&logical_documents)
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        let operational = canonical_operational_projection(&documents)
+            .map_err(|_| "cutover_blocked".to_owned())?;
+        manifest.local_generation = local_generation;
+        manifest.logical_export_sha256 = logical_export_digest(&logical);
+        manifest.operational_projection_sha256 = operational_projection_digest(&operational);
+    }
+    manifest.remote_relation = relation.clone();
+    manifest.pending_operation_ids = pending_operation_ids
+        .iter()
+        .map(|operation| (*operation).to_owned())
+        .collect();
+    let known_observation =
+        !matches!(relation, RemoteRelation::Unknown) || preserve_remote_observation;
+    if known_observation {
+        manifest.remote_generation = Some(CONTRACT_REMOTE_GENERATION.into());
+        manifest.remote_observed_at = Some(CONTRACT_OBSERVED_AT.into());
+        manifest.observed_local_generation = Some(if pending_operation_ids.is_empty() {
+            manifest.local_generation.clone()
+        } else {
+            observed_local_base
+        });
+    } else {
+        manifest.remote_generation = None;
+        manifest.remote_observed_at = None;
+        manifest.observed_local_generation = None;
+    }
+    manifest.last_successful_sync_at = match relation {
+        RemoteRelation::Equivalent => Some(CONTRACT_OBSERVED_AT.into()),
+        RemoteRelation::Unknown if preserve_remote_observation => Some(CONTRACT_OBSERVED_AT.into()),
+        RemoteRelation::Ahead | RemoteRelation::Unknown => None,
+    };
+    let contents = serde_json::to_vec(&manifest).map_err(|_| "cutover_blocked".to_owned())?;
+    let state_path = staging.join("state.json");
+    let mut state = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(state_path)
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    state
+        .write_all(&contents)
+        .and_then(|()| state.sync_all())
+        .map_err(|_| "cutover_blocked".to_owned())?;
+    drop(state);
+    activate_staged_generation(location, &staging, &generation_name, None)
+        .map_err(|error| error.code().to_owned())?;
+    current_generation(location).map_err(|error| error.code().to_owned())
+}
+
+fn assert_freshness_projection(
+    runner: &mut SystemCommandRunner,
+    worktree: &Path,
+    generation: &CurrentGeneration,
+    pin: &PinManifest,
+    expected: Freshness,
+) -> Result<(), String> {
+    let snapshot = read_disposable_snapshot(runner, generation, pin, host_target())
+        .map_err(|error| error.code().to_owned())?;
+    let freshness = &snapshot.freshness;
+    if freshness.freshness != expected
+        || freshness.local_generation != generation.manifest.local_generation
+        || freshness.remote_generation != generation.manifest.remote_generation
+        || freshness.remote_observed_at != generation.manifest.remote_observed_at
+        || freshness.last_successful_sync_at != generation.manifest.last_successful_sync_at
+        || freshness.pending_mutations.operation_ids != generation.manifest.pending_operation_ids
+    {
+        return Err("cutover_blocked".into());
+    }
+    assert_launcher_read(runner, worktree, ReadCommand::List, generation, &snapshot)?;
+    let (_, human) = expected_read_response(ReadCommand::List, generation, &snapshot)?;
+    if matches!(expected, Freshness::SynchronizedAsOf)
+        && !human.contains(&format!("synchronized as of {CONTRACT_OBSERVED_AT}"))
+    {
+        return Err("cutover_blocked".into());
+    }
+    if human.contains("up to date") || human.contains("freshness: current") {
+        return Err("cutover_blocked".into());
+    }
+    Ok(())
+}
+
+fn local_read_contract_case(
+    runner: &mut SystemCommandRunner,
+    root: &Path,
+    case: &str,
+    request: &ContractRequest,
+    source: &SourceDocuments,
+    pin: &PinManifest,
+) -> Result<LocalReadEvidence, String> {
+    let (fixture, location, base, bootstrap_request) =
+        bootstrap_fixture(runner, root, case, request, source, pin)?;
+    let mut command_plans = fixture.command_plans.clone();
+    command_plans.push("bootstrap installed".into());
+    command_plans.push("bootstrap unchanged".into());
+    let mut operation_ids = Vec::new();
+    match case {
+        "local-reads" => {
+            assert_bootstrap_contention(
+                runner,
+                &location,
+                &fixture.first_worktree,
+                &bootstrap_request,
+            )?;
+            command_plans
+                .push("held bootstrap lock refuses a second compiled CLI bootstrap".into());
+            command_plans.extend(exercise_all_local_reads(
+                runner, &fixture, &location, &base, source, pin,
+            )?);
+            let repair_candidate = activate_freshness_fixture(
+                runner,
+                &location,
+                &base,
+                pin,
+                RemoteRelation::Ahead,
+                false,
+                &[CONTRACT_PENDING_OPERATION],
+            )?;
+            operation_ids.push(CONTRACT_PENDING_OPERATION.into());
+            command_plans.push("committed non-default runtime repair fixture".into());
+            let (repaired, repair_plans) = assert_runtime_repair(
+                runner,
+                &fixture,
+                &location,
+                &repair_candidate,
+                &bootstrap_request,
+                source,
+                pin,
+            )?;
+            command_plans.extend(repair_plans);
+            assert_changed_source_refusal(runner, &location, &bootstrap_request, source)?;
+            command_plans.push("bootstrap changed-source refusal".into());
+            return Ok(LocalReadEvidence {
+                clone_labels: vec![format!("{case}-worktree-a"), format!("{case}-worktree-b")],
+                source_commit: repaired.manifest.source_commit,
+                local_generation: repaired.manifest.local_generation,
+                operation_ids,
+                command_plans,
+            });
+        }
+        "freshness" => {
+            assert_freshness_projection(
+                runner,
+                &fixture.first_worktree,
+                &base,
+                pin,
+                Freshness::Unknown,
+            )?;
+            for (relation, pending, expected) in [
+                (
+                    RemoteRelation::Equivalent,
+                    Vec::new(),
+                    Freshness::SynchronizedAsOf,
+                ),
+                (RemoteRelation::Ahead, Vec::new(), Freshness::Stale),
+                (
+                    RemoteRelation::Equivalent,
+                    vec![CONTRACT_PENDING_OPERATION],
+                    Freshness::Unpublished,
+                ),
+            ] {
+                let generation = activate_freshness_fixture(
+                    runner, &location, &base, pin, relation, false, &pending,
+                )?;
+                assert_freshness_projection(
+                    runner,
+                    &fixture.first_worktree,
+                    &generation,
+                    pin,
+                    expected,
+                )?;
+                operation_ids.extend(pending.into_iter().map(str::to_owned));
+            }
+            command_plans.push("tools/work-state list freshness fixtures".into());
+        }
+        "combined-freshness" => {
+            for relation in [RemoteRelation::Ahead, RemoteRelation::Unknown] {
+                let generation = activate_freshness_fixture(
+                    runner,
+                    &location,
+                    &base,
+                    pin,
+                    relation.clone(),
+                    matches!(relation, RemoteRelation::Unknown),
+                    &[CONTRACT_PENDING_OPERATION],
+                )?;
+                let expected = match relation {
+                    RemoteRelation::Ahead => Freshness::StaleWithUnpublished,
+                    RemoteRelation::Unknown => Freshness::UnknownWithUnpublished,
+                    RemoteRelation::Equivalent => return Err("cutover_blocked".into()),
+                };
+                assert_freshness_projection(
+                    runner,
+                    &fixture.first_worktree,
+                    &generation,
+                    pin,
+                    expected,
+                )?;
+                operation_ids.push(CONTRACT_PENDING_OPERATION.into());
+            }
+            command_plans.push("tools/work-state list combined freshness fixtures".into());
+        }
+        _ => return Err("invalid_command".into()),
+    }
+    Ok(LocalReadEvidence {
+        clone_labels: vec![format!("{case}-worktree-a"), format!("{case}-worktree-b")],
+        source_commit: base.manifest.source_commit,
+        local_generation: base.manifest.local_generation,
+        operation_ids,
+        command_plans,
+    })
+}
+
+fn local_read_contract_result(
+    case: &str,
+    source_ref: &str,
+    source: &SourceDocuments,
+    evidence: LocalReadEvidence,
+) -> ContractResult {
+    let mut result = source_result(case, source_ref, source);
+    result.clone_labels = evidence.clone_labels;
+    result.source_commit = Some(evidence.source_commit.clone());
+    result.final_generation = Some(evidence.local_generation.clone());
+    result.operation_ids = evidence.operation_ids.clone();
+    result.command_plans = evidence.command_plans.clone();
+    result.scenarios = vec![ScenarioEvidence {
+        case: case.into(),
+        observed_base: evidence.source_commit,
+        final_generation: evidence.local_generation,
+        operation_ids: evidence.operation_ids,
+        command_plans: evidence.command_plans,
+    }];
     result
 }
 
@@ -1134,15 +2601,88 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
                     })?;
             let mut result = migration_result(&request.case, source_ref, &source, evidence);
             if request.case == "all" {
+                for case in local_read_cases(&request.case) {
+                    let local = local_read_contract_case(
+                        &mut runner,
+                        root.path(),
+                        case,
+                        request,
+                        &source,
+                        &manifest,
+                    )
+                    .map_err(|code| {
+                        Box::new(snapshot_refusal(
+                            &request.case,
+                            source_ref,
+                            &source,
+                            &code,
+                            None,
+                            None,
+                        ))
+                    })?;
+                    result.clone_labels.extend(local.clone_labels.clone());
+                    result.command_plans.extend(local.command_plans.clone());
+                    result.scenarios.push(ScenarioEvidence {
+                        case: (*case).into(),
+                        observed_base: local.source_commit,
+                        final_generation: local.local_generation,
+                        operation_ids: local.operation_ids,
+                        command_plans: local.command_plans,
+                    });
+                }
                 let transport = run_scripted_cases("transport")
                     .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
                 result.observed_base = transport.observed_base;
                 result.final_generation = transport.final_generation;
                 result.operation_ids = transport.operation_ids;
                 result.command_plans.extend(transport.command_plans);
-                result.scenarios = transport.scenarios;
+                result.scenarios.extend(transport.scenarios);
             }
             return Ok(result);
+        }
+        if requires_local_read_contract(&request.case) {
+            let source_ref = request.source_ref.as_deref().ok_or_else(|| {
+                Box::new(ContractResult::refusal(&request.case, "invalid_source_ref"))
+            })?;
+            let source = load_documents(
+                &mut runner,
+                &repository_root(),
+                &isolated_environment(root.path()),
+                source_ref,
+            )
+            .map_err(|error: DocumentError| {
+                Box::new(source_refusal(
+                    &request.case,
+                    source_ref,
+                    error.code(),
+                    error.offending_key,
+                    None,
+                ))
+            })?;
+            let local = local_read_contract_case(
+                &mut runner,
+                root.path(),
+                &request.case,
+                request,
+                &source,
+                &manifest,
+            )
+            .map_err(|code| {
+                Box::new(snapshot_refusal(
+                    &request.case,
+                    source_ref,
+                    &source,
+                    &code,
+                    None,
+                    None,
+                ))
+            })?;
+            return Ok(local_read_contract_result(
+                &request.case,
+                source_ref,
+                &source,
+                local,
+            ));
         }
         let first = init_store(&request.binary, root.path(), "clone-a")
             .map_err(|code| Box::new(ContractResult::refusal(&request.case, code)))?;
@@ -1167,10 +2707,9 @@ fn finish_contract(
     cleanup: Result<(), &'static str>,
     case: &str,
 ) -> Result<ContractResult, Box<ContractResult>> {
-    match (cleanup, result) {
-        (Ok(()), result) => result,
-        (Err(_), Err(result)) => Err(result),
-        (Err(code), Ok(_)) => Err(Box::new(ContractResult::refusal(case, code))),
+    match cleanup {
+        Ok(()) => result,
+        Err(code) => Err(Box::new(ContractResult::refusal(case, code))),
     }
 }
 pub fn run_scripted_cases(case: &str) -> Result<ContractResult, &'static str> {
@@ -1635,15 +3174,114 @@ fn host_target() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContractRequest, ContractResult, contract_refusal_exit_code, finish_contract,
-        manifest_path, run_contract, source_refusal,
+        ContractRequest, ContractResult, HISTORICAL_SOURCE_COMMIT, contract_refusal_exit_code,
+        finish_contract, manifest_path, resolve_changed_source_ref, run_contract, source_refusal,
     };
+    use crate::command::{CommandOutput, CommandSpec, RecordingCommandRunner};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     static PROCESS_WORKING_DIRECTORY: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn cleanup_failure_preserves_an_earlier_refusal() {
+    fn changed_source_refusal_requires_a_locally_available_different_commit() {
+        let source_root = PathBuf::from("/contract-source");
+        let selected = "a".repeat(40);
+        let alternate = "b".repeat(40);
+        let mut runner = RecordingCommandRunner::scripted(vec![Ok(CommandOutput::success(
+            format!("{alternate}\n"),
+        ))]);
+
+        assert_eq!(
+            resolve_changed_source_ref(&mut runner, &source_root, &selected).unwrap(),
+            alternate
+        );
+        assert_eq!(
+            runner.commands(),
+            &[CommandSpec {
+                program: PathBuf::from("git"),
+                argv: vec![
+                    "rev-parse".into(),
+                    "--verify".into(),
+                    "--end-of-options".into(),
+                    format!("{HISTORICAL_SOURCE_COMMIT}^{{commit}}"),
+                ],
+                cwd: Some(source_root.clone()),
+                environment: BTreeMap::from([
+                    ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                    ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+                    ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+                    ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                    ("BD_DISABLE_METRICS".into(), "1".into()),
+                    ("BD_DISABLE_EVENT_FLUSH".into(), "1".into()),
+                    ("BD_NON_INTERACTIVE".into(), "1".into()),
+                    ("CI".into(), "true".into()),
+                    ("HOME".into(), "/contract-source/home".into()),
+                    (
+                        "XDG_CONFIG_HOME".into(),
+                        "/contract-source/xdg_config_home".into(),
+                    ),
+                    (
+                        "XDG_CACHE_HOME".into(),
+                        "/contract-source/xdg_cache_home".into(),
+                    ),
+                    (
+                        "XDG_DATA_HOME".into(),
+                        "/contract-source/xdg_data_home".into(),
+                    ),
+                    ("TMPDIR".into(), "/contract-source/tmpdir".into()),
+                    (
+                        "GIT_CONFIG_GLOBAL".into(),
+                        "/contract-source/git_config_global".into(),
+                    ),
+                    ("PATH".into(), std::env::var("PATH").unwrap()),
+                ]),
+                redacted_argv_positions: Vec::new(),
+            }],
+        );
+        assert!(runner.finish().is_ok());
+
+        let mut selected_historical = RecordingCommandRunner::scripted(vec![Ok(
+            CommandOutput::success(format!("{alternate}\n")),
+        )]);
+        assert_eq!(
+            resolve_changed_source_ref(
+                &mut selected_historical,
+                &source_root,
+                HISTORICAL_SOURCE_COMMIT,
+            )
+            .unwrap(),
+            alternate
+        );
+        assert_eq!(
+            selected_historical.commands()[0].argv.last(),
+            Some(&"origin/main^{commit}".to_owned())
+        );
+        assert!(selected_historical.finish().is_ok());
+
+        for output in [
+            CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "missing".into(),
+            },
+            CommandOutput::success(format!("{selected}\n")),
+            CommandOutput::success(format!("{}\n", "B".repeat(40))),
+            CommandOutput::success(format!("{alternate}\nextra\n")),
+        ] {
+            let mut refusal = RecordingCommandRunner::scripted(vec![Ok(output)]);
+            assert_eq!(
+                resolve_changed_source_ref(&mut refusal, &source_root, &selected).unwrap_err(),
+                "cutover_blocked"
+            );
+            assert_eq!(refusal.commands().len(), 1);
+            assert!(refusal.finish().is_ok());
+        }
+    }
+
+    #[test]
+    fn fixture_cleanup_failure_takes_precedence_over_an_operation_refusal() {
         let result = finish_contract(
             Err(Box::new(ContractResult::refusal(
                 "version-pin",
@@ -1654,7 +3292,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(result.code, "beads_checksum_mismatch");
+        assert_eq!(result.code, "fixture_cleanup_failed");
     }
 
     #[test]
@@ -1682,6 +3320,20 @@ mod tests {
 
         assert_eq!(value["source_ref"], "selected-ref");
         assert_eq!(value["offending_key"], "task:045");
+        assert_eq!(contract_refusal_exit_code(&result.code), 1);
+    }
+
+    #[test]
+    fn legacy_contract_normalizes_an_unavailable_source_ref() {
+        let result = source_refusal(
+            "document-mapping",
+            "refs/heads/definitely-missing",
+            "source_ref_unavailable",
+            None,
+            None,
+        );
+
+        assert_eq!(result.code, "invalid_source_ref");
         assert_eq!(contract_refusal_exit_code(&result.code), 1);
     }
 

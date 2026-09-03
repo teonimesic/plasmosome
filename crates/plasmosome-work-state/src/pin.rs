@@ -51,7 +51,12 @@ pub struct PinnedTarget {
 impl PinManifest {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, PinError> {
         let source = fs::read_to_string(path).map_err(|_| error("invalid_beads_pin"))?;
-        let pin: Self = toml::from_str(&source).map_err(|_| error("invalid_beads_pin"))?;
+        Self::parse(&source)
+    }
+
+    /// Parses and validates pinned release contents embedded by an installed wrapper.
+    pub fn parse(source: &str) -> Result<Self, PinError> {
+        let pin: Self = toml::from_str(source).map_err(|_| error("invalid_beads_pin"))?;
         let names: BTreeSet<_> = pin
             .targets
             .iter()
@@ -100,6 +105,13 @@ pub struct VerifiedBeads {
     pub target: String,
 }
 
+/// A pinned Beads executable verified after it has been installed in a generation.
+#[derive(Debug, Clone)]
+pub struct InstalledBeads {
+    /// The pinned host target selected for this executable.
+    pub target: String,
+}
+
 impl VerifiedBeads {
     pub fn verify<R: CommandRunner>(
         manifest: &PinManifest,
@@ -128,6 +140,51 @@ impl VerifiedBeads {
             || checksum(archive)? != pin.archive_sha256
             || checksum(binary)? != pin.binary_sha256
         {
+            return Err(error("beads_checksum_mismatch"));
+        }
+        let output = runner
+            .run(CommandSpec {
+                program: binary.to_path_buf(),
+                argv: vec!["--version".into()],
+                cwd: None,
+                environment,
+                redacted_argv_positions: Vec::new(),
+            })
+            .map_err(|_| error("unsupported_beads_version"))?;
+        if output.status != 0 || !valid_version(&output.stdout) {
+            return Err(error("unsupported_beads_version"));
+        }
+        Ok(Self {
+            target: target.to_owned(),
+        })
+    }
+}
+
+impl InstalledBeads {
+    /// Verifies an installed regular executable without consulting an archive or extraction tree.
+    pub fn verify<R: CommandRunner>(
+        manifest: &PinManifest,
+        target: &str,
+        binary: &Path,
+        environment: BTreeMap<String, String>,
+        runner: &mut R,
+    ) -> Result<Self, PinError> {
+        let pin = manifest
+            .targets
+            .iter()
+            .find(|candidate| candidate.target == target)
+            .ok_or_else(|| error("unsupported_beads_platform"))?;
+        let metadata = fs::symlink_metadata(binary).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                error("installed_beads_missing")
+            } else {
+                error("installed_beads_invalid")
+            }
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(error("installed_beads_invalid"));
+        }
+        if checksum(binary)? != pin.binary_sha256 {
             return Err(error("beads_checksum_mismatch"));
         }
         let output = runner

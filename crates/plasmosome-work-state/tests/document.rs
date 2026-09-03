@@ -142,6 +142,35 @@ fn source_resolution_requires_a_lowercase_hex_commit() {
 }
 
 #[test]
+fn failed_local_source_resolution_is_source_ref_unavailable() {
+    for output in [
+        Err("git executable unavailable".to_owned()),
+        Ok(CommandOutput {
+            status: 1,
+            stdout: String::new(),
+            stderr: "unknown revision".into(),
+        }),
+    ] {
+        let mut runner = RecordingCommandRunner::scripted(vec![output]);
+
+        let error = load(&mut runner, "refs/heads/definitely-missing").unwrap_err();
+
+        assert_eq!(error.code(), "source_ref_unavailable");
+        assert_eq!(runner.commands().len(), 1);
+        assert_eq!(
+            runner.commands()[0].argv,
+            vec![
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                "refs/heads/definitely-missing^{commit}",
+            ]
+        );
+        assert!(runner.finish().is_ok());
+    }
+}
+
+#[test]
 fn requested_tree_paths_are_discovered_without_a_configured_count() {
     let source_commit = sha('a');
     let content_commit = sha('b');
