@@ -1,7 +1,7 @@
 ---
 id: 046
 title: Install and query the shared local Beads shadow
-status: in_review
+status: done
 priority: 1
 specs: [014]
 intents: [015]
@@ -47,7 +47,7 @@ done_when:
   - Ordinary reads construct only local `git rev-parse`, installed-wrapper and Beads verification, and pinned `bd --readonly --sandbox` status/export/KV commands under the isolated environment; they never run Cargo, resolve or fetch a source ref, configure or contact a remote, open a credential, sync implicitly, or modify the source checkout or shared generation.
   - Tests are written and observed failing before each implementation batch, real pinned Beads acceptance passes, coverage and uncovered branches are reviewed, the timed workspace suite and all five root gates exit 0, and the task makes no claim that Spec 014's complete `offline-reads` case passes because `heartbeat observe` and the OS-level no-socket harness remain separate work.
 pr: https://github.com/teonimesic/plasmosome/pull/82
-evidence:
+evidence: "PR #82 squash merge 414fc8670f863506fff5301e1cdf959ef7d4aa3e on main; verified local Beads shadow bootstrap and read projections delivered, while Spec 014 offline-reads remains deferred"
 ---
 
 ## Why
