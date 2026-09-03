@@ -167,6 +167,8 @@ Planner correction: bind separate exact observation and Dolt transport URLs; do 
 
 The corrected isolated probe then ran exact `bd --sandbox init --remote git+https://github.com/teonimesic/plasmosome.git --stealth --skip-agents --skip-hooks --non-interactive` with exit 0 in embedded mode. Its output said `Remote has no Dolt data yet; initialized a fresh local database`, configured `origin` to the canonical URL, and reported Dolt embedded mode. The subsequent JSON remote list exited 0 with exactly one object: `name` `origin`, both URL fields the canonical git+https URL, and `status` `ok`. This proves the strict canonical init/list form, while confirming that the R0 absent-ref check must precede every Beads remote command.
 
+A second isolated probe started in an empty non-Git directory. The same exact init command exited 0 and reported `Initialized git repository`, so the pinned embedded client creates its private Git repository itself; no additional production `git init` command is required or allowed. It again reported absent Dolt data and initialized a fresh local database, which remains prohibited from activation by the R0 existing-ref guard.
+
 ### 2026-09-02 — TDD: compiled project binding
 
 Test-only `project_config_accepts_only_the_compiled_plasmosome_remote_pair` first failed to compile because `plasmosome_work_state::project` did not exist. The implementation then added the checksum-bound `include_str!` configuration and exact parser; the focused command passed with 1 test. The parser accepts only the compiled schema/project/name/observation URL/Dolt URL/ref tuple and rejects alternate, duplicate, or unknown fields as `invalid_project_config`.
@@ -186,3 +188,7 @@ Test-only `sync_runner_binds_every_command_before_dispatch` first failed because
 ### 2026-09-02 — TDD: pending observation stops before clone
 
 Test-only `pending_mutations_are_observed_but_never_cloned_over` first failed to compile because clone authorization accepted no pending-operation input. The sync fence now accepts the ordered pending IDs at that decision point, returns `pending_mutations` for a nonempty set, and remains in the pre-init phase; the attempted Beads init is refused before dispatch. The full sync test target then passed 6 tests. Freshness persistence for the outer sync operation remains a later, separately tested store/sync batch.
+
+### 2026-09-02 — TDD: stable observation and result rendering
+
+Test-only `moving_remote_never_activates_the_cloned_candidate` first failed because no R0/R1 stability gate existed. The pure runner state now returns `remote_changed` when a completed R1 differs or disappears, and `remote_transport` for R1 transport; equal exact observations return their shared generation. Test-only `sync_human_and_json_results_carry_the_same_freshness` first failed because the sync result and renderer did not exist. The success result now serializes the exact freshness envelope and the human rendering says `synchronized as of`, never `current`. Focused tests for both are green; no staging, filesystem, network, or activation behavior was added in this batch.

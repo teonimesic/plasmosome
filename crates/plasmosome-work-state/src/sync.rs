@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::command::{CommandOutput, CommandRunner, CommandSpec};
 use crate::document::is_lower_hex_sha;
+use crate::freshness::{Freshness, FreshnessEnvelope};
 use crate::project::ProjectConfig;
 
 /// A stable refusal raised while validating the online-sync command sequence.
@@ -30,6 +31,102 @@ impl std::error::Error for SyncError {}
 
 fn refusal(code: &'static str) -> SyncError {
     SyncError { code }
+}
+
+/// The complete successful response emitted by the explicit installed-wrapper sync command.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SyncResult {
+    /// The fixed public command name.
+    pub command: String,
+    /// The fixed checksum-bound project identifier.
+    pub project_id: String,
+    /// The fixed successful outcome.
+    pub outcome: String,
+    /// The installed Beads authority mode.
+    pub authority_mode: String,
+    /// The Markdown source commit retained from the active generation.
+    pub source_commit: String,
+    /// Whether a complete compatible generation was atomically activated.
+    pub state_changed: bool,
+    /// The complete persisted freshness envelope.
+    pub freshness: FreshnessEnvelope,
+}
+
+impl SyncResult {
+    /// Creates the only success outcome Task 047 may expose.
+    pub fn synchronized(
+        source_commit: String,
+        freshness: FreshnessEnvelope,
+        state_changed: bool,
+    ) -> Self {
+        Self {
+            command: "sync".into(),
+            project_id: "plasmosome".into(),
+            outcome: "synchronized".into(),
+            authority_mode: "markdown-shadow".into(),
+            source_commit,
+            state_changed,
+            freshness,
+        }
+    }
+}
+
+fn displayed_option(value: Option<&str>) -> &str {
+    value.unwrap_or("none")
+}
+
+fn freshness_name(freshness: &Freshness) -> &'static str {
+    match freshness {
+        Freshness::SynchronizedAsOf => "synchronized_as_of",
+        Freshness::Stale => "stale",
+        Freshness::Unknown => "unknown",
+        Freshness::Unpublished => "unpublished",
+        Freshness::StaleWithUnpublished => "stale_with_unpublished",
+        Freshness::UnknownWithUnpublished => "unknown_with_unpublished",
+    }
+}
+
+/// Renders a successful sync without representing its state as current or up to date.
+pub fn render_sync_human(result: &SyncResult) -> String {
+    let freshness = &result.freshness;
+    let freshness_line = match freshness.freshness {
+        Freshness::SynchronizedAsOf => format!(
+            "freshness: synchronized as of {}",
+            displayed_option(freshness.last_successful_sync_at.as_deref())
+        ),
+        _ => format!("freshness: {}", freshness_name(&freshness.freshness)),
+    };
+    [
+        format!(
+            "sync: synchronized as of {}",
+            displayed_option(freshness.last_successful_sync_at.as_deref())
+        ),
+        format!("project: {}", result.project_id),
+        format!("authority mode: {}", result.authority_mode),
+        format!("source commit: {}", result.source_commit),
+        format!("state changed: {}", result.state_changed),
+        format!(
+            "last successful sync at: {}",
+            displayed_option(freshness.last_successful_sync_at.as_deref())
+        ),
+        format!("local generation: {}", freshness.local_generation),
+        format!(
+            "remote generation: {}",
+            displayed_option(freshness.remote_generation.as_deref())
+        ),
+        format!(
+            "remote observed at: {}",
+            displayed_option(freshness.remote_observed_at.as_deref())
+        ),
+        format!(
+            "pending mutations: {} [{}]",
+            freshness.pending_mutations.count,
+            freshness.pending_mutations.operation_ids.join(", ")
+        ),
+        freshness_line,
+    ]
+    .join("\n")
+        + "\n"
 }
 
 /// The immutable paths and sealed environment bound to one staged synchronization attempt.
@@ -135,6 +232,28 @@ impl<'a, R> SyncCommandRunner<'a, R> {
     /// Returns the recorded second observation classification without inspecting command stderr.
     pub fn second_outcome(&self) -> Option<&RemoteObservation> {
         self.second.as_ref()
+    }
+
+    /// Requires the two completed observations to name the same exact remote generation.
+    pub fn require_stable_observation(&self) -> Result<String, SyncError> {
+        if self.phase != Phase::Complete {
+            return Err(refusal("invalid_sync_command"));
+        }
+        match (self.first.as_ref(), self.second.as_ref()) {
+            (Some(RemoteObservation::Found(first)), Some(RemoteObservation::Found(second)))
+                if first == second =>
+            {
+                Ok(first.clone())
+            }
+            (Some(RemoteObservation::Found(_)), Some(RemoteObservation::Transport)) => {
+                Err(refusal("remote_transport"))
+            }
+            (Some(RemoteObservation::Found(_)), Some(RemoteObservation::NoMatch))
+            | (Some(RemoteObservation::Found(_)), Some(RemoteObservation::Found(_))) => {
+                Err(refusal("remote_changed"))
+            }
+            _ => Err(refusal("invalid_sync_command")),
+        }
     }
 
     /// Allows the exact fresh-clone commands only after a valid R0 generation is observed.

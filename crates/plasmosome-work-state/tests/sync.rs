@@ -4,8 +4,11 @@ use std::path::PathBuf;
 use plasmosome_work_state::command::{
     CommandOutput, CommandRunner, CommandSpec, RecordingCommandRunner,
 };
+use plasmosome_work_state::freshness::{Freshness, FreshnessEnvelope, PendingMutationEnvelope};
 use plasmosome_work_state::project::compiled_project_config;
-use plasmosome_work_state::sync::{RemoteObservation, SyncCommandBinding, SyncCommandRunner};
+use plasmosome_work_state::sync::{
+    RemoteObservation, SyncCommandBinding, SyncCommandRunner, SyncResult, render_sync_human,
+};
 use tempfile::tempdir;
 
 fn environment() -> BTreeMap<String, String> {
@@ -164,6 +167,7 @@ fn sync_runner_binds_every_command_before_dispatch() {
         runner.run(remote_list(root.path())).unwrap();
         runner.run(observation(root.path())).unwrap();
         assert_eq!(runner.second_observation().as_deref(), Some(sha.as_str()));
+        assert_eq!(runner.require_stable_observation().unwrap(), sha);
 
         let replay = observation(root.path());
         assert_eq!(runner.run(replay).unwrap_err(), "invalid_sync_command");
@@ -414,4 +418,68 @@ fn pending_mutations_are_observed_but_never_cloned_over() {
     }
     assert_eq!(inner.commands().len(), 1);
     inner.finish().unwrap();
+}
+
+#[test]
+fn moving_remote_never_activates_the_cloned_candidate() {
+    let root = tempdir().unwrap();
+    let mut inner = RecordingCommandRunner::scripted(vec![
+        Ok(CommandOutput::success(format!(
+            "{}\trefs/dolt/data\n",
+            "a".repeat(40)
+        ))),
+        Ok(CommandOutput::success("")),
+        Ok(CommandOutput::success(
+            r#"[{"name":"origin","url":"git+https://github.com/teonimesic/plasmosome.git","sql_url":"git+https://github.com/teonimesic/plasmosome.git","status":"ok"}]"#,
+        )),
+        Ok(CommandOutput::success(format!(
+            "{}\trefs/dolt/data\n",
+            "b".repeat(40)
+        ))),
+    ]);
+    {
+        let mut runner = SyncCommandRunner::new(&mut inner, binding(root.path()));
+        runner.run(observation(root.path())).unwrap();
+        runner.authorize_fresh_clone(&[]).unwrap();
+        runner.run(init(root.path())).unwrap();
+        runner.run(remote_list(root.path())).unwrap();
+        runner.run(observation(root.path())).unwrap();
+        assert_eq!(
+            runner.require_stable_observation().unwrap_err().code(),
+            "remote_changed"
+        );
+    }
+    inner.finish().unwrap();
+}
+
+#[test]
+fn sync_human_and_json_results_carry_the_same_freshness() {
+    let freshness = FreshnessEnvelope {
+        last_successful_sync_at: Some("2026-09-02T12:34:56Z".into()),
+        local_generation: "local-generation".into(),
+        remote_generation: Some("a".repeat(40)),
+        remote_observed_at: Some("2026-09-02T12:34:56Z".into()),
+        pending_mutations: PendingMutationEnvelope {
+            count: 0,
+            operation_ids: Vec::new(),
+        },
+        freshness: Freshness::SynchronizedAsOf,
+    };
+    let result = SyncResult::synchronized("b".repeat(40), freshness.clone(), true);
+    let json = serde_json::to_value(&result).unwrap();
+
+    assert_eq!(json["command"], "sync");
+    assert_eq!(json["project_id"], "plasmosome");
+    assert_eq!(json["outcome"], "synchronized");
+    assert_eq!(json["authority_mode"], "markdown-shadow");
+    assert_eq!(json["state_changed"], true);
+    assert_eq!(json["freshness"], serde_json::to_value(&freshness).unwrap());
+
+    let human = render_sync_human(&result);
+    assert!(human.contains("sync: synchronized as of 2026-09-02T12:34:56Z"));
+    assert!(human.contains("authority mode: markdown-shadow"));
+    assert!(human.contains("local generation: local-generation"));
+    assert!(human.contains(&format!("remote generation: {}", "a".repeat(40))));
+    assert!(human.contains("freshness: synchronized as of 2026-09-02T12:34:56Z"));
+    assert!(!human.contains("current"));
 }
