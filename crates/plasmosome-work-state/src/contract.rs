@@ -3485,6 +3485,8 @@ enum GitShimCategory {
     LocatorCommon,
     Observation,
     LocalBeadsDiscovery,
+    LocalBeadsRepoContext,
+    LocalBeadsActor,
     Unexpected,
 }
 
@@ -3496,6 +3498,8 @@ impl GitShimCategory {
             "locator_common" => Ok(Self::LocatorCommon),
             "observation" => Ok(Self::Observation),
             "local_beads_discovery" => Ok(Self::LocalBeadsDiscovery),
+            "local_beads_repo_context" => Ok(Self::LocalBeadsRepoContext),
+            "local_beads_actor" => Ok(Self::LocalBeadsActor),
             "unexpected" => Ok(Self::Unexpected),
             _ => Err("cutover_blocked".into()),
         }
@@ -3633,7 +3637,7 @@ runtime_root() {
 
 runtime_environment_is_bound() {
   local root=$1
-  local home config cache data tmp config_parent config_name
+  local home config cache data tmp config_parent config_name beads_dir beads_root
   home=$(cd "${HOME-}" 2>/dev/null && pwd -P) || return 1
   config=$(cd "${XDG_CONFIG_HOME-}" 2>/dev/null && pwd -P) || return 1
   cache=$(cd "${XDG_CACHE_HOME-}" 2>/dev/null && pwd -P) || return 1
@@ -3642,7 +3646,11 @@ runtime_environment_is_bound() {
   config_parent=${GIT_CONFIG_GLOBAL%/*}
   config_name=${GIT_CONFIG_GLOBAL##*/}
   config_parent=$(cd "$config_parent" 2>/dev/null && pwd -P) || return 1
-  [[ "$PATH" == "$locator_path" && "$home" == "$root/runtime/home" && "$config" == "$root/runtime/xdg_config" && "$cache" == "$root/runtime/xdg_cache" && "$data" == "$root/runtime/xdg_data" && "$tmp" == "$root/runtime/tmp" && "$config_parent/$config_name" == "$root/runtime/git_config_global" && "${GIT_CONFIG_NOSYSTEM-}" == 1 && "${GIT_TERMINAL_PROMPT-}" == 0 && "${GIT_NO_LAZY_FETCH-}" == 1 && "${GIT_OPTIONAL_LOCKS-}" == 0 && "${BD_DISABLE_METRICS-}" == 1 && "${BD_DISABLE_EVENT_FLUSH-}" == 1 && "${BD_NON_INTERACTIVE-}" == 1 && "${CI-}" == true ]] && forbidden_environment_is_absent
+  beads_dir=${BEADS_DIR-}
+  beads_root=${beads_dir%/repository/.beads}
+  [[ "$beads_dir" == "$beads_root/repository/.beads" ]] || return 1
+  beads_root=$(cd "$beads_root" 2>/dev/null && pwd -P) || return 1
+  [[ "$PATH" == "$locator_path" && "$home" == "$root/runtime/home" && "$config" == "$root/runtime/xdg_config" && "$cache" == "$root/runtime/xdg_cache" && "$data" == "$root/runtime/xdg_data" && "$tmp" == "$root/runtime/tmp" && "$config_parent/$config_name" == "$root/runtime/git_config_global" && "$beads_root" == "$root" && "${GIT_CONFIG_NOSYSTEM-}" == 1 && "${GIT_TERMINAL_PROMPT-}" == 0 && "${GIT_NO_LAZY_FETCH-}" == 1 && "${GIT_OPTIONAL_LOCKS-}" == 0 && "${BD_DISABLE_METRICS-}" == 1 && "${BD_DISABLE_EVENT_FLUSH-}" == 1 && "${BD_NON_INTERACTIVE-}" == 1 && "${BD_BACKUP_ENABLED-}" == false && "${CI-}" == true ]] && forbidden_environment_is_absent
 }
 
 if [[ "$cwd" == "$worktree" ]] && locator_environment_is_bound; then
@@ -3664,12 +3672,13 @@ if root=$(runtime_root) && runtime_environment_is_bound "$root"; then
     record observation "$@"
     exit 2
   fi
-  if [[ "$#" -eq 5 && "$1" == -C && "$3" == rev-parse && "$4" == --git-dir && "$5" == --git-common-dir ]]; then
-    repository=
-    if repository=$(cd "$2" 2>/dev/null && pwd -P) && [[ "$repository" == "$cwd" && "$repository" == "$root/repository" ]]; then
-      record local_beads_discovery "$@"
-      exec "$real_git" "$@"
-    fi
+  if [[ "$#" -eq 4 && "$1" == rev-parse && "$2" == --git-dir && "$3" == --git-common-dir && "$4" == --show-toplevel && "$cwd" == "$root/repository" ]]; then
+    record local_beads_repo_context "$@"
+    exec "$real_git" "$@"
+  fi
+  if [[ "$#" -eq 2 && "$1" == config && "$2" == user.name && "$cwd" == "$root/repository" ]]; then
+    record local_beads_actor "$@"
+    exec "$real_git" "$@"
   fi
 fi
 
@@ -3732,6 +3741,13 @@ fn assert_installed_git_shim_records(
         binding.project.git_observation_url(),
         binding.project.data_ref(),
     ];
+    let repo_context = [
+        "rev-parse",
+        "--git-dir",
+        "--git-common-dir",
+        "--show-toplevel",
+    ];
+    let actor_lookup = ["config", "user.name"];
     let matches = |category: GitShimCategory, argv: &[&str]| {
         records
             .iter()
@@ -3751,11 +3767,12 @@ fn assert_installed_git_shim_records(
         || matches(GitShimCategory::LocatorTop, &locator_top) != 4
         || matches(GitShimCategory::LocatorCommon, &locator_common) != 4
         || matches(GitShimCategory::Observation, &observation) != 2
+        || matches(GitShimCategory::LocalBeadsRepoContext, &repo_context) != 8
+        || matches(GitShimCategory::LocalBeadsActor, &actor_lookup) != 8
         || records
             .iter()
-            .filter(|record| record.category == GitShimCategory::LocalBeadsDiscovery)
-            .count()
-            < 2
+            .any(|record| record.category == GitShimCategory::LocalBeadsDiscovery)
+        || records.len() != 26
     {
         return Err("cutover_blocked".into());
     }
@@ -5208,6 +5225,10 @@ mod tests {
                     "GIT_CONFIG_GLOBAL".into(),
                     runtime.join("git_config_global").display().to_string(),
                 ),
+                (
+                    "BEADS_DIR".into(),
+                    root.join("repository/.beads").display().to_string(),
+                ),
                 ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
                 ("GIT_TERMINAL_PROMPT".into(), "0".into()),
                 ("GIT_NO_LAZY_FETCH".into(), "1".into()),
@@ -5215,6 +5236,7 @@ mod tests {
                 ("BD_DISABLE_METRICS".into(), "1".into()),
                 ("BD_DISABLE_EVENT_FLUSH".into(), "1".into()),
                 ("BD_NON_INTERACTIVE".into(), "1".into()),
+                ("BD_BACKUP_ENABLED".into(), "false".into()),
                 ("CI".into(), "true".into()),
             ])
         }
@@ -5261,6 +5283,19 @@ mod tests {
                 .status,
             0
         );
+        assert_eq!(
+            runner
+                .run(CommandSpec {
+                    program: real_git.clone(),
+                    argv: vec!["config".into(), "user.name".into(), "Private User".into()],
+                    cwd: Some(repository.clone()),
+                    environment: BTreeMap::from([("PATH".into(), original_path.clone())]),
+                    redacted_argv_positions: Vec::new(),
+                })
+                .unwrap()
+                .status,
+            0
+        );
         let environment = runtime_environment(&disposable, path.clone());
         let shim = fake_bin.join("git");
         let capture = root.path().join("capture");
@@ -5275,6 +5310,13 @@ mod tests {
         write_installed_config_git_shim(&shim, &binding).unwrap();
         fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
 
+        let repo_context = vec![
+            "rev-parse".into(),
+            "--git-dir".into(),
+            "--git-common-dir".into(),
+            "--show-toplevel".into(),
+        ];
+        let actor_lookup = vec!["config".into(), "user.name".into()];
         let discovery = vec![
             "-C".into(),
             repository.display().to_string(),
@@ -5282,15 +5324,24 @@ mod tests {
             "--git-dir".into(),
             "--git-common-dir".into(),
         ];
-        let output = runner
+        let repo_context_output = runner
             .run(command(
-                discovery.clone(),
+                repo_context.clone(),
                 repository.clone(),
                 environment.clone(),
             ))
             .unwrap();
-        assert_eq!(output.status, 0);
-        assert!(!output.stdout.is_empty());
+        assert_eq!(repo_context_output.status, 0);
+        assert!(!repo_context_output.stdout.is_empty());
+        let actor_output = runner
+            .run(command(
+                actor_lookup.clone(),
+                repository.clone(),
+                environment.clone(),
+            ))
+            .unwrap();
+        assert_eq!(actor_output.status, 0);
+        assert_eq!(actor_output.stdout, "Private User\n");
 
         let mut wrong_environment = environment.clone();
         wrong_environment.remove("CI");
@@ -5301,8 +5352,22 @@ mod tests {
         );
         let mut proxy_environment = environment.clone();
         proxy_environment.insert("HTTPS_PROXY".into(), "sentinel".into());
+        let mut missing_beads_dir = environment.clone();
+        missing_beads_dir.remove("BEADS_DIR");
+        let mut altered_backup = environment.clone();
+        altered_backup.insert("BD_BACKUP_ENABLED".into(), "true".into());
         let cases = vec![
-            command(discovery.clone(), disposable.clone(), environment.clone()),
+            command(discovery.clone(), repository.clone(), environment.clone()),
+            command(
+                repo_context.clone(),
+                disposable.clone(),
+                environment.clone(),
+            ),
+            command(
+                actor_lookup.clone(),
+                disposable.clone(),
+                environment.clone(),
+            ),
             command(
                 vec![
                     "-C".into(),
@@ -5315,29 +5380,35 @@ mod tests {
                 environment.clone(),
             ),
             command(
-                discovery[..4].to_vec(),
+                repo_context[..3].to_vec(),
                 repository.clone(),
                 environment.clone(),
             ),
             command(
                 vec![
-                    "-C".into(),
-                    repository.display().to_string(),
                     "rev-parse".into(),
                     "--git-common-dir".into(),
                     "--git-dir".into(),
+                    "--show-toplevel".into(),
                 ],
                 repository.clone(),
                 environment.clone(),
             ),
             command(
-                [discovery.clone(), vec!["extra".into()]].concat(),
+                [repo_context.clone(), vec!["extra".into()]].concat(),
                 repository.clone(),
                 environment.clone(),
             ),
-            command(discovery.clone(), repository.clone(), wrong_environment),
-            command(discovery.clone(), repository.clone(), wrong_runtime),
-            command(discovery.clone(), repository.clone(), proxy_environment),
+            command(
+                [actor_lookup.clone(), vec!["extra".into()]].concat(),
+                repository.clone(),
+                environment.clone(),
+            ),
+            command(repo_context.clone(), repository.clone(), wrong_environment),
+            command(repo_context.clone(), repository.clone(), wrong_runtime),
+            command(repo_context.clone(), repository.clone(), proxy_environment),
+            command(repo_context.clone(), repository.clone(), missing_beads_dir),
+            command(actor_lookup.clone(), repository.clone(), altered_backup),
             command(
                 vec![
                     "ls-remote".into(),
@@ -5349,13 +5420,12 @@ mod tests {
                 environment.clone(),
             ),
             command(
-                vec![
-                    "-C".into(),
-                    repository.display().to_string(),
-                    "config".into(),
-                    "--get".into(),
-                    "remote.origin.url".into(),
-                ],
+                vec!["config".into(), "user.email".into()],
+                repository.clone(),
+                environment.clone(),
+            ),
+            command(
+                vec!["config".into(), "--get".into(), "remote.origin.url".into()],
                 repository.clone(),
                 environment.clone(),
             ),
@@ -5377,16 +5447,23 @@ mod tests {
                 environment,
             ),
         ];
+        let rejected = cases.len();
         for case in cases {
             assert_eq!(runner.run(case).unwrap().status, 97);
         }
         let records = read_installed_git_shim_records(&capture).unwrap();
-        assert_eq!(records.len(), 1 + 15);
-        assert_eq!(records[0].category, GitShimCategory::LocalBeadsDiscovery);
+        assert_eq!(records.len(), 2 + rejected);
+        assert_ne!(records[0].category, GitShimCategory::Unexpected);
+        assert_ne!(records[1].category, GitShimCategory::Unexpected);
+        assert_ne!(records[0].category, GitShimCategory::LocalBeadsDiscovery);
+        assert_ne!(records[1].category, GitShimCategory::LocalBeadsDiscovery);
+        assert_ne!(records[0].category, records[1].category);
         assert_eq!(records[0].cwd, fs::canonicalize(&repository).unwrap());
-        assert_eq!(records[0].argv, discovery);
+        assert_eq!(records[0].argv, repo_context);
+        assert_eq!(records[1].cwd, fs::canonicalize(&repository).unwrap());
+        assert_eq!(records[1].argv, actor_lookup);
         assert!(
-            records[1..]
+            records[2..]
                 .iter()
                 .all(|record| record.category == GitShimCategory::Unexpected)
         );
