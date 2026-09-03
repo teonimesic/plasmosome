@@ -13,11 +13,11 @@ use plasmosome_work_state::shadow::{
     to_operational_beads_jsonl,
 };
 use plasmosome_work_state::store::{
-    ActivationFault, BootstrapLock, BootstrapRequest, CurrentGeneration, StateManifest,
-    StoreLocation, activate_staged_generation, active_generation, bootstrap, current_generation,
-    generation_for_installed_wrapper, host_target, locate_store, locator_environment,
-    read_disposable_snapshot, validate_bootstrap_command, validate_fenced_snapshot,
-    validate_read_command, validate_read_locator_command,
+    ActivationFault, BootstrapLock, BootstrapRequest, CurrentGeneration, GenerationActivationLock,
+    StateManifest, StoreLocation, activate_staged_generation, active_generation, bootstrap,
+    current_generation, generation_for_installed_wrapper, host_target, locate_store,
+    locator_environment, read_disposable_snapshot, validate_bootstrap_command,
+    validate_fenced_snapshot, validate_read_command, validate_read_locator_command,
 };
 use tempfile::tempdir;
 
@@ -633,6 +633,28 @@ fn bootstrap_lock_refuses_contention_without_waiting() {
     assert_eq!(error.code(), "bootstrap_busy");
     drop(first);
     BootstrapLock::acquire(&location).expect("process-scoped lock is released on drop");
+}
+
+#[test]
+fn bootstrap_and_sync_contend_on_one_generation_lock() {
+    let root = tempdir().unwrap();
+    let checkout = root.path().join("checkout");
+    let common = root.path().join("common");
+    fs::create_dir_all(&checkout).unwrap();
+    fs::create_dir_all(&common).unwrap();
+    let location = locate(&checkout, &checkout, &common).unwrap();
+    fs::create_dir_all(&location.state_root).unwrap();
+
+    let bootstrap = BootstrapLock::acquire(&location).expect("bootstrap holds activation lock");
+    assert_eq!(
+        GenerationActivationLock::acquire_for_sync(&location)
+            .expect_err("sync never waits behind bootstrap")
+            .code(),
+        "sync_busy"
+    );
+    drop(bootstrap);
+    GenerationActivationLock::acquire_for_sync(&location)
+        .expect("sync acquires the released activation lock");
 }
 
 #[cfg(unix)]

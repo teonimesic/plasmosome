@@ -174,3 +174,7 @@ Test-only `project_config_accepts_only_the_compiled_plasmosome_remote_pair` firs
 ### 2026-09-02 — TDD: online freshness facts
 
 Test-only `equivalent_reobservation_may_postdate_successful_sync` first failed with `invalid_freshness`; the old validator required equality between successful-sync and observation timestamps. Test-only `failed_sync_records_unknown_without_erasing_history` then failed to compile because `record_failed_sync_observation` did not exist. The minimum freshness implementation preserves prior successful-sync/local/pending facts, records a complete post-R0 Unknown observation, and permits a later equivalent re-observation without moving the successful-sync timestamp. `cargo test -p plasmosome-work-state --test freshness` then passed all 7 tests. Post-hoc boundary coverage `failed_sync_observation_refuses_a_regressing_timestamp` passed, confirming that a new failure observation cannot move canonical UTC time backward.
+
+### 2026-09-02 — TDD: shared generation-activation lock
+
+Test-only `bootstrap_and_sync_contend_on_one_generation_lock` first failed to compile because `GenerationActivationLock` did not exist. The implementation extracted the existing nonblocking physical `bootstrap.lock` into that shared lock, retaining the bootstrap adapter and mapping contention to `bootstrap_busy` or `sync_busy` by caller. The focused new and existing bootstrap-contended tests passed, followed by `cargo test -p plasmosome-work-state --test store` with 25 passing tests.

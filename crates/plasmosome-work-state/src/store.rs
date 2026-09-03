@@ -223,15 +223,17 @@ pub enum ActivationFault {
     BeforePointerRename,
 }
 
-/// A process-scoped nonblocking lock that serializes bootstrap preparation only.
+/// A process-scoped nonblocking lock that serializes immutable-generation activation.
 #[derive(Debug)]
-pub struct BootstrapLock {
+pub struct GenerationActivationLock {
     file: File,
 }
 
-impl BootstrapLock {
-    /// Acquires the clone-local bootstrap lock without waiting for another installer.
-    pub fn acquire(location: &StoreLocation) -> Result<Self, StoreError> {
+impl GenerationActivationLock {
+    fn acquire_with_busy_code(
+        location: &StoreLocation,
+        busy_code: &'static str,
+    ) -> Result<Self, StoreError> {
         match fs::symlink_metadata(&location.state_root) {
             Ok(_) => {
                 directory_without_symlink(&location.state_root)?;
@@ -277,7 +279,7 @@ impl BootstrapLock {
                 let code = std::io::Error::last_os_error().raw_os_error();
                 return Err(
                     if code == Some(libc::EAGAIN) || code == Some(libc::EWOULDBLOCK) {
-                        refusal("bootstrap_busy")
+                        refusal(busy_code)
                     } else {
                         refusal("invalid_store")
                     },
@@ -286,9 +288,14 @@ impl BootstrapLock {
         }
         Ok(Self { file })
     }
+
+    /// Acquires the clone-local activation lock for one synchronization without waiting.
+    pub fn acquire_for_sync(location: &StoreLocation) -> Result<Self, StoreError> {
+        Self::acquire_with_busy_code(location, "sync_busy")
+    }
 }
 
-impl Drop for BootstrapLock {
+impl Drop for GenerationActivationLock {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
@@ -296,6 +303,20 @@ impl Drop for BootstrapLock {
 
             let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
         }
+    }
+}
+
+/// The bootstrap-facing adapter for the shared generation-activation lock.
+#[derive(Debug)]
+pub struct BootstrapLock {
+    _activation_lock: GenerationActivationLock,
+}
+
+impl BootstrapLock {
+    /// Acquires the clone-local activation lock for bootstrap without waiting for sync.
+    pub fn acquire(location: &StoreLocation) -> Result<Self, StoreError> {
+        GenerationActivationLock::acquire_with_busy_code(location, "bootstrap_busy")
+            .map(|_activation_lock| Self { _activation_lock })
     }
 }
 
