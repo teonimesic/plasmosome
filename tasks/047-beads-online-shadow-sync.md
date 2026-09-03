@@ -1,7 +1,7 @@
 ---
 id: 047
 title: Synchronize the installed Beads shadow online
-status: in_progress
+status: in_review
 priority: 1
 specs: [014]
 intents: [015]
@@ -14,7 +14,7 @@ done_when:
   - Bootstrap and sync share one nonblocking activation lock; readers stay lock-free; interruption exposes an old or fully validated new generation only.
   - Sync's allowlist has no push, force, ref update, fetch, arbitrary URL, shell, or ambient credential path; Task 042 helpers remain contract scaffolding.
   - Strict test-first reds, real pinned local-store plus recorded-transport online-sync contract, coverage and branch review, timed suite, and five root gates pass; no writer, lifecycle, claim, heartbeat, reconciliation, backup, or cutover acceptance is claimed.
-pr:
+pr: 84
 evidence:
 ---
 
