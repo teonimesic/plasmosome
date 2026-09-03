@@ -3748,11 +3748,12 @@ fn assert_installed_git_shim_records(
         "--show-toplevel",
     ];
     let actor_lookup = ["config", "user.name"];
-    let matches = |category: GitShimCategory, argv: &[&str]| {
+    let matches = |category: &GitShimCategory, argv: &[&str], cwd: Option<&Path>| {
         records
             .iter()
             .filter(|record| {
-                record.category == category
+                &record.category == category
+                    && cwd.is_none_or(|expected| record.cwd == expected)
                     && record
                         .argv
                         .iter()
@@ -3761,19 +3762,65 @@ fn assert_installed_git_shim_records(
             })
             .count()
     };
-    if records
-        .iter()
-        .any(|record| record.category == GitShimCategory::Unexpected)
-        || matches(GitShimCategory::LocatorTop, &locator_top) != 4
-        || matches(GitShimCategory::LocatorCommon, &locator_common) != 4
-        || matches(GitShimCategory::Observation, &observation) != 2
-        || matches(GitShimCategory::LocalBeadsRepoContext, &repo_context) != 8
-        || matches(GitShimCategory::LocalBeadsActor, &actor_lookup) != 8
-        || records
+    let category_count = |category: &GitShimCategory| {
+        records
             .iter()
-            .any(|record| record.category == GitShimCategory::LocalBeadsDiscovery)
-        || records.len() != 26
-    {
+            .filter(|record| &record.category == category)
+            .count()
+    };
+    let no_unexpected = category_count(&GitShimCategory::Unexpected) == 0;
+    let no_discovery = category_count(&GitShimCategory::LocalBeadsDiscovery) == 0;
+    let initial = records.len() == 26
+        && no_unexpected
+        && no_discovery
+        && matches(
+            &GitShimCategory::LocatorTop,
+            &locator_top,
+            Some(&binding.worktree),
+        ) == 4
+        && matches(
+            &GitShimCategory::LocatorCommon,
+            &locator_common,
+            Some(&binding.worktree),
+        ) == 4
+        && matches(&GitShimCategory::Observation, &observation, None) == 2
+        && matches(&GitShimCategory::LocalBeadsRepoContext, &repo_context, None) == 8
+        && matches(&GitShimCategory::LocalBeadsActor, &actor_lookup, None) == 8;
+    let busy_local_cwd = records.iter().find_map(|record| {
+        matches!(
+            record.category,
+            GitShimCategory::LocalBeadsRepoContext | GitShimCategory::LocalBeadsActor
+        )
+        .then_some(&record.cwd)
+    });
+    let busy = records.len() == 12
+        && no_unexpected
+        && no_discovery
+        && category_count(&GitShimCategory::Observation) == 0
+        && matches(
+            &GitShimCategory::LocatorTop,
+            &locator_top,
+            Some(&binding.worktree),
+        ) == 2
+        && matches(
+            &GitShimCategory::LocatorCommon,
+            &locator_common,
+            Some(&binding.worktree),
+        ) == 2
+        && matches(&GitShimCategory::LocalBeadsRepoContext, &repo_context, None) == 4
+        && matches(&GitShimCategory::LocalBeadsActor, &actor_lookup, None) == 4
+        && busy_local_cwd.is_some_and(|private_repository| {
+            private_repository.is_absolute()
+                && private_repository != &binding.worktree
+                && private_repository != &binding.common_dir
+                && records.iter().all(|record| {
+                    !matches!(
+                        record.category,
+                        GitShimCategory::LocalBeadsRepoContext | GitShimCategory::LocalBeadsActor
+                    ) || record.cwd == *private_repository
+                })
+        });
+    if !initial && !busy {
         return Err("cutover_blocked".into());
     }
     Ok(())
@@ -3901,6 +3948,7 @@ fn assert_installed_sync_config_and_lock(
         {
             return Err("installed-current-change".into());
         }
+        let state_before_busy = snapshot_regular_tree(&location.state_root)?;
         let held = GenerationActivationLock::acquire_for_sync(location)
             .map_err(|error| error.code().to_owned())?;
         let records_before_busy = records.len();
@@ -3918,20 +3966,20 @@ fn assert_installed_sync_config_and_lock(
         {
             return Err("cutover_blocked".into());
         }
-        assert_launcher_read(runner, worktree, ReadCommand::List, base, baseline)?;
         let post_lock_records = read_installed_git_shim_records(&binding.capture)?;
         if post_lock_records.len() < records_before_busy
-            || post_lock_records[records_before_busy..]
-                .iter()
-                .any(|record| {
-                    !matches!(
-                        record.category,
-                        GitShimCategory::LocatorTop | GitShimCategory::LocatorCommon
-                    )
-                })
-            || fs::read(location.state_root.join("current"))
-                .map_err(|_| "cutover_blocked".to_owned())?
-                != current_before
+            || assert_installed_git_shim_records(
+                &post_lock_records[records_before_busy..],
+                &binding,
+            )
+            .is_err()
+            || snapshot_regular_tree(&location.state_root)? != state_before_busy
+        {
+            return Err("cutover_blocked".into());
+        }
+        assert_launcher_read(runner, worktree, ReadCommand::List, base, baseline)?;
+        if read_installed_git_shim_records(&binding.capture)? != post_lock_records
+            || snapshot_regular_tree(&location.state_root)? != state_before_busy
         {
             return Err("cutover_blocked".into());
         }
@@ -5186,6 +5234,114 @@ mod tests {
             installed_config_locator_path(&fake_bin, &original).unwrap(),
             expected
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn busy_sync_git_records_are_exact_preflight_reads() {
+        use super::{
+            GitShimCategory, GitShimRecord, InstalledGitShimBinding,
+            assert_installed_git_shim_records,
+        };
+        use std::fs;
+
+        fn record(
+            category: GitShimCategory,
+            cwd: &std::path::Path,
+            argv: &[&str],
+        ) -> GitShimRecord {
+            GitShimRecord {
+                cwd: cwd.to_path_buf(),
+                argv: argv.iter().map(|value| (*value).to_owned()).collect(),
+                category,
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let worktree = root.path().join("worktree");
+        let common_dir = root.path().join("common");
+        let repository = root.path().join("disposable/repository");
+        let other_repository = root.path().join("other/repository");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&common_dir).unwrap();
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(&other_repository).unwrap();
+        let worktree = fs::canonicalize(worktree).unwrap();
+        let repository = fs::canonicalize(repository).unwrap();
+        let other_repository = fs::canonicalize(other_repository).unwrap();
+        let binding = InstalledGitShimBinding {
+            real_git: PathBuf::from("/usr/bin/git"),
+            capture: root.path().join("capture"),
+            worktree: worktree.clone(),
+            common_dir: fs::canonicalize(common_dir).unwrap(),
+            locator_path: "/contract-private-bin".into(),
+            project: crate::project::compiled_project_config().unwrap(),
+        };
+        let top = ["rev-parse", "--show-toplevel"];
+        let common = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+        let context = [
+            "rev-parse",
+            "--git-dir",
+            "--git-common-dir",
+            "--show-toplevel",
+        ];
+        let actor = ["config", "user.name"];
+        let mut records = vec![
+            record(GitShimCategory::LocatorTop, &worktree, &top),
+            record(GitShimCategory::LocatorTop, &worktree, &top),
+            record(GitShimCategory::LocatorCommon, &worktree, &common),
+            record(GitShimCategory::LocatorCommon, &worktree, &common),
+        ];
+        records.extend((0..4).map(|_| {
+            record(
+                GitShimCategory::LocalBeadsRepoContext,
+                &repository,
+                &context,
+            )
+        }));
+        records
+            .extend((0..4).map(|_| record(GitShimCategory::LocalBeadsActor, &repository, &actor)));
+
+        assert_eq!(
+            assert_installed_git_shim_records(&records, &binding),
+            Ok(())
+        );
+
+        let assert_refused = |invalid: &[GitShimRecord]| {
+            assert_eq!(
+                assert_installed_git_shim_records(invalid, &binding),
+                Err("cutover_blocked".into())
+            );
+        };
+        let mut observation = records.clone();
+        observation.push(record(
+            GitShimCategory::Observation,
+            &repository,
+            &[
+                "ls-remote",
+                "--exit-code",
+                "https://github.com/teonimesic/plasmosome.git",
+                "refs/dolt/data",
+            ],
+        ));
+        assert_refused(&observation);
+        let mut unexpected = records.clone();
+        unexpected[4].category = GitShimCategory::Unexpected;
+        assert_refused(&unexpected);
+        let mut extra = records.clone();
+        extra.push(records[0].clone());
+        assert_refused(&extra);
+        let mut wrong_argv = records.clone();
+        wrong_argv[4].argv = vec![
+            "rev-parse".into(),
+            "--git-dir".into(),
+            "--show-toplevel".into(),
+            "--git-common-dir".into(),
+        ];
+        assert_refused(&wrong_argv);
+        let mut wrong_cwd = records;
+        wrong_cwd[8].cwd = other_repository;
+        assert_refused(&wrong_cwd);
     }
 
     #[cfg(unix)]
