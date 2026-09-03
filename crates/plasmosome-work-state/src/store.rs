@@ -431,6 +431,7 @@ impl<'lock> SyncStaging<'lock> {
             &self.pin,
             &self.target,
             &self.binary(),
+            &self.root,
             self.environment.clone(),
             runner,
         )
@@ -522,6 +523,7 @@ impl<'lock> FreshSyncCandidate<'lock> {
             &self.staging.pin,
             &self.staging.target,
             &self.binary(),
+            self.staging.root(),
             self.environment().clone(),
             runner,
         )
@@ -967,6 +969,7 @@ fn environment_for_runtime(
     root: &Path,
     create: bool,
 ) -> Result<BTreeMap<String, String>, StoreError> {
+    let owner = root.parent().ok_or_else(|| refusal("invalid_store"))?;
     if create {
         match fs::symlink_metadata(root) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1007,6 +1010,10 @@ fn environment_for_runtime(
         environment.insert(key.to_owned(), path.display().to_string());
     }
     environment.insert("GIT_CONFIG_GLOBAL".into(), git_config.display().to_string());
+    environment.insert(
+        "BEADS_DIR".into(),
+        owner.join("repository/.beads").display().to_string(),
+    );
     for (key, value) in [
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_TERMINAL_PROMPT", "0"),
@@ -1015,6 +1022,7 @@ fn environment_for_runtime(
         ("BD_DISABLE_METRICS", "1"),
         ("BD_DISABLE_EVENT_FLUSH", "1"),
         ("BD_NON_INTERACTIVE", "1"),
+        ("BD_BACKUP_ENABLED", "false"),
         ("CI", "true"),
     ] {
         environment.insert(key.into(), value.into());
@@ -1022,6 +1030,27 @@ fn environment_for_runtime(
     let path = std::env::var_os("PATH").ok_or_else(|| refusal("invalid_store"))?;
     environment.insert("PATH".into(), path.to_string_lossy().into_owned());
     Ok(environment)
+}
+
+fn runtime_owner_from_environment(
+    environment: &BTreeMap<String, String>,
+) -> Result<PathBuf, StoreError> {
+    let beads_dir = PathBuf::from(
+        environment
+            .get("BEADS_DIR")
+            .ok_or_else(|| refusal("invalid_store"))?,
+    );
+    let repository = beads_dir.parent().ok_or_else(|| refusal("invalid_store"))?;
+    let owner = repository
+        .parent()
+        .ok_or_else(|| refusal("invalid_store"))?;
+    if !owner.is_absolute()
+        || beads_dir != owner.join("repository/.beads")
+        || environment.get("BD_BACKUP_ENABLED") != Some(&"false".to_owned())
+    {
+        return Err(refusal("invalid_store"));
+    }
+    Ok(owner.to_path_buf())
 }
 
 fn copy_regular_file(source: &Path, destination: &Path) -> Result<(), StoreError> {
@@ -1274,12 +1303,19 @@ impl<'a, R> ReadVersionRunner<'a, R> {
     }
 
     fn valid(&self, command: &CommandSpec) -> bool {
+        let (Ok(installed_root), Ok(copied_root)) = (
+            runtime_owner_from_environment(&self.installed_environment),
+            runtime_owner_from_environment(&self.copied_environment),
+        ) else {
+            return false;
+        };
         command.argv == ["--version"]
-            && command.cwd.is_none()
             && command.redacted_argv_positions.is_empty()
             && ((command.program == self.installed_binary
+                && command.cwd.as_deref() == Some(installed_root.as_path())
                 && command.environment == self.installed_environment)
                 || (command.program == self.copied_binary
+                    && command.cwd.as_deref() == Some(copied_root.as_path())
                     && command.environment == self.copied_environment))
     }
 }
@@ -1307,14 +1343,18 @@ pub fn validate_read_command(
     }
     let expected_environment = environment_for_runtime(&temporary_root.join("runtime"), false)
         .map_err(|_| refusal("invalid_read_command"))?;
-    if command.environment != expected_environment {
+    if command.environment != expected_environment
+        || runtime_owner_from_environment(&expected_environment)
+            .map_err(|_| refusal("invalid_read_command"))?
+            != temporary_root
+    {
         return Err(refusal("invalid_read_command"));
     }
     if command.program != copied_binary {
         return Err(refusal("invalid_read_command"));
     }
     if command.argv == ["--version"] {
-        return if command.cwd.is_none() {
+        return if command.cwd.as_deref() == Some(temporary_root) {
             Ok(())
         } else {
             Err(refusal("invalid_read_command"))
@@ -1867,9 +1907,13 @@ impl BootstrapCommandRunner {
     }
 
     fn valid_initial_version(&self, command: &CommandSpec) -> bool {
+        let Ok(verification_root) = runtime_owner_from_environment(&self.verification_environment)
+        else {
+            return false;
+        };
         command.program == self.initial_binary
             && command.argv == ["--version"]
-            && command.cwd.is_none()
+            && command.cwd.as_deref() == Some(verification_root.as_path())
             && command.environment == self.verification_environment
     }
 
@@ -1880,7 +1924,10 @@ impl BootstrapCommandRunner {
             if command.environment != *environment {
                 return false;
             }
-            if command.program == binary && command.argv == ["--version"] && command.cwd.is_none() {
+            if command.program == binary
+                && command.argv == ["--version"]
+                && command.cwd.as_deref() == Some(root.as_path())
+            {
                 return true;
             }
             let valid_repository_command = if command.program == Path::new("git") {
@@ -1925,7 +1972,7 @@ impl BootstrapCommandRunner {
         self.installed_roots.iter().any(|(root, environment)| {
             command.program == root.join("bd")
                 && command.argv == ["--version"]
-                && command.cwd.is_none()
+                && command.cwd.as_deref() == Some(root.as_path())
                 && command.environment == *environment
         })
     }
@@ -2281,6 +2328,10 @@ fn read_disposable_snapshot_in_root<R: CommandRunner>(
     }
     let repository = request.temporary_root.join("repository");
     let copied_binary = request.temporary_root.join("bd");
+    let selected_runtime_owner = runtime_owner_from_environment(&request.selected_environment)?;
+    if runtime_owner_from_environment(&request.copied_environment)? != request.temporary_root {
+        return Err(refusal("invalid_store"));
+    }
     {
         let mut version_runner = ReadVersionRunner::new(
             runner,
@@ -2293,6 +2344,7 @@ fn read_disposable_snapshot_in_root<R: CommandRunner>(
             request.pin,
             request.target,
             request.selected_binary,
+            &selected_runtime_owner,
             request.selected_environment.clone(),
             &mut version_runner,
         )
@@ -2303,6 +2355,7 @@ fn read_disposable_snapshot_in_root<R: CommandRunner>(
             request.pin,
             request.target,
             &copied_binary,
+            request.temporary_root,
             request.copied_environment.clone(),
             &mut version_runner,
         )
@@ -2669,6 +2722,7 @@ fn install_staged_runtime(
         pin,
         &request.host_target,
         &binary,
+        staging,
         environment.clone(),
         runner,
     )
@@ -2940,6 +2994,7 @@ fn installed_runtime_preflight(
         pin,
         target,
         &generation.root.join("bd"),
+        &generation.root,
         environment.clone(),
         runner,
     )
@@ -3042,7 +3097,8 @@ pub fn bootstrap(request: &BootstrapRequest) -> Result<BootstrapResult, StoreErr
     let verification_root = tempfile::tempdir().map_err(|_| refusal("invalid_store"))?;
     let mut lock = None;
     let preparation = (|| {
-        let verification_environment = environment_for_runtime(verification_root.path(), true)?;
+        let verification_environment =
+            environment_for_runtime(&verification_root.path().join("runtime"), true)?;
         let mut runner = BootstrapCommandRunner::new(source_root.clone(), request.binary.clone());
         runner.bind_source_inputs(request.source_ref.clone(), verification_environment.clone())?;
         VerifiedBeads::verify_with_environment(
@@ -3050,6 +3106,7 @@ pub fn bootstrap(request: &BootstrapRequest) -> Result<BootstrapResult, StoreErr
             &request.host_target,
             &request.archive,
             &request.binary,
+            verification_root.path(),
             verification_environment.clone(),
             &mut runner,
         )
@@ -3620,7 +3677,25 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_version_checks_are_bound_before_dispatch() {
+    fn runtime_environment_binds_private_beads_dir_and_disables_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = root.path().join("private-owner");
+        fs::create_dir(&owner).unwrap();
+
+        let environment = environment_for_runtime(&owner.join("runtime"), true).unwrap();
+
+        assert_eq!(
+            environment.get("BEADS_DIR"),
+            Some(&owner.join("repository/.beads").display().to_string())
+        );
+        assert_eq!(
+            environment.get("BD_BACKUP_ENABLED"),
+            Some(&"false".to_owned())
+        );
+    }
+
+    #[test]
+    fn version_checks_use_explicit_private_cwd() {
         let root = tempfile::tempdir().unwrap();
         let installed_binary = root.path().join("generation/bd");
         let copied_binary = root.path().join("disposable/bd");
@@ -3633,14 +3708,14 @@ mod tests {
         let installed = CommandSpec {
             program: installed_binary.clone(),
             argv: vec!["--version".into()],
-            cwd: None,
+            cwd: Some(installed_binary.parent().unwrap().to_path_buf()),
             environment: installed_environment.clone(),
             redacted_argv_positions: Vec::new(),
         };
         let copied = CommandSpec {
             program: copied_binary.clone(),
             argv: vec!["--version".into()],
-            cwd: None,
+            cwd: Some(copied_binary.parent().unwrap().to_path_buf()),
             environment: copied_environment.clone(),
             redacted_argv_positions: Vec::new(),
         };
@@ -3672,6 +3747,18 @@ mod tests {
                 ..installed.clone()
             },
             CommandSpec {
+                cwd: None,
+                ..installed.clone()
+            },
+            CommandSpec {
+                cwd: Some(root.path().join("invoking-checkout")),
+                ..installed.clone()
+            },
+            CommandSpec {
+                cwd: Some(root.path().join("generation/repository")),
+                ..installed.clone()
+            },
+            CommandSpec {
                 cwd: Some(root.path().to_path_buf()),
                 ..installed.clone()
             },
@@ -3698,6 +3785,65 @@ mod tests {
                 "an invalid version plan must be refused before dispatch"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_runtime_environment_cannot_admit_a_none_cwd_version() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let installed_binary = root.path().join("generation/bd");
+        let copied_binary = root.path().join("disposable/bd");
+        fs::create_dir_all(installed_binary.parent().unwrap()).unwrap();
+        fs::create_dir_all(copied_binary.parent().unwrap()).unwrap();
+        fs::write(&installed_binary, "installed").unwrap();
+        fs::write(&copied_binary, "copied").unwrap();
+        let mut malformed =
+            environment_for_runtime(&root.path().join("generation/runtime"), true).unwrap();
+        malformed.remove("BEADS_DIR");
+        let copied_environment =
+            environment_for_runtime(&root.path().join("disposable/runtime"), true).unwrap();
+        let none_cwd = CommandSpec {
+            program: installed_binary.clone(),
+            argv: vec!["--version".into()],
+            cwd: None,
+            environment: malformed.clone(),
+            redacted_argv_positions: Vec::new(),
+        };
+        let mut read_inner = RecordingCommandRunner::default();
+        let mut read_runner = ReadVersionRunner::new(
+            &mut read_inner,
+            &installed_binary,
+            malformed.clone(),
+            &copied_binary,
+            copied_environment,
+        );
+        assert_eq!(
+            read_runner.run(none_cwd.clone()).unwrap_err(),
+            "invalid_read_command"
+        );
+        assert!(read_inner.commands().is_empty());
+
+        let source_root = root.path().join("source");
+        let marker = root.path().join("bootstrap-version-ran");
+        fs::create_dir(&source_root).unwrap();
+        let source_root = source_root.canonicalize().unwrap();
+        fs::write(
+            &installed_binary,
+            format!("#!/bin/sh\nprintf dispatched > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&installed_binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut bootstrap_runner = BootstrapCommandRunner::new(source_root, installed_binary);
+        bootstrap_runner
+            .bind_source_inputs("origin/main".into(), malformed)
+            .unwrap();
+        assert_eq!(
+            bootstrap_runner.run(none_cwd).unwrap_err(),
+            "invalid_bootstrap_command"
+        );
+        assert!(!marker.exists());
     }
 
     #[cfg(unix)]
@@ -5097,6 +5243,7 @@ mod tests {
                 &pin,
                 "aarch64-apple-darwin",
                 &generation.root.join("bd"),
+                &generation.root,
                 environment,
                 &mut runner,
             )

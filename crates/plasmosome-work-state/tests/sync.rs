@@ -11,8 +11,8 @@ use plasmosome_work_state::sync::{
 };
 use tempfile::tempdir;
 
-fn environment() -> BTreeMap<String, String> {
-    BTreeMap::from([
+fn environment(root: &std::path::Path) -> BTreeMap<String, String> {
+    let mut environment = BTreeMap::from([
         ("PATH".into(), "/test/bin".into()),
         ("HOME".into(), "/test/home".into()),
         ("XDG_CONFIG_HOME".into(), "/test/xdg-config".into()),
@@ -28,7 +28,13 @@ fn environment() -> BTreeMap<String, String> {
         ("BD_DISABLE_EVENT_FLUSH".into(), "1".into()),
         ("BD_NON_INTERACTIVE".into(), "1".into()),
         ("CI".into(), "true".into()),
-    ])
+    ]);
+    environment.insert(
+        "BEADS_DIR".into(),
+        root.join("repository/.beads").display().to_string(),
+    );
+    environment.insert("BD_BACKUP_ENABLED".into(), "false".into());
+    environment
 }
 
 fn binding(root: &std::path::Path) -> SyncCommandBinding {
@@ -37,7 +43,7 @@ fn binding(root: &std::path::Path) -> SyncCommandBinding {
         root.to_path_buf(),
         root.join("repository"),
         root.join("bd"),
-        environment(),
+        environment(root),
     )
     .expect("test binding is valid")
 }
@@ -52,7 +58,7 @@ fn observation(root: &std::path::Path) -> CommandSpec {
             "refs/dolt/data".into(),
         ],
         cwd: Some(root.to_path_buf()),
-        environment: environment(),
+        environment: environment(root),
         redacted_argv_positions: vec![2],
     }
 }
@@ -71,7 +77,7 @@ fn init(root: &std::path::Path) -> CommandSpec {
             "--non-interactive".into(),
         ],
         cwd: Some(root.join("repository")),
-        environment: environment(),
+        environment: environment(root),
         redacted_argv_positions: vec![3],
     }
 }
@@ -87,7 +93,7 @@ fn remote_list(root: &std::path::Path) -> CommandSpec {
             "list".into(),
         ],
         cwd: Some(root.join("repository")),
-        environment: environment(),
+        environment: environment(root),
         redacted_argv_positions: Vec::new(),
     }
 }
@@ -103,7 +109,7 @@ fn readonly_status(root: &std::path::Path) -> CommandSpec {
             "status".into(),
         ],
         cwd: Some(root.join("repository")),
-        environment: environment(),
+        environment: environment(root),
         redacted_argv_positions: Vec::new(),
     }
 }
@@ -112,8 +118,8 @@ fn staged_version(root: &std::path::Path) -> CommandSpec {
     CommandSpec {
         program: root.join("bd"),
         argv: vec!["--version".into()],
-        cwd: None,
-        environment: environment(),
+        cwd: Some(root.to_path_buf()),
+        environment: environment(root),
         redacted_argv_positions: Vec::new(),
     }
 }
@@ -123,7 +129,7 @@ fn readonly_export(root: &std::path::Path) -> CommandSpec {
         program: root.join("bd"),
         argv: vec!["--readonly".into(), "--sandbox".into(), "export".into()],
         cwd: Some(root.join("repository")),
-        environment: environment(),
+        environment: environment(root),
         redacted_argv_positions: Vec::new(),
     }
 }
@@ -139,8 +145,57 @@ fn readonly_key_values(root: &std::path::Path) -> CommandSpec {
             "list".into(),
         ],
         cwd: Some(root.join("repository")),
-        environment: environment(),
+        environment: environment(root),
         redacted_argv_positions: Vec::new(),
+    }
+}
+
+#[test]
+fn sync_binding_refuses_missing_or_altered_private_beads_environment() {
+    let root = tempdir().unwrap();
+    let project = compiled_project_config().unwrap();
+    let valid = environment(root.path());
+    assert!(
+        SyncCommandBinding::new(
+            project.clone(),
+            root.path().to_path_buf(),
+            root.path().join("repository"),
+            root.path().join("bd"),
+            valid.clone(),
+        )
+        .is_ok()
+    );
+
+    let mut missing_beads_dir = valid.clone();
+    missing_beads_dir.remove("BEADS_DIR");
+    let mut altered_beads_dir = valid.clone();
+    altered_beads_dir.insert(
+        "BEADS_DIR".into(),
+        root.path().join("other/.beads").display().to_string(),
+    );
+    let mut missing_backup = valid.clone();
+    missing_backup.remove("BD_BACKUP_ENABLED");
+    let mut altered_backup = valid;
+    altered_backup.insert("BD_BACKUP_ENABLED".into(), "true".into());
+
+    for environment in [
+        missing_beads_dir,
+        altered_beads_dir,
+        missing_backup,
+        altered_backup,
+    ] {
+        assert_eq!(
+            SyncCommandBinding::new(
+                project.clone(),
+                root.path().to_path_buf(),
+                root.path().join("repository"),
+                root.path().join("bd"),
+                environment,
+            )
+            .unwrap_err()
+            .code(),
+            "invalid_sync_command"
+        );
     }
 }
 
@@ -238,7 +293,7 @@ fn sync_runner_rejects_every_remote_write_shape() {
             program: root.path().join("bd"),
             argv: Vec::new(),
             cwd: Some(root.path().join("repository")),
-            environment: environment(),
+            environment: environment(root.path()),
             redacted_argv_positions: Vec::new(),
         };
         for forbidden in [
@@ -353,7 +408,37 @@ fn stable_sync_runner_admits_only_the_exact_readonly_fence_after_r1() {
 
         let wrong_order = readonly_export(root.path());
         assert_eq!(runner.run(wrong_order).unwrap_err(), "invalid_sync_command");
-        runner.run(staged_version(root.path())).unwrap();
+        let version = staged_version(root.path());
+        let mut altered_beads_dir = version.environment.clone();
+        altered_beads_dir.insert(
+            "BEADS_DIR".into(),
+            root.path().join("outside/.beads").display().to_string(),
+        );
+        for invalid in [
+            CommandSpec {
+                cwd: None,
+                ..version.clone()
+            },
+            CommandSpec {
+                cwd: Some(root.path().join("invoking-checkout")),
+                ..version.clone()
+            },
+            CommandSpec {
+                cwd: Some(root.path().join("repository")),
+                ..version.clone()
+            },
+            CommandSpec {
+                cwd: Some(root.path().join("outside")),
+                ..version.clone()
+            },
+            CommandSpec {
+                environment: altered_beads_dir,
+                ..version.clone()
+            },
+        ] {
+            assert_eq!(runner.run(invalid).unwrap_err(), "invalid_sync_command");
+        }
+        runner.run(version).unwrap();
         runner.run(readonly_status(root.path())).unwrap();
         runner.run(readonly_export(root.path())).unwrap();
         runner.run(readonly_key_values(root.path())).unwrap();

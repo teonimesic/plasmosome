@@ -136,11 +136,16 @@ fn disposable_environment(root: &Path) -> BTreeMap<String, String> {
         ("BD_DISABLE_METRICS", "1"),
         ("BD_DISABLE_EVENT_FLUSH", "1"),
         ("BD_NON_INTERACTIVE", "1"),
+        ("BD_BACKUP_ENABLED", "false"),
         ("CI", "true"),
     ] {
         environment.insert(key.into(), value.into());
     }
     environment.insert("PATH".into(), std::env::var("PATH").unwrap());
+    environment.insert(
+        "BEADS_DIR".into(),
+        root.join("repository/.beads").display().to_string(),
+    );
     environment
 }
 
@@ -951,7 +956,7 @@ fn ordinary_read_plans_are_local_and_write_free() {
     };
 
     for command in [
-        command(&["--version"], None),
+        command(&["--version"], Some(root.path())),
         command(
             &["--readonly", "--sandbox", "--json", "vc", "status"],
             Some(&temporary_repository),
@@ -988,7 +993,7 @@ fn ordinary_read_plans_are_local_and_write_free() {
     let leaked = CommandSpec {
         program: copied_binary.clone(),
         argv: vec!["--version".into()],
-        cwd: None,
+        cwd: Some(root.path().to_path_buf()),
         environment: leaked_environment,
         redacted_argv_positions: Vec::new(),
     };

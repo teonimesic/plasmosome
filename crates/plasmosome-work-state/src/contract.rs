@@ -3939,6 +3939,7 @@ pub fn run_contract(request: &ContractRequest) -> Result<ContractResult, Box<Con
             host_target(),
             &request.archive,
             &request.binary,
+            root.path(),
             isolated_environment(root.path()),
             &mut runner,
         )

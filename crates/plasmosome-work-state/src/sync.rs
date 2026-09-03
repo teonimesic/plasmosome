@@ -173,6 +173,9 @@ impl SyncCommandBinding {
             || repository != staging_root.join("repository")
             || binary != staging_root.join("bd")
             || environment.is_empty()
+            || environment.get("BEADS_DIR")
+                != Some(&repository.join(".beads").display().to_string())
+            || environment.get("BD_BACKUP_ENABLED") != Some(&"false".to_owned())
         {
             return Err(refusal("invalid_sync_command"));
         }
@@ -379,7 +382,7 @@ impl<'a, R> SyncCommandRunner<'a, R> {
     fn version_command(&self, command: &CommandSpec) -> bool {
         command.program == self.binding.binary
             && command.argv == ["--version"]
-            && command.cwd.is_none()
+            && command.cwd.as_deref() == Some(self.binding.staging_root.as_path())
             && command.environment == self.binding.environment
             && command.redacted_argv_positions.is_empty()
     }

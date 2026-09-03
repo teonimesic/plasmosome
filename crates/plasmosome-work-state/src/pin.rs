@@ -118,9 +118,18 @@ impl VerifiedBeads {
         target: &str,
         archive: &Path,
         binary: &Path,
+        cwd: &Path,
         runner: &mut R,
     ) -> Result<Self, PinError> {
-        Self::verify_with_environment(manifest, target, archive, binary, BTreeMap::new(), runner)
+        Self::verify_with_environment(
+            manifest,
+            target,
+            archive,
+            binary,
+            cwd,
+            BTreeMap::new(),
+            runner,
+        )
     }
 
     pub fn verify_with_environment<R: CommandRunner>(
@@ -128,6 +137,7 @@ impl VerifiedBeads {
         target: &str,
         archive: &Path,
         binary: &Path,
+        cwd: &Path,
         environment: BTreeMap<String, String>,
         runner: &mut R,
     ) -> Result<Self, PinError> {
@@ -146,7 +156,7 @@ impl VerifiedBeads {
             .run(CommandSpec {
                 program: binary.to_path_buf(),
                 argv: vec!["--version".into()],
-                cwd: None,
+                cwd: Some(cwd.to_path_buf()),
                 environment,
                 redacted_argv_positions: Vec::new(),
             })
@@ -166,6 +176,7 @@ impl InstalledBeads {
         manifest: &PinManifest,
         target: &str,
         binary: &Path,
+        cwd: &Path,
         environment: BTreeMap<String, String>,
         runner: &mut R,
     ) -> Result<Self, PinError> {
@@ -191,7 +202,7 @@ impl InstalledBeads {
             .run(CommandSpec {
                 program: binary.to_path_buf(),
                 argv: vec!["--version".into()],
-                cwd: None,
+                cwd: Some(cwd.to_path_buf()),
                 environment,
                 redacted_argv_positions: Vec::new(),
             })
