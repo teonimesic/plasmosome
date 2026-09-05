@@ -1,7 +1,7 @@
 ---
 id: 006
 title: Criterion benchmarks for the six kernel operations, plus the CI bench job
-status: planned
+status: done
 priority: 2
 specs: [005]
 intents: [002]
@@ -141,3 +141,58 @@ without.
 
 T3 is the fallback for rerunning one benchmark by name without touching any manifest. CI cannot
 use it, because CI has to run all six.
+
+### 2026-09-05 — local and ten-run records
+
+The complete suite was run with `cargo bench --workspace` on this unchanged task commit. It
+completed successfully in 77.79 seconds (wall time), with all six benchmark names present and
+non-zero medians. The quick suite completed in 5.76 seconds (wall time).
+
+Machine baseline: Mac15,8, Apple arm64, 16 logical CPUs, 64 GiB RAM, rustc 1.97.1
+(8bab26f4f, 2026-07-14), cargo 1.97.1 (c980f4866, 2026-06-30).
+
+Ten consecutive quick runs of `cargo bench -p plasmosome-ledger --bench ledger_replay -- --quick`
+against this unchanged commit produced these medians (microseconds):
+
+| run | 10 effects | 100 effects | 1000 effects |
+| ---: | ---: | ---: | ---: |
+| 1 | 2.8711 | 33.7330 | 347.3100 |
+| 2 | 3.0094 | 33.3620 | 354.5000 |
+| 3 | 2.9422 | 33.2460 | 355.3000 |
+| 4 | 2.9692 | 34.0880 | 359.4100 |
+| 5 | 3.1120 | 33.4910 | 351.8800 |
+| 6 | 2.9244 | 32.8770 | 356.1300 |
+| 7 | 2.9072 | 33.7240 | 344.6900 |
+| 8 | 2.9724 | 32.6500 | 344.7800 |
+| 9 | 2.9117 | 32.9040 | 355.2800 |
+| 10 | 2.9023 | 33.2450 | 342.7300 |
+
+Using the median of the ten medians as the denominator, the inter-quartile ranges are:
+
+| benchmark | median | IQR | relative IQR |
+| --- | ---: | ---: | ---: |
+| `ledger_replay/10` | 2.9601 µs | 0.0715 µs | 2.42% |
+| `ledger_replay/100` | 33.5110 µs | 0.6920 µs | 2.06% |
+| `ledger_replay/1000` | 356.0100 µs | 12.8000 µs | 3.60% |
+
+The first full run exposed a file-descriptor exhaustion bug in the append fixture: Criterion's
+`SmallInput` batches retained too many open `SessionLog` files. Switching that stateful fixture
+to `BatchSize::PerIteration` fixed the harness; the subsequent full run passed. This is why the
+append benchmark uses per-iteration setup even though its operation is otherwise independent.
+
+### Handoff — 2026-09-05
+
+Implemented on `task-006-kernel-benchmarks` from `origin/main`. Added Criterion 0.7 workspace
+dependency, six named harness-free benchmarks, `bench = false` for every workspace library and
+binary target, and an advisory PR `bench` job that publishes benchmark medians to
+`GITHUB_STEP_SUMMARY`. The stateful `ledger_replay` and `attach_detach` fixtures use
+`iter_batched`; `session_log_append` uses `PerIteration` to avoid retaining open temporary log
+files across setup batches.
+
+Verification: RED-first `cargo bench --workspace -- --quick` initially failed on the missing
+`DesiredCell` import; after the import fix it passed (5.76s wall time). A first full
+`cargo bench --workspace` exposed the file-descriptor issue documented above; the rerun passed
+in 77.79s wall time. `cargo test --workspace` passed, and
+`cargo clippy --workspace --all-targets -- -D warnings` plus `cargo fmt --all -- --check` passed.
+
+Commit: see the task branch commit history; no generated `target/criterion/` files are tracked.

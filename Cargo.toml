@@ -26,6 +26,7 @@ proptest = "1"
 tempfile = "3"
 libc = "0.2"
 sha2 = "0.10"
+criterion = "0.7"
 
 plasmosome-backend = { path = "crates/plasmosome-backend" }
 plasmosome-ledger = { path = "crates/plasmosome-ledger" }

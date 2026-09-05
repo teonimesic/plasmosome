@@ -16,3 +16,11 @@ toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[lib]
+bench = false
+
+[[bin]]
+name = "plasmosome-work-state"
+path = "src/main.rs"
+bench = false
