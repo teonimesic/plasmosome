@@ -1,7 +1,7 @@
 ---
 id: 006
 title: Criterion benchmarks for the six kernel operations, plus the CI bench job
-status: done
+status: in_review
 priority: 2
 specs: [005]
 intents: [002]
@@ -30,8 +30,12 @@ done_when: >-
   bench job runs the quick suite on PRs and shows medians in the step summary
   without gating on any number, and the ten-run CI variance record plus a
   machine-named local baseline are appended to this task's Notes.
-pr:
-evidence:
+pr: https://github.com/teonimesic/plasmosome/pull/86
+evidence: >-
+  Draft PR #86. cargo bench --workspace -- --quick passed in 5.76s wall time;
+  cargo bench --workspace passed in 77.79s wall time; cargo test --workspace,
+  cargo clippy --workspace --all-targets -- -D warnings, cargo fmt --all -- --check,
+  and git diff --check passed. Awaiting review and merge.
 ---
 
 ## Why
