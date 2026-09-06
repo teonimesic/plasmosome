@@ -1,0 +1,50 @@
+---
+id: 049
+title: Define the typed heartbeat observe and apply contract
+status: planned
+priority: 1
+specs: [015]
+intents: [015]
+refs:
+  [
+    docs/intents/015-local-first-shared-work-state.md,
+    docs/specs/014-local-first-work-state.md,
+    docs/specs/015-typed-heartbeat-observe-and-apply.md,
+    tasks/048-heartbeat-dispatch-driver.md,
+    .agents/skills/heartbeat/SKILL.md,
+    .agents/skills/tasks/SKILL.md,
+    docs/templates/spec.md,
+    docs/templates/task.md,
+  ]
+done_when:
+  - Spec 015 is implemented as a typed library boundary for bounded heartbeat observation and guarded application, with deterministic operation/action/request ids, receipts, cancellation, lifecycle, freshness, stale and conflict refusals.
+  - RED-first contract tests fail before implementation and then pass for valid observation/application, malformed status and links, every freshness refusal, version/generation/authority conflicts, duplicate actions, idempotent receipts, planner non-authority, and cancellation before and after an effect boundary.
+  - The implementation delegates mutation and external effects to Spec 014 seams, makes no implicit approval/acceptance/claim/start/dispatch decision, and leaves Task 048 able to consume the typed boundary without inventing semantics.
+  - Focused coverage, lint/format checks, and the repository quality gate pass; evidence records commands, elapsed time, result and any explicitly deferred integration boundary.
+pr:
+evidence:
+---
+
+## Why
+
+Task 048 cannot safely implement the recurring driver because Spec 014 names heartbeat commands but
+the current work-state crate exposes no typed reconciliation result, proposed action, planner
+request, receipt, or cancellation seam. This task defines that smallest missing contract before a
+driver is allowed to schedule or dispatch anything.
+
+## Plan
+
+1. Read the accepted Spec 014 contract and freeze the typed input/result/error/receipt shapes in
+   the Spec 015 boundary.
+2. Add RED tests for deterministic identity, explicit refusal states, guarded revalidation,
+   idempotency, planner non-authority, and cancellation.
+3. Implement only the library contract and injected writer/effect seams; do not add a scheduler,
+   network sync, provider, host operation, VMM, or GUI behavior.
+4. Run focused tests, coverage, formatting, lint and the full repository gate; record deferred
+   integration work for Task 048 if the existing Spec 014 writer is not yet callable.
+
+## Notes
+
+2026-09-06 — Planned as the bounded prerequisite identified by Task 048. Spec 014 remains the
+authority for freshness, lifecycle, writer lease, ownership, publication and receipts; this task
+adds only the missing typed heartbeat boundary. No intent approval is inferred.
