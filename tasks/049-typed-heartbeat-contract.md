@@ -1,7 +1,7 @@
 ---
 id: 049
 title: Define the typed heartbeat observe and apply contract
-status: planned
+status: in_review
 priority: 1
 specs: [015]
 intents: [015]
@@ -58,3 +58,9 @@ seam exists only for contract tests; it is not an authority implementation. RED-
 `crates/plasmosome-work-state/tests/heartbeat.rs` (5 passing). Focused tests, crate tests, clippy with
 `-D warnings`, and format checks pass. The scheduler, Beads writer, lifecycle mutations, planner
 authority, and post-effect cancellation adapter remain Task 048/integration work.
+
+2026-09-06 — Lifecycle handoff: implementation commit `aaa3885` is ready for review. No pull
+request exists yet, so this task remains `in_review` and must not be marked `done` until the reviewed
+change is merged. Verification: `cargo test -p plasmosome-work-state --test heartbeat` (5 passed),
+`cargo test -p plasmosome-work-state` (all passed), `cargo clippy -p plasmosome-work-state
+--all-targets -- -D warnings` (passed), and `cargo fmt --all -- --check` (passed).
