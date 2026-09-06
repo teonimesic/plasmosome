@@ -48,3 +48,13 @@ driver is allowed to schedule or dispatch anything.
 2026-09-06 — Planned as the bounded prerequisite identified by Task 048. Spec 014 remains the
 authority for freshness, lifecycle, writer lease, ownership, publication and receipts; this task
 adds only the missing typed heartbeat boundary. No intent approval is inferred.
+
+2026-09-06 — Implemented `plasmosome-work-state::heartbeat` as an injected library seam. Observation
+is read-only and returns explicit `refused`, `idle`, or `proposed` states with deterministic
+observation/action identifiers, freshness refusal codes, and checked keys. Application requires the
+exact observation/action and generation, revalidates through the injected Spec 014 seam, checks
+cooperative cancellation before the effect boundary, and records idempotent receipts. The recording
+seam exists only for contract tests; it is not an authority implementation. RED-first tests are in
+`crates/plasmosome-work-state/tests/heartbeat.rs` (5 passing). Focused tests, crate tests, clippy with
+`-D warnings`, and format checks pass. The scheduler, Beads writer, lifecycle mutations, planner
+authority, and post-effect cancellation adapter remain Task 048/integration work.

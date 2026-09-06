@@ -4,6 +4,7 @@ pub mod command;
 pub mod contract;
 pub mod document;
 pub mod freshness;
+pub mod heartbeat;
 pub mod pin;
 pub mod read;
 pub mod shadow;
