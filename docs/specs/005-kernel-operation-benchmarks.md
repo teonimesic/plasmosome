@@ -124,14 +124,14 @@ outlier sets the figure for the whole record. It is also self-defeating as a thr
 times an observed range, any range wider than about 66% of baseline lets a genuine 2x regression
 through. The inter-quartile range discards the extremes and moves far less between records.
 
-The ten-run record lands in the task's Notes; enabling the gate is its own later task citing
+The ten-run record lands in the Beads task's native `notes`; enabling the gate is its own later task citing
 those numbers. Until then the comparison is advisory by construction. Any tighter promise from a
 shared runner would be noise dressed as a check.
 
 ### Local baselines
 
 Full `cargo bench` runs happen on developer machines. The first baseline is recorded in the
-task's Notes with the machine named (chip, core count, memory, toolchain version). A number
+Beads task's native `notes` with the machine named (chip, core count, memory, toolchain version). A number
 without its machine is not a baseline.
 
 ## Contract
