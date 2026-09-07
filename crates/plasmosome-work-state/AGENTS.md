@@ -17,6 +17,8 @@ one fresh private candidate only after an existing data ref is observed, and act
 Markdown-shadow parity after a second matching observation. Bootstrap and sync share the
 generation-activation lock; ordinary readers remain local and lock-free. Preserve this command
 fence and the credential-free environment: sync never publishes or changes work records.
+The private runtime bounds Git discovery below its owner's parent as well as isolating global and
+system configuration; pre-init commands must not discover the enclosing clone's local Git config.
 
 Do not broaden this boundary into publication, leases, GitHub reconciliation, backup/restore, or
 cutover. Complete Spec 014 `offline-reads` acceptance remains unfinished here: `heartbeat observe`

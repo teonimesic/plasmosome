@@ -329,3 +329,37 @@ Both equivalent checks were then run explicitly: `./.githooks/provenance-guard` 
 `./.githooks/attribution-guard cd775345e39ad1a3d5c70a85832f8c03ff10b8ef..HEAD` each reported
 `clean` with exit 0. This is guard evidence only, not runtime verification. Later pushes use the
 standard safety hooks.
+
+### 2026-09-07 — review P1: stop ancestor Git configuration discovery
+
+The independent reader identified that Git observation and pre-init Beads startup ran below the
+clone's `.git` directory. A private HOME and global Git configuration did not stop Git from
+discovering that ancestor and applying its repository-local URL rewrites or credential helpers.
+The coordinator reproduced the rewrite safely with a file-only transport canary, with real
+network protocols disabled; no project remote was contacted.
+
+After the initial editing wave settled, the coordinator authorized focused regression runs and
+formatting. Test-only
+`private_runtime_git_discovery_excludes_ancestor_config_but_finds_its_repository` failed with
+the resolved URL `file:///ancestor-config-canary/` instead of the compiled HTTPS URL. This
+regression invokes real Git's `ls-remote --get-url`, which resolves the URL without contacting
+a remote, from both the runtime owner and its still-empty repository.
+
+The existing sealed runtime environment now binds `GIT_CEILING_DIRECTORIES` to the private
+owner's parent. Git excludes a directory itself from its ancestor calculation, so using the
+owner as the sole ceiling would not protect commands whose cwd is that owner. The parent ceiling
+stops discovery before the enclosing shared clone while still permitting the private repository.
+The regression then passed and also proved an initialized private repository's own configuration
+remains discoverable. No remote command or credential path was admitted.
+
+The contract's metadata fixture now reuses the production runtime-environment helper rather than
+maintaining a second copy. The strict installed Git shim and its negative cases also bind the
+physical ceiling; store/sync fixtures carry that same field, and altered ceilings refuse at the
+sync boundary. The earlier format failure is addressed by the authorized `cargo fmt --all` run.
+
+Observed proof: the new regression failed before the fix and passed afterward; the focused
+CLI/store/sync targets passed 51 tests, and the library target passed 55 tests including the
+strict installed Git shim and pending metadata fence. No full workspace gate, coverage or physical
+pinned contract was run by this author after the repair; those remain coordinator-owned.
+The reviewer's proposed staging cleanup issue was withdrawn after reading the explicit plan
+requirement to retain abandoned stages. This change adds no garbage collection.

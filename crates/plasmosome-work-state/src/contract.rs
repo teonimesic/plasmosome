@@ -2444,48 +2444,8 @@ fn pending_fixture_metadata(
 }
 
 fn fixture_runtime_environment(staging: &Path) -> Result<BTreeMap<String, String>, String> {
-    let runtime = staging.join("runtime");
-    let directories = [
-        ("HOME", runtime.join("home")),
-        ("XDG_CONFIG_HOME", runtime.join("xdg_config")),
-        ("XDG_CACHE_HOME", runtime.join("xdg_cache")),
-        ("XDG_DATA_HOME", runtime.join("xdg_data")),
-        ("TMPDIR", runtime.join("tmp")),
-    ];
-    let mut environment = BTreeMap::new();
-    for (key, path) in directories {
-        let metadata = fs::symlink_metadata(&path).map_err(|_| "cutover_blocked".to_owned())?;
-        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-            return Err("cutover_blocked".into());
-        }
-        environment.insert(key.into(), path.display().to_string());
-    }
-    let git_config = runtime.join("git_config_global");
-    let metadata = fs::symlink_metadata(&git_config).map_err(|_| "cutover_blocked".to_owned())?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return Err("cutover_blocked".into());
-    }
-    environment.insert("GIT_CONFIG_GLOBAL".into(), git_config.display().to_string());
-    environment.insert(
-        "BEADS_DIR".into(),
-        staging.join("repository/.beads").display().to_string(),
-    );
-    for (key, value) in [
-        ("GIT_CONFIG_NOSYSTEM", "1"),
-        ("GIT_TERMINAL_PROMPT", "0"),
-        ("GIT_NO_LAZY_FETCH", "1"),
-        ("GIT_OPTIONAL_LOCKS", "0"),
-        ("BD_DISABLE_METRICS", "1"),
-        ("BD_DISABLE_EVENT_FLUSH", "1"),
-        ("BD_NON_INTERACTIVE", "1"),
-        ("BD_BACKUP_ENABLED", "false"),
-        ("CI", "true"),
-    ] {
-        environment.insert(key.into(), value.into());
-    }
-    let path = std::env::var_os("PATH").ok_or_else(|| "cutover_blocked".to_owned())?;
-    environment.insert("PATH".into(), path.to_string_lossy().into_owned());
-    Ok(environment)
+    crate::store::environment_for_runtime(&staging.join("runtime"), false)
+        .map_err(|_| "cutover_blocked".to_owned())
 }
 
 fn fixture_status_commit(value: &str) -> Result<String, String> {
@@ -3934,7 +3894,7 @@ runtime_root() {
 
 runtime_environment_is_bound() {
   local root=$1
-  local home config cache data tmp config_parent config_name beads_dir beads_root
+  local home config cache data tmp config_parent config_name beads_dir beads_root ceiling
   home=$(cd "${HOME-}" 2>/dev/null && pwd -P) || return 1
   config=$(cd "${XDG_CONFIG_HOME-}" 2>/dev/null && pwd -P) || return 1
   cache=$(cd "${XDG_CACHE_HOME-}" 2>/dev/null && pwd -P) || return 1
@@ -3947,6 +3907,9 @@ runtime_environment_is_bound() {
   beads_root=${beads_dir%/repository/.beads}
   [[ "$beads_dir" == "$beads_root/repository/.beads" ]] || return 1
   beads_root=$(cd "$beads_root" 2>/dev/null && pwd -P) || return 1
+  [[ -n "${GIT_CEILING_DIRECTORIES-}" ]] || return 1
+  ceiling=$(cd "$GIT_CEILING_DIRECTORIES" 2>/dev/null && pwd -P) || return 1
+  [[ "$ceiling" == "${root%/*}" ]] || return 1
   [[ "$PATH" == "$locator_path" && "$home" == "$root/runtime/home" && "$config" == "$root/runtime/xdg_config" && "$cache" == "$root/runtime/xdg_cache" && "$data" == "$root/runtime/xdg_data" && "$tmp" == "$root/runtime/tmp" && "$config_parent/$config_name" == "$root/runtime/git_config_global" && "$beads_root" == "$root" && "${GIT_CONFIG_NOSYSTEM-}" == 1 && "${GIT_TERMINAL_PROMPT-}" == 0 && "${GIT_NO_LAZY_FETCH-}" == 1 && "${GIT_OPTIONAL_LOCKS-}" == 0 && "${BD_DISABLE_METRICS-}" == 1 && "${BD_DISABLE_EVENT_FLUSH-}" == 1 && "${BD_NON_INTERACTIVE-}" == 1 && "${BD_BACKUP_ENABLED-}" == false && "${CI-}" == true ]] && forbidden_environment_is_absent
 }
 
@@ -5494,6 +5457,10 @@ mod tests {
                     runtime.join("git_config_global").display().to_string(),
                 ),
                 (
+                    "GIT_CEILING_DIRECTORIES".into(),
+                    staging.parent().unwrap().display().to_string(),
+                ),
+                (
                     "BEADS_DIR".into(),
                     staging.join("repository/.beads").display().to_string(),
                 ),
@@ -5932,6 +5899,10 @@ mod tests {
                     runtime.join("git_config_global").display().to_string(),
                 ),
                 (
+                    "GIT_CEILING_DIRECTORIES".into(),
+                    root.parent().unwrap().display().to_string(),
+                ),
+                (
                     "BEADS_DIR".into(),
                     root.join("repository/.beads").display().to_string(),
                 ),
@@ -6062,6 +6033,13 @@ mod tests {
         missing_beads_dir.remove("BEADS_DIR");
         let mut altered_backup = environment.clone();
         altered_backup.insert("BD_BACKUP_ENABLED".into(), "true".into());
+        let mut missing_ceiling = environment.clone();
+        missing_ceiling.remove("GIT_CEILING_DIRECTORIES");
+        let mut altered_ceiling = environment.clone();
+        altered_ceiling.insert(
+            "GIT_CEILING_DIRECTORIES".into(),
+            disposable.display().to_string(),
+        );
         let cases = vec![
             command(discovery.clone(), repository.clone(), environment.clone()),
             command(
@@ -6115,6 +6093,8 @@ mod tests {
             command(repo_context.clone(), repository.clone(), proxy_environment),
             command(repo_context.clone(), repository.clone(), missing_beads_dir),
             command(actor_lookup.clone(), repository.clone(), altered_backup),
+            command(repo_context.clone(), repository.clone(), missing_ceiling),
+            command(repo_context.clone(), repository.clone(), altered_ceiling),
             command(
                 vec![
                     "ls-remote".into(),

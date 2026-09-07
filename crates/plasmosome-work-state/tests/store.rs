@@ -127,6 +127,10 @@ fn disposable_environment(root: &Path) -> BTreeMap<String, String> {
             "GIT_CONFIG_GLOBAL".into(),
             runtime.join("git_config_global").display().to_string(),
         ),
+        (
+            "GIT_CEILING_DIRECTORIES".into(),
+            root.parent().unwrap().display().to_string(),
+        ),
     ]);
     for (key, value) in [
         ("GIT_CONFIG_NOSYSTEM", "1"),

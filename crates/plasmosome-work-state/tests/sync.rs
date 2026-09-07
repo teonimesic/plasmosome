@@ -14,7 +14,10 @@ use tempfile::tempdir;
 fn environment(root: &std::path::Path) -> BTreeMap<String, String> {
     let mut environment = BTreeMap::from([
         ("PATH".into(), std::env::var("PATH").unwrap()),
-        ("HOME".into(), root.join("runtime/home").display().to_string()),
+        (
+            "HOME".into(),
+            root.join("runtime/home").display().to_string(),
+        ),
         (
             "XDG_CONFIG_HOME".into(),
             root.join("runtime/xdg_config").display().to_string(),
@@ -27,10 +30,17 @@ fn environment(root: &std::path::Path) -> BTreeMap<String, String> {
             "XDG_DATA_HOME".into(),
             root.join("runtime/xdg_data").display().to_string(),
         ),
-        ("TMPDIR".into(), root.join("runtime/tmp").display().to_string()),
+        (
+            "TMPDIR".into(),
+            root.join("runtime/tmp").display().to_string(),
+        ),
         (
             "GIT_CONFIG_GLOBAL".into(),
             root.join("runtime/git_config_global").display().to_string(),
+        ),
+        (
+            "GIT_CEILING_DIRECTORIES".into(),
+            root.parent().unwrap().display().to_string(),
         ),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
@@ -227,6 +237,7 @@ fn sync_binding_refuses_ambient_credentials_and_unbound_runtime_before_dispatch(
         ("XDG_DATA_HOME", "/ambient/data"),
         ("TMPDIR", "/ambient/tmp"),
         ("GIT_CONFIG_GLOBAL", "/ambient/gitconfig"),
+        ("GIT_CEILING_DIRECTORIES", "/ambient/ceiling"),
         ("GIT_CONFIG_NOSYSTEM", "0"),
         ("GIT_TERMINAL_PROMPT", "1"),
         ("GITHUB_TOKEN", "ambient-token"),

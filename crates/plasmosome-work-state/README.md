@@ -37,6 +37,9 @@ the canonical `git+https` URL, then observes the ref again. Only a stable ref an
 with the active Markdown shadow can activate a complete generation. This includes source,
 authority mode, document content and links, lifecycle, owner, dependencies and operational
 digests; sync does not reimport Markdown or replace those facts with different remote values.
+The sealed runtime also stops Git discovery before the private owner's parent, so pre-init
+observation cannot inherit URL rewrites or credential helpers from the enclosing clone's local
+Git configuration. The initialized private repository remains discoverable by Beads.
 
 An absent ref returns `remote_uninitialized` without cloning or creating the remote ref. Transport
 loss, a moving ref, pending operations or incompatible remote data refuse without exposing the

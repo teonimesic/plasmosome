@@ -1010,6 +1010,12 @@ pub(crate) fn environment_for_runtime(
         environment.insert(key.to_owned(), path.display().to_string());
     }
     environment.insert("GIT_CONFIG_GLOBAL".into(), git_config.display().to_string());
+    let ceiling = owner.parent().ok_or_else(|| refusal("invalid_store"))?;
+    let ceiling = std::env::join_paths([ceiling])
+        .map_err(|_| refusal("invalid_store"))?
+        .into_string()
+        .map_err(|_| refusal("invalid_store"))?;
+    environment.insert("GIT_CEILING_DIRECTORIES".into(), ceiling);
     environment.insert(
         "BEADS_DIR".into(),
         owner.join("repository/.beads").display().to_string(),
@@ -3691,6 +3697,72 @@ mod tests {
         assert_eq!(
             environment.get("BD_BACKUP_ENABLED"),
             Some(&"false".to_owned())
+        );
+    }
+
+    #[test]
+    fn private_runtime_git_discovery_excludes_ancestor_config_but_finds_its_repository() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = root
+            .path()
+            .join(".git/plasmosome-work-state/generations/.staging-canary");
+        let repository = owner.join("repository");
+        fs::create_dir_all(&owner).unwrap();
+        let environment = environment_for_runtime(&owner.join("runtime"), true).unwrap();
+        let git = |cwd: &Path, argv: &[&str]| {
+            std::process::Command::new("git")
+                .args(argv)
+                .current_dir(cwd)
+                .env_clear()
+                .envs(&environment)
+                .output()
+                .unwrap()
+        };
+        assert!(git(root.path(), &["init", "--quiet"]).status.success());
+        let url = "https://github.com/teonimesic/plasmosome.git";
+        assert!(
+            git(
+                root.path(),
+                &[
+                    "config",
+                    "--local",
+                    "url.file:///ancestor-config-canary/.insteadOf",
+                    url,
+                ],
+            )
+            .status
+            .success()
+        );
+        fs::create_dir(&repository).unwrap();
+        for cwd in [&owner, &repository] {
+            let output = git(cwd, &["ls-remote", "--get-url", url]);
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!("{url}\n"),
+                "the pre-init runtime inherited ancestor URL configuration"
+            );
+        }
+        assert!(git(&repository, &["init", "--quiet"]).status.success());
+        assert!(
+            git(
+                &repository,
+                &[
+                    "config",
+                    "--local",
+                    "url.file:///private-config-canary/.insteadOf",
+                    url,
+                ],
+            )
+            .status
+            .success()
+        );
+        let output = git(&repository, &["ls-remote", "--get-url", url]);
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "file:///private-config-canary/\n",
+            "the initialized private repository must remain discoverable"
         );
     }
 
