@@ -902,24 +902,27 @@ fn bootstrap_launcher_uses_release_locked_offline_cargo() {
     fs::create_dir_all(&fake_bin).unwrap();
 
     let launcher = tools.join("work-state");
+    let launcher_staging = tools.join("work-state.staging");
     fs::copy(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/work-state"),
-        &launcher,
+        &launcher_staging,
     )
     .unwrap();
+    fs::set_permissions(&launcher_staging, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&launcher_staging, &launcher).unwrap();
     let record = root.path().join("cargo-arguments");
     let cargo = fake_bin.join("cargo");
+    let cargo_staging = fake_bin.join("cargo.staging");
     fs::write(
-        &cargo,
+        &cargo_staging,
         format!(
             "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{}'\n",
             record.display()
         ),
     )
     .unwrap();
-    for path in [&launcher, &cargo] {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    fs::set_permissions(&cargo_staging, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&cargo_staging, &cargo).unwrap();
     let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
 
     let bootstrap = Command::new(&launcher)

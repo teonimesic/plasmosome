@@ -64,3 +64,9 @@ request exists yet, so this task remains `in_review` and must not be marked `don
 change is merged. Verification: `cargo test -p plasmosome-work-state --test heartbeat` (5 passed),
 `cargo test -p plasmosome-work-state` (all passed), `cargo clippy -p plasmosome-work-state
 --all-targets -- -D warnings` (passed), and `cargo fmt --all -- --check` (passed).
+
+2026-09-07 — PR #85 exposed an intermittent Linux `ExecutableFileBusy` while launching the
+bootstrap fixture. The test now materializes both executable scripts through a fully written and
+chmod'd staging path followed by an atomic rename; it still executes the real launcher path and
+asserts the exact Cargo argv. The focused test passed 30 consecutive runs, plus focused clippy and
+format checks. Fix is pending PR CI rerun.
