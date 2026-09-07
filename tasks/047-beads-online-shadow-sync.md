@@ -280,3 +280,45 @@ Test-only `fixture_runtime_environment_binds_private_beads_state_and_disables_ba
 ### 2026-09-03 — retained release acceptance: online-sync
 
 The first countable retained release-profile `contract-test online-sync` run from clean `4ebc5bab14f34e3e909c1972b8be33b8870d8824` passed: exit 0, `outcome: passed`, `code: ok`, empty refusal output, and final generation `8pf3mh09e2m98l8va1v42h29qbh372i7`. It used `source_ref: HEAD` and resolved source commit `4ebc5bab14f34e3e909c1972b8be33b8870d8824`, with 14 intents, 13 specs, 44 tasks, and 71 total documents under `markdown-shadow`; its emitted command-plan evidence remained within the recorded-remote/real-local no-write boundary. `/usr/bin/time -p` recorded `real 369.85`, `user 153.00`, `sys 64.82` for this warmed release execution. This supersedes the earlier `884bc5a` refusal diagnostics as online-sync acceptance evidence, but does not yet establish aggregate `all`, coverage, root gates, or final review evidence; Task047 remains `in_progress`.
+
+### 2026-09-07 — resumed command-fence repair and honest review state
+
+Read the existing GitHub gate failure for head `cd775345e39ad1a3d5c70a85832f8c03ff10b8ef`
+(run `33732026205`). Its library tests passed; the CLI target stopped at
+`bootstrap_and_contract_test_launchers_use_release_locked_offline_cargo`, before launcher
+execution, with Linux `ExecutableFileBusy` / `Text file busy` at `cli.rs:1071`.
+That test only compared arguments echoed by a fake Cargo executable. It has been removed rather
+than retaining an implementation-order assertion or adding an executable-busy retry. The launcher
+and its release/locked/offline arguments are unchanged. Existing installed-wrapper/no-Cargo,
+syntax, state-path and environment-refusal behavior tests remain; physical bootstrap and contract
+execution, not an argv echo, must establish the installation behavior.
+
+The command-boundary audit found a separate implementation defect: `SyncCommandBinding::new`
+checked only `BEADS_DIR` and `BD_BACKUP_ENABLED`, then trusted the rest of its supplied environment.
+A caller could bind an ambient home, global Git configuration or token, and a matching command
+would pass the fence. The constructor now reuses the store's existing private-runtime validator
+and compares the complete environment, including existing runtime paths, before constructing the
+runner. The new regression exercises foreign HOME/XDG/TMP/global-Git paths, altered Git safety
+flags, extra credentials/proxy variables and a missing private runtime directory. Existing sync
+fixtures now create the same private runtime layout rather than using unrelated `/test` paths.
+No production command, project binding, authority mode or synchronization sequence was broadened.
+
+The crate instructions and README no longer claim that synchronization is absent. They describe
+the explicit installed-wrapper command, exact same-source parity, observation-only refusals,
+shared activation lock and recorded-remote/real-local contract. Markdown source refresh remains
+outside this task: bootstrap still only reinstalls a wrapper for the same source, and sync must not
+resolve a new source or reimport Markdown.
+
+No validation, formatter, build, test, contract or coverage command was run in this concurrent
+editing batch, as directed by the coordinating session. In particular the new regression has not
+been observed red or green; this is not new strict-TDD evidence. The earlier `4ebc5bab` online-sync
+run remains historical evidence only and is not a final-head pass.
+
+The PR review bodies and issue comments contain no independent review, and the GraphQL thread
+queue is empty with no additional page. CodeRabbit reports that the draft was not reviewed, which
+is not a passing review. Keep this PR draft and this task in progress until final-head evidence is
+available. Required proof is the focused sync and CLI targets, the full crate/workspace gates,
+retained pinned `contract-test online-sync` and `contract-test all`, timed suite, coverage/branch
+review and the independent review followed by the required CodeRabbit rounds. The coordinator
+owns those runs and supplies already-pinned artifacts; no dependency installation, hosted fixture
+or credential is an acceptance prerequisite for this task.

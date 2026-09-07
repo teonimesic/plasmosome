@@ -965,7 +965,7 @@ fn required_runtime_paths(root: &Path) -> [PathBuf; 5] {
     ]
 }
 
-fn environment_for_runtime(
+pub(crate) fn environment_for_runtime(
     root: &Path,
     create: bool,
 ) -> Result<BTreeMap<String, String>, StoreError> {

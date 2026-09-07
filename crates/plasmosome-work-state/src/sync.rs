@@ -12,7 +12,7 @@ use crate::freshness::{
 use crate::project::{ProjectConfig, compiled_project_config};
 use crate::store::{
     CurrentGeneration, FailedSyncObservation, FencedSnapshot, GenerationActivationLock, StoreError,
-    StoreLocation, prepare_sync_staging, read_disposable_snapshot,
+    StoreLocation, environment_for_runtime, prepare_sync_staging, read_disposable_snapshot,
 };
 
 /// A stable refusal raised while validating the online-sync command sequence.
@@ -161,7 +161,8 @@ pub struct SyncCommandBinding {
 }
 
 impl SyncCommandBinding {
-    /// Binds the one allowed staging root, repository, binary, and cleared environment.
+    /// Binds one staging root with an existing private runtime and the exact cleared environment
+    /// produced for it. Missing runtime paths, extra variables, and foreign runtime paths refuse.
     pub fn new(
         project: ProjectConfig,
         staging_root: PathBuf,
@@ -172,10 +173,9 @@ impl SyncCommandBinding {
         if !staging_root.is_absolute()
             || repository != staging_root.join("repository")
             || binary != staging_root.join("bd")
-            || environment.is_empty()
-            || environment.get("BEADS_DIR")
-                != Some(&repository.join(".beads").display().to_string())
-            || environment.get("BD_BACKUP_ENABLED") != Some(&"false".to_owned())
+            || environment
+                != environment_for_runtime(&staging_root.join("runtime"), false)
+                    .map_err(|_| refusal("invalid_sync_command"))?
         {
             return Err(refusal("invalid_sync_command"));
         }

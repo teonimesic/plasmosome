@@ -13,13 +13,25 @@ use tempfile::tempdir;
 
 fn environment(root: &std::path::Path) -> BTreeMap<String, String> {
     let mut environment = BTreeMap::from([
-        ("PATH".into(), "/test/bin".into()),
-        ("HOME".into(), "/test/home".into()),
-        ("XDG_CONFIG_HOME".into(), "/test/xdg-config".into()),
-        ("XDG_CACHE_HOME".into(), "/test/xdg-cache".into()),
-        ("XDG_DATA_HOME".into(), "/test/xdg-data".into()),
-        ("TMPDIR".into(), "/test/tmp".into()),
-        ("GIT_CONFIG_GLOBAL".into(), "/test/git-config".into()),
+        ("PATH".into(), std::env::var("PATH").unwrap()),
+        ("HOME".into(), root.join("runtime/home").display().to_string()),
+        (
+            "XDG_CONFIG_HOME".into(),
+            root.join("runtime/xdg_config").display().to_string(),
+        ),
+        (
+            "XDG_CACHE_HOME".into(),
+            root.join("runtime/xdg_cache").display().to_string(),
+        ),
+        (
+            "XDG_DATA_HOME".into(),
+            root.join("runtime/xdg_data").display().to_string(),
+        ),
+        ("TMPDIR".into(), root.join("runtime/tmp").display().to_string()),
+        (
+            "GIT_CONFIG_GLOBAL".into(),
+            root.join("runtime/git_config_global").display().to_string(),
+        ),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
         ("GIT_NO_LAZY_FETCH".into(), "1".into()),
@@ -38,6 +50,10 @@ fn environment(root: &std::path::Path) -> BTreeMap<String, String> {
 }
 
 fn binding(root: &std::path::Path) -> SyncCommandBinding {
+    for directory in ["home", "xdg_config", "xdg_cache", "xdg_data", "tmp"] {
+        std::fs::create_dir_all(root.join("runtime").join(directory)).unwrap();
+    }
+    std::fs::write(root.join("runtime/git_config_global"), "").unwrap();
     SyncCommandBinding::new(
         compiled_project_config().unwrap(),
         root.to_path_buf(),
@@ -154,6 +170,7 @@ fn readonly_key_values(root: &std::path::Path) -> CommandSpec {
 fn sync_binding_refuses_missing_or_altered_private_beads_environment() {
     let root = tempdir().unwrap();
     let project = compiled_project_config().unwrap();
+    let _binding = binding(root.path());
     let valid = environment(root.path());
     assert!(
         SyncCommandBinding::new(
@@ -197,6 +214,61 @@ fn sync_binding_refuses_missing_or_altered_private_beads_environment() {
             "invalid_sync_command"
         );
     }
+}
+
+#[test]
+fn sync_binding_refuses_ambient_credentials_and_unbound_runtime_before_dispatch() {
+    let root = tempdir().unwrap();
+    let _binding = binding(root.path());
+    for (key, value) in [
+        ("HOME", "/ambient/home"),
+        ("XDG_CONFIG_HOME", "/ambient/config"),
+        ("XDG_CACHE_HOME", "/ambient/cache"),
+        ("XDG_DATA_HOME", "/ambient/data"),
+        ("TMPDIR", "/ambient/tmp"),
+        ("GIT_CONFIG_GLOBAL", "/ambient/gitconfig"),
+        ("GIT_CONFIG_NOSYSTEM", "0"),
+        ("GIT_TERMINAL_PROMPT", "1"),
+        ("GITHUB_TOKEN", "ambient-token"),
+        ("GIT_ASKPASS", "/ambient/askpass"),
+        ("SSH_AUTH_SOCK", "/ambient/agent"),
+        ("HTTPS_PROXY", "https://ambient.proxy"),
+    ] {
+        let mut environment = environment(root.path());
+        environment.insert(key.into(), value.into());
+        let mut inner = RecordingCommandRunner::default();
+        let result = SyncCommandBinding::new(
+            compiled_project_config().unwrap(),
+            root.path().to_path_buf(),
+            root.path().join("repository"),
+            root.path().join("bd"),
+            environment.clone(),
+        )
+        .and_then(|binding| {
+            SyncCommandRunner::new(&mut inner, binding)
+                .run(CommandSpec {
+                    environment,
+                    ..observation(root.path())
+                })
+                .map_err(|_| unreachable!("an unsafe binding must never dispatch"))
+        });
+        assert_eq!(result.unwrap_err().code(), "invalid_sync_command", "{key}");
+        assert!(inner.commands().is_empty(), "{key} reached the runner");
+    }
+
+    std::fs::remove_dir(root.path().join("runtime/home")).unwrap();
+    assert_eq!(
+        SyncCommandBinding::new(
+            compiled_project_config().unwrap(),
+            root.path().to_path_buf(),
+            root.path().join("repository"),
+            root.path().join("bd"),
+            environment(root.path()),
+        )
+        .unwrap_err()
+        .code(),
+        "invalid_sync_command"
+    );
 }
 
 #[test]

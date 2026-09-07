@@ -12,8 +12,13 @@ runtime and reads a disposable copy of the local generation. Keep all child exec
 `CommandRunner` and preserve the exact local-only command allowlists and isolated environment.
 These are local projections, never authority to claim, start, dispatch, or mutate work.
 
-Do not broaden this boundary into synchronization, publication, leases, GitHub reconciliation,
-backup/restore, or cutover. Complete Spec 014 `offline-reads` acceptance remains unfinished here:
-`heartbeat observe` and the operating-system no-socket harness are separate work. Transport
-outcomes remain scripted at the narrow process seam and never require a hosted fixture or
-credential.
+Explicit `sync` is the only online route. It observes the compiled project remote, initializes
+one fresh private candidate only after an existing data ref is observed, and activates only exact
+Markdown-shadow parity after a second matching observation. Bootstrap and sync share the
+generation-activation lock; ordinary readers remain local and lock-free. Preserve this command
+fence and the credential-free environment: sync never publishes or changes work records.
+
+Do not broaden this boundary into publication, leases, GitHub reconciliation, backup/restore, or
+cutover. Complete Spec 014 `offline-reads` acceptance remains unfinished here: `heartbeat observe`
+and the operating-system no-socket harness are separate work. Transport outcomes remain scripted
+at the narrow process seam and never require a hosted fixture or credential.
