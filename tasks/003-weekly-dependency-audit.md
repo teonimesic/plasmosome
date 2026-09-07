@@ -1,7 +1,7 @@
 ---
 id: 003
 title: Weekly cargo audit workflow
-status: in_review
+status: done
 priority: 3
 specs: []
 intents: []
@@ -11,7 +11,10 @@ done_when: >-
   changes Cargo.lock, fails the job when a dependency has an open RustSec
   advisory, and has completed one green scheduled run.
 pr: https://github.com/teonimesic/plasmosome/pull/17
-evidence:
+evidence: >-
+  PR #17 merged as 25a4cb8442c8e2df81e9ddd0e616c5747b80549c; scheduled audit run
+  https://github.com/teonimesic/plasmosome/actions/runs/34123903323 completed successfully
+  on 2026-09-07.
 ---
 
 ## Why
@@ -49,3 +52,7 @@ the default branch — so merging does not close this task.
 green scheduled run, and a `schedule:` trigger only fires from the default branch — so it could
 not be met inside the pull request and cannot be met by merging. Close it when a Monday run has
 passed.
+
+**2026-09-07.** GitHub reports PR #17 as merged and the Monday `schedule` run
+34123903323 as completed with conclusion `success`. The post-merge acceptance condition now
+holds; the task is closed on that evidence, not merely because its PR merged.
