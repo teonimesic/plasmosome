@@ -1,7 +1,7 @@
 ---
 id: 043
 title: plasmosomed answers plasmosome.status from its cell registry
-status: in_review
+status: done
 priority: 2
 specs: [001]
 intents: [003, 004, 009, 012]
@@ -28,7 +28,9 @@ done_when:
   - The chain walks - this task names spec 001 and intents 003, 004, 009, 012, reaches
     in_review with pr: set, and the pull request is a draft whose body ends with `task: 043`.
 pr: 76
-evidence:
+evidence: >-
+  PR #76 merged as 707972ec889464d47595a03cb61fb16854d962a6 on 2026-09-07;
+  https://github.com/teonimesic/plasmosome/pull/76.
 ---
 
 ## Why
@@ -251,3 +253,16 @@ sound check is a review object whose `commit_id` is the head — `gh api
 repos/teonimesic/plasmosome/pulls/76/reviews` — because `mergeStateStatus` reads `CLEAN` here on
 the strength of resolved threads and the checks that did report, while CodeRabbit is absent from
 the rollup entirely. Absent is not clean.
+
+### 2026-09-07 — merged after completed reviews and live daemon verification
+
+GitHub confirmed PR #76 merged as `707972ec889464d47595a03cb61fb16854d962a6`.
+The final head had three completed CodeRabbit rounds, all five threads resolved, and the
+previously missing review had completed. The historical absence above is no longer a blocker.
+
+The actual `plasmosomed` process answered status and wrong-instance requests, and continued after
+malformed JSON on the same connection. SIGTERM and SIGINT were exercised separately with an idle
+client connected: each exited 0, removed the socket, and closed the client connection.
+`cargo test --locked -p plasmosome-core --test plasmosomed` passed all three integration tests.
+PR #76 retains the current-head CI gate and independent-review evidence; closure follows the
+GitHub squash result, not the branch tip.
