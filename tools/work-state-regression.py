@@ -75,6 +75,19 @@ def main():
         assert shown["metadata"] == {"spec_ids": ["016"], "intent_ids": ["015"]}
         assert issue in {item["id"] for item in json.loads(native("ready", "--label", "planned", "--json").stdout)}
         native("update", issue, "--claim", actor="", success=False)
+        alias = json.loads(native("create", "Hidden native aliases", "-mhello", "--json").stdout)
+        assert alias["description"] == "hello"
+        native("update", alias["id"], "--description-file=body.txt", cwd=linked)
+        native("update", alias["id"], "--body", "--help", "--claim", actor="", success=False)
+        untouched = json.loads(native("show", alias["id"], "--json").stdout)[0]
+        assert (untouched["status"], untouched["description"]) == ("open", "Shared body from the calling worktree")
+        native("update", alias["id"], "--body", "--help", "--claim", actor="alias-agent")
+        consumed = json.loads(native("show", alias["id"], "--json").stdout)[0]
+        assert (consumed["status"], consumed["assignee"], consumed["description"]) == ("in_progress", "alias-agent", "--help")
+        native("close", alias["id"], "--message", "--help", "--claim-next", actor="", success=False)
+        assert json.loads(native("show", alias["id"], "--json").stdout)[0]["status"] == "in_progress"
+        exported = [json.loads(line) for line in native("export", "--no-memories").stdout.splitlines()]
+        assert next(row for row in exported if row.get("id") == alias["id"])["description"] == "--help"
 
         competitors = []
         for cwd, actor in ((repo, "agent-one"), (linked, "agent-two")):
