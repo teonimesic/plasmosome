@@ -88,8 +88,12 @@ permission to bypass those checks.
 
 ## Ownership, dependencies and recovery
 
-Set a unique actor for this executor session, not a shared Git username. After reading `show ID`
-and the governing documents, claim before creating its code worktree or doing work:
+Set a unique actor for this executor session, not a shared Git username. Even when dispatched
+directly by ID, read `show ID`, check its `planned` label and governing documents, and inspect
+its native prerequisites with `show ID` and `blocked` before claiming. Native ready filters
+dependency blockers; native claim checks open status and assignee, not dependency edges.
+A successful claim therefore does not prove dependency eligibility. Claim only eligible work,
+before creating its code worktree or doing work:
 
 ```shell
 export BEADS_ACTOR='agent-name-unique-session-id'

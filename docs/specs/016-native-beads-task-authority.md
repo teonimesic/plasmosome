@@ -147,10 +147,12 @@ The native software has other features; this table is the chosen repository task
 
 Before adding `planned`, the planner supplies a complete design and acceptance, resolves every
 spec link to accepted Git content and checks its approved intent chain. The executor re-reads the
-record and governing documents before claim. Intent approval remains exclusively the owner's
-instruction under `docs/intents/README.md`; the launcher does not infer or write it. Native
-ready/claim do not validate Markdown specs or the adequacy of prose, and this adapter does not
-pretend to automate those admission rules.
+record and governing documents before claim, including a direct-ID assignment's planned label
+and active dependency blockers. Intent approval remains exclusively the owner's instruction
+under `docs/intents/README.md`; the launcher does not infer or write it. Native ready filters
+dependencies; native claim checks open status and assignee but does not check dependency edges.
+Neither validates Markdown specs or prose adequacy. These admission checks belong to the agents;
+the adapter promises atomic competing ownership, not atomic dependency or spec validation.
 
 A successful native claim atomically assigns the actor and moves the issue to `in_progress`.
 A competing actor is refused. Repeating a claim as the same actor is idempotent, so each executor
