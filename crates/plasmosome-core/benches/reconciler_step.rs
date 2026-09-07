@@ -20,8 +20,9 @@ fn bench(c: &mut Criterion) {
         .into_iter()
         .collect::<BTreeMap<_, _>>(),
     };
+    let reconciler = Reconciler::new(desired);
     c.bench_function("reconciler_step", |b| {
-        b.iter(|| black_box(Reconciler::new(desired.clone()).reconcile()))
+        b.iter(|| black_box(black_box(&reconciler).reconcile()))
     });
 }
 

@@ -4,7 +4,7 @@ use std::hint::black_box;
 
 fn bench(c: &mut Criterion) {
     c.bench_function("session_log_append", |b| {
-        b.iter_batched(
+        b.iter_batched_ref(
             || {
                 let dir = tempfile::tempdir().unwrap();
                 let log = SessionLog::create(dir.path().join("session.ndjson")).unwrap();

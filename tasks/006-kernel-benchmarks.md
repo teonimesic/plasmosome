@@ -31,11 +31,7 @@ done_when: >-
   without gating on any number, and the ten-run CI variance record plus a
   machine-named local baseline are appended to this task's Notes.
 pr: https://github.com/teonimesic/plasmosome/pull/86
-evidence: >-
-  Ready-for-review PR #86. All required checks are green. cargo bench --workspace -- --quick passed in 5.76s wall time;
-  cargo bench --workspace passed in 77.79s wall time; cargo test --workspace,
-  cargo clippy --workspace --all-targets -- -D warnings, cargo fmt --all -- --check,
-  and git diff --check passed. Awaiting review and merge.
+evidence:
 ---
 
 ## Why
@@ -71,8 +67,10 @@ Steps:
 3. Write the six benchmarks per the spec's table: `attach_detach` (testkit), `ledger_replay`
    at 10/100/1000 (ledger), `manifest_parse`, `reconciler_step`, `session_log_append`,
    `session_log_read` (core, session log in a `TempDir`).
-4. `ledger_replay` and `attach_detach` use `iter_batched` with per-iteration setup building a
-   fresh `SealedLedger` and a fresh `FakeBackend`. Do not use `b.iter()` for either.
+4. Both stateful benchmarks use `iter_batched`, never `b.iter()`. `ledger_replay` setup builds a
+   populated `SealedLedger` and fresh `FakeBackend`; its measured routine replays the ledger.
+   `attach_detach` setup builds an empty `Ledger` and fresh `FakeBackend`; its measured routine
+   grants capabilities, pushes their effects, closes the ledger, replays it, and checks residue.
    `SealedLedger::detach` takes `&mut self`, drains as it replays, and mutates the backend, so
    under `iter()` every iteration after the first measures an empty loop and reports a median
    near zero — which reads as a great result.
@@ -148,15 +146,18 @@ use it, because CI has to run all six.
 
 ### 2026-09-05 — local and ten-run records
 
-The complete suite was run with `cargo bench --workspace` on this unchanged task commit. It
-completed successfully in 77.79 seconds (wall time), with all six benchmark names present and
-non-zero medians. The quick suite completed in 5.76 seconds (wall time).
+The previous author recorded a complete `cargo bench --workspace` run finishing in 77.79 seconds
+and a quick suite in 5.76 seconds. These are historical wall times, not proof for the corrected
+timing boundaries below. No per-benchmark full-run baseline or exact measured commit was recorded.
 
 Machine baseline: Mac15,8, Apple arm64, 16 logical CPUs, 64 GiB RAM, rustc 1.97.1
 (8bab26f4f, 2026-07-14), cargo 1.97.1 (c980f4866, 2026-06-30).
 
-Ten consecutive quick runs of `cargo bench -p plasmosome-ledger --bench ledger_replay -- --quick`
-against this unchanged commit produced these medians (microseconds):
+The previous author recorded ten consecutive local quick runs of
+`cargo bench -p plasmosome-ledger --bench ledger_replay -- --quick` as the following values
+(microseconds). The original record called these medians, but retained neither Criterion JSON nor
+an exact commit SHA; their estimator cannot be verified. They are not the ten CI runs of the
+complete suite required by spec 005.
 
 | run | 10 effects | 100 effects | 1000 effects |
 | ---: | ---: | ---: | ---: |
@@ -171,13 +172,16 @@ against this unchanged commit produced these medians (microseconds):
 | 9 | 2.9117 | 32.9040 | 355.2800 |
 | 10 | 2.9023 | 33.2450 | 342.7300 |
 
-Using the median of the ten medians as the denominator, the inter-quartile ranges are:
+Recomputed from the ten recorded values per column, using Python's
+`statistics.quantiles(values, n=4, method="inclusive")`: sort each column and linearly interpolate
+at zero-based ranks `(n - 1) * 0.25` and `(n - 1) * 0.75` for Q1 and Q3. The median averages the
+middle two values; IQR is Q3 minus Q1; relative IQR is `100 * IQR / median`.
 
-| benchmark | median | IQR | relative IQR |
+| benchmark | median of recorded values | IQR | relative IQR |
 | --- | ---: | ---: | ---: |
-| `ledger_replay/10` | 2.9601 µs | 0.0715 µs | 2.42% |
-| `ledger_replay/100` | 33.5110 µs | 0.6920 µs | 2.06% |
-| `ledger_replay/1000` | 356.0100 µs | 12.8000 µs | 3.60% |
+| `ledger_replay/10` | 2.9333 µs | 0.063275 µs | 2.16% |
+| `ledger_replay/100` | 33.3040 µs | 0.676500 µs | 2.03% |
+| `ledger_replay/1000` | 353.1900 µs | 9.882500 µs | 2.80% |
 
 The first full run exposed a file-descriptor exhaustion bug in the append fixture: Criterion's
 `SmallInput` batches retained too many open `SessionLog` files. Switching that stateful fixture
@@ -200,3 +204,38 @@ in 77.79s wall time. `cargo test --workspace` passed, and
 `cargo clippy --workspace --all-targets -- -D warnings` plus `cargo fmt --all -- --check` passed.
 
 Commit: see the task branch commit history; no generated `target/criterion/` files are tracked.
+
+### 2026-09-07 — review corrections; measurement pending
+
+The reconciler fixture is now constructed once before timing; each iteration calls the
+non-mutating `reconcile()` without cloning the desired state or constructing a reconciler.
+The append fixture uses `iter_batched_ref` with `PerIteration`, so Criterion drops both the log
+and its temporary directory after stopping the measurement, without accumulating open files.
+
+The CI summary reads `median.point_estimate` from each of the eight expected
+`target/criterion/<name>/new/estimates.json` files and prints nanoseconds in both the job log and
+step summary. The old text parser emitted the center estimate's unit and upper bound for the
+actual CI lines, which include the benchmark name. Merely shifting the fields would still not
+produce a median: Criterion 0.7 reports a slope estimate, or a mean when no slope exists, in its
+console `time:` interval. Missing result files now fail summary publication rather than silently
+omitting a benchmark. No performance threshold is enforced.
+
+All four existing review findings are addressed in source or the corrected historical table.
+No benchmark, build, test, formatter, or linter was run during this editing batch. The historical
+gate claims above do not validate these corrections. Independent review is still required; no
+independent review comment was present on PR #86 when this work began.
+
+Before readiness or merge, run the full local suite on the corrected head and record all eight
+JSON median estimates with the exact commit, chip, core count, memory, and toolchain. Run the CI
+quick suite ten times against that same unchanged head, record the run URLs and all eight medians
+from the summary logs, then calculate per-benchmark relative IQR with the method above. Those two
+measurement records remain pending, as does the root gate on the corrected head.
+
+The existing `attach_detach` benchmark also timed only detach: all grants and ledger recording
+ran in setup, and there was no residue check. That followed the original setup instruction in
+both this plan and spec 005, but contradicted the spec's full attach/detach contract. Main directed
+the correction to follow that accepted contract: only an empty ledger and backend are set up
+outside timing; grants, recording, closure, detach/replay, and the existing
+`ResidueReport::from_diff` check now run inside it. The plan and spec setup paragraph are aligned
+with that contract. This changes the meaning of the old attach result, so it also needs a fresh
+baseline, not comparison against the historical detach-only timing.
