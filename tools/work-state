@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
+import signal
 import shutil
 import sys
 import tempfile
@@ -78,23 +80,9 @@ def install(arguments, state, pin):
     print(destination)
 
 
-GLOBAL_VALUES = {"--actor", "--db", "--directory", "-C", "--dolt-auto-commit"}
 FILE_FLAGS = {
     "--body-file", "--design-file", "--file", "--input", "--output", "--graph",
-    "--agents-template", "--schema-file", "--rules-file",
-}
-TEXT_FLAGS = {
-    "--actor", "--acceptance", "--append-notes", "--assignee", "--await-id",
-    "--context", "--defer", "--deps", "--description", "--design", "--due",
-    "--estimate", "--event-actor", "--event-category", "--event-payload",
-    "--event-target", "--external-ref", "--id", "--labels", "--mol-type",
-    "--notes", "--parent", "--priority", "--skills", "--spec-id", "--title",
-    "--type", "--waits-for", "--waits-for-gate", "--wisp-type", "--add-label",
-    "--remove-label", "--set-labels", "--set-metadata", "--unset-metadata",
-    "--session", "--status", "--reason", "--message", "--author", "--label",
-    "--prefix", "--role", "--limit", "--format", "--sort", "--search",
-    "--dolt-auto-commit", "--remote", "-a", "-d", "-e", "-l", "-m", "-p",
-    "-r", "-s", "-t",
+    "--agents-template", "--schema-file", "--rules-file", "--reason-file",
 }
 ROUTING_FLAGS = {"--db", "--directory", "--global", "--repo", "--database"}
 INIT_FLAGS = {
@@ -110,81 +98,111 @@ def caller_path(value, cwd):
     return str(cwd / value)
 
 
-def native_arguments(arguments, cwd):
+def command_help(binary, command, private, child, lock):
+    response = subprocess.run(
+        [str(binary), *command, "--help"], cwd=private, env=child,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, pass_fds=(lock.fileno(),),
+    )
+    if response.returncode:
+        sys.stdout.write(response.stdout)
+        sys.stderr.write(response.stderr)
+        sys.exit(response.returncode)
+    flags = {}
+    for match in re.finditer(r"^\s+(?:(-\w), )?(--[\w-]+)(?: (\S+))?\s{2,}", response.stdout, re.MULTILINE):
+        short, long, kind = match.groups()
+        flags[long] = (long, kind is not None)
+        if short:
+            flags[short] = flags[long]
+    commands = set(re.findall(r"^  ([\w-]+) {2,}", response.stdout, re.MULTILINE))
+    return flags, commands
+
+
+def native_arguments(arguments, cwd, binary, private, child, lock):
     result = []
     positionals = []
     actor = os.environ.get("BEADS_ACTOR", "")
-    claim = False
-    command = None
+    toggles = {}
+    command = []
+    flags, commands = command_help(binary, command, private, child, lock)
     index = 0
     literal = False
     while index < len(arguments):
         argument = arguments[index]
-        flag, equals, value = argument.partition("=")
-        if not literal and len(argument) > 2 and argument[:2] in TEXT_FLAGS | {"-f", "-i", "-o"}:
-            flag, equals, value = argument[:2], "=", argument[2:].removeprefix("=")
-            argument = flag + "=" + value
         if not literal and argument == "--":
             literal = True
             result.append(argument)
-            index += 1
-            continue
-        if not literal and argument.startswith("-") and argument != "-":
-            if flag in ROUTING_FLAGS or (argument.startswith("-") and not argument.startswith("--") and "C" in argument.split("=", 1)[0]):
-                refuse(f"{flag} cannot override the shared Beads store")
-            if flag.startswith(("--server-", "--proxied-server-")) or flag in {"--server", "--shared-server", "--proxied-server"}:
-                refuse("the shared store uses embedded Dolt, not a server")
-            if command == "init" and flag in INIT_FLAGS:
-                refuse(f"{flag} is not permitted for non-destructive shared initialization")
-            if flag == "--claim" and (not equals or value.lower() not in {"false", "0"}):
-                claim = True
-            path_flag = flag in FILE_FLAGS or (flag in {"-f", "-i", "-o"})
-            takes_value = path_flag or flag in TEXT_FLAGS or flag == "--metadata" or (command is None and flag in GLOBAL_VALUES)
-            if takes_value:
-                if not equals:
-                    index += 1
-                    if index == len(arguments):
-                        refuse(f"{flag} requires a value")
-                    value = arguments[index]
-                if flag == "--actor":
-                    actor = value
-                if flag == "--dolt-auto-commit" and value != "on":
-                    refuse("Dolt auto-commit must remain on")
-                if path_flag:
-                    value = caller_path(value, cwd)
-                elif flag == "--metadata" and value.startswith("@"):
-                    value = "@" + caller_path(value[1:], cwd)
-                if equals:
-                    result.append(flag + "=" + value)
+        elif not literal and argument.startswith("-") and argument != "-":
+            pending = argument
+            while pending:
+                if pending.startswith("--"):
+                    name, equals, value = pending.partition("=")
+                    pending = ""
                 else:
-                    result.extend((flag, value))
-            else:
-                result.append(argument)
+                    name = pending[:2]
+                    value = pending[2:]
+                    equals = value.startswith("=")
+                    if equals:
+                        value = value[1:]
+                    pending = ""
+                canonical, takes_value = flags.get(name, (name, False))
+                if canonical in ROUTING_FLAGS or name == "-C":
+                    refuse(f"{name} cannot override the shared Beads store")
+                if canonical.startswith(("--server-", "--proxied-server-")) or canonical in {"--server", "--shared-server", "--proxied-server"}:
+                    refuse("the shared store uses embedded Dolt, not a server")
+                if command == ["init"] and canonical in INIT_FLAGS:
+                    refuse(f"{name} is not permitted for non-destructive shared initialization")
+                if takes_value:
+                    if not value and not equals:
+                        index += 1
+                        if index == len(arguments):
+                            refuse(f"{name} requires a value")
+                        value = arguments[index]
+                    if canonical == "--actor":
+                        actor = value
+                    if canonical == "--dolt-auto-commit" and value != "on":
+                        refuse("Dolt auto-commit must remain on")
+                    if canonical in FILE_FLAGS:
+                        value = caller_path(value, cwd)
+                    elif canonical == "--metadata" and value.startswith("@"):
+                        value = "@" + caller_path(value[1:], cwd)
+                    result.extend((canonical, value))
+                else:
+                    if not name.startswith("--") and value and not equals:
+                        pending = "-" + value
+                        value = ""
+                    toggles[canonical] = not equals or value.lower() not in {"false", "0", "f"}
+                    result.append(canonical + ("=" + value if equals else ""))
         else:
-            if command is None:
-                command = argument
+            if not command or (not positionals and argument in commands):
+                command.append(argument)
+                flags, commands = command_help(binary, command, private, child, lock)
             else:
                 positionals.append(argument)
-                if command == "import":
+                if command == ["import"]:
                     argument = caller_path(argument, cwd)
             result.append(argument)
         index += 1
-    if claim and not actor.strip():
+    help_requested = toggles.get("--help", False) or command[:1] == ["help"]
+    claims = toggles.get("--claim", False) or toggles.get("--claim-next", False)
+    claims |= toggles.get("--continue", False) and not toggles.get("--no-auto", False)
+    if claims and not help_requested and not actor.strip():
         refuse("claims require an explicit unique --actor or BEADS_ACTOR (not a shared Git username)")
-    if command in {"repo", "worktree", "hooks", "setup", "bootstrap", "upgrade"}:
-        refuse(f"{command} is not a shared-store operation")
-    if command == "dolt" and positionals and positionals[0] in {"set", "start", "stop", "killall", "clean-databases"}:
+    if actor.strip():
+        result[:0] = ("--actor", actor)
+    if command[:1] and command[0] in {"repo", "worktree", "hooks", "setup", "bootstrap", "upgrade"}:
+        refuse(f"{command[0]} is not a shared-store operation")
+    if command[:1] == ["dolt"] and len(command) > 1 and command[1] in {"set", "start", "stop", "killall", "clean-databases"}:
         refuse("Dolt server and storage routing changes are not shared-store operations")
-    if command == "config" and positionals and positionals[0] in {"set", "set-many", "unset"}:
+    if command[:1] == ["config"] and len(command) > 1 and command[1] in {"set", "set-many", "unset"}:
         protected = ("repos.", "routing.", "contributor.", "dolt.data-dir", "dolt.mode",
                      "dolt.shared-server", "dolt.auto-", "export.auto", "export.git-add",
                      "import.auto", "backup.enabled", "no-git-ops", "no-hooks")
-        if any(item.partition("=")[0].startswith(protected) for item in positionals[1:]):
+        if any(item.partition("=")[0].startswith(protected) for item in positionals):
             refuse("configuration cannot override shared-store routing or automatic-operation policy")
-    if command == "init":
+    if command == ["init"] and not help_requested:
         boundary = result.index("--") if "--" in result else len(result)
         result[boundary:boundary] = ("--skip-agents", "--skip-hooks", "--non-interactive")
-    return command, result
+    return command[0] if command else None, result, help_requested
 
 
 def environment(store, private):
@@ -220,6 +238,9 @@ def environment(store, private):
     return child
 
 
+INIT_CONFIG = "dolt.auto-commit: on\ndolt.auto-push: false\nexport.auto: false\nno-git-ops: true\n"
+
+
 def check_store(store, command):
     """Seed native config so fresh init cannot rediscover an ancestor store."""
     if store.is_symlink():
@@ -243,9 +264,31 @@ def check_store(store, command):
             refuse("shared store is nonempty but not initialized; inspect it before recovery")
         directory(store)
         with (store / "config.yaml").open("x") as stream:
-            stream.write("dolt.auto-commit: on\ndolt.auto-push: false\nexport.auto: false\nno-git-ops: true\n")
+            stream.write(INIT_CONFIG)
     elif command not in {None, "help", "version"}:
         refuse("shared store is not initialized; run work-state init --prefix plasmosome")
+
+
+def initialize(binary, arguments, store, child, lock):
+    process = subprocess.Popen(
+        [str(binary), "--dolt-auto-commit=on", *arguments], env=child,
+        pass_fds=(lock.fileno(),),
+    )
+    handlers = {}
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        handlers[number] = signal.signal(number, lambda received, frame: process.send_signal(received))
+    try:
+        code = process.wait()
+    finally:
+        for number, handler in handlers.items():
+            signal.signal(number, handler)
+        seed = store / "config.yaml"
+        if set(store.iterdir()) == {seed} and not seed.is_symlink() and seed.read_text() == INIT_CONFIG:
+            seed.unlink()
+    if code < 0:
+        signal.signal(-code, signal.SIG_DFL)
+        os.kill(os.getpid(), -code)
+    sys.exit(code)
 
 
 def main():
@@ -274,19 +317,22 @@ def main():
             refuse("pinned native bd is not installed; use work-state install --archive PATH --bd PATH")
         if digest(binary) != pin["binary_sha256"]:
             refuse("installed bd SHA256 does not match the pinned release")
-        command, arguments = native_arguments(arguments, cwd)
         store = state / "store"
         private = state / "cwd"
         directory(private)
         if (private / ".git").exists() or (private / ".beads").exists():
             refuse("private invocation directory must not contain a Git or Beads checkout")
         child = environment(store, private)
-        check_store(store, command)
+        command, arguments, help_requested = native_arguments(arguments, cwd, binary, private, child, lock)
+        if not help_requested:
+            check_store(store, command)
         if command != "init" and (store / "metadata.json").is_file():
             # Native reverse discovery assumes a .beads basename; bind the metadata directory.
             arguments.insert(0, f"--db={store}")
         os.chdir(private)
         os.set_inheritable(lock.fileno(), True)
+        if command == "init" and not help_requested:
+            initialize(binary, arguments, store, child, lock)
         os.execve(binary, [str(binary), "--dolt-auto-commit=on", *arguments], child)
 
 
