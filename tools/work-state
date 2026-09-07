@@ -1,117 +1,298 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env python3
+"""Run pinned native Beads against the Git common directory's shared store."""
 
-json=false
-for argument in "$@"; do
-  if [[ "$argument" == "--json" ]]; then
-    json=true
-  fi
-done
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import shutil
+import sys
+import tempfile
+import subprocess
+import tomllib
 
-refuse() {
-  local code=$1
-  local exit_code=${2:-1}
-  if [[ "$json" == true ]]; then
-    printf '{"code":"%s"}\n' "$code" >&2
-  else
-    printf 'error[%s]: %s\n' "$code" "$code" >&2
-  fi
-  exit "$exit_code"
+
+class Refusal(Exception):
+    pass
+
+
+def refuse(message):
+    raise Refusal(message)
+
+
+def digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def directory(path):
+    if path.is_symlink():
+        refuse(f"shared runtime path must not be a symlink: {path}")
+    path.mkdir(mode=0o700, exist_ok=True)
+    if not path.is_dir():
+        refuse(f"not a directory: {path}")
+
+
+def release_pin():
+    target = {
+        ("Darwin", "arm64"): "aarch64-apple-darwin",
+        ("Linux", "x86_64"): "x86_64-unknown-linux-gnu",
+    }.get((platform.system(), platform.machine()))
+    manifest = Path(__file__).resolve().with_name("work-state-beads-1.1.2.toml")
+    with manifest.open("rb") as stream:
+        pin = tomllib.load(stream)
+    for entry in pin["targets"]:
+        if entry["target"] == target:
+            return entry
+    refuse("this platform has no verified Beads release in the pinned manifest")
+
+
+def install(arguments, state, pin):
+    parser = argparse.ArgumentParser(prog="work-state install")
+    parser.add_argument("--archive", required=True, type=Path)
+    parser.add_argument("--bd", required=True, type=Path)
+    options = parser.parse_args(arguments)
+    if options.archive.name != pin["archive"]:
+        refuse(f"expected archive filename {pin['archive']}")
+    if digest(options.archive) != pin["archive_sha256"]:
+        refuse("archive SHA256 does not match the pinned release")
+    destination = state / "bd"
+    if destination.is_symlink():
+        refuse("installed bd must not be a symlink")
+    descriptor, name = tempfile.mkstemp(prefix=".bd-install-", dir=state)
+    staged = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as output, options.bd.open("rb") as source:
+            shutil.copyfileobj(source, output)
+            output.flush()
+            os.fsync(output.fileno())
+        if digest(staged) != pin["binary_sha256"]:
+            refuse("binary SHA256 does not match the pinned release")
+        staged.chmod(0o700)
+        os.replace(staged, destination)
+    finally:
+        staged.unlink(missing_ok=True)
+    print(destination)
+
+
+GLOBAL_VALUES = {"--actor", "--db", "--directory", "-C", "--dolt-auto-commit"}
+FILE_FLAGS = {
+    "--body-file", "--design-file", "--file", "--input", "--output", "--graph",
+    "--agents-template", "--schema-file", "--rules-file",
+}
+TEXT_FLAGS = {
+    "--actor", "--acceptance", "--append-notes", "--assignee", "--await-id",
+    "--context", "--defer", "--deps", "--description", "--design", "--due",
+    "--estimate", "--event-actor", "--event-category", "--event-payload",
+    "--event-target", "--external-ref", "--id", "--labels", "--mol-type",
+    "--notes", "--parent", "--priority", "--skills", "--spec-id", "--title",
+    "--type", "--waits-for", "--waits-for-gate", "--wisp-type", "--add-label",
+    "--remove-label", "--set-labels", "--set-metadata", "--unset-metadata",
+    "--session", "--status", "--reason", "--message", "--author", "--label",
+    "--prefix", "--role", "--limit", "--format", "--sort", "--search",
+    "--dolt-auto-commit", "--remote", "-a", "-d", "-e", "-l", "-m", "-p",
+    "-r", "-s", "-t",
+}
+ROUTING_FLAGS = {"--db", "--directory", "--global", "--repo", "--database"}
+INIT_FLAGS = {
+    "--force", "--reinit-local", "--destroy-token", "--discard-remote",
+    "--server", "--shared-server", "--proxied-server", "--external",
+    "--stealth", "--setup-exclude", "--contributor", "--team", "--from-jsonl",
 }
 
-script_dir=${BASH_SOURCE[0]%/*}
-root=$(cd "$script_dir/.." 2>/dev/null && pwd -P) || refuse invalid_store_location
-cd "$root" 2>/dev/null || refuse invalid_store_location
 
-read_launcher() {
-  local top common canonical_top canonical_common state current generations generation wrapper exit_code wrapper_stderr
-  top=$(if env -i \
-    PATH="$PATH" \
-    GIT_CONFIG_NOSYSTEM=1 \
-    GIT_TERMINAL_PROMPT=0 \
-    GIT_NO_LAZY_FETCH=1 \
-    GIT_OPTIONAL_LOCKS=0 \
-    git rev-parse --show-toplevel 2>/dev/null; then
-    printf '\036'
-  else
-    exit_code=$?
-    printf '\036'
-    exit "$exit_code"
-  fi) || refuse invalid_store_location
-  common=$(if env -i \
-    PATH="$PATH" \
-    GIT_CONFIG_NOSYSTEM=1 \
-    GIT_TERMINAL_PROMPT=0 \
-    GIT_NO_LAZY_FETCH=1 \
-    GIT_OPTIONAL_LOCKS=0 \
-    git rev-parse --path-format=absolute --git-common-dir 2>/dev/null; then
-    printf '\036'
-  else
-    exit_code=$?
-    printf '\036'
-    exit "$exit_code"
-  fi) || refuse invalid_store_location
-  [[ "$top" == *$'\n'$'\036' ]] || refuse invalid_store_location
-  [[ "$common" == *$'\n'$'\036' ]] || refuse invalid_store_location
-  top=${top%$'\036'}
-  common=${common%$'\036'}
-  top=${top%$'\n'}
-  common=${common%$'\n'}
-  [[ "$top" == /* && "$top" != *$'\n'* && "$top" != *$'\r'* && -d "$top" && ! -L "$top" ]] || refuse invalid_store_location
-  [[ "$common" == /* && "$common" != *$'\n'* && "$common" != *$'\r'* && -d "$common" && ! -L "$common" ]] || refuse invalid_store_location
-  canonical_top=$(cd "$top" 2>/dev/null && pwd -P) || refuse invalid_store_location
-  canonical_common=$(cd "$common" 2>/dev/null && pwd -P) || refuse invalid_store_location
-  [[ "$canonical_top" == "$top" && "$canonical_common" == "$common" ]] || refuse invalid_store_location
-  state="$common/plasmosome-work-state"
-  [[ ! -e "$state" && ! -L "$state" ]] && refuse not_initialized
-  [[ -d "$state" && ! -L "$state" ]] || refuse invalid_store
-  [[ ! -e "$state/current" && ! -L "$state/current" ]] && refuse not_initialized
-  [[ -f "$state/current" && ! -L "$state/current" ]] || refuse invalid_store
-  { exec 3<"$state/current"; } 2>/dev/null || refuse invalid_store
-  current=
-  if IFS= read -r -d '' current <&3; then
-    { exec 3<&-; } 2>/dev/null || refuse invalid_store
-    refuse invalid_store
-  fi
-  { exec 3<&-; } 2>/dev/null || refuse invalid_store
-  [[ "$current" == *$'\n' ]] || refuse invalid_store
-  current=${current%$'\n'}
-  [[ "$current" != *$'\n'* && "$current" != *$'\r'* ]] || refuse invalid_store
-  [[ "$current" =~ ^generation-[A-Za-z0-9_-]+$ ]] || refuse invalid_store
-  generations="$state/generations"
-  [[ -d "$generations" && ! -L "$generations" ]] || refuse invalid_store
-  generation="$generations/$current"
-  [[ -d "$generation" && ! -L "$generation" ]] || refuse invalid_store
-  wrapper="$generation/plasmosome-work-state"
-  [[ -f "$wrapper" && ! -L "$wrapper" && -x "$wrapper" ]] || refuse invalid_store
-  exec 3>&1
-  if wrapper_stderr=$( (exec env -i PATH="$PATH" "$wrapper" "$@") 2>&1 1>&3); then
-    [[ -z "$wrapper_stderr" ]] || printf '%s\n' "$wrapper_stderr" >&2
-    exit 0
-  else
-    exit_code=$?
-  fi
-  [[ "$wrapper_stderr" != *"$wrapper"* && "$wrapper_stderr" != *$'\n'* && "$wrapper_stderr" != *$'\r'* ]] || refuse invalid_store
-  if [[ "$json" == true ]]; then
-    [[ "$wrapper_stderr" == '{"code":'* && "$wrapper_stderr" == *'}' ]] || refuse invalid_store
-  else
-    [[ "$wrapper_stderr" == error\[*\]:\ * ]] || refuse invalid_store
-  fi
-  [[ -z "$wrapper_stderr" ]] || printf '%s\n' "$wrapper_stderr" >&2
-  exit "$exit_code"
-}
+def caller_path(value, cwd):
+    if not value or value == "-" or Path(value).is_absolute():
+        return value
+    return str(cwd / value)
 
-case "${1:-}" in
-  list|show|ready|blocked)
-    read_launcher "$@"
-    ;;
-  bootstrap)
-    exec cargo run --release --locked --offline --quiet -p plasmosome-work-state -- "$@"
-    ;;
-  contract-test)
-    exec cargo run --locked --offline --quiet -p plasmosome-work-state -- "$@"
-    ;;
-  *)
-    refuse invalid_command 2
-    ;;
-esac
+
+def native_arguments(arguments, cwd):
+    result = []
+    positionals = []
+    actor = os.environ.get("BEADS_ACTOR", "")
+    claim = False
+    command = None
+    index = 0
+    literal = False
+    while index < len(arguments):
+        argument = arguments[index]
+        flag, equals, value = argument.partition("=")
+        if not literal and len(argument) > 2 and argument[:2] in TEXT_FLAGS | {"-f", "-i", "-o"}:
+            flag, equals, value = argument[:2], "=", argument[2:].removeprefix("=")
+            argument = flag + "=" + value
+        if not literal and argument == "--":
+            literal = True
+            result.append(argument)
+            index += 1
+            continue
+        if not literal and argument.startswith("-") and argument != "-":
+            if flag in ROUTING_FLAGS or (argument.startswith("-") and not argument.startswith("--") and "C" in argument.split("=", 1)[0]):
+                refuse(f"{flag} cannot override the shared Beads store")
+            if flag.startswith(("--server-", "--proxied-server-")) or flag in {"--server", "--shared-server", "--proxied-server"}:
+                refuse("the shared store uses embedded Dolt, not a server")
+            if command == "init" and flag in INIT_FLAGS:
+                refuse(f"{flag} is not permitted for non-destructive shared initialization")
+            if flag == "--claim" and (not equals or value.lower() not in {"false", "0"}):
+                claim = True
+            path_flag = flag in FILE_FLAGS or (flag in {"-f", "-i", "-o"})
+            takes_value = path_flag or flag in TEXT_FLAGS or flag == "--metadata" or (command is None and flag in GLOBAL_VALUES)
+            if takes_value:
+                if not equals:
+                    index += 1
+                    if index == len(arguments):
+                        refuse(f"{flag} requires a value")
+                    value = arguments[index]
+                if flag == "--actor":
+                    actor = value
+                if flag == "--dolt-auto-commit" and value != "on":
+                    refuse("Dolt auto-commit must remain on")
+                if path_flag:
+                    value = caller_path(value, cwd)
+                elif flag == "--metadata" and value.startswith("@"):
+                    value = "@" + caller_path(value[1:], cwd)
+                if equals:
+                    result.append(flag + "=" + value)
+                else:
+                    result.extend((flag, value))
+            else:
+                result.append(argument)
+        else:
+            if command is None:
+                command = argument
+            else:
+                positionals.append(argument)
+                if command == "import":
+                    argument = caller_path(argument, cwd)
+            result.append(argument)
+        index += 1
+    if claim and not actor.strip():
+        refuse("claims require an explicit unique --actor or BEADS_ACTOR (not a shared Git username)")
+    if command in {"repo", "worktree", "hooks", "setup", "bootstrap", "upgrade"}:
+        refuse(f"{command} is not a shared-store operation")
+    if command == "dolt" and positionals and positionals[0] in {"set", "start", "stop", "killall", "clean-databases"}:
+        refuse("Dolt server and storage routing changes are not shared-store operations")
+    if command == "config" and positionals and positionals[0] in {"set", "set-many", "unset"}:
+        protected = ("repos.", "routing.", "contributor.", "dolt.data-dir", "dolt.mode",
+                     "dolt.shared-server", "dolt.auto-", "export.auto", "export.git-add",
+                     "import.auto", "backup.enabled", "no-git-ops", "no-hooks")
+        if any(item.partition("=")[0].startswith(protected) for item in positionals[1:]):
+            refuse("configuration cannot override shared-store routing or automatic-operation policy")
+    if command == "init":
+        boundary = result.index("--") if "--" in result else len(result)
+        result[boundary:boundary] = ("--skip-agents", "--skip-hooks", "--non-interactive")
+    return command, result
+
+
+def environment(store, private):
+    for key, value in os.environ.items():
+        if not value:
+            continue
+        if key in {"BEADS_DIR", "BEADS_DB", "BD_DB", "BEADS_DOLT_DATA_DIR", "BEADS_DOLT_PROXIED_SERVER", "BD_DOLT_DATA_DIR"} or key.startswith(("BEADS_DOLT_SERVER_", "BEADS_DOLT_SHARED_", "BEADS_PROXIED_", "BD_ROUTING_", "BD_REPOS_")):
+            refuse(f"unset {key}; work-state binds the shared embedded store")
+    child = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    child.update({
+        "BEADS_DIR": str(store),
+        "BEADS_DOLT_SHARED_SERVER": "false",
+        "BD_DOLT_SHARED_SERVER": "false",
+        "BD_DOLT_AUTO_START": "false",
+        "BD_DOLT_AUTO_COMMIT": "on",
+        "BD_DOLT_AUTO_PUSH": "false",
+        "BD_EXPORT_AUTO": "false",
+        "BD_EXPORT_GIT_ADD": "false",
+        "BD_IMPORT_AUTO": "false",
+        "BD_BACKUP_ENABLED": "false",
+        "BD_NO_GIT_OPS": "true",
+        "BD_NO_HOOKS": "true",
+        "BD_ROUTING_MODE": "explicit",
+        "BD_ROUTING_DEFAULT": ".",
+        "BD_ROUTING_MAINTAINER": ".",
+        "BD_ROUTING_CONTRIBUTOR": ".",
+        "BD_CONTRIBUTOR_AUTO_ROUTE": "false",
+        "BD_NON_INTERACTIVE": "1",
+        "BD_DISABLE_METRICS": "1",
+        "GIT_CEILING_DIRECTORIES": str(private.parent),
+        "PWD": str(private),
+    })
+    return child
+
+
+def check_store(store, command):
+    """Seed native config so fresh init cannot rediscover an ancestor store."""
+    if store.is_symlink():
+        refuse("shared store must not be a symlink")
+    for name in ("redirect", ".env"):
+        if (store / name).exists():
+            refuse(f"shared store must not contain a {name} routing override")
+    metadata = store / "metadata.json"
+    if metadata.exists():
+        if metadata.is_symlink():
+            refuse("shared metadata must not be a symlink")
+        config = json.loads(metadata.read_text())
+        if config.get("dolt_mode", "embedded") != "embedded":
+            refuse("shared metadata must select embedded Dolt")
+        if config.get("dolt_data_dir"):
+            refuse("shared metadata must use its default embedded data directory")
+        if command == "init":
+            refuse("shared store is already initialized; existing data was left untouched")
+    elif command == "init":
+        if store.exists() and any(store.iterdir()):
+            refuse("shared store is nonempty but not initialized; inspect it before recovery")
+        directory(store)
+        with (store / "config.yaml").open("x") as stream:
+            stream.write("dolt.auto-commit: on\ndolt.auto-push: false\nexport.auto: false\nno-git-ops: true\n")
+    elif command not in {None, "help", "version"}:
+        refuse("shared store is not initialized; run work-state init --prefix plasmosome")
+
+
+def main():
+    cwd = Path.cwd()
+    root = Path(__file__).resolve().parent.parent
+    git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    discovery = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=root, env=git_env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if discovery.returncode:
+        refuse("launcher must live in a Git worktree")
+    common = Path(discovery.stdout.rstrip("\n")).resolve(strict=True)
+    state = common / "plasmosome-beads"
+    directory(state)
+    pin = release_pin()
+    descriptor = os.open(state / "command.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "r+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        arguments = sys.argv[1:]
+        if arguments and arguments[0] == "install":
+            install(arguments[1:], state, pin)
+            return
+        binary = state / "bd"
+        if binary.is_symlink() or not binary.is_file():
+            refuse("pinned native bd is not installed; use work-state install --archive PATH --bd PATH")
+        if digest(binary) != pin["binary_sha256"]:
+            refuse("installed bd SHA256 does not match the pinned release")
+        command, arguments = native_arguments(arguments, cwd)
+        store = state / "store"
+        private = state / "cwd"
+        directory(private)
+        if (private / ".git").exists() or (private / ".beads").exists():
+            refuse("private invocation directory must not contain a Git or Beads checkout")
+        child = environment(store, private)
+        check_store(store, command)
+        if command != "init" and (store / "metadata.json").is_file():
+            # Native reverse discovery assumes a .beads basename; bind the metadata directory.
+            arguments.insert(0, f"--db={store}")
+        os.chdir(private)
+        os.set_inheritable(lock.fileno(), True)
+        os.execve(binary, [str(binary), "--dolt-auto-commit=on", *arguments], child)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (Refusal, OSError, ValueError) as error:
+        print(f"work-state: {error}", file=sys.stderr)
+        sys.exit(2)
