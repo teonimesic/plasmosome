@@ -438,6 +438,7 @@ name = "plasmosome-core"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "libc",
  "plasmosome-backend",
  "serde",
  "serde_json",

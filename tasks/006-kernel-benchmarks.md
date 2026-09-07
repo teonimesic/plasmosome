@@ -263,3 +263,7 @@ tools, and drain timeout. It now follows the existing `GITHUB_PR` parser fixture
 `requires.capabilities`, a tool binding under `provides`, and `lifecycle.drain_ms`, with a WASM
 implementation and pinned network range. The old fixture exercised only ID, version, and network
 parsing, not the representative manifest promised by spec 005; its median also needs replacement.
+
+Integrated main after PR #76 (`707972ec889464d47595a03cb61fb16854d962a6`) before final
+measurement. Its new `plasmosomed` binary also carries `bench = false`, so the workspace quick
+invocation does not pass Criterion's `--quick` option to that binary's libtest harness.

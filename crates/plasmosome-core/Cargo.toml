@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 plasmosome-backend = { workspace = true }
+libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -17,6 +18,13 @@ criterion = { workspace = true }
 tempfile = { workspace = true }
 
 [lib]
+name = "plasmosome_core"
+path = "src/lib.rs"
+bench = false
+
+[[bin]]
+name = "plasmosomed"
+path = "src/main.rs"
 bench = false
 
 [[bench]]
