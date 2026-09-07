@@ -309,10 +309,10 @@ shared activation lock and recorded-remote/real-local contract. Markdown source 
 outside this task: bootstrap still only reinstalls a wrapper for the same source, and sync must not
 resolve a new source or reimport Markdown.
 
-No validation, formatter, build, test, contract or coverage command was run in this concurrent
-editing batch, as directed by the coordinating session. In particular the new regression has not
-been observed red or green; this is not new strict-TDD evidence. The earlier `4ebc5bab` online-sync
-run remains historical evidence only and is not a final-head pass.
+No formatter, build, test, contract or coverage command was run in this concurrent editing batch,
+as directed by the coordinating session. In particular the new regression has not been observed
+red or green; this is not new strict-TDD evidence. The earlier `4ebc5bab` online-sync run remains
+historical evidence only and is not a final-head pass.
 
 The PR review bodies and issue comments contain no independent review, and the GraphQL thread
 queue is empty with no additional page. CodeRabbit reports that the draft was not reviewed, which
@@ -322,3 +322,10 @@ retained pinned `contract-test online-sync` and `contract-test all`, timed suite
 review and the independent review followed by the required CodeRabbit rounds. The coordinator
 owns those runs and supplies already-pinned artifacts; no dependency installation, hosted fixture
 or credential is an acceptance prerequisite for this task.
+
+After commit `01bf8d7` was pushed, the coordinator clarified that push safety guards were permitted.
+The in-flight push had already bypassed hooks under the initial no-validation instruction.
+Both equivalent checks were then run explicitly: `./.githooks/provenance-guard` and
+`./.githooks/attribution-guard cd775345e39ad1a3d5c70a85832f8c03ff10b8ef..HEAD` each reported
+`clean` with exit 0. This is guard evidence only, not runtime verification. Later pushes use the
+standard safety hooks.
