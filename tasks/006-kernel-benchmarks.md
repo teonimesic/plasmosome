@@ -239,3 +239,27 @@ outside timing; grants, recording, closure, detach/replay, and the existing
 `ResidueReport::from_diff` check now run inside it. The plan and spec setup paragraph are aligned
 with that contract. This changes the meaning of the old attach result, so it also needs a fresh
 baseline, not comparison against the historical detach-only timing.
+
+### 2026-09-07 — independent review: exclude retained fixture destruction
+
+The independent reviewer found that `ledger_replay` still consumed its fixture and returned
+`()`. `detach` advances the replay cursor but retains the ledger's effect storage and the fake
+backend's grant history, so dropping those collections inside the measured closure added
+size-dependent teardown to replay. `attach_detach` had the same ownership boundary.
+
+Both `iter_batched` routines now return the sealed ledger, backend, and detach report.
+Criterion 0.7 retains these outputs until after `measurement.end`, excluding fixture and report
+destruction while still timing the requested operations. The attach routine still checks residue
+before returning its output.
+
+Main's full run on `cf26471d7adb009a8f89adc54b6aaa5d43002a3a` completed in 89.54 seconds
+and its summary matched the eight JSON medians, but it preceded this fix. Its baseline and the
+interrupted CI variance collection are historical, not acceptance proof for the final timing
+boundaries. Fresh local and ten-run CI measurements must follow this correction and the completed
+independent review.
+
+The reviewer also found that the manifest fixture used ignored root fields for requirements,
+tools, and drain timeout. It now follows the existing `GITHUB_PR` parser fixture's table grammar:
+`requires.capabilities`, a tool binding under `provides`, and `lifecycle.drain_ms`, with a WASM
+implementation and pinned network range. The old fixture exercised only ID, version, and network
+parsing, not the representative manifest promised by spec 005; its median also needs replacement.

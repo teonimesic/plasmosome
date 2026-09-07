@@ -33,7 +33,8 @@ fn bench(c: &mut Criterion) {
             b.iter_batched(
                 || fixture(size),
                 |(mut ledger, mut backend)| {
-                    ledger.detach(&mut backend, DrainSpec::forcing()).unwrap();
+                    let report = ledger.detach(&mut backend, DrainSpec::forcing()).unwrap();
+                    (ledger, backend, report)
                 },
                 BatchSize::SmallInput,
             )

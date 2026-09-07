@@ -3,9 +3,11 @@ use plasmosome_backend::{
     Capability, Diff, DrainSpec, EnforcementBackend, FakeBackend, Grant, GrantKind, PluginId,
     ResidueReport,
 };
-use plasmosome_ledger::{Effect, InverseVia, Ledger};
+use plasmosome_ledger::{Closure, DetachReport, Effect, InverseVia, Ledger, SealedLedger};
 
-fn attach_detach((mut ledger, mut backend): (Ledger, FakeBackend)) {
+fn attach_detach(
+    (mut ledger, mut backend): (Ledger, FakeBackend),
+) -> (SealedLedger, FakeBackend, DetachReport) {
     let before = backend.snapshot_os_state();
     for (index, capability) in [
         Capability::SessionFile {
@@ -32,15 +34,14 @@ fn attach_detach((mut ledger, mut backend): (Ledger, FakeBackend)) {
             InverseVia::Backend(entry.handle),
         ));
     }
-    match ledger.close() {
-        plasmosome_ledger::Closure::ExternalFree(mut sealed) => {
-            sealed.detach(&mut backend, DrainSpec::forcing()).unwrap();
-        }
-        plasmosome_ledger::Closure::OutstandingExternal(_) => unreachable!(),
-    }
+    let Closure::ExternalFree(mut sealed) = ledger.close() else {
+        unreachable!();
+    };
+    let report = sealed.detach(&mut backend, DrainSpec::forcing()).unwrap();
     let after = backend.snapshot_os_state();
     let residue = ResidueReport::from_diff(Diff::between(&before, &after), Vec::new());
     assert_eq!(residue, ResidueReport::Empty, "{residue}");
+    (sealed, backend, report)
 }
 
 fn bench(c: &mut Criterion) {

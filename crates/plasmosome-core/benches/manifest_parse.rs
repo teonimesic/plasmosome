@@ -5,12 +5,21 @@ use std::hint::black_box;
 const MANIFEST: &str = r#"
 id = "github-pr"
 version = "1.2.3"
-requires = ["git"]
-provides_tools = ["pr.read", "pr.open"]
-drain_ms = 750
+impl.wasm = "components/github-pr.wasm"
+
+[requires]
+capabilities = ["network:hosts=api.github.com"]
+
+[provides]
+"github:tools" = { tools = ["pr.read", "pr.open"] }
+
 [network]
 hosts = ["api.github.com"]
 ports = [443]
+pin_cidrs = ["140.82.112.0/20"]
+
+[lifecycle]
+drain_ms = 750
 "#;
 
 fn bench(c: &mut Criterion) {
