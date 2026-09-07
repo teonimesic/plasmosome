@@ -197,6 +197,12 @@ def native_arguments(arguments, cwd, binary, private, child, lock):
                 positionals.append(argument)
                 if command == ["import"]:
                     argument = caller_path(argument, cwd)
+                elif (
+                    command in (["backup", "init"], ["backup", "restore"])
+                    or (command == ["backup"] and positionals[0] == "add" and len(positionals) == 2)
+                ) and "://" not in argument:
+                    if command == ["backup", "restore"] or not argument.startswith("~/"):
+                        argument = caller_path(argument, cwd)
             result.append(argument)
         index += 1
     help_requested = toggles.get("--help", False) or command[:1] == ["help"]

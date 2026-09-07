@@ -86,6 +86,10 @@ Native ready does not read repository specs or decide whether a plan is adequate
 checks admission, and the executor rechecks it before claiming. A listed row is a candidate, not
 permission to bypass those checks.
 
+`planned` records an admitted plan, not an exclusive lifecycle state. Keep it while claimed;
+native status keeps in-progress and closed tasks out of `ready`. Remove it only if the plan or
+admission ceases to hold.
+
 ## Ownership, dependencies and recovery
 
 Set a unique actor for this executor session, not a shared Git username. Even when dispatched
@@ -129,9 +133,14 @@ review evidence references and anything the next agent would otherwise rediscove
 threads remain on GitHub; link them instead of transcribing or treating chat as evidence.
 
 `.agents/skills/pr-review` owns review and the merge gate. After GitHub reports `MERGED` with a
-squash commit, record that PR URL, commit and observed merge time in notes, then run
-`./tools/work-state close ID --reason 'Merged PR_URL at SQUASH_SHA'`. Remove `in-review` when
-closing. A successful merge command, deleted branch or closed-but-unmerged PR is not proof.
+squash commit, record that PR URL, commit and observed merge time in notes, then run:
+
+```shell
+./tools/work-state update ID --remove-label in-review
+./tools/work-state close ID --reason 'Merged PR_URL at SQUASH_SHA'
+```
+
+A successful merge command, deleted branch or closed-but-unmerged PR is not proof.
 Cancellation may close a task with an explicit cancellation reason, never as delivered work.
 
 Task creation, planning, status changes and closure never need commits, branches or status-only

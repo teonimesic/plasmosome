@@ -27,8 +27,8 @@ def main():
         (home / ".beads/config.yaml").write_text("actor: shared-config-actor\n")
         environment.update(HOME=str(home), BD_ACTOR="shared-environment-actor")
 
-        def git(*arguments):
-            return subprocess.run(["git", *arguments], cwd=repo, env=environment, check=True, text=True, capture_output=True).stdout.strip()
+        def git(*arguments, cwd=repo):
+            return subprocess.run(["git", *arguments], cwd=cwd, env=environment, check=True, text=True, capture_output=True).stdout.strip()
 
         def native(*arguments, cwd=repo, actor="regression", success=True):
             result = subprocess.run(
@@ -56,14 +56,16 @@ def main():
         foreign_metadata = '{"backend":"dolt","dolt_mode":"embedded","dolt_database":"wrong"}'
         (foreign / "metadata.json").write_text(foreign_metadata)
         (foreign / "embeddeddolt").mkdir()
+        (linked / "body.txt").write_text("Shared body from the calling worktree")
+        (linked / "metadata.json").write_text('{"spec_ids":["016"],"intent_ids":["015"]}')
+        (linked / "evidence.txt").write_text("Exactly one competing actor claimed the task")
+        before_status = {cwd: git("status", "--porcelain=v1", "--untracked-files=all", cwd=cwd) for cwd in (repo, linked)}
         native("install", "--archive", str(options.archive.resolve()), "--bd", str(options.bd.resolve()))
         native("init", "--help")
         native("init", "--not-a-native-flag", success=False)
         native("init", "--prefix", "regression")
         native("init", "--help", cwd=linked)
         native("list", "--json", cwd=linked)
-        (linked / "body.txt").write_text("Shared body from the calling worktree")
-        (linked / "metadata.json").write_text('{"spec_ids":["016"],"intent_ids":["015"]}')
         created = json.loads(native("create", "Claim race", "--body-file=body.txt", "--metadata", "@metadata.json", "--labels", "planned", "--json", cwd=linked).stdout)
         issue = created["id"]
         next_issue = json.loads(native("create", "Next priority task", "--priority", "0", "--json").stdout)["id"]
@@ -104,7 +106,6 @@ def main():
         native("close", issue, "--continue", actor="", success=False)
         assert json.loads(native("show", issue, "--json").stdout)[0]["status"] == "in_progress"
 
-        (linked / "evidence.txt").write_text("Exactly one competing actor claimed the task")
         native("comments", "add", issue, "-fevidence.txt", cwd=linked)
         native("close", issue, "--reason-file", "evidence.txt", "--claim-next", cwd=linked, actor="closer")
         closed = json.loads(native("show", issue, "--json").stdout)[0]
@@ -120,11 +121,28 @@ def main():
         second = json.loads(native("create", "Second step", "--parent", parent, "--deps", first, "--json").stdout)["id"]
         native("close", first, "--continue", actor="continuing-agent")
         assert json.loads(native("show", second, "--json").stdout)[0]["status"] == "in_progress"
+        for verb, location, name in (
+            ("init", "../backups/snapshot", "../backups/snapshot"),
+            ("add", "../backups/alias-snapshot", "../backups/alias-snapshot"),
+            ("init", (root / "backups/uri-snapshot").as_uri(), "../backups/uri-snapshot"),
+            ("add", "~/home-snapshot", str(home / "home-snapshot")),
+        ):
+            native("backup", verb, location, cwd=linked)
+            native("backup", "sync")
+            assert (linked / name).is_dir()
+            snapshot = json.loads(native("show", issue, "--json").stdout)[0]
+            generation = json.loads(native("vc", "status", "--json").stdout)["commit"]
+            native("update", issue, "--notes", "Mutation after the backup")
+            native("backup", "restore", "--force", name, cwd=linked)
+            assert json.loads(native("show", issue, "--json").stdout)[0] == snapshot
+            assert json.loads(native("vc", "status", "--json").stdout)["commit"] == generation
         for flags in (("--db", str(foreign)), ("--directory=" + str(linked),), ("-C" + str(linked),), ("--global",)):
             native("list", *flags, success=False)
         native("init", "--force", success=False)
         native("init", success=False)
         assert git("rev-parse", "HEAD") == before_head
+        for cwd, status in before_status.items():
+            assert git("status", "--porcelain=v1", "--untracked-files=all", cwd=cwd) == status
         assert (repo / ".git/config").read_bytes() == before_config
         assert hook.read_text() == "#!/bin/sh\nexit 97\n"
         assert (foreign / "metadata.json").read_text() == foreign_metadata
