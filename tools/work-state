@@ -207,7 +207,8 @@ def native_arguments(arguments, cwd, binary, private, child, lock):
         index += 1
     help_requested = toggles.get("--help", False) or command[:1] == ["help"]
     claims = toggles.get("--claim", False) or toggles.get("--claim-next", False)
-    claims |= toggles.get("--continue", False) and not toggles.get("--no-auto", False)
+    if toggles.get("--continue", False) and not toggles.get("--no-auto", False) and not help_requested:
+        refuse("native Beads 1.1.2 --continue does not assign ownership; use --continue --no-auto, then explicitly claim the suggested task")
     if claims and not help_requested and not actor.strip():
         refuse("claims require an explicit unique --actor or BEADS_ACTOR (not a shared Git username)")
     if actor.strip():

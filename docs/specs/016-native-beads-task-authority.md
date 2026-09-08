@@ -66,6 +66,13 @@ A native command that performs a claim requires an explicit nonempty `--actor` o
 a silent shared Git username is not a claim identity. Actors distinguish sessions for coordination,
 not authentication of people or proof that an agent obeyed a planning gate.
 
+Pinned Beads 1.1.2's `close --continue` changes the next step to `in_progress` without assigning
+ownership. The launcher refuses that automatic mode before any mutation. Use
+`close ID --continue --no-auto` to close and suggest a next step without starting it, then
+inspect its admission/dependencies and explicitly `update NEXT_ID --claim` with a unique actor.
+Suggestion is not reservation; a competing claim may win before this claim. Native
+`close ID --claim-next` without `--continue` uses an atomic claim and requires explicit identity.
+
 Native init is non-destructive and uses `--skip-agents --skip-hooks --non-interactive`. It must
 not discover and auto-commit the code repository: use a private working directory, Git discovery
 ceiling and no-Git-operations configuration. No checkout instructions, hooks, staged files, code

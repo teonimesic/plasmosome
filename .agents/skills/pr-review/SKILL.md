@@ -13,18 +13,27 @@ A merged PR carries three things: its upward link to wanted work, a review that 
 being merged, and an answer to every finding. Spec012 governs those requirements and its two
 taskless structural shapes; `.agents/skills/tasks` governs task admission and ownership.
 
-## 1. Open a draft and connect the task
+## 1. Open a draft in the correct shape
 
-Start from the claimed Beads task, using `./tools/work-state show ID`. Open the PR as a draft.
-The body ends with `task: BEADS_ID` on its own line. Link the record once; do not duplicate its
-plan, description or acceptance as another task authority. Record the PR immediately:
+- **Intent-filing PR:** file the intent under `docs/intents/` using its template. It has no
+  parent task, `task:` footer or Beads external reference. Keep the PR draft until the owner
+  reads and approves it on GitHub, as required by `docs/intents/README.md`.
+- **Spec-filing PR:** file the spec under `docs/specs/` using its template and name the intents
+  it serves. It has no task, `task:` footer or Beads external reference. Follow
+  `docs/specs/README.md` for draft versus accepted state; implementation waits for acceptance
+  on main. Filing a spec does not approve its intents.
+- **Work PR:** start from the claimed Beads task, using `./tools/work-state show ID`. Open a
+  draft whose body ends with `task: BEADS_ID` on its own line. Link the record once; do not
+  duplicate its plan, description or acceptance as another task authority.
+
+For a work PR, record the PR immediately:
 
 ```shell
 ./tools/work-state update ID --external-ref PR_URL --add-label in-review
 ```
 
-The author retains ownership through review. Record verification and important decisions in
-Beads notes. These updates never require a commit, extra push or status-only PR.
+For a work PR, retain task ownership through review and record verification and important
+decisions in Beads notes. These updates never require a commit, extra push or status-only PR.
 
 Get the root gate green and obtain independent review while draft. CodeRabbit skips draft PRs;
 a skipped green is not a completed review. The owner-approval rule in `docs/intents/README.md`
@@ -128,13 +137,14 @@ gh pr merge "$PR" --squash --match-head-commit "$HEAD"
 If the head moved, restart the affected checks. A clean mergeability signal does not establish
 any of the review conditions.
 
-## 5. Close in Beads after observing the merge
+## 5. Observe the merge and close the work task
 
 Ask GitHub for `state,mergeCommit,mergedAt,url`. Only `MERGED` with the actual squash commit
-establishes delivery; the old branch tip is not that commit. Append the observed PR, squash SHA,
-merge time and verification references to Beads notes. Remove `in-review` and close the task
+establishes delivery; the old branch tip is not that commit. For a work PR, append the observed
+PR, squash SHA, merge time and verification references to Beads notes. Remove `in-review` and close the task
 with native `close ID --reason`, as specified in the tasks skill. Keep its plan and evidence.
 There is no later closure commit, next-branch status edit or `chore(tasks)` PR.
+Intent- and spec-filing PRs have no Beads task to close.
 
 Remove your code worktree by its actual path only after its work is committed and its owner is
 finished, then prune and delete the merged branch as appropriate. Preserve anyone else's or any
@@ -145,8 +155,8 @@ uncertain worktree. Cleanup is not merge evidence or a substitute for native clo
 The PR's first paragraph explains the problem and what a user can now do, without opening with
 module names or document numbers. Follow with deliberate non-goals and any surprising design
 choice. Keep the body to about four short paragraphs; put verification details behind a
-`<details>` fold, without using a fold to hide an overlong explanation. Cite the Beads ID at the
-bottom, not in place of an explanation.
+`<details>` fold, without using a fold to hide an overlong explanation. For work PRs, cite the
+Beads ID at the bottom, not in place of an explanation.
 
 Read touched files and relevant consumers, not only changed lines. Report nearby duplication,
 misleading names, swallowed errors and unnecessary complexity separately from blocking findings;

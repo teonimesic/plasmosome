@@ -126,8 +126,19 @@ def main():
         parent = json.loads(native("create", "Continuation", "--type", "epic", "--json").stdout)["id"]
         first = json.loads(native("create", "First step", "--parent", parent, "--json").stdout)["id"]
         second = json.loads(native("create", "Second step", "--parent", parent, "--deps", first, "--json").stdout)["id"]
-        native("close", first, "--continue", actor="continuing-agent")
-        assert json.loads(native("show", second, "--json").stdout)[0]["status"] == "in_progress"
+        native("update", first, "--claim", actor="continuing-agent")
+        refused_continue = native("close", first, "--continue", actor="continuing-agent", success=False)
+        assert refused_continue.returncode == 2 and "does not assign ownership" in refused_continue.stderr
+        unchanged_first = json.loads(native("show", first, "--json").stdout)[0]
+        unchanged_second = json.loads(native("show", second, "--json").stdout)[0]
+        assert (unchanged_first["status"], unchanged_first["assignee"]) == ("in_progress", "continuing-agent")
+        assert unchanged_second["status"] == "open" and not unchanged_second.get("assignee")
+        native("close", first, "--continue", "--no-auto", actor="continuing-agent")
+        suggested = json.loads(native("show", second, "--json").stdout)[0]
+        assert suggested["status"] == "open" and not suggested.get("assignee")
+        native("update", second, "--claim", actor="continuing-agent")
+        continued = json.loads(native("show", second, "--json").stdout)[0]
+        assert (continued["status"], continued["assignee"]) == ("in_progress", "continuing-agent")
         for verb, location, name in (
             ("init", "../backups/snapshot", "../backups/snapshot"),
             ("add", "../backups/alias-snapshot", "../backups/alias-snapshot"),
