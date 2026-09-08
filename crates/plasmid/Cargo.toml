@@ -12,3 +12,8 @@ exclude = ["AGENTS.md", "CLAUDE.md"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[[bin]]
+name = "plasmid"
+path = "src/main.rs"
+bench = false

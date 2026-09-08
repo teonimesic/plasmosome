@@ -9,3 +9,6 @@ repository = "https://github.com/teonimesic/plasmosome"
 readme = "README.md"
 publish = ["crates-io"]
 exclude = ["AGENTS.md", "CLAUDE.md"]
+
+[lib]
+bench = false
