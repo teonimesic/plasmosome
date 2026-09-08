@@ -111,10 +111,11 @@ held by the same actor is idempotent, so sharing an actor would defeat competing
 The executor claims for itself; an orchestrator dispatches a candidate ID, not an already-claimed
 task under the orchestrator's identity.
 
-The launcher refuses native `close --continue` automatic advancement: Beads 1.1.2 changes
-status without assigning an owner. Use `close ID --continue --no-auto` only for closure and
-next-step suggestion. Before starting that suggested task, repeat the admission/dependency
-checks above and claim its complete ID explicitly; suggestion does not reserve it.
+The launcher refuses native `close --continue` and `--suggest-next`, including `--no-auto`:
+the pinned implementation can advance without ownership or skip history auto-commit.
+Close normally, then inspect eligible next work. Before starting it, repeat the
+admission/dependency checks above and explicitly claim its complete ID. Inspection does not
+reserve the task. Ordinary JSON close remains available.
 
 Use `./tools/work-state dep add CHILD PREREQUISITE` for actual blocking dependencies: CHILD waits
 for PREREQUISITE. Use `blocked` and `show ID` to inspect them. Record external blockers in notes
