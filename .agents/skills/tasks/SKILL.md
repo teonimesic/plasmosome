@@ -54,8 +54,9 @@ Use native `update ID --description`, `--design`, `--acceptance` and `--append-n
 content. `--body-file`, `--design-file` and `--metadata @file.json` can consume temporary input;
 such inputs are not another authority and are not committed. Preserve migration metadata when
 changing links: use key-level `--set-metadata` rather than replacing the whole metadata object.
-Always pass an ID: native commands can otherwise act on the last touched issue, which is unsafe
-in a store other agents use.
+For commands that address existing tasks by ID (such as `show`, `update`, and `close`), pass each
+complete Beads ID rather than relying on the native last-touched default. Creation, collection,
+automatic-selection, and dependency commands follow their native operand and arity rules.
 
 ## Planning and lifecycle
 
