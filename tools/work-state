@@ -11,6 +11,7 @@ import platform
 import re
 import signal
 import shutil
+import stat
 import sys
 import tempfile
 import subprocess
@@ -34,8 +35,11 @@ def directory(path):
     if path.is_symlink():
         refuse(f"shared runtime path must not be a symlink: {path}")
     path.mkdir(mode=0o700, exist_ok=True)
-    if not path.is_dir():
+    metadata = path.lstat()
+    if not stat.S_ISDIR(metadata.st_mode):
         refuse(f"not a directory: {path}")
+    if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+        refuse(f"shared runtime directory must be owned by the current user and deny group/other access: {path}")
 
 
 def release_pin():
@@ -269,6 +273,8 @@ def check_store(store, command):
     """Seed native config so fresh init cannot rediscover an ancestor store."""
     if store.is_symlink():
         refuse("shared store must not be a symlink")
+    if store.exists():
+        directory(store)
     for name in ("redirect", ".env"):
         if (store / name).exists():
             refuse(f"shared store must not contain a {name} routing override")

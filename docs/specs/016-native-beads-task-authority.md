@@ -53,6 +53,11 @@ BEADS_DIR   = <absolute-git-common-dir>/plasmosome-beads/store
 command lock= <absolute-git-common-dir>/plasmosome-beads/command.lock
 ```
 
+The runtime directory, store and private invocation directory are created with mode `0700`.
+Existing directories must belong to the current effective user and have no group/other POSIX
+mode bits. Refuse unsuitable ownership or modes without rewriting them; the operator inspects
+and repairs the filesystem before retrying.
+
 An OS `flock` covers the full native invocation, including reads, initialization and explicit
 sync commands, and is released when the process ends. All linked worktrees use this same lock
 and store, not their individual Git directories. A checkout switch, worktree removal or new

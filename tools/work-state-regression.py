@@ -60,7 +60,21 @@ def main():
         (linked / "metadata.json").write_text('{"spec_ids":["016"],"intent_ids":["015"]}')
         (linked / "evidence.txt").write_text("Exactly one competing actor claimed the task")
         before_status = {cwd: git("status", "--porcelain=v1", "--untracked-files=all", cwd=cwd) for cwd in (repo, linked)}
+        shared_runtime = repo / ".git/plasmosome-beads"
+        shared_runtime.mkdir(mode=0o700)
+        shared_runtime.chmod(0o755)
+        refused_install = native("install", "--archive", str(options.archive.resolve()), "--bd", str(options.bd.resolve()), success=False)
+        assert refused_install.returncode == 2 and not (shared_runtime / "bd").exists()
+        assert shared_runtime.stat().st_mode & 0o777 == 0o755
+        shared_runtime.chmod(0o700)
         native("install", "--archive", str(options.archive.resolve()), "--bd", str(options.bd.resolve()))
+        for existing_directory in (shared_runtime / "cwd", shared_runtime / "store"):
+            existing_directory.mkdir(mode=0o700)
+            existing_directory.chmod(0o755)
+            refused_init = native("init", "--prefix", "regression", success=False)
+            assert refused_init.returncode == 2 and not (shared_runtime / "store/metadata.json").exists()
+            assert existing_directory.stat().st_mode & 0o777 == 0o755
+            existing_directory.chmod(0o700)
         native("init", "--help")
         native("init", "--not-a-native-flag", success=False)
         native("init", "--prefix", "regression")
@@ -73,6 +87,13 @@ def main():
         assert refused.returncode == 2 and refused.stderr.startswith("work-state:"), (refused.returncode, refused.stderr)
         assert shared_metadata.read_text() == '[{"dolt_mode":"embedded"}]'
         shared_metadata.write_bytes(valid_metadata)
+        before_refused_create = json.loads(native("list", "--all", "--limit", "0", "--json").stdout)
+        (shared_runtime / "store").chmod(0o755)
+        refused_create = native("create", "Must not enter a permissive store", "--json", success=False)
+        assert refused_create.returncode == 2
+        assert (shared_runtime / "store").stat().st_mode & 0o777 == 0o755
+        (shared_runtime / "store").chmod(0o700)
+        assert json.loads(native("list", "--all", "--limit", "0", "--json").stdout) == before_refused_create
         created = json.loads(native("create", "Claim race", "--body-file=body.txt", "--metadata", "@metadata.json", "--labels", "planned", "--json", cwd=linked).stdout)
         issue = created["id"]
         next_issue = json.loads(native("create", "Next priority task", "--priority", "0", "--json").stdout)["id"]
