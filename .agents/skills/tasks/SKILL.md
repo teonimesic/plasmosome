@@ -59,8 +59,8 @@ in a store other agents use.
 
 ## Planning and lifecycle
 
-The lifecycle and label meanings are defined once in spec016. In particular, `planned` is a
-**label on an open task**, not a custom status. Beads 1.1.2 accepts a custom planned status but
+The lifecycle and label meanings are defined once in spec016. In particular, `planned` is an
+**admitted-plan label**, not a custom status. Beads 1.1.2 accepts a custom planned status but
 its native ready and claim paths do not support it. Use the native lifecycle, not old `todo`,
 `in_review` or `done` status values.
 

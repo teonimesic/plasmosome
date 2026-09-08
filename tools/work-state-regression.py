@@ -66,6 +66,13 @@ def main():
         native("init", "--prefix", "regression")
         native("init", "--help", cwd=linked)
         native("list", "--json", cwd=linked)
+        shared_metadata = repo / ".git/plasmosome-beads/store/metadata.json"
+        valid_metadata = shared_metadata.read_bytes()
+        shared_metadata.write_text('[{"dolt_mode":"embedded"}]')
+        refused = native("list", "--json", success=False)
+        assert refused.returncode == 2 and refused.stderr.startswith("work-state:"), (refused.returncode, refused.stderr)
+        assert shared_metadata.read_text() == '[{"dolt_mode":"embedded"}]'
+        shared_metadata.write_bytes(valid_metadata)
         created = json.loads(native("create", "Claim race", "--body-file=body.txt", "--metadata", "@metadata.json", "--labels", "planned", "--json", cwd=linked).stdout)
         issue = created["id"]
         next_issue = json.loads(native("create", "Next priority task", "--priority", "0", "--json").stdout)["id"]

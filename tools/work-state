@@ -276,6 +276,8 @@ def check_store(store, command):
         if metadata.is_symlink():
             refuse("shared metadata must not be a symlink")
         config = json.loads(metadata.read_text())
+        if not isinstance(config, dict):
+            refuse("shared metadata must be a JSON object")
         if config.get("dolt_mode", "embedded") != "embedded":
             refuse("shared metadata must select embedded Dolt")
         if config.get("dolt_data_dir"):

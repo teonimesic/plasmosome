@@ -233,6 +233,11 @@ promised: after failed/no synchronization, report remote currency as unverified 
 claiming local success means global truth. Resolve divergence explicitly while writers are
 quiescent; never force-push away task history to recover a rejected push.
 
+Use an intended encrypted transport, such as HTTPS or SSH, for off-machine replication and
+credentials. Do not send credentials or confidential task content through plaintext HTTP.
+Native Dolt permits HTTP authentication; this launcher retains native transport semantics and
+does not enforce TLS. Local filesystem backups remain supported.
+
 Take a restorable native store backup with writers quiescent, plus a logical export containing
 all task fields and provenance. Preserve the source Git snapshot and old stores. Demonstrate
 restoration into a separate location, including contents and native history; record backup paths,
