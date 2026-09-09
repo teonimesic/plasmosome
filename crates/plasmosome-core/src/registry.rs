@@ -37,7 +37,9 @@ impl ToolRegistry {
         ToolRegistry::default()
     }
 
-    /// Registers the declared descriptions; a later registration replaces the same tool name.
+    /// Associates `plugin` with the names and descriptions in `tools`, replacing any
+    /// existing entries with the same names. Updates the registry in place and returns `()`.
+    /// Callers must not rely on registration to validate declaration grammar or attach a cell.
     pub fn register(&self, plugin: &PluginId, tools: &[ToolDeclaration]) {
         let mut entries = self
             .entries

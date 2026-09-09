@@ -29,24 +29,26 @@ A declaration requires a nonblank `description`. Tools are a table of names to n
 descriptions; the former names-only list is refused. Both strings retain the author's text,
 including surrounding whitespace. For example:
 
-```toml
+```rust
+use plasmosome_core::manifest::PlasmidManifest;
+use plasmosome_core::ToolRegistry;
+use plasmosome_backend::PluginId;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let source = r#"
 id = "github-pr"
 description = "Read pull requests."
 impl.wasm = "github-pr.wasm"
 
 [provides."github:tools".tools]
 "pr.read" = "Read a pull request's title and review state."
-```
-
-```rust
-use plasmosome_core::manifest::PlasmidManifest;
-use plasmosome_core::ToolRegistry;
-use plasmosome_backend::PluginId;
-
-let manifest = PlasmidManifest::parse(source)?;
-let registry = ToolRegistry::new();
-registry.register(&PluginId::from(manifest.id.as_str()), &manifest.provides_tools);
-let description = registry.lookup("pr.read")?.description;
+"#;
+    let manifest = PlasmidManifest::parse(source)?;
+    let registry = ToolRegistry::new();
+    registry.register(&PluginId::from(manifest.id.as_str()), &manifest.provides_tools);
+    println!("{}", registry.lookup("pr.read")?.description);
+    Ok(())
+}
 ```
 
 Missing or invalid purpose, tool declarations and missing/non-string IDs return

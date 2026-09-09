@@ -23,8 +23,9 @@ pub struct ManifestBuilder {
 }
 
 impl ManifestBuilder {
-    /// Starts a trusted test manifest with an author-written purpose and no tools.
-    /// This builder does not validate the declaration grammar.
+    /// Returns a builder for plasmid `id`, using `description` as its purpose, with no tools.
+    /// Inputs are copied unchanged into trusted test data; use the manifest parser when
+    /// declaration grammar must be validated.
     pub fn new(id: &str, description: &str) -> ManifestBuilder {
         ManifestBuilder {
             id: id.to_string(),
@@ -36,7 +37,9 @@ impl ManifestBuilder {
         }
     }
 
-    /// Adds a tool and its author-written description, in declaration order.
+    /// Consumes the builder, appends the `tool` name and its `description` in declaration
+    /// order, and returns the updated builder. Inputs are copied without grammar validation;
+    /// callers must not treat building a fixture as proof that its TOML declaration parses.
     pub fn tool(mut self, tool: &str, description: &str) -> ManifestBuilder {
         self.tools.push(ToolDeclaration {
             name: tool.to_string(),
