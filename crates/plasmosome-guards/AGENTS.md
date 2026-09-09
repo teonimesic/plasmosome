@@ -35,12 +35,13 @@ reports, then compares only the *number* of them against the members the workspa
 The count is there so a metadata read that silently returned fewer crates cannot let the guard
 claim it saw them all.
 
-Do not upgrade that to a name-by-name comparison. `workspace_members()` derives names from the
-member *paths*, and Cargo does not require a member's directory to be named after its package, so
-comparing names asserts a layout convention this repository has never stated — inside a guard about
-publishing, where a reader would not look for one. Comparing counts keeps the coverage guarantee
-and asserts nothing about layout. If the directory-naming convention is ever worth enforcing, it
-earns its own named guard and a stated intent, not a silent clause in this one.
+Do not upgrade that to a name-by-name comparison. `workspace_members()` resolves each member path
+to the `[package].name` that member's own manifest declares (task 030), so the names it reports are
+the packages Cargo knows, whatever the directories are called. What stops the upgrade is no longer
+the accuracy of those names: widening what a guard asserts is its own decision, with its own task,
+and never a side effect of a change that made a name correct. The count already carries the
+coverage guarantee this guard was written for. If the directory-naming convention is ever worth
+enforcing, it earns its own named guard and a stated intent, not a silent clause in this one.
 
 The publish allowlist is the one place that guard compares names: the source-controlled
 `HELD_NAMES` in `tests/workspace_guards.rs` is checked against the package names `cargo metadata`
