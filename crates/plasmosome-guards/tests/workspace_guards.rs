@@ -463,5 +463,8 @@ fn a_member_whose_manifest_is_not_valid_toml_is_refused_not_skipped() {
 
     let result = std::panic::catch_unwind(|| workspace_members_in(workspace.path()));
 
-    assert!(result.is_err(), "an invalid member manifest must not be skipped");
+    assert!(
+        result.is_err(),
+        "an invalid member manifest must not be skipped"
+    );
 }
