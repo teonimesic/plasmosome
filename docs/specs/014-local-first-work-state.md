@@ -1,9 +1,23 @@
 ---
 id: 014
 title: Local-first work state with one authoritative writer
-status: accepted
+status: superseded
 intents: [015]
 ---
+
+## Superseded by spec016
+
+This is the historical split-authority/custom-ledger design, not the active runtime contract.
+The owner's explicit full-task-content decision under approved intent015 replaces it with
+[`016-native-beads-task-authority.md`](016-native-beads-task-authority.md). All task prose,
+plans, acceptance, notes and coordination now belong to native Beads; specs and intents,
+including their states, remain in Git.
+
+The text below is retained to explain the former experiment and its acceptance proposal.
+Its shadow API, authority epochs, remote writer leases, freshness envelopes and cross-clone
+exactly-once claims are retired, not features the native launcher implements. Historical PR84
+and benchmark/closure evidence are preserved by the spec016 migration, not an active request
+to keep or update task Markdown. None of the commands below is a current instruction.
 
 ## Behavior
 

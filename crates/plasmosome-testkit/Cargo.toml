@@ -10,3 +10,14 @@ publish = false
 plasmosome-backend = { workspace = true }
 plasmosome-ledger = { workspace = true }
 plasmosome-core = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = { workspace = true }
+
+[lib]
+bench = false
+
+[[bench]]
+name = "attach_detach"
+harness = false

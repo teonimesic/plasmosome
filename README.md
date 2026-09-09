@@ -60,6 +60,32 @@ cargo fmt --all -- --check
 
 Rust stable, edition 2024. macOS (Apple Silicon) is the first target; Linux follows.
 
+## Development work
+
+Tasks live entirely in shared native Beads: their descriptions, plans, acceptance, notes, status
+and ownership. Use `./tools/work-state` from any linked worktree; it binds the pinned native
+runtime to one store under the Git common directory, without changing your PATH. Worktrees
+isolate code only. Intents and specs remain versioned Markdown.
+
+```shell
+./tools/work-state install --archive /path/to/pinned-release-archive --bd /path/to/verified-bd
+./tools/work-state init
+./tools/work-state ready --label planned
+./tools/work-state show BEADS_ID
+```
+
+The installer verifies the current platform's archive and binary against
+`tools/work-state-beads-1.1.2.toml`; Python 3.11+ is required. Do not initialize an empty queue
+when you need the project's existing task history: obtain the verified backup or explicitly
+pull its configured Dolt remote. There is no tracked task export to reconstruct it from.
+
+Read [AGENTS.md](AGENTS.md) and the [heartbeat](.agents/skills/heartbeat/SKILL.md) before picking
+work. The [task skill](.agents/skills/tasks/SKILL.md) covers native filing, planning and unique-actor
+claims; [spec016](docs/specs/016-native-beads-task-authority.md) defines the complete API,
+installation, migration and backup contract. Ordinary reads and mutations stay local.
+`./tools/work-state dolt pull` and `dolt push` are explicit replication, not distributed claim
+coordination across independent writer clones. No task Markdown or status-closure PR is needed.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

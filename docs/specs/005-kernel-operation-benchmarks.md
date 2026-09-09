@@ -91,9 +91,11 @@ the record before the real implementation arrives — expect no signal from it u
 
 ### Stateful benchmarks use `iter_batched`, never `iter`
 
-`ledger_replay` and `attach_detach` use criterion's `iter_batched` with per-iteration setup that
-constructs a fresh `SealedLedger` and a fresh `FakeBackend` for every iteration. Neither may use
-`b.iter()`.
+`ledger_replay` and `attach_detach` use criterion's `iter_batched` with fresh state for every
+iteration. `ledger_replay` setup constructs a populated `SealedLedger` and a `FakeBackend`;
+only replay is measured. `attach_detach` setup constructs an empty `Ledger` and a `FakeBackend`;
+the measured routine grants capabilities, records effects, closes the ledger, replays it, and
+checks residue. Neither may use `b.iter()`.
 
 Both operations consume what they measure. `SealedLedger::detach` takes `&mut self` and drains
 its pending effects as it replays them, and it mutates the backend as well, so revoking the same
@@ -124,14 +126,14 @@ outlier sets the figure for the whole record. It is also self-defeating as a thr
 times an observed range, any range wider than about 66% of baseline lets a genuine 2x regression
 through. The inter-quartile range discards the extremes and moves far less between records.
 
-The ten-run record lands in the task's Notes; enabling the gate is its own later task citing
+The ten-run record lands in the Beads task's native `notes`; enabling the gate is its own later task citing
 those numbers. Until then the comparison is advisory by construction. Any tighter promise from a
 shared runner would be noise dressed as a check.
 
 ### Local baselines
 
 Full `cargo bench` runs happen on developer machines. The first baseline is recorded in the
-task's Notes with the machine named (chip, core count, memory, toolchain version). A number
+Beads task's native `notes` with the machine named (chip, core count, memory, toolchain version). A number
 without its machine is not a baseline.
 
 ## Contract

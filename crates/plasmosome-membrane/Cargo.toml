@@ -16,7 +16,9 @@ tempfile = { workspace = true }
 [lib]
 name = "plasmosome_membrane"
 path = "src/lib.rs"
+bench = false
 
 [[bin]]
 name = "membraned"
 path = "src/main.rs"
+bench = false

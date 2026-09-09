@@ -5,6 +5,14 @@ status: draft
 intents: [008]
 ---
 
+## Native task input amendment
+
+This remains a draft proposal; the native-task cutover does not accept it, add `served:` to
+intents or make its proposed check part of the active heartbeat. When implemented, task input
+comes from spec016's shared native Beads records, including imported history, not task Markdown.
+Below, task spec/intent links mean `metadata.spec_ids` and `metadata.intent_ids`; delivered work
+means native `closed` with merge evidence, not an explicitly cancelled closed task.
+
 ## Behavior
 
 The work chain records what each piece of work points at: a task names a spec, a spec names an
@@ -17,7 +25,7 @@ This spec puts that answer in the intent, split along the line that decides whet
 **The judgement is written down; everything mechanical is derived.** Whether a goal is
 substantially met, and what is left of it, is a reading of the goal against what exists — it does
 not go stale when a task merges. Which specs name the intent, what their statuses are, which tasks
-name those specs and how many are still open all change every day and are a `grep` away, so no
+name those specs and how many are still open all change every day and are native queries away, so no
 intent file carries them.
 
 A typed list of specs and tasks would be wrong within a week and would read as authoritative while
@@ -127,17 +135,16 @@ this repository has already decided not to add more of. It belongs beside the cr
 `.agents/skills/heartbeat` step 4, and reads the same way: it prints faults, and silence is the only
 passing answer.
 
-**Work has landed** under an intent when a task with `status: done` reaches it either way:
+**Work has landed** under an intent when a native task closed with delivery evidence reaches it either way:
 
-- **through a spec** — the task's `specs:` names a spec whose `intents:` names the intent; or
-- **directly** — the task's own `intents:` names the intent.
+- **through a spec** — its `metadata.spec_ids` names a spec whose `intents:` names the intent; or
+- **directly** — the task's own `metadata.intent_ids` names the intent.
 
 **Both legs are required, and the second is not defensive.** `.agents/skills/tasks` keeps the
-task-level `intents:` copy so that a search over tasks and a search over specs return the same
-answer; a check walking only the spec leg makes them differ. On the tree today four `done` tasks
-carry `specs: []`, and `tasks/007-adopt-the-measured-instruction-rules.md` names `intents: [001]`
-directly — finished work under intent 001 that a spec-only walk cannot see, which would let intent
-001 sit at `served: none` forever without a word.
+task-level intent copy so that task and spec queries return the same answer; a check walking
+only the spec leg makes them differ. The historical fixture includes delivered legacy tasks with
+empty spec links, including `plasmosome-007` with intent link `001`: work under intent001 that
+a spec-only walk cannot see, which would let that intent sit at `served: none` without a word.
 
 The three per-intent faults, and nothing else:
 
@@ -154,9 +161,8 @@ The three per-intent faults, and nothing else:
   has whichever one sorts first silently chosen for it, and a file that says two things says
   nothing.
 
-**The check never reads an *intent's* `status:`.** It does read a *task's* `status:`, and only to
-tell landed work from open work — that is the `done` test above, and it is the only `status:` the
-check has any use for. An intent's approval is invisible to it: approval and existence are
+**The check never reads an *intent's* `status:`.** It reads a native task's status and closure
+evidence only to distinguish delivered work from open or cancelled work. Approval and existence are
 independent, so no combination of the two is a fault, and a `draft` intent carrying `substantially`
 is not the check's business. An earlier draft of this spec had that fault and it was wrong twice
 over: it fired on the value alone with no landed-work condition, and it left a truthful shape — a
@@ -200,38 +206,25 @@ task that reaches the intent directly.
 
 **It walks both legs, for the same reason the check does.** A reader forming this judgement is
 reading to answer "how much of this exists", and a spec-only walk answers it wrong in exactly the
-place the check was built to catch: no spec on the tree names intent 001, so a spec-only command
-prints nothing for it while `tasks/007-adopt-the-measured-instruction-rules.md` sits `done` beneath
-it. A command that hides finished work from the person setting `served:` is worse than no command.
+place the check was built to catch: in the historical fixture no spec names intent001 while
+the imported `plasmosome-007` reaches it directly with delivery evidence. Hiding that work from
+the person setting `served:` is worse than having no derivation.
+
+Read the complete native record set:
 
 ```shell
-n=008
-shown=""
-for f in docs/specs/*.md; do
-  grep -q "^intents:.*\b$n\b" "$f" || continue
-  sid=$(sed -n 's/^id: *//p' "$f" | head -1)
-  printf '%s\t%s\n' "$(sed -n 's/^status: *//p' "$f" | head -1)" "$f"
-  for t in tasks/*.md; do
-    grep -q "^specs:.*\b$sid\b" "$t" || continue
-    printf '  %s\t%s\n' "$(sed -n 's/^status: *//p' "$t" | head -1)" "$t"
-    shown="$shown|$t|"
-  done
-done
-for t in tasks/*.md; do
-  grep -q "^intents:.*\b$n\b" "$t" || continue
-  case "$shown" in *"|$t|"*) continue ;; esac
-  printf '%s\t%s\n' "$(sed -n 's/^status: *//p' "$t" | head -1)" "$t"
-done
+./tools/work-state list --all --limit 0 --json
 ```
 
-A task that carries both links is printed once, under its spec: `.agents/skills/tasks` has every
-task copy its spec's `intents:` down, so the common case is a task matching both legs, and a
-command that listed it twice would read as two pieces of work. The second loop prints only what the
-first did not — `shown` is why it exists, and it is a string rather than an array because array
-syntax and unquoted word splitting differ between `bash` and `zsh`.
+For one requested intent ID, resolve specs from their Git `id:` and `intents:` fields. For each
+matching spec, list its state and the native tasks whose `metadata.spec_ids` contains that ID.
+Then list tasks reaching the intent directly through `metadata.intent_ids` that were not already
+shown. Deduplicate by complete Beads ID, not source path or legacy number, and display native
+state plus delivery/cancellation evidence. A task with both links appears once.
 
-Ids are read from each file's `id:` rather than from its filename, for the reason the heartbeat's
-loop already gives: a glob over a dangling id aborts the loop it was meant to report on.
+Missing or duplicate document IDs, malformed native link metadata, incomplete enumeration and
+failed native queries are explicit errors, not empty derivations. This specifies the future
+check's algorithm without retaining shell loops over a retired task directory.
 
 ## Contract
 
@@ -243,8 +236,8 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
   It holds what of the goal exists and what is left. It contains no spec id, no task id and no
   count. It stops being updated once the intent settles and is not deleted.
 - **`status:`, `outcome:` and `## Outcome` are unchanged** by this spec, in meaning and in
-  placement. No fault in the check reads an intent's `status:`; the only `status:` it reads is a
-  task's, to tell landed work from open.
+  placement. No fault in the check reads an intent's `status:`; task native status and delivery
+  evidence distinguish landed work from open or cancelled work.
 - **Every intent file already on `main` gains the field.** The value is the owner's; the mechanical
   part of the backfill is that no intent file is left without one.
 - **The task under this spec runs after `status:` exists.** `served:` is placed relative to
@@ -253,19 +246,19 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
   two, and avoids a second pass to move every line. This is an ordering constraint on the task, not
   a second gate: nothing about this contract changes if the two land in the other order, only the
   amount of editing.
-- **The check** lives in `.agents/skills/heartbeat` step 4 beside the existing cross-layer loop.
-  Its inputs are `docs/intents/`, `docs/specs/` and `tasks/`. It **validates** only the files in
-  `docs/intents/` that carry an `id:`, so the folder's `README.md` is neither validated nor
-  reported; it reads the other two folders to derive whether work has landed.
+- **The check**, when this proposal is implemented, lives beside heartbeat's governing-document
+  checks. Its inputs are Git intents/specs and complete native Beads task records. It validates
+  only intents carrying `id:`, not the folder README; it reads specs and native tasks to derive
+  whether work has landed.
 - **Per intent**, it prints one line per fault naming the intent file and the fault, and prints
   nothing on a tree where every intent's `served:` is well-formed and unrefuted. There are exactly
   three per-intent faults: `served: none` with work landed; `served: substantially` with no work
   landed; and a file not carrying exactly one well-formed `served:` line — absent, empty,
   duplicated, or outside the three values. It reports nothing about open tasks under any value,
   nothing about an intent's `status:`, and nothing that contradicts `partly`.
-- **"Work has landed"** is true when some task with `status: done` either names a spec whose
-  `intents:` names the intent, or names the intent directly in its own `intents:`. Either leg
-  suffices.
+- **"Work has landed"** is true when a native task closed with delivery evidence either names
+  a spec reaching the intent through `metadata.spec_ids`, or names the intent directly through
+  `metadata.intent_ids`. Either leg suffices; cancellation is not delivery.
 - **A spec naming an intent id that no intent file carries does not abort the check**; the intents
   that do exist are still validated. Ids are resolved by reading each file's `id:`, never by
   globbing a filename.
@@ -303,8 +296,8 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
   tree this spec merges into has no `served:` field at all, so the clean run is asserted against the
   post-backfill tree.
 - The check prints the offending file for each of the three faults, injected one at a time into a
-  scratch copy: an intent flipped to `served: none` while a `done` task reaches it; one flipped to
-  `served: substantially` with nothing done beneath it; and one carrying `served: mostly`.
+  scratch copy: an intent flipped to `served: none` while a delivered native task reaches it;
+  one flipped to `served: substantially` with nothing delivered; and one carrying `served: mostly`.
 - The check prints the offending file for an intent whose `served:` line is **deleted**, for one
   whose `served:` line is present but empty, and for one carrying **two** `served:` lines — planted
   as `served: none` and `served: mostly` in the same file, the shape a per-file line count catches
@@ -314,8 +307,8 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
 - The check prints nothing for an intent marked `served: substantially` that has open tasks beneath
   it, verified by planting exactly that shape.
 - The check prints nothing for an intent marked `served: partly` in any of those shapes.
-- **The second landing leg is exercised:** with `tasks/007-adopt-the-measured-instruction-rules.md`
-  `done`, `specs: []` and `intents: [001]`, intent 001 at `served: none` prints the staleness fault
+- **The second landing leg is exercised:** with imported `plasmosome-007` closed with delivery
+  evidence, `metadata.spec_ids: []` and `metadata.intent_ids: ["001"]`, intent001 at `served: none` prints the staleness fault
   and at `served: substantially` prints nothing. A check walking only the spec leg gets both
   backwards, which is what this bullet is for.
 - The check says nothing about `docs/intents/README.md`, which carries no `id:`.
@@ -330,14 +323,12 @@ loop already gives: a glob over a dangling id aborts the loop it was meant to re
 - The check runs clean under both `bash` and `zsh`. Two `zsh` traps are already known and neither
   may resurface: `status` is a read-only variable name, and a glob matching nothing is a fatal
   error rather than an empty list.
-- The derivation command in this spec, run for an intent with at least one spec, prints that spec
-  and the tasks naming it. Run for **intent 001** — which no spec names, and which
-  `tasks/007-adopt-the-measured-instruction-rules.md` reaches directly — it prints that task. It
-  prints nothing, and exits 0, only for an intent neither leg reaches.
-- The derivation command prints a task carrying **both** links exactly once, under its spec:
-  verified against `tasks/004-testkit-and-seams.md`, which names `specs: [003]` and `intents: [002]`,
-  in a run for intent 002. It runs identically under `bash` and `zsh`, which is why the seen-set is a
-  string tested with `case` rather than an array.
+- The native derivation for an intent with at least one spec prints that spec and its tasks.
+  In the legacy intent001 fixture reached directly by `plasmosome-007`, it prints that task
+  even with no intervening spec. It prints nothing and exits 0 only when neither leg reaches
+  the requested intent; failed queries and malformed records refuse instead.
+- A task carrying both links appears exactly once, under its spec. The imported
+  `plasmosome-004` fixture names spec003 and intent002 and exercises this deduplication.
 
 ## Out of scope
 

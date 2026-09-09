@@ -8,9 +8,37 @@ publish = false
 
 [dependencies]
 plasmosome-backend = { workspace = true }
+libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 tempfile = { workspace = true }
+
+[lib]
+name = "plasmosome_core"
+path = "src/lib.rs"
+bench = false
+
+[[bin]]
+name = "plasmosomed"
+path = "src/main.rs"
+bench = false
+
+[[bench]]
+name = "manifest_parse"
+harness = false
+
+[[bench]]
+name = "reconciler_step"
+harness = false
+
+[[bench]]
+name = "session_log_append"
+harness = false
+
+[[bench]]
+name = "session_log_read"
+harness = false

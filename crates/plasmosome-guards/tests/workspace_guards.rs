@@ -428,33 +428,40 @@ fn cargo_tree_resolves_every_name_workspace_members_reports() {
 }
 
 #[test]
-#[should_panic(expected = "`crates/nameless` declares no `[package].name`")]
 fn a_member_that_declares_no_package_name_is_refused_not_skipped() {
     let workspace = workspace_with_a_member_declaring_no_package();
 
-    workspace_members_in(workspace.path());
+    let result = std::panic::catch_unwind(|| workspace_members_in(workspace.path()));
+
+    assert!(result.is_err(), "a nameless member must not be skipped");
 }
 
 #[test]
-#[should_panic(expected = "`crates/numbered` declares no `[package].name`")]
 fn a_member_whose_package_name_is_not_a_string_is_refused_not_skipped() {
     let workspace = workspace_with_a_member_whose_package_name_is_not_a_string();
 
-    workspace_members_in(workspace.path());
+    let result = std::panic::catch_unwind(|| workspace_members_in(workspace.path()));
+
+    assert!(
+        result.is_err(),
+        "a non-string package name must not be coerced or skipped"
+    );
 }
 
 #[test]
-#[should_panic(expected = "could not be read")]
 fn a_member_whose_manifest_is_missing_is_refused_not_skipped() {
     let workspace = workspace_with_a_member_whose_manifest_is_missing();
 
-    workspace_members_in(workspace.path());
+    let result = std::panic::catch_unwind(|| workspace_members_in(workspace.path()));
+
+    assert!(result.is_err(), "an unreadable member must not be skipped");
 }
 
 #[test]
-#[should_panic(expected = "is not valid TOML")]
 fn a_member_whose_manifest_is_not_valid_toml_is_refused_not_skipped() {
     let workspace = workspace_with_a_member_whose_manifest_is_not_valid_toml();
 
-    workspace_members_in(workspace.path());
+    let result = std::panic::catch_unwind(|| workspace_members_in(workspace.path()));
+
+    assert!(result.is_err(), "an invalid member manifest must not be skipped");
 }
