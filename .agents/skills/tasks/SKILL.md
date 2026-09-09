@@ -53,7 +53,9 @@ remain in `docs/templates/`; there is no task template file.
 Use native `update ID --description`, `--design`, `--acceptance` and `--append-notes` for task
 content. `--body-file`, `--design-file` and `--metadata @file.json` can consume temporary input;
 such inputs are not another authority and are not committed. Preserve migration metadata when
-changing links: use key-level `--set-metadata` rather than replacing the whole metadata object.
+changing links: pass only changed keys with `--metadata '{"intent_ids":["002"]}'`. Native update
+merges those keys, preserving unrelated metadata and JSON value types. Do not use `--set-metadata`
+for link arrays: Beads 1.1.2 stores that input as a string rather than an array.
 For commands that address existing tasks by ID (such as `show`, `update`, and `close`), pass each
 complete Beads ID rather than relying on the native last-touched default. Creation, collection,
 automatic-selection, and dependency commands follow their native operand and arity rules.
