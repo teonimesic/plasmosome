@@ -2,7 +2,7 @@
 id: 007
 title: Publishing the crates — packagability in CI, releases by tag
 status: draft
-intents: [002]
+intents: [013]
 ---
 
 ## Behavior
