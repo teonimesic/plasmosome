@@ -55,4 +55,10 @@ and verifies the backend snapshot shows no residue.
 Nothing here ships: the crate is `publish = false`, and a guard keeps it out of every other
 crate's non-dev dependencies.
 
+`ManifestBuilder::new(id, description)` requires the test's purpose text, and
+`.tool(name, description)` adds a named tool with its sentence. The builder constructs trusted
+test data directly; it is not a second TOML validator. The description scenario in
+`tests/attach_detach_residue.rs` instead parses a real declaration and reads the resulting
+descriptions through `ToolRegistry::lookup`, then verifies withdrawal removes them.
+
 Tests: `cargo test -p plasmosome-testkit`

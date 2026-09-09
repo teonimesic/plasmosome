@@ -3,17 +3,25 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlasmidManifest {
     pub id: String,
+    pub description: String,
     pub version: String,
     pub wasm: Option<PathBuf>,
     pub network: Option<NetworkSpec>,
     pub requires: Vec<String>,
-    pub provides_tools: Vec<String>,
+    pub provides_tools: Vec<ToolDeclaration>,
     pub secrets: Vec<SecretRef>,
     pub commands: Option<CommandsSpec>,
     pub workspace: Option<WorkspaceMount>,
     pub mock: Option<MockSpec>,
     pub model: Option<ModelSpec>,
     pub drain_ms: Option<u64>,
+}
+
+/// A tool name and the author-written description a registry consumer reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolDeclaration {
+    pub name: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -146,7 +154,12 @@ pub struct CommandsSpec {
 pub enum ManifestError {
     Io(std::io::Error),
     Parse(toml::de::Error),
-    MissingField(String),
+    Field {
+        plasmid: Option<String>,
+        field: String,
+        fix: String,
+        detail: String,
+    },
     Invalid(String),
 }
 
@@ -155,7 +168,17 @@ impl std::fmt::Display for ManifestError {
         match self {
             ManifestError::Io(e) => write!(f, "manifest io error: {e}"),
             ManifestError::Parse(e) => write!(f, "manifest toml error: {e}"),
-            ManifestError::MissingField(name) => write!(f, "manifest is missing `{name}`"),
+            ManifestError::Field {
+                plasmid,
+                field,
+                fix,
+                detail,
+            } => {
+                if let Some(id) = plasmid {
+                    write!(f, "plasmid {id}: ")?;
+                }
+                write!(f, "{field}: {detail}; write {fix}")
+            }
             ManifestError::Invalid(d) => write!(f, "invalid manifest: {d}"),
         }
     }
@@ -174,11 +197,29 @@ impl PlasmidManifest {
         let id = raw
             .get("id")
             .and_then(toml::Value::as_str)
-            .ok_or_else(|| ManifestError::MissingField("id".into()))?
+            .ok_or_else(|| ManifestError::Field {
+                plasmid: None,
+                field: "id".into(),
+                fix: "id = \"choose-a-stable-id\"".into(),
+                detail: "a string id is required".into(),
+            })?
             .to_string();
         if id.is_empty() {
             return Err(ManifestError::Invalid("id must not be empty".into()));
         }
+        let description = raw
+            .get("description")
+            .and_then(toml::Value::as_str)
+            .filter(|description| !description.trim().is_empty())
+            .ok_or_else(|| {
+                field_error(
+                    &id,
+                    "description".into(),
+                    "description = \"Describe what this plasmid is for.\"".into(),
+                    "a nonblank description string is required",
+                )
+            })?
+            .to_string();
         let version = raw
             .get("version")
             .and_then(toml::Value::as_str)
@@ -199,14 +240,8 @@ impl PlasmidManifest {
             .unwrap_or_default();
         let provides_tools = raw
             .get("provides")
-            .and_then(toml::Value::as_table)
-            .map(|table| {
-                table
-                    .values()
-                    .filter_map(|binding| binding.get("tools"))
-                    .flat_map(|tools| string_list(Some(tools)))
-                    .collect()
-            })
+            .map(|provides| parse_tools(&id, provides))
+            .transpose()?
             .unwrap_or_default();
         let secrets = raw
             .get("secrets")
@@ -303,6 +338,7 @@ impl PlasmidManifest {
         }
         Ok(PlasmidManifest {
             id,
+            description,
             version,
             wasm,
             network,
@@ -322,6 +358,80 @@ impl PlasmidManifest {
             .as_ref()
             .is_some_and(|n| n.hosts.iter().any(|h| h == host))
     }
+}
+
+fn field_error(id: &str, field: String, fix: String, detail: &str) -> ManifestError {
+    ManifestError::Field {
+        plasmid: Some(id.to_string()),
+        field,
+        fix,
+        detail: detail.to_string(),
+    }
+}
+
+fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>, ManifestError> {
+    let bindings = provides.as_table().ok_or_else(|| {
+        field_error(
+            id,
+            "provides".into(),
+            "[provides]".into(),
+            "expected a table",
+        )
+    })?;
+    let mut tools = Vec::new();
+    for (name, binding) in bindings {
+        let binding_path = || format!("provides.{}", toml::Value::String(name.clone()));
+        let binding = binding.as_table().ok_or_else(|| {
+            field_error(
+                id,
+                binding_path(),
+                format!("[{}]", binding_path()),
+                "expected a capability binding table",
+            )
+        })?;
+        let declarations = binding.get("tools");
+        let declarations = declarations.and_then(toml::Value::as_table).ok_or_else(|| {
+            let field = format!("{}.tools", binding_path());
+            let first_tool = declarations
+                .and_then(toml::Value::as_array)
+                .and_then(|names| names.first())
+                .and_then(toml::Value::as_str);
+            let (fix, detail) = if let Some(tool) = first_tool {
+                (
+                    format!(
+                        "[{field}]\n{} = \"Describe what this tool does.\"",
+                        toml::Value::String(tool.to_string())
+                    ),
+                    format!("tool {tool:?} needs a description; replace the names list with a table"),
+                )
+            } else {
+                (
+                    format!("[{field}]"),
+                    "expected a tools table; an empty table declares no tools until entries are written".into(),
+                )
+            };
+            field_error(id, field, fix, &detail)
+        })?;
+        for (name, description) in declarations {
+            let description = description
+                .as_str()
+                .filter(|description| !description.trim().is_empty())
+                .ok_or_else(|| {
+                    let key = toml::Value::String(name.clone());
+                    field_error(
+                        id,
+                        format!("{}.tools.{key}", binding_path()),
+                        format!("{key} = \"Describe what this tool does.\""),
+                        "a nonblank tool description string is required",
+                    )
+                })?;
+            tools.push(ToolDeclaration {
+                name: name.clone(),
+                description: description.to_string(),
+            });
+        }
+    }
+    Ok(tools)
 }
 
 fn parse_network(id: &str, section: &str, n: &toml::Value) -> Result<NetworkSpec, ManifestError> {
@@ -554,8 +664,124 @@ fn string_list(value: Option<&toml::Value>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn field_fix(source: &str, expected_field: &str) -> String {
+        let ManifestError::Field {
+            plasmid,
+            field,
+            fix,
+            ..
+        } = PlasmidManifest::parse(source).unwrap_err()
+        else {
+            panic!("expected a structured declaration refusal");
+        };
+        assert_eq!(plasmid.as_deref(), Some("github-pr"));
+        let actual_path: toml::Value = format!("{field} = true").parse().unwrap();
+        let expected_path: toml::Value = format!("{expected_field} = true").parse().unwrap();
+        assert_eq!(actual_path, expected_path);
+        fix
+    }
+
+    #[test]
+    fn missing_or_invalid_purpose_has_an_actionable_field_refusal() {
+        for purpose in ["", "description = 42", "description = \" \\t \""] {
+            let source = format!("id = \"github-pr\"\n{purpose}\nimpl.wasm = \"pr.wasm\"");
+            let fix = field_fix(&source, "description");
+            let repaired: toml::Value = fix.parse().unwrap();
+            assert!(!repaired["description"].as_str().unwrap().trim().is_empty());
+        }
+        let error = PlasmidManifest::parse("id = 42").unwrap_err();
+        assert!(matches!(
+            error,
+            ManifestError::Field { plasmid: None, field, .. } if field == "id"
+        ));
+    }
+
+    #[test]
+    fn malformed_tool_declarations_are_refused_instead_of_dropped() {
+        let base =
+            "id = \"github-pr\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"\n";
+        for (declaration, field) in [
+            ("provides = false", "provides"),
+            (
+                "[provides]\n\"github:tools\" = false",
+                "provides.\"github:tools\"",
+            ),
+            (
+                "[provides.\"github:tools\"]",
+                "provides.\"github:tools\".tools",
+            ),
+            (
+                "[provides.\"github:tools\"]\ntools = false",
+                "provides.\"github:tools\".tools",
+            ),
+            (
+                "[provides.\"github:tools\"]\ntools = []",
+                "provides.\"github:tools\".tools",
+            ),
+        ] {
+            let fix = field_fix(&format!("{base}{declaration}"), field);
+            let repair: toml::Value = fix.parse().unwrap();
+            assert!(repair["provides"].is_table());
+        }
+        let fix = field_fix(
+            &format!("{base}[provides.\"github:tools\"]\ntools = [\"pr.read\"]"),
+            "provides.\"github:tools\".tools",
+        );
+        let repair: toml::Value = fix.parse().unwrap();
+        assert!(repair["provides"]["github:tools"]["tools"]["pr.read"].is_str());
+    }
+
+    #[test]
+    fn tool_description_refusals_quote_the_exact_key_and_repair_entry() {
+        let base =
+            "id = \"github-pr\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"\n";
+        for description in ["42", "\"\"", "\" \\t \""] {
+            let source = format!(
+                "{base}[provides.\"git\\\"hub:tools\".tools]\n\"pr.\\\"read\" = {description}"
+            );
+            let fix = field_fix(
+                &source,
+                "provides.\"git\\\"hub:tools\".tools.\"pr.\\\"read\"",
+            );
+            let repair: toml::Value = fix.parse().unwrap();
+            assert_eq!(repair.as_table().unwrap().len(), 1);
+            assert!(!repair["pr.\"read"].as_str().unwrap().trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn equivalent_tables_and_provenance_comments_preserve_author_descriptions() {
+        let base = "id = \"github-pr\"\ndescription = \" Read pull requests. \"\nimpl.wasm = \"pr.wasm\"\n";
+        let nested =
+            format!("{base}[provides.\"github:tools\".tools]\n\"pr.read\" = \" Read the title. \"");
+        let inline = format!(
+            "{base}# Generated from an author's request.\n[provides]\n\"github:tools\" = {{ tools = {{ \"pr.read\" = \" Read the title. \" }} }}"
+        );
+        let manifest = PlasmidManifest::parse(&nested).unwrap();
+        assert_eq!(manifest, PlasmidManifest::parse(&inline).unwrap());
+        assert_eq!(manifest.description, " Read pull requests. ");
+        assert_eq!(
+            manifest.provides_tools,
+            vec![ToolDeclaration {
+                name: "pr.read".into(),
+                description: " Read the title. ".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn absent_or_empty_tools_do_not_invent_a_tool() {
+        let base = "id = \"github-pr\"\ndescription = \"Reach GitHub.\"\n[network]\nhosts = [\"api.github.com\"]\n";
+        for provides in ["", "[provides.\"github:tools\".tools]"] {
+            let manifest = PlasmidManifest::parse(&format!("{base}{provides}")).unwrap();
+            assert!(manifest.provides_tools.is_empty());
+            assert!(manifest.declares_any_host("api.github.com"));
+        }
+    }
+
     const GITHUB_PR: &str = r#"
 id = "github-pr"
+description = "Read and comment on pull requests."
 version = "0.1.0"
 impl.wasm = "components/github-pr.wasm"
 
@@ -563,7 +789,7 @@ impl.wasm = "components/github-pr.wasm"
 capabilities = ["network:hosts=api.github.com"]
 
 [provides]
-"github:tools" = { tools = ["pr.read", "pr.comment"] }
+"github:tools" = { tools = { "pr.read" = "Read a pull request.", "pr.comment" = "Post a comment on a pull request." } }
 
 [network]
 hosts = ["api.github.com"]
@@ -576,6 +802,7 @@ drain_ms = 750
 
     const GITHUB_PR_LEGACY_STRING_REFS: &str = r#"
 id = "github-pr"
+description = "Read and comment on pull requests."
 version = "0.1.0"
 impl.wasm = "components/github-pr.wasm"
 
@@ -589,6 +816,7 @@ refs = ["github-pr/token"]
 
     const GITHUB_PR_FROZEN: &str = r#"
 id = "github-pr"
+description = "Read and comment on pull requests."
 version = "0.2.0"
 impl.wasm = "components/github-pr.wasm"
 
@@ -612,6 +840,7 @@ scope = ["/repos/", "/repos/*/pulls/"]
 
     const MODEL_PROVIDER: &str = r#"
 id = "model-provider"
+description = "Complete prompts through the model endpoint."
 version = "0.1.0"
 
 [network]
@@ -630,6 +859,7 @@ credential = "model-provider/key"
 
     const WORKSPACE: &str = r#"
 id = "workspace-bind"
+description = "Make the workspace available to the cell."
 version = "0.1.0"
 
 [workspace]
@@ -638,6 +868,7 @@ mount = { backend = "virtiofs", dst = "/workspace" }
 
     const GITHUB_PR_WITH_MOCK: &str = r#"
 id = "github-pr"
+description = "Read and comment on pull requests."
 version = "0.1.0"
 impl.wasm = "components/github-pr.wasm"
 
@@ -653,6 +884,7 @@ backend = { kind = "recorded", source = "fixtures/github-pr" }
 
     const MOCK_WITHOUT_NETWORK: &str = r#"
 id = "mock-github"
+description = "Replay recorded GitHub responses."
 version = "0.1.0"
 
 [mock]
@@ -663,6 +895,7 @@ backend = { kind = "recorded", source = "fixtures/github-pr" }
 
     const MOCK_HOSTS_DRIFTED_FROM_NETWORK: &str = r#"
 id = "github-pr"
+description = "Read and comment on pull requests."
 version = "0.1.0"
 
 [network]
@@ -677,6 +910,7 @@ backend = { kind = "recorded", source = "fixtures/github-pr" }
 
     const MOCK_HOSTS_AS_SCALAR: &str = r#"
 id = "github-pr"
+description = "Read and comment on pull requests."
 version = "0.1.0"
 
 [network]
@@ -691,6 +925,7 @@ backend = { kind = "recorded", source = "fixtures/github-pr" }
 
     const MOCK_HOSTS_MIXED_TYPES: &str = r#"
 id = "github-pr"
+description = "Read and comment on pull requests."
 version = "0.1.0"
 
 [network]
@@ -705,6 +940,7 @@ backend = { kind = "recorded", source = "fixtures/github-pr" }
 
     const NETWORK_PIN_CIDRS_AS_SCALAR: &str = r#"
 id = "github-pr"
+description = "Read and comment on pull requests."
 version = "0.1.0"
 
 [network]
@@ -715,6 +951,7 @@ pin_cidrs = "140.82.112.0/20"
 
     const NETWORK_PIN_CIDRS_MIXED_TYPES: &str = r#"
 id = "github-pr"
+description = "Read and comment on pull requests."
 version = "0.1.0"
 
 [network]
@@ -725,6 +962,7 @@ pin_cidrs = ["140.82.112.0/20", 20]
 
     const NETWORK_HOSTS_AS_SCALAR: &str = r#"
 id = "github-pr"
+description = "Read and comment on pull requests."
 version = "0.1.0"
 
 [network]
@@ -734,6 +972,7 @@ ports = [443]
 
     const NETWORK_PIN_CIDRS_EMPTY: &str = r#"
 id = "github-pr"
+description = "Read and comment on pull requests."
 version = "0.1.0"
 
 [network]
@@ -744,6 +983,7 @@ pin_cidrs = []
 
     const COMMAND_NETWORK_HOSTS_AS_SCALAR: &str = r#"
 id = "e13-commands-fixture"
+description = "Run git with declared network access."
 version = "0.1.0"
 
 [network]
@@ -764,12 +1004,14 @@ ports = [443]
 
     const NETWORK_SECTION_AS_SCALAR: &str = r#"
 id = "probe"
+description = "Reach the declared network endpoint."
 version = "0.1.0"
 network = "api.github.com"
 "#;
 
     const COMMAND_NETWORK_SECTION_AS_SCALAR: &str = r#"
 id = "e13-commands-fixture"
+description = "Run git with declared network access."
 version = "0.1.0"
 
 [network]
@@ -786,6 +1028,7 @@ network = "alpha.ak.local"
 
     const COMMAND_NETWORK_PIN_CIDRS_AS_SCALAR: &str = r#"
 id = "e13-commands-fixture"
+description = "Run git with declared network access."
 version = "0.1.0"
 
 [network]
@@ -807,6 +1050,7 @@ pin_cidrs = "10.29.0.0/24"
 
     const COMMANDS_E13: &str = r#"
 id = "e13-commands-fixture"
+description = "Run git with declared network access."
 version = "0.1.0"
 
 [network]
@@ -836,7 +1080,20 @@ subject = "git"
     fn github_pr_manifest_carries_tools_network_and_drain() {
         let manifest = PlasmidManifest::parse(GITHUB_PR).unwrap();
         assert_eq!(manifest.id, "github-pr");
-        assert_eq!(manifest.provides_tools, vec!["pr.read", "pr.comment"]);
+        assert_eq!(manifest.description, "Read and comment on pull requests.");
+        assert_eq!(
+            manifest.provides_tools,
+            vec![
+                ToolDeclaration {
+                    name: "pr.comment".into(),
+                    description: "Post a comment on a pull request.".into(),
+                },
+                ToolDeclaration {
+                    name: "pr.read".into(),
+                    description: "Read a pull request.".into(),
+                },
+            ]
+        );
         assert_eq!(
             manifest.network.as_ref().unwrap().hosts,
             vec!["api.github.com".to_string()]
@@ -1071,6 +1328,7 @@ subject = "git"
     fn a_command_secret_without_any_subject_is_a_named_error() {
         let text = r#"
 id = "bad-commands"
+description = "Run gh with a scoped credential."
 [network]
 hosts = ["alpha.ak.local"]
 [commands.commands.gh]
@@ -1089,6 +1347,7 @@ scope = { path_scope = ["/api/"] }
     fn a_delivery_consumer_mismatch_is_a_named_error() {
         let text = r#"
 id = "mismatched"
+description = "Read GitHub using a git credential."
 [network]
 hosts = ["api.github.com"]
 [secrets]
@@ -1105,6 +1364,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["handle"] }]
     fn mint_is_a_legal_fallback_for_a_git_consumer() {
         let text = r#"
 id = "mint-fallback"
+description = "Read GitHub with a minted fallback credential."
 [network]
 hosts = ["api.github.com"]
 [secrets]
@@ -1121,6 +1381,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
     fn a_wasm_consumer_cannot_take_inject() {
         let text = r#"
 id = "wasm-inject"
+description = "Read GitHub from a component."
 [network]
 hosts = ["api.github.com"]
 [secrets]
@@ -1137,6 +1398,7 @@ refs = [{ id = "t", consumer = "wasm", delivery = ["inject"], scope = { path_sco
     fn an_empty_delivery_list_is_a_named_error() {
         let text = r#"
 id = "empty-delivery"
+description = "Read GitHub with an HTTP credential."
 [network]
 hosts = ["api.github.com"]
 [secrets]
@@ -1150,6 +1412,7 @@ refs = [{ id = "t", consumer = "http", delivery = [] }]
     fn inject_without_a_path_scope_is_a_named_error() {
         let text = r#"
 id = "scopeless-inject"
+description = "Read GitHub with an injected credential."
 [network]
 hosts = ["api.github.com"]
 [secrets]
@@ -1163,6 +1426,7 @@ refs = [{ id = "t", consumer = "http", delivery = ["inject"] }]
     fn a_relative_path_scope_entry_is_a_named_error() {
         let text = r#"
 id = "relative-scope"
+description = "Read GitHub within the credential scope."
 [network]
 hosts = ["api.github.com"]
 [secrets]
@@ -1176,6 +1440,7 @@ refs = [{ id = "t", consumer = "http", delivery = ["inject"], scope = { path_sco
     fn an_unknown_delivery_mode_is_a_parse_error() {
         let text = r#"
 id = "future-mode"
+description = "Read GitHub with an HTTP credential."
 [network]
 hosts = ["api.github.com"]
 [secrets]
@@ -1187,21 +1452,30 @@ refs = [{ id = "t", consumer = "http", delivery = ["teleport"] }]
 
     #[test]
     fn manifest_with_no_capability_section_is_rejected() {
-        let err = PlasmidManifest::parse("id = \"empty\"").unwrap_err();
+        let err = PlasmidManifest::parse(
+            "id = \"empty\"\ndescription = \"A declaration with no capability.\"",
+        )
+        .unwrap_err();
         assert!(matches!(err, ManifestError::Invalid(_)));
     }
 
     #[test]
     fn network_section_without_hosts_is_rejected() {
-        let err =
-            PlasmidManifest::parse("id = \"netless\"\n\n[network]\nports = [443]").unwrap_err();
+        let err = PlasmidManifest::parse(
+            "id = \"netless\"\ndescription = \"Reach a network host.\"\n\n[network]\nports = [443]",
+        )
+        .unwrap_err();
         assert!(matches!(err, ManifestError::Invalid(_)));
     }
 
     #[test]
     fn missing_id_is_rejected() {
         let err = PlasmidManifest::parse("version = \"1\"").unwrap_err();
-        assert!(matches!(err, ManifestError::MissingField(_)));
+        assert!(matches!(
+            err,
+            ManifestError::Field { plasmid: None, field, fix, .. }
+                if field == "id" && fix.parse::<toml::Value>().unwrap()["id"].is_str()
+        ));
     }
 
     #[test]

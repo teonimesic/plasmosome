@@ -3,10 +3,13 @@ use std::sync::Mutex;
 
 use plasmosome_backend::PluginId;
 
+use crate::manifest::ToolDeclaration;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryEntry {
     pub plugin: PluginId,
     pub tool: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +29,7 @@ impl std::error::Error for LookupError {}
 
 #[derive(Debug, Default)]
 pub struct ToolRegistry {
-    entries: Mutex<BTreeMap<String, PluginId>>,
+    entries: Mutex<BTreeMap<String, (PluginId, String)>>,
 }
 
 impl ToolRegistry {
@@ -34,13 +37,17 @@ impl ToolRegistry {
         ToolRegistry::default()
     }
 
-    pub fn register(&self, plugin: &PluginId, tools: &[String]) {
+    /// Registers the declared descriptions; a later registration replaces the same tool name.
+    pub fn register(&self, plugin: &PluginId, tools: &[ToolDeclaration]) {
         let mut entries = self
             .entries
             .lock()
             .expect("tool registry lock is never poisoned while held");
         for tool in tools {
-            entries.insert(tool.clone(), plugin.clone());
+            entries.insert(
+                tool.name.clone(),
+                (plugin.clone(), tool.description.clone()),
+            );
         }
     }
 
@@ -59,9 +66,10 @@ impl ToolRegistry {
             .expect("tool registry lock is never poisoned while held");
         entries
             .get(tool)
-            .map(|plugin| RegistryEntry {
+            .map(|(plugin, description)| RegistryEntry {
                 plugin: plugin.clone(),
                 tool: tool.to_string(),
+                description: description.clone(),
             })
             .ok_or_else(|| LookupError::UnknownTool(tool.to_string()))
     }
@@ -73,7 +81,7 @@ impl ToolRegistry {
             .expect("tool registry lock is never poisoned while held");
         let withdrawn: Vec<String> = entries
             .iter()
-            .filter(|(_, owner)| *owner == plugin)
+            .filter(|(_, (owner, _))| owner == plugin)
             .map(|(tool, _)| tool.clone())
             .collect();
         for tool in &withdrawn {
@@ -98,17 +106,31 @@ impl ToolRegistry {
 mod tests {
     use super::*;
 
+    fn tool(name: &str, description: &str) -> ToolDeclaration {
+        ToolDeclaration {
+            name: name.into(),
+            description: description.into(),
+        }
+    }
+
     #[test]
     fn registration_exposes_tools_sorted_by_name() {
         let registry = ToolRegistry::new();
         registry.register(
             &PluginId::from("github-pr"),
-            &["pr.comment".to_string(), "pr.read".to_string()],
+            &[
+                tool("pr.comment", "Post a comment on a pull request."),
+                tool("pr.read", "Read a pull request."),
+            ],
         );
         assert_eq!(registry.list(), vec!["pr.comment", "pr.read"]);
         assert_eq!(
-            registry.lookup("pr.read").unwrap().plugin,
-            PluginId::from("github-pr")
+            registry.lookup("pr.read").unwrap(),
+            RegistryEntry {
+                plugin: PluginId::from("github-pr"),
+                tool: "pr.read".into(),
+                description: "Read a pull request.".into(),
+            }
         );
     }
 
@@ -117,21 +139,34 @@ mod tests {
         let registry = ToolRegistry::new();
         registry.register(
             &PluginId::from("github-pr"),
-            &["pr.read".to_string(), "pr.comment".to_string()],
+            &[
+                tool("pr.read", "Read a pull request."),
+                tool("pr.comment", "Post a comment on a pull request."),
+            ],
         );
         registry.register(
             &PluginId::from("model-provider"),
-            &["model.complete".to_string()],
+            &[tool("model.complete", "Complete a model prompt.")],
         );
 
         let withdrawn = registry.withdraw_plugin(&PluginId::from("github-pr"));
 
         assert_eq!(withdrawn, vec!["pr.comment", "pr.read"]);
-        assert!(registry.lookup("pr.read").is_err());
-        assert!(registry.lookup("pr.comment").is_err());
         assert_eq!(
-            registry.lookup("model.complete").unwrap().plugin,
-            PluginId::from("model-provider"),
+            registry.lookup("pr.read"),
+            Err(LookupError::UnknownTool("pr.read".into()))
+        );
+        assert_eq!(
+            registry.lookup("pr.comment"),
+            Err(LookupError::UnknownTool("pr.comment".into()))
+        );
+        assert_eq!(
+            registry.lookup("model.complete").unwrap(),
+            RegistryEntry {
+                plugin: PluginId::from("model-provider"),
+                tool: "model.complete".into(),
+                description: "Complete a model prompt.".into(),
+            },
             "other plugins' tools must survive a withdrawal"
         );
     }
@@ -140,18 +175,46 @@ mod tests {
     fn lookup_of_unknown_tool_names_the_tool() {
         let registry = ToolRegistry::new();
         let err = registry.lookup("pr.merge").unwrap_err();
-        assert_eq!(err.to_string(), "tool 'pr.merge' is not in the registry");
+        assert_eq!(err, LookupError::UnknownTool("pr.merge".into()));
     }
 
     #[test]
     fn re_registration_after_withdrawal_restores_the_tool() {
         let registry = ToolRegistry::new();
-        registry.register(&PluginId::from("github-pr"), &["pr.read".to_string()]);
+        registry.register(
+            &PluginId::from("github-pr"),
+            &[tool("pr.read", "Read the title.")],
+        );
         registry.withdraw_plugin(&PluginId::from("github-pr"));
-        registry.register(&PluginId::from("github-pr"), &["pr.read".to_string()]);
+        registry.register(
+            &PluginId::from("github-pr"),
+            &[tool("pr.read", "Read the title and review state.")],
+        );
         assert_eq!(
-            registry.lookup("pr.read").unwrap().plugin,
-            PluginId::from("github-pr")
+            registry.lookup("pr.read").unwrap().description,
+            "Read the title and review state."
+        );
+    }
+
+    #[test]
+    fn replacement_owner_and_description_survive_previous_owner_withdrawal() {
+        let registry = ToolRegistry::new();
+        registry.register(
+            &PluginId::from("old"),
+            &[tool("pr.read", "Read the title.")],
+        );
+        registry.register(
+            &PluginId::from("new"),
+            &[tool("pr.read", "Read review state.")],
+        );
+        assert!(registry.withdraw_plugin(&PluginId::from("old")).is_empty());
+        assert_eq!(
+            registry.lookup("pr.read").unwrap(),
+            RegistryEntry {
+                plugin: PluginId::from("new"),
+                tool: "pr.read".into(),
+                description: "Read review state.".into(),
+            }
         );
     }
 }

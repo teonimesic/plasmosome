@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use plasmosome_backend::{Capability, Grant, GrantKind, LedgerEntry, PluginId};
-use plasmosome_core::manifest::{NetworkSpec, PlasmidManifest};
+use plasmosome_core::manifest::{NetworkSpec, PlasmidManifest, ToolDeclaration};
 use plasmosome_core::reconciler::{DesiredCell, DesiredState};
 use plasmosome_core::state::{CellId, GenomeName, MockMode, PlasmidRecord};
 use plasmosome_ledger::{Effect, InverseVia};
@@ -15,17 +15,20 @@ const DEFAULT_DRAIN_MS: u64 = 750;
 /// host and a drain deadline; callers that care about either replace them.
 pub struct ManifestBuilder {
     id: String,
+    description: String,
     version: String,
-    tools: Vec<String>,
+    tools: Vec<ToolDeclaration>,
     hosts: Vec<String>,
     drain_ms: u64,
 }
 
 impl ManifestBuilder {
-    /// Starts a manifest for the plasmid `id`, version `0.1.0`, with no tools.
-    pub fn new(id: &str) -> ManifestBuilder {
+    /// Starts a trusted test manifest with an author-written purpose and no tools.
+    /// This builder does not validate the declaration grammar.
+    pub fn new(id: &str, description: &str) -> ManifestBuilder {
         ManifestBuilder {
             id: id.to_string(),
+            description: description.to_string(),
             version: "0.1.0".to_string(),
             tools: Vec::new(),
             hosts: Vec::new(),
@@ -33,9 +36,12 @@ impl ManifestBuilder {
         }
     }
 
-    /// Adds a tool the plasmid provides, in the order tools are declared.
-    pub fn tool(mut self, tool: &str) -> ManifestBuilder {
-        self.tools.push(tool.to_string());
+    /// Adds a tool and its author-written description, in declaration order.
+    pub fn tool(mut self, tool: &str, description: &str) -> ManifestBuilder {
+        self.tools.push(ToolDeclaration {
+            name: tool.to_string(),
+            description: description.to_string(),
+        });
         self
     }
 
@@ -58,6 +64,7 @@ impl ManifestBuilder {
         };
         PlasmidManifest {
             id: self.id,
+            description: self.description,
             version: self.version,
             wasm: None,
             network: Some(NetworkSpec {

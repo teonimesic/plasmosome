@@ -3,6 +3,7 @@ use std::time::Duration;
 use plasmosome_backend::{
     Capability, Diff, DrainSpec, EnforcementBackend, FakeBackend, PluginId, ResidueReport,
 };
+use plasmosome_core::manifest::PlasmidManifest;
 use plasmosome_core::state::MockMode;
 use plasmosome_core::{CellId, ToolRegistry};
 use plasmosome_ledger::{Closure, Ledger};
@@ -12,9 +13,9 @@ use plasmosome_testkit::builders::{
 
 #[test]
 fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
-    let manifest = ManifestBuilder::new("github-pr")
-        .tool("pr.read")
-        .tool("pr.comment")
+    let manifest = ManifestBuilder::new("github-pr", "Read and comment on pull requests.")
+        .tool("pr.read", "Read a pull request.")
+        .tool("pr.comment", "Post a comment on a pull request.")
         .host("api.github.com")
         .drain_ms(750)
         .build();
@@ -92,4 +93,34 @@ fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
     let residue = ResidueReport::from_diff(Diff::between(&before, &after), Vec::new());
     assert_eq!(residue, ResidueReport::Empty, "{residue}");
     assert!(after.is_empty());
+}
+
+#[test]
+fn declared_descriptions_reach_registry_lookup_until_withdrawal() {
+    let source = r#"
+id = "github-pr"
+description = "Read and comment on pull requests."
+impl.wasm = "github-pr.wasm"
+
+[provides."github:tools".tools]
+"pr.read" = " Read the title and review state. "
+"pr.comment" = "Post a comment on a pull request."
+"#;
+    let manifest = PlasmidManifest::parse(source).unwrap();
+    let registry = ToolRegistry::new();
+    let plugin = PluginId::from(manifest.id.as_str());
+    registry.register(&plugin, &manifest.provides_tools);
+    assert_eq!(
+        registry.lookup("pr.read").unwrap().description,
+        " Read the title and review state. "
+    );
+    assert_eq!(
+        registry.lookup("pr.comment").unwrap().description,
+        "Post a comment on a pull request."
+    );
+    registry.withdraw_plugin(&plugin);
+    assert_eq!(
+        registry.lookup("pr.read"),
+        Err(plasmosome_core::LookupError::UnknownTool("pr.read".into()))
+    );
 }
