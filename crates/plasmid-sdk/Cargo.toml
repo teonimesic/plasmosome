@@ -9,3 +9,4 @@ publish = false
 [lib]
 name = "plasmid_sdk"
 path = "src/lib.rs"
+bench = false

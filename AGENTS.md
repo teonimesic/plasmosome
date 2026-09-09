@@ -22,22 +22,20 @@ every grant records how to undo it.
 | --- | --- |
 | `.agents/skills/planning-work` | Starting a piece of work, or briefing another agent |
 | `.agents/skills/pr-review` | Opening a PR, addressing review feedback, or merging |
-| `.agents/skills/tasks` | Finding, filing, or closing work — the layers, formats and links |
+| `.agents/skills/tasks` | Reading and mutating the shared native Beads task records |
 | `.agents/skills/heartbeat` | The start-of-session routine: reconcile, then pick what to do next |
 
 Read the one that covers what you are about to do. The rules live there, not here — this table
 is an index, and a second copy of a rule is a copy that will disagree.
 
-**Approving an intent takes a human.** An intent in `docs/intents/` becomes `status: approved` only
-on the owner's word — relayed to you by another agent, or heard directly — and never on an agent's
-own judgement, its own draft least of all. Who writes an intent does not matter; who approves it
-does. **A PR proposing an intent, or moving one to `approved`, stays a draft until the owner has
-read it and approved it there** — an agent does not mark it ready.
-The failure this prevents is an intent reaching `main` as approved that the owner never approved,
-which starts a chain of specs and tasks under a goal nobody asked for. Nothing mechanical enforces
-it, by decision: [`docs/intents/README.md`](docs/intents/README.md) has the rule in full, and
-[`docs/decisions/008-approving-an-intent-is-an-instruction.md`](docs/decisions/008-approving-an-intent-is-an-instruction.md)
-has what was rejected and why.
+**All task content lives in shared native Beads.** Start with `./tools/work-state show ID`;
+`.agents/skills/tasks` defines the workflow and
+[`spec016`](docs/specs/016-native-beads-task-authority.md) defines storage and lifecycle.
+Worktrees isolate code, not task records. Specs and intents remain versioned Markdown.
+
+**Intent approval belongs to the owner.** Read
+[`docs/intents/README.md`](docs/intents/README.md) for the approval and draft-PR gate.
+It prevents agents committing the project to goals nobody approved; Beads does not replace it.
 
 **A new rule arrives with evidence.** Before a rule is added to this file or to a skill, run the
 task twice — once with the rule appended to the prompt, once without, at least eight runs each —

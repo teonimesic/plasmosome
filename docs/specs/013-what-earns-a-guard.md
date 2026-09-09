@@ -96,8 +96,8 @@ name promising otherwise invites the rules this spec refuses.
 
 - `crates/plasmosome-guards` exists, is a workspace member, carries `publish = false`, and
   nothing in the tree claims `plasmosome-freeze-checks` enforces anything. The dated records under
-  `docs/decisions/` and `tasks/`, and this spec's own account of the change, still name it; they
-  are history, not claims of enforcement, and are not rewritten.
+  `docs/decisions/`, preserved legacy task snapshots in Beads, and this spec's own account of the
+  change still name it; they are history, not claims of enforcement, and are not rewritten.
 - The crate holds these six guards and no others:
   `only_the_held_names_are_publishable_to_a_registry`,
   `no_binary_target_takes_a_name_another_package_owns`, `testkit_is_dev_only`, the attribution
