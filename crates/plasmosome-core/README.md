@@ -15,8 +15,8 @@ one.
 
 | Module | Responsibility |
 | --- | --- |
-| `manifest` | The plasmid declaration grammar: capabilities, scopes, credential delivery, mock mode |
-| `registry` | Which plasmids exist, which are attached, and the tools they expose |
+| `manifest` | The plasmid declaration grammar: purpose, tool descriptions, capabilities, scopes, credential delivery, mock mode |
+| `registry` | Tool names, their registered owners and author-written descriptions |
 | `reconciler` | Desired state vs observed state, converging by generation |
 | `gatekeeper` | Credential custody — the cell receives handles, never secrets |
 | `session_log` | Append-only record of everything that happened in a cell |
@@ -25,11 +25,40 @@ one.
 
 ## Use
 
+A declaration requires a nonblank `description`. Tools are a table of names to nonblank
+descriptions; the former names-only list is refused. Both strings retain the author's text,
+including surrounding whitespace. For example:
+
 ```rust
 use plasmosome_core::manifest::PlasmidManifest;
+use plasmosome_core::ToolRegistry;
+use plasmosome_backend::PluginId;
 
-let manifest = PlasmidManifest::from_toml(source)?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let source = r#"
+id = "github-pr"
+description = "Read pull requests."
+impl.wasm = "github-pr.wasm"
+
+[provides."github:tools".tools]
+"pr.read" = "Read a pull request's title and review state."
+"#;
+    let manifest = PlasmidManifest::parse(source)?;
+    let registry = ToolRegistry::new();
+    registry.register(&PluginId::from(manifest.id.as_str()), &manifest.provides_tools);
+    println!("{}", registry.lookup("pr.read")?.description);
+    Ok(())
+}
 ```
+
+Missing or invalid purpose, tool declarations and missing/non-string IDs return
+`ManifestError::Field` with the declaration ID when available, a TOML field path and a suggested
+repair. Other manifest errors retain their existing forms. `ToolDeclaration` lives in
+`plasmosome_core::manifest`; `RegistryEntry` includes the tool's description.
+
+These are library APIs, not evidence of a running cell attaching or invoking a component.
+Registration preserves last-registration-wins behavior; withdrawal removes the owner's tools
+and their descriptions. `list()` still returns sorted names.
 
 Tests: `cargo test -p plasmosome-core`
 

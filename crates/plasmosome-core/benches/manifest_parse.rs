@@ -4,6 +4,7 @@ use std::hint::black_box;
 
 const MANIFEST: &str = r#"
 id = "github-pr"
+description = "Read and open pull requests."
 version = "1.2.3"
 impl.wasm = "components/github-pr.wasm"
 
@@ -11,7 +12,7 @@ impl.wasm = "components/github-pr.wasm"
 capabilities = ["network:hosts=api.github.com"]
 
 [provides]
-"github:tools" = { tools = ["pr.read", "pr.open"] }
+"github:tools" = { tools = { "pr.read" = "Read a pull request.", "pr.open" = "Open a pull request." } }
 
 [network]
 hosts = ["api.github.com"]

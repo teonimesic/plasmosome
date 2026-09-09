@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use plasmosome_backend::{Capability, Grant, GrantKind, LedgerEntry, PluginId};
-use plasmosome_core::manifest::{NetworkSpec, PlasmidManifest};
+use plasmosome_core::manifest::{NetworkSpec, PlasmidManifest, ToolDeclaration};
 use plasmosome_core::reconciler::{DesiredCell, DesiredState};
 use plasmosome_core::state::{CellId, GenomeName, MockMode, PlasmidRecord};
 use plasmosome_ledger::{Effect, InverseVia};
@@ -15,17 +15,21 @@ const DEFAULT_DRAIN_MS: u64 = 750;
 /// host and a drain deadline; callers that care about either replace them.
 pub struct ManifestBuilder {
     id: String,
+    description: String,
     version: String,
-    tools: Vec<String>,
+    tools: Vec<ToolDeclaration>,
     hosts: Vec<String>,
     drain_ms: u64,
 }
 
 impl ManifestBuilder {
-    /// Starts a manifest for the plasmid `id`, version `0.1.0`, with no tools.
-    pub fn new(id: &str) -> ManifestBuilder {
+    /// Returns a builder for plasmid `id`, using `description` as its purpose, with no tools.
+    /// Inputs are copied unchanged into trusted test data; use the manifest parser when
+    /// declaration grammar must be validated.
+    pub fn new(id: &str, description: &str) -> ManifestBuilder {
         ManifestBuilder {
             id: id.to_string(),
+            description: description.to_string(),
             version: "0.1.0".to_string(),
             tools: Vec::new(),
             hosts: Vec::new(),
@@ -33,9 +37,14 @@ impl ManifestBuilder {
         }
     }
 
-    /// Adds a tool the plasmid provides, in the order tools are declared.
-    pub fn tool(mut self, tool: &str) -> ManifestBuilder {
-        self.tools.push(tool.to_string());
+    /// Consumes the builder, appends the `tool` name and its `description` in declaration
+    /// order, and returns the updated builder. Inputs are copied without grammar validation;
+    /// callers must not treat building a fixture as proof that its TOML declaration parses.
+    pub fn tool(mut self, tool: &str, description: &str) -> ManifestBuilder {
+        self.tools.push(ToolDeclaration {
+            name: tool.to_string(),
+            description: description.to_string(),
+        });
         self
     }
 
@@ -58,6 +67,7 @@ impl ManifestBuilder {
         };
         PlasmidManifest {
             id: self.id,
+            description: self.description,
             version: self.version,
             wasm: None,
             network: Some(NetworkSpec {
