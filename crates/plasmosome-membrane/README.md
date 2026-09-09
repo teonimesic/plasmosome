@@ -14,12 +14,12 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 
 | Module | Responsibility |
 | --- | --- |
-| `vmm` | The VM process lifecycle: fork, observe, kill, and always reap |
+| `vmm` | The VM process lifecycle: fork, observe, kill, and reap on drop |
 | `readiness` | Is a broker actually serving? Readiness is an *answered query*, never a running pid or an existing file — a process can be alive and useless |
 | `brokers` | A cell's broker set, each one a `vmm::VmmChild`, asked again on every call |
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
-| `exec` | Spawning a supervised child process |
+| `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
 
 ## Use
 
@@ -43,16 +43,22 @@ treats accept-without-answer as not ready.
 
 The broker set inherits the same rule. It answers ready only once every broker answers its own
 control socket, and it asks again on every call rather than caching a past yes. One `status` call
-spends a single deadline across the whole set: brokers are asked in turn, each given whatever time
-is left, so one unresponsive broker cannot multiply the wait by the size of the set. That bounds
-the worst case, not the happy path — a healthy answer still costs the sum of the probes, so it
-grows with the number of brokers.
+shares one budget across the whole set: brokers are asked in turn, each given whatever time
+is left, and no further probe starts once that budget is spent. This avoids giving every broker
+a fresh full deadline; it is not a strict bound on elapsed time. The set cannot interrupt a probe
+that overshoots its allowance, and the real probe connects with a blocking socket call before
+setting read/write timeouts. A healthy answer still costs the sum of the sequential probes.
 
-## Nothing it starts outlives it
+## Dropping a handle cleans up its child
 
 `vmm::VmmChild` owns its forked child end to end — fork, non-blocking state poll, kill, and reap
-on drop — so a dropped handle never leaves an orphaned hypervisor behind. A cell's brokers are one
-`VmmChild` each, which is how they inherit that guarantee rather than restating it.
+on drop. Each broker in a `BrokerSet` has one `VmmChild`, so dropping the set drops those handles.
+The handle must be its child's only reaper: a competing reaper can leave the child's process
+group running. Cleanup also requires the handle to be dropped; `mem::forget` leaks the child.
+
+Killing the daemon with `SIGKILL` runs no destructors, so its brokers can keep running and its
+socket path remains. The `membrane.residue.snapshot` verb intended to observe that residue is
+still reserved in spec 001 §4, not an implemented recovery mechanism.
 
 The division of labour is a design rule held in review, not by a test: VMs, shims and brokers
 belong here, and the controller (`plasmosome-core`) must never own them. Both halves are written
