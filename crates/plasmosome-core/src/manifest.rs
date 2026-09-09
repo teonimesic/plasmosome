@@ -369,6 +369,10 @@ fn field_error(id: &str, field: String, fix: String, detail: &str) -> ManifestEr
     }
 }
 
+fn diagnostic_key(name: &str) -> String {
+    toml_edit::Key::new(name).display_repr().into_owned()
+}
+
 fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>, ManifestError> {
     let bindings = provides.as_table().ok_or_else(|| {
         field_error(
@@ -380,14 +384,11 @@ fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>,
     })?;
     let mut tools = Vec::new();
     for (name, binding) in bindings {
-        let binding_path = || format!("provides.{}", toml::Value::String(name.clone()));
+        let binding_path = || format!("provides.{}", diagnostic_key(name));
         let binding = binding.as_table().ok_or_else(|| {
-            field_error(
-                id,
-                binding_path(),
-                format!("[{}]", binding_path()),
-                "expected a capability binding table",
-            )
+            let field = binding_path();
+            let fix = format!("[{field}]");
+            field_error(id, field, fix, "expected a capability binding table")
         })?;
         let declarations = binding.get("tools");
         let declarations = declarations.and_then(toml::Value::as_table).ok_or_else(|| {
@@ -400,7 +401,7 @@ fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>,
                 (
                     format!(
                         "[{field}]\n{} = \"Describe what this tool does.\"",
-                        toml::Value::String(tool.to_string())
+                        diagnostic_key(tool)
                     ),
                     format!("tool {tool:?} needs a description; replace the names list with a table"),
                 )
@@ -417,7 +418,7 @@ fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>,
                 .as_str()
                 .filter(|description| !description.trim().is_empty())
                 .ok_or_else(|| {
-                    let key = toml::Value::String(name.clone());
+                    let key = diagnostic_key(name);
                     field_error(
                         id,
                         format!("{}.tools.{key}", binding_path()),
@@ -746,6 +747,93 @@ mod tests {
             let repair: toml::Value = fix.parse().unwrap();
             assert_eq!(repair.as_table().unwrap().len(), 1);
             assert!(!repair["pr.\"read"].as_str().unwrap().trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn diagnostic_paths_and_repairs_preserve_special_binding_and_tool_keys() {
+        let base =
+            "id = \"github-pr\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"\n";
+        for (name, quoted) in [
+            ("line\nname", "\"line\\nname\""),
+            ("both'\"quotes", "\"both'\\\"quotes\""),
+            ("tab\tname", "\"tab\\tname\""),
+            ("back\\slash", "\"back\\\\slash\""),
+            ("", "\"\""),
+        ] {
+            for (declaration, expected_path, replacement) in [
+                (
+                    format!("[provides]\n{quoted} = false"),
+                    format!("provides.{quoted}"),
+                    "{ tools = {} }",
+                ),
+                (
+                    format!("[provides.{quoted}]\ntools = [{quoted}]"),
+                    format!("provides.{quoted}.tools"),
+                    "{}",
+                ),
+                (
+                    format!("[provides.{quoted}.tools]\n{quoted} = 42"),
+                    format!("provides.{quoted}.tools.{quoted}"),
+                    "\"Read the title.\"",
+                ),
+            ] {
+                let source = format!("{base}{declaration}");
+                let ManifestError::Field {
+                    plasmid,
+                    field,
+                    fix,
+                    ..
+                } = PlasmidManifest::parse(&source).unwrap_err()
+                else {
+                    panic!("expected a structured declaration refusal for {name:?}");
+                };
+                assert_eq!(plasmid.as_deref(), Some("github-pr"));
+                let actual_path: toml::Value = format!("{field} = true").parse().unwrap();
+                let expected_path: toml::Value = format!("{expected_path} = true").parse().unwrap();
+                assert_eq!(actual_path, expected_path);
+                let repaired_path =
+                    PlasmidManifest::parse(&format!("{base}{field} = {replacement}")).unwrap();
+                let repair: toml::Value = fix.parse().unwrap();
+                if declaration.ends_with("false") {
+                    let bindings = repair["provides"].as_table().unwrap();
+                    assert_eq!(bindings.len(), 1);
+                    assert!(bindings[name].as_table().unwrap().is_empty());
+                    assert!(repaired_path.provides_tools.is_empty());
+                } else {
+                    let repaired_source = if declaration.ends_with("42") {
+                        assert_eq!(repair.as_table().unwrap().len(), 1);
+                        assert!(!repair[name].as_str().unwrap().trim().is_empty());
+                        assert_eq!(
+                            repaired_path.provides_tools,
+                            vec![ToolDeclaration {
+                                name: name.into(),
+                                description: "Read the title.".into(),
+                            }]
+                        );
+                        format!("{base}[provides.{quoted}.tools]\n{fix}")
+                    } else {
+                        assert_eq!(repair["provides"].as_table().unwrap().len(), 1);
+                        assert_eq!(
+                            repair["provides"][name]["tools"].as_table().unwrap().len(),
+                            1
+                        );
+                        assert!(
+                            !repair["provides"][name]["tools"][name]
+                                .as_str()
+                                .unwrap()
+                                .trim()
+                                .is_empty()
+                        );
+                        assert!(repaired_path.provides_tools.is_empty());
+                        format!("{base}{fix}")
+                    };
+                    let repaired = PlasmidManifest::parse(&repaired_source).unwrap();
+                    assert_eq!(repaired.provides_tools.len(), 1);
+                    assert_eq!(repaired.provides_tools[0].name, name);
+                    assert!(!repaired.provides_tools[0].description.trim().is_empty());
+                }
+            }
         }
     }
 
