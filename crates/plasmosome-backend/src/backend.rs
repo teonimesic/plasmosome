@@ -2,7 +2,8 @@ use std::fmt;
 use std::time::Duration;
 
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::ser::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::universe::{
     GrantId, OsObject, OsState, PluginId, UniverseClass, UniverseOp, UniverseRemoval,
@@ -79,7 +80,7 @@ pub struct Grant {
     pub kind: GrantKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerEntry {
     pub handle: Handle,
     pub plugin: PluginId,
@@ -101,6 +102,35 @@ impl LedgerEntry {
             id: self.handle.id,
             capability: self.capability.clone(),
         }
+    }
+}
+
+impl Serialize for LedgerEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.handle.class != self.capability.class() {
+            return Err(S::Error::custom(
+                "ledger entry handle class does not match its capability",
+            ));
+        }
+
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            handle: &'a Handle,
+            plugin: &'a PluginId,
+            capability: &'a Capability,
+            kind: &'a GrantKind,
+        }
+
+        Wire {
+            handle: &self.handle,
+            plugin: &self.plugin,
+            capability: &self.capability,
+            kind: &self.kind,
+        }
+        .serialize(serializer)
     }
 }
 

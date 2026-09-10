@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use plasmosome_backend::{
     Capability, Diff, DrainSpec, EnforcementBackend, FakeBackend, Grant, GrantId, GrantKind,
-    PluginId, UniverseOp, UniverseRemoval,
+    LedgerEntry, PluginId, UniverseClass, UniverseOp, UniverseRemoval,
 };
-use plasmosome_ledger::{Closure, Effect, InverseVia, Ledger};
+use plasmosome_ledger::{Closure, Effect, InverseVia, Ledger, LogRecord};
 
 fn file_removal(path: &str) -> UniverseRemoval {
     UniverseRemoval {
@@ -194,6 +194,42 @@ fn exact_state_wire_preserves_identity_and_refuses_ambiguous_rows() {
             "{invalid} must not decode as a grant identity"
         );
     }
+}
+
+#[test]
+fn ledger_entry_refuses_serializing_a_class_capability_mismatch() {
+    let mut backend = FakeBackend::new();
+    let entry = backend.grant(Grant {
+        plugin: PluginId::from("network"),
+        capability: Capability::SessionFile {
+            path: "skills/pr.md".to_string(),
+        },
+        kind: GrantKind::Hot,
+    });
+    let encoded = serde_json::to_string(&entry).unwrap();
+    assert_eq!(
+        serde_json::from_str::<LedgerEntry>(&encoded).unwrap(),
+        entry
+    );
+
+    let mut invalid = entry;
+    invalid.handle.class = UniverseClass::Mount;
+    assert!(serde_json::to_string(&invalid).is_err());
+}
+
+#[test]
+fn log_record_refuses_serializing_an_unsupported_format() {
+    let record = LogRecord {
+        format: 2,
+        plugin: PluginId::from("network"),
+        effect: Effect::exact("wire", InverseVia::Universe(file_removal("skills/pr.md"))),
+    };
+    let encoded = serde_json::to_string(&record).unwrap();
+    assert_eq!(serde_json::from_str::<LogRecord>(&encoded).unwrap(), record);
+
+    let mut invalid = record;
+    invalid.format = 1;
+    assert!(serde_json::to_string(&invalid).is_err());
 }
 
 #[test]

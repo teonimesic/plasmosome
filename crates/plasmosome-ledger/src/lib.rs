@@ -12,7 +12,8 @@ use std::fmt;
 use std::path::Path;
 
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::ser::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use plasmosome_backend::{
     BackendError, DrainSpec, EnforcementBackend, Handle, PluginId, UniverseRemoval,
@@ -408,11 +409,39 @@ fn replay(
     Ok(report)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogRecord {
     pub format: u8,
     pub plugin: PluginId,
     pub effect: Effect,
+}
+
+impl Serialize for LogRecord {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.format != 2 {
+            return Err(S::Error::custom(format!(
+                "unsupported ledger format {}; expected 2",
+                self.format
+            )));
+        }
+
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            format: u8,
+            plugin: &'a PluginId,
+            effect: &'a Effect,
+        }
+
+        Wire {
+            format: self.format,
+            plugin: &self.plugin,
+            effect: &self.effect,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl<'de> Deserialize<'de> for LogRecord {
