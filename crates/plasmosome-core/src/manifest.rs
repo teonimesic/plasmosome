@@ -703,15 +703,28 @@ fn validate_mock(
 fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestError> {
     for decl in &commands.commands {
         for (index, secret) in decl.secrets.iter().enumerate() {
-            if secret.subject.is_none() && decl.subject.is_none() {
+            if secret
+                .subject
+                .as_deref()
+                .is_none_or(|subject| subject.trim().is_empty())
+                && decl
+                    .subject
+                    .as_deref()
+                    .is_none_or(|subject| subject.trim().is_empty())
+            {
+                let suggestion = if decl.id.trim().is_empty() {
+                    "command-name"
+                } else {
+                    &decl.id
+                };
                 return Err(field_error(
                     id,
                     format!(
                         "commands.commands.{}.secrets.refs[{index}].subject",
                         diagnostic_key(&decl.id)
                     ),
-                    format!("subject = {}", toml::Value::String(decl.id.clone())),
-                    "a command credential requires a ref or command subject",
+                    format!("subject = {}", toml::Value::String(suggestion.into())),
+                    "a command credential requires a nonblank ref or command subject",
                 ));
             }
         }
@@ -1629,31 +1642,48 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
     }
 
     #[test]
-    fn command_ref_diagnostics_repair_the_missing_subject_in_its_own_declaration() {
-        let text = r#"
-id = "command-credential"
-description = "Run Git with its own credential."
-[commands.commands."git ops"]
-exec = ["git"]
-[[commands.commands."git ops".secrets.refs]]
-id = "token"
-consumer = "git"
-"#;
-        let error = PlasmidManifest::parse(text).unwrap_err();
-        let ManifestError::Field { field, fix, .. } = error else {
-            panic!("missing command subject has no repair context: {error:?}");
-        };
-        assert_eq!(
-            field,
-            "commands.commands.\"git ops\".secrets.refs[0].subject"
-        );
-        let repaired = PlasmidManifest::parse(&format!("{text}\n{fix}")).unwrap();
-        let command = &repaired.commands.as_ref().unwrap().commands[0];
-        assert_eq!(
-            command.secrets[0].subject.as_deref(),
-            Some(command.id.as_str())
-        );
-        assert_eq!(command.secrets[0].delivery, vec![DeliveryMode::Helper]);
+    fn command_ref_diagnostics_repair_missing_or_blank_subjects() {
+        for (command_subject, ref_subject, command_key) in [
+            ("", "", "git ops"),
+            ("", "subject = \"\"", "git ops"),
+            ("subject = \"\"", "", "git ops"),
+            ("", "subject = \" \\t\"", "git ops"),
+            ("subject = \" \\t\"", "", "git ops"),
+            ("", "", " "),
+        ] {
+            let quoted_key = toml::Value::String(command_key.into()).to_string();
+            let text = format!(
+                "id = \"command-credential\"\ndescription = \"Run Git with its own credential.\"\n\
+                 [commands.commands.{quoted_key}]\nexec = [\"git\"]\n{command_subject}\n\
+                 [[commands.commands.{quoted_key}.secrets.refs]]\nid = \"token\"\n\
+                 consumer = \"git\"\n{ref_subject}\n"
+            );
+            let error = PlasmidManifest::parse(&text).unwrap_err();
+            let ManifestError::Field { field, fix, .. } = error else {
+                panic!("missing command subject has no repair context: {error:?}");
+            };
+            assert_eq!(
+                field,
+                format!("commands.commands.{quoted_key}.secrets.refs[0].subject")
+            );
+            let mut declaration: toml::Value = toml::from_str(&text).unwrap();
+            let repair: toml::Value = toml::from_str(&fix).unwrap();
+            declaration["commands"]["commands"][command_key]["secrets"]["refs"][0]
+                .as_table_mut()
+                .unwrap()
+                .insert("subject".into(), repair["subject"].clone());
+            let repaired = PlasmidManifest::parse(&toml::to_string(&declaration).unwrap()).unwrap();
+            let command = &repaired.commands.as_ref().unwrap().commands[0];
+            assert!(
+                !command.secrets[0]
+                    .subject
+                    .as_deref()
+                    .unwrap()
+                    .trim()
+                    .is_empty()
+            );
+            assert_eq!(command.secrets[0].delivery, vec![DeliveryMode::Helper]);
+        }
     }
 
     #[test]

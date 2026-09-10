@@ -66,7 +66,7 @@ An explicit empty list is refused, not defaulted. An empty or malformed declared
 is refused rather than treated as an unscoped credential; legacy scope arrays retain every entry
 for validation. Omission also refuses relative path-scope entries for `wasm` and `git`: deriving
 a mode does not repair a malformed scope. Command refs use the same pairing and scope checks
-and still require a ref or command `subject`.
+and still require a nonblank ref or command `subject`.
 
 This implements spec011's credential-delivery amendment to spec001 in the manifest library.
 It does not choose a runtime fallback or implement delivery, credential custody or attachment.
