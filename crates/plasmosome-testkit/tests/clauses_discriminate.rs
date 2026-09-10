@@ -1,5 +1,6 @@
+use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use plasmosome_backend::{
     BackendError, Capability, DrainSpec, EnforcementBackend, Grant, GrantId, GrantKind, Handle,
@@ -36,6 +37,20 @@ enum Defect {
     GrantSubstitutesMountSource,
     GrantSubstitutesProxyRoute,
     GrantSubstitutesBrokerName,
+    GrantPanics,
+    SnapshotPanicsLikeAssertion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InfrastructureFailure {
+    Factory,
+    Grant,
+}
+
+const ASSERTION_SHAPED_INFRASTRUCTURE_PANIC: &str = "assertion failed: infrastructure sentinel";
+
+thread_local! {
+    static INFRASTRUCTURE_PANICKED: Cell<bool> = const { Cell::new(false) };
 }
 
 struct DefectiveBackend {
@@ -184,6 +199,9 @@ impl DefectiveBackend {
 
 impl EnforcementBackend for DefectiveBackend {
     fn grant(&mut self, mut grant: Grant) -> LedgerEntry {
+        if self.defect == Defect::GrantPanics {
+            std::panic::panic_any(InfrastructureFailure::Grant);
+        }
         if self.defect == Defect::GrantSubstitutesLiveOwner
             && let Some(owner) = self
                 .ledger
@@ -282,6 +300,9 @@ impl EnforcementBackend for DefectiveBackend {
     }
 
     fn snapshot_os_state(&self) -> OsState {
+        if self.defect == Defect::SnapshotPanicsLikeAssertion {
+            std::panic::panic_any(ASSERTION_SHAPED_INFRASTRUCTURE_PANIC);
+        }
         if self.mirrors_its_ledger() {
             self.mirrored_state()
         } else {
@@ -363,6 +384,48 @@ impl EnforcementBackend for DefectiveBackend {
             return Ok(());
         }
         self.state.insert(object).map(|_| ())
+    }
+}
+
+struct WitnessBackend(DefectiveBackend);
+
+fn run_as_infrastructure<T>(run: impl FnOnce() -> T) -> T {
+    match catch_unwind(AssertUnwindSafe(run)) {
+        Ok(output) => output,
+        Err(payload) => {
+            INFRASTRUCTURE_PANICKED.with(|panicked| panicked.set(true));
+            resume_unwind(payload);
+        }
+    }
+}
+
+impl EnforcementBackend for WitnessBackend {
+    fn grant(&mut self, grant: Grant) -> LedgerEntry {
+        run_as_infrastructure(|| self.0.grant(grant))
+    }
+
+    fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError> {
+        run_as_infrastructure(|| self.0.revoke(handle, drain))
+    }
+
+    fn snapshot_os_state(&self) -> OsState {
+        run_as_infrastructure(|| self.0.snapshot_os_state())
+    }
+
+    fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
+        run_as_infrastructure(|| self.0.apply(op))
+    }
+
+    fn apply_removal(
+        &mut self,
+        removal: UniverseRemoval,
+        owner: &PluginId,
+    ) -> Result<(), BackendError> {
+        run_as_infrastructure(|| self.0.apply_removal(removal, owner))
+    }
+
+    fn plant(&mut self, object: OsObject) -> Result<(), BackendError> {
+        run_as_infrastructure(|| self.0.plant(object))
     }
 }
 
@@ -450,15 +513,23 @@ fn a_stranger(handle: Handle) -> LedgerEntry {
     }
 }
 
-fn carrying(defect: Defect) -> impl Fn() -> DefectiveBackend {
-    move || DefectiveBackend::carrying(defect)
+fn carrying(defect: Defect) -> impl Fn() -> WitnessBackend {
+    move || run_as_infrastructure(|| WitnessBackend(DefectiveBackend::carrying(defect)))
+}
+
+fn factory_panics() -> WitnessBackend {
+    run_as_infrastructure(|| std::panic::panic_any(InfrastructureFailure::Factory))
 }
 
 fn assert_rejected(run: impl FnOnce()) {
-    assert!(
-        catch_unwind(AssertUnwindSafe(run)).is_err(),
-        "the defective backend passed the clause that should reject it"
-    );
+    INFRASTRUCTURE_PANICKED.with(|panicked| panicked.set(false));
+    let result = catch_unwind(AssertUnwindSafe(run));
+    let infrastructure_panicked = INFRASTRUCTURE_PANICKED.with(|panicked| panicked.replace(false));
+    match result {
+        Ok(()) => panic!("the defective backend passed the clause that should reject it"),
+        Err(payload) if infrastructure_panicked => resume_unwind(payload),
+        Err(_) => {}
+    }
 }
 
 fn run_all(defect: Defect) {
@@ -482,6 +553,40 @@ fn defect_free_backend_passes_every_clause() {
 #[test]
 fn mirror_oracle_passes_every_clause_without_proving_os_enforcement() {
     run_all(Defect::AMirrorOfItsOwnLedger);
+}
+
+#[test]
+fn infrastructure_panics_cannot_satisfy_clause_witnesses() {
+    let factory = catch_unwind(AssertUnwindSafe(|| {
+        assert_rejected(|| conformance::snapshot_never_invents_objects(factory_panics))
+    }))
+    .expect_err("a factory panic must escape the clause witness");
+    assert_eq!(
+        factory.downcast_ref::<InfrastructureFailure>(),
+        Some(&InfrastructureFailure::Factory)
+    );
+
+    let grant = catch_unwind(AssertUnwindSafe(|| {
+        assert_rejected(|| conformance::grant_is_replayable(carrying(Defect::GrantPanics)))
+    }))
+    .expect_err("a backend panic must escape the clause witness");
+    assert_eq!(
+        grant.downcast_ref::<InfrastructureFailure>(),
+        Some(&InfrastructureFailure::Grant)
+    );
+
+    let snapshot = catch_unwind(AssertUnwindSafe(|| {
+        assert_rejected(|| {
+            conformance::snapshot_never_invents_objects(carrying(
+                Defect::SnapshotPanicsLikeAssertion,
+            ))
+        })
+    }))
+    .expect_err("an assertion-shaped snapshot panic must escape the clause witness");
+    assert_eq!(
+        snapshot.downcast_ref::<&str>().copied(),
+        Some(ASSERTION_SHAPED_INFRASTRUCTURE_PANIC)
+    );
 }
 
 #[test]
