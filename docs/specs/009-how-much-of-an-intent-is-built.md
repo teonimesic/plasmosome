@@ -47,7 +47,7 @@ Empty is missing judgment, not a fourth coverage value and not a passing field.
 Anyone may copy that template to propose an intent without originating a coverage judgment.
 
 A new intent awaiting owner input may be pushed as a draft PR after the existing local root/CI
-gate. The separate coverage command still reports fault3 for its empty field, and that expected
+gate. The separate coverage command still reports fault 3 for its empty field, and that expected
 result is disclosed, never called a clean coverage check. It is not added to the pre-push gate:
 doing so would prevent the owner from seeing the proposal on GitHub. The draft stays unready
 and cannot merge until the owner supplies its value and actual prose and approves them there.
@@ -150,14 +150,25 @@ For this consumer, add one typed annotation **inside the existing native issue**
 ```
 
 This is the partial object passed to native `update ID --metadata`; the stored path is
-`metadata.closure`. Its only keys are `kind` and `closed_at`. `kind` is exactly `delivered` or
-`cancelled`; `closed_at` is a valid RFC3339 timestamp with an offset, copied exactly from that
-issue's current native `closed_at`. Missing, extra, mistyped or unknown fields, or a timestamp
-mismatch, mean unknown evidence. A reopened task is not delivered. A reconciler reopening it
-clears the annotation in the same native update with `--metadata '{"closure":null}'`; each later
-closure requires a fresh evidence annotation. Timestamp equality alone cannot detect a reused
-annotation if two closures receive the same timestamp; clearing it is part of the native workflow,
-not an authenticated history guarantee made by this read-only command.
+`metadata.closure`. A delivered annotation has exactly `kind` and `closed_at`; a cancelled
+annotation additionally requires `reason`, the explicit cancellation explanation established
+from the preserved native record. `kind` is exactly `delivered` or `cancelled`. `closed_at` is a
+valid RFC3339 timestamp with an offset, copied exactly from the issue's current native field.
+Missing, extra or mistyped keys, unknown kind, or timestamp mismatch mean unknown evidence.
+A cancelled `reason` must be a string, nonempty after trimming and not exactly `Closed` after
+trimming. That generic native default is not cancellation evidence. The reason must come from
+an actual recorded cancellation decision, not from a template or the annotation's existence.
+
+For example, the partial update for a cancellation is:
+
+```json
+{"closure": {"kind": "cancelled", "closed_at": "<exact native closed_at string>", "reason": "<recorded cancellation explanation>"}}
+```
+
+A reopened task is not delivered. An ordinary lifecycle operation reopening it clears the
+annotation in the same native update with `--metadata '{"closure":null}'`; any later closure
+requires fresh evidence. Timestamp equality alone cannot detect reuse if two closures receive
+the same timestamp. Clearing is a workflow obligation, not an authenticated history guarantee.
 
 This annotation selects the native closure's meaning; it does not replace status, reason, PR
 identity or forge evidence. It is needed because spec016 deliberately permits prose closure
@@ -165,38 +176,45 @@ reasons, and does not define a parseable cancellation field. It uses spec016's e
 metadata and partial-object update, not a second database, tracked export or custom task status.
 There is no new authenticated actor or owner approval gate for task-evidence reconciliation.
 
-A task reconciler establishes the annotation from the complete native record and actual evidence,
-records the decision and source in native notes, then writes the partial metadata object without
-altering old notes, legacy evidence, source snapshots or unrelated metadata. A cancellation
-needs an explicit reason in `close_reason`: a string that is neither empty after trimming
-whitespace nor exactly `Closed` after that trimming. `Closed` is Beads' generic no-reason default,
-not the distinct cancellation reason required by spec016. The typed annotation records the
-reconciler's decision; this check does not infer cancellation from other prose.
+Historical reconciliation annotates the closure that already exists. It never reopens or
+recloses a task and never rewrites `closed_at` or `close_reason`. This avoids both unsupported
+reason setters and native `close` side effects: Beads1.1.2 may automatically close a completed
+molecule's parent, and `--no-auto` does not disable that behavior. No parent-type exclusion or
+loss of historical coverage is needed when reconciliation makes no lifecycle transition.
 
-A notes-only cancellation or generic reason remains unknown unless a deliberate native
-reconciliation records a supported new closure. Beads1.1.2 has no `update --close-reason`;
-`close --reason` on an already-closed issue does not change it. The authorized reconciler:
+The cancellation explanation may be established from the original explicit `close_reason` or
+from preserved native notes. The annotation supplies a machine-readable explanation in either
+case while leaving the original evidence intact. A notes-only cancellation can therefore be
+reconciled without replacing a missing or generic native reason. Future cancellations still
+follow spec016's ordinary explicit-reason closure workflow; the annotation does not weaken it.
+Neither a generic `Closed` value nor arbitrary prose alone establishes a cancellation: the
+reconciler must identify the actual decision and record its source. Ambiguous history stays
+unknown; no default classification or natural-language substring matcher is introduced.
 
-1. Coordinates a pause of dispatch and coverage reads for this queue during the transition;
-   native command serialization alone does not make several commands one operation.
-2. Appends the old status, exact `closed_at`, `close_reason`, annotation and the source of the
-   cancellation decision to notes before changing them. Preserve assignee, labels, dependencies,
-   links and all unrelated fields; this is evidence repair, not release or reassignment.
-3. Uses `update ID --status open --metadata '{"closure":null}'`, then ordinary
-   `close ID --reason 'the actual evidenced cancellation reason'`. These are two commands;
-   do not use automatic continuation or permit dispatch of the temporarily reopened row.
-4. Reads the resulting closed record, verifies its actual reason and current `closed_at`,
-   and annotates that new closure with `kind: cancelled` and the returned timestamp. The old
-   annotation is not reused, even if the timestamps happen to match.
-5. Records the transition result in notes before ending the pause. If any step fails, keep the
-   pause and recorded recovery responsibility until the row is safely reconciled; never report
-   a partially reopened migration as a clean coverage observation.
+The authorized reconciler uses this bounded procedure:
 
-When that deliberate transition cannot be performed, leave the record unknown; do not imply
-a direct field update or treat a successful no-op as repair. Do not classify prose by substring,
-migrate by blanket default, or annotate an ambiguous record. Reconcile relevant historical
-closed rows before enabling the check. Until then missing annotations refuse, including imported
-delivered rows. This spec does not perform that migration.
+1. Establishes exclusive writer access by coordinating a pause of **all other native writers**
+   in the active writer clone, as well as dispatch and coverage reads. This includes linked
+   worktrees, closure/reconciliation commands and remote pulls. The single active writer rule
+   of spec016 still applies. If that pause cannot be established, do not mutate the annotation.
+   Per-command serialization is not a multi-command transaction or evidence of exclusivity.
+2. Under that pause, reads the complete record and establishes its outcome from the preserved
+   evidence and, for delivery, actual forge facts. Appends the decision, its source, and the
+   observed status, `closed_at`, `close_reason`, PR reference and prior annotation to native
+   notes. The pause covers evidence capture through the final readback, not just dispatch.
+3. Writes only the selected `metadata.closure` object using native partial metadata update.
+   No status, closure field, assignee, label, dependency, link or parent record is changed.
+4. Reads back the record before releasing the pause. Require the status, `closed_at`,
+   `close_reason`, PR reference and unrelated fields to match the captured record, allowing only
+   the intended notes append, annotation and native update timestamp. Require the annotation to
+   equal the intended object exactly. An error or mismatch retains the pause and recorded
+   recovery responsibility; correct or clear the unverified annotation before consumers resume.
+
+This reuses native metadata and coordinated quiescence, not a custom lock, conditional-update
+API or multi-row transaction engine. It promises safety while the documented writer pause is
+honored, not authentication of arbitrary native writers. Reconcile every relevant historical
+closed row before enabling the check; missing annotations still refuse, including imported
+delivered rows. This spec does not perform the migration.
 
 The command applies this table in order. "PR observation" means a successful GitHub query of
 `state,mergeCommit,mergedAt,url` for the exact canonical `external_ref` URL in this repository,
@@ -205,13 +223,21 @@ once per invocation. Require the returned URL to match and the fields to have th
 types. Never take a PR mentioned in notes as the task's PR; a replacement PR may be the reason
 for cancelling this one. The command does not parse old prose to compare its commit claims.
 
+Every forge observation has finite deadlines: at most 10 seconds to connect, 30 seconds without
+read progress, and 60 seconds total for that distinct PR observation. The whole command has a
+300-second deadline, including native input and all forge reads; activity cannot extend it.
+Use monotonic elapsed time. Any expiry follows the same unknown/input-refusal path, with no
+partial output. Cancel outstanding work and reap any owned helper processes before returning.
+Do not retry within the invocation or refresh a deadline on each response byte. A large input
+that exceeds the overall bound refuses explicitly rather than reporting partial success.
+
 | Native observation | Required evidence | Derived disposition |
 | --- | --- | --- |
 | Status is not `closed` | Structurally valid native record | Open work; not delivered, regardless of an old closure annotation |
 | `closed`, annotation absent, malformed or not bound to current `closed_at` | None can substitute for the annotation | Unknown; input refusal |
 | `closed`, kind `delivered` | Canonical `external_ref`; PR state `MERGED`; non-null merge commit with full 40-hex `oid`; non-null valid `mergedAt` | Delivered; report actual PR URL, commit and merge time |
-| `closed`, kind `cancelled`, absent or empty `external_ref` | Explicit `close_reason` meeting the rule above | Cancelled; not delivered; report the reason |
-| `closed`, kind `cancelled`, nonempty `external_ref` | Explicit `close_reason` meeting the rule above; canonical PR URL; PR state `CLOSED` with null `mergeCommit` and `mergedAt` | Cancelled; not delivered; report the reason and PR |
+| `closed`, kind `cancelled`, absent or empty `external_ref` | Valid annotation `reason` established as above | Cancelled; not delivered; report the reason |
+| `closed`, kind `cancelled`, nonempty `external_ref` | Valid annotation `reason`; canonical PR URL; PR state `CLOSED` with null `mergeCommit` and `mergedAt` | Cancelled; not delivered; report the reason and PR |
 | Any other closed combination, including failed/unavailable forge reads | No inference or fallback | Unknown; input refusal |
 
 In particular, cancellation linked to a merged or still-open PR is conflicting evidence, not
@@ -250,9 +276,9 @@ complete, `check` emits one stdout line per coverage fault, naming the intent fi
 3. Not exactly one well-formed `served:` line: absent, empty, duplicated, outside frontmatter,
    not directly after `status:`, or a value outside the three.
 
-A malformed field receives only fault3, not an attempted semantic reading as fault1 or2. Sort
+A malformed field receives only fault 3, not an attempted semantic reading as fault 1 or 2. Sort
 faults by intent ID. Exit **1** when any coverage fault occurs; otherwise exit **0** with no output.
-No input diagnostic is a fourth coverage fault, and exit2 never carries partial coverage output.
+No input diagnostic is a fourth coverage fault, and exit 2 never carries partial coverage output.
 
 Coverage comparisons do not use an intent's approval status. Shared structural validation still
 checks status declarations and accepted-to-approved chains; "approval is independent" is not a
@@ -303,7 +329,7 @@ The implementation must demonstrate all of the following; specification acceptan
 claim that these implementation proofs have run:
 
 - The template has empty `served:` directly after `status:` and the new section before `Outcome`.
-  A copied new draft contains no coverage judgment; its blank field produces fault3 while the
+  A copied new draft contains no coverage judgment; its blank field produces fault 3 while the
   PR waits on the owner, without preventing the existing pre-push gate or draft publication.
   Owner input, not an agent default, supplies its eventual valid value. Every numeric intent
   on the completed post-backfill tree has exactly one correctly positioned valid field.
@@ -320,7 +346,7 @@ claim that these implementation proofs have run:
   still refuses. A clean numeric-document sweep alone cannot satisfy this acceptance item.
 - Inject each of the three coverage faults separately. Also exercise deleted, empty, doubled,
   body-only and misplaced fields, including one valid and one invalid line in a single file.
-  Each malformed case names the file once; each coverage-only failure exits1.
+  Each malformed case names the file once; each coverage-only failure exits 1.
 - A draft intent at `partly`, and a draft intent at `substantially` with delivery, pass; so does
   `substantially` with both delivered and open tasks. `partly` passes with or without delivery.
   No approval-state combination becomes a coverage fault.
@@ -335,19 +361,26 @@ claim that these implementation proofs have run:
   unsupported kind, extra keys, missing or mismatched closure timestamp refuse. Reopening clears
   the annotation and is open work; closing again without fresh annotation refuses.
 - Explicit no-PR cancellation with a reason contributes no delivery. Cancellation with a confirmed
-  closed-unmerged PR contributes none. Exercise047/049 and the no-reference050 historical shapes
-  after deliberate reconciliation, preserving their original sources. Missing cancellation reason,
-  whitespace-only or generic `Closed` reason, cancelled-plus-merged/open PR, and
+  closed-unmerged PR contributes none. Exercise 047/049 and the no-reference 050 historical shapes
+  after deliberate reconciliation, preserving their original sources. Missing annotation reason,
+  whitespace-only or generic `Closed` annotation reason, cancelled-plus-merged/open PR, and
   delivered-plus-unmerged PR each refuse. Closed alone, URL alone, prose saying "merged", and
-  legacy evidence alone cannot establish delivery. Demonstrate notes-only reason migration with
-  the supported paused reopen/reclose/annotate sequence, preserving old closure fields in notes
-  and binding to the resulting timestamp. An unreconciled notes-only reason stays unknown.
+  legacy evidence alone cannot establish delivery. Demonstrate annotation-only reconciliation
+  of an evidenced notes-only cancellation while native `close_reason` remains absent or generic.
+  Verify all original closure fields and all parent records remain unchanged, including a
+  molecule step whose ordinary reclose could close its parent. No historical shape is dropped.
+  Without established cancellation evidence and its valid annotation, notes-only history refuses.
+  Exercise inability to establish the writer pause and mismatched final readback: neither permits
+  consumption of an unverified annotation or a false claim of transaction atomicity.
 - Delivered annotations require actual matching PR URL, `MERGED`, full commit and merge time.
   Exercise failed/offline/malformed/mismatched forge responses; each refuses rather than returning
   no deliveries. Repeated references to one PR use one observation within a run, not mixed states.
+  Exercise connection stall, stalled read, slow progressing response and total-command expiry.
+  Each returns the input refusal within its bound without derived output or surviving helpers;
+  per-request progress cannot reset the command deadline.
 - Missing/empty intent or spec directories, numeric documents missing or duplicating IDs/status,
   unknown state, invalid accepted chain, dangling099, malformed native link arrays, copied-link
-  mismatch, duplicate native ID, unavailable store and malformed native JSON each exit2 with an
+  mismatch, duplicate native ID, unavailable store and malformed native JSON each exit 2 with an
   input diagnostic and no derived/coverage stdout. Combine dangling099 with a malformed coverage
   field to prove input-fault precedence. Imported empty links are preserved, not discarded.
   Exercise the exact unbounded native invocation and successful empty and nonempty arrays.
