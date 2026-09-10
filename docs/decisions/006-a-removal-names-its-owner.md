@@ -72,11 +72,12 @@ objects. `contains` remains an any-owner diagnostic, while exact object comparis
 owner and holding remains. The owner argument chosen here remains separate from the serialized
 removal, which now carries a grant identity and complete capability.
 
-A detach may not withdraw an object its plugin does not own. `Ledger` replays
-`InverseVia::Universe` and every compensation on behalf of the ledger's own plugin, so a removal
-naming another plugin's object is refused, and a refusal stops the replay. The effects below it
-remain standing. `Effect::exact` and `Effect::compensating` therefore accept only inverses for
-objects their ledger owner may withdraw.
+Universe inverses and compensation witnesses are replayed on behalf of the ledger's plugin.
+During detach, `backend.apply_removal` checks ownership and refuses a foreign-owner object.
+A refusal stops replay and leaves the effects below it standing. `Effect::exact` and
+`Effect::compensating` record the supplied inverse without checking ledger ownership.
+`InverseVia::Backend` instead passes the exact handle to the backend and may name a grant
+issued to another plugin.
 
 Spec 017 and task 022 resolved the two precision gaps recorded by the original decision. Equal
 grants now materialize as independently removable identified objects, and the shared conformance

@@ -477,13 +477,24 @@ impl Ledger {
     }
 
     pub fn open_file(path: &Path) -> std::io::Result<Ledger> {
-        let text = std::fs::read_to_string(path)?;
+        let bytes = std::fs::read(path)?;
         let mut plugin: Option<PluginId> = None;
         let mut effects = Vec::new();
-        for (index, framed) in text.split_inclusive('\n').enumerate() {
-            let newline_ended = framed.ends_with('\n');
-            let line = framed.strip_suffix('\n').unwrap_or(framed);
-            let record = match serde_json::from_str::<LogRecord>(line) {
+        for (index, framed) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+            let newline_ended = framed.ends_with(b"\n");
+            let line = framed.strip_suffix(b"\n").unwrap_or(framed);
+            if let Err(error) = std::str::from_utf8(line)
+                && (newline_ended || error.error_len().is_some())
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid UTF-8 in ledger record on line {}: {error}",
+                        index + 1
+                    ),
+                ));
+            }
+            let record = match serde_json::from_slice::<LogRecord>(line) {
                 Ok(record) => record,
                 Err(error) if !newline_ended && error.is_eof() => break,
                 Err(error) => {

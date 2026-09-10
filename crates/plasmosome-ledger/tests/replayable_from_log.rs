@@ -204,6 +204,65 @@ fn a_crash_truncated_final_line_costs_only_its_own_entry() {
 }
 
 #[test]
+fn a_torn_utf8_tail_preserves_complete_entries_without_rewriting() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+    let first = Effect::exact(
+        "entry one",
+        InverseVia::Universe(file_removal("skills/a.md")),
+    );
+    let mut ledger = Ledger::new("github-pr");
+    ledger.push(first.clone());
+    ledger.push(Effect::exact(
+        "entry €",
+        InverseVia::Universe(file_removal("skills/b.md")),
+    ));
+    let mut encoded = Vec::new();
+    ledger.write_to(&mut encoded).unwrap();
+    let split = encoded
+        .windows("€".len())
+        .position(|bytes| bytes == "€".as_bytes())
+        .unwrap()
+        + 1;
+    let torn = &encoded[..split];
+    std::fs::write(&log, torn).unwrap();
+
+    let reopened = Ledger::open_file(&log).expect("only the incomplete final record may be lost");
+    assert_eq!(reopened.effects(), &[first]);
+    assert_eq!(std::fs::read(&log).unwrap(), torn);
+}
+
+#[test]
+fn invalid_utf8_and_complete_final_records_cannot_be_discarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+    let mut ledger = Ledger::new("github-pr");
+    ledger.push(Effect::exact(
+        "entry",
+        InverseVia::Universe(file_removal("skills/a.md")),
+    ));
+    let mut valid = Vec::new();
+    ledger.write_to(&mut valid).unwrap();
+    let prefix = br#"{"format":2,"plugin":"github-pr","effect":{"description":""#;
+    let mut invalid_byte = prefix.to_vec();
+    invalid_byte.push(0xff);
+    let mut terminated_sequence = prefix.to_vec();
+    terminated_sequence.extend_from_slice(&[0xe2, b'\n']);
+    let mut complete_with_junk = valid.strip_suffix(b"\n").unwrap().to_vec();
+    complete_with_junk.push(0xe2);
+
+    for tail in [invalid_byte, terminated_sequence, complete_with_junk] {
+        let mut input = valid.clone();
+        input.extend_from_slice(&tail);
+        std::fs::write(&log, &input).unwrap();
+        let error = Ledger::open_file(&log).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("line 2"));
+        assert_eq!(std::fs::read(&log).unwrap(), input);
+    }
+}
+
+#[test]
 fn a_log_whose_lines_disagree_on_the_plugin_is_a_named_error() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("ledger.ndjson");
