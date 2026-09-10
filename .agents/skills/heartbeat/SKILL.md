@@ -119,6 +119,37 @@ chain. Native ready is dependency eligibility, not a spec validator. Send each e
 Beads ID and its non-overlapping ownership; it uses its unique actor and atomically claims before
 creating a code worktree. A losing claimant stops, not a second implementation.
 
+## 6. Explore the product when planned work runs out
+
+When no eligible planned task can be dispatched, and existing authors and reviews are accounted
+for, try a bounded real development workflow before concluding there is no useful work. Build
+Plasmosome, run its actual commands and services, and compare the result with its documentation
+and approved goals. Explore performance, security, documentation and usability through concrete
+scenarios, not just source inspection or another queue scan. These are investigation directions,
+not a requirement to repeat an exhaustive checklist on every sweep.
+
+Use common software-development needs to choose scenarios and candidate plasmids: workspace and
+local tools, compilation and tests, Git, and API/MCP integrations. Progressively try using
+Plasmosome to develop itself, including OMP, Claude Code, Codex or another supported harness
+inside a cell. First establish that the required cell runtime, workspace, toolchain, connectivity
+and credential boundaries exist. A host process is not a cell, a declaration is not a working
+adapter, and launching a harness does not prove isolation or revocation. If a prerequisite is
+missing, capture the earliest actual refusal and the next needed capability; do not simulate
+success or bypass the boundary to claim dogfooding.
+
+Keep experiments bounded and reversible: owned temporary workspaces and processes, explicit
+time/resource limits, synthetic credentials where sufficient, and verified cleanup. Do not
+touch another author's work, production endpoints or real credentials without the necessary
+authorization. Record the revision, configuration, commands, expected and observed behavior,
+measurements and limits. Distinguish a defect, an unsupported capability and an untested idea;
+a quick timing sample is not a performance guarantee.
+
+Check native records before filing findings. Add new evidence to an existing issue rather than
+duplicate it; file concrete new work through the task skill's spec/intent admission rules.
+Propose missing authority instead of inventing approval. Rank development-plasmid and dogfooding
+gaps by the workflow they unblock. Do not repeat a known experiment without a changed input,
+implementation or question, or create speculative tasks merely to keep the queue populated.
+
 Before reporting no safe action, account for agent-resolvable prerequisites as well as ready
 implementation work across approved goals. An empty ready list or unchanged blocked labels is
 not sufficient. Repeated idle sweeps while such work remains are a work-selection failure to
