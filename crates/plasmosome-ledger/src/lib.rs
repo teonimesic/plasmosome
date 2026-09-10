@@ -11,25 +11,30 @@
 use std::fmt;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::ser::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use plasmosome_backend::{
     BackendError, DrainSpec, EnforcementBackend, Handle, PluginId, UniverseRemoval,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Inverse {
     pub description: String,
     pub via: InverseVia,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum InverseVia {
     Backend(Handle),
     Universe(UniverseRemoval),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Compensation {
     pub witness: UniverseRemoval,
 }
@@ -47,6 +52,7 @@ pub struct Policy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Reversibility {
     Exact(Inverse),
     Compensating(Compensation),
@@ -55,6 +61,7 @@ pub enum Reversibility {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Effect {
     pub description: String,
     pub reversibility: Reversibility,
@@ -402,10 +409,67 @@ fn replay(
     Ok(report)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogRecord {
+    pub format: u8,
     pub plugin: PluginId,
     pub effect: Effect,
+}
+
+impl Serialize for LogRecord {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.format != 2 {
+            return Err(S::Error::custom(format!(
+                "unsupported ledger format {}; expected 2",
+                self.format
+            )));
+        }
+
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            format: u8,
+            plugin: &'a PluginId,
+            effect: &'a Effect,
+        }
+
+        Wire {
+            format: self.format,
+            plugin: &self.plugin,
+            effect: &self.effect,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LogRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            format: u8,
+            plugin: PluginId,
+            effect: Effect,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.format != 2 {
+            return Err(D::Error::custom(format!(
+                "unsupported ledger format {}; expected 2",
+                wire.format
+            )));
+        }
+        Ok(LogRecord {
+            format: wire.format,
+            plugin: wire.plugin,
+            effect: wire.effect,
+        })
+    }
 }
 
 impl Ledger {
@@ -429,6 +493,7 @@ impl Ledger {
     pub fn write_to<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<usize> {
         for effect in &self.effects {
             let record = LogRecord {
+                format: 2,
                 plugin: self.plugin.clone(),
                 effect: effect.clone(),
             };
@@ -441,19 +506,44 @@ impl Ledger {
     }
 
     pub fn open_file(path: &Path) -> std::io::Result<Ledger> {
-        let text = std::fs::read_to_string(path)?;
+        let bytes = std::fs::read(path)?;
         let mut plugin: Option<PluginId> = None;
         let mut effects = Vec::new();
-        for line in text.lines() {
-            let Ok(record) = serde_json::from_str::<LogRecord>(line) else {
-                continue;
+        for (index, framed) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+            let newline_ended = framed.ends_with(b"\n");
+            let line = framed.strip_suffix(b"\n").unwrap_or(framed);
+            let parsed = match std::str::from_utf8(line) {
+                Ok(text) => serde_json::from_str::<LogRecord>(text),
+                Err(error) if !newline_ended && error.error_len().is_none() => {
+                    serde_json::from_slice::<LogRecord>(line)
+                }
+                Err(error) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "invalid UTF-8 in ledger record on line {}: {error}",
+                            index + 1
+                        ),
+                    ));
+                }
+            };
+            let record = match parsed {
+                Ok(record) => record,
+                Err(error) if !newline_ended && error.is_eof() => break,
+                Err(error) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid ledger record on line {}: {error}", index + 1),
+                    ));
+                }
             };
             match &plugin {
                 Some(existing) if *existing != record.plugin => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!(
-                            "ledger log mixes plugins: `{existing}` and `{}`",
+                            "ledger log mixes plugins on line {}: `{existing}` and `{}`",
+                            index + 1,
                             record.plugin
                         ),
                     ));
@@ -478,7 +568,9 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plasmosome_backend::{Capability, Diff, FakeBackend, Grant, GrantKind, UniverseOp};
+    use plasmosome_backend::{
+        Capability, Diff, FakeBackend, Grant, GrantId, GrantKind, UniverseOp,
+    };
 
     fn grant_uds(backend: &mut FakeBackend, path: &str) -> (Handle, UniverseRemoval) {
         let entry = backend.grant(Grant {
@@ -488,10 +580,7 @@ mod tests {
             },
             kind: GrantKind::Hot,
         });
-        let removal = UniverseRemoval::UnbindUds {
-            path: path.to_string(),
-        };
-        (entry.handle, removal)
+        (entry.handle, entry.removal())
     }
 
     fn grant_file(backend: &mut FakeBackend, path: &str) -> (Handle, UniverseRemoval) {
@@ -502,10 +591,7 @@ mod tests {
             },
             kind: GrantKind::Hot,
         });
-        let removal = UniverseRemoval::RemoveSessionFile {
-            path: path.to_string(),
-        };
-        (entry.handle, removal)
+        (entry.handle, entry.removal())
     }
 
     fn populate(backend: &mut FakeBackend) -> Vec<(Handle, UniverseRemoval)> {
@@ -519,18 +605,17 @@ mod tests {
     #[test]
     fn a_universe_inverse_naming_another_plugins_object_is_refused_and_leaves_it_standing() {
         let mut backend = FakeBackend::new();
-        backend
-            .apply(UniverseOp::WriteSessionFile {
-                path: "skills/pr.md".to_string(),
-                owner: PluginId::from("workspace-bind"),
-            })
-            .unwrap();
+        let op = UniverseOp::WriteSessionFile {
+            id: GrantId::new(),
+            path: "skills/pr.md".to_string(),
+            owner: PluginId::from("workspace-bind"),
+        };
+        let removal = op.removal();
+        backend.apply(op).unwrap();
         let mut ledger = Ledger::new("github-pr");
         ledger.push(Effect::exact(
             "a skill file this plugin did not write",
-            InverseVia::Universe(UniverseRemoval::RemoveSessionFile {
-                path: "skills/pr.md".to_string(),
-            }),
+            InverseVia::Universe(removal),
         ));
         let Closure::ExternalFree(mut sealed) = ledger.close() else {
             panic!("a single exact effect closes as ExternalFree");
@@ -582,12 +667,19 @@ mod tests {
             "LIFO: last pushed replays first"
         );
         assert!(backend.snapshot_os_state().is_empty());
-        assert!(report.is_quiet() || !report.is_quiet());
     }
 
     #[test]
     fn replay_over_exact_compensating_and_delayed_produces_an_empty_diff() {
         let mut backend = FakeBackend::new();
+        backend
+            .apply(UniverseOp::SetProxyMap {
+                id: GrantId::new(),
+                host: "api.github.com".to_string(),
+                route: "staged".to_string(),
+                owner: PluginId::from("github-pr"),
+            })
+            .unwrap();
         let before = backend.snapshot_os_state();
         let (handle_a, _) = grant_uds(&mut backend, "/run/ak/egressd.uds");
         let (handle_b, _) = grant_file(&mut backend, "skills/pr.md");
@@ -600,19 +692,17 @@ mod tests {
             "injected skill file",
             InverseVia::Backend(handle_b),
         ));
+        let op = UniverseOp::SetProxyMap {
+            id: GrantId::new(),
+            host: "api.github.com".to_string(),
+            route: "staged".to_string(),
+            owner: PluginId::from("github-pr"),
+        };
         ledger.push(Effect::compensating(
             "posted a comment; compensation retracts the staged row",
-            UniverseRemoval::RemoveProxyMap {
-                host: "api.github.com".to_string(),
-            },
+            op.removal(),
         ));
-        backend
-            .apply(UniverseOp::SetProxyMap {
-                host: "api.github.com".to_string(),
-                route: "staged".to_string(),
-                owner: PluginId::from("github-pr"),
-            })
-            .unwrap();
+        backend.apply(op).unwrap();
         ledger.push(Effect::delayed_unpublished(
             "outbox/github",
             "post-comment payload",

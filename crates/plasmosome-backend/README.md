@@ -19,6 +19,13 @@ The seam crosses a process boundary, so its state travels as serde data: every t
 vocabulary derives `Serialize`/`Deserialize` and holds no shared memory. Why the crate names no
 VMM or broker process is covered in `AGENTS.md`.
 
+Each successful grant gets a canonical RFC 4122 UUID-v4 identity and an exact handle made from
+its universe class and that identity. Equal capabilities remain separate holdings. Recorded
+operations and planted observations keep caller-supplied identities, while identity conflicts fail
+without replacing state. `FakeBackend::plant_residue`, the trait's `plant`, and
+`CompositeBackend::new` are fallible; the composite rejects initial observations assigned to the
+wrong leaf.
+
 ## What's inside
 
 | Piece | Responsibility |

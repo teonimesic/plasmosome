@@ -11,6 +11,13 @@ Not everything can. An effect that already left the system — a pushed commit, 
 has no inverse, and the ledger says so rather than pretending. Those are typed differently and
 require an explicit force to discard, which the record then notes.
 
+Ledger log records use format 2 and retain every exact grant identity in backend handles and
+universe inverses. Opening a log refuses unversioned, older, unsupported, or malformed complete
+records instead of guessing which holding an old lossy inverse meant. Only an incomplete final
+JSON fragment without a newline is treated as a torn write.
+A split UTF-8 character may be discarded with that incomplete final record; other invalid UTF-8
+is rejected with its record's line number. Opening a log never rewrites the source file.
+
 ## What's inside
 
 | Concept | Meaning |

@@ -8,8 +8,8 @@ publish = false
 
 [dependencies]
 serde = { workspace = true }
+uuid = { workspace = true }
 
-[dev-dependencies]
 
 [lib]
 bench = false

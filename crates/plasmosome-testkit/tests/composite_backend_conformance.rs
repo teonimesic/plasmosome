@@ -5,7 +5,7 @@ fn composite_over_fake_leaves() -> CompositeBackend {
     fn leaf() -> Box<dyn EnforcementBackend> {
         Box::new(FakeBackend::new())
     }
-    CompositeBackend::new(leaf(), leaf(), leaf())
+    CompositeBackend::new(leaf(), leaf(), leaf()).expect("empty fake leaves are valid")
 }
 
 #[test]
@@ -46,4 +46,14 @@ fn composite_backend_applies_and_removes_universe_objects() {
 #[test]
 fn composite_backend_rejects_a_handle_it_already_revoked() {
     conformance::revoke_of_a_revoked_handle_is_error(composite_over_fake_leaves);
+}
+
+#[test]
+fn composite_backend_revokes_only_its_owners_object() {
+    conformance::revoke_takes_its_owners_object(composite_over_fake_leaves);
+}
+
+#[test]
+fn composite_backend_removes_repeated_grants_independently() {
+    conformance::repeated_grants_are_independently_removable(composite_over_fake_leaves);
 }

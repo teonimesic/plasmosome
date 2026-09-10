@@ -1,7 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, btree_map};
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::ser::{SerializeSeq, SerializeStruct};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use uuid::{Uuid, Variant, Version};
+
+use crate::backend::{BackendError, Capability};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PluginId(String);
@@ -30,6 +35,62 @@ impl fmt::Display for PluginId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GrantId(Uuid);
+
+impl GrantId {
+    /// Creates a fresh probabilistically unique grant identity.
+    pub fn new() -> GrantId {
+        GrantId(Uuid::new_v4())
+    }
+}
+
+impl Default for GrantId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for GrantId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0.hyphenated())
+    }
+}
+
+impl Serialize for GrantId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for GrantId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let parsed = Uuid::parse_str(&value).map_err(D::Error::custom)?;
+        if parsed.is_nil() {
+            return Err(D::Error::custom("grant identity must not be nil"));
+        }
+        if parsed.get_variant() != Variant::RFC4122 || parsed.get_version() != Some(Version::Random)
+        {
+            return Err(D::Error::custom(
+                "grant identity must be an RFC 4122 UUID v4 value",
+            ));
+        }
+        if value != parsed.hyphenated().to_string() {
+            return Err(D::Error::custom(
+                "grant identity must be a canonical lower-case hyphenated UUID",
+            ));
+        }
+        Ok(GrantId(parsed))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum UniverseClass {
     SessionFile,
@@ -52,26 +113,37 @@ impl UniverseClass {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OsObject {
-    pub class: UniverseClass,
-    pub key: String,
+    pub id: GrantId,
     pub owner: PluginId,
+    pub capability: Capability,
 }
 
 impl OsObject {
+    pub fn class(&self) -> UniverseClass {
+        self.capability.class()
+    }
+
+    pub fn key(&self) -> String {
+        self.capability.key()
+    }
+
     pub fn describe(&self) -> String {
         format!(
-            "{} `{}` owned by `{}`",
-            self.class.as_str(),
-            self.key,
-            self.owner
+            "{} `{}` grant {} owned by `{}` with {:?}",
+            self.class().as_str(),
+            self.key(),
+            self.id,
+            self.owner,
+            self.capability
         )
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OsState {
-    objects: BTreeSet<OsObject>,
+    objects: BTreeMap<(UniverseClass, GrantId), OsObject>,
 }
 
 impl OsState {
@@ -79,42 +151,42 @@ impl OsState {
         OsState::default()
     }
 
-    pub fn insert(&mut self, object: OsObject) -> bool {
-        self.objects.insert(object)
+    pub fn insert(&mut self, object: OsObject) -> Result<bool, BackendError> {
+        let address = (object.class(), object.id);
+        match self.objects.entry(address) {
+            btree_map::Entry::Vacant(slot) => {
+                slot.insert(object);
+                Ok(true)
+            }
+            btree_map::Entry::Occupied(slot) if slot.get() == &object => Ok(false),
+            btree_map::Entry::Occupied(_) => Err(BackendError::IdentityConflict {
+                class: address.0.as_str(),
+                id: address.1,
+            }),
+        }
     }
 
-    /// Takes the object `owner` holds at `class` and `key`, if there is one.
-    /// A key may be held by several owners at once; this takes only the named
-    /// owner's, and answers `None` when that owner holds nothing there — even
-    /// where another owner does.
-    pub fn remove(
-        &mut self,
-        class: UniverseClass,
-        key: &str,
-        owner: &PluginId,
-    ) -> Option<OsObject> {
-        self.objects.take(&OsObject {
-            class,
-            key: key.to_string(),
-            owner: owner.clone(),
+    /// Takes only the object matching the exact removal, capability, and owner.
+    pub fn remove(&mut self, removal: &UniverseRemoval, owner: &PluginId) -> Option<OsObject> {
+        let address = (removal.class(), removal.id);
+        let matches = self.objects.get(&address).is_some_and(|object| {
+            object.owner == *owner && object.capability == removal.capability
+        });
+        matches.then(|| {
+            self.objects
+                .remove(&address)
+                .expect("the exact object was observed before removal")
         })
-    }
-
-    pub fn owner_of(&self, class: UniverseClass, key: &str) -> Option<PluginId> {
-        self.objects
-            .iter()
-            .find(|o| o.class == class && o.key == key)
-            .map(|o| o.owner.clone())
     }
 
     pub fn contains(&self, class: UniverseClass, key: &str) -> bool {
         self.objects
-            .iter()
-            .any(|o| o.class == class && o.key == key)
+            .values()
+            .any(|object| object.class() == class && object.key() == key)
     }
 
     pub fn objects(&self) -> impl Iterator<Item = &OsObject> {
-        self.objects.iter()
+        self.objects.values()
     }
 
     pub fn len(&self) -> usize {
@@ -124,9 +196,93 @@ impl OsState {
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
     }
+
+    /// Compares owner, complete capability, and multiplicity while ignoring grant identities.
+    pub fn canonically_equivalent(&self, other: &OsState) -> bool {
+        self.canonical_multiset() == other.canonical_multiset()
+    }
+
+    pub(crate) fn contains_id(&self, id: GrantId) -> bool {
+        [
+            UniverseClass::SessionFile,
+            UniverseClass::UdsPath,
+            UniverseClass::ProxyMap,
+            UniverseClass::BrokerPid,
+            UniverseClass::Mount,
+        ]
+        .into_iter()
+        .any(|class| self.objects.contains_key(&(class, id)))
+    }
+
+    fn canonical_multiset(&self) -> BTreeMap<(&PluginId, &Capability), usize> {
+        let mut counts = BTreeMap::new();
+        for object in self.objects.values() {
+            *counts
+                .entry((&object.owner, &object.capability))
+                .or_default() += 1;
+        }
+        counts
+    }
+}
+
+struct Objects<'a>(&'a BTreeMap<(UniverseClass, GrantId), OsObject>);
+
+impl Serialize for Objects<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for object in self.0.values() {
+            sequence.serialize_element(object)?;
+        }
+        sequence.end()
+    }
+}
+
+impl Serialize for OsState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("OsState", 1)?;
+        state.serialize_field("objects", &Objects(&self.objects))?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for OsState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct State {
+            objects: Vec<OsObject>,
+        }
+
+        let wire = State::deserialize(deserializer)?;
+        let mut state = OsState::new();
+        for object in wire.objects {
+            let address = (object.class(), object.id);
+            if state.objects.contains_key(&address) {
+                return Err(D::Error::custom(format!(
+                    "duplicate grant address {} {}",
+                    address.0.as_str(),
+                    address.1
+                )));
+            }
+            state
+                .insert(object)
+                .map_err(|error| D::Error::custom(error.to_string()))?;
+        }
+        Ok(state)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Diff {
     pub added: Vec<OsObject>,
     pub removed: Vec<OsObject>,
@@ -137,14 +293,14 @@ impl Diff {
         let added = after
             .objects
             .iter()
-            .filter(|o| !before.objects.contains(o))
-            .cloned()
+            .filter(|(address, object)| before.objects.get(*address) != Some(*object))
+            .map(|(_, object)| object.clone())
             .collect();
         let removed = before
             .objects
             .iter()
-            .filter(|o| !after.objects.contains(o))
-            .cloned()
+            .filter(|(address, object)| after.objects.get(*address) != Some(*object))
+            .map(|(_, object)| object.clone())
             .collect();
         Diff { added, removed }
     }
@@ -155,96 +311,122 @@ impl Diff {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum UniverseOp {
     WriteSessionFile {
+        id: GrantId,
         path: String,
         owner: PluginId,
     },
     BindUds {
+        id: GrantId,
         path: String,
         owner: PluginId,
     },
     SetProxyMap {
+        id: GrantId,
         host: String,
         route: String,
         owner: PluginId,
     },
     SpawnBroker {
+        id: GrantId,
         pid: u32,
         name: String,
         owner: PluginId,
     },
     AddMount {
+        id: GrantId,
         source: String,
         target: String,
         owner: PluginId,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UniverseRemoval {
-    RemoveSessionFile { path: String },
-    UnbindUds { path: String },
-    RemoveProxyMap { host: String },
-    KillBroker { pid: u32 },
-    RemoveMount { target: String },
-}
-
 impl UniverseOp {
-    pub fn object(&self) -> OsObject {
+    pub fn id(&self) -> GrantId {
         match self {
-            UniverseOp::WriteSessionFile { path, owner } => OsObject {
-                class: UniverseClass::SessionFile,
-                key: format!("session/{path}"),
-                owner: owner.clone(),
+            UniverseOp::WriteSessionFile { id, .. }
+            | UniverseOp::BindUds { id, .. }
+            | UniverseOp::SetProxyMap { id, .. }
+            | UniverseOp::SpawnBroker { id, .. }
+            | UniverseOp::AddMount { id, .. } => *id,
+        }
+    }
+
+    pub fn class(&self) -> UniverseClass {
+        match self {
+            UniverseOp::WriteSessionFile { .. } => UniverseClass::SessionFile,
+            UniverseOp::BindUds { .. } => UniverseClass::UdsPath,
+            UniverseOp::SetProxyMap { .. } => UniverseClass::ProxyMap,
+            UniverseOp::SpawnBroker { .. } => UniverseClass::BrokerPid,
+            UniverseOp::AddMount { .. } => UniverseClass::Mount,
+        }
+    }
+
+    pub fn object(&self) -> OsObject {
+        let owner = match self {
+            UniverseOp::WriteSessionFile { owner, .. }
+            | UniverseOp::BindUds { owner, .. }
+            | UniverseOp::SetProxyMap { owner, .. }
+            | UniverseOp::SpawnBroker { owner, .. }
+            | UniverseOp::AddMount { owner, .. } => owner.clone(),
+        };
+        OsObject {
+            id: self.id(),
+            owner,
+            capability: self.capability(),
+        }
+    }
+
+    pub fn removal(&self) -> UniverseRemoval {
+        UniverseRemoval {
+            id: self.id(),
+            capability: self.capability(),
+        }
+    }
+
+    fn capability(&self) -> Capability {
+        match self {
+            UniverseOp::WriteSessionFile { path, .. } => {
+                Capability::SessionFile { path: path.clone() }
+            }
+            UniverseOp::BindUds { path, .. } => Capability::UdsSocket { path: path.clone() },
+            UniverseOp::SetProxyMap { host, route, .. } => Capability::ProxyMap {
+                host: host.clone(),
+                route: route.clone(),
             },
-            UniverseOp::BindUds { path, owner } => OsObject {
-                class: UniverseClass::UdsPath,
-                key: path.clone(),
-                owner: owner.clone(),
+            UniverseOp::SpawnBroker { pid, name, .. } => Capability::Broker {
+                pid: *pid,
+                name: name.clone(),
             },
-            UniverseOp::SetProxyMap { host, owner, .. } => OsObject {
-                class: UniverseClass::ProxyMap,
-                key: host.clone(),
-                owner: owner.clone(),
-            },
-            UniverseOp::SpawnBroker { pid, owner, .. } => OsObject {
-                class: UniverseClass::BrokerPid,
-                key: format!("broker/{pid}"),
-                owner: owner.clone(),
-            },
-            UniverseOp::AddMount { target, owner, .. } => OsObject {
-                class: UniverseClass::Mount,
-                key: target.clone(),
-                owner: owner.clone(),
+            UniverseOp::AddMount { source, target, .. } => Capability::Mount {
+                source: source.clone(),
+                target: target.clone(),
             },
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UniverseRemoval {
+    pub id: GrantId,
+    pub capability: Capability,
 }
 
 impl UniverseRemoval {
     pub fn class(&self) -> UniverseClass {
-        match self {
-            UniverseRemoval::RemoveSessionFile { .. } => UniverseClass::SessionFile,
-            UniverseRemoval::UnbindUds { .. } => UniverseClass::UdsPath,
-            UniverseRemoval::RemoveProxyMap { .. } => UniverseClass::ProxyMap,
-            UniverseRemoval::KillBroker { .. } => UniverseClass::BrokerPid,
-            UniverseRemoval::RemoveMount { .. } => UniverseClass::Mount,
-        }
+        self.capability.class()
     }
 
     pub fn key(&self) -> String {
-        match self {
-            UniverseRemoval::RemoveSessionFile { path } => format!("session/{path}"),
-            UniverseRemoval::UnbindUds { path } => path.clone(),
-            UniverseRemoval::RemoveProxyMap { host } => host.clone(),
-            UniverseRemoval::KillBroker { pid } => format!("broker/{pid}"),
-            UniverseRemoval::RemoveMount { target } => target.clone(),
-        }
+        self.capability.key()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ResidueReport {
     Empty,
     Residue {
@@ -308,202 +490,235 @@ impl fmt::Display for ResidueReport {
 mod tests {
     use super::*;
 
-    fn object(class: UniverseClass, key: &str, owner: &str) -> OsObject {
+    fn object(owner: &str, capability: Capability) -> OsObject {
         OsObject {
-            class,
-            key: key.to_string(),
+            id: GrantId::new(),
             owner: PluginId::from(owner),
+            capability,
+        }
+    }
+
+    fn proxy(owner: &str, route: &str) -> OsObject {
+        object(
+            owner,
+            Capability::ProxyMap {
+                host: "api.github.com".to_string(),
+                route: route.to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn grant_identity_defaults_are_fresh_and_non_rfc_variants_are_refused() {
+        assert_ne!(GrantId::default(), GrantId::default());
+        for invalid in [
+            "00000000-0000-4000-0000-000000000001",
+            "00000000-0000-4000-c000-000000000001",
+            "00000000-0000-4000-e000-000000000001",
+        ] {
+            let deserializer =
+                serde::de::value::StrDeserializer::<serde::de::value::Error>::new(invalid);
+            assert!(GrantId::deserialize(deserializer).is_err());
         }
     }
 
     #[test]
-    fn the_universe_models_all_five_classes() {
+    fn inserting_one_address_is_idempotent_but_changed_payload_conflicts() {
         let mut state = OsState::new();
-        assert!(state.insert(object(
-            UniverseClass::SessionFile,
-            "session/skills/pr.md",
-            "github-pr"
-        )));
-        assert!(state.insert(object(
-            UniverseClass::UdsPath,
-            "/run/ak/egressd.uds",
-            "network"
-        )));
-        assert!(state.insert(object(UniverseClass::ProxyMap, "api.github.com", "github")));
-        assert!(state.insert(object(UniverseClass::BrokerPid, "broker/4242", "network")));
-        assert!(state.insert(object(UniverseClass::Mount, "/workspace", "workspace-bind")));
-        assert_eq!(state.len(), 5);
+        let original = proxy("deploy", "splice");
+        assert!(state.insert(original.clone()).unwrap());
+        assert!(!state.insert(original.clone()).unwrap());
+        let conflicting = OsObject {
+            owner: PluginId::from("audit"),
+            ..original.clone()
+        };
         assert_eq!(
-            state
-                .owner_of(UniverseClass::ProxyMap, "api.github.com")
-                .as_ref()
-                .map(PluginId::as_str),
-            Some("github")
+            state.insert(conflicting).unwrap_err(),
+            BackendError::IdentityConflict {
+                class: "proxy-map",
+                id: original.id,
+            }
         );
+        assert_eq!(state.objects().collect::<Vec<_>>(), vec![&original]);
     }
 
     #[test]
-    fn diff_reports_additions_and_removals_in_class_order() {
-        let before = OsState::new();
-        let mut after = OsState::new();
-        after.insert(object(UniverseClass::Mount, "/workspace", "workspace-bind"));
-        after.insert(object(
-            UniverseClass::SessionFile,
-            "session/skills/pr.md",
-            "github-pr",
-        ));
-        let diff = Diff::between(&before, &after);
-        assert_eq!(diff.added.len(), 2);
-        assert_eq!(diff.added[0].class, UniverseClass::SessionFile);
-        assert_eq!(diff.added[1].class, UniverseClass::Mount);
-        assert!(diff.removed.is_empty());
-        assert!(!diff.is_empty());
-    }
-
-    #[test]
-    fn diff_between_equal_states_is_empty() {
-        let mut a = OsState::new();
-        let mut b = OsState::new();
-        a.insert(object(
-            UniverseClass::UdsPath,
-            "/run/ak/egressd.uds",
-            "network",
-        ));
-        b.insert(object(
-            UniverseClass::UdsPath,
-            "/run/ak/egressd.uds",
-            "network",
-        ));
-        assert!(Diff::between(&a, &b).is_empty());
-    }
-
-    #[test]
-    fn a_change_of_owner_is_both_a_loss_and_a_leak() {
-        let mut a = OsState::new();
-        let mut b = OsState::new();
-        a.insert(object(UniverseClass::ProxyMap, "api.github.com", "github"));
-        b.insert(object(
-            UniverseClass::ProxyMap,
-            "api.github.com",
-            "someone-else",
-        ));
-        let diff = Diff::between(&a, &b);
-        assert_eq!(diff.added.len(), 1);
-        assert_eq!(diff.removed.len(), 1);
-    }
-
-    #[test]
-    fn removal_takes_the_whole_attributed_object() {
+    fn removal_requires_exact_identity_owner_and_capability() {
         let mut state = OsState::new();
-        state.insert(object(UniverseClass::BrokerPid, "broker/4242", "network"));
-        let removed = state.remove(
-            UniverseClass::BrokerPid,
-            "broker/4242",
-            &PluginId::from("network"),
-        );
-        assert_eq!(removed.unwrap().owner, PluginId::from("network"));
-        assert!(state.is_empty());
+        let held = proxy("deploy", "splice");
+        let neighbour = proxy("deploy", "audit-route");
+        state.insert(held.clone()).unwrap();
+        state.insert(neighbour.clone()).unwrap();
+
+        let wrong_capability = UniverseRemoval {
+            id: held.id,
+            capability: neighbour.capability.clone(),
+        };
         assert!(
             state
-                .remove(
-                    UniverseClass::BrokerPid,
-                    "broker/4242",
-                    &PluginId::from("network")
-                )
+                .remove(&wrong_capability, &PluginId::from("deploy"))
                 .is_none()
         );
+        assert!(
+            state
+                .remove(&held.removal(), &PluginId::from("audit"))
+                .is_none()
+        );
+        assert_eq!(state.len(), 2);
+        assert_eq!(
+            state.remove(&held.removal(), &PluginId::from("deploy")),
+            Some(held)
+        );
+        assert_eq!(state.objects().collect::<Vec<_>>(), vec![&neighbour]);
     }
 
     #[test]
-    fn removal_takes_the_named_owners_object_and_leaves_the_other_holders_alone() {
-        for (asked_for, left_standing) in [("deploy", "audit"), ("audit", "deploy")] {
-            let mut state = OsState::new();
-            for owner in ["audit", "deploy"] {
-                state.insert(object(UniverseClass::ProxyMap, "api.github.com", owner));
-            }
-            let taken = state.remove(
-                UniverseClass::ProxyMap,
-                "api.github.com",
-                &PluginId::from(asked_for),
-            );
-            assert_eq!(
-                taken.map(|o| o.owner),
-                Some(PluginId::from(asked_for)),
-                "a removal must take the owner it named, asked for {asked_for}"
-            );
-            let left: Vec<&str> = state.objects().map(|o| o.owner.as_str()).collect();
-            assert_eq!(
-                left,
-                vec![left_standing],
-                "a removal must leave every other holder of that key standing, asked for {asked_for}"
-            );
+    fn canonical_equivalence_ignores_only_identity_and_keeps_multiplicity() {
+        let capability = Capability::Mount {
+            source: "/secrets".to_string(),
+            target: "/workspace".to_string(),
+        };
+        let mut left = OsState::new();
+        let mut right = OsState::new();
+        for _ in 0..2 {
+            left.insert(object("workspace", capability.clone()))
+                .unwrap();
+            right
+                .insert(object("workspace", capability.clone()))
+                .unwrap();
+        }
+        assert_ne!(left, right);
+        assert!(left.canonically_equivalent(&right));
+
+        let survivor = right.objects().next().cloned().unwrap();
+        right
+            .remove(&survivor.removal(), &PluginId::from("workspace"))
+            .unwrap();
+        assert!(!left.canonically_equivalent(&right));
+        right.insert(object("audit", capability)).unwrap();
+        assert!(!left.canonically_equivalent(&right));
+    }
+
+    #[test]
+    fn canonical_equivalence_detects_complete_capability_changes() {
+        for (left_capability, right_capability) in [
+            (
+                Capability::Mount {
+                    source: "/source-a".to_string(),
+                    target: "/workspace".to_string(),
+                },
+                Capability::Mount {
+                    source: "/source-b".to_string(),
+                    target: "/workspace".to_string(),
+                },
+            ),
+            (
+                Capability::ProxyMap {
+                    host: "api.github.com".to_string(),
+                    route: "splice".to_string(),
+                },
+                Capability::ProxyMap {
+                    host: "api.github.com".to_string(),
+                    route: "audit".to_string(),
+                },
+            ),
+            (
+                Capability::Broker {
+                    pid: 31337,
+                    name: "egressd".to_string(),
+                },
+                Capability::Broker {
+                    pid: 31337,
+                    name: "auditd".to_string(),
+                },
+            ),
+        ] {
+            let mut left = OsState::new();
+            left.insert(object("network", left_capability)).unwrap();
+            let mut right = OsState::new();
+            right.insert(object("network", right_capability)).unwrap();
+            assert!(!left.canonically_equivalent(&right));
         }
     }
 
     #[test]
-    fn removing_a_key_held_only_by_another_owner_takes_nothing() {
-        let mut state = OsState::new();
-        state.insert(object(UniverseClass::ProxyMap, "api.github.com", "audit"));
-        assert!(
-            state
-                .remove(
-                    UniverseClass::ProxyMap,
-                    "api.github.com",
-                    &PluginId::from("deploy")
-                )
-                .is_none()
+    fn exact_diff_reports_address_or_payload_replacement_as_loss_and_leak() {
+        let before_object = proxy("deploy", "splice");
+        let after_object = OsObject {
+            id: GrantId::new(),
+            ..before_object.clone()
+        };
+        let after_id = after_object.id;
+        let baseline = object(
+            "baseline",
+            Capability::SessionFile {
+                path: "skills/baseline.md".to_string(),
+            },
         );
-        assert_eq!(state.len(), 1);
+        let mut before = OsState::new();
+        let mut after = OsState::new();
+        before.insert(baseline.clone()).unwrap();
+        after.insert(baseline.clone()).unwrap();
+        before.insert(before_object.clone()).unwrap();
+        after.insert(after_object.clone()).unwrap();
+        let diff = Diff::between(&before, &after);
+        assert_eq!(diff.removed, vec![before_object.clone()]);
+        assert_eq!(diff.added, vec![after_object.clone()]);
+        assert!(before.canonically_equivalent(&after));
+
+        let mut peers = after.clone();
+        peers.insert(before_object.clone()).unwrap();
+        let partial = Diff::between(&peers, &after);
+        assert_eq!(partial.removed, vec![before_object]);
+        assert!(partial.added.is_empty());
+
+        let conflicting_object = OsObject {
+            owner: PluginId::from("audit"),
+            ..after
+                .objects()
+                .find(|object| object.id == after_id)
+                .unwrap()
+                .clone()
+        };
+        let mut conflicting = OsState::new();
+        conflicting.insert(baseline).unwrap();
+        conflicting.insert(conflicting_object.clone()).unwrap();
+        let diff = Diff::between(&after, &conflicting);
+        assert_eq!(diff.removed, vec![after_object]);
+        assert_eq!(diff.added, vec![conflicting_object]);
     }
 
     #[test]
-    fn empty_diff_with_no_assertions_is_an_empty_report() {
-        let report =
-            ResidueReport::from_diff(Diff::between(&OsState::new(), &OsState::new()), vec![]);
-        assert_eq!(report, ResidueReport::Empty);
-        assert!(report.is_empty());
-    }
-
-    #[test]
-    fn a_planted_leak_is_named_with_its_owner() {
-        let mut leaked_state = OsState::new();
-        leaked_state.insert(object(
-            UniverseClass::SessionFile,
-            "session/cache/github-tokens",
+    fn residue_report_names_exact_identified_objects() {
+        let leaked = object(
             "github",
-        ));
-        let report =
-            ResidueReport::from_diff(Diff::between(&OsState::new(), &leaked_state), vec![]);
+            Capability::SessionFile {
+                path: "cache/github-tokens".to_string(),
+            },
+        );
+        let mut after = OsState::new();
+        after.insert(leaked.clone()).unwrap();
+        let report = ResidueReport::from_diff(Diff::between(&OsState::new(), &after), vec![]);
         let ResidueReport::Residue {
-            leaked,
+            leaked: reported,
             lost,
             assertions,
         } = report
         else {
-            panic!("a non-empty diff must never produce an empty report");
+            panic!("a non-empty diff must produce residue");
         };
-        assert_eq!(leaked.len(), 1);
-        assert_eq!(leaked[0].owner, PluginId::from("github"));
-        assert!(leaked[0].describe().contains("github"));
+        assert_eq!(reported, vec![leaked.clone()]);
+        assert!(leaked.describe().contains(&leaked.id.to_string()));
         assert!(lost.is_empty());
         assert!(assertions.is_empty());
     }
 
-    #[test]
-    fn a_force_assertion_is_recorded_alongside_any_residue() {
-        let report = ResidueReport::from_diff(
-            Diff::between(&OsState::new(), &OsState::new()),
-            vec!["operator `stefano` asserted github emission is acceptable".to_string()],
-        );
-        let is_empty = report.is_empty();
-        let ResidueReport::Residue {
-            leaked, assertions, ..
-        } = report
-        else {
-            panic!("an assertion is itself reportable residue");
-        };
-        assert!(leaked.is_empty());
-        assert_eq!(assertions.len(), 1);
-        assert!(!is_empty);
+    impl OsObject {
+        fn removal(&self) -> UniverseRemoval {
+            UniverseRemoval {
+                id: self.id,
+                capability: self.capability.clone(),
+            }
+        }
     }
 }
