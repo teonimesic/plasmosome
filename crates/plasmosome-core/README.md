@@ -59,8 +59,8 @@ forms. `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` i
 description.
 
 Credential `delivery` is optional in both `[secrets]` and command-local refs. Omission derives one
-mode: `handle` for `wasm`, `helper` for `git`, and `inject` for `http` or `process` with a declared
-nonempty absolute `scope.path_scope`; otherwise those last two use `mint`. Derivation does not
+mode: `handle` for `wasm`, `helper` for `git`, and `inject` for `http` or `process` that declare
+`scope.path_scope`; without that key those last two use `mint`. Derivation does not
 add fallback modes. Explicit lists retain their order and pass the same consumer/mode validator.
 An explicit empty list is refused, not defaulted. An empty or malformed declared injection scope
 is refused rather than treated as an unscoped credential; legacy scope arrays retain every entry
