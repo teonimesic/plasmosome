@@ -95,12 +95,13 @@ fn every_other_sole_operand_remains_a_literal_config_path() {
         );
     }
 
+    write_config(directory.path(), OsStr::new("cfg\u{fffd}"), &occupied);
     let non_utf8 = OsString::from_vec(vec![b'c', b'f', b'g', 0xff]);
     let output = output_within(membraned(directory.path(), &[&non_utf8]));
     assert_eq!(
         output.status.code(),
         Some(2),
-        "a non-UTF-8 operand reaches config reading: {output:?}"
+        "a raw non-UTF-8 operand does not alias its lossy spelling: {output:?}"
     );
     assert!(output.stdout.is_empty(), "{output:?}");
     assert!(

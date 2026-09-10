@@ -144,16 +144,17 @@ with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir="/tmp") as scr
         try:
             code = process.wait(timeout=BUILD_BUDGET)
         except BaseException:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=COMMAND_BUDGET)
-            except subprocess.TimeoutExpired:
-                abort_with_unreaped(
-                    f"owned Cargo process group leader {process.pid} did not exit after SIGKILL"
-                )
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=COMMAND_BUDGET)
+                except subprocess.TimeoutExpired:
+                    abort_with_unreaped(
+                        f"owned Cargo process group leader {process.pid} did not exit after SIGKILL"
+                    )
             raise
         require(code == 0, f"build exited {code}")
         print("build exit: 0")
@@ -450,9 +451,11 @@ residue verification or controller-to-membrane attachment. It starts no broker a
 credential or production endpoint.
 
 The 600-second build, 10-second status and 5-second process waits are client limits, not daemon or
-kernel scheduling guarantees. An uninterruptible process can defeat wall-clock termination; the
-example reports and preserves its private path rather than claiming cleanup. Ordinary daemon
-cleanup assumes no other actor replaces or renames entries inside the private directory.
+kernel scheduling guarantees. An interrupted build does not signal a Cargo process group after
+its leader is observed to have exited; the example does not discover or contain descendants that
+outlive that leader. An uninterruptible process can defeat wall-clock termination; the example
+reports and preserves its private path rather than claiming cleanup. Ordinary daemon cleanup
+assumes no other actor replaces or renames entries inside the private directory.
 `SIGKILL` skips daemon destructors and can leave socket residue. Connections are closed promptly;
 the example does not change service admission for an idle client. The block is intended for
 macOS and Linux with Unix sockets, but the recorded primary platform is macOS Apple Silicon;
