@@ -1,7 +1,7 @@
 ---
 id: 018
 title: Owned process-group supervision
-status: draft
+status: accepted
 intents: [006, 012]
 ---
 
