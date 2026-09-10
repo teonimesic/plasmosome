@@ -36,6 +36,8 @@ enum Defect {
     GrantSubstitutesMountSource,
     GrantSubstitutesProxyRoute,
     GrantSubstitutesBrokerName,
+    GrantSubstitutesRequestedOwner,
+    GrantSubstitutesRequestedCapability,
     GrantPanics,
     SnapshotPanicsLikeAssertion,
 }
@@ -196,6 +198,12 @@ impl EnforcementBackend for DefectiveBackend {
     fn grant(&mut self, mut grant: Grant) -> LedgerEntry {
         if self.defect == Defect::GrantPanics {
             std::panic::panic_any(InfrastructureFailure::Grant);
+        }
+        if self.defect == Defect::GrantSubstitutesRequestedOwner {
+            grant.plugin = PluginId::from("substituted-owner");
+        }
+        if self.defect == Defect::GrantSubstitutesRequestedCapability {
+            grant.capability = substituted_capability(&grant.capability);
         }
         if self.defect == Defect::GrantSubstitutesLiveOwner
             && let Some(owner) = self
@@ -427,6 +435,29 @@ fn remove_planted(
     })
 }
 
+fn substituted_capability(capability: &Capability) -> Capability {
+    match capability {
+        Capability::SessionFile { .. } => Capability::SessionFile {
+            path: "substituted-session".to_string(),
+        },
+        Capability::UdsSocket { .. } => Capability::UdsSocket {
+            path: "/substituted.uds".to_string(),
+        },
+        Capability::ProxyMap { host, .. } => Capability::ProxyMap {
+            host: host.clone(),
+            route: "substituted-route".to_string(),
+        },
+        Capability::Broker { pid, .. } => Capability::Broker {
+            pid: *pid,
+            name: "substituted-broker".to_string(),
+        },
+        Capability::Mount { target, .. } => Capability::Mount {
+            source: "/substituted".to_string(),
+            target: target.clone(),
+        },
+    }
+}
+
 fn shadow_of(entry: &LedgerEntry) -> OsObject {
     OsObject {
         id: GrantId::new(),
@@ -593,6 +624,24 @@ fn established_clauses_reject_their_distinct_faults() {
     assert_rejected(|| {
         conformance::live_grants_hold_distinct_handles(carrying(
             Defect::RevokeTakesAnotherResourceOfClass,
+        ))
+    });
+}
+
+#[test]
+fn snapshot_clause_rejects_returned_owner_substitution() {
+    assert_rejected(|| {
+        conformance::snapshot_never_invents_objects(carrying(
+            Defect::GrantSubstitutesRequestedOwner,
+        ))
+    });
+}
+
+#[test]
+fn snapshot_clause_rejects_returned_capability_substitution() {
+    assert_rejected(|| {
+        conformance::snapshot_never_invents_objects(carrying(
+            Defect::GrantSubstitutesRequestedCapability,
         ))
     });
 }

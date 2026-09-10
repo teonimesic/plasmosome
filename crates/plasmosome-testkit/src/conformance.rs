@@ -241,8 +241,8 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
     let mut backend = make();
     let mut expected = Vec::new();
     for grant in sample_grants() {
-        let entry = backend.grant(grant);
-        expected.push(entry.object());
+        let entry = backend.grant(grant.clone());
+        expected.push(requested_object(&entry, &grant));
     }
     let residue = residue_objects().remove(0);
     contract_expect!(

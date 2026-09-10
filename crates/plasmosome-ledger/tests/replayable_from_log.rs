@@ -16,6 +16,29 @@ fn file_removal(path: &str) -> UniverseRemoval {
     }
 }
 
+fn wire_capabilities() -> Vec<Capability> {
+    vec![
+        Capability::SessionFile {
+            path: "skills/pr.md".to_string(),
+        },
+        Capability::UdsSocket {
+            path: "/run/plasmosome/egressd.uds".to_string(),
+        },
+        Capability::ProxyMap {
+            host: "api.github.com".to_string(),
+            route: "splice".to_string(),
+        },
+        Capability::Broker {
+            pid: 31337,
+            name: "egressd".to_string(),
+        },
+        Capability::Mount {
+            source: "/secrets".to_string(),
+            target: "/workspace".to_string(),
+        },
+    ]
+}
+
 fn populate(backend: &mut FakeBackend) -> (PluginId, Vec<Effect>) {
     let op = UniverseOp::WriteSessionFile {
         id: GrantId::new(),
@@ -170,6 +193,55 @@ fn exact_state_wire_preserves_identity_and_refuses_ambiguous_rows() {
             serde_json::from_value::<GrantId>(serde_json::json!(invalid)).is_err(),
             "{invalid} must not decode as a grant identity"
         );
+    }
+}
+
+#[test]
+fn format_two_refuses_unknown_fields_in_every_nested_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+
+    for capability in wire_capabilities() {
+        let removal = UniverseRemoval {
+            id: GrantId::new(),
+            capability,
+        };
+        for (effect, pointer) in [
+            (
+                Effect::exact("wire", InverseVia::Universe(removal.clone())),
+                "/effect/reversibility/Exact/via/Universe/capability",
+            ),
+            (
+                Effect::compensating("wire", removal.clone()),
+                "/effect/reversibility/Compensating/witness/capability",
+            ),
+        ] {
+            let mut ledger = Ledger::new("owner");
+            ledger.push(effect.clone());
+            let mut valid = Vec::new();
+            ledger.write_to(&mut valid).unwrap();
+            std::fs::write(&log, &valid).unwrap();
+            assert_eq!(
+                Ledger::open_file(&log).unwrap().effects(),
+                std::slice::from_ref(&effect)
+            );
+
+            let mut malformed: serde_json::Value = serde_json::from_slice(&valid).unwrap();
+            malformed
+                .pointer_mut(pointer)
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|variants| variants.values_mut().next())
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("a structured capability payload")
+                .insert("obsolete".to_string(), serde_json::json!("discarded"));
+            let mut encoded = serde_json::to_vec(&malformed).unwrap();
+            encoded.push(b'\n');
+            std::fs::write(&log, &encoded).unwrap();
+            let error = Ledger::open_file(&log).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("line 1"));
+            assert_eq!(std::fs::read(&log).unwrap(), encoded);
+        }
     }
 }
 

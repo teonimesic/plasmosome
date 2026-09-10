@@ -37,6 +37,7 @@ impl GrantKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Capability {
     SessionFile { path: String },
     UdsSocket { path: String },
