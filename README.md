@@ -1,12 +1,15 @@
 # Plasmosome
 
-**A composable, OS-enforced capability kernel for AI agents.**
+Plasmosome is being built as a composable, OS-enforced capability kernel for AI agents. The
+intended cell is a hardware-isolated microVM with no ambient network, filesystem, credential or
+model access; revocable plasmids grant only the capabilities it needs.
 
-An agent gets a **cell**: a hardware-isolated microVM that starts with *nothing* — no network,
-no filesystem beyond its workspace, no credentials, no model access. Capabilities arrive as
-**plasmids**: modules you attach and detach while the agent is running. Removing one is enforced
-by the operating system, not by asking the agent nicely — the socket closes, the mount goes away,
-the credential handle dies.
+Today this repository does not create that cell or deliver those enforcement properties. It
+contains the first libraries plus two runnable daemons that answer status for an empty controller
+and an empty membrane.
+
+The [status-only quickstart](#status-only-quickstart) builds and exercises exactly that delivered
+surface in a private temporary directory, then stops and reaps both daemons.
 
 The name is biology's: a *plasmosome* organizes the cell; *plasmids* are the mobile modules that
 confer abilities on it and can be lost again without altering the organism.
@@ -14,41 +17,462 @@ confer abilities on it and can be lost again without altering the organism.
 ## Why
 
 Agent sandboxes today grant capabilities for a whole session and enforce them inside the harness.
-Plasmosome moves enforcement below the harness — into the VM boundary, the network topology, and
-the kernel's own access controls — so it holds for *any* workload in the cell, including agent
-software that has never heard of Plasmosome. And because every capability is a revocable object,
-it can be granted late, revoked mid-turn, and swapped for a mock.
+Plasmosome aims to move enforcement below the harness — into the VM boundary, network topology
+and kernel access controls — so it holds for any workload in the cell.
 
-## Properties
+## Design goals
+
+These are project goals, not claims about the runnable status-only daemons:
 
 - **Deny by default.** A cell begins with no capabilities. Everything is an explicit grant.
-- **Hot attach / detach.** Capabilities change while the agent runs; revocation is enforced at
-  the OS layer within milliseconds, not at the next restart.
-- **Verified reversibility.** Detaching a plasmid returns the system to its pre-attach state, and
-  the kernel *proves* it: OS state is diffed across the lifecycle and any residue is named.
-- **Mockable worlds.** Any plasmid can serve a fake backend (`simulate`), record a real one
-  (`capture`), or pass through — so agents can be evaluated against production-shaped worlds
-  without touching production.
-- **Harness-agnostic.** Enforcement does not depend on the agent cooperating.
+- **Hot attach and detach.** Capabilities change while the agent runs, with revocation enforced
+  below the harness.
+- **Verified reversibility.** Detaching a plasmid restores the prior OS state and names residue.
+- **Mockable worlds.** A plasmid can simulate, capture or pass through to a backend.
+- **Harness-agnostic enforcement.** Enforcement does not depend on agent cooperation.
 
-## Status
+## Current status
 
-Early. The architecture and its properties were established through a measured research program;
-this repository is the product build. The kernel controller, the per-cell supervisor, the typed
-reversibility ledger, and the enforcement-backend seam are landing here first.
+Early. The accepted control protocol describes the intended surface, while
+[its delivery accounting](docs/specs/001-control-protocol.md#6-how-much-of-this-is-delivered)
+states what the tree serves now.
+
+| Binary | Delivered behavior |
+| --- | --- |
+| `plasmosomed <config.json>` | Runs a foreground controller and serves only `plasmosome.status` on its configured Unix socket. |
+| `membraned <config.json>` | Runs a foreground empty/broker supervisor and serves only `membrane.status` on its configured Unix socket. |
+| `plasmid --help` | Describes the reserved author command; `plasmid new` refuses without writing a scaffold. |
+
+There is no `plasmosome` executable or `plasmosome start` command today. The accepted future
+controller methods — `plasmosome.start/list/status/stop`, `cell.new/list/status/kill/exec`,
+`exec.status` and `plasmid.list/add/remove/reload` — are not implemented except for
+`plasmosome.status`. The membrane's desired-state, observe, kill and residue methods are also
+reserved. See the [`plasmosome-core`](crates/plasmosome-core/README.md),
+[`plasmosome-membrane`](crates/plasmosome-membrane/README.md) and
+[`plasmid`](crates/plasmid/README.md) guides for their narrower current contracts.
+
+The SDK WIT, plasmid declaration scaffold, VM launch/orchestration and guest execution remain
+separate work; the scaffold and SDK residuals are tracked in native task `plasmosome-q7d`.
+
+## Status-only quickstart
+
+Run this block from the root of a trusted source checkout. It requires Rust stable and Cargo with
+edition 2024 support, the host C linker and SDK/build tools, and Python 3.11+. Git is needed only
+to obtain the checkout. Cargo may need registry network access unless the dependencies are
+already cached; `--locked` does not mean offline. The daemons require POSIX Unix sockets and
+`SIGINT`/`SIGTERM`, so Windows is unsupported.
+
+No native Beads/Dolt installation, Python package, `jq`, `nc`, `socat`, root access, hypervisor,
+guest image, MCP service, credential or external endpoint is needed. Cargo keeps its normal
+registry/cache under the user's existing `CARGO_HOME`; that cache can remain after the example.
+The checkout is trusted host code: putting build output under the temporary directory does not
+isolate an untrusted build.
+
+```shell
+python3 - <<'PY'
+import errno
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+BUILD_BUDGET = 600
+COMMAND_BUDGET = 5
+STATUS_BUDGET = 10
+RESPONSE_CAP = 65_536
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+root = Path.cwd().resolve()
+required_paths = [
+    root / "Cargo.toml",
+    root / "crates" / "plasmosome-core",
+    root / "crates" / "plasmosome-membrane",
+    root / "crates" / "plasmid",
+]
+for required in required_paths:
+    require(required.exists(), f"run from the checkout root; missing {required}")
+for executable in ("cargo", "rustc"):
+    require(shutil.which(executable), f"required executable is not on PATH: {executable}")
+
+failure = None
+scratch_path = None
+with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir="/tmp") as scratch_text:
+    scratch_path = Path(scratch_text).resolve()
+    require(
+        scratch_path.stat().st_mode & 0o077 == 0,
+        f"temporary directory is not private: {scratch_path}",
+    )
+    target = scratch_path / "target"
+    controller_socket = scratch_path / "control.uds"
+    membrane_socket = scratch_path / "membrane.uds"
+    socket_paths = [controller_socket, membrane_socket]
+    for path in socket_paths:
+        require(len(os.fsencode(path)) < 100, f"Unix socket path is too long: {path}")
+
+    processes = []
+    logs = []
+
+    def abort_with_unreaped(message):
+        print(message, file=sys.stderr)
+        print(f"incomplete cleanup; preserved private files at {scratch_path}", file=sys.stderr)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
+
+    def build_binaries():
+        argv = ["cargo", "build", "--locked", "--workspace", "--bins"]
+        environment = os.environ.copy()
+        environment["CARGO_TARGET_DIR"] = str(target)
+        print("build argv:", json.dumps(argv))
+        process = subprocess.Popen(
+            argv,
+            cwd=root,
+            env=environment,
+            start_new_session=True,
+        )
+        try:
+            code = process.wait(timeout=BUILD_BUDGET)
+        except BaseException:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=COMMAND_BUDGET)
+            except subprocess.TimeoutExpired:
+                abort_with_unreaped(
+                    f"owned Cargo process group leader {process.pid} did not exit after SIGKILL"
+                )
+            raise
+        require(code == 0, f"build exited {code}")
+        print("build exit: 0")
+
+    def run_help(binary):
+        argv = [str(binary), "--help"]
+        print("help argv:", json.dumps(argv))
+        completed = subprocess.run(
+            argv,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_BUDGET,
+            check=False,
+        )
+        require(completed.returncode == 0, f"{binary.name} --help exited {completed.returncode}")
+        require(not completed.stderr, f"{binary.name} --help wrote stderr: {completed.stderr}")
+        print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
+
+    def write_json(path, value):
+        path.write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
+
+    def start_daemon(name, binary, config, log_path):
+        argv = [str(binary), str(config)]
+        print(f"{name} argv:", json.dumps(argv))
+        log = log_path.open("w+", encoding="utf-8")
+        try:
+            process = subprocess.Popen(
+                argv,
+                cwd=root,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+        except BaseException:
+            log.close()
+            raise
+        record = {"name": name, "process": process, "log": log}
+        processes.append(record)
+        logs.append(log)
+        return record
+
+    def remaining(deadline, operation):
+        allowance = deadline - time.monotonic()
+        if allowance <= 0:
+            raise TimeoutError(f"{operation} exceeded {STATUS_BUDGET}s")
+        return allowance
+
+    def request_status(record, path, request):
+        deadline = time.monotonic() + STATUS_BUDGET
+        while True:
+            code = record["process"].poll()
+            if code is not None:
+                raise RuntimeError(f"{record['name']} exited early with {code}")
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(min(remaining(deadline, "connect"), 0.25))
+            try:
+                client.connect(str(path))
+            except OSError as error:
+                client.close()
+                if error.errno not in (errno.ENOENT, errno.ECONNREFUSED):
+                    raise
+                time.sleep(min(0.05, remaining(deadline, "connect retry")))
+                continue
+            break
+
+        payload = json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+        with client:
+            client.settimeout(remaining(deadline, "status send"))
+            client.sendall(payload)
+            received = bytearray()
+            while True:
+                client.settimeout(remaining(deadline, "status receive"))
+                chunk = client.recv(4096)
+                if not chunk:
+                    raise RuntimeError(f"{record['name']} closed before a response line")
+                received.extend(chunk)
+                require(
+                    len(received) <= RESPONSE_CAP,
+                    f"{record['name']} response exceeded {RESPONSE_CAP} bytes",
+                )
+                if b"\n" not in received:
+                    continue
+                line, extra = received.split(b"\n", 1)
+                require(not extra, f"{record['name']} sent an unexpected extra frame")
+                break
+
+        try:
+            response = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"{record['name']} sent a malformed response: {error}") from error
+        require(response.get("id") == request["id"], f"{record['name']} returned the wrong id")
+        require("error" not in response, f"{record['name']} returned an error: {response}")
+        print(f"{record['name']} request:", json.dumps(request, separators=(",", ":")))
+        print(f"{record['name']} response:", json.dumps(response, separators=(",", ":")))
+        return response
+
+    try:
+        build_binaries()
+        binaries = {
+            name: target / "debug" / name
+            for name in ("plasmosomed", "membraned", "plasmid")
+        }
+        for binary in binaries.values():
+            require(
+                binary.is_file() and os.access(binary, os.X_OK),
+                f"build did not produce executable {binary}",
+            )
+            run_help(binary)
+
+        controller_config = {
+            "control_socket": str(controller_socket),
+            "name": "quickstart",
+        }
+        membrane_config = {
+            "control_socket": str(membrane_socket),
+            "status_deadline_ms": 500,
+            "brokers": [],
+        }
+        controller_config_path = scratch_path / "controller.json"
+        membrane_config_path = scratch_path / "membrane.json"
+        write_json(controller_config_path, controller_config)
+        write_json(membrane_config_path, membrane_config)
+        print("controller config:", json.dumps(controller_config, separators=(",", ":")))
+        print("membrane config:", json.dumps(membrane_config, separators=(",", ":")))
+
+        controller = start_daemon(
+            "plasmosomed",
+            binaries["plasmosomed"],
+            controller_config_path,
+            scratch_path / "plasmosomed.log",
+        )
+        membrane = start_daemon(
+            "membraned",
+            binaries["membraned"],
+            membrane_config_path,
+            scratch_path / "membraned.log",
+        )
+
+        controller_request = {
+            "id": 1,
+            "method": "plasmosome.status",
+            "params": {"name": "quickstart"},
+        }
+        controller_response = request_status(controller, controller_socket, controller_request)
+        result = controller_response.get("result")
+        require(isinstance(result, dict), f"controller result is not an object: {result}")
+        require(result.get("name") == "quickstart", f"unexpected controller name: {result}")
+        require(result.get("state") == "running", f"unexpected controller state: {result}")
+        require(result.get("ready") is True, f"controller did not answer ready: {result}")
+        require(result.get("cells") == [], f"controller unexpectedly has cells: {result}")
+        controller_details = result.get("controller")
+        require(
+            isinstance(controller_details, dict),
+            f"controller details are not an object: {result}",
+        )
+        require(
+            controller_details.get("ledger_generation") == 0,
+            f"unexpected ledger generation: {result}",
+        )
+        uptime = controller_details.get("uptime_ms")
+        require(
+            type(uptime) is int and uptime >= 0,
+            f"controller uptime is not a nonnegative integer: {result}",
+        )
+
+        membrane_request = {"id": 2, "method": "membrane.status", "params": {}}
+        membrane_response = request_status(membrane, membrane_socket, membrane_request)
+        require(
+            membrane_response.get("result") == {"ready": False, "state": "empty"},
+            f"unexpected empty membrane status: {membrane_response}",
+        )
+
+        for record in processes:
+            process = record["process"]
+            require(process.poll() is None, f"{record['name']} exited before shutdown")
+            process.send_signal(signal.SIGTERM)
+            code = process.wait(timeout=COMMAND_BUDGET)
+            print(f"{record['name']} graceful exit: {code}")
+            require(code == 0, f"{record['name']} shutdown exited {code}")
+        for path in socket_paths:
+            require(not path.exists(), f"daemon left its socket path behind: {path}")
+        print("socket cleanup: both paths absent before temporary-directory removal")
+    except BaseException as error:
+        failure = error
+    finally:
+        fallback_used = []
+        cleanup_errors = []
+        unreaped = []
+        for record in processes:
+            process = record["process"]
+            try:
+                running = process.poll() is None
+            except BaseException as error:
+                cleanup_errors.append(f"{record['name']} state: {error}")
+                unreaped.append((record["name"], process.pid))
+                continue
+            if not running:
+                continue
+            try:
+                process.send_signal(signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except BaseException as error:
+                cleanup_errors.append(f"{record['name']} SIGTERM: {error}")
+            try:
+                process.wait(timeout=COMMAND_BUDGET)
+            except subprocess.TimeoutExpired:
+                fallback_used.append(record["name"])
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                except BaseException as error:
+                    cleanup_errors.append(f"{record['name']} kill: {error}")
+                try:
+                    process.wait(timeout=COMMAND_BUDGET)
+                except subprocess.TimeoutExpired:
+                    unreaped.append((record["name"], process.pid))
+                except BaseException as error:
+                    cleanup_errors.append(f"{record['name']} post-kill wait: {error}")
+            except BaseException as error:
+                cleanup_errors.append(f"{record['name']} wait: {error}")
+            try:
+                if process.poll() is None and (record["name"], process.pid) not in unreaped:
+                    unreaped.append((record["name"], process.pid))
+            except BaseException as error:
+                cleanup_errors.append(f"{record['name']} final state: {error}")
+                if (record["name"], process.pid) not in unreaped:
+                    unreaped.append((record["name"], process.pid))
+        cleanup_failures = []
+        if fallback_used:
+            cleanup_failures.append(f"forced cleanup was required for {fallback_used}")
+        cleanup_failures.extend(cleanup_errors)
+        if cleanup_failures:
+            detail = "; ".join(cleanup_failures)
+            failure = RuntimeError(detail if failure is None else f"{failure}; {detail}")
+        if unreaped:
+            for log in logs:
+                try:
+                    log.flush()
+                except BaseException:
+                    pass
+            abort_with_unreaped(f"owned daemon processes did not reap: {unreaped}")
+        if failure is not None:
+            for record in processes:
+                print(
+                    f"{record['name']} cleanup observed exit: {record['process'].returncode}",
+                    file=sys.stderr,
+                )
+            socket_residue = [str(path) for path in socket_paths if path.exists()]
+            if socket_residue:
+                failure = RuntimeError(
+                    f"{failure}; cleanup left socket paths behind: {socket_residue}"
+                )
+            else:
+                print(
+                    "cleanup socket check: both paths absent before temporary-directory removal",
+                    file=sys.stderr,
+                )
+        if failure is not None:
+            print(f"scenario failed: {failure}", file=sys.stderr)
+            for record in processes:
+                log = record["log"]
+                log.flush()
+                log.seek(0)
+                print(
+                    f"--- {record['name']} log ---\n{log.read()}",
+                    file=sys.stderr,
+                    end="",
+                )
+        for log in logs:
+            log.close()
+
+require(
+    scratch_path is not None and not scratch_path.exists(),
+    f"temporary directory still exists: {scratch_path}",
+)
+print(f"scratch cleanup: removed {scratch_path}")
+if failure is not None:
+    raise failure
+print("status-only quickstart completed successfully")
+PY
+```
+
+The controller response has `ready:true`, `cells:[]` and `ledger_generation:0`: the controller can
+answer status, but no guest exists. The independently started membrane returns exactly
+`{"ready":false,"state":"empty"}` because `brokers:[]`; that is the expected successful response,
+not a failed daemon start. Its `status_deadline_ms` is a broker probe budget, not a strict elapsed
+bound.
+
+This example creates no cell and launches no OMP, Claude Code, Codex or other agent harness. It
+does not establish hardware/OS isolation, enforcement, credential custody, attach/detach,
+residue verification or controller-to-membrane attachment. It starts no broker and uses no real
+credential or production endpoint.
+
+The 600-second build, 10-second status and 5-second process waits are client limits, not daemon or
+kernel scheduling guarantees. An uninterruptible process can defeat wall-clock termination; the
+example reports and preserves its private path rather than claiming cleanup. Ordinary daemon
+cleanup assumes no other actor replaces or renames entries inside the private directory.
+`SIGKILL` skips daemon destructors and can leave socket residue. Connections are closed promptly;
+the example does not change service admission for an idle client. The block is intended for
+macOS and Linux with Unix sockets, but the recorded primary platform is macOS Apple Silicon;
+running it here is not evidence of a Linux run.
 
 ## Architecture
 
+The component boundaries below describe the intended architecture. A listed crate is not evidence
+that its complete runtime role is delivered.
+
 | Component | Role |
 | --- | --- |
-| `plasmosome-core` | The controller: plasmid registry, desired-state reconciler, manifest grammar, session log, credential gatekeeper |
-| `plasmosome-membrane` | The per-cell supervisor: owns the cell's VMM, network path, and broker processes — the selective barrier around a cell |
-| `plasmosome-ledger` | Typed reversibility: every effect records its inverse; detach replays them, and the result is verified |
-| `plasmosome-backend` | The enforcement seam: one interface, with a fake in-memory backend for tests and real OS backends behind it |
-| `plasmid` | The plasmid author's command line — a client of the control socket, never something a plasmid depends on |
-| `plasmid-sdk` | The stability boundary for plasmid authors — build against this, not against the kernel |
-| `plasmosome-guards` | The repository's own guards as tests: what may reach a registry, what may claim a binary name, what may credit a commit |
-| `plasmosome-testkit` | Test support: builders, the backend conformance suite, and the cross-crate scenarios — never shipped |
+| `plasmosome-core` | Controller decisions: registry, reconciler, manifest grammar, session log and credential gatekeeper |
+| `plasmosome-membrane` | Per-cell host supervisor for the VMM, network path and broker processes |
+| `plasmosome-ledger` | Typed reversibility: effects and their inverses |
+| `plasmosome-backend` | Enforcement interface, currently including a fake in-memory backend for tests |
+| `plasmid` | Reserved plasmid-author command line |
+| `plasmid-sdk` | Reserved stability boundary for plasmid authors |
+| `plasmosome-guards` | Repository policy checks |
+| `plasmosome-testkit` | Test support; never shipped |
 
 ## Build
 
