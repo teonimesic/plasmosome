@@ -53,8 +53,23 @@ impl.wasm = "github-pr.wasm"
 
 Missing or invalid purpose, tool declarations and missing/non-string IDs return
 `ManifestError::Field` with the declaration ID when available, a TOML field path and a suggested
-repair. Other manifest errors retain their existing forms. `ToolDeclaration` lives in
-`plasmosome_core::manifest`; `RegistryEntry` includes the tool's description.
+repair. Credential-reference refusals use that same form, including the indexed reference and,
+for command credentials, the quoted command key. Other manifest errors retain their existing
+forms. `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
+description.
+
+Credential `delivery` is optional in both `[secrets]` and command-local refs. Omission derives one
+mode: `handle` for `wasm`, `helper` for `git`, and `inject` for `http` or `process` with a declared
+nonempty absolute `scope.path_scope`; otherwise those last two use `mint`. Derivation does not
+add fallback modes. Explicit lists retain their order and pass the same consumer/mode validator.
+An explicit empty list is refused, not defaulted. An empty or malformed declared injection scope
+is refused rather than treated as an unscoped credential; legacy scope arrays retain every entry
+for validation. Omission also refuses relative path-scope entries for `wasm` and `git`: deriving
+a mode does not repair a malformed scope. Command refs use the same pairing and scope checks
+and still require a ref or command `subject`.
+
+This implements spec011's credential-delivery amendment to spec001 in the manifest library.
+It does not choose a runtime fallback or implement delivery, credential custody or attachment.
 
 These are library APIs, not evidence of a running cell attaching or invoking a component.
 Registration preserves last-registration-wins behavior; withdrawal removes the owner's tools

@@ -245,7 +245,7 @@ impl PlasmidManifest {
             .unwrap_or_default();
         let secrets = raw
             .get("secrets")
-            .map(parse_secret_refs)
+            .map(|secrets| parse_secret_refs(&id, "secrets", secrets))
             .transpose()?
             .unwrap_or_default();
         let commands = raw
@@ -332,7 +332,6 @@ impl PlasmidManifest {
         if let Some(spec) = &mock {
             validate_mock(&id, spec, network.as_ref())?;
         }
-        validate_secret_refs(&id, &secrets)?;
         if let Some(commands) = &commands {
             validate_commands(&id, commands)?;
         }
@@ -461,40 +460,98 @@ fn parse_network(id: &str, section: &str, n: &toml::Value) -> Result<NetworkSpec
     })
 }
 
-fn parse_secret_refs(secrets: &toml::Value) -> Result<Vec<SecretRef>, ManifestError> {
+fn parse_secret_refs(
+    id: &str,
+    section: &str,
+    secrets: &toml::Value,
+) -> Result<Vec<SecretRef>, ManifestError> {
     let Some(refs) = secrets.get("refs") else {
         return Ok(Vec::new());
     };
-    let items = refs
-        .as_array()
-        .ok_or_else(|| ManifestError::Invalid("[secrets] refs must be a list".into()))?;
-    let mut parsed = Vec::new();
-    for item in items {
-        let mut item = item.clone();
+    let items = refs.as_array().ok_or_else(|| {
+        field_error(
+            id,
+            format!("{section}.refs"),
+            "refs = [{ id = \"credential-id\", consumer = \"wasm\" }]".into(),
+            "credential refs must be a list",
+        )
+    })?;
+    let mut parsed = Vec::with_capacity(items.len());
+    for (index, original) in items.iter().enumerate() {
+        let field = |name: &str| format!("{section}.refs[{index}].{name}");
+        let mut item = original.clone();
         normalize_scope(&mut item);
-        let secret: SecretRef = item.try_into().map_err(|e| {
-            ManifestError::Invalid(format!("secret ref is not the frozen shape: {e}"))
+        let consumer = item
+            .get("consumer")
+            .and_then(toml::Value::as_str)
+            .and_then(SecretConsumer::parse)
+            .ok_or_else(|| {
+                field_error(
+                    id,
+                    field("consumer"),
+                    "consumer = \"wasm\"".into(),
+                    "consumer must be wasm, git, http or process",
+                )
+            })?;
+        let paths = item.get("scope").and_then(|scope| scope.get("path_scope"));
+        let derived = narrowest_delivery(consumer, paths.is_some());
+        let delivery_omitted = item.get("delivery").is_none();
+        if delivery_omitted {
+            item.as_table_mut()
+                .expect("a named consumer belongs to a table")
+                .insert(
+                    "delivery".into(),
+                    toml::Value::Array(vec![toml::Value::String(derived.as_str().into())]),
+                );
+        }
+        let secret: SecretRef = item.try_into().map_err(|error| {
+            let (name, fix) = if original.get("id").and_then(toml::Value::as_str).is_none() {
+                ("id", "id = \"credential-id\"".into())
+            } else if original.get("delivery").is_some_and(|delivery| {
+                delivery.as_array().is_none_or(|modes| {
+                    modes
+                        .iter()
+                        .any(|mode| mode.as_str().and_then(DeliveryMode::parse).is_none())
+                })
+            }) {
+                ("delivery", format!("delivery = [\"{}\"]", derived.as_str()))
+            } else if original.get("ttl").is_some_and(|ttl| !ttl.is_str()) {
+                ("ttl", "ttl = \"1h\"".into())
+            } else if original
+                .get("subject")
+                .is_some_and(|subject| !subject.is_str())
+            {
+                ("subject", "subject = \"command-name\"".into())
+            } else {
+                (
+                    "scope",
+                    "scope = { path_scope = [\"/required/path/\"] }".into(),
+                )
+            };
+            field_error(
+                id,
+                field(name),
+                fix,
+                &format!("invalid credential reference: {error}"),
+            )
         })?;
+        validate_secret_ref(id, section, index, &secret, delivery_omitted)?;
         parsed.push(secret);
     }
     Ok(parsed)
 }
 
 fn normalize_scope(item: &mut toml::Value) {
-    let Some(scope) = item.get("scope") else {
-        return;
-    };
-    if !scope.is_array() {
-        return;
-    }
-    let paths = string_list(Some(scope));
-    let mut table = toml::map::Map::new();
-    table.insert(
-        "path_scope".to_string(),
-        toml::Value::Array(paths.into_iter().map(toml::Value::String).collect()),
-    );
-    if let Some(entry) = item.as_table_mut() {
-        entry.insert("scope".to_string(), toml::Value::Table(table));
+    if let Some(table) = item.as_table_mut()
+        && table.get("scope").is_some_and(toml::Value::is_array)
+    {
+        let scope = table
+            .remove("scope")
+            .expect("the scope array was just found");
+        table.insert(
+            "scope".into(),
+            toml::Value::Table(toml::map::Map::from_iter([("path_scope".into(), scope)])),
+        );
     }
 }
 
@@ -529,7 +586,13 @@ fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, M
                 .transpose()?,
             secrets: decl
                 .get("secrets")
-                .map(parse_secret_refs)
+                .map(|secrets| {
+                    parse_secret_refs(
+                        plasmid_id,
+                        &format!("commands.commands.{}.secrets", diagnostic_key(id)),
+                        secrets,
+                    )
+                })
                 .transpose()?
                 .unwrap_or_default(),
         });
@@ -540,48 +603,77 @@ fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, M
     })
 }
 
-fn validate_secret_refs(id: &str, refs: &[SecretRef]) -> Result<(), ManifestError> {
-    for secret in refs {
-        if secret.delivery.is_empty() {
-            return Err(ManifestError::Invalid(format!(
-                "plasmid {id}: secret ref `{}` has an empty delivery list",
-                secret.id
-            )));
-        }
-        for mode in &secret.delivery {
-            let consumer_ok = matches!(
-                (secret.consumer, mode),
-                (SecretConsumer::Wasm, DeliveryMode::Handle)
-                    | (SecretConsumer::Git, DeliveryMode::Helper)
-                    | (SecretConsumer::Git, DeliveryMode::Mint)
-                    | (
-                        SecretConsumer::Http | SecretConsumer::Process,
-                        DeliveryMode::Inject | DeliveryMode::Mint
-                    )
-            );
-            if !consumer_ok {
-                return Err(ManifestError::Invalid(format!(
-                    "plasmid {id}: secret ref `{}` pairs delivery `{}` with consumer `{}`",
-                    secret.id,
+fn narrowest_delivery(consumer: SecretConsumer, path_scoped: bool) -> DeliveryMode {
+    match consumer {
+        SecretConsumer::Wasm => DeliveryMode::Handle,
+        SecretConsumer::Git => DeliveryMode::Helper,
+        SecretConsumer::Http | SecretConsumer::Process if path_scoped => DeliveryMode::Inject,
+        SecretConsumer::Http | SecretConsumer::Process => DeliveryMode::Mint,
+    }
+}
+
+fn validate_secret_ref(
+    id: &str,
+    section: &str,
+    index: usize,
+    secret: &SecretRef,
+    delivery_omitted: bool,
+) -> Result<(), ManifestError> {
+    let field = |name: &str| format!("{section}.refs[{index}].{name}");
+    let narrowest = narrowest_delivery(
+        secret.consumer,
+        secret
+            .scope
+            .as_ref()
+            .is_some_and(|scope| !scope.path_scope.is_empty()),
+    )
+    .as_str();
+    if secret.delivery.is_empty() {
+        return Err(field_error(
+            id,
+            field("delivery"),
+            format!("delivery = [\"{narrowest}\"]"),
+            "an explicit delivery list must not be empty",
+        ));
+    }
+    for mode in &secret.delivery {
+        let consumer_ok = matches!(
+            (secret.consumer, mode),
+            (SecretConsumer::Wasm, DeliveryMode::Handle)
+                | (SecretConsumer::Git, DeliveryMode::Helper)
+                | (SecretConsumer::Git, DeliveryMode::Mint)
+                | (
+                    SecretConsumer::Http | SecretConsumer::Process,
+                    DeliveryMode::Inject | DeliveryMode::Mint
+                )
+        );
+        if !consumer_ok {
+            return Err(field_error(
+                id,
+                field("delivery"),
+                format!("delivery = [\"{narrowest}\"]"),
+                &format!(
+                    "delivery `{}` is not valid for consumer `{}`",
                     mode.as_str(),
                     secret.consumer.as_str()
-                )));
-            }
-            if *mode == DeliveryMode::Inject {
-                let Some(scope) = &secret.scope else {
-                    return Err(ManifestError::Invalid(format!(
-                        "plasmid {id}: secret ref `{}` uses `inject` without a path_scope",
-                        secret.id
-                    )));
-                };
-                for prefix in &scope.path_scope {
-                    if !prefix.starts_with('/') {
-                        return Err(ManifestError::Invalid(format!(
-                            "plasmid {id}: secret ref `{}` path_scope entry `{prefix}` is not an absolute path",
-                            secret.id
-                        )));
-                    }
-                }
+                ),
+            ));
+        }
+        if *mode == DeliveryMode::Inject || delivery_omitted {
+            let paths = secret
+                .scope
+                .as_ref()
+                .map(|scope| scope.path_scope.as_slice())
+                .unwrap_or_default();
+            if (*mode == DeliveryMode::Inject && paths.is_empty())
+                || paths.iter().any(|path| !path.starts_with('/'))
+            {
+                return Err(field_error(
+                    id,
+                    field("scope.path_scope"),
+                    "scope = { path_scope = [\"/required/path/\"] }".into(),
+                    "path-scope entries must be absolute; inject also requires a nonempty scope",
+                ));
             }
         }
     }
@@ -610,12 +702,17 @@ fn validate_mock(
 
 fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestError> {
     for decl in &commands.commands {
-        for secret in &decl.secrets {
+        for (index, secret) in decl.secrets.iter().enumerate() {
             if secret.subject.is_none() && decl.subject.is_none() {
-                return Err(ManifestError::Invalid(format!(
-                    "plasmid {id}: [commands.{}] secret ref `{}` names no subject",
-                    decl.id, secret.id
-                )));
+                return Err(field_error(
+                    id,
+                    format!(
+                        "commands.commands.{}.secrets.refs[{index}].subject",
+                        diagnostic_key(&decl.id)
+                    ),
+                    format!("subject = {}", toml::Value::String(decl.id.clone())),
+                    "a command credential requires a ref or command subject",
+                ));
             }
         }
     }
@@ -1197,12 +1294,6 @@ subject = "git"
     }
 
     #[test]
-    fn the_pre_freeze_string_refs_form_is_rejected_as_not_the_frozen_shape() {
-        let err = PlasmidManifest::parse(GITHUB_PR_LEGACY_STRING_REFS).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid(m) if m.contains("frozen shape")));
-    }
-
-    #[test]
     fn the_frozen_secret_grammar_parses_delivery_consumer_scope_and_ttl() {
         let manifest = PlasmidManifest::parse(GITHUB_PR_FROZEN).unwrap();
         assert_eq!(manifest.secrets.len(), 2);
@@ -1413,42 +1504,6 @@ subject = "git"
     }
 
     #[test]
-    fn a_command_secret_without_any_subject_is_a_named_error() {
-        let text = r#"
-id = "bad-commands"
-description = "Run gh with a scoped credential."
-[network]
-hosts = ["alpha.ak.local"]
-[commands.commands.gh]
-exec = ["gh"]
-[[commands.commands.gh.secrets.refs]]
-id = "github:token:gh"
-consumer = "http"
-delivery = ["inject"]
-scope = { path_scope = ["/api/"] }
-"#;
-        let err = PlasmidManifest::parse(text).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid(m) if m.contains("names no subject")));
-    }
-
-    #[test]
-    fn a_delivery_consumer_mismatch_is_a_named_error() {
-        let text = r#"
-id = "mismatched"
-description = "Read GitHub using a git credential."
-[network]
-hosts = ["api.github.com"]
-[secrets]
-refs = [{ id = "t", consumer = "git", delivery = ["handle"] }]
-"#;
-        let err = PlasmidManifest::parse(text).unwrap_err();
-        assert!(matches!(
-            err,
-            ManifestError::Invalid(m) if m.contains("`handle`") && m.contains("`git`")
-        ));
-    }
-
-    #[test]
     fn mint_is_a_legal_fallback_for_a_git_consumer() {
         let text = r#"
 id = "mint-fallback"
@@ -1466,76 +1521,139 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
     }
 
     #[test]
-    fn a_wasm_consumer_cannot_take_inject() {
-        let text = r#"
-id = "wasm-inject"
-description = "Read GitHub from a component."
-[network]
-hosts = ["api.github.com"]
-[secrets]
-refs = [{ id = "t", consumer = "wasm", delivery = ["inject"], scope = { path_scope = ["/v1/"] } }]
-"#;
-        let err = PlasmidManifest::parse(text).unwrap_err();
-        assert!(matches!(
-            err,
-            ManifestError::Invalid(m) if m.contains("`inject`") && m.contains("`wasm`")
-        ));
+    fn invalid_credential_modes_and_scopes_are_refused_at_both_locations() {
+        assert!(PlasmidManifest::parse(GITHUB_PR_LEGACY_STRING_REFS).is_err());
+        let cases = [
+            (
+                r#"consumer = "wasm", scope = { path_scope = ["relative"] }"#,
+                "scope.path_scope",
+                DeliveryMode::Handle,
+            ),
+            (
+                r#"consumer = "git", scope = { path_scope = ["relative"] }"#,
+                "scope.path_scope",
+                DeliveryMode::Helper,
+            ),
+            (
+                r#"consumer = "git", delivery = []"#,
+                "delivery",
+                DeliveryMode::Helper,
+            ),
+            (
+                r#"consumer = "wasm", delivery = ["inject"], scope = ["/v1/"]"#,
+                "delivery",
+                DeliveryMode::Handle,
+            ),
+            (
+                r#"consumer = "git", delivery = ["handle"]"#,
+                "delivery",
+                DeliveryMode::Helper,
+            ),
+            (
+                r#"consumer = "http", delivery = ["inject"]"#,
+                "scope.path_scope",
+                DeliveryMode::Inject,
+            ),
+            (
+                r#"consumer = "http", delivery = ["inject"], scope = []"#,
+                "scope.path_scope",
+                DeliveryMode::Inject,
+            ),
+            (
+                r#"consumer = "http", scope = { path_scope = [] }"#,
+                "scope.path_scope",
+                DeliveryMode::Inject,
+            ),
+            (
+                r#"consumer = "process", scope = { path_scope = ["relative"] }"#,
+                "scope.path_scope",
+                DeliveryMode::Inject,
+            ),
+            (
+                r#"consumer = "http", scope = ["/v1/", 7]"#,
+                "scope",
+                DeliveryMode::Inject,
+            ),
+            (
+                r#"consumer = "http", delivery = ["teleport"]"#,
+                "delivery",
+                DeliveryMode::Mint,
+            ),
+        ];
+        for (header, section) in [
+            ("[secrets]", "secrets"),
+            (
+                "[commands.commands.\"git ops\"]\nexec = [\"git\"]\nsubject = \"git\"\n[commands.commands.\"git ops\".secrets]",
+                "commands.commands.\"git ops\".secrets",
+            ),
+        ] {
+            for (entry, suffix, expected) in cases {
+                let text = format!(
+                    "id = \"credential-example\"\ndescription = \"Use only a scoped credential.\"\nimpl.wasm = \"example.wasm\"\n{header}\nrefs = [{{ id = \"token\", {entry} }}]"
+                );
+                let error = PlasmidManifest::parse(&text).unwrap_err();
+                let ManifestError::Field {
+                    plasmid,
+                    field,
+                    fix,
+                    ..
+                } = error
+                else {
+                    panic!("credential refusal lost its repair context: {error:?}");
+                };
+                assert_eq!(plasmid.as_deref(), Some("credential-example"));
+                assert_eq!(field, format!("{section}.refs[0].{suffix}"), "{entry}");
+                let repair: toml::Value = toml::from_str(&fix).unwrap();
+                let mut repaired: toml::Value = toml::from_str(&text).unwrap();
+                let reference = if section == "secrets" {
+                    &mut repaired["secrets"]["refs"][0]
+                } else {
+                    &mut repaired["commands"]["commands"]["git ops"]["secrets"]["refs"][0]
+                };
+                for (key, value) in repair.as_table().unwrap() {
+                    reference
+                        .as_table_mut()
+                        .unwrap()
+                        .insert(key.clone(), value.clone());
+                }
+                let accepted =
+                    PlasmidManifest::parse(&toml::to_string(&repaired).unwrap()).unwrap();
+                let secret = if section == "secrets" {
+                    &accepted.secrets[0]
+                } else {
+                    &accepted.commands.as_ref().unwrap().commands[0].secrets[0]
+                };
+                assert_eq!(secret.delivery, vec![expected]);
+            }
+        }
     }
 
     #[test]
-    fn an_empty_delivery_list_is_a_named_error() {
+    fn command_ref_diagnostics_repair_the_missing_subject_in_its_own_declaration() {
         let text = r#"
-id = "empty-delivery"
-description = "Read GitHub with an HTTP credential."
-[network]
-hosts = ["api.github.com"]
-[secrets]
-refs = [{ id = "t", consumer = "http", delivery = [] }]
+id = "command-credential"
+description = "Run Git with its own credential."
+[commands.commands."git ops"]
+exec = ["git"]
+[[commands.commands."git ops".secrets.refs]]
+id = "token"
+consumer = "git"
 "#;
-        let err = PlasmidManifest::parse(text).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid(m) if m.contains("empty delivery")));
-    }
-
-    #[test]
-    fn inject_without_a_path_scope_is_a_named_error() {
-        let text = r#"
-id = "scopeless-inject"
-description = "Read GitHub with an injected credential."
-[network]
-hosts = ["api.github.com"]
-[secrets]
-refs = [{ id = "t", consumer = "http", delivery = ["inject"] }]
-"#;
-        let err = PlasmidManifest::parse(text).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid(m) if m.contains("without a path_scope")));
-    }
-
-    #[test]
-    fn a_relative_path_scope_entry_is_a_named_error() {
-        let text = r#"
-id = "relative-scope"
-description = "Read GitHub within the credential scope."
-[network]
-hosts = ["api.github.com"]
-[secrets]
-refs = [{ id = "t", consumer = "http", delivery = ["inject"], scope = { path_scope = ["repos/"] } }]
-"#;
-        let err = PlasmidManifest::parse(text).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid(m) if m.contains("not an absolute path")));
-    }
-
-    #[test]
-    fn an_unknown_delivery_mode_is_a_parse_error() {
-        let text = r#"
-id = "future-mode"
-description = "Read GitHub with an HTTP credential."
-[network]
-hosts = ["api.github.com"]
-[secrets]
-refs = [{ id = "t", consumer = "http", delivery = ["teleport"] }]
-"#;
-        let err = PlasmidManifest::parse(text).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid(m) if m.contains("frozen shape")));
+        let error = PlasmidManifest::parse(text).unwrap_err();
+        let ManifestError::Field { field, fix, .. } = error else {
+            panic!("missing command subject has no repair context: {error:?}");
+        };
+        assert_eq!(
+            field,
+            "commands.commands.\"git ops\".secrets.refs[0].subject"
+        );
+        let repaired = PlasmidManifest::parse(&format!("{text}\n{fix}")).unwrap();
+        let command = &repaired.commands.as_ref().unwrap().commands[0];
+        assert_eq!(
+            command.secrets[0].subject.as_deref(),
+            Some(command.id.as_str())
+        );
+        assert_eq!(command.secrets[0].delivery, vec![DeliveryMode::Helper]);
     }
 
     #[test]
