@@ -299,12 +299,15 @@ systems; it neither claims their guarantees nor waits for another owner decision
 - **A4 — exact refusal:** wrong owner, wrong capability, missing ID, and spent handle cannot take
   a neighbouring object. Runtime removal failures preserve the full state. Graceful timeout and
   force-after-timeout are exercised with equal peer holdings still standing.
+  A deterministic random-source failure witness triggers a panic before mutation and shows no
+  new object or live handle and no change to existing holdings.
 - **A5 — apply identity:** replay of one live recorded op is a no-op; two equal ops with fresh IDs
   create two holdings. Standing payload collision refuses without mutation. Apply or plant after
   exact removal does not revive a spent grant handle; new grants still use fresh identities.
   Cross-entry paths through apply, plant, direct removal, and revoke preserve those transitions.
-- **A6 — independent backends:** composite leaves and fresh backend instances do not alias handle
-  counters; class routing preserves IDs and errors. Invalid initial leaf observations refuse.
+- **A6 — independent backends:** independently minted grant identities do not alias across leaves
+  or fresh backend instances; class routing preserves IDs and errors. Invalid initial leaf
+  observations refuse.
   A spent or prior-backend handle cannot withdraw an equal new grant.
 - **A7 — two comparisons:** canonical equivalence ignores IDs but detects changed owner, source,
   route, name, and multiplicity. Exact diff identifies replacement, partial-survivor identity,
