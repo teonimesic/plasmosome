@@ -113,12 +113,13 @@ A fresh fixture creates an explicit fresh identity for its planted object.
 `CompositeBackend` routes handles by their class, without rewriting their IDs or keeping a second
 integer-handle namespace. Leaves keep their grant records and drain state; an error names the
 original handle. Snapshot union preserves every distinct address, even when leaves previously
-would have used the same local counter. Composite construction must reject conflicting initial
-observations at one address rather than select a leaf's row. Identical observations may be
-coalesced, but do not create two grants. Leaves must observe only the classes assigned to them:
-network owns proxy maps and UDS paths, filesystem owns files and mounts, broker owns broker PIDs.
-Construction returns `Result<CompositeBackend, BackendError>` to report these violations, using
-`IdentityConflict` for conflicting addresses and `Fault` for an out-of-class leaf observation.
+would have used the same local counter. Composite construction first validates that each leaf
+observes only its assigned classes: network owns proxy maps and UDS paths, filesystem owns files
+and mounts, and broker owns broker PIDs. Construction returns
+`Result<CompositeBackend, BackendError>` and refuses any out-of-class observation with `Fault`.
+After that validation, the leaves' exact-address sets are disjoint: each class has one leaf and
+each leaf's `OsState` already excludes duplicate addresses. The union therefore needs neither
+cross-leaf coalescing nor constructor-level `IdentityConflict` selection.
 
 ### Exact withdrawal
 
