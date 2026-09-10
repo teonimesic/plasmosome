@@ -173,13 +173,43 @@ retryable reap. Before that disposition, a retry must re-establish the same exac
 observation before signalling; a saved exit alone is not a new ownership check.
 A reap returning `ECHILD` never authorizes another signal.
 
+If the positive leader signal fails, including `ESRCH`, `kill` returns
+`SupervisionError { operation: SignalLeader, errno, observed: None }` with that signal's errno.
+It attempts neither group signalling nor reap in that call, and caches neither completion nor
+`Lost`. The handle remains unfinished. A later call starts with fresh exact-child observation:
+terminal observation enters group cleanup, no event remains running, and a wait's `ECHILD`
+caches loss and forbids signals. `ESRCH` from a signal is not a wait result and does not prove
+loss or successful cleanup. An unexpected `ECHILD` from the signal itself is likewise retained
+as a `SignalLeader` error, not interpreted as a wait's authority-loss result.
+
+After the same signal failure, `Drop` makes one fresh nonblocking exact-child observation:
+
+- No terminal event: send no further signal and do not reap; report possible live leader/workers.
+- Observation error other than `ECHILD`: send no further signal and do not reap; report the
+  original `SignalLeader` error and the `Observe` error, with possible live leader/workers.
+- `ECHILD`: cache the `Observe` loss, send no further signal or wait, and report the original
+  signal error plus lost authority and possible workers.
+- Terminal event: retain that known exit and perform the normal group-cleanup disposition
+  followed by a nonblocking exact-child reap. Record successful/permitted-ESRCH group disposition
+  before reap as above. A group failure is `SignalGroup` with its own errno and the known exit;
+  Drop still attempts the final direct reap. A reap failure is `Reap` with its errno and known
+  exit; `ECHILD` caches loss and forbids further PID operations. Successful reap completes the
+  terminal state; other errors remain incomplete. Report the original signal errno, any later
+  error and known exit, and the actual cleanup disposition rather than claiming the failed
+  leader signal stopped anything.
+
+This fallback never waits for a running leader or retries a failed observation/reap inside
+`Drop`. It can leave reported residue after an OS failure; errors do not promise successful
+worker cleanup. Its fresh terminal observation, not the failed signal or a saved PID, authorizes
+group cleanup.
+
 `Drop` invokes the same teardown. It does not panic or turn a cleanup error into success. If a
 terminal leader cannot have its group signalled, Drop still attempts to reap that direct child,
-reports possible workers, and never signals after releasing identity. If signalling a live
-leader fails, Drop performs at most a nonblocking follow-up observation/reap, not an indefinite
-wait for a child it failed to stop. If a non-EINTR wait error prevents reaping, it reports the
-possible unreaped child as well. No guarantee is made for `mem::forget`, parent abort/SIGKILL,
-or an uninterruptible child that prevents a successful blocking teardown from returning.
+reports possible workers, and never signals after releasing identity. A failed live-leader
+signal follows the nonblocking fallback above. If a non-EINTR wait error prevents reaping,
+it reports the possible unreaped child as well. No guarantee is made for `mem::forget`,
+parent abort/SIGKILL, or an uninterruptible child that prevents a successful blocking teardown
+from returning.
 
 Drop-only failures, including a cached loss, attempt a non-panicking parent-side stderr
 diagnostic containing the diagnostic PID, operation, errno, any observed exit, possible live
@@ -226,7 +256,7 @@ leader-first managed-worker cases; it does not label a group signal as general c
 7. **Released identity:** repeated successful terminal and lost operations do not affect an independently owned sentinel; a deliberate signal-after-loss mutation fails the lost-worker case, without host PID-exhaustion or guessed-PID cleanup.
 8. **Ownership race limit:** source review verifies the retained-child-through-signal interval and shipped-host reaper/disposition requirements; controlled post-peek loss reports a violation and prohibits subsequent signals, without claiming to prove safety against arbitrary concurrent reaping or actual PGID reuse.
 9. **Startup gap:** immediate kill/Drop, including a deliberately held pre-setsid child in an isolated instrumented fixture, completes without a surviving managed worker or direct-child zombie; evidence distinguishes that instrumentation from a real setsid failure.
-10. **Failure and retry:** observation, group-signal, and reap failures retain the operation/errno/known exit, cannot become successful cached completion, and either retry with owned identity or become permanent loss; a failed reap after completed group signalling retries only the exact-child reap across all entry points, without another group signal; Drop's persistent-error path reports residue and never waits indefinitely after a failed live-leader signal.
+10. **Failure and retry:** observation, leader-signal, group-signal, and reap failures retain the operation/errno/known exit and cannot become successful cached completion; leader-signal ESRCH and other errors leave `kill` unfinished without group signalling/reap, later calls re-observe exact ownership, and only a wait's ECHILD caches loss; Drop's fresh-observation running, terminal, loss, and error branches follow the defined fallback and report original/later errors and possible residue; a failed reap after completed group signalling retries only the exact-child reap across all entry points, without another group signal or an indefinite wait after a failed live-leader signal.
 11. **Status and budgets:** running WNOHANG, normal exit, signal/core termination, EINTR, zero/expired polling budgets, and interrupted incomplete reap preserve their defined observations; bounded signal pressure proves actual delivered signals and interrupted blocking waits rather than an unexercised retry branch.
 12. **Reporting and integration:** public-consumer and real `membraned` shutdown scenarios demonstrate leader-first worker cleanup and readable loss/error diagnostics; closed-report-channel limitations are disclosed, and existing broker partial-spawn/drop and readiness behavior remain intact.
 13. **Accurate boundary:** public API, membrane ownership documentation, existing competing-reaper regression, and affected callers agree on managed groups, exclusive reaping, no-signal loss, synchronous kill, and the lack of implemented residue observation; none promises escaped-descendant containment.
