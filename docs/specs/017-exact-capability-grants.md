@@ -73,8 +73,13 @@ silently erase a row. `objects()`, `len()`, and `is_empty()` continue to describ
 `EnforcementBackend::grant(Grant) -> LedgerEntry` is a **new grant**, including a call with the
 same arguments as its predecessor. The backend issues a fresh identity and materializes exactly
 one holding. It checks standing addresses before publishing the result; a generated UUID
-collision is retried, never used to overwrite a holding. Random-source failure cannot return a
-successful entry. The existing infallible seam does not gain a pretend successful fallback.
+collision is retried, never used to overwrite a holding. `GrantId::new()` panics if its random
+source fails. Each backend, including fake and composite implementations, must acquire the
+identity before changing observed state, live grant records, or enforcement. Thus a generation
+failure creates no object or handle and leaves existing holdings unchanged. The panic follows
+the build's Rust panic strategy: it unwinds, or terminates the process with `panic=abort`.
+`grant` remains infallible at its return boundary; callers receive neither a `BackendError` nor a
+fallback entry for this failure. No automatic random-source failure retry or recovery is added.
 
 `Handle` changes from a local integer to `{ class: UniverseClass, id: GrantId }`. It is the exact
 address of a granted holding, not a separate sequence number. `LedgerEntry` keeps its existing
@@ -120,6 +125,17 @@ and mounts, and broker owns broker PIDs. Construction returns
 After that validation, the leaves' exact-address sets are disjoint: each class has one leaf and
 each leaf's `OsState` already excludes duplicate addresses. The union therefore needs neither
 cross-leaf coalescing nor constructor-level `IdentityConflict` selection.
+
+### Public API migration
+
+Fallible planting and composite construction are breaking API changes, not optional wrappers.
+Change `EnforcementBackend::plant`, its fake/composite and test-backend implementations, and
+`FakeBackend::plant_residue` to return the specified `Result<(), BackendError>`. Change
+`CompositeBackend::new` and its consumer/conformance factories to handle its `Result`. Callers
+must propagate failures or explicitly assert expected fixture success; discarding the result
+does not satisfy the cutover. Existing success fixtures and new conflict/invalid-leaf cases must
+exercise these outcomes through public APIs: failed planting preserves standing objects, and
+invalid composite construction refuses. No old infallible wrapper remains.
 
 ### Exact withdrawal
 
