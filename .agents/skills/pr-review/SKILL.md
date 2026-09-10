@@ -13,7 +13,26 @@ A merged PR carries three things: its upward link to wanted work, a review that 
 being merged, and an answer to every finding. Spec012 governs those requirements and its two
 taskless structural shapes; `.agents/skills/tasks` governs task admission and ownership.
 
-## 1. Open a draft in the correct shape
+## 1. Validate locally, then open a draft
+
+The author is responsible for local validation **before the first PR push and every update**,
+including documentation-only changes. CI confirms the result and adds platform coverage; it is
+not the first attempt at checks that can run locally. This prevents avoidable failing CI runs
+and review of revisions whose author has not checked them.
+
+After edits settle, run the root gate in [AGENTS.md](../../../AGENTS.md) and the additional
+locally runnable checks in [CI](../../../.github/workflows/ci.yml), including quick workspace
+benchmarks. Tests and benchmarks already compile their targets; add an explicit build for a
+changed target they do not cover rather than repeat identical compilation. Behavior changes
+also need their applicable focused regressions, mutation witnesses and runtime smoke scenarios;
+a documentation change does not need an unrelated runtime experiment.
+
+The author may coordinate these runs with the orchestrator, but must wait for actual results
+before pushing. Record the validated revision, commands, outcomes and platform limits in the PR
+verification and, for work PRs, native task notes. Later edits invalidate affected evidence;
+rerun those checks before the next push. A failed check or unavailable local prerequisite blocks
+the push: report it rather than silently defer validation to CI. Do not bypass this requirement
+by opening an unvalidated draft.
 
 - **Intent-filing PR:** file the intent under `docs/intents/` using its template. It has no
   parent task, `task:` footer or Beads external reference. Keep the PR draft until the owner
@@ -35,7 +54,7 @@ For a work PR, record the PR immediately:
 For a work PR, retain task ownership through review and record verification and important
 decisions in Beads notes. These updates never require a commit, extra push or status-only PR.
 
-Get the root gate green and obtain independent review while draft. CodeRabbit skips draft PRs;
+Obtain independent review while draft, after local validation. CodeRabbit skips draft PRs;
 a skipped green is not a completed review. The owner-approval rule in `docs/intents/README.md`
 controls intent PRs. A work PR whose chain reaches an unapproved intent also stays draft, and
 that wait is ended by the owner's approval, not an agent's judgement. A missing chain is an
@@ -53,6 +72,12 @@ The reviewer reads the surrounding code as well as the diff, verifies empirical 
 checks every applicable acceptance item in every governing spec. For a regression test, break
 the implementation in a disposable copy outside the working checkout and establish that it
 fails for the promised reason. Report limits rather than claiming evidence not run.
+
+Inspect the author's local validation evidence for the reviewed revision. Independent review
+need not duplicate an unchanged full suite, but must independently investigate uncertain claims
+and perform the applicable regression mutation checks above. State what the reviewer actually
+ran separately from author and CI evidence; avoiding duplicate review runs never waives the
+author's pre-push gate.
 
 Post the review as a PR issue comment starting with `Model: <name>` and the reviewed head SHA.
 Name the examined behavior and spec acceptance items, findings, observed proof and limits. The
