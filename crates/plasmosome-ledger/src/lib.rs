@@ -483,18 +483,22 @@ impl Ledger {
         for (index, framed) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
             let newline_ended = framed.ends_with(b"\n");
             let line = framed.strip_suffix(b"\n").unwrap_or(framed);
-            if let Err(error) = std::str::from_utf8(line)
-                && (newline_ended || error.error_len().is_some())
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "invalid UTF-8 in ledger record on line {}: {error}",
-                        index + 1
-                    ),
-                ));
-            }
-            let record = match serde_json::from_slice::<LogRecord>(line) {
+            let parsed = match std::str::from_utf8(line) {
+                Ok(text) => serde_json::from_str::<LogRecord>(text),
+                Err(error) if !newline_ended && error.error_len().is_none() => {
+                    serde_json::from_slice::<LogRecord>(line)
+                }
+                Err(error) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "invalid UTF-8 in ledger record on line {}: {error}",
+                            index + 1
+                        ),
+                    ));
+                }
+            };
+            let record = match parsed {
                 Ok(record) => record,
                 Err(error) if !newline_ended && error.is_eof() => break,
                 Err(error) => {
