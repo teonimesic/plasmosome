@@ -1,7 +1,7 @@
 ---
 id: 009
 title: How much of an intent has been built, recorded in the intent and checkable against delivery
-status: draft
+status: accepted
 intents: [008]
 ---
 
@@ -42,8 +42,17 @@ change to wait for.
 `served:` appears exactly once, at the start of its own line inside frontmatter, directly after
 `status:`, with exactly one of the three values. Count every line beginning `served:` in the
 file, then check its position and value: a valid-looking frontmatter field plus a second field in
-the body is malformed too. The template ships `served: none`; this default is not permission to
-assign `none` to an existing intent during backfill.
+the body is malformed too. The template ships an empty `served:` line, not `served: none`.
+Empty is missing judgment, not a fourth coverage value and not a passing field.
+Anyone may copy that template to propose an intent without originating a coverage judgment.
+
+A new intent awaiting owner input may be pushed as a draft PR after the existing local root/CI
+gate. The separate coverage command still reports fault3 for its empty field, and that expected
+result is disclosed, never called a clean coverage check. It is not added to the pre-push gate:
+doing so would prevent the owner from seeing the proposal on GitHub. The draft stays unready
+and cannot merge until the owner supplies its value and actual prose and approves them there.
+`show` can supply mechanical evidence while it waits. No agent fills the blank to make the check
+pass, including for a new draft over existing work.
 
 `none` means nothing built, `partly` some, and `substantially` most of what was wanted, with what
 remains named in prose. There is no terminal coverage value. Open work beneath `substantially`
@@ -85,10 +94,18 @@ The future command is `./tools/intent-coverage check`, run from the repository r
 its coverage field. Neither command changes Git, Beads or GitHub. Neither synchronizes the native
 store, reconciles tasks, retries a failed query indefinitely or falls back to task Markdown.
 
-Read the complete native set with `./tools/work-state list --all --limit 0 --json`. A successful
-empty native array is valid; a failed query, invalid JSON, duplicate native ID or incomplete
-result is not. The result is a local observation, not a claim of remote Beads freshness. GitHub
-reads below are explicit additional network inputs, not native `dolt pull` or publication.
+Read the complete native set with `./tools/work-state list --all --limit 0 --json`. Trust the
+pinned native command's unbounded-enumeration contract on successful exit with a well-formed
+array. A successful empty array is valid; command failure, invalid JSON or duplicate IDs refuse.
+The launcher serializes that invocation against other linked-worktree commands. The array has
+no total, cursor or completeness marker: a valid shorter array is indistinguishable from a
+smaller store. The checker cannot independently detect silent native truncation and does not
+pretend that a separately locked `count` call creates an atomic snapshot. Invocation without
+`--all --limit 0` is outside this contract, not a supported sampling mode.
+
+This trusts native enumeration, not remote freshness. GitHub reads below are explicit additional
+network inputs, not native `dolt pull` or publication. A native completeness defect needs repair
+in that authority; adding a synthetic error fixture cannot prove its detection here.
 
 Validate every numeric intent/spec document before selecting by status, following spec012 and
 the two document READMEs. Read IDs from frontmatter, never infer identity from the filename.
@@ -150,12 +167,36 @@ There is no new authenticated actor or owner approval gate for task-evidence rec
 
 A task reconciler establishes the annotation from the complete native record and actual evidence,
 records the decision and source in native notes, then writes the partial metadata object without
-altering old notes, reasons, legacy evidence, source snapshots or unrelated metadata. A cancellation
-also needs its explicit reason in `close_reason`; where historical cancellation exists only in
-notes, record that evidenced reason there without deleting its source. Do not classify prose by
-substring in the command, migrate by blanket default, or annotate an ambiguous record. Reconcile
-all relevant historical closed rows before enabling the check. Until then missing annotations
-refuse, including imported delivered rows. This spec does not perform that migration.
+altering old notes, legacy evidence, source snapshots or unrelated metadata. A cancellation
+needs an explicit reason in `close_reason`: a string that is neither empty after trimming
+whitespace nor exactly `Closed` after that trimming. `Closed` is Beads' generic no-reason default,
+not the distinct cancellation reason required by spec016. The typed annotation records the
+reconciler's decision; this check does not infer cancellation from other prose.
+
+A notes-only cancellation or generic reason remains unknown unless a deliberate native
+reconciliation records a supported new closure. Beads1.1.2 has no `update --close-reason`;
+`close --reason` on an already-closed issue does not change it. The authorized reconciler:
+
+1. Coordinates a pause of dispatch and coverage reads for this queue during the transition;
+   native command serialization alone does not make several commands one operation.
+2. Appends the old status, exact `closed_at`, `close_reason`, annotation and the source of the
+   cancellation decision to notes before changing them. Preserve assignee, labels, dependencies,
+   links and all unrelated fields; this is evidence repair, not release or reassignment.
+3. Uses `update ID --status open --metadata '{"closure":null}'`, then ordinary
+   `close ID --reason 'the actual evidenced cancellation reason'`. These are two commands;
+   do not use automatic continuation or permit dispatch of the temporarily reopened row.
+4. Reads the resulting closed record, verifies its actual reason and current `closed_at`,
+   and annotates that new closure with `kind: cancelled` and the returned timestamp. The old
+   annotation is not reused, even if the timestamps happen to match.
+5. Records the transition result in notes before ending the pause. If any step fails, keep the
+   pause and recorded recovery responsibility until the row is safely reconciled; never report
+   a partially reopened migration as a clean coverage observation.
+
+When that deliberate transition cannot be performed, leave the record unknown; do not imply
+a direct field update or treat a successful no-op as repair. Do not classify prose by substring,
+migrate by blanket default, or annotate an ambiguous record. Reconcile relevant historical
+closed rows before enabling the check. Until then missing annotations refuse, including imported
+delivered rows. This spec does not perform that migration.
 
 The command applies this table in order. "PR observation" means a successful GitHub query of
 `state,mergeCommit,mergedAt,url` for the exact canonical `external_ref` URL in this repository,
@@ -169,8 +210,8 @@ for cancelling this one. The command does not parse old prose to compare its com
 | Status is not `closed` | Structurally valid native record | Open work; not delivered, regardless of an old closure annotation |
 | `closed`, annotation absent, malformed or not bound to current `closed_at` | None can substitute for the annotation | Unknown; input refusal |
 | `closed`, kind `delivered` | Canonical `external_ref`; PR state `MERGED`; non-null merge commit with full 40-hex `oid`; non-null valid `mergedAt` | Delivered; report actual PR URL, commit and merge time |
-| `closed`, kind `cancelled`, absent or empty `external_ref` | Nonempty explicit `close_reason` | Cancelled; not delivered; report the reason |
-| `closed`, kind `cancelled`, nonempty `external_ref` | Nonempty explicit `close_reason`; canonical PR URL; PR state `CLOSED` with null `mergeCommit` and `mergedAt` | Cancelled; not delivered; report the reason and PR |
+| `closed`, kind `cancelled`, absent or empty `external_ref` | Explicit `close_reason` meeting the rule above | Cancelled; not delivered; report the reason |
+| `closed`, kind `cancelled`, nonempty `external_ref` | Explicit `close_reason` meeting the rule above; canonical PR URL; PR state `CLOSED` with null `mergeCommit` and `mergedAt` | Cancelled; not delivered; report the reason and PR |
 | Any other closed combination, including failed/unavailable forge reads | No inference or fallback | Unknown; input refusal |
 
 In particular, cancellation linked to a merged or still-open PR is conflicting evidence, not
@@ -261,9 +302,12 @@ closure-evidence migration are complete, the promised clean activation run remai
 The implementation must demonstrate all of the following; specification acceptance is not a
 claim that these implementation proofs have run:
 
-- The template has `served: none` directly after `status:` and the new section before `Outcome`.
-  Every numeric intent has exactly one correctly positioned field. A matching-file count cannot
-  substitute for checking each file; an extra `served: mostly` line in the same file must fail.
+- The template has empty `served:` directly after `status:` and the new section before `Outcome`.
+  A copied new draft contains no coverage judgment; its blank field produces fault3 while the
+  PR waits on the owner, without preventing the existing pre-push gate or draft publication.
+  Owner input, not an agent default, supplies its eventual valid value. Every numeric intent
+  on the completed post-backfill tree has exactly one correctly positioned valid field.
+  A matching-file count cannot replace per-file checking; an extra `served: mostly` must fail.
 - Actual backfill values/prose have owner judgment and GitHub approval provenance; the PR stays
   draft until the owner ends the wait. Missing judgments are not replaced with defaults or derived
   percentages. Existing `status:`, `outcome:` and `Outcome` content remain unchanged by backfill.
@@ -293,16 +337,22 @@ claim that these implementation proofs have run:
 - Explicit no-PR cancellation with a reason contributes no delivery. Cancellation with a confirmed
   closed-unmerged PR contributes none. Exercise047/049 and the no-reference050 historical shapes
   after deliberate reconciliation, preserving their original sources. Missing cancellation reason,
-  cancelled-plus-merged/open PR, and delivered-plus-unmerged PR each refuse. Closed alone, URL
-  alone, prose saying "merged", and legacy evidence alone cannot establish delivery.
+  whitespace-only or generic `Closed` reason, cancelled-plus-merged/open PR, and
+  delivered-plus-unmerged PR each refuse. Closed alone, URL alone, prose saying "merged", and
+  legacy evidence alone cannot establish delivery. Demonstrate notes-only reason migration with
+  the supported paused reopen/reclose/annotate sequence, preserving old closure fields in notes
+  and binding to the resulting timestamp. An unreconciled notes-only reason stays unknown.
 - Delivered annotations require actual matching PR URL, `MERGED`, full commit and merge time.
   Exercise failed/offline/malformed/mismatched forge responses; each refuses rather than returning
   no deliveries. Repeated references to one PR use one observation within a run, not mixed states.
 - Missing/empty intent or spec directories, numeric documents missing or duplicating IDs/status,
   unknown state, invalid accepted chain, dangling099, malformed native link arrays, copied-link
-  mismatch, duplicate native ID, unavailable store and incomplete enumeration each exit2 with an
+  mismatch, duplicate native ID, unavailable store and malformed native JSON each exit2 with an
   input diagnostic and no derived/coverage stdout. Combine dangling099 with a malformed coverage
   field to prove input-fault precedence. Imported empty links are preserved, not discarded.
+  Exercise the exact unbounded native invocation and successful empty and nonempty arrays.
+  Do not claim detection of a valid shorter native array: native completeness is a trusted
+  dependency, not an independently observed cardinality guarantee.
 - Invoke from a wrong directory and one holding only non-record intent files under both `bash`
   and `zsh`: the command produces its own refusal, not a shell glob error or quiet success. Normal
   invocations also work in both shells; do not use zsh's read-only `status` variable.
