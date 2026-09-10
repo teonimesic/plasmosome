@@ -73,8 +73,8 @@ mocks it in the test.
   `RevokesOnlyInGrantOrder` and `RevokesOnlyInReversePushOrder`. Without both, one pass can be
   deleted and nothing goes red — which is how the grant-order pass stood until an independent
   reviewer deleted it and watched the suite stay green. A new clause holding a set does the same.
-  No clause holds a set of *applied* objects yet, so removal order is unwitnessed; the first one
-  that does owes both orders too.
+  `apply_and_removal_reach_the_universe` now holds applied objects in both orders, pinned by
+  `AppliedRemovalsOnlyInGrantOrder` and `AppliedRemovalsOnlyInReverseOrder`.
 - **The fake does not model path containment.** `OsState` is a flat set of objects in five
   classes. A mount at `/workspace` and a socket at `/workspace/run/egressd.uds` are unrelated
   entries; nothing in the fake knows one sits inside the other. So in

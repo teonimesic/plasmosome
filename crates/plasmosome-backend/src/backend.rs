@@ -1,22 +1,23 @@
 use std::fmt;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::universe::{OsObject, OsState, PluginId, UniverseOp, UniverseRemoval};
+use crate::universe::{
+    GrantId, OsObject, OsState, PluginId, UniverseClass, UniverseOp, UniverseRemoval,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Handle(pub u64);
-
-impl Handle {
-    pub fn raw(&self) -> u64 {
-        self.0
-    }
+#[serde(deny_unknown_fields)]
+pub struct Handle {
+    pub class: UniverseClass,
+    pub id: GrantId,
 }
 
 impl fmt::Display for Handle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "h{}", self.0)
+        write!(f, "{}/{}", self.class.as_str(), self.id)
     }
 }
 
@@ -35,7 +36,7 @@ impl GrantKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Capability {
     SessionFile { path: String },
     UdsSocket { path: String },
@@ -45,13 +46,27 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub fn class_str(&self) -> &'static str {
+    pub fn class(&self) -> UniverseClass {
         match self {
-            Capability::SessionFile { .. } => "session-file",
-            Capability::UdsSocket { .. } => "uds-path",
-            Capability::ProxyMap { .. } => "proxy-map",
-            Capability::Broker { .. } => "broker-pid",
-            Capability::Mount { .. } => "mount",
+            Capability::SessionFile { .. } => UniverseClass::SessionFile,
+            Capability::UdsSocket { .. } => UniverseClass::UdsPath,
+            Capability::ProxyMap { .. } => UniverseClass::ProxyMap,
+            Capability::Broker { .. } => UniverseClass::BrokerPid,
+            Capability::Mount { .. } => UniverseClass::Mount,
+        }
+    }
+
+    pub fn class_str(&self) -> &'static str {
+        self.class().as_str()
+    }
+
+    pub fn key(&self) -> String {
+        match self {
+            Capability::SessionFile { path } => format!("session/{path}"),
+            Capability::UdsSocket { path } => path.clone(),
+            Capability::ProxyMap { host, .. } => host.clone(),
+            Capability::Broker { pid, .. } => format!("broker/{pid}"),
+            Capability::Mount { target, .. } => target.clone(),
         }
     }
 }
@@ -63,12 +78,58 @@ pub struct Grant {
     pub kind: GrantKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LedgerEntry {
     pub handle: Handle,
     pub plugin: PluginId,
     pub capability: Capability,
     pub kind: GrantKind,
+}
+
+impl LedgerEntry {
+    pub fn object(&self) -> OsObject {
+        OsObject {
+            id: self.handle.id,
+            owner: self.plugin.clone(),
+            capability: self.capability.clone(),
+        }
+    }
+
+    pub fn removal(&self) -> UniverseRemoval {
+        UniverseRemoval {
+            id: self.handle.id,
+            capability: self.capability.clone(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for LedgerEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            handle: Handle,
+            plugin: PluginId,
+            capability: Capability,
+            kind: GrantKind,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.handle.class != wire.capability.class() {
+            return Err(D::Error::custom(
+                "ledger entry handle class does not match its capability",
+            ));
+        }
+        Ok(LedgerEntry {
+            handle: wire.handle,
+            plugin: wire.plugin,
+            capability: wire.capability,
+            kind: wire.kind,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +173,11 @@ pub enum BackendError {
         class: &'static str,
         key: String,
         owner: PluginId,
+        id: GrantId,
+    },
+    IdentityConflict {
+        class: &'static str,
+        id: GrantId,
     },
     Fault(String),
     Unimplemented(&'static str),
@@ -130,8 +196,19 @@ impl fmt::Display for BackendError {
                     "handle {handle} did not drain within its {deadline_ms} ms deadline"
                 )
             }
-            BackendError::UnknownObject { class, key, owner } => {
-                write!(f, "`{owner}` holds no {class} object `{key}`")
+            BackendError::UnknownObject {
+                class,
+                key,
+                owner,
+                id,
+            } => {
+                write!(f, "`{owner}` holds no {class} object `{key}` at grant {id}")
+            }
+            BackendError::IdentityConflict { class, id } => {
+                write!(
+                    f,
+                    "{class} grant identity {id} is already held by another object"
+                )
             }
             BackendError::Fault(cause) => write!(f, "injected backend fault: {cause}"),
             BackendError::Unimplemented(what) => write!(f, "unimplemented in this track: {what}"),
@@ -146,14 +223,11 @@ pub trait EnforcementBackend {
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError>;
     fn snapshot_os_state(&self) -> OsState;
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError>;
-    /// Withdraws the object `owner` holds at the removal's class and key. A key
-    /// may be held by more than one owner; the removal takes that owner's object
-    /// and must never take another's, nor report success when the owner holds
-    /// nothing there.
+    /// Withdraws only the object matching the exact removal and named owner.
     fn apply_removal(
         &mut self,
         removal: UniverseRemoval,
         owner: &PluginId,
     ) -> Result<(), BackendError>;
-    fn plant(&mut self, object: OsObject);
+    fn plant(&mut self, object: OsObject) -> Result<(), BackendError>;
 }

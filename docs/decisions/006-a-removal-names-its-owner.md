@@ -67,24 +67,20 @@ false statement in exactly the case this change makes reachable. What the error 
 is *who* does hold the key. Nothing branches on that today, and saying it would be a new contract
 every backend must implement with no clause holding it to the answer, so it was left out.
 
-`OsState::owner_of` keeps its first-match answer and is now only a diagnostic read: it still names
-one owner where several hold a key, and no removal goes through it. `contains` is the same shape —
-it answers whether anyone holds a key, not whether you do.
+Spec 017 later replaced the ambiguous `OsState::owner_of` diagnostic with complete identified
+objects. `contains` remains an any-owner diagnostic, while exact object comparisons answer which
+owner and holding remains. The owner argument chosen here remains separate from the serialized
+removal, which now carries a grant identity and complete capability.
 
-A detach may no longer withdraw an object its plugin does not own. `Ledger` replays
+A detach may not withdraw an object its plugin does not own. `Ledger` replays
 `InverseVia::Universe` and every compensation on behalf of the ledger's own plugin, so a removal
-naming another plugin's object is now refused, and a refusal stops the replay — the effects below
-it in the ledger are left standing. That is a real precondition on `Effect::exact` and
-`Effect::compensating` where there was none: a compensation may retract only what its own plugin
-created. Both constructors say so, and a test pins the refusal. It is the right direction — the
-alternative is a compensation quietly taking a neighbour's capability — but it is a narrowing, not
-a pure bug fix, and callers building ledgers by hand can trip on it.
+naming another plugin's object is refused, and a refusal stops the replay. The effects below it
+remain standing. `Effect::exact` and `Effect::compensating` therefore accept only inverses for
+objects their ledger owner may withdraw.
 
-Two things this does not fix, both filed as task 022. One plasmid granted the same capability twice
-still materializes one object, so the second detach fails and residue verification cannot see what
-the first one left. And the rule that a revoke takes its own plugin's object is enforced by tests
-over the two backends in this repository rather than by a clause the conformance suite holds every
-backend to, so a third backend can still break it and be certified.
+Spec 017 and task 022 resolved the two precision gaps recorded by the original decision. Equal
+grants now materialize as independently removable identified objects, and the shared conformance
+suite checks owner-specific and instance-specific withdrawal for every backend.
 
 Finally, the rule this adds to `crates/plasmosome-backend/AGENTS.md` carries no A/B result, and
 decision 001 asks for one before a rule lands. The method there scores code an agent writes from a

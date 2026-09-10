@@ -14,5 +14,6 @@ pub use backend::{
 pub use composite::{CompositeBackend, Leaf};
 pub use fake::FakeBackend;
 pub use universe::{
-    Diff, OsObject, OsState, PluginId, ResidueReport, UniverseClass, UniverseOp, UniverseRemoval,
+    Diff, GrantId, OsObject, OsState, PluginId, ResidueReport, UniverseClass, UniverseOp,
+    UniverseRemoval,
 };

@@ -1,6 +1,4 @@
-use plasmosome_backend::{
-    Diff, EnforcementBackend, FakeBackend, PluginId, UniverseOp, UniverseRemoval,
-};
+use plasmosome_backend::{Diff, EnforcementBackend, FakeBackend, GrantId, PluginId, UniverseOp};
 use plasmosome_ledger::{Closure, Effect, Force, InverseVia, Ledger};
 use proptest::prelude::*;
 
@@ -35,38 +33,35 @@ enum GeneratedEffect {
 }
 
 impl GeneratedEffect {
-    fn setup(&self) -> Option<UniverseOp> {
+    fn setup_and_effect(&self) -> (Option<UniverseOp>, Effect) {
         match self {
-            GeneratedEffect::ExactFile { index } => Some(UniverseOp::WriteSessionFile {
-                path: format!("skills/generated-{index}.md"),
-                owner: PluginId::from("generated"),
-            }),
-            GeneratedEffect::CompensatingProxy { index } => Some(UniverseOp::SetProxyMap {
-                host: format!("host-{index}.example.test"),
-                route: "staged".to_string(),
-                owner: PluginId::from("generated"),
-            }),
-            GeneratedEffect::DelayedUnpublished { .. } => None,
-        }
-    }
-
-    fn effect(&self) -> Effect {
-        match self {
-            GeneratedEffect::ExactFile { index } => Effect::exact(
-                format!("exact file {index}"),
-                InverseVia::Universe(UniverseRemoval::RemoveSessionFile {
+            GeneratedEffect::ExactFile { index } => {
+                let op = UniverseOp::WriteSessionFile {
+                    id: GrantId::new(),
                     path: format!("skills/generated-{index}.md"),
-                }),
-            ),
-            GeneratedEffect::CompensatingProxy { index } => Effect::compensating(
-                format!("compensating proxy {index}"),
-                UniverseRemoval::RemoveProxyMap {
-                    host: format!("host-{index}.example.test"),
-                },
-            ),
-            GeneratedEffect::DelayedUnpublished { index } => {
-                Effect::delayed_unpublished("outbox/generated", &format!("payload-{index}"))
+                    owner: PluginId::from("generated"),
+                };
+                let effect = Effect::exact(
+                    format!("exact file {index}"),
+                    InverseVia::Universe(op.removal()),
+                );
+                (Some(op), effect)
             }
+            GeneratedEffect::CompensatingProxy { index } => {
+                let op = UniverseOp::SetProxyMap {
+                    id: GrantId::new(),
+                    host: format!("host-{index}.example.test"),
+                    route: "staged".to_string(),
+                    owner: PluginId::from("generated"),
+                };
+                let effect =
+                    Effect::compensating(format!("compensating proxy {index}"), op.removal());
+                (Some(op), effect)
+            }
+            GeneratedEffect::DelayedUnpublished { index } => (
+                None,
+                Effect::delayed_unpublished("outbox/generated", &format!("payload-{index}")),
+            ),
         }
     }
 
@@ -107,10 +102,11 @@ proptest! {
         let before = backend.snapshot_os_state();
         let mut ledger = Ledger::new("generated");
         for generated in &effects {
-            if let Some(op) = generated.setup() {
+            let (op, effect) = generated.setup_and_effect();
+            if let Some(op) = op {
                 backend.apply(op).expect("generated setup op must apply");
             }
-            ledger.push(generated.effect());
+            ledger.push(effect);
         }
 
         let Closure::ExternalFree(mut sealed) = ledger.close() else {

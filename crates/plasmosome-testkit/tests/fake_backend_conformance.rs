@@ -40,3 +40,13 @@ fn fake_backend_applies_and_removes_universe_objects() {
 fn fake_backend_rejects_a_handle_it_already_revoked() {
     conformance::revoke_of_a_revoked_handle_is_error(FakeBackend::new);
 }
+
+#[test]
+fn fake_backend_revokes_only_its_owners_object() {
+    conformance::revoke_takes_its_owners_object(FakeBackend::new);
+}
+
+#[test]
+fn fake_backend_removes_repeated_grants_independently() {
+    conformance::repeated_grants_are_independently_removable(FakeBackend::new);
+}
