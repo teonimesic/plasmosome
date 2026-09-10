@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::time::Duration;
 
 use plasmosome_backend::{
@@ -11,18 +13,141 @@ const CONFORMANCE_PLUGIN: &str = "conformance";
 const SECOND_PLUGIN: &str = "conformance-second";
 const DRAIN: Duration = Duration::from_millis(50);
 
+#[cfg(test)]
+thread_local! {
+    static CONTRACT_FAILURE_RECORDED: Cell<bool> = const { Cell::new(false) };
+}
+
+macro_rules! record_contract_failure {
+    () => {{
+        #[cfg(test)]
+        CONTRACT_FAILURE_RECORDED.with(|recorded| recorded.set(true));
+    }};
+}
+
+macro_rules! contract_assert {
+    ($condition:expr $(,)?) => {{
+        let condition = $condition;
+        if !condition {
+            record_contract_failure!();
+            panic!("assertion failed: {}", stringify!($condition));
+        }
+    }};
+    ($condition:expr, $($arg:tt)+) => {{
+        let condition = $condition;
+        if !condition {
+            record_contract_failure!();
+            panic!($($arg)+);
+        }
+    }};
+}
+
+macro_rules! contract_assert_eq {
+    ($left:expr, $right:expr $(,)?) => {{
+        let left = &$left;
+        let right = &$right;
+        if !(*left == *right) {
+            record_contract_failure!();
+            panic!(
+                "assertion `left == right` failed\n  left: {left:?}\n right: {right:?}"
+            );
+        }
+    }};
+    ($left:expr, $right:expr, $($arg:tt)+) => {{
+        let left = &$left;
+        let right = &$right;
+        if !(*left == *right) {
+            record_contract_failure!();
+            panic!(
+                "assertion `left == right` failed: {}\n  left: {left:?}\n right: {right:?}",
+                format_args!($($arg)+)
+            );
+        }
+    }};
+}
+
+macro_rules! contract_assert_ne {
+    ($left:expr, $right:expr $(,)?) => {{
+        let left = &$left;
+        let right = &$right;
+        if *left == *right {
+            record_contract_failure!();
+            panic!("assertion `left != right` failed\n  left: {left:?}\n right: {right:?}");
+        }
+    }};
+    ($left:expr, $right:expr, $($arg:tt)+) => {{
+        let left = &$left;
+        let right = &$right;
+        if *left == *right {
+            record_contract_failure!();
+            panic!(
+                "assertion `left != right` failed: {}\n  left: {left:?}\n right: {right:?}",
+                format_args!($($arg)+)
+            );
+        }
+    }};
+}
+
+macro_rules! contract_unwrap {
+    ($result:expr) => {{
+        match $result {
+            Ok(value) => value,
+            Err(error) => {
+                record_contract_failure!();
+                panic!("called `Result::unwrap()` on an `Err` value: {error:?}");
+            }
+        }
+    }};
+}
+
+macro_rules! contract_unwrap_err {
+    ($result:expr) => {{
+        match $result {
+            Err(error) => error,
+            Ok(value) => {
+                record_contract_failure!();
+                panic!("called `Result::unwrap_err()` on an `Ok` value: {value:?}");
+            }
+        }
+    }};
+}
+
+macro_rules! contract_expect {
+    ($result:expr, $message:literal) => {{
+        match $result {
+            Ok(value) => value,
+            Err(error) => {
+                record_contract_failure!();
+                panic!("{}: {error:?}", $message);
+            }
+        }
+    }};
+}
+
+macro_rules! contract_panic {
+    ($($arg:tt)*) => {{
+        record_contract_failure!();
+        panic!($($arg)*);
+    }};
+}
+
+#[cfg(test)]
+fn take_contract_failure() -> bool {
+    CONTRACT_FAILURE_RECORDED.with(|recorded| recorded.replace(false))
+}
+
 /// Checks that a grant's exact ledger entry is returned by either revoke policy.
 pub fn grant_is_replayable<B: EnforcementBackend>(make: impl Fn() -> B) {
     for drain in drains() {
         let mut backend = make();
         for grant in sample_grants() {
             let entry = backend.grant(grant.clone());
-            assert_eq!(entry.plugin, grant.plugin);
-            assert_eq!(entry.capability, grant.capability);
-            assert_eq!(entry.kind, grant.kind);
-            assert_eq!(
+            contract_assert_eq!(entry.plugin, grant.plugin);
+            contract_assert_eq!(entry.capability, grant.capability);
+            contract_assert_eq!(entry.kind, grant.kind);
+            contract_assert_eq!(
                 backend.revoke(entry.handle, drain).unwrap_or_else(|error| {
-                    panic!(
+                    contract_panic!(
                         "the handle {} a grant just issued did not survive a {} revoke: {error}",
                         entry.handle,
                         policy_of(drain)
@@ -45,8 +170,8 @@ pub fn revoke_unknown_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> 
             class: live.handle.class,
             id: GrantId::new(),
         };
-        assert_eq!(
-            backend.revoke(unknown, drain).unwrap_err(),
+        contract_assert_eq!(
+            contract_unwrap_err!(backend.revoke(unknown, drain)),
             BackendError::UnknownHandle { handle: unknown },
             "revoking the never-granted handle must return UnknownHandle"
         );
@@ -66,13 +191,13 @@ pub fn drained_revoke_removes_object<B: EnforcementBackend>(make: impl Fn() -> B
             let entry = backend.grant(grant);
             let object = entry.object();
             backend.revoke(entry.handle, drain).unwrap_or_else(|error| {
-                panic!(
+                contract_panic!(
                     "a {} revoke of {} failed: {error}",
                     policy_of(drain),
                     entry.handle
                 )
             });
-            assert!(
+            contract_assert!(
                 !holds_exact(&backend.snapshot_os_state(), &object),
                 "a {} revoke left {} standing",
                 policy_of(drain),
@@ -87,13 +212,14 @@ pub fn planted_residue_survives_unrelated_revoke<B: EnforcementBackend>(make: im
     for drain in drains() {
         let mut backend = make();
         let residue = residue_objects().remove(0);
-        backend
-            .plant(residue.clone())
-            .expect("the residue fixture must plant");
+        contract_expect!(
+            backend.plant(residue.clone()),
+            "the residue fixture must plant"
+        );
         for grant in sample_grants() {
             let entry = backend.grant(grant);
-            backend.revoke(entry.handle, drain).unwrap();
-            assert!(
+            contract_unwrap!(backend.revoke(entry.handle, drain));
+            contract_assert!(
                 holds_exact(&backend.snapshot_os_state(), &residue),
                 "a {} revoke of {} removed the unrelated {}",
                 policy_of(drain),
@@ -111,7 +237,7 @@ pub fn planted_residue_survives_unrelated_revoke<B: EnforcementBackend>(make: im
 
 /// Checks that snapshots contain every and only requested grant or planted object.
 pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> B) {
-    assert!(make().snapshot_os_state().is_empty());
+    contract_assert!(make().snapshot_os_state().is_empty());
     let mut backend = make();
     let mut expected = Vec::new();
     for grant in sample_grants() {
@@ -119,9 +245,10 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         expected.push(entry.object());
     }
     let residue = residue_objects().remove(0);
-    backend
-        .plant(residue.clone())
-        .expect("the residue fixture must plant");
+    contract_expect!(
+        backend.plant(residue.clone()),
+        "the residue fixture must plant"
+    );
     expected.push(residue);
     assert_exact_state(
         &backend.snapshot_os_state(),
@@ -137,7 +264,7 @@ pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() 
         let mut live = Vec::new();
         for grant in grants_with_two_of_one_class() {
             let entry = backend.grant(grant);
-            assert!(
+            contract_assert!(
                 live.iter()
                     .all(|(held, _): &(LedgerEntry, OsObject)| held.handle != entry.handle),
                 "a live grant is already holding {}",
@@ -150,7 +277,7 @@ pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() 
             backend
                 .revoke(entry.handle, DrainSpec::graceful(DRAIN))
                 .unwrap_or_else(|error| {
-                    panic!(
+                    contract_panic!(
                         "the live grant did not revoke through {} on the {} pass: {error}",
                         entry.handle,
                         order.name()
@@ -168,28 +295,37 @@ pub fn live_grants_hold_distinct_handles<B: EnforcementBackend>(make: impl Fn() 
 
 /// Checks exact apply/removal behavior with same-key neighbours in both orders.
 pub fn apply_and_removal_reach_the_universe<B: EnforcementBackend>(make: impl Fn() -> B) {
+    apply_and_removal_reach_the_universe_with(make, GrantId::new);
+}
+
+fn apply_and_removal_reach_the_universe_with<B, I>(make: impl Fn() -> B, mut new_id: I)
+where
+    B: EnforcementBackend,
+    I: FnMut() -> GrantId,
+{
     for capability in sample_capabilities() {
         for order in orders() {
             let mut backend = make();
-            let mut expected: Vec<OsObject> = residue_objects()
+            let mut expected: Vec<OsObject> = residue_objects_with(&mut new_id)
                 .into_iter()
                 .filter(|object| object.class() != capability.class())
                 .collect();
             let residue = OsObject {
-                id: GrantId::new(),
+                id: new_id(),
                 owner: PluginId::from(SECOND_PLUGIN),
                 capability: capability.clone(),
             };
             expected.push(residue.clone());
             for object in &expected {
-                backend
-                    .plant(object.clone())
-                    .expect("the residue fixture must plant");
+                contract_expect!(
+                    backend.plant(object.clone()),
+                    "the residue fixture must plant"
+                );
             }
-            let first = op_for(GrantId::new(), CONFORMANCE_PLUGIN, capability.clone());
-            let second = op_for(GrantId::new(), CONFORMANCE_PLUGIN, capability.clone());
-            backend.apply(first.clone()).unwrap();
-            backend.apply(second.clone()).unwrap();
+            let first = op_for(new_id(), CONFORMANCE_PLUGIN, capability.clone());
+            let second = op_for(new_id(), CONFORMANCE_PLUGIN, capability.clone());
+            contract_unwrap!(backend.apply(first.clone()));
+            contract_unwrap!(backend.apply(second.clone()));
             expected.extend([first.object(), second.object()]);
             assert_exact_state(
                 &backend.snapshot_os_state(),
@@ -202,7 +338,7 @@ pub fn apply_and_removal_reach_the_universe<B: EnforcementBackend>(make: impl Fn
                 backend
                     .apply_removal(op.removal(), &object.owner)
                     .unwrap_or_else(|error| {
-                        panic!(
+                        contract_panic!(
                             "removing the applied {} on the {} pass failed: {error}",
                             object.describe(),
                             order.name()
@@ -215,18 +351,18 @@ pub fn apply_and_removal_reach_the_universe<B: EnforcementBackend>(make: impl Fn
                     &expected,
                     "an applied removal selected the wrong instance or damaged unrelated state",
                 );
-                assert!(
+                contract_assert!(
                     !holds_exact(&state, &object),
                     "an applied removal left its exact object standing"
                 );
                 let owner_still_holds_key =
                     owner_holds_key(&state, &object.owner, object.class(), &object.key());
-                assert_eq!(
+                contract_assert_eq!(
                     owner_still_holds_key,
                     index == 0,
                     "owner key membership must remain only while that owner has another holding"
                 );
-                assert!(holds_exact(&state, &residue));
+                contract_assert!(holds_exact(&state, &residue));
             }
         }
     }
@@ -240,21 +376,21 @@ pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn(
         for grant in sample_grants().into_iter().take(2) {
             let entry = backend.grant(grant);
             let object = entry.object();
-            backend.revoke(entry.handle, drain).unwrap();
+            contract_unwrap!(backend.revoke(entry.handle, drain));
             spent.push((entry, object));
         }
         let live = backend.grant(sample_grants().remove(2));
         for (entry, spent_object) in spent.into_iter().rev() {
-            assert_eq!(
-                backend.revoke(entry.handle, drain).unwrap_err(),
+            contract_assert_eq!(
+                contract_unwrap_err!(backend.revoke(entry.handle, drain)),
                 BackendError::UnknownHandle {
                     handle: entry.handle
                 },
                 "revoking the already-revoked handle must return UnknownHandle"
             );
             let state = backend.snapshot_os_state();
-            assert!(!holds_exact(&state, &spent_object));
-            assert!(
+            contract_assert!(!holds_exact(&state, &spent_object));
+            contract_assert!(
                 holds_exact(&state, &live.object()),
                 "a refused spent-handle revoke took the live neighbour"
             );
@@ -287,7 +423,7 @@ pub fn revoke_takes_its_owners_object<B: EnforcementBackend>(make: impl Fn() -> 
                     order.arrange(vec![(audit, audit_object), (deploy, deploy_object)])
                 {
                     backend.revoke(entry.handle, drain).unwrap_or_else(|error| {
-                        panic!(
+                        contract_panic!(
                             "the {} revoke on the {} pass did not revoke its owner's object: {error}",
                             policy_of(drain),
                             order.name()
@@ -360,7 +496,7 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
                 };
                 let second = backend.grant(second_request.clone());
                 let second_object = requested_object(&second, &second_request);
-                assert_ne!(first.handle, second.handle);
+                contract_assert_ne!(first.handle, second.handle);
                 let mut expected = vec![first_object.clone(), second_object.clone()];
                 assert_exact_state(
                     &backend.snapshot_os_state(),
@@ -371,7 +507,7 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
                     order.arrange(vec![(first, first_object), (second, second_object)])
                 {
                     backend.revoke(entry.handle, drain).unwrap_or_else(|error| {
-                        panic!(
+                        contract_panic!(
                             "repeated grant did not revoke on the {} {} pass: {error}",
                             policy_of(drain),
                             order.name()
@@ -399,9 +535,7 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
             owner: PluginId::from(CONFORMANCE_PLUGIN),
             capability: capability.clone(),
         };
-        backend
-            .plant(residue.clone())
-            .expect("broker residue must plant");
+        contract_expect!(backend.plant(residue.clone()), "broker residue must plant");
         let live_request = Grant {
             plugin: residue.owner.clone(),
             capability: capability.clone(),
@@ -414,22 +548,20 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
             &[residue.clone(), live_object],
             "live broker and equal residue must coexist exactly",
         );
-        backend.revoke(live.handle, drain).unwrap();
+        contract_unwrap!(backend.revoke(live.handle, drain));
         assert_exact_state(
             &backend.snapshot_os_state(),
             std::slice::from_ref(&residue),
             "live broker revoke must preserve equal residue",
         );
-        backend
-            .apply_removal(
-                plasmosome_backend::UniverseRemoval {
-                    id: residue.id,
-                    capability: residue.capability.clone(),
-                },
-                &residue.owner,
-            )
-            .unwrap();
-        assert!(backend.snapshot_os_state().is_empty());
+        contract_unwrap!(backend.apply_removal(
+            plasmosome_backend::UniverseRemoval {
+                id: residue.id,
+                capability: residue.capability.clone(),
+            },
+            &residue.owner,
+        ));
+        contract_assert!(backend.snapshot_os_state().is_empty());
     }
 }
 
@@ -522,21 +654,24 @@ fn one_grant() -> Grant {
 }
 
 fn requested_object(entry: &LedgerEntry, request: &Grant) -> OsObject {
-    assert_eq!(
+    contract_assert_eq!(
         entry.handle.class,
         request.capability.class(),
         "a grant handle must name the requested capability class"
     );
-    assert_eq!(
-        entry.plugin, request.plugin,
+    contract_assert_eq!(
+        entry.plugin,
+        request.plugin,
         "a grant must retain its requested owner"
     );
-    assert_eq!(
-        entry.capability, request.capability,
+    contract_assert_eq!(
+        entry.capability,
+        request.capability,
         "a grant must retain its complete requested capability"
     );
-    assert_eq!(
-        entry.kind, request.kind,
+    contract_assert_eq!(
+        entry.kind,
+        request.kind,
         "a grant must retain its requested lifecycle kind"
     );
     OsObject {
@@ -554,10 +689,14 @@ fn policy_of(drain: DrainSpec) -> &'static str {
 }
 
 fn residue_objects() -> Vec<OsObject> {
+    residue_objects_with(GrantId::new)
+}
+
+fn residue_objects_with(mut new_id: impl FnMut() -> GrantId) -> Vec<OsObject> {
     sample_capabilities()
         .into_iter()
         .map(|capability| OsObject {
-            id: GrantId::new(),
+            id: new_id(),
             owner: PluginId::from("abandoned"),
             capability,
         })
@@ -615,5 +754,8 @@ fn assert_exact_state(actual: &OsState, expected: &[OsObject], context: &str) {
             .insert(object.clone())
             .expect("expected conformance objects must have unique addresses");
     }
-    assert_eq!(actual, &expected_state, "{context}");
+    contract_assert_eq!(actual, &expected_state, "{context}");
 }
+
+#[cfg(test)]
+mod clauses_discriminate;

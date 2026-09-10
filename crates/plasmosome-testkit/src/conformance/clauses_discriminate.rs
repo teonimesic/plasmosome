@@ -1,13 +1,12 @@
-use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
+use super as conformance;
 use plasmosome_backend::{
     BackendError, Capability, DrainSpec, EnforcementBackend, Grant, GrantId, GrantKind, Handle,
     LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass, UniverseOp,
     UniverseRemoval,
 };
-use plasmosome_testkit::conformance;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Defect {
@@ -48,10 +47,6 @@ enum InfrastructureFailure {
 }
 
 const ASSERTION_SHAPED_INFRASTRUCTURE_PANIC: &str = "assertion failed: infrastructure sentinel";
-
-thread_local! {
-    static INFRASTRUCTURE_PANICKED: Cell<bool> = const { Cell::new(false) };
-}
 
 struct DefectiveBackend {
     defect: Defect,
@@ -387,48 +382,6 @@ impl EnforcementBackend for DefectiveBackend {
     }
 }
 
-struct WitnessBackend(DefectiveBackend);
-
-fn run_as_infrastructure<T>(run: impl FnOnce() -> T) -> T {
-    match catch_unwind(AssertUnwindSafe(run)) {
-        Ok(output) => output,
-        Err(payload) => {
-            INFRASTRUCTURE_PANICKED.with(|panicked| panicked.set(true));
-            resume_unwind(payload);
-        }
-    }
-}
-
-impl EnforcementBackend for WitnessBackend {
-    fn grant(&mut self, grant: Grant) -> LedgerEntry {
-        run_as_infrastructure(|| self.0.grant(grant))
-    }
-
-    fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError> {
-        run_as_infrastructure(|| self.0.revoke(handle, drain))
-    }
-
-    fn snapshot_os_state(&self) -> OsState {
-        run_as_infrastructure(|| self.0.snapshot_os_state())
-    }
-
-    fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
-        run_as_infrastructure(|| self.0.apply(op))
-    }
-
-    fn apply_removal(
-        &mut self,
-        removal: UniverseRemoval,
-        owner: &PluginId,
-    ) -> Result<(), BackendError> {
-        run_as_infrastructure(|| self.0.apply_removal(removal, owner))
-    }
-
-    fn plant(&mut self, object: OsObject) -> Result<(), BackendError> {
-        run_as_infrastructure(|| self.0.plant(object))
-    }
-}
-
 fn removal_of(object: &OsObject) -> UniverseRemoval {
     UniverseRemoval {
         id: object.id,
@@ -513,22 +466,23 @@ fn a_stranger(handle: Handle) -> LedgerEntry {
     }
 }
 
-fn carrying(defect: Defect) -> impl Fn() -> WitnessBackend {
-    move || run_as_infrastructure(|| WitnessBackend(DefectiveBackend::carrying(defect)))
+fn carrying(defect: Defect) -> impl Fn() -> DefectiveBackend {
+    move || DefectiveBackend::carrying(defect)
 }
 
-fn factory_panics() -> WitnessBackend {
-    run_as_infrastructure(|| std::panic::panic_any(InfrastructureFailure::Factory))
+fn factory_panics() -> DefectiveBackend {
+    std::panic::panic_any(InfrastructureFailure::Factory)
 }
 
 fn assert_rejected(run: impl FnOnce()) {
-    INFRASTRUCTURE_PANICKED.with(|panicked| panicked.set(false));
+    conformance::take_contract_failure();
     let result = catch_unwind(AssertUnwindSafe(run));
-    let infrastructure_panicked = INFRASTRUCTURE_PANICKED.with(|panicked| panicked.replace(false));
-    match result {
-        Ok(()) => panic!("the defective backend passed the clause that should reject it"),
-        Err(payload) if infrastructure_panicked => resume_unwind(payload),
-        Err(_) => {}
+    let contract_failed = conformance::take_contract_failure();
+    match (result, contract_failed) {
+        (Err(_), true) => {}
+        (Err(payload), false) => resume_unwind(payload),
+        (Ok(()), false) => panic!("the defective backend passed the clause that should reject it"),
+        (Ok(()), true) => panic!("a conformance failure was recorded without a panic"),
     }
 }
 
@@ -556,7 +510,7 @@ fn mirror_oracle_passes_every_clause_without_proving_os_enforcement() {
 }
 
 #[test]
-fn infrastructure_panics_cannot_satisfy_clause_witnesses() {
+fn infrastructure_and_fixture_panics_cannot_satisfy_clause_witnesses() {
     let factory = catch_unwind(AssertUnwindSafe(|| {
         assert_rejected(|| conformance::snapshot_never_invents_objects(factory_panics))
     }))
@@ -587,6 +541,16 @@ fn infrastructure_panics_cannot_satisfy_clause_witnesses() {
         snapshot.downcast_ref::<&str>().copied(),
         Some(ASSERTION_SHAPED_INFRASTRUCTURE_PANIC)
     );
+
+    let fixture = catch_unwind(AssertUnwindSafe(|| {
+        assert_rejected(|| {
+            conformance::apply_and_removal_reach_the_universe_with(carrying(Defect::None), || {
+                std::panic::panic_any(98_u64)
+            })
+        })
+    }))
+    .expect_err("a fixture identity panic must escape the clause witness");
+    assert_eq!(fixture.downcast_ref::<u64>(), Some(&98_u64));
 }
 
 #[test]

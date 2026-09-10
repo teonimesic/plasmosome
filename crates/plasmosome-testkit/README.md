@@ -23,9 +23,10 @@ A clause earns its place by being watched failing against a backend built to car
 names. The suite started at five, and the three added by task 009 came from asking what a broken
 backend could still walk through: handles reused between live grants, `apply` and `apply_removal`
 never called at all, and a handle revoked twice. That watching is now committed rather than
-remembered: `tests/clauses_discriminate.rs` holds one defective backend per defect and asserts the
-clause panics against it, alongside a defect-free backend that passes all ten. A clause that
-stops discriminating fails there.
+remembered: the private unit-test module `src/conformance/clauses_discriminate.rs` holds one
+defective backend per defect and accepts only failures recorded by the clause's semantic checks.
+A clause that stops discriminating fails there. Run those witnesses directly with
+`cargo test -p plasmosome-testkit --lib conformance::clauses_discriminate`.
 
 The order a clause revokes in is part of what it proves. A detach replays a ledger in reverse push
 order, so a backend that accepts revokes only in grant order was conformant right up until task 012
@@ -50,7 +51,7 @@ and verifies the backend snapshot shows no residue.
 | --- | --- |
 | `builders` | `PlasmidManifest`, `Grant` sequences, `Effect`s and `DesiredState` — a test states only what it is about |
 | `conformance` | Ten clauses of the backend contract, each generic over `EnforcementBackend` |
-| `tests/clauses_discriminate.rs` | Defective backends shown failing the clause that names each fault |
+| `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |
 
 Nothing here ships: the crate is `publish = false`, and a guard keeps it out of every other
