@@ -1,7 +1,7 @@
 ---
 id: 017
 title: Exact capability grants and independently removable objects
-status: draft
+status: accepted
 intents: [004]
 ---
 
@@ -39,7 +39,7 @@ allocator or proof of kernel process identity; a detected collision must not ove
 A grant's exact address is `(UniverseClass, GrantId)`. Qualifying the address by class permits
 class-directed removal without searching another leaf. A `GrantId` minted for a new operation
 must be fresh even across classes; this is an issuance requirement, not a requirement to scan
-every backend in existence. Reusing an address with another payload is a conflict, not replacement.
+every backend in existence. Reusing a standing address with another payload is a conflict, not replacement.
 The address is stable for the lifetime of the holding, including when it becomes residue.
 
 `Capability` retains its five existing variants and every existing field. It gains total ordering
@@ -72,7 +72,7 @@ silently erase a row. `objects()`, `len()`, and `is_empty()` continue to describ
 `Grant { plugin, capability, kind }` remains unchanged. Each invocation of
 `EnforcementBackend::grant(Grant) -> LedgerEntry` is a **new grant**, including a call with the
 same arguments as its predecessor. The backend issues a fresh identity and materializes exactly
-one holding. It checks locally known addresses before publishing the result; a generated UUID
+one holding. It checks standing addresses before publishing the result; a generated UUID
 collision is retried, never used to overwrite a holding. Random-source failure cannot return a
 successful entry. The existing infallible seam does not gain a pretend successful fallback.
 
@@ -87,23 +87,27 @@ Every `UniverseOp` variant gains required `id: GrantId`; the other fields remain
 `op.object()` preserves that ID and all its resource fields. `op.removal()` produces the exact
 inverse before execution. `apply(op)` remains `Result<(), BackendError>`:
 
-- An unseen address materializes its object once.
+- An absent address materializes its object once.
 - Repeating the same recorded operation while that object stands succeeds without creating a
   second holding. Two intended grants therefore use two IDs, even with equal owner and capability.
-- The same address with a different owner or capability returns `IdentityConflict` without change.
-- Reapplying an address retired during this backend's lifetime returns
-  `BackendError::RetiredObject { class, id }`; it does not resurrect a withdrawn grant.
+- A standing address with a different owner or capability returns `IdentityConflict` without change.
 
-A backend retains enough identity history during its lifetime to make those answers independent
-of insertion order. Grant, direct apply, and plant share the address space, so applying or planting
-a matching observation of a live grant is not a second grant and cannot replace its handle record.
-The corresponding operation with a changed payload conflicts. `GrantKind` remains entry metadata,
+The backend retains standing objects and live grant records, not an unbounded history of retired
+IDs. Applying an explicitly supplied address after its object was removed can materialize that
+observation again, but does not restore a spent grant handle. Callers must not use a stale apply
+as a new grant or replay it after withdrawal without reconciling the current observation. This
+seam provides exact selection and live-operation deduplication, not cross-operation retry ordering
+or crash recovery. New grants always receive fresh identities.
+
+Grant, direct apply, and plant share the address space, so applying or planting a matching
+observation of a live grant is not a second grant and cannot replace its handle record. The
+corresponding operation with a changed payload conflicts. `GrantKind` remains entry metadata,
 not part of the observed capability, and direct apply does not convert a holding into a grant.
 
 `plant(object)` and `FakeBackend::plant_residue(object)` return `Result<(), BackendError>` and
 preserve the supplied identity. Planting is explicit observation/fixture insertion, not a grant
 request, handle issuance, PID lookup, or license to make up an ID during recovery. An identical
-standing observation is a no-op; conflicting and locally retired addresses refuse as above.
+standing observation is a no-op; a conflicting standing address refuses as above.
 A fresh fixture creates an explicit fresh identity for its planted object.
 
 `CompositeBackend` routes handles by their class, without rewriting their IDs or keeping a second
@@ -122,13 +126,13 @@ Construction returns `Result<CompositeBackend, BackendError>` to report these vi
 removal variants. It contains no owner: `apply_removal(removal, owner)` continues to receive the
 owner separately from the ledger or caller. `removal.class()` and `removal.key()` derive diagnostics.
 `OsState::remove(&removal, owner)` takes only the row matching the exact address, full capability,
-and owner; it returns that object or none. No selector uses `owner_of`, an arbitrary matching
-resource, a count, or first/last insertion order.
+and owner; it returns that object or none. No selector uses an arbitrary matching resource,
+a count, or first/last insertion order.
 
-A removal with an absent or retired address, wrong owner, or wrong capability returns
+A removal with an absent address, wrong owner, or wrong capability returns
 `BackendError::UnknownObject { class, key, owner, id }` and leaves every holding and grant record
-unchanged. The diagnostic key alone never decides the outcome. Success retires the address and,
-if the holding was granted, retires its handle record too. Later `revoke` of that handle is
+unchanged. The diagnostic key alone never decides the outcome. Success removes the object and,
+if the holding was granted, removes its live handle record too. Later `revoke` of that handle is
 `UnknownHandle`; direct removal is not permission to leave a stale live handle pointing elsewhere.
 
 `revoke(handle, drain)` first resolves that exact live grant. An unknown or spent handle returns
@@ -138,7 +142,7 @@ original entry, removes its exact object, and retires the handle. Either revoke 
 source/target or route/host coincidence does not impose an order on this seam. LIFO remains the
 ledger's order, not a restriction that a backend imposes on independent grants.
 
-A retired address is never automatically treated as a successful withdrawal. The sealed ledger's
+An absent address is never automatically treated as a successful withdrawal. The sealed ledger's
 existing pending cursor prevents repeat undo during interruption/resume in that ledger instance.
 Reopening a log after a crash has separate recovery obligations; this specification does not
 silently turn unknown-object or unknown-handle failures into proof of a completed inverse.
@@ -178,8 +182,9 @@ newly leaked when the baseline already includes it.
 UUID values while representing the same holdings. Multiplicity remains significant: two equal
 holdings are not equivalent to one. This compares the verification universe, not physical inode,
 listener, mount, or process counts. It never authorizes removal and never replaces identity-aware
-lifecycle diffs. `contains(class, key)` remains an any-owner diagnostic; `owner_of` remains a
-first-match diagnostic, with no claim to select one exact holding.
+lifecycle diffs. `contains(class, key)` remains an any-owner diagnostic. Remove the ambiguous
+first-match `owner_of` API and migrate its diagnostic/test callers to complete object comparisons;
+the existing `objects()` iterator already exposes every owner without selecting an arbitrary one.
 
 ### Serialization and ledger interoperability
 
@@ -215,7 +220,7 @@ handles merely because objects were planted. A fresh backend without those recor
 old handle even while equal new capabilities stand.
 
 No claim is made that UUIDs, serialized snapshots, or the existing append/read helpers recover
-OS authority, retired-address history, acknowledged inverses, or atomic attach publication after
+OS authority, operation ordering, acknowledged inverses, or atomic attach publication after
 a crash. Recovery must preserve known IDs, recover real grant ownership, reconcile observations,
 and never reinterpret a new grant as the old one. The separate recovery design must integrate
 these types rather than retain the retired lossy wire path. This specification leaves
@@ -278,7 +283,8 @@ systems; it neither claims their guarantees nor waits for another owner decision
   a neighbouring object. Runtime removal failures preserve the full state. Graceful timeout and
   force-after-timeout are exercised with equal peer holdings still standing.
 - **A5 — apply identity:** replay of one live recorded op is a no-op; two equal ops with fresh IDs
-  create two holdings. Payload collision and local retired-ID replay refuse without mutation.
+  create two holdings. Standing payload collision refuses without mutation. Apply or plant after
+  exact removal does not revive a spent grant handle; new grants still use fresh identities.
   Cross-entry paths through apply, plant, direct removal, and revoke preserve those transitions.
 - **A6 — independent backends:** composite leaves and fresh backend instances do not alias handle
   counters; class routing preserves IDs and errors. Invalid initial leaf observations refuse.
