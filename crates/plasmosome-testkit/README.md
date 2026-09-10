@@ -32,16 +32,12 @@ order, so a backend that accepts revokes only in grant order was conformant righ
 had `live_grants_hold_distinct_handles` walk both orders — it revokes its live set in reverse
 first, then in grant order, and says in every failure which pass it came from.
 
-**Passing the suite is not evidence of enforcement.** `snapshot_os_state` is the only oracle any
-clause has, and it is the backend's own account of the world. A backend that holds no operating
-system state at all — one that answers every snapshot from its live ledger, so the answer is what
-it was asked to do rather than what happened — passes all ten clauses, and
-`snapshot_os_state_is_the_only_oracle_a_clause_has` is that backend, passing. Nothing at this seam
-separates a backend that enforces from one that reports its intent, because the seam never reads
-the operating system. **If that test ever fails, the seam gained a real oracle: delete the test
-and this paragraph, never the clause that caught it.** Read "conformant" as "keeps its own books consistently", never as
-"enforcing"; the evidence for enforcement has to come from an end-to-end test that drives the real
-thing and looks at the real world.
+**Passing the suite is not evidence of enforcement.** Clauses compare requested changes with
+the backend's own account of the world. A backend can maintain a consistent in-memory inventory
+without performing an operating-system operation; this interface provides no independent OS
+oracle. Read "conformant" as "keeps its own books consistently", not "enforcing". Evidence of
+enforcement must come from an end-to-end test that drives the real adapter and observes the
+real world.
 
 The second is the **integration layer**. A unit test exercises one crate. These exercise core,
 backend and ledger together through their public APIs, with the outside world replaced only at

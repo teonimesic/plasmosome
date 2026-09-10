@@ -538,6 +538,22 @@ fn revoke_order_witnesses_are_independent() {
             Defect::RevokesOnlyInReversePushOrder,
         ))
     });
+    assert_rejected(|| {
+        conformance::revoke_takes_its_owners_object(carrying(Defect::RevokesOnlyInGrantOrder))
+    });
+    assert_rejected(|| {
+        conformance::revoke_takes_its_owners_object(carrying(Defect::RevokesOnlyInReversePushOrder))
+    });
+    assert_rejected(|| {
+        conformance::repeated_grants_are_independently_removable(carrying(
+            Defect::RevokesOnlyInGrantOrder,
+        ))
+    });
+    assert_rejected(|| {
+        conformance::repeated_grants_are_independently_removable(carrying(
+            Defect::RevokesOnlyInReversePushOrder,
+        ))
+    });
 }
 
 #[test]
