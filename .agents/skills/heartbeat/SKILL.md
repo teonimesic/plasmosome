@@ -1,9 +1,13 @@
 ---
 name: heartbeat
-description: Reconcile PRs and shared Beads ownership against evidence, then dispatch eligible planned tasks. Use at session start and when choosing work.
+description: Advance approved project goals by reconciling current work, resolving prerequisites and dispatching useful deliverables. Use at session start and when choosing work.
 ---
 
 # The heartbeat
+
+The main driver advances the project toward working capabilities. Reconciliation supplies evidence
+for that work; a successful sweep is not itself a delivery. Select across the whole approved
+intent/spec/task graph, not a remembered set of task IDs or only the currently ready queue.
 
 Finish work already in flight before starting more. The task queue is shared native Beads,
 accessed only through `./tools/work-state`; the contents of a chat, branch or old task snapshot
@@ -65,10 +69,25 @@ status, missing link target, or accepted spec reaching no approved intent is a f
 empty planning queue. Report each fault rather than hiding it with a status selector. Task states
 and contents come from native rows, never a Markdown state-line sweep.
 
-For a draft spec with no task, or an approved intent with no spec, decide whether it needs a
-planner or why not. An unanswered draft intent goes to the owner as a draft PR. Drafts with a
-recorded refusal/outcome are not forgotten approvals. New task filing follows the mapping rule
-in the tasks skill; noticing something during review is not enough to admit it.
+Use code and delivery evidence to find useful unfinished behavior under approved intents,
+including intents that already have specs and accepted specs that already have tasks. A link is
+not evidence that the wanted behavior exists. For missing specs, draft specs and incomplete
+plans, identify the next finishable prerequisite and dispatch its author when ownership and
+capacity permit. New task filing follows the tasks skill; do not fabricate a goal or mapping.
+
+Distinguish an implementation blocker from a blocker on that prerequisite. A missing accepted
+spec blocks code, not writing and reviewing the spec. Technical design choices belong to the
+planner; spec acceptance follows `docs/specs/README.md`, not an invented owner approval gate.
+After an investigation finishes, advance its result into the needed spec, executable plan or
+implementation. Do not repeat the investigation, or treat its assignment's limited write scope
+as a permanent prohibition on the next assignment.
+
+For a genuine external or owner-only blocker, name the exact missing decision or evidence and
+who supplies it, then consider unrelated approved goals. Preserve unresolved ownership; it
+blocks taking that work, not investigating every other non-overlapping opportunity. Proposals
+needing intent approval follow the intent README's draft-PR gate. A recorded refusal is not an
+approval. If the owner has asked not to be questioned, record the decision needed without
+prompting them and continue work within existing authority.
 
 ## 4. Establish actual capacity
 
@@ -100,8 +119,14 @@ chain. Native ready is dependency eligibility, not a spec validator. Send each e
 Beads ID and its non-overlapping ownership; it uses its unique actor and atomically claims before
 creating a code worktree. A losing claimant stops, not a second implementation.
 
-If fewer candidates can run, record the reason: empty queue, blockers, missing plans, conflicting
-files or review capacity. Persist task decisions, notes and any newly admitted work in Beads
-before the session ends; a summary to the user communicates those records and is not their
-replacement. Explicitly publish when intended: an ordinary task mutation never claims to have
-backed up or synchronized the store.
+Before reporting no safe action, account for agent-resolvable prerequisites as well as ready
+implementation work across approved goals. An empty ready list or unchanged blocked labels is
+not sufficient. Repeated idle sweeps while such work remains are a work-selection failure to
+investigate, not proof the driver is healthy. Do not manufacture documentation or tasks to
+appear busy; report actual behavior proved, reviewed contracts and merged delivery separately.
+
+If fewer candidates can run, record the concrete ownership, admission, dependency or review
+constraint. Persist changed decisions, blockers and newly admitted work in Beads; do not append
+the same idle note each sweep. If no safe action remains, stop this sweep. A user summary is not
+a substitute for native records. Explicitly publish when intended: an ordinary task mutation
+never claims to have backed up or synchronized the store.
