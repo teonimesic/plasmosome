@@ -296,6 +296,10 @@ state; post-effect incompleteness is explicit, not a false promise of atomic OS 
 `DrainTimedOut` preserves the pre-withdrawal holding: it applies before destructive release.
 A timeout after release has already changed resources is IncompleteEffect instead; remaining
 authority and peers are preserved, but released resources are not falsely reported restored.
+Spec001 §4.2 therefore uses a deadline-limited host-local pause and an observational guest
+drain: no guest-gate restoration RPC is required for an ordinary pre-destructive timeout.
+A genuine bridge-channel loss is a distinct enforcement failure: affected holdings move to
+incomplete with original authority retained and permit only exact withdrawal, never reactivation.
 
 `apply_removal` also accepts an incomplete address when the supplied owner and full removal
 match its recorded operation. It drains/releases only resources belonging to that association,
@@ -629,6 +633,10 @@ source acceptance still supplies neither deployed artifacts nor successful platf
   a neighbouring object. Pre-effect refusal preserves full state; post-effect failure exposes
   an incomplete obligation rather than hiding changed resources. Graceful timeout preserves
   selected authority and peers. Caller UUID failure occurs before prepare/backend invocation.
+  Stall a guest drain reply while keeping both streams live: the host deadline restores original
+  access without a remote activation reply. A mutant that closes the guest gate and depends on
+  that reply must fail. Separately break a stream: affected exact operations must become
+  incomplete, not closed-but-standing or silently absent; reconnection cannot reactivate them.
 - **A5 — apply identity:** replay of one live recorded op is a no-op; two equal ops with fresh IDs
   create two holdings. Standing payload collision refuses without mutation. Apply or plant after
   exact removal does not revive a spent grant handle; new grants still use fresh identities.

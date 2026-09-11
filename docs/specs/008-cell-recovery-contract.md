@@ -608,6 +608,10 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   association and resolve pending cleanup without a duplicate spawn. An unknown incarnation
   cannot target a same-number replacement. Direct exact removal must enforce its supplied
   graceful deadline and preserve peers on timeout, not bypass drain because it uses an inverse.
+  In the selected runtime, stall the non-mutating guest drain observation while streams remain
+  live: the host-local deadline restores access with no remote activation dependency. Actual
+  stream loss instead exposes affected operations as incomplete and permits only exact cleanup
+  under original authority; a same-boot reconnect or changed-boot replacement cannot promote them.
   After real fork and successful bind, inject access/association failure before successful
   publication. Observe the typed incomplete operation with no complete object or fabricated
   entry. Kill the controller, restart, durably abort, then exact-withdraw using retained original

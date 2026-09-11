@@ -636,26 +636,45 @@ prevent leakage of VM descriptors to descendants. Guest-ready requires the trust
 handshake, not a successful fork, socket file or recorded PID.
 
 Trusted deployment input supplies a `RuntimeRecipe`:
-`{version:1, vcpus:u8, memory_mib:u32, kernel:Artifact, initramfs:Artifact, root_image:Artifact,
-helper:Artifact, libraries:[Artifact], host_policy:Artifact, guest_policy:Artifact,
-architecture:Architecture}`. All fields are required and
+`{version:1, vcpus:u8, memory_mib:u32, kernel:Artifact, kernel_format:KernelFormat,
+initramfs:Artifact, root_image:Artifact, writable_root:String, helper:Artifact,
+libraries:[Artifact], host_policy:Artifact, guest_policy:Artifact, architecture:Architecture}`.
+All fields are required and
 unknown fields refuse. Artifact is `{path:String, sha256:String}` with an absolute NUL-free path
 and64lowercase hexadecimal SHA256 digits; Architecture is `aarch64 | x86_64`. CPU/memory values
 are positive and fit the actual platform's admitted limits. Artifacts are publisher-produced,
 architecture-matched and pinned before launch. The trusted operator selects them, never workload
 text. The root image is explicitly RAW; no format autodetection or guest-selected backing paths.
+KernelFormat is exactly `raw | elf | pe_gz | image_bz2 | image_gz | image_zstd`, mapped to the
+pinned header's KRUN_KERNEL_FORMAT constants0 through5 respectively. The publisher proves the
+selected format/architecture combination supported by the pinned library; no format guessing
+or hidden command-line override is allowed. `writable_root` is an absolute NUL-free path under
+an owned nonreplaceable private per-cell directory. Create that copy exclusively from root_image
+before VMM launch and retain its original inode/authority; it is never the immutable source path
+or a caller-selected existing file. This path is an explicit launch input, not recovery authority.
 Use immutable verified kernel/initramfs/base artifacts and a separately owned RAW per-cell copy
 for writes. Verification/opening must preserve the selected inode/bytes through the library's
 path-based opens; a replaceable parent or mutable artifact is refused, not trusted after hashing.
 A runtime recipe is deployment input retained by the original supervisor, not a mutable recovery
 database or permission to recreate a lost VM. Recovery reconnects, not relaunches.
 
-Call `krun_create_ctx`, `krun_set_vm_config`, `krun_set_kernel` and explicit RAW disk setup.
-The external kernel/initramfs supplies trusted PID1 and root boot policy. Disable implicit init
-and console; pass explicit environment and only declared FDs. Do not export a host directory
-through `krun_set_root` or virtiofs. Call `krun_disable_implicit_vsock` before
-`krun_add_vsock(ctx,0)`; zero disables both TSI flags. Add no NIC, TAP, passt or gvproxy backend,
-and pass an explicitly empty port map. Omitting a NIC alone does not disable implicit TSI.
+Call `krun_create_ctx` and `krun_set_vm_config(ctx,vcpus,memory_mib)`, then
+`krun_set_kernel(ctx,kernel.path,kernel_format,initramfs.path,"rdinit=/init panic=-1")`.
+The command line is fixed on both admitted architectures. The trusted initramfs `/init` is PID1;
+it mounts the single unpartitioned ext4 root from `/dev/vda` and enters that root before starting
+the trusted shim/policy and then the unprivileged workload. Add exactly one disk, first and only,
+with `krun_add_disk3(ctx,"root",writable_root,KRUN_DISK_FORMAT_RAW,false,false,KRUN_SYNC_FULL)`.
+Thus block ID, guest device, writable mode, host-cache mode and sync mode are fixed, not
+publisher-private choices. Do not call the deprecated root-disk API or implicit-init remount.
+Call `krun_disable_implicit_init` and `krun_disable_implicit_console`; add no console. Pass an
+explicit empty environment with `krun_set_env(ctx,empty)` where empty is a non-null array
+containing only the terminating NULL, not NULL (which inherits the host environment).
+Only the declared descriptors survive exec. Do not export a host directory through
+`krun_set_root` or virtiofs. Call `krun_disable_implicit_vsock` before `krun_add_vsock(ctx,0)`;
+zero disables both TSI flags. Add no NIC, TAP, passt or gvproxy backend, and call
+`krun_set_port_map(ctx,empty)` with the same explicit empty-array convention.
+Omitting a NIC alone does not disable implicit TSI. A negative context ID or nonzero setter
+status refuses launch and cleans only this attempt's original resources; no failed call is skipped.
 Source for these API constraints is the pinned
 [header](https://github.com/libkrun/libkrun/blob/v1.19.4/include/libkrun.h) and
 [implementation](https://github.com/libkrun/libkrun/blob/v1.19.4/src/libkrun/src/lib.rs).
@@ -688,9 +707,17 @@ but the original host supervisor is the sole RPC caller and the shim is the resp
 calls hello before any other verb. On4091 the shim is the sole caller and the host the responder;
 the host admits that stream only within the same verified original VMM association. Neither
 stream uses notifications or accepts requests in the opposite direction. One control request is
-outstanding at a time; bounded data requests may overlap with distinct IDs. Losing either stream
-closes both admission gates and preserves unfinished original resources. Reconnection first
-repeats hello and complete observation; it neither reinstalls nor reactivates grants by replay.
+outstanding at a time; bounded data requests may overlap with distinct IDs. Actual loss of
+either stream closes host admission and moves every affected operation out of standing state
+into `IncompleteEffect`, retaining its original operation, resources and any issued record.
+The guest closes its corresponding admissions when it observes the loss; delayed detection
+cannot bypass the already-closed host gate. Never report a closed complete holding as effective,
+place one address in both collections or hide its resources. This is a transport/enforcement
+fault, not a graceful drain timeout. A controller restart does not close these supervisor-owned
+streams. Reconnection first repeats hello and complete observation of the same original boot
+and associations; it permits only exact cleanup of these incomplete effects, not activation,
+reinstallation or promotion. A changed boot cannot take this path or recreate lost authority.
+Connection-local data-handle loss remains distinct from the original grant/resource identity.
 
 | Method | Params | Result |
 | --- | --- | --- |
@@ -699,7 +726,7 @@ repeats hello and complete observation; it neither reinstalls nor reactivates gr
 | `install` | `{operation:UniverseOp, address:String|null, deadline_ms}` | `{boot, grant, installed:true}` |
 | `activate` | `{grant:GrantId, deadline_ms}` | `{boot, grant, active:true}` |
 | `drain` | `{grant:GrantId, deadline_ms}` | `{boot, grant, drained:true}` |
-| `remove` | `{inverse:UniverseOp, force:bool, deadline_ms}` | `{boot, grant, removed:true}` |
+| `remove` | `{inverse:UniverseRemoval, owner:CellOwner, force:bool, deadline_ms}` | `{boot, grant, removed:true}` |
 | `shutdown` | `{deadline_ms}` | `{boot, shutdown_requested:true}` |
 
 Hello is compared to the original supervisor's verified runtime and effective guest policy,
@@ -724,21 +751,37 @@ effect failure durably aborts before withdrawing all newly created complete/inco
 bindings in reverse prepare order; retained holdings remain intact. Spec008's preflight refusal
 of a reload that would widen access or disturb retained holdings still applies.
 
-Graceful removal first closes host admission and calls drain, which closes guest admission
-(`draining`) and waits for actual admitted work under the same remaining deadline. The host also
-drains its own original work. Before destructive progress, a timeout restores both gates using
-activate and preserves all original resources. The single budget includes restoration; the
-host must begin it while time remains. Expiry without proven restoration is incomplete, not
-DrainTimedOut and not permission to renew the budget. Once both sides are drained, remove with
-force:false verifies the exact
-inverse against the retained installed operation and destroys only that grant's original guest
-attachments. Force authority is checked/durably recorded by the host under spec008; force:true
-closes guest admission and releases cancellable original attachments without pretending
-uncancellable work is terminal. Neither form returns removed:true until fresh observation proves
-the selected guest bindings absent. Host resource cleanup is separately required. Failure/lost
-acknowledgement preserves original associations and incomplete state, never reacquires by path
-or ID. A matching already-installed/active operation may be acknowledged only after actual
-inspection; a retry cannot create another attachment or rebind an old handle.
+Graceful removal uses a reversible **host-local** admission pause until the original host
+monotonic deadline. Every4091admission check treats that pause as expired at that deadline;
+restoration needs neither a timer callback nor a guest RPC. The existing guest binding and
+selector remain active during this reversible phase. The host admits no new actual IO while
+paused and waits for already-admitted host work. `drain` only observes/waits for the guest
+requests pending when that control request arrived; it neither closes a guest gate nor destroys,
+rebinds or forgets any resource. Later attempts cannot perform host effects through the paused
+gate. Guest drain and host drain share the one remaining budget.
+
+If the deadline expires before destructive progress, restore the local pause and return
+DrainTimedOut with original objects, handles, guest admission and peers unchanged. A delayed
+drain reply cannot authorize removal or change admission after that deadline. Do not close a
+healthy stream merely because this observation timed out. The outstanding drain retains its
+request ID until its eventual reply is discarded; subsequent control mutations wait for that
+request to settle or return a bounded refusal without effects. Actual stream loss is the
+separate incomplete transition above, not an unproved remote-restoration result relabelled as
+a timeout. This preserves spec017 A4 and spec008 R7 rather than weakening their pure-timeout rule.
+
+Only while the deadline is still live and both drains have completed may the host irreversibly
+close that selected grant's gate and send remove with force:false. This begins destructive
+withdrawal: the guest verifies UniverseRemoval and the separate CellOwner against the retained
+installed UniverseOp, closes its selected admission and destroys only those original guest
+attachments. A timeout/lost reply after this point is incomplete, not a preserved timeout.
+Force authority is checked/durably recorded by the host under spec008; force:true closes
+admission and releases cancellable original attachments without pretending uncancellable work
+is terminal. Neither form returns removed:true until fresh observation proves the selected
+guest bindings absent. Host resource cleanup is separately required. Failures preserve original
+associations and incomplete state, never reacquire by path or ID. A matching already-installed
+or active operation may be acknowledged only after actual inspection and only while still
+standing; no retry creates another attachment, rebinds an old handle or promotes an incomplete
+operation. Install/activate refuse an address made incomplete by a lost stream or other failure.
 Shutdown requests orderly guest exit; only actual original-child terminal/reap observation
 establishes completion. Lost channels or handshakes are faults, not assumed graceful shutdown.
 
@@ -863,6 +906,8 @@ inventory. Closed/staged attachments remain visible until physically removed; a 
 inventoried even with no active flow. A compromised workload cannot write this account; the host
 separately verifies effective resource gates. Unknown or unattributable managed objects fail
 complete observation rather than disappearing from stop/recovery.
+The observational drain leaves guest admission active; `draining` is reserved for an already
+irreversible withdrawal with admission closed and original work still pending.
 Physical projections do not create new logical granted classes or authorize cleanup by ID alone.
 
 **Platform admission.** Darwin uses Apple Silicon/macOS14+ with Hypervisor.framework, a correctly
