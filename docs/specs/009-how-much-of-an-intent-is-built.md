@@ -1,355 +1,403 @@
 ---
 id: 009
-title: How much of an intent has been built, recorded in the intent and checkable against the tree
-status: draft
+title: How much of an intent has been built, recorded in the intent and checkable against delivery
+status: accepted
 intents: [008]
 ---
 
-## Native task input amendment
-
-This remains a draft proposal; the native-task cutover does not accept it, add `served:` to
-intents or make its proposed check part of the active heartbeat. When implemented, task input
-comes from spec016's shared native Beads records, including imported history, not task Markdown.
-Below, task spec/intent links mean `metadata.spec_ids` and `metadata.intent_ids`; delivered work
-means native `closed` with merge evidence, not an explicitly cancelled closed task.
-
 ## Behavior
 
-The work chain records what each piece of work points at: a task names a spec, a spec names an
-intent. Read upward it answers "was this asked for". Read downward it answers nothing. An intent
-says what is wanted and never says whether any of it exists, so `docs/intents/` cannot tell a goal
-that is nearly met from one nobody has started, and the only way to find out is to read every spec
-and every task and form the judgement again.
+An intent records the owner's judgment of how much of the goal exists, in `served:` and
+`## What is served`. Specs, task lists and delivery facts are derived, not copied into that
+prose. The judgment answers what the owner considers built; the derivation shows the recorded
+work beneath it. Neither makes previously unwanted work approved.
 
-This spec puts that answer in the intent, split along the line that decides whether it stays true.
-**The judgement is written down; everything mechanical is derived.** Whether a goal is
-substantially met, and what is left of it, is a reading of the goal against what exists — it does
-not go stale when a task merges. Which specs name the intent, what their statuses are, which tasks
-name those specs and how many are still open all change every day and are native queries away, so no
-intent file carries them.
+A read-only command shows that derivation or checks it against the judgment. It reads Git
+intents/specs, complete native Beads records and actual GitHub PR states. Invalid inputs or
+unknown delivery evidence refuse the run before any coverage verdict. With valid inputs, it
+reports only malformed coverage fields and the two contradictory extremes: `none` with delivered
+work, or `substantially` without it. Passing means consistency with these records, not proof that
+the goal is satisfied.
 
-A typed list of specs and tasks would be wrong within a week and would read as authoritative while
-it was. That is not hypothetical. A pull request on this repository carried a count of the
-repository's own pull requests and was wrong twice: once from a sample that missed rows, and once
-because the true number moved from 43 to 49 while the branch sat open. Nothing about that count was
-careless. It was a derived fact typed into prose, which is the failure this shape exists to avoid.
+This document specifies later implementation; it does not add fields, backfill judgments or
+activate a heartbeat check. Its reviewed acceptance belongs to the planner under approved
+intent008, following the spec index, without a second owner spec-approval gate. Actual coverage
+values and prose, including backfill, still require the owner's judgment. Implementation waits
+for this spec accepted on main and an admitted native plan under specs012/016.
 
-**No intent is ever expected to be finished.** An intent is a direction, and asking when one is
-exhausted has no answer for most of them. The vocabulary below therefore has no terminal value: the
-top of the scale is "substantially", not "complete", and an intent may sit there permanently with
-open work beneath it. Anything that treats leftover work under a well-served goal as a defect has
-misread the field.
+## Contract
 
-### Three fields, three different questions
+### The judgment and its owner
 
-`served:` is a new frontmatter field on an intent. It sits beside two others, and the whole risk in
-adding it is that a reader takes it for one of them. Neither neighbour is on `main` yet: `status:`
-and `outcome:` arrive together with the change that introduces intent approval, and the table below
-is the shape of an intent's frontmatter once they have. `docs/templates/intent.md` on `main` today
-carries neither field and defines only a `## Outcome` section.
+The existing intent `status:`, `outcome:` and `## Outcome` keep their meanings and content.
+`status:` and `outcome:` already exist in the intent template; there is no missing approval-field
+change to wait for.
 
-| Field | The question it answers | Values |
+| Field | Question | Values |
 | --- | --- | --- |
 | `status:` | Does the owner want this? | `draft`, `approved` |
 | `served:` | How much of it exists? | `none`, `partly`, `substantially` |
-| `outcome:` | Is this still open? | blank while open, non-blank once settled |
+| `outcome:` | Is this still open? | Blank while open, non-blank once settled |
 
-**`status:` and `served:` vary independently, and every combination of the two is legal.**
-`outcome:` is not a free third axis and does not join that claim: it is blank while the intent is
-open and takes a word once it settles, exactly as the table says, and nothing here changes it. The
-independence is a design commitment rather than an observation, and the combination worth stating
-outright is the one that looks wrong and is not: a `draft` intent may carry any of the three values,
-`substantially` included. **Existence does not wait for approval.** An intent drafted over an area
-where code already exists is exactly the backfill `docs/intents/README.md` invites — anyone may
-draft the intent that closes a gap under work already finished — and `partly` is the truthful value
-for it. Nothing may be *committed to* under a draft goal; that gate is `status:`, and it is not this
-field's business. A check that refused `draft` with work beneath it would be reading the approval
-axis off the existence axis, which is the confusion this whole design exists to prevent.
+`served:` appears exactly once, at the start of its own line inside frontmatter, directly after
+`status:`, with exactly one of the three values. Count every line beginning `served:` in the
+file, then check its position and value: a valid-looking frontmatter field plus a second field in
+the body is malformed too. The template ships an empty `served:` line, not `served: none`.
+Empty is missing judgment, not a fourth coverage value and not a passing field.
+Anyone may copy that template to propose an intent without originating a coverage judgment.
 
-No value of one field is a value of another, so a reader who confuses two of them is contradicted by
-the words themselves rather than by a rule they have to know.
+A new intent awaiting owner input may be pushed as a draft PR after the existing local root/CI
+gate. The separate coverage command still reports fault 3 for its empty field, and that expected
+result is disclosed, never called a clean coverage check. It is not added to the pre-push gate:
+doing so would prevent the owner from seeing the proposal on GitHub. The draft stays unready
+and cannot merge until the owner supplies its value and actual prose and approves them there.
+`show` can supply mechanical evidence while it waits. No agent fills the blank to make the check
+pass, including for a new draft over existing work.
 
-The three values are the whole vocabulary and there is deliberately no fourth. `none` is nothing
-built. `partly` is some of it built. `substantially` is most of what was asked for built, with what
-remains named in the prose. The boundaries are judgements, which is what the field is for; a scale
-fine enough to argue about would be a scale nobody keeps current.
+`none` means nothing built, `partly` some, and `substantially` most of what was wanted, with what
+remains named in prose. There is no terminal coverage value. Open work beneath `substantially`
+is normal. Approval and existence are independent: a draft intent may have any coverage value,
+including `substantially`, without authorizing implementation beneath an unapproved goal.
+Only the owner chooses its actual value, even when the draft describes an area with existing code.
 
-### Where the prose goes, and why not `## Outcome`
-
-The intent template ships a `## Outcome` section, and it is the obvious home until you look at what
-it is paired with. `outcome:` is a terminal marker — blank while the intent is open, non-blank once
-it is settled — and the section carries the same name and the same tense: what was built, or why
-nothing was, written at the end. Coverage is the opposite tense. It is the running answer, most
-useful precisely while the intent is open, and it is revised many times before anything settles.
-
-Putting a running record under a heading whose frontmatter twin means "finished" gives one word two
-tenses. A reader finding prose under `## Outcome` could no longer tell whether they were reading a
-progress note or an epitaph. So `## Outcome` and `outcome:` keep the meaning they have, and the
-judgement gets a section of its own:
+The template gains `## What is served` before `## Outcome`, with this prompt:
 
 ```markdown
 ## What is served
 
-(filled in as work lands) How much of this goal exists today, and what is left of it.
-Name what is missing, not which specs or tasks exist — those are derived below.
+How much of this goal exists, and what is left? Name what is missing, not specs or tasks.
 ```
 
-It holds two things and nothing else: what of the goal exists, and what is left. It names no spec
-id, no task id, and no counts. An intent whose `## What is served` lists the specs beneath it has
-reintroduced the stale copy this spec exists to prevent, and a reviewer should refuse it on sight.
+The section contains what exists and what is left, with no spec IDs, task IDs or counts. It is a
+running judgment, not a stored query result. When the intent settles, it stays as the final
+coverage account and stops being updated. `## Outcome` remains available for what was built or
+why nothing was, as the current template permits. Do not delete or rewrite it merely because
+some prose overlaps; this migration does not reinterpret existing outcomes.
 
-**When an intent settles, `## What is served` stops being updated and stays where it is.** It
-becomes the record of what existed at the end, and `## Outcome` says why the goal stopped. The two
-are not one story told twice: the first says what was built, the second says why nothing more will
-be. A settled intent whose `## Outcome` merely restates `## What is served` should lose one of them,
-and the one to lose is `## Outcome` — the frontmatter `outcome:` already carries the fact that it
-settled.
+Only the owner originates `served:` and `## What is served` judgments. An agent may record an
+actual judgment it carries, identify landed work and prepare a draft PR for the owner to read,
+but must not select a value or manufacture approval from task counts or a passing check. A PR
+changing either judgment remains draft until the owner reads and approves those judgments on
+GitHub and takes it out of draft; it names the actual source of the judgment. An agent does not
+mark it ready. This applies to the initial backfill as well as later revisions.
 
-### Who moves it
+The reason differs from intent approval: coverage commits no implementation queue, but compares
+what exists with what the owner wanted. No coverage value is a task-admission or priority gate.
+The draft-PR wait for changing the judgment still applies. It is an instruction, not an approval
+authenticator. The mechanical check may contradict a recorded value; it never chooses its
+replacement. Between owner readings the judgment may remain stale.
 
-`served:` and `## What is served` are the owner's judgement, and a pull request that changes either
-stays a draft until the owner takes it out, exactly as one proposing an intent does. An agent that
-notices a merged task moved a goal forward raises it that way: opens the edit as a draft, says what
-landed, and lets the owner decide the value.
+### Inputs and refusal come before coverage
 
-**The reason is not the one that puts approval with the owner, and borrowing that reasoning would be
-wrong.** `docs/decisions/008-approving-an-intent-is-an-instruction.md` puts approval there because
-an approved intent multiplies into specs and tasks — one decision committing a queue. `served:`
-commits nothing; no gate reads it and nothing downstream waits on it. It is the owner's for a
-different reason: **the question is not answerable from the tree.** "How much of this goal exists"
-compares what was built against what was wanted, and only the person who wanted it holds the second
-half. An agent can read every spec and task beneath an intent and still not know whether they add up
-to the thing that was asked for. That is why the derived half below can be computed by anyone and
-this half cannot.
+The future command is `./tools/intent-coverage check`, run from the repository root.
+`./tools/intent-coverage show INTENT_ID` reads the same derivation for one intent without requiring
+its coverage field. Neither command changes Git, Beads or GitHub. Neither synchronizes the native
+store, reconciles tasks, retries a failed query indefinitely or falls back to task Markdown.
 
-The cost is stated rather than hidden. A judgement only the owner can revise goes stale between his
-readings, and the check catches only the loud ways. Letting an agent set the value from what it can
-see in the tree was rejected for collapsing the two halves back together: the derived facts would be
-laundered into a judgement, and the file would claim an authority it did not have.
+Read the complete native set with `./tools/work-state list --all --limit 0 --json`. Trust the
+pinned native command's unbounded-enumeration contract on successful exit with a well-formed
+array. A successful empty array is valid; command failure, invalid JSON or duplicate IDs refuse.
+The launcher serializes that invocation against other linked-worktree commands. The array has
+no total, cursor or completeness marker: a valid shorter array is indistinguishable from a
+smaller store. The checker cannot independently detect silent native truncation and does not
+pretend that a separately locked `count` call creates an atomic snapshot. Invocation without
+`--all --limit 0` is outside this contract, not a supported sampling mode.
 
-### The check
+This trusts native enumeration, not remote freshness. GitHub reads below are explicit additional
+network inputs, not native `dolt pull` or publication. A native completeness defect needs repair
+in that authority; adding a synthetic error fixture cannot prove its detection here.
 
-The point of the field is that it can be contradicted. An intent claiming a coverage the tree does
-not support is a defect a script can find, and a convention nobody can notice drifting is the shape
-this repository has already decided not to add more of. It belongs beside the cross-layer loop in
-`.agents/skills/heartbeat` step 4, and reads the same way: it prints faults, and silence is the only
-passing answer.
+Validate every numeric intent/spec document before selecting by status, following spec012 and
+the two document READMEs. Read IDs from frontmatter, never infer identity from the filename.
+A missing folder, empty document set, numeric document missing its ID, missing/duplicate/malformed
+ID or state, duplicate resolved ID, invalid intent list, dangling link, or accepted spec without
+an approved intent chain is an input fault. Non-document files such as the folder README are not
+coverage inputs. A directory containing only files without intent records refuses, not passes.
 
-**Work has landed** under an intent when a native task closed with delivery evidence reaches it either way:
+Native IDs and statuses must be well-formed; the statuses consumed are `open`, `in_progress`,
+`blocked` and `closed`. Link arrays must be arrays of three-digit strings with uniquely resolving
+targets. Existing imported empty links remain visible history, not permission to admit new
+unmapped work. For a task with spec links, its copied intent list must equal the first-seen ordered
+union from those specs; a mismatch is a repairable input fault, not another approval gate. An
+imported task with empty spec links may still reach intents through its direct links. No missing
+link is silently replaced by an inferred goal.
 
-- **through a spec** — its `metadata.spec_ids` names a spec whose `intents:` names the intent; or
-- **directly** — the task's own `metadata.intent_ids` names the intent.
+Both commands first validate all these structural inputs and the closure evidence below for
+every closed task that reaches any intent. Only then may they emit derived results or coverage
+faults. `show` also requires its requested three-digit ID to resolve to an existing intent.
+Unknown requested IDs are input faults, not empty successful lookups.
 
-**Both legs are required, and the second is not defensive.** `.agents/skills/tasks` keeps the
-task-level intent copy so that task and spec queries return the same answer; a check walking
-only the spec leg makes them differ. The historical fixture includes delivered legacy tasks with
-empty spec links, including `plasmosome-007` with intent link `001`: work under intent001 that
-a spec-only walk cannot see, which would let that intent sit at `served: none` without a word.
+Any input fault emits an `input:` diagnostic on stderr naming the failing authority and, when
+available, its file, Beads ID or PR URL. Exit status is **2**, with no derived rows or per-intent
+coverage faults on stdout. Collecting several input diagnostics is allowed, but partial coverage
+results are not. Thus a planted spec naming absent intent099 refuses the entire run, rather than
+validating the remaining intents and appearing successful. This deliberately replaces the earlier
+draft's tolerant dangling-link acceptance to agree with spec012. A simultaneous malformed
+`served:` field does not override input-fault precedence.
 
-The three per-intent faults, and nothing else:
+### Closing a task is not proof of delivery
 
-- **`served: none` with work landed.** Something was built under this goal and the file says nothing
-  was. This is the staleness case, and it is the common one: it fires the first time a task closes
-  under a goal nobody has revisited.
-- **`served: substantially` with no work landed.** The file claims most of the goal exists and
-  nothing under it has shipped.
-- **A file that does not carry exactly one well-formed `served:` line.** Malformation rather than
-  contradiction, reported the same way. Absent counts because the field is required and a file that
-  never received it is exactly what needs finding — an intent merging from a branch written before
-  this spec is the shape that will hit it. Empty counts, and so does a value outside the three. So
-  does a *second* `served:` line: the check reads the field by matching a line, a file carrying two
-  has whichever one sorts first silently chosen for it, and a file that says two things says
-  nothing.
+Spec016 stores both delivery and cancellation as native `closed`, with human-readable evidence.
+Those prose fields are not a machine-readable discriminator: imported007 and004 have legacy
+merge evidence but no `close_reason`; cancelled047/049 have prose reasons and unmerged PR links;
+cancelled050 has no `external_ref`. Searching for words such as "merged" or "cancelled" cannot
+safely interpret these records. A PR URL alone and a nonempty reason prove neither outcome.
 
-**The check never reads an *intent's* `status:`.** It reads a native task's status and closure
-evidence only to distinguish delivered work from open or cancelled work. Approval and existence are
-independent, so no combination of the two is a fault, and a `draft` intent carrying `substantially`
-is not the check's business. An earlier draft of this spec had that fault and it was wrong twice
-over: it fired on the value alone with no landed-work condition, and it left a truthful shape — a
-draft intent over work that already exists — with no legal value at all.
+For this consumer, add one typed annotation **inside the existing native issue**:
 
-**Silence needs a floor, because silence is the passing answer.** The check reads relative paths in
-the working tree, so a run started from the wrong directory finds no intent files, prints nothing,
-and is indistinguishable from a clean tree. That is the same shape as a review status that reads
-green because no review ran. So **an empty input set refuses, never passes**: finding no intent file
-carrying an `id:` is reported and the run refuses, rather than passing quietly. One condition buys
-the difference between "nothing is wrong" and "nothing was read", and without it every other
-guarantee here is conditional on a fact nobody checked.
-
-**That refusal is not a fourth fault, and the distinction is what makes it implementable.** The
-three above are per-intent: each names the intent file it fires on, and finding them is what a run
-does. This one is about the run itself, has no intent file to name, and is the answer to whether
-there was a run at all. It is reported in the check's own words rather than in the one-line-per-fault
-shape, and it ends the run.
-
-This is the whole of the provenance question the check can answer on its own. It names its inputs,
-and it refuses when they are absent. It cannot tell which *repository* it is standing in, and it
-does not try — that is a property of how it is invoked, not of what it reads.
-
-**What it must not flag, stated because it is the tempting check and it is wrong.** Open tasks
-beneath an intent marked `served: substantially` are not a contradiction. Substantial is not
-exhausted, no intent is expected to be exhausted, and a check that treated leftover work as a fault
-would fire on every healthy goal in the folder and be switched off within a week.
-
-**No state of the work beneath an intent can contradict `partly`.** It is compatible with landed
-work and with none, so only the malformation fault can ever name a `partly` intent, and only by
-being unreadable rather than by being wrong. That is a real limit and the reason this is a floor
-rather than a proof: it catches the two extremes going stale and catches nothing in the middle. An
-intent drifting from `partly` to `substantially` is caught by the owner reading, and by nothing
-else.
-
-### Reading the derived half
-
-Nothing above replaces reading the tree, and the command that reads it is what an intent file
-points at instead of listing anything. For one intent: its specs with the tasks under each, then any
-task that reaches the intent directly.
-
-**It walks both legs, for the same reason the check does.** A reader forming this judgement is
-reading to answer "how much of this exists", and a spec-only walk answers it wrong in exactly the
-place the check was built to catch: in the historical fixture no spec names intent001 while
-the imported `plasmosome-007` reaches it directly with delivery evidence. Hiding that work from
-the person setting `served:` is worse than having no derivation.
-
-Read the complete native record set:
-
-```shell
-./tools/work-state list --all --limit 0 --json
+```json
+{"closure": {"kind": "delivered", "closed_at": "<exact native closed_at string>"}}
 ```
 
-For one requested intent ID, resolve specs from their Git `id:` and `intents:` fields. For each
-matching spec, list its state and the native tasks whose `metadata.spec_ids` contains that ID.
-Then list tasks reaching the intent directly through `metadata.intent_ids` that were not already
-shown. Deduplicate by complete Beads ID, not source path or legacy number, and display native
-state plus delivery/cancellation evidence. A task with both links appears once.
+This is the partial object passed to native `update ID --metadata`; the stored path is
+`metadata.closure`. A delivered annotation has exactly `kind` and `closed_at`; a cancelled
+annotation additionally requires `reason`, the explicit cancellation explanation established
+from the preserved native record. `kind` is exactly `delivered` or `cancelled`. `closed_at` is a
+valid RFC3339 timestamp with an offset, copied exactly from the issue's current native field.
+Missing, extra or mistyped keys, unknown kind, or timestamp mismatch mean unknown evidence.
+A cancelled `reason` must be a string, nonempty after trimming and not exactly `Closed` after
+trimming. That generic native default is not cancellation evidence. The reason must come from
+an actual recorded cancellation decision, not from a template or the annotation's existence.
 
-Missing or duplicate document IDs, malformed native link metadata, incomplete enumeration and
-failed native queries are explicit errors, not empty derivations. This specifies the future
-check's algorithm without retaining shell loops over a retired task directory.
+For example, the partial update for a cancellation is:
 
-## Contract
+```json
+{"closure": {"kind": "cancelled", "closed_at": "<exact native closed_at string>", "reason": "<recorded cancellation explanation>"}}
+```
 
-- **`served:`** is a required frontmatter field on every intent file, appearing **exactly once**, on
-  its own line, anchored at the start of the line, inside the frontmatter and directly after
-  `status:`. Its value is exactly one of `none`, `partly`, `substantially`.
-  `docs/templates/intent.md` ships `served: none`, so a copied and unfilled file claims nothing.
-- **`## What is served`** is a section of `docs/templates/intent.md`, placed before `## Outcome`.
-  It holds what of the goal exists and what is left. It contains no spec id, no task id and no
-  count. It stops being updated once the intent settles and is not deleted.
-- **`status:`, `outcome:` and `## Outcome` are unchanged** by this spec, in meaning and in
-  placement. No fault in the check reads an intent's `status:`; task native status and delivery
-  evidence distinguish landed work from open or cancelled work.
-- **Every intent file already on `main` gains the field.** The value is the owner's; the mechanical
-  part of the backfill is that no intent file is left without one.
-- **The task under this spec runs after `status:` exists.** `served:` is placed relative to
-  `status:`, and no intent on `main` carries that field yet — it arrives with the change that
-  introduces intent approval. Sequencing the backfill after it keeps one placement rule instead of
-  two, and avoids a second pass to move every line. This is an ordering constraint on the task, not
-  a second gate: nothing about this contract changes if the two land in the other order, only the
-  amount of editing.
-- **The check**, when this proposal is implemented, lives beside heartbeat's governing-document
-  checks. Its inputs are Git intents/specs and complete native Beads task records. It validates
-  only intents carrying `id:`, not the folder README; it reads specs and native tasks to derive
-  whether work has landed.
-- **Per intent**, it prints one line per fault naming the intent file and the fault, and prints
-  nothing on a tree where every intent's `served:` is well-formed and unrefuted. There are exactly
-  three per-intent faults: `served: none` with work landed; `served: substantially` with no work
-  landed; and a file not carrying exactly one well-formed `served:` line — absent, empty,
-  duplicated, or outside the three values. It reports nothing about open tasks under any value,
-  nothing about an intent's `status:`, and nothing that contradicts `partly`.
-- **"Work has landed"** is true when a native task closed with delivery evidence either names
-  a spec reaching the intent through `metadata.spec_ids`, or names the intent directly through
-  `metadata.intent_ids`. Either leg suffices; cancellation is not delivery.
-- **A spec naming an intent id that no intent file carries does not abort the check**; the intents
-  that do exist are still validated. Ids are resolved by reading each file's `id:`, never by
-  globbing a filename.
-- **An empty input set is a run-level refusal, outside the three per-intent faults.** If no file in
-  `docs/intents/` carries an `id:`, there is no intent file to name and the one-line-per-fault shape
-  does not apply: the check prints its own refusal, naming the input set it did not find, and exits
-  non-zero without validating anything. It is not counted among the three, and a run that refuses
-  reports no per-intent faults at all — it did not read far enough to have any. This is what stops a
-  run in the wrong working directory being read as a clean tree.
-- **Callers may rely on** the check being a floor and not a proof: silence means no intent makes a
-  claim the tree flatly contradicts, never that any intent's coverage is accurate.
-- **A pull request changing `served:` or `## What is served` stays a draft** until the owner takes
-  it out of draft, and says where the judgement came from. `.agents/skills/pr-review` step 2 gains
-  that trigger; `.agents/skills/tasks` and `docs/intents/README.md` gain the field and its values.
-  Nothing mechanical enforces it.
+A reopened task is not delivered. An ordinary lifecycle operation reopening it clears the
+annotation in the same native update with `--metadata '{"closure":null}'`; any later closure
+requires fresh evidence. Timestamp equality alone cannot detect reuse if two closures receive
+the same timestamp. Clearing is a workflow obligation, not an authenticated history guarantee.
+
+This annotation selects the native closure's meaning; it does not replace status, reason, PR
+identity or forge evidence. It is needed because spec016 deliberately permits prose closure
+reasons, and does not define a parseable cancellation field. It uses spec016's extensible native
+metadata and partial-object update, not a second database, tracked export or custom task status.
+There is no new authenticated actor or owner approval gate for task-evidence reconciliation.
+
+Historical reconciliation annotates the closure that already exists. It never reopens or
+recloses a task and never rewrites `closed_at` or `close_reason`. This avoids both unsupported
+reason setters and native `close` side effects: Beads1.1.2 may automatically close a completed
+molecule's parent, and `--no-auto` does not disable that behavior. No parent-type exclusion or
+loss of historical coverage is needed when reconciliation makes no lifecycle transition.
+
+The cancellation explanation may be established from the original explicit `close_reason` or
+from preserved native notes. The annotation supplies a machine-readable explanation in either
+case while leaving the original evidence intact. A notes-only cancellation can therefore be
+reconciled without replacing a missing or generic native reason. Future cancellations still
+follow spec016's ordinary explicit-reason closure workflow; the annotation does not weaken it.
+Neither a generic `Closed` value nor arbitrary prose alone establishes a cancellation: the
+reconciler must identify the actual decision and record its source. Ambiguous history stays
+unknown; no default classification or natural-language substring matcher is introduced.
+
+The authorized reconciler uses this bounded procedure:
+
+1. Establishes exclusive writer access by coordinating a pause of **all other native writers**
+   in the active writer clone, as well as dispatch and coverage reads. This includes linked
+   worktrees, closure/reconciliation commands and remote pulls. The single active writer rule
+   of spec016 still applies. If that pause cannot be established, do not mutate the annotation.
+   Per-command serialization is not a multi-command transaction or evidence of exclusivity.
+2. Under that pause, reads the complete record and establishes its outcome from the preserved
+   evidence and, for delivery, actual forge facts. Appends the decision, its source, and the
+   observed status, `closed_at`, `close_reason`, PR reference and prior annotation to native
+   notes. The pause covers evidence capture through the final readback, not just dispatch.
+3. Writes only the selected `metadata.closure` object using native partial metadata update.
+   No status, closure field, assignee, label, dependency, link or parent record is changed.
+4. Reads back the record before releasing the pause. Require the status, `closed_at`,
+   `close_reason`, PR reference and unrelated fields to match the captured record, allowing only
+   the intended notes append, annotation and native update timestamp. Require the annotation to
+   equal the intended object exactly. An error or mismatch retains the pause and recorded
+   recovery responsibility; correct or clear the unverified annotation before consumers resume.
+
+This reuses native metadata and coordinated quiescence, not a custom lock, conditional-update
+API or multi-row transaction engine. It promises safety while the documented writer pause is
+honored, not authentication of arbitrary native writers. Reconcile every relevant historical
+closed row before enabling the check; missing annotations still refuse, including imported
+delivered rows. This spec does not perform the migration.
+
+The command applies this table in order. "PR observation" means a successful GitHub query of
+`state,mergeCommit,mergedAt,url` for the exact canonical `external_ref` URL in this repository,
+`https://github.com/teonimesic/plasmosome/pull/N` with positive decimal N. Query each distinct URL
+once per invocation. Require the returned URL to match and the fields to have their documented
+types. Never take a PR mentioned in notes as the task's PR; a replacement PR may be the reason
+for cancelling this one. The command does not parse old prose to compare its commit claims.
+
+Every forge observation has finite deadlines: at most 10 seconds to connect, 30 seconds without
+read progress, and 60 seconds total for that distinct PR observation. The whole command has a
+300-second deadline, including native input and all forge reads; activity cannot extend it.
+Use monotonic elapsed time. Any expiry follows the same unknown/input-refusal path, with no
+partial output. Cancel outstanding work and reap any owned helper processes before returning.
+Do not retry within the invocation or refresh a deadline on each response byte. A large input
+that exceeds the overall bound refuses explicitly rather than reporting partial success.
+
+| Native observation | Required evidence | Derived disposition |
+| --- | --- | --- |
+| Status is not `closed` | Structurally valid native record | Open work; not delivered, regardless of an old closure annotation |
+| `closed`, annotation absent, malformed or not bound to current `closed_at` | None can substitute for the annotation | Unknown; input refusal |
+| `closed`, kind `delivered` | Canonical `external_ref`; PR state `MERGED`; non-null merge commit with full 40-hex `oid`; non-null valid `mergedAt` | Delivered; report actual PR URL, commit and merge time |
+| `closed`, kind `cancelled`, absent or empty `external_ref` | Valid annotation `reason` established as above | Cancelled; not delivered; report the reason |
+| `closed`, kind `cancelled`, nonempty `external_ref` | Valid annotation `reason`; canonical PR URL; PR state `CLOSED` with null `mergeCommit` and `mergedAt` | Cancelled; not delivered; report the reason and PR |
+| Any other closed combination, including failed/unavailable forge reads | No inference or fallback | Unknown; input refusal |
+
+In particular, cancellation linked to a merged or still-open PR is conflicting evidence, not
+permission to hide delivered work. A delivered annotation linked to a closed-unmerged PR is also
+unknown, not cancellation. Offline or unauthorized forge access is unknown, not zero deliveries.
+The no-PR cancellation case relies on the deliberately recorded native cancellation decision;
+it is not a claim that software authenticated its author. Incorrect task-to-PR attribution is
+reconciliation work under spec016, not something PR state alone can prove.
+
+The annotation and evidence requirements apply to both link paths. Imported007 retains empty
+spec links and intent001; after evidence reconciliation, PR6 supplies its merge facts. Imported004
+retains spec003 and intent002 and obtains merge facts from PR8. No requirement to map the historical
+007 to a fabricated spec is introduced. Current ordinary closures use the same annotation and
+forge predicate as imported ones. There is no shortcut for a familiar ID or a quoted short SHA.
+
+### Derivation and the three coverage faults
+
+For an intent, first list all specs whose `intents:` reaches it, with their states and tasks whose
+`metadata.spec_ids` names each spec. Then list directly reaching tasks whose `metadata.intent_ids`
+names the intent and which have not already appeared. Sort specs by ID and tasks by complete
+Beads ID. A task under several matching specs appears under the first matching spec only; a task
+reaching both ways appears once under its spec. A task with empty spec links appears in the direct
+group. Identity is the complete native ID, never a legacy number or source filename.
+
+Each task row reports native status and the derived disposition, including cancellation reasons
+or actual merge evidence where applicable. A matching spec is shown even when it has no tasks.
+`show` exits 0 after these rows, and prints nothing only when the existing requested intent has
+neither matching specs nor directly reaching tasks. It never copies this output into an intent.
+
+Work has landed under an intent exactly when at least one task reaching it by either path is
+**delivered** under the table. Cancelled and open work do not count. With all input validation
+complete, `check` emits one stdout line per coverage fault, naming the intent file and fault:
+
+1. `served: none` with landed work.
+2. `served: substantially` with no landed work.
+3. Not exactly one well-formed `served:` line: absent, empty, duplicated, outside frontmatter,
+   not directly after `status:`, or a value outside the three.
+
+A malformed field receives only fault 3, not an attempted semantic reading as fault 1 or 2. Sort
+faults by intent ID. Exit **1** when any coverage fault occurs; otherwise exit **0** with no output.
+No input diagnostic is a fourth coverage fault, and exit 2 never carries partial coverage output.
+
+Coverage comparisons do not use an intent's approval status. Shared structural validation still
+checks status declarations and accepted-to-approved chains; "approval is independent" is not a
+reason to omit those checks. A well-formed draft intent with delivered work and `substantially`
+passes. Open tasks never contradict `substantially`, and no delivery state contradicts `partly`.
+A `partly` intent can still occur in a refused run with unknown evidence; that refusal makes no
+claim about its coverage value.
+
+These extremes compare a judgment with recorded delivered work, not every file in the tree. Work
+without a recorded link cannot be seen, substantial satisfaction cannot be calculated, and a
+passing `partly` value may be stale. The owner must read the goal. Neither passing nor repairing
+a task link retroactively authorizes work or proves the intent's original request was met.
+
+### Activation and complete backfill
+
+Implementation delivers the command, field/template changes, owner-supplied backfill and active
+workflow integration together. It first reconciles the relevant native closure annotations and
+evidence without rewriting history. The post-backfill tree must pass with actual forge inputs;
+no clean check is claimed for today's tree without `served:`. A closed task becoming unknown
+later produces a refusal, not a silent degradation to no work.
+
+Every existing numeric intent receives the field; none is silently exempt because it is draft or
+settled. The owner supplies each value and any actual `What is served` prose, including the final
+account for an already-settled intent. Missing owner judgments hold that later draft PR; they do
+not block planner acceptance of this specification. The template's empty prompt is not a claim
+about an existing intent, and evidence reconciliation does not decide its coverage.
+
+The later implementation puts the operational owner-judgment rule and vocabulary in
+`docs/intents/README.md`, with links from the task skill and the review skill's draft-opening
+section. It adds the check beside heartbeat's governing-document inspection, not its capacity
+section. The task skill points to this contract for closure evidence preparation rather than
+creating another lifecycle or field-value table. The active documents are not changed by this
+spec-only proposal. No scheduler, automatic judgment update or coverage-based dispatch is added.
+
+Retained legacy link faults are also real activation prerequisites. At this proposal's base,
+the native delegation record names absent spec015 and intent016, and closed049 names absent
+spec015. Numeric-document validation alone does not make those native links valid. Cancellation
+classification does not exempt a row from structural link validation: even an evidenced
+cancellation with a dangling spec link refuses before any coverage verdict. An authorized task
+reconciler must resolve these live mappings from actual governing documents and recorded history,
+preserving previous mappings and their reasons in provenance. Do not invent the missing documents,
+drop the records, or remove links merely to pass this check. Until that reconciliation and the
+closure-evidence migration are complete, the promised clean activation run remains unproved.
 
 ## Acceptance
 
-- `docs/templates/intent.md` carries `served: none` directly after `status:`, and a
-  `## What is served` section before `## Outcome`.
-- Every intent file — every file in `docs/intents/` carrying an `id:`, which excludes `README.md` —
-  carries **exactly one** `^served:` line, sitting in the frontmatter on the line directly after
-  `status:`, whose value is one of the three. Counting the files that match
-  `grep -E '^served: (none|partly|substantially)$'` does **not** establish this and is not the
-  criterion: that count passes a file carrying both `served: none` and `served: mostly`, and passes
-  one whose only `served:` line sits in the body. Count `^served:` lines per file, assert one, then
-  assert its position and its value.
-- `docs/intents/README.md` states the three values and the question the field answers, states that
-  the field is the owner's to move, and states that it is independent of `status:`.
-- `.agents/skills/tasks` lists intent `served:` beside intent `status:` in its field-value list, and
-  neither section restates the other's rule.
-- `.agents/skills/pr-review` step 2 names a `served:` change as a pull request that stays a draft.
-- No intent file names a spec id, a task id or a count in `## What is served`.
-- The check prints nothing on the tree as it stands **after the backfill in the same change** — the
-  tree this spec merges into has no `served:` field at all, so the clean run is asserted against the
-  post-backfill tree.
-- The check prints the offending file for each of the three faults, injected one at a time into a
-  scratch copy: an intent flipped to `served: none` while a delivered native task reaches it;
-  one flipped to `served: substantially` with nothing delivered; and one carrying `served: mostly`.
-- The check prints the offending file for an intent whose `served:` line is **deleted**, for one
-  whose `served:` line is present but empty, and for one carrying **two** `served:` lines — planted
-  as `served: none` and `served: mostly` in the same file, the shape a per-file line count catches
-  and a match count does not.
-- The check prints nothing for a `status: draft` intent carrying `served: partly`, and nothing for a
-  `status: draft` intent carrying `served: substantially` with work landed beneath it.
-- The check prints nothing for an intent marked `served: substantially` that has open tasks beneath
-  it, verified by planting exactly that shape.
-- The check prints nothing for an intent marked `served: partly` in any of those shapes.
-- **The second landing leg is exercised:** with imported `plasmosome-007` closed with delivery
-  evidence, `metadata.spec_ids: []` and `metadata.intent_ids: ["001"]`, intent001 at `served: none` prints the staleness fault
-  and at `served: substantially` prints nothing. A check walking only the spec leg gets both
-  backwards, which is what this bullet is for.
-- The check says nothing about `docs/intents/README.md`, which carries no `id:`.
-- Run from a directory with no `docs/intents/`, and from one where `docs/intents/` holds only files
-  without an `id:`, the check prints **its own** refusal and exits non-zero — verified in both
-  shapes and under both shells, because a silent pass there is indistinguishable from a clean tree.
-  Leaving this to the shell is not enough: `zsh` aborts on a glob that matches nothing, so an
-  unguarded implementation dies with a shell error under `zsh` and prints the check's refusal only
-  under `bash`. Test the directory before globbing it.
-- A planted spec carrying `intents: [099]`, which no intent file has, does not abort the check:
-  every real intent is still validated in the same run.
-- The check runs clean under both `bash` and `zsh`. Two `zsh` traps are already known and neither
-  may resurface: `status` is a read-only variable name, and a glob matching nothing is a fatal
-  error rather than an empty list.
-- The native derivation for an intent with at least one spec prints that spec and its tasks.
-  In the legacy intent001 fixture reached directly by `plasmosome-007`, it prints that task
-  even with no intervening spec. It prints nothing and exits 0 only when neither leg reaches
-  the requested intent; failed queries and malformed records refuse instead.
-- A task carrying both links appears exactly once, under its spec. The imported
-  `plasmosome-004` fixture names spec003 and intent002 and exercises this deduplication.
+The implementation must demonstrate all of the following; specification acceptance is not a
+claim that these implementation proofs have run:
+
+- The template has empty `served:` directly after `status:` and the new section before `Outcome`.
+  A copied new draft contains no coverage judgment; its blank field produces fault 3 while the
+  PR waits on the owner, without preventing the existing pre-push gate or draft publication.
+  Owner input, not an agent default, supplies its eventual valid value. Every numeric intent
+  on the completed post-backfill tree has exactly one correctly positioned valid field.
+  A matching-file count cannot replace per-file checking; an extra `served: mostly` must fail.
+- Actual backfill values/prose have owner judgment and GitHub approval provenance; the PR stays
+  draft until the owner ends the wait. Missing judgments are not replaced with defaults or derived
+  percentages. Existing `status:`, `outcome:` and `Outcome` content remain unchanged by backfill.
+- The intent README defines the three values and owner-only judgment once. Task/review skills
+  link to that rule; draft opening includes changes to either value or prose. Heartbeat's
+  governing-document inspection calls the check. No intent prose stores spec/task IDs or counts.
+- The actual post-backfill tree passes, using complete native input and successful forge reads.
+  Record Git revision and observation time; ordinary local reads do not prove remote Beads currency.
+  Include the complete retained native set: a cancelled row with an unresolved legacy spec link
+  still refuses. A clean numeric-document sweep alone cannot satisfy this acceptance item.
+- Inject each of the three coverage faults separately. Also exercise deleted, empty, doubled,
+  body-only and misplaced fields, including one valid and one invalid line in a single file.
+  Each malformed case names the file once; each coverage-only failure exits 1.
+- A draft intent at `partly`, and a draft intent at `substantially` with delivery, pass; so does
+  `substantially` with both delivered and open tasks. `partly` passes with or without delivery.
+  No approval-state combination becomes a coverage fault.
+- Reconciled imported007 with empty spec links, direct intent001 and actual PR6 merge evidence
+  makes `none` fail and `substantially` pass. Imported004 with spec003/intent002 and PR8 appears
+  exactly once under its spec. Exercise multiple matching specs and deduplication by full native
+  ID, including different IDs sharing a historical legacy number.
+- `show` prints matching specs even without tasks, shows direct-only tasks, and shows delivery
+  facts or cancellation reasons. An existing intent with neither path produces empty success;
+  an unknown requested ID refuses. The folder README never receives a coverage diagnostic.
+- Exercise current and imported closures through the same table. Missing/wrong annotation type,
+  unsupported kind, extra keys, missing or mismatched closure timestamp refuse. Reopening clears
+  the annotation and is open work; closing again without fresh annotation refuses.
+- Explicit no-PR cancellation with a reason contributes no delivery. Cancellation with a confirmed
+  closed-unmerged PR contributes none. Exercise 047/049 and the no-reference 050 historical shapes
+  after deliberate reconciliation, preserving their original sources. Missing annotation reason,
+  whitespace-only or generic `Closed` annotation reason, cancelled-plus-merged/open PR, and
+  delivered-plus-unmerged PR each refuse. Closed alone, URL alone, prose saying "merged", and
+  legacy evidence alone cannot establish delivery. Demonstrate annotation-only reconciliation
+  of an evidenced notes-only cancellation while native `close_reason` remains absent or generic.
+  Verify all original closure fields and all parent records remain unchanged, including a
+  molecule step whose ordinary reclose could close its parent. No historical shape is dropped.
+  Without established cancellation evidence and its valid annotation, notes-only history refuses.
+  Exercise inability to establish the writer pause and mismatched final readback: neither permits
+  consumption of an unverified annotation or a false claim of transaction atomicity.
+- Delivered annotations require actual matching PR URL, `MERGED`, full commit and merge time.
+  Exercise failed/offline/malformed/mismatched forge responses; each refuses rather than returning
+  no deliveries. Repeated references to one PR use one observation within a run, not mixed states.
+  Exercise connection stall, stalled read, slow progressing response and total-command expiry.
+  Each returns the input refusal within its bound without derived output or surviving helpers;
+  per-request progress cannot reset the command deadline.
+- Missing/empty intent or spec directories, numeric documents missing or duplicating IDs/status,
+  unknown state, invalid accepted chain, dangling099, malformed native link arrays, copied-link
+  mismatch, duplicate native ID, unavailable store and malformed native JSON each exit 2 with an
+  input diagnostic and no derived/coverage stdout. Combine dangling099 with a malformed coverage
+  field to prove input-fault precedence. Imported empty links are preserved, not discarded.
+  Exercise the exact unbounded native invocation and successful empty and nonempty arrays.
+  Do not claim detection of a valid shorter native array: native completeness is a trusted
+  dependency, not an independently observed cardinality guarantee.
+- Invoke from a wrong directory and one holding only non-record intent files under both `bash`
+  and `zsh`: the command produces its own refusal, not a shell glob error or quiet success. Normal
+  invocations also work in both shells; do not use zsh's read-only `status` variable.
+- The checker is read-only even when refusing. Evidence reconciliation uses native partial metadata
+  updates and preserved notes, never a tracked export. Unknown history blocks activation until
+  reconciled; it is not erased, guessed cancelled or reclassified as an owner coverage judgment.
 
 ## Out of scope
 
-- **Building any of it.** This spec is the contract; the field, the template and README edits, the
-  backfill and the check are one task under it, and that task is the first work this spec generates.
-  Splitting them is not caution — a spec lands in its own pull request before the work branch
-  exists, and the check cannot be written against a field no file carries yet.
-- **Deciding any intent's value.** Nothing here says how much of any goal is built. Every value in
-  the backfill is the owner's, gathered the way the draft-pull-request convention says.
-- **Rolling the field up.** No summary across intents, no dashboard, no count of how many goals are
-  substantially served. The folder is small enough to read, and a rollup is a derived fact with
-  somewhere to go stale.
-- **Making `partly` checkable.** It would need a measure of how much of a goal a spec covers, which
-  is the judgement the field exists to hold rather than a fact a script can read.
-- **A `superseded` or `abandoned` coverage value.** A goal that stops being wanted is already
-  expressible: the intent settles and `outcome:` says so. A second way to say it would be a second
-  source of truth.
-- **Changing what `status:` or `outcome:` mean.** Both keep the definitions
-  `docs/intents/README.md` gives them.
-- **A decision record.** The alternatives turned down here — an agent deriving `served:` from the
-  tree, folding coverage into `status:`, reusing `## Outcome` — are argued above rather than in
-  `docs/decisions/`. The first of them is the one that will be argued for again, because deriving
-  the value looks like less work every time someone meets a stale field. **If it is raised a second
-  time, that is the trigger to write the record** rather than to re-run the argument from here.
+This spec PR builds none of the field, command, backfill or workflow integration. It changes no
+actual intent judgment or approval, and no native closure annotation. Those are later implementation
+and reconciliation work under the accepted contract. It does not add a dashboard, an intent rollup,
+a terminal coverage value, a measure for `partly`, a new task authority, a scheduler or a mechanical
+owner authenticator. The root gate and normal independent/provider review apply to delivery;
+accepting this contract does not assert those implementation results or spend a review slot.
