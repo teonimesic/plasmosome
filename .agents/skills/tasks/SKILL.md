@@ -166,7 +166,11 @@ review evidence references and anything the next agent would otherwise rediscove
 threads remain on GitHub; link them instead of transcribing or treating chat as evidence.
 
 `.agents/skills/pr-review` owns review and the merge gate. After GitHub reports `MERGED` with a
-squash commit, record that PR URL, commit and observed merge time in notes, then run:
+squash commit, record that PR URL, commit and observed merge time in notes. Then re-read the
+complete native acceptance under spec016's closure contract. Source publication alone does not
+complete required live migration, configuration or operational verification. While acceptance
+remains unfinished, keep the owner, record the remaining criteria and next action, and use the
+actual phase of that work. Only after every required acceptance item has observed evidence run:
 
 ```shell
 ./tools/work-state close ID --reason 'Merged PR_URL at SQUASH_SHA'

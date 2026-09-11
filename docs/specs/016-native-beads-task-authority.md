@@ -223,9 +223,17 @@ CI or an expected provider retry are pending. Active implementation repairs take
 then return to `review` on resubmission; a real external impediment uses `blocked` with the
 resume phase. Do not flip status for a note, review reply or ordinary polling interval.
 After the full PR-review gate and observed GitHub `MERGED`, append the PR URL, actual squash
-commit and `mergedAt`, then close with the merge reason. A branch tip, deleted branch, successful
-CLI invocation or closed-but-unmerged PR is not delivery. Cancellations record their distinct
-reason. No status-only code PR follows.
+commit and `mergedAt`. This proves source publication, not completion of the task's entire
+acceptance. Before closing, the author re-reads the complete native acceptance and verifies
+every remaining requirement, including any coordinated live configuration, migration, recovery
+or operational measurement. Close with the merge and acceptance evidence only when all required
+work is complete. Otherwise retain ownership, record the unfulfilled criteria and next action,
+and use the phase of the actual continuing work; a blocker retains its cause and resume phase.
+Do not close early and reopen later, invent a transition for evidence, or equate a taskless
+prerequisite spec PR with delivery of its implementation task. The concrete failure is a closed
+task whose required live behavior has never been exercised. A branch tip, deleted branch,
+successful CLI invocation or closed-but-unmerged PR is not source delivery. Cancellations record
+their distinct reason. No status-only code PR follows.
 
 ### Current-status age
 
