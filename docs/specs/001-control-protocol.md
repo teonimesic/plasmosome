@@ -97,7 +97,7 @@ Application error codes (closed set; additions are a contract change):
 | 102 | `already_exists` / `already_attached` | `target` |
 | 103 | `unresolved_requirement` | `capability`, `plasmid` |
 | 104 | `mock_mode_conflict` | `node`, `modes`, `plasmids`, `resolutions` — per D2b rule 3 |
-| 105 | `illegal_state` | `from`, `to` |
+| 105 | `illegal_state` | `from`, `to`; private recovery methods additionally carry the typed `recovery` refusal in §4.1 |
 | 106 | `drain_timeout` | `handle`, `deadline_ms` |
 | 107 | `not_running` | `target` — the named instance is not up |
 | 108 | `manifest_invalid` | `detail`, `path` |
@@ -173,6 +173,40 @@ observed by probing control-`status`, not by reading a pidfile).
 - Plasmid labels carry the D2 mock mode: `[mock:simulate]`, `[mock:capture]`, or `[real]` —
   `plasmid list`/status always shows the mode per plasmid (D2).
 
+Spec008 defines recovered `ledger_generation` as the maximum adopted cell generation, or 0.
+It is not a cross-cell acknowledgement watermark. Recovered cells retain their actual observed
+supervisor state; replay does not prove readiness. After successful recovery startup, `ready`
+is false while the account contains drift, quarantine or unmatched effects. Quarantined cells
+are absent from `cells` and remain named in `plasmosome.recovery`. A recovered unknown genome
+is omitted, as §1 requires.
+
+### 3.3a `plasmosome.recovery`
+
+Read-only diagnostics for the most recent completed recovery observation:
+
+```json
+{"id": 30, "method": "plasmosome.recovery", "params": {"name": "work"}}
+```
+
+The result is `{name, ledger_generation, desired, tombstones, observed_cells, expected, drift,
+unmatched, pending, quarantined}`. `desired`, exact objects, pending transactions and quarantine
+reports use spec008's typed records with this wire projection: absent genome/cell/line,
+operation and force fields are omitted; a journal change whose replacement is null becomes
+`{plugin, remove: true}`, while a replacement change is `{plugin, replacement: ...}`.
+These are response encodings, not changes to the required nullable journal fields.
+`drift` retains `Diff { added, removed }`: added objects were observed but not desired; removed
+objects were desired but absent. IDs, complete capabilities and cell/plugin owners are
+preserved. This is not a canonical-equivalence comparison. Empty collections are `[]` or their
+empty map, not an omitted failure. Quarantine raw names and paths are arrays of unsigned byte
+values; human messages escape them and are not machine selectors. The same optional-field
+projection applies to the DesiredCell sent to a membrane.
+
+The call neither forces cleanup nor claims to refresh a failed observation. Name resolution
+and wrong-name errors are the same as `plasmosome.status`. Recovery startup with incomplete
+observation or blocked cleanup does not serve this or any other method: it exits with the
+structured stderr diagnostic described in §4.1. Quarantine alone can coexist with a serving
+controller when all live observations are complete; readiness remains false.
+
 ### 3.4 `plasmosome.stop`
 
 Graceful by default: drains every cell (detach cascades, ledger replays LIFO), then stops the
@@ -195,6 +229,9 @@ universe (five host classes + guest classes), **observed off the wire from the m
 side**, never from controller memory (86 §4 rule 4). Non-empty residue is reported as
 `"residue": "items"` plus a `residue_items` array of the named leaked/lost/asserted objects
 (the `ResidueReport` shape already serde-typed in `plasmosome-backend`).
+Spec017 gives each residue object an exact grant ID and complete capability; spec008 widens
+its owner to `{cell, plugin}`. These embedded wire changes do not change the residue variants
+or authorize removing a different holding with an equal resource description.
 
 ### 3.5 `plasmosome.cell.new` — wire method `cell.new`
 
@@ -397,9 +434,9 @@ The controller drives each cell's `membraned` over a second, private ndjson-UDS
   it answered that it is not serving and said so in `broker_state`. Delivered in
   `plasmosome-membrane::{control, daemon}` and served by `membraned`.
 - `membrane.cell.desired` — desired-state push, **idempotent and generation-numbered**: the
-  full desired cell record plus `generation: u64`. A membrane that receives an equal-or-older
-  generation acks and does nothing (replayed reconciler converges instead of re-firing —
-  86 §4 rule 2).
+  full desired cell record plus `generation: u64`. An identical equal-generation request is
+  a no-op; conflicting content at that generation refuses. An older request is ignored and
+  returns the current published record, never an assertion that the older payload was published.
 - `membrane.cell.observe` — the supervisor's observed state (cells, broker readiness, VMM
   liveness). This is the only source the controller trusts for liveness; `sessions.status`-style
   requested state is lifecycle, not liveness.
@@ -412,6 +449,133 @@ The controller drives each cell's `membraned` over a second, private ndjson-UDS
 - RESERVED for P1 step 2: vsock bridge setup, shim lifecycle, broker spawn/supervision verbs,
   and the credential vsock proxy (port 4041 terminates at the membrane and proxies to the
   controller; custody state stays kernel-core).
+
+### 4.1 Recovery startup and exact operation messages
+
+These are the recovery additions specified by spec008, not claims that the existing membrane
+daemon already serves them. Its existing `membrane.status` response and error codes remain.
+The configured controller gains required absolute `instance_root` and positive integer
+`recovery_deadline_ms`, alongside `control_socket` and `name`; no root is inferred from the
+socket. Startup has one monotonic recovery deadline covering discovery, observation, pending
+cleanup and settled-generation publication, not a new budget per retry. After a live mutation's
+durable finish, its publication exchange gets one recovery_deadline_ms budget, likewise not
+reset on retry. Exhaustion refuses startup or blocks further mutation of that cell; it is never
+an empty observation or successful client result. JSON configuration rejects unknown keys as before.
+
+The controller holds spec008's instance writer lock and discovers validated cell directories
+before sending requests to their membrane sockets. A membrane is configured for one validated
+cell and rejects a request naming another cell with code101. Each connection uses §1 framing,
+request IDs and errors. Responses with a wrong request ID or cell, unknown fields/variants,
+malformed exact objects, incomplete frames or timeout are failed observations. The controller
+must not operate a quarantine's effects merely because its supervisor answered.
+
+- `membrane.cell.observe` params are `{cell, deadline_ms}`. `deadline_ms` is a positive
+  remaining budget capped by the controller's recovery deadline. Result is
+  `{cell, state, supervisor, generation, desired}`: `state` is the existing closed cell lifecycle
+  enum from actual child/supervisor observation, `supervisor` is the current `membrane.status`
+  result, and `desired` is the complete last published DesiredCell retained by this supervisor,
+  with `generation == desired.generation`. Generation and content are retained atomically.
+  A fresh supervisor starts with the empty generation-0 record. Missing retained content is an
+  observation failure, not permission to reconstruct it from the requesting controller.
+  This publication record is not evidence of liveness or holdings: those still require actual
+  supervisor and enforcement-side observation. No PID-file or socket-existence substitute is allowed.
+- `membrane.residue.snapshot` params are `{cell, deadline_ms}`. Result is
+  `{cell, state: OsState, grants: [LedgerEntry, ...]}`. `state` is fresh enforcement-side
+  observation, including unrequested residue, using spec017 identities and spec008 CellOwner.
+  Every object and grant belongs to the addressed cell. `grants` names only original live grant
+  records for which this surviving backend still has its drain/withdrawal authority; it is
+  not rebuilt by planting observed objects. An unsupported or failed class observation fails
+  the whole request with `-32603`, never omits the class or returns a requested-state mirror.
+  The result contains the five currently specified capability classes; adding guest classes
+  requires their explicit enumeration rather than a claim of coverage without an observer.
+- `membrane.effect.apply` params are `{cell, generation, operation, deadline_ms}`.
+  `operation` is a fully predeclared spec017 UniverseOp with spec008 owner. The trusted
+  controller sends it only after that generation's prepare is durable. Result is
+  `{cell, generation, id, applied: true}` after enforcement accepted the exact operation.
+  Duplicate application of the same standing operation retains spec017's no-op semantics.
+  This result does not replace the independent snapshot used for recovery verification.
+- `membrane.effect.withdraw` params are `{cell, generation, removal, owner, drain, deadline_ms}`.
+  `removal` is the exact spec017 UniverseRemoval, `owner` is CellOwner, and `drain` is the
+  existing DrainSpec serde value. Result is `{cell, generation, id, withdrawn: true}`.
+  The backend preserves all neighbours, drain behavior and incarnation checks. Unknown-object
+  and unknown-handle refusals are not translated into success; the controller must freshly
+  observe exact absence before completing an uncertain obligation.
+- For either effect method, backend refusal is code105 with `from: "prepared"` or `"held"`,
+  `to: "applied"` or `"withdrawn"`, plus `recovery: {kind, ...}`. The closed kinds and fields
+  are `identity_conflict {class,id}`, `unknown_object {class,id,key,owner}`,
+  `unknown_handle {handle}`, `drain_timeout {handle,deadline_ms}`, and
+  `backend_fault {detail}`. Unsupported enforcement and unverified process incarnation are
+  backend_fault, not successful model operations. The human message is never a selector.
+  Protocol parse/parameter/internal errors keep §1's existing meanings.
+- `membrane.cell.desired` params are `{cell, generation, desired}` with spec008's complete,
+  settled DesiredCell reconstructed from the journal; the outer and desired generations must
+  agree. Result is `{cell, generation, desired}`, carrying the complete currently published
+  record and its generation, not an unchecked echo of the request. A newer generation atomically
+  publishes the full record only after its individual effects, cleanup and durable finish have
+  completed; it never infers operations, allocates replacement IDs or resurrects holdings.
+  An equal generation is a no-op only if every decoded DesiredCell field matches the retained
+  record, including ordered plasmids/effects and their complete metadata. A mismatch changes
+  nothing and returns code105, `from: "settled"`, `to: "conflicting"`, with
+  `recovery: {kind: "desired_conflict", cell, generation}`. JSON spacing and object-key order
+  are not content differences. An older request changes nothing and returns the newer retained
+  record; it cannot acknowledge publication of the requested older content.
+  The controller requires matching request-ID/cell/generation and complete desired content in
+  the acknowledgement, followed by a fresh observation matching that same complete record,
+  before mutation success or completed rollback. An abort publishes unchanged attachments at
+  its consumed new generation. Lost acknowledgement can resend the identical settled record
+  without repeating effects. Neither the reply nor the observed publication record substitutes
+  for independent readiness and holding observations.
+
+Recovery sockets are restricted to the instance's trusted host UID: the controller and its
+membranes run under that same effective UID. Before binding, the membrane opens and validates
+the socket's private parent directory without following symlinks: it is owned by that UID,
+mode0700, with no ACL granting access to another principal. Ancestors cannot be replaced by
+an untrusted principal. The bound socket is owned by that UID and mode0600 before listening;
+umask alone is not the boundary. An existing unsafe directory/socket is refused, not silently
+adopted, chmodded or unlinked. The controller validates this same path boundary before connecting.
+Both endpoints obtain the connected peer's effective UID from the kernel (`getpeereid` on
+macOS, `SO_PEERCRED` on Linux) and require it to equal their own. Missing credentials, a mismatch,
+or failure to establish the path boundary closes/refuses the connection before request parsing,
+method dispatch or trusting a response. No recovery result is returned on an unauthorized
+connection. Client-supplied cell, PID, operator or UID fields are not authentication.
+
+Processes under that host UID, and host root, are inside the trusted boundary; this is not
+protection against their compromise or a multi-user authorization service. A cell workload must
+not share that host principal's access to the socket namespace: it runs under a different host
+UID or confinement that denies the socket path and connections, and receives no connected/listening
+socket descriptors. Merely removing cell write permission is insufficient. The launcher must
+establish this exclusion before starting a workload; an unsupported or failed confinement is
+a refusal, not permission to expose the recovery endpoint. The instance writer lock serializes
+controllers, not arbitrary clients, and is not authentication.
+The supervisor retains exact resource associations independently of controller memory and must
+verify resource/process incarnation before enforcing a withdrawal. No recovery RPC may create
+an in-memory backend in production and report its ledger as an OS observation.
+
+Before serving, the controller completes spec008 discovery, observation, pending recovery and
+per-cell generation and complete-content settlement within its single startup deadline. For a
+settled journal generation, a lower membrane generation requires complete desired republication,
+matching acknowledgement and fresh matching observation. Equal generation continues only when
+the complete observed DesiredCell matches journal replay; mismatched content refuses without
+overwrite. Higher generation refuses as unaccounted participant state, never as a reason to
+send an older no-op request. Before pending cleanup, an ahead generation or a membrane already
+at that unfinished journal generation also refuses. All requests, acknowledgements and fresh
+observations use the remaining deadline. Aborted and empty cells follow the same rules.
+A lower post-ack generation can only retry within that budget; higher generation or conflicting
+equal-generation content refuses.
+An instance-wide fault emits one LF-terminated JSON object on stderr:
+`{recovery_error:{kind,path_bytes,detail}, quarantined:[...]}`. `kind` is one of
+`writer_busy`, `discovery`, `identity_conflict`, `desired_conflict`, `observation`, `cleanup`, `deadline`, or `io`;
+`path_bytes` is the exact related Unix path as byte values, omitted if no path applies.
+For a generation observation refusal or equal-generation `desired_conflict`, recovery_error
+additionally carries `cell`, `journal_generation` and `membrane_generation` as structured values.
+Equal generations or object snapshots cannot hide conflicting published content in a ready result.
+Quarantine entries whose observation failed include `observation_error` and omit `found`;
+an empty found list is reserved for an actually observed empty set or an invalid entry with
+no attributable cell. Error exit removes only this invocation's control socket and releases
+the lock; it neither kills the surviving cells nor rewrites their journals.
+
+Spec008's R9/R10 acceptance exercises this actual socket path and independent enforcement-side
+observation. A library-only fake or manually constructed Controller cannot demonstrate it.
 
 ## 5. What this spec deliberately leaves undecided
 
@@ -444,3 +608,8 @@ is a claim that the text above may not be corrected.
 5. Ambiguity-as-error with candidate lists is the only selection semantics — **delivered** (§2).
 6. Ledger replayable-from-log and residue-empty as standing rows — ledger property green
    today (rule 3); the D4 residue row re-points at the membrane in P1 step 2.
+7. Spec008's recovery journal, typed cell ownership, instance-root startup, recovery diagnostics
+   and exact-operation/observation messages in §4.1 are **not yet implemented**. Their acceptance
+   requires actual controller restart and independently surviving supervisor observation,
+   separately from portable journal/model evidence. Accepting the contract does not turn the
+   existing status-only daemons into recovery-capable daemons.

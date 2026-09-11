@@ -1,391 +1,564 @@
 ---
 id: 008
-title: The per-cell ledger path, the durable ledger generation, and the quarantine report
-status: draft
+title: Durable cell journals and controller recovery against live observation
+status: accepted
 intents: [003]
 ---
 
 ## Behavior
 
-Decision 002 settled the shape of recovery: one append-only ledger per cell, replayed on
-restart and reconciled against what the operating system shows, with quarantine instead of
-half-recovery when a ledger does not parse. It left three contract details open. This spec
-closes them: a cell's ledger lives at `<instance-root>/cells/<cell>/ledger.ndjson`, derived by
-one function that both the writer and recovery call; `ledger_generation` is a per-cell counter
-carried on every ledger line, so the file itself is its durable home; and the quarantine
-report names the cell, the fault, what the snapshot shows, and exactly what the controller
-refuses to claim.
+A controller restart recovers the cells whose supervisors stayed running. It reads one journal
+per cell, reconnects to those supervisors, rebuilds desired state, and compares it with fresh
+observations. A corrupt journal quarantines its cell, not its neighbours: the controller names
+the cell and its observed holdings without adopting a prefix or withdrawing those holdings.
 
-The instance root is not new. Spec 001 §1 already fixes it as the directory holding
-`control.uds` (`~/.plasmosome/instances/<name>/` in production), and §4 already places each
-cell's `membrane.uds` in `cells/<cell>/`. This spec adds one filename inside that existing
-per-cell directory and nothing else. The root always arrives as an argument — tests pass a
-temporary directory — and the cell id is validated before it becomes a path component,
-because `CellId` today accepts any string, including path-shaped ones.
+The journal is `<instance-root>/cells/<cell>/ledger.ndjson`. It retains exact grant identities,
+resolved modes, durable generations and unfinished withdrawal obligations. Recovery never turns
+a pathname, PID, UUID, old handle or desired record into evidence of operating-system authority.
+A missing observation is an error, not an empty snapshot. Missing and unexpected holdings remain
+visible even when the cell's supervisor reports ready.
 
-Recovery reads that layout end to end. It lists the entries of `cells/`, derives each cell's
-ledger path, and reads the file with a strict reader: every line must parse, and generations
-must never decrease. A clean read yields the cell's desired state — the plasmids whose grants
-still stand after any revokes, their effects, their modes, the cell's generation. Any
-per-cell fault quarantines that cell and recovery moves on; a failure to list `cells/` at
-all aborts recovery with an error, because a partial listing cannot say which cells it
-missed. The desired states of the adopted cells become one `DesiredState`, the expected
-operating-system objects are rebuilt from the standing grants' inverses, and `Diff::between`
-against the backend snapshot names every difference.
-
-### Decision 1 — where a cell's ledger lives
-
-`<instance-root>/cells/<cell>/ledger.ndjson`.
-
-One function derives it, and it lives in `plasmosome-core::state` beside the `InstanceName`
-parser. It takes the instance root as a `&Path` and the `CellId`, and returns the path or an
-error. It applies the same rules `InstanceName::parse` applies: the cell id must be
-non-empty, contain no `/`, `\` or NUL, and must not be `.` or `..`. A cell id that fails is
-refused with a named error, never sanitized. No other code builds this path; the writer and
-the recovery reader both call this function.
-
-The file is ndjson: one line per event, in append order. The line shapes are the next
-decision's.
-
-### Decision 2 — where `ledger_generation` is durably kept
-
-In the ledger itself, on every line. A line is one of two shapes, externally tagged:
-
-```json
-{"grant": {"plugin": "github-pr", "mock": "simulate", "generation": 3, "effect": {"...": "..."}}}
-{"revoke": {"plugin": "github-pr", "generation": 4}}
-```
-
-- A `grant` line records one effect granted to the cell on the named plasmid's behalf.
-  `mock` is the plasmid's mock mode at grant time; without it a recovered cell would have to
-  claim a mode it cannot know, and claiming `passthrough` for a simulated plasmid is a claim
-  in the unsafe direction.
-- A `revoke` line records that every effect the named plasmid was granted before this line
-  is no longer desired. `plasmid.remove` writes one. `plasmid.reload` writes one followed by
-  the reloaded plasmid's fresh `grant` lines, all at the same new generation. A reload is
-  not atomic across its lines; the crash window between them is defined below, under what
-  the writer guarantees.
-
-All fields are required in both shapes; the recovery reader defaults nothing. Nothing
-durable exists in any older shape — no production writer of per-cell ledgers exists before
-this spec — so there is no history to stay readable for.
-
-`mock` takes exactly three values, and their wire strings are part of this contract:
-`"simulate"`, `"capture"`, `"passthrough"` — the closed D2 vocabulary spec 001 §3.9 states,
-in the lowercase serde form `plasmosome-core::state::MockMode` already writes. A fourth
-string does not parse, and on the recovery path an unparseable line quarantines the cell.
-
-The generation rules:
-
-- The generation has no durable home other than the lines. An accepted mutating transaction
-  on a cell increments the cell's generation once and stamps every line it appends with the
-  new value. A transaction that appends no line cannot move the generation — and the
-  transactions that grant nothing, removal and reload, always append their `revoke` line, so
-  the generation they took is on disk and recovery reads it back.
-- Within a file, generations never decrease. A decrease is a fault and quarantines the cell.
-- Every line's generation is at least 1. Generation 0 is reserved: it is the reading of a
-  cell with no lines at all, and only that. A line carrying 0 is a fault and quarantines
-  the cell.
-- A cell's `ledger_generation` is the generation of the last line of its ledger, whichever
-  shape that line is. A cell with no ledger file, or an empty one, is a fresh cell:
-  generation 0, no granted effects, still adopted. A quarantined cell has no generation; the
-  controller does not claim one.
-- The per-plasmid `generation` spec 001 §3.9–§3.12 reports is the generation of that
-  plasmid's last line in its cell's ledger.
-
-Spec 001 §3.3 reports one `ledger_generation` under `controller`. That number is defined
-here as the maximum generation across the adopted cells, and 0 when there are none. This is
-the value passed to `Controller::new`, whose doc already says the caller supplies it, and it
-is the `generation` of the `DesiredState` recovery hands to the `Reconciler`. A per-cell
-membrane push (`membrane.cell.desired`, spec 001 §4) carries that cell's own generation.
-
-A plasmid's mode after replay is defined the same way its effects are: by its standing
-lines. The recovered mode is the `mock` of the plasmid's **last `grant` line after its last
-`revoke` line**. This is not the last-write-wins that D2b forbids: D2b governs conflicting
-declarations at attach time, and those are resolved before anything is written. The ledger
-records only resolved outcomes, so the latest record is not one side of a conflict — it is
-the newest fact.
-
-### What the writer guarantees — and what it does not
-
-- Appending is per line: one ndjson line per grant or revoke. A transaction's lines are
-  flushed to disk before the transaction is acknowledged to its caller.
-- Write-ahead order: a `grant` line is durable **before** its effect is applied to the
-  world. The invariant this buys is the one the project needs: no object the controller
-  created exists without a line claiming it. A crash between flush and apply leaves a line
-  without a world object, and recovery names that as `missing` drift rather than hiding it.
-- A `revoke` line is write-ahead too: durable before any inverse runs. The direction is
-  chosen so a crash can never resurrect a capability — once the revoke is on disk, no
-  recovery will claim those effects as desired again. What a crash can leave is objects
-  that exist but are no longer claimed, and those are named on the snapshot side of
-  `drift`.
-- A multi-line transaction has no boundary marker, and this spec does not add one — a
-  marker would be a transaction in everything but name, and this contract has already
-  said it does not have transactions. The real crash window is a reload's, and appending
-  per line makes it a spectrum: disk can hold the `revoke` and any prefix of the fresh
-  grants, from none of them to all but the last. Every point on that spectrum is a valid
-  ledger, and **recovery adopts exactly what the standing lines say**. The empty prefix
-  reads as a completed removal: the plasmid is not desired, and whichever of its old
-  objects still stand surface as drift, named with their owner. A non-empty prefix reads
-  as a **partially reloaded plasmid**: desired, with only the effects whose lines were
-  written, at the reload's generation, with the last written grant's mock. That is a
-  state the system can be in, not an error, and the ledger cannot distinguish it from a
-  smaller reload that finished.
-- What a partial reload can and cannot cost. Every written-but-unapplied grant is named
-  as `missing` drift; every old object not yet undone is named on the snapshot side. The
-  grants the crash prevented from being written are different: they produce no drift and
-  cannot — write-ahead means an unwritten grant also never touched the world, so there is
-  nothing anywhere to reconcile. The loss is capabilities the plasmid was meant to get
-  back, never an object owned by nothing: a partial reload under-provisions, and
-  under-provision is the failure direction a capability kernel chooses. The party that
-  notices is the reload's caller: acknowledgement comes only after every line is flushed
-  and every effect applied, so a crashed reload was never acknowledged, and the re-issued
-  reload writes a fresh `revoke` and the full grant set at a new generation, converging
-  over the partial state.
-- **Exactly-once is not guaranteed.** A line carries no transaction identifier beyond its
-  generation, and an append can succeed while its acknowledgement is lost — a crash at that
-  moment leaves the caller unsure, and a re-issued transaction appends again, under the next
-  generation. A caller must tolerate three consequences. A recorded effect that was never
-  applied surfaces as `missing` drift. The same world object promised by more than one
-  `grant` line collapses in `expected` — an `OsState` is a set keyed by class, key and
-  owner — and produces no drift of its own. And any replayer of a cell ledger must treat an
-  inverse whose object is already absent as done, never as failure, because a duplicated
-  line's inverse runs twice. The retry is never silent: both lines sit in the file, and
-  their generations show what happened.
-- `Ledger::append_to_file` is not the writer. It writes every effect the in-memory ledger
-  holds, so calling it on a ledger rebuilt from disk writes the whole history a second
-  time. The crate doc currently recommends exactly that (`open_file` → `push` →
-  `append_to_file`); the recipe is wrong for cell ledgers and this spec retires it. A
-  per-line append replaces it.
-
-### The strict reader
-
-`Ledger::open_file` is not the recovery reader, on two verified counts. First, it skips any
-line that does not parse (`let Ok(record) … else { continue }`), which decision 002 forbids:
-a torn write must quarantine, not shorten history. Second, it returns an error when a file
-holds records from more than one plugin, while a per-cell ledger holds every plasmid the
-cell attached. `open_file` keeps its current single-plugin callers; recovery gets a strict
-reader in `plasmosome-ledger`.
-
-The strict reader returns either every line in file order, or a fault carrying the path,
-the 1-based line number, and the kind: `Unparseable`, `GenerationZero`,
-`GenerationDecreased`, or `Io`. A
-missing file and an empty file are not faults; they read as a fresh cell. There is no
-partial success: one bad line fails the whole read.
-
-### Recovery
-
-Recovery lives in `plasmosome-core` (which gains a dependency on `plasmosome-ledger`; no
-cycle — the ledger crate does not depend on core). Its signature:
-
-```
-recover(instance: &InstanceName, instance_root: &Path, snapshot: &OsState)
-    -> Result<RecoveryOutcome, RecoveryError>
-```
-
-The caller names the instance; recovery does not derive an identity from a path, and a test
-passes any valid name over a temporary root. The snapshot comes from `snapshot_os_state` on
-the seam.
-
-Discovery draws one line between two failure scopes. A missing `cells/` directory is a
-fresh instance: `Ok`, an empty outcome. A `cells/` that exists but cannot be listed is
-`Err(RecoveryError::Discovery)` and recovery aborts adopting nothing — a partial listing
-cannot name the cells it missed, and a live cell adopted around would become unowned residue
-without a word, the failure decision 002 exists to prevent. Every fault scoped to one cell
-quarantines that cell and recovery continues: an entry of `cells/` that is not a directory,
-or whose name the path function refuses, is quarantined with fault `NotACell`; a ledger the
-strict reader faults on is quarantined with that read fault. Instance-wide failure aborts,
-per-cell failure quarantines — the blast radius decision 002 chose.
-
-A clean read becomes the cell's desired state by the standing-lines rule. A plasmid is
-desired when it has at least one `grant` line after its last `revoke` line. Its desired
-effects are those standing grants, in file order; its mode is the last standing grant's
-`mock`. A cell whose plasmids were all revoked is still adopted: a `DesiredCell` with empty
-`plasmids`, at the generation of the ledger's last line. `genome` is `None` for every
-recovered cell: the ledger does not record a genome name and recovery does not invent one.
-A reload's partial prefix is one of the states this rule can return — a plasmid desired
-with only the effects whose lines were written before a crash. Recovery adopts it as it
-stands; what that state can and cannot cost is defined under what the writer guarantees.
-
-`RecoveryOutcome` holds:
-
-- `desired: DesiredState` — one `DesiredCell` per adopted cell, built as above;
-  `generation` is the maximum adopted cell generation.
-- `expected: OsState` and `drift: Diff` — for each standing grant whose reversibility names
-  a universe object (`Exact` via `InverseVia::Universe`, or `Compensating`), the removal's
-  class and key plus the line's plugin form an expected `OsObject`.
-  `Diff::between(&expected, &snapshot)` then names every object the ledgers promise but the
-  snapshot lacks, and every object the snapshot holds but no adopted ledger accounts for.
-  One caveat binds the instance-wide union: `OsObject` ownership is a `PluginId` alone, so
-  when one plugin is attached to two cells their expected objects collapse into the same
-  set entries, and drift between those cells can hide. Exactness of `expected` and `drift`
-  across cells that share a plugin waits on the ownership decision in `## Blocked on`; per
-  cell, and across cells with disjoint plugins, they are exact.
-- `unmatched` — the standing grants recovery cannot verify: an `Exact` inverse via
-  `InverseVia::Backend(Handle)` names no class and key, and a handle is process-local, so
-  it is dead after a restart. Each entry carries the cell, the plugin, and the effect
-  description. A caller must not read their absence from `drift` as verification. `Delayed`
-  and `External` effects create no snapshot object and produce neither drift nor an entry
-  here.
-- `quarantined: Vec<QuarantineReport>` — one per quarantined cell.
-
-### Decision 3 — the quarantine report
-
-`QuarantineReport` carries:
-
-- `instance: InstanceName` — the name the caller passed to `recover` — and `cell: CellId` —
-  which cell. For a `NotACell` entry the cell id is the entry's name verbatim, so the
-  operator can find the directory even though the path function refuses it.
-- `path: PathBuf` and `fault` — where and what. For a read fault, `path` is the ledger
-  file, derived by `cell_ledger_path`, and the fault carries its line number, so an
-  operator can open the exact line the controller stopped at. For `NotACell`, `path` is
-  the raw `cells/` entry as the listing returned it — explicitly not a validated ledger
-  path, which a refused name cannot have — carried so the operator can find the entry.
-- `lines_parsed: usize` — how many lines read cleanly before the fault. Context only; the
-  prefix is not trusted. Zero for `NotACell`.
-- `found: Vec<OsObject>` — every snapshot object whose owner is a plugin named by any line
-  of the file that did parse, grant or revoke. This is what exists in the world and
-  plausibly belongs to the cell; the snapshot does not need the ledger, so the operator
-  sees it even though the controller will not act on it. Empty for `NotACell`, which has no
-  parsed lines to name a plugin. Attribution is by plugin name, the only ownership
-  `OsObject` carries, so a plugin attached to a second cell can bring that cell's objects
-  into `found`; the ownership decision in `## Blocked on` settles the ambiguity.
-- `refuses: Vec<String>` — the fixed claims the controller declines, stated outright: it
-  does not adopt the cell, does not trust the parsed prefix as the cell's history, claims no
-  `ledger_generation` for it, and revokes none of the found objects without an operator
-  `Force`.
-
-The report implements `Display` in the `ResidueReport` style: a header naming the instance,
-the cell and the fault, one `FOUND` line per object via `OsObject::describe()`, one
-`REFUSES` line per claim. A caller may rely on: a quarantined cell never appears in
-`desired`, contributes nothing to any generation, and its objects are left exactly as the
-snapshot found them — so they surface as drift against whoever audits the instance next,
-rather than vanishing into an adopted history.
+This is a contract for implementation, not a claim that recovery is already built. Accepted
+spec017 supplies exact grant identity and predeclared operations; decisions002,003 and006 supply
+per-cell recovery and owner-selective withdrawal. The startup and diagnostic protocol additions
+are stated in spec001. Implementation admission still requires this revision accepted on main;
+a local acceptance candidate or a model experiment is neither admission nor product delivery.
 
 ## Contract
 
-- `plasmosome-core::state`: `cell_ledger_path(instance_root: &Path, cell: &CellId) ->
-  Result<PathBuf, CellPathError>`. Errors: empty id, path-shaped id (`/`, `\`, NUL, `.`,
-  `..`). The only place the literal `ledger.ndjson` appears outside tests.
-- `plasmosome-ledger`: `LedgerLine`, one per ndjson line, externally tagged `grant` |
-  `revoke`. `grant` carries `plugin: PluginId`, `mock`, `generation: u64`, `effect: Effect`;
-  `revoke` carries `plugin: PluginId`, `generation: u64`. All fields required in serde.
-  `mock` serializes to exactly `"simulate"`, `"capture"`, or `"passthrough"`; the set is
-  closed. A strict read function returning `Result<Vec<LedgerLine>, LedgerReadFault>`;
-  `LedgerReadFault { path, line: Option<u64>, kind: Unparseable | GenerationZero |
-  GenerationDecreased | Io }`. A per-line append that flushes before returning. Missing or empty file reads as
-  `Ok(vec![])`.
-- `plasmosome-core::recovery`: `recover(instance: &InstanceName, instance_root: &Path,
-  snapshot: &OsState) -> Result<RecoveryOutcome, RecoveryError>`. `RecoveryOutcome {
-  desired: DesiredState, expected: OsState, drift: Diff, unmatched: Vec<UnmatchedRecord>,
-  quarantined: Vec<QuarantineReport> }`. `RecoveryError::Discovery` carries the path that
-  could not be listed and the io error; it is returned only for that instance-wide failure,
-  never for a per-cell one. `QuarantineReport.path` is the derived ledger file for a read
-  fault and the raw `cells/` entry for `NotACell`. Recovery requires of the backend that an
-  object's ownership answers which cell it belongs to; `## Blocked on` carries that
-  requirement. `MockMode` moves into `LedgerLine`'s reach without a dependency
-  cycle: `plasmosome-ledger` must not depend on `plasmosome-core`, so `MockMode` either
-  moves to `plasmosome-backend` or is mirrored by a ledger-owned type with the same three
-  wire values; the implementer picks, the vocabulary and the strings stay fixed.
-- `plasmosome-core::control`: the value handed to `Controller::new` as `ledger_generation`
-  is `RecoveryOutcome::desired.generation` — the maximum adopted cell generation, 0 with no
-  adopted cells.
-- Callers may rely on: the path function is total over valid ids and refuses invalid ones;
-  every acknowledged effect has at least one durable line, written before the effect
-  touched the world; a retried transaction may leave duplicate grant lines, visible in the
-  file, collapsing to one expected object; generations within a file start at 1 and never
-  decrease; a
-  removal or reload moves the generation durably via its `revoke` line; a fresh cell reads
-  as generation 0; a quarantined cell is absent from `desired`, has no claimed generation,
-  and loses no objects; a replayer treats an inverse whose object is already absent as
-  done.
+### Identity, paths and the writer domain
+
+`CellId` moves from core to `plasmosome-backend`; core consumes that one type. `CellOwner` is
+`{ cell: CellId, plugin: PluginId }`. It replaces plugin-only ownership in `OsObject`,
+`UniverseOp`, `Grant`, `LedgerEntry`, owner comparisons and removal arguments. `Grant` becomes
+`{ owner: CellOwner, capability, kind }`; `LedgerEntry` becomes `{ handle, owner: CellOwner,
+capability, kind }`. Universe operations keep the field name `owner` with its widened type.
+This independently extends spec017's owner representation, not its grant identity semantics.
+Journal changes still name a plugin and infer their cell from the validated directory; embedded
+operations must carry that same cell in their owner. This is decision003's already-decided
+ownership, not a restriction making plugins unique across an instance. Tool-registry ownership
+is outside this recovery change.
+
+Spec017's `GrantId`, exact `(UniverseClass, GrantId)` address, full `Capability`, conflict
+refusal, handle/drain semantics and canonical comparison remain unchanged. Exact recovery diffs
+compare complete objects including `CellOwner`. They never use canonical equivalence. A recorded
+operation replay keeps its ID; two intended holdings use two IDs, even for identical capabilities
+in one cell. Removing one cell's holding cannot remove another's. No migration manufactures IDs
+or owners for old lossy records. The instance is the observation/writer domain; sharing a backend
+between instances requires an independent instance partition and is not introduced here.
+
+`plasmosome-core::state::cell_ledger_path(root: &Path, cell: &CellId) ->
+Result<PathBuf, CellPathError>` is the sole journal path constructor. Valid IDs are nonempty UTF-8
+strings without `/`, `\`, NUL, `.` or `..`. Invalid IDs are refused, never sanitized. The filename
+is constructed once in non-test source; reader and writer use the same function. `MockMode`
+moves to backend alongside `CellId`, with its existing lowercase serde vocabulary and methods;
+there is no second enum, alias compatibility path or core/ledger dependency cycle.
+
+The daemon receives an explicit absolute `instance_root`, independently of its configured
+`control_socket` and validated instance name. Tests use temporary roots. The usual instance
+layout in spec001 does not imply that today's arbitrary configured socket identifies a root.
+The trusted operator supplies the root. The root and its ancestors are outside the cell's write
+authority; cell workloads must not be able to replace journal directories or files.
+Private supervisor sockets additionally require spec001 §4.1's owner/mode, kernel peer-UID and
+workload-confinement boundary. A trusted path or writer lock alone does not authorize an RPC.
+
+There is one controller writer per instance. Startup opens `<root>/controller.lock` without
+following a symlink and takes a nonblocking exclusive OS file lock before discovery; contention
+refuses startup. The lock is held through serving and recovery, released by process death, and
+its file is not unlinked. This is cooperative local writer exclusion, not authentication or a
+cross-host lock. All journal mutation runs under it and is serialized per cell. No later
+transaction on a cell starts until the preceding transaction finishes or the cell is blocked.
+
+After opening the trusted root directory, discovery and journal IO use directory-relative,
+no-follow opens. `cells`, cell directories and journal files must not be symlinks; journals must
+be regular files. Do not validate a path and then follow a different object through it. A
+non-UTF-8 or invalid cell entry is reported by its raw Unix name, never lossy-converted into a
+`CellId`. The supported platforms are macOS and Linux; their no-follow directory operations and
+advisory locks are the filesystem seam, not a virtual-machine dependency in core.
+
+### Journal records and generations
+
+The new per-cell format is version 1 of `CellJournalRecord`, distinct from spec017's version-2
+single-plugin `LogRecord`. The former draft's unversioned grant/revoke lines were never a
+production per-cell format and are refused, not inferred or rewritten. Every record is one UTF-8
+JSON object followed by LF. Required fields have no defaults; unknown fields, enum variants and
+versions refuse. CRLF is accepted as JSON trailing whitespace followed by LF. Empty lines refuse.
+
+The serde envelope is `{ "format": 1, "generation": N, "event": EVENT }`. `EVENT` is one of:
+
+- `{"prepare":{"changes":[...],"force":null}}`;
+- `{"commit":{}}`;
+- `{"abort":{}}`;
+- `{"finish":{}}`.
+
+`force` is required and is either null or `{ "operator": STRING, "reason": STRING }`, both
+nonblank. It is a recorded operator assertion, not authentication. Each change is
+`{ "plugin": PluginId, "replacement": Replacement-or-null }`; a replacement is
+`{ "mock": MockMode, "effects": [RecordedEffect, ...] }`. Null removes the attachment. An empty
+effects array is a real attached plasmid with a known mode, not an accidental removal. Changes
+contain each plugin at most once, are nonempty, and carry the complete replacement for each
+changed attachment. Unmentioned attachments remain unchanged. Effect order is grant order.
+
+`RecordedEffect` is `{ "effect": Effect, "operation": UniverseOp-or-null }`. Exact universe
+inverses and compensation witnesses carry spec017's exact ID and full capability. Their operation
+is required; its object, owner and inverse must agree with the journal cell, change plugin and
+witness. An identity cannot be assigned conflicting payloads or reassigned to another holding
+anywhere in that cell's history. A replacement may retain an identical standing effect/ID;
+otherwise newly introduced operations use fresh IDs, not retired ones. The same exact retained
+record appears at most once in a replacement. Identical capabilities with different IDs remain
+separate effects. Across successfully validated journals, a repeated exact address is an instance
+consistency error, including when owners differ; recovery never chooses a file by listing order.
+A quarantined prefix is not used as a trusted identity index.
+
+Forensic replay can encounter an `Exact(Backend(handle))`, `External`, or `Delayed` effect with
+null operation. The reader retains it rather than pretending it is a universe operation. A
+backend handle is reported as unmatched unless the surviving supervisor independently proves
+its original grant record and drain state; planting its snapshot is not that proof. Published
+delayed effects and external assertions remain outstanding safe-removal obligations. They do
+not become observed OS objects. The transaction writer defined here refuses newly introduced
+opaque backend-handle or irreversible/published effects before preparing: it cannot perform
+them with a predeclared undo and spec001's rollback guarantee. It can retain such records while
+changing another attachment. Force can discharge recorded external/published assertions, but
+cannot restore a missing backend handle's authority: an unverified opaque inverse blocks cleanup
+and remains unmatched until its original supervisor authority is established.
+Unpublished delayed records have no world operation and may be discarded on withdrawal. This
+contract adds no external publisher or handle-import mechanism.
+
+A generation identifies one accepted, prepared cell mutation, not a process or an object.
+The first prepare is 1; subsequent prepares are exactly the preceding generation plus 1.
+All terminal records for a prepare carry that same generation. Generation 0 appears in no
+record and means only an empty/missing journal. `u64::MAX` refuses the next mutation before IO
+or effect application; it never wraps. A prepare always records the new generation, including
+an empty attachment or removal. Rejected validation and failed pre-write preparation take no
+generation. Once bytes may have been appended, the writer cannot assume that number is unused.
+
+The only valid event sequences within a generation are `prepare, commit, finish` and
+`prepare, abort, finish`. At EOF, any prefix of either sequence is valid unfinished work;
+commit and abort are mutually exclusive. Finish without a terminal decision, a second prepare
+before finish, a skipped/decreasing/zero generation, or a repeated terminal record is a semantic
+fault. Retry resolves the observed journal state; it never appends a duplicate terminal record
+because its acknowledgement was lost. There is no transaction ID beyond the cell/generation.
+A client retry after a completed transaction is a new request, subject to normal verb validation;
+this specification promises neither exactly-once client execution nor lost-reply deduplication.
+
+### Durable publication and interrupted transactions
+
+Each append writes exactly one complete record and calls `File::sync_all` before returning
+success. `Write::flush` alone is not durability. Creating the root's child directories, lock
+file or journal also syncs the containing directory entries before a journal operation may
+apply effects or acknowledge success. Directory creation is performed from opened trusted
+parents. A new journal never replaces an existing inode. The durability claim assumes the OS
+and filesystem honour successful sync operations; it covers controller crashes and host restart,
+not storage hardware lying about flushes or recovery of running processes after power loss.
+
+A write, sync or directory-sync error returns failure and blocks that cell's writer. No further
+append, operation, rollback acknowledgement or client success is allowed from guessed memory.
+Reopen under the instance lock and strict-read the original file: a valid prefix of complete
+records determines recovery, while a partial final record quarantines the cell. Even complete
+JSON without its LF is a torn cell-journal record and quarantines. No automatic truncate,
+repair, prefix adoption or in-place migration occurs. The single-plugin reader's narrow EOF
+allowance in spec017 remains a different API and is never used for cell recovery.
+
+A mutation validates the full dependency closure, resolved mock modes, exact ownership,
+identity conflicts and safe-removal/Force requirements before preparing. It computes replacement
+states, newly introduced operations and old effects to retire without changing the world.
+`UniverseOp` supplies a fresh ID and `op.removal()` before `apply`; using
+`grant()` followed by recording its returned handle is expressly not this writer.
+
+The sequence is:
+
+1. Append and sync prepare. The previous committed desired state remains authoritative.
+   If prepare carries Force, durably append its session-log assertion as specified below before
+   using that authority. Failure stops this cell; it does not continue toward a forced result.
+2. Apply only newly introduced operations, in recorded order, through the owning supervisor.
+   Retained IDs are not reapplied. The supervisor enforces the exact operations; an independent
+   snapshot, not an echoed request, establishes which holdings exist.
+3. If all new operations succeeded, append and sync commit. This atomically publishes all
+   replacements in that cell's desired state. Only now may old, unretained effects be retired,
+   in reverse original grant order, preserving order across changed plugins from the replayed
+   cell history. Safe-removal assertions were checked before prepare, not after publication.
+4. If application fails before commit, append and sync abort BEFORE withdrawing newly applied
+   operations, in reverse prepare order. Old desired state and old holdings remain unchanged.
+   A failed attach's `CommitFailed` reply names this rollback; no rolled-back success is
+   reported until cleanup and finish are durable. If abort cannot be made durable, stop and
+   let startup resolve the pending prepare; do not acknowledge a rollback that is not recorded.
+5. Append and sync finish only after all required cleanup is independently observed complete.
+   Finish records journal-side completion; it does not yet permit a client result or the
+   next transaction. A timeout or uncertain cleanup blocks the cell and reports the unfinished
+   generation rather than declaring success.
+6. Send the complete settled DesiredCell to `membrane.cell.desired` at this cell generation,
+   require an acknowledgement matching request ID, cell and the entire published record, then
+   freshly observe that same complete record. Only then may a committed mutation return success or an
+   aborted mutation report completed rollback and admit the next transaction. An abort publishes
+   the unchanged committed attachments at its consumed new cell generation, not the old one.
+   A lost, malformed or wrong acknowledgement is not success; block further cell mutation until
+   the bounded publication exchange below succeeds. Never append another finish or apply effects
+   again merely to retry this publication.
+
+Reload prepares fresh replacement holdings while old holdings remain, commits the generation
+swap, then retires only the old ones. It is not a remove/add pair and never exposes a partially
+published replacement as desired. If a backend cannot stage a proposed replacement without
+withdrawing an old holding or widening access, validation refuses it before prepare; recovery
+does not bypass that backend constraint. A multi-plugin attach uses one prepare/commit pair
+for the cell, so a failure cannot publish only a prefix of its closure.
+
+On restart, a prepare without commit is resolved to abort, then only its newly introduced
+holdings are cleaned up. A commit without finish retains its new desired state and resumes the
+old effects' cleanup. An abort without finish retains the prior desired state and resumes new
+effects' cleanup. A completed generation is not replayed as new operations. Recovery never
+reapplies a withdrawn ID or automatically creates a missing desired holding; it reports that
+drift for an explicit new mutation. This prevents stale recovery from resurrecting capability.
+A valid finish with a stale membrane generation still requires publication reconciliation below.
+It is not an unfinished journal transaction, but it is not a settled controller/supervisor pair.
+
+Before each resumed withdrawal, request a fresh independent snapshot and match exact address,
+full capability and cell/plugin owner. If the exact address is absent, record completion of that
+obligation by observation; do not invoke its inverse again. A present conflicting payload is a
+fault and blocks cleanup. A matching holding is withdrawn via its exact universe inverse and
+then observed absent. `UnknownObject`, `UnknownHandle`, a timeout or a lost response is NOT
+success: obtain a new observation and use the same rules. A live conflicting or unobservable
+holding remains unfinished. Spec017's backend refusal contract is not weakened. For brokers,
+only the surviving supervisor's original process-incarnation authority can act; a journal PID
+or GrantId never permits signalling a replacement process.
+
+Finish records completion of all obligations, not a cursor or a claim that every historical
+effect was undone twice. Crash after removal but before finish is safe because restart observes
+the exact ID absent. Crash during an uncompleted rollback cannot drop the old desired state.
+Force authorizes only the exact obligations recorded in that prepared operation. After its
+prepare is durable and before using Force, append a `force` session-log event carrying the
+cell, generation and exact operator/reason pair. `SessionLog::append` becomes
+`Result<u64, SessionLogError>`: successful append means the complete LF-terminated event was
+written, flushed and `File::sync_all` succeeded, not just that a sequence number was reserved.
+Creating the log or its parent directories also durably syncs their containing entries.
+Propagate write, flush, file-sync and directory-sync errors; none may be swallowed.
+An audit error blocks this cell before forced cleanup and prevents a forced acknowledgement
+or further mutation, even if the journal prepare is already durable. Reopen/recover rather
+than proceeding from guessed memory. The session log is not a second recovery authority:
+the strict cell journal still determines exact obligations. Recovery durably appends the same
+cell/generation assertion before resuming Force; duplicate audit assertions after an uncertain
+append are allowed and do not mean the operation ran twice. They attest authorization, not
+completion. This does not require an atomic commit across the journal and session log.
+The shared log writer refuses every later append after an IO error until it is reopened and
+validated. Before extending an existing log, require complete LF-terminated UTF-8 JSON objects;
+a torn or malformed audit log refuses further audit rather than appending onto a corrupt suffix,
+skipping it or truncating it. Reopening re-establishes the required directory durability too.
+Quarantine is never an implicit Force and has no automatic cleanup path.
+
+This deliberately replaces the earlier draft's boundary-free partial-reload proposal. That
+proposal could not preserve spec001's whole-closure rollback, empty attachments or durable
+teardown obligations. The four records are an append-only protocol in one per-cell file, not a
+database, multi-file atomic commit, or a second durable generation store. No record is edited.
+
+### Strict read and the recovered account
+
+`plasmosome-ledger::read_cell_journal(path: &Path) ->
+Result<Vec<CellJournalRecord>, CellJournalFault>` returns every record or no history.
+`CellJournalFault` carries `path: PathBuf`, `line: Option<u64>`, `lines_parsed: u64`, and kind
+`Io | Unparseable | UnsupportedFormat | GenerationZero | GenerationOrder | EventOrder |
+InvalidEffect`. Read framing as bytes: invalid UTF-8, a malformed complete record and any
+non-LF-terminated final record all fault. A nonempty physical line is counted once; CRLF does
+not add a line. The reader stops at the first fault. `lines_parsed` counts only complete,
+syntactically and semantically accepted records before it, including terminal records.
+A mid-read IO error identifies the next physical line where possible; open errors have no line.
+No parsed records or decoded prefix owners are returned on failure. Missing and empty files
+return an empty history, not a history read using the single-plugin compatibility rules.
+
+`recover(instance: &InstanceName, root: &Path, observation: &RecoveryObservation) ->
+Result<RecoveryOutcome, RecoveryError>` is a read-only core operation. It does not append,
+apply, remove, signal, manufacture a snapshot or create controller status from desired data.
+Recovery orchestration separately resolves pending transactions and repeats read/observation
+before serving. The writer retains validated journal handles under the same instance lock;
+strict reads are never raced against another controller append.
+
+`DesiredState` retains `generation: u64` and `cells: BTreeMap<CellId, DesiredCell>`.
+`DesiredCell` is `{ generation: u64, genome: Option<GenomeName>,
+plasmids: Vec<DesiredPlasmid> }`. `DesiredPlasmid` is `{ plugin: PluginId, mock: MockMode,
+generation: u64, effects: Vec<RecordedEffect> }`. This is separate from the existing compact
+status `PlasmidRecord`; a status projection cannot replace the recovered effects.
+`RecoveryOutcome.tombstones` is `BTreeMap<CellId, BTreeMap<PluginId, u64>>`, retaining removed
+attachments' last committed change generations rather than fake attached plasmids. A cell's
+generation is the last prepare generation, including an aborted or unfinished transaction;
+committed attachment generations only change on commit. The instance generation is the maximum
+adopted cell generation, or 0. It is a status aggregate, never a watermark deciding whether
+another cell's mutation should run. Per-cell desired pushes carry the cell's settled generation.
+For publication, both live execution and restart use the same settled journal replay: plasmids
+are ordered by PluginId, effects retain recorded order, and genome is None because this journal
+does not persist it. Unrecorded live metadata cannot enter the published record and disappear
+on restart. Complete-content equality compares every decoded field, including attachment
+generations, modes, ordered effects and exact operations, not JSON formatting or only OS holdings.
+
+An empty journal adopts an empty generation-0 desired cell; an empty attachment remains an
+attachment. No recovered genome is invented: it is None internally and omitted on spec001's
+wire. Recovery retains both pending retirement obligations and the newly prepared effects in
+`PendingCellTransaction { generation, phase, changes, cleanup }`. They are not silently mixed
+into committed desired state. Reconstructed effects retain file order, and cleanup order is
+reverse grant order, not map-key order. A per-effect replay ordinal derived from journal position
+provides that order; it is not an additional durable identity.
+`pending` is a `BTreeMap<CellId, PendingCellTransaction>`. Its phase is the closed enum
+`Prepared | Committed | Aborted`; cleanup is an ordered list of
+`CleanupObligation { plugin, effect, grant_ordinal }`. Retained effects keep their original
+ordinal; newly committed effects take prepare position plus their changes/effects position.
+The ordinal is a tuple, not a plugin-name sort or a wrapping arithmetic counter.
+
+`RecoveryObservation` contains a fresh `OsState` plus observed cell records, observation faults
+and the independently verified recoverable handle records, if any. The observer has no desired
+state input. Each observed record names its cell, actual lifecycle/readiness and the complete
+last published `desired: DesiredCell`, retained by the supervisor atomically with its generation.
+That record proves publication content only, never liveness or enforcement. A snapshot includes
+all holdings reported by the queried supervisor,
+including holdings absent from its cell journal. Supervisor lifecycle/readiness comes from
+actual child/broker observation; holdings come from enforcement-side observation bound to
+original identities, not a copy of controller requests or reconstructed ledgers.
+
+`RecoveryOutcome` contains `desired`, `tombstones`, `expected: OsState`, `drift: Diff`,
+`unmatched: Vec<UnmatchedRecord>`, `pending`, `quarantined: Vec<QuarantineReport>` and the
+independently observed cells. Expected contains exact objects of standing committed
+universe/compensating effects. A standing backend-handle effect can additionally contribute the
+object from an independently retained original LedgerEntry only when its exact handle and
+cell/plugin owner match; the entry is original grant authority, not a snapshot row converted
+into a receipt. Otherwise it is `UnmatchedRecord { cell, plugin, effect }` and contributes no
+expected object. An equal capability or planted observation is never substituted.
+For `Diff::between(&expected, &observation.objects)`, added means observed but not desired,
+removed means desired but missing. Pending and quarantined holdings may therefore be in added;
+their reports explain attribution rather than erase differences. Replayed exact operations
+produce one object; fresh IDs remain distinct. External and published delayed assertions stay
+explicit obligations, not claims of snapshot verification. `recover` refuses observation faults
+with `RecoveryError::Observation { cell, source }`; it cannot return a successful partial account.
+
+A missing `cells/` directory is a fresh instance. Failure to enumerate its complete contents,
+including an iterator error after some entries, is `RecoveryError::Discovery { path, source }`
+and yields no outcome/adoption. A symlink or non-directory at `cells/` is also Discovery.
+A known entry that is not a directory, has an invalid/non-UTF-8 name, or is a symlink is a
+per-entry quarantine. A symlink/non-regular journal, per-cell open/read/permission failure or
+strict-reader fault quarantines that cell while good siblings remain recoverable. A missing
+journal is empty, but never implies that independently observed holdings are absent or revocable.
+An instance identity collision is `RecoveryError::IdentityConflict { class, id, paths }` and
+aborts the account rather than merging objects. Observe all valid cell directories, including
+ones whose journals quarantine, not just the adopted subset. Unknown names remain reported
+without being turned into requests to arbitrary socket paths.
+
+### Quarantine and startup integration
+
+`QuarantineReport` carries instance, optional validated cell, raw entry name bytes, raw path,
+fault, optional line, lines_parsed, found objects and refusal claims. A valid cell's `found`
+is every independently observed object whose `owner.cell` is that cell, even if the first
+journal line is corrupt and no plugin was parsed. Another cell's same-plugin objects are
+excluded. An invalid raw name has no validated cell and no guessed object attribution.
+The report does not expose an adoptable prefix and claims no generation.
+`fault` is `NotACell` for a refused directory entry or `Journal(CellJournalFault)` for its
+journal. A non-regular/symlinked journal is a Journal Io fault with no parsed lines; a
+directory entry's invalid name is never passed to the journal opener.
+
+Display escapes raw bytes and control characters unambiguously, names the instance, entry/path
+and fault, emits one FOUND line per full `OsObject::describe()`, and states these refusals:
+not adopted; no trusted prefix; no claimed generation; no withdrawal without separately recorded
+operator Force and independently verified exact authority. The wire report encodes raw names and
+paths as arrays of byte values, not lossy strings. `cell` and `line` are omitted when absent.
+A quarantine report with unavailable observation says so; an unknown found set is not `[]`.
+
+Startup holds the instance lock, binds the configured control socket without replacing an
+existing path, discovers every entry, and queries every validated cell's
+`<root>/cells/<cell>/membrane.uds` using spec001's live recovery observation contract. Only
+socket paths under validated no-follow directories are used. A missing/failed/timed-out or
+malformed live response is an observation failure, not an empty cell. A cell's supervisor is
+allowed to report an observed dead cell; the controller must not derive that state from a PID
+file, socket existence or inability to connect.
+
+No requests are answered until complete discovery and observation have succeeded, journals have
+been classified, pending cleanup has completed and every adopted cell's complete settled record
+has been reconciled with its membrane. Compare generations before any resumed effect operation:
+an observation newer than the journal is an unaccounted participant state and refuses startup
+without cleanup. A pending generation cannot already have been published at that same generation:
+publication follows durable finish, so that case also refuses rather than acknowledging an
+unfinished or subsequently aborted payload.
+
+After cleanup and durable finish, reconcile each adopted, non-quarantined cell independently:
+
+| Observed membrane generation versus settled journal generation | Startup action |
+| --- | --- |
+| Lower | Send the complete settled DesiredCell at the journal generation; require matching request-ID/cell/full-record acknowledgement and a fresh observation of that same full record before serving. |
+| Equal | Continue only when every field of the observed DesiredCell matches settled journal replay. A content mismatch refuses without overwriting the membrane; matching records require no operations or republication. |
+| Higher | Refuse startup as unaccounted participant state. Never send an older generation and treat its no-op acknowledgement as repair. |
+
+These rules include generation 0 and aborted generations. For an abort, publication carries
+the unchanged committed attachments and attachment generations under the consumed new cell
+generation; the recovery account's tombstones are unchanged. If the controller dies before
+sending, after the request but before acknowledgement, or after acknowledgement but before
+replying to its client, restart re-observes
+and applies this table. Lost acknowledgement may safely resend the identical settled record:
+equal generation is a no-op only with identical content, and its matching acknowledgement must
+still be followed by fresh complete-record observation. A lower post-ack generation retries
+within the remaining deadline; a higher generation or equal-generation content mismatch refuses.
+No retry applies effects, changes IDs, consumes another generation or adds journal records.
+An older desired request remains a no-op but returns the newer retained record, not a claim that
+the requested old content was published. No historical payload store is required for old requests.
+
+All startup publication requests, acknowledgements, re-observations and retries share the existing
+single recovery deadline; they do not replenish it. The same publication exchange after a live
+mutation is bounded by one recovery_deadline_ms budget starting after durable finish, with no
+budget reset on retry. Failure blocks that cell's next mutation and prevents a successful client
+result; recovery readiness is false until publication is settled.
+If observation, cleanup or publication remains incomplete, startup emits a structured recovery
+error and available quarantine diagnostics on stderr, releases its own socket/lock and exits
+nonzero rather than serving a partial instance. Generation refusal reports the cell and both
+numeric generations as an observation error. Equal-generation content mismatch is
+`RecoveryError::DesiredConflict { cell, generation }`, reported with spec001's structured
+`desired_conflict` kind. It is not repaired by overwriting content or ignoring a field.
+This availability cost leaves live supervisors alone. An operator can repair the cause and
+restart. Journals and unknown socket paths are never
+unlinked as recovery. A stale control socket after SIGKILL still requires explicit operator/caller
+handling, as the existing daemon does.
+
+On successful startup, construct ControllerState from recovered identities/modes and actual
+supervisor state, retain the entire recovery account, and pass desired.generation to
+Controller::new. Quarantined cells are absent from the ordinary cell registry and visible in
+`plasmosome.recovery`. The controller's ready flag is false if any quarantine, unmatched effect,
+drift or unsettled publication remains; an empty instance is ready only after the same startup
+requirements. An observed ready cell is not relabelled dead because its desired holdings drift.
+The diagnostic surface states that discrepancy separately. Equal object snapshots do not
+establish equal participant generations or publication content. Matching published records do
+not establish matching holdings. No journal record or recovery result by itself proves liveness.
+
+The controller reconnects to surviving supervisors and retains exact inverses for subsequent
+ordinary revocation. It does not restart those supervisors, recreate missing grants or turn
+snapshot rows into grant handles. The publication exchange above sends only complete settled
+state after durable finish and before a completed client result. Spec001 binds equal-generation
+no-op acknowledgement to identical content; older requests return the current retained record.
+Generation and complete-content comparison, not an echoed acknowledgement, decide settlement.
+An unfinished or partial desired record is never published.
+
+The concrete enforcement path is the surviving membrane's exact-operation and withdrawal RPCs
+specified in spec001. Its adapters must observe and retain actual resource/holding associations,
+including process incarnation for brokers. Implementing only FakeBackend or serving snapshots
+from remembered requests cannot complete the live-controller acceptance below. No such real
+adapter is claimed to exist today; acceptance of this contract is not evidence that it does.
+
+### Existing APIs and implementation boundary
+
+Core currently serves only plasmosome.status from an empty registry; its existing daemon has no
+recovery root or live observation client. Membrane currently serves membrane.status, not the
+recovery/operation RPCs below. The current ledger helper's append-whole-history recipe is not a
+cell writer and must no longer be recommended for reopen/extend. Spec017 changes the legacy
+single-plugin reader's compatibility rules independently; this contract does not depend on its
+old skip-malformed-lines implementation or change its narrow torn-tail allowance.
+
+Implementation adds core's ledger dependency, the recovery module, explicit recovered-state
+carriers and daemon integration; ledger owns the typed journal reader/writer. Backend owns the
+shared CellId/CellOwner/MockMode and exact-operation types; core never depends on a VMM crate.
+All affected ownership constructors, comparisons, serde consumers and conformance factories
+migrate together. No plugin-only or lossy compatibility fallback remains in the recovery path.
+The session-log return-contract change includes all append callers and benchmarks; no infallible
+audit fallback remains. Socket creation, both connection endpoints and workload launch must
+establish the spec001 authorization boundary before exposing recovery operations.
+Native implementation plans, ownership, API migration lists, proof output and admission state
+remain in Beads under specs012/016, not duplicated as a task in this document.
 
 ## Acceptance
 
-- `cell_ledger_path` exists beside `InstanceName` in `plasmosome-core::state`; a test shows
-  `../x`, `a/b`, and the empty id refused with a named error, and a valid id resolving under
-  `cells/<cell>/ledger.ndjson` of the given root.
-- `git grep -l 'ledger.ndjson' -- crates` names one non-test source file.
-- `LedgerLine` round-trips both shapes; a `grant` line missing `mock` or `generation`, and
-  a line whose `mock` is any string outside `simulate`/`capture`/`passthrough`, fail the
-  strict reader.
-- Strict-reading a file whose last line is torn returns a fault carrying that line's number;
-  no line set is returned.
-- Strict-reading lines with generations `2, 2, 1` returns `GenerationDecreased` naming
-  line 3.
-- Strict-reading a file whose first line carries `generation: 0` returns `GenerationZero`
-  naming line 1.
-- Strict-reading a missing path and an empty file both return no lines and no fault.
-- The per-line append extends a file holding M lines to exactly M + 1; a test appends, then
-  independently reopens the path and strict-reads the new line back.
-- A ledger holding a grant at generation 1 and a revoke at generation 2 recovers a cell at
-  generation 2 with no desired plasmids and no expected objects.
-- The same ledger, over a snapshot still holding the granted object, yields a `drift`
-  naming that object as unaccounted for — the mid-reload crash reads as a completed
-  removal, loudly.
-- A ledger holding a grant at generation 1 for one object, a revoke at generation 2, and
-  a grant at generation 2 for a different object — a reload crashed after its first fresh
-  grant — recovers the plasmid as desired with exactly the second object in `expected`;
-  over a snapshot still holding the first object and lacking the second, `drift` names
-  the first as unaccounted for and the second as missing, and nothing else.
-- A ledger holding a grant with `mock: simulate` at generation 1, a revoke at generation 2,
-  and a grant with `mock: capture` at generation 3 recovers one desired plasmid whose mode
-  is `capture`.
-- Two grant lines in one cell's ledger promising the same universe object produce one object in `expected` and
-  an empty `drift` when the snapshot holds it.
-- `recover` over a temp instance root with two cells at generations 3 and 5 returns
-  `desired.generation == 5` and both cells in `desired.cells`.
-- A snapshot missing one promised object and holding one stray produces a `drift` naming
-  both, and nothing else.
-- A grant whose inverse is `InverseVia::Backend` appears in `unmatched` and never in
-  `expected` or `drift`.
-- A cell with one unparseable line is quarantined: absent from `desired`, excluded from the
-  generation maximum, and its report names the instance passed to `recover`, the cell, the
-  path, the line number, every found object via `describe()`, and each refusal claim; the
-  report's `Display` output shows one `FOUND` line per object and one `REFUSES` line per
-  claim.
-- A `cells/` entry that is a regular file, and one whose name contains `\`, are each
-  quarantined with fault `NotACell`, each report carrying the raw entry path, while a
-  valid sibling cell is still adopted.
-- An instance root where `cells` is a regular file returns `RecoveryError::Discovery` and
-  no outcome; an instance root with no `cells/` at all returns `Ok` with an empty outcome.
-- A controller constructed from a recovery outcome answers `plasmosome.status` with
-  `controller.ledger_generation` equal to the maximum adopted cell generation.
-- The `plasmosome-ledger` crate doc no longer recommends `open_file` → `push` →
-  `append_to_file`.
+- **R1 — common path and safe discovery:** valid cell IDs resolve beneath the supplied root;
+  empty, dot/dot-dot, slash, backslash and NUL IDs refuse. Both real writer and reader resolve
+  through the same constructor. Invalid/raw non-UTF-8 entries, symlinked cells/journals and
+  regular-file entries quarantine without accessing the link target; good siblings survive.
+  Missing cells/ is empty, but non-directory/symlink cells/ and partial listing failure abort.
+- **R2 — complete strict history:** missing/empty journals are empty; every required field,
+  closed mode, record format and exact inverse is validated. Bad middle/final JSON, invalid
+  UTF-8, unknown fields/version and complete final JSON without LF fault at the right physical
+  line. No partial history escapes, no source file changes, and diagnostics count only the
+  accepted prefix. A corrupt first line still permits cell-aware found attribution.
+- **R3 — durable generation:** prepare/commit/finish and prepare/abort/finish round-trip;
+  interrupted legal prefixes are pending. Zero, decreasing/skipped generations, duplicate or
+  reordered terminal events refuse. Empty attachments and removal consume durable generations;
+  aborted generation remains consumed. Exhaustion refuses without write/apply. Two cells at
+  3 and 5 report instance5 while retaining their own generations and attachment tombstones.
+- **R4 — exact identity:** two cells share a plugin and capability without coalescing objects or
+  quarantine attribution; one cell's two equal fresh grants remain independent. Replayed exact
+  operations retain IDs, changed-payload/recycled-ID records refuse, and duplicate addresses
+  across cell histories abort instead of choosing a file. Exact drift detects replacement,
+  lost objects and stray objects; canonical equivalence is never used as its substitute.
+- **R5 — one durable append:** independently reopen after each event and observe exactly one
+  added record without history duplication. Deterministic write/sync/parent-sync failures block
+  further mutation and produce no successful acknowledgement or unlogged effect. Kill the
+  writer after append-before-apply and inspect the file independently; fault injection separates
+  successful sync ordering from any claim about actual power-loss hardware guarantees.
+- **R6 — transaction publication:** exercise a multi-plugin attach and reload at every event
+  boundary and after each apply/withdrawal. Before commit, old desired survives and new holdings
+  roll back in reverse order. After commit, complete replacement desired survives and old
+  withdrawals resume. No partial reload becomes published. Durable finish precedes the complete
+  desired request, matching full-record acknowledgement and fresh full-record observation; all
+  precede client success or a completed rollback reply. Kill before request, after request/before ack,
+  after ack/before reply and after reply, for committed and aborted generations. A staged
+  replacement that cannot preserve old holdings refuses before prepare. Missing desired holdings
+  are named, never auto-regranted.
+- **R7 — exact resumption:** kill after an inverse but before finish, then resume against fresh
+  observation. The absent exact holding is not withdrawn again; an equal neighbouring holding
+  survives. Inject UnknownObject/lost reply/conflicting payload/unavailable observation: only
+  verified exact absence completes an obligation. Preserve graceful timeout and explicit Force
+  requirements, external assertions and broker incarnation refusal. No blanket error swallowing.
+  For Force, independently reopen the session log and match its cell/generation/operator/reason
+  to the prepared assertion. Inject write, flush, file-sync and new-parent-sync failures: no
+  forced cleanup, successful acknowledgement or next mutation may pass the failed audit.
+  Kill between prepare, audit persistence and forced cleanup; restart must durably reassert
+  authorization before resuming exact obligations, without treating an audit event as completion.
+  A partial audit write must also prevent another cell from appending to that shared writer;
+  reopening a torn audit log refuses without changing its bytes. A complete uncertain append
+  may be followed by another durable assertion with the same cell/generation after validation.
+- **R8 — quarantine blast radius:** a corrupt cell is absent from desired and ordinary status,
+  excluded from generation maximum and never mutated. Its report names raw path, fault/line,
+  parsed count, every cell-owned found object and every refusal. Same-plugin siblings are
+  adopted normally. Unknown observation is represented as unknown and prevents startup success.
+- **R9 — observed startup:** run actual plasmosomed over a persistent instance with independently
+  surviving supervisors and nonzero journals. While the controller is stopped, remove a promised
+  holding, leave a stray, and corrupt one sibling journal. Restart, query status/recovery over
+  the actual UDS, and observe correct desired cells/generations, both drift directions,
+  quarantined cell absence, untouched quarantine holdings, omitted genome and false readiness.
+  Inspect supervisor-side enforcement state, not a mirror populated from the same journals.
+  An unavailable supervisor, partial discovery, unfinished cleanup or unresolved publication
+  prevents serving and emits the specified error without killing cells or unlinking another
+  process's socket. Lower observed generation republishes and converges within the single
+  deadline; equal continues only with identical complete content; higher refuses even when all
+  holdings match. Change an empty attachment's mode at the same generation: equal empty OS
+  snapshots must not hide the publication conflict. Refuse without overwriting either record.
+- **R10 — wire and liveness:** recovery observer replies preserve exact typed ownership and grant
+  IDs, distinguish lifecycle/readiness from desired state, and bound deadlines. Wrong-cell,
+  malformed, partial or wrong-ID replies cannot pass as complete observation or successful undo.
+  Equal-generation identical desired requests are no-ops; conflicting content returns the typed
+  refusal. Older requests return the current record without mutation and cannot settle the old
+  request. Wrong/lost acks cannot settle a mutation; lower post-ack generation retries within the
+  deadline, and higher generation or equal-generation content mismatch refuses. Check complete
+  ordered effects/operations, attachment generations/modes, missing retained content, and the
+  same journal-derived representation for live and restarted publishers, including generation0.
+  Aborted generations publish unchanged settled attachments at the consumed cell generation.
+  A Backend handle without original supervisor records remains unmatched, even with a matching
+  planted observation; a UUID or reused PID cannot restore authority.
+  Exercise the actual private UDS boundary on each supported platform: the trusted peer can
+  observe, while a different-UID local client and a confined cell workload cannot reach any
+  recovery handler or change holdings/publication. Wrong-owner, permissive/ACL-exposed or symlinked
+  socket parents refuse startup; peer-credential lookup failure or mismatch closes before
+  dispatch. A passing same-UID client alone does not prove workload exclusion. Report any
+  unavailable distinct-UID/confinement fixture as unproved, never as a successful authorization test.
+- **R11 — discriminating proof:** in disposable mutations, skipping daemon recovery fails the
+  nonzero restart case; adopting a parsed prefix fails quarantine; comparing expected to itself
+  fails the missing/stray case; collapsing owners/IDs fails cross-cell and repeated-grant cases;
+  moving sync after apply fails write-ahead; ignoring commit/abort or dropping pending cleanup
+  fails the interrupted attach/reload cases. Permitting a client result before the matching
+  desired acknowledgement, ignoring a stale/ahead membrane generation, comparing only generation,
+  or checking reply content without fresh observed content must fail the publication/restart
+  cases. Record actual failures for the claimed reason, restored passes and limitations, not
+  source wording checks or calls to an inert mock.
+  Accepting a recovery connection without its authorization boundary must fail the unauthorized
+  client case; ignoring audit IO errors or acknowledging Force before durable audit must fail
+  the Force crash/fault cases.
+- **R12 — integration:** the complete accepted control/recovery contract is served, all affected
+  consumers migrate and the root gate passes. Independent review checks the acceptance against
+  the actual final head. Portable journal/model proofs are reported separately from macOS/Linux
+  filesystem proofs and real supervisor/enforcement proofs. A green model alone is not delivery.
 
 ## Out of scope
 
-- **Bringing the cells back.** Everything this spec produces is an account: `desired`,
-  `expected`, `drift`, `unmatched`, `quarantined`. Nothing in it re-establishes a
-  capability or re-owns a cell, and no caller of the `ReconcilePlan` it feeds exists yet.
-  Intent 003 asks for the cells that were running to be brought back; this spec is the
-  durable record that makes doing so possible, not the doing of it. Whether it is extended
-  or a later spec covers the remainder is open.
-- Surfacing quarantine over the control protocol. Spec 001's cell states and error codes
-  are closed sets with no slot for it; adding one is a change to that contract and needs
-  its own spec.
-- Exactly-once append. It would need a durable transaction identifier in the line format
-  and an acknowledgement protocol between writer and caller; the contract above is honest
-  instead — at-least-once, write-ahead, retries visible in the file.
-- Recovering a cell's genome name. The ledger does not record it; a recovered cell reports
-  `genome: null` until something durable carries it.
-- A snapshot alongside the log for restart speed. Decision 002 names it as the future fix
-  if replay ever makes restart slow; nothing here forecloses it.
-
-## Blocked on
-
-- **A decision on object ownership identity.** `OsObject` is `{class, key, owner:
-  PluginId}`, and `plasmosome-backend` has no notion of `CellId`. Recovery requires one of
-  two things to be true: an object's ownership names the cell it belongs to, or a plugin
-  name belongs to at most one cell of an instance at a time. Neither holds today, and the
-  choice between them is one with rejected alternatives someone will argue for again — a
-  decision for `docs/decisions/`, not a contract detail for this spec. Until it is made,
-  two behaviors above cannot be finished: quarantine `found` for an instance where one
-  plugin spans cells, and `expected`/`drift` exactness across cells that share a plugin.
-  Everything else is implementable now, single-cell and disjoint-plugin cases included.
-- Nothing else. Every other behavior runs against `FakeBackend`, `tempfile` directories,
-  and the existing crates on a Mac, with no VM and no running cell. One rule is testable
-  only later rather than blocked: the write-ahead order binds the transaction writer
-  inside the daemon, and no such writer exists yet. It is stated now so the first one is
-  built against it, not discovered against it.
+A database or compacting snapshot, multi-host writer coordination, exactly-once client requests,
+automatic repair of corrupt journals, genome persistence, restoring dead supervisors/VMs after
+host failure, automatic creation of missing capabilities, a new external-effects publisher,
+resource reconstruction from UUIDs/PIDs, and a task-storage or review-workflow change.
+Operator-authorized quarantine cleanup requires a separate exact-authority operation; no startup
+code silently turns a report into a Force request. These limits do not exclude reconnecting to
+live cells, durable rollback/withdrawal recovery or actual observation: those are this contract.
