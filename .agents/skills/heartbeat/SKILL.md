@@ -66,28 +66,64 @@ has been exercised, and a later sweep observes the delivery floor. Record those 
 observations; a later missed window is a new failure to reconcile, not permanently healthy
 history. Never close unwanted PRs, weaken review or invent approved work to improve the number.
 
-### Management targets and checkpoints
+### Recommend capacity from measured flow
 
-These are intervention targets, not deadlines that authorize unsafe completion, claim expiry or
-quality-gate exceptions. At each boundary collect completed agents/processes before waiting on
-one unfinished job; avoid leaving a settled result undispatched behind an unrelated review.
+Use the [Kanban Guide's flow measures](https://kanbanguides.org/the-kanban-guide/2025.5/#flow-metrics):
+work started but unfinished, throughput, age and completed elapsed time, with explicit boundaries.
 
-| Measure | Target and response |
-| --- | --- |
-| Independent delivery authors | Three when admission, disjoint ownership and review capacity permit; report actual planning/implementation/review roles, not three fictitious implementation slots. Reviewers and validators are separate roles. |
-| Approved ready reserve | At least one eligible next deliverable beyond occupied author lanes. When below it, assign bounded planning of the next approved prerequisite now, not after all authors finish. No forced queue padding. |
-| Assignment or settled-result handoff | Acknowledge and route within five minutes; otherwise identify the missing executor/reviewer/validator and delegate the next action. |
-| Planning or implementation | A substantive evidence checkpoint within thirty minutes of start or last demonstrated advance; at sixty minutes without advance, diagnose the concrete obstacle and adjust the assignment. Notes alone do not restart this interval. |
-| Local validation and CI | Inspect at five minutes if unfinished; identify the actual running command/job or queue and preserve its evidence rather than rerunning a duplicate gate. |
-| Independent review | Check at fifteen minutes; at thirty minutes obtain findings, remaining scope and next checkpoint from the reviewer. Preserve independence; time pressure never turns an unfinished review into a pass. |
-| Provider wait | Track the actual admission and completion signals and provider-supplied availability checkpoint. If unavailable, re-observe at the next sweep; do not invent a refill time or duplicate an active request. |
-| Merge-ready result | Route to its author within five minutes after every review/quiet/CI condition is actually met; recheck the exact head under the review skill. |
+The heartbeat's LLM orchestrator makes the allocation decision; no fixed author count, per-status
+WIP limit, ready-reserve size or stage timer is enforced here. Keep admission, atomic ownership
+and review gates hard. Recommendations adapt to the delivery goal, observed flow and available
+agents. State the evidence and uncertainty behind each decision, rather than filling idle agents
+or treating a calculated average as an instruction to start more work.
 
-These initial checkpoints address observed independent-review spans of roughly sixty-two and
-thirty-one minutes while local gates took under a minute and CI under four minutes (native
-pipeline bug `plasmosome-7nw`). They are not runtime guarantees.
-Revise them from measured execution and the owner's delivery goal, recording the reason in
-native evidence instead of lowering the goal to match a stalled pipeline.
+Choose and report an observation window and comparable work classes. For each native status,
+measure time-weighted WIP and completed visits: sample count, mean elapsed time, a stated tail
+percentile and maximum. Include waiting and blocked ownership in committed WIP; separate active
+service from waiting only where timestamps support it. Track re-entry/rework visits and total
+residence per task without treating repeated snapshots as independent samples. Show current ages
+and right-censored visits separately; unfinished work is not a fast completion. Report missing
+history and the population excluded, not just the successful sample.
+
+Use spec016's status-history evidence rules. Before the new statuses have usable observations,
+their sample count is zero, not the old `in_progress` duration relabeled as planning or review.
+Use actual dispatch/acknowledgement/finished notes, process events and GitHub timestamps as
+separate, explicitly named proxy cohorts when their boundaries are known. PR creation-to-merge,
+an independent-review attempt, and native review residence are different measurements. Preserve
+their sample sizes, censoring and comparability limits; do not pool them to manufacture precision.
+Capture real future transitions and results in native evidence so missing history does not become
+a permanent excuse for not learning.
+
+[Little's Law](https://web.mit.edu/urban_or_book/www/book/chapter4/4.4.html) supplies a baseline,
+not a WIP controller: for a stable, consistently bounded flow,
+`mean occupancy = throughput × mean elapsed time`. To reason per status at the target merge rate,
+use `target merges/hour × observed visits to that status per merged PR × mean hours per visit`.
+Measure the conversion: tasks, taskless spec/intent PRs, revisits and merges are not interchangeable.
+Do not round this result into compulsory slots, or increase WIP because congestion lengthened the
+cycle time. Check the limiting service first: available service capacity divided by service demand
+per merged PR bounds sustainable throughput. More authors cannot fix insufficient review allowance.
+
+Show the historical throughput distribution, age/tail risk and a next-window delivery outlook,
+including the unfinished queue, review demand, rework and known external waits. State assumptions,
+sample sizes and forecast uncertainty. An empirical percentile is not a confidence guarantee;
+one merge/hour on average does not guarantee a merge in every rolling hour. Sparse, censored or
+changing-policy data calls for a provisional recommendation and explicit next observations, not
+an invented probability or a claim that the owner's delivery floor was met.
+
+For each status, record **observed WIP → recommended allocation → orchestrator decision**, with
+the source cohort, limiting cause, assigned agent action and next evidence checkpoint. Compare
+actual results with that recommendation on the following sweep and revise it. Choose checkpoints
+from task progress, relevant historical elapsed-time/age distributions and actual provider events,
+not universal countdowns. Collect settled agents/processes at handoffs before waiting on unrelated
+work; unchanged notes do not establish advance.
+
+Pull eligible work when an author and downstream capacity can use it; otherwise prioritize
+finishing, reviewing or unblocking committed work. Replenish approved plans when expected
+consumption over the observed planning lead time threatens to exhaust eligible work, accounting
+for variability and uncertainty rather than a fixed reserve. Missing data does not justify idle
+sweeps: assign a bounded approved prerequisite or missing measurement while preserving existing
+ownership. Persist changed recommendations, decisions and results in native notes, not a new
+scheduler, dashboard, timer or task store.
 
 ### Provider capacity
 
@@ -194,9 +230,9 @@ Only remove a finished clean worktree after its owner is done; preserve old or u
 and databases. Remove by actual path, not an inferred branch name. Reconcile any native owner
 with no active author, and any active author with no claim, before dispatching over them.
 
-Apply the author and ready-reserve targets above. Compare planned write sets, not only
+Apply the current evidence-based allocation decision above. Compare planned write sets, not only
 `metadata.refs` (references are reads); preserve blocked claims and uncertain ownership even
-when a target is missed. Review backlog and provider evidence constrain new execution without
+when delivery is below target. Review backlog and provider evidence constrain new execution without
 turning unrelated planning into forbidden work.
 
 ## 5. Pick and dispatch
@@ -213,7 +249,7 @@ creating a code worktree. A losing claimant stops, not a second implementation.
 
 ## 6. Replenish approved work continuously
 
-When eligible backlog falls below the reserve target, account for existing authors and reviews
+When the measured flow calls for replenishment, account for existing authors and reviews
 and delegate the next useful approved prerequisite. If existing evidence does not settle what
 to build, assign an agent a bounded real development workflow: build Plasmosome, run its actual
 commands and services, and compare behavior with its documentation and approved goals. Explore
