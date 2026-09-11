@@ -183,8 +183,8 @@ The sequence is:
    next transaction. A timeout or uncertain cleanup blocks the cell and reports the unfinished
    generation rather than declaring success.
 6. Send the complete settled DesiredCell to `membrane.cell.desired` at this cell generation,
-   require an acknowledgement matching request ID, cell and generation, then freshly observe
-   that same membrane generation. Only then may a committed mutation return success or an
+   require an acknowledgement matching request ID, cell and the entire published record, then
+   freshly observe that same complete record. Only then may a committed mutation return success or an
    aborted mutation report completed rollback and admit the next transaction. An abort publishes
    the unchanged committed attachments at its consumed new cell generation, not the old one.
    A lost, malformed or wrong acknowledgement is not success; block further cell mutation until
@@ -261,6 +261,11 @@ generation is the last prepare generation, including an aborted or unfinished tr
 committed attachment generations only change on commit. The instance generation is the maximum
 adopted cell generation, or 0. It is a status aggregate, never a watermark deciding whether
 another cell's mutation should run. Per-cell desired pushes carry the cell's settled generation.
+For publication, both live execution and restart use the same settled journal replay: plasmids
+are ordered by PluginId, effects retain recorded order, and genome is None because this journal
+does not persist it. Unrecorded live metadata cannot enter the published record and disappear
+on restart. Complete-content equality compares every decoded field, including attachment
+generations, modes, ordered effects and exact operations, not JSON formatting or only OS holdings.
 
 An empty journal adopts an empty generation-0 desired cell; an empty attachment remains an
 attachment. No recovered genome is invented: it is None internally and omitted on spec001's
@@ -277,8 +282,10 @@ The ordinal is a tuple, not a plugin-name sort or a wrapping arithmetic counter.
 
 `RecoveryObservation` contains a fresh `OsState` plus observed cell records, observation faults
 and the independently verified recoverable handle records, if any. The observer has no desired
-state input. Each observed record names its cell, actual lifecycle/readiness and last fully
-applied generation. A snapshot includes all holdings reported by the queried supervisor,
+state input. Each observed record names its cell, actual lifecycle/readiness and the complete
+last published `desired: DesiredCell`, retained by the supervisor atomically with its generation.
+That record proves publication content only, never liveness or enforcement. A snapshot includes
+all holdings reported by the queried supervisor,
 including holdings absent from its cell journal. Supervisor lifecycle/readiness comes from
 actual child/broker observation; holdings come from enforcement-side observation bound to
 original identities, not a copy of controller requests or reconstructed ledgers.
@@ -338,8 +345,8 @@ allowed to report an observed dead cell; the controller must not derive that sta
 file, socket existence or inability to connect.
 
 No requests are answered until complete discovery and observation have succeeded, journals have
-been classified, pending cleanup has completed and every adopted cell's settled generation has
-been reconciled with its membrane. Compare generations before any resumed effect operation:
+been classified, pending cleanup has completed and every adopted cell's complete settled record
+has been reconciled with its membrane. Compare generations before any resumed effect operation:
 an observation newer than the journal is an unaccounted participant state and refuses startup
 without cleanup. A pending generation cannot already have been published at that same generation:
 publication follows durable finish, so that case also refuses rather than acknowledging an
@@ -349,8 +356,8 @@ After cleanup and durable finish, reconcile each adopted, non-quarantined cell i
 
 | Observed membrane generation versus settled journal generation | Startup action |
 | --- | --- |
-| Lower | Send the complete settled DesiredCell at the journal generation; require matching request-ID/cell/generation acknowledgement and a fresh cell observation at that generation before serving. |
-| Equal | Continue using the fresh equal observation; no replay of operations or another publication is needed. |
+| Lower | Send the complete settled DesiredCell at the journal generation; require matching request-ID/cell/full-record acknowledgement and a fresh observation of that same full record before serving. |
+| Equal | Continue only when every field of the observed DesiredCell matches settled journal replay. A content mismatch refuses without overwriting the membrane; matching records require no operations or republication. |
 | Higher | Refuse startup as unaccounted participant state. Never send an older generation and treat its no-op acknowledgement as repair. |
 
 These rules include generation 0 and aborted generations. For an abort, publication carries
@@ -359,10 +366,12 @@ generation; the recovery account's tombstones are unchanged. If the controller d
 sending, after the request but before acknowledgement, or after acknowledgement but before
 replying to its client, restart re-observes
 and applies this table. Lost acknowledgement may safely resend the identical settled record:
-equal generation is a no-op, but its matching acknowledgement must still be followed by fresh
-generation observation. A lower post-ack observation retries within the remaining deadline;
-a higher one refuses. No retry applies effects, changes IDs, consumes another generation or
-adds journal records.
+equal generation is a no-op only with identical content, and its matching acknowledgement must
+still be followed by fresh complete-record observation. A lower post-ack generation retries
+within the remaining deadline; a higher generation or equal-generation content mismatch refuses.
+No retry applies effects, changes IDs, consumes another generation or adds journal records.
+An older desired request remains a no-op but returns the newer retained record, not a claim that
+the requested old content was published. No historical payload store is required for old requests.
 
 All startup publication requests, acknowledgements, re-observations and retries share the existing
 single recovery deadline; they do not replenish it. The same publication exchange after a live
@@ -372,8 +381,11 @@ result; recovery readiness is false until publication is settled.
 If observation, cleanup or publication remains incomplete, startup emits a structured recovery
 error and available quarantine diagnostics on stderr, releases its own socket/lock and exits
 nonzero rather than serving a partial instance. Generation refusal reports the cell and both
-numeric generations as an observation error. This availability cost leaves live supervisors
-alone. An operator can repair the cause and restart. Journals and unknown socket paths are never
+numeric generations as an observation error. Equal-generation content mismatch is
+`RecoveryError::DesiredConflict { cell, generation }`, reported with spec001's structured
+`desired_conflict` kind. It is not repaired by overwriting content or ignoring a field.
+This availability cost leaves live supervisors alone. An operator can repair the cause and
+restart. Journals and unknown socket paths are never
 unlinked as recovery. A stale control socket after SIGKILL still requires explicit operator/caller
 handling, as the existing daemon does.
 
@@ -384,16 +396,16 @@ Controller::new. Quarantined cells are absent from the ordinary cell registry an
 drift or unsettled publication remains; an empty instance is ready only after the same startup
 requirements. An observed ready cell is not relabelled dead because its desired holdings drift.
 The diagnostic surface states that discrepancy separately. Equal object snapshots do not
-establish equal participant generations. No journal record or recovery result by itself is an
-observation of liveness.
+establish equal participant generations or publication content. Matching published records do
+not establish matching holdings. No journal record or recovery result by itself proves liveness.
 
 The controller reconnects to surviving supervisors and retains exact inverses for subsequent
 ordinary revocation. It does not restart those supervisors, recreate missing grants or turn
 snapshot rows into grant handles. The publication exchange above sends only complete settled
-state after durable finish and before a completed client result. Equal/older acknowledgements
-retain spec001's no-op meaning; the generation comparison, not an echoed old acknowledgement,
-decides whether the pair is settled. An unfinished or partial desired record is never sent at a
-generation the supervisor might thereafter ignore.
+state after durable finish and before a completed client result. Spec001 binds equal-generation
+no-op acknowledgement to identical content; older requests return the current retained record.
+Generation and complete-content comparison, not an echoed acknowledgement, decide settlement.
+An unfinished or partial desired record is never published.
 
 The concrete enforcement path is the surviving membrane's exact-operation and withdrawal RPCs
 specified in spec001. Its adapters must observe and retain actual resource/holding associations,
@@ -449,8 +461,8 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   boundary and after each apply/withdrawal. Before commit, old desired survives and new holdings
   roll back in reverse order. After commit, complete replacement desired survives and old
   withdrawals resume. No partial reload becomes published. Durable finish precedes the complete
-  desired request, matching acknowledgement and fresh equal-generation observation; all precede
-  client success or a completed rollback reply. Kill before request, after request/before ack,
+  desired request, matching full-record acknowledgement and fresh full-record observation; all
+  precede client success or a completed rollback reply. Kill before request, after request/before ack,
   after ack/before reply and after reply, for committed and aborted generations. A staged
   replacement that cannot preserve old holdings refuses before prepare. Missing desired holdings
   are named, never auto-regranted.
@@ -472,12 +484,18 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   An unavailable supervisor, partial discovery, unfinished cleanup or unresolved publication
   prevents serving and emits the specified error without killing cells or unlinking another
   process's socket. Lower observed generation republishes and converges within the single
-  deadline; equal continues; higher refuses even when all holdings match.
+  deadline; equal continues only with identical complete content; higher refuses even when all
+  holdings match. Change an empty attachment's mode at the same generation: equal empty OS
+  snapshots must not hide the publication conflict. Refuse without overwriting either record.
 - **R10 — wire and liveness:** recovery observer replies preserve exact typed ownership and grant
   IDs, distinguish lifecycle/readiness from desired state, and bound deadlines. Wrong-cell,
   malformed, partial or wrong-ID replies cannot pass as complete observation or successful undo.
-  Equal/older desired generation is a no-op, not proof of publication: wrong or lost acks cannot
-  settle a mutation, lower post-ack observation retries within the deadline, and higher refuses.
+  Equal-generation identical desired requests are no-ops; conflicting content returns the typed
+  refusal. Older requests return the current record without mutation and cannot settle the old
+  request. Wrong/lost acks cannot settle a mutation; lower post-ack generation retries within the
+  deadline, and higher generation or equal-generation content mismatch refuses. Check complete
+  ordered effects/operations, attachment generations/modes, missing retained content, and the
+  same journal-derived representation for live and restarted publishers, including generation0.
   Aborted generations publish unchanged settled attachments at the consumed cell generation.
   A Backend handle without original supervisor records remains unmatched, even with a matching
   planted observation; a UUID or reused PID cannot restore authority.
@@ -486,9 +504,10 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   fails the missing/stray case; collapsing owners/IDs fails cross-cell and repeated-grant cases;
   moving sync after apply fails write-ahead; ignoring commit/abort or dropping pending cleanup
   fails the interrupted attach/reload cases. Permitting a client result before the matching
-  desired acknowledgement or ignoring a stale/ahead membrane generation must fail the
-  publication/restart cases. Record actual failures for the claimed reason, restored passes and
-  limitations, not source wording checks or calls to an inert mock.
+  desired acknowledgement, ignoring a stale/ahead membrane generation, comparing only generation,
+  or checking reply content without fresh observed content must fail the publication/restart
+  cases. Record actual failures for the claimed reason, restored passes and limitations, not
+  source wording checks or calls to an inert mock.
 - **R12 — integration:** the complete accepted control/recovery contract is served, all affected
   consumers migrate and the root gate passes. Independent review checks the acceptance against
   the actual final head. Portable journal/model proofs are reported separately from macOS/Linux

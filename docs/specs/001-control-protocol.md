@@ -97,7 +97,7 @@ Application error codes (closed set; additions are a contract change):
 | 102 | `already_exists` / `already_attached` | `target` |
 | 103 | `unresolved_requirement` | `capability`, `plasmid` |
 | 104 | `mock_mode_conflict` | `node`, `modes`, `plasmids`, `resolutions` — per D2b rule 3 |
-| 105 | `illegal_state` | `from`, `to`; private recovery effect methods additionally carry the typed `recovery` refusal in §4.1 |
+| 105 | `illegal_state` | `from`, `to`; private recovery methods additionally carry the typed `recovery` refusal in §4.1 |
 | 106 | `drain_timeout` | `handle`, `deadline_ms` |
 | 107 | `not_running` | `target` — the named instance is not up |
 | 108 | `manifest_invalid` | `detail`, `path` |
@@ -434,9 +434,9 @@ The controller drives each cell's `membraned` over a second, private ndjson-UDS
   it answered that it is not serving and said so in `broker_state`. Delivered in
   `plasmosome-membrane::{control, daemon}` and served by `membraned`.
 - `membrane.cell.desired` — desired-state push, **idempotent and generation-numbered**: the
-  full desired cell record plus `generation: u64`. A membrane that receives an equal-or-older
-  generation acks and does nothing (replayed reconciler converges instead of re-firing —
-  86 §4 rule 2).
+  full desired cell record plus `generation: u64`. An identical equal-generation request is
+  a no-op; conflicting content at that generation refuses. An older request is ignored and
+  returns the current published record, never an assertion that the older payload was published.
 - `membrane.cell.observe` — the supervisor's observed state (cells, broker readiness, VMM
   liveness). This is the only source the controller trusts for liveness; `sessions.status`-style
   requested state is lifecycle, not liveness.
@@ -471,10 +471,14 @@ must not operate a quarantine's effects merely because its supervisor answered.
 
 - `membrane.cell.observe` params are `{cell, deadline_ms}`. `deadline_ms` is a positive
   remaining budget capped by the controller's recovery deadline. Result is
-  `{cell, state, supervisor, generation}`: `state` is the existing closed cell lifecycle enum
-  from actual child/supervisor observation, `supervisor` is the current `membrane.status`
-  result, and `generation` is the last completely published desired generation. No PID-file,
-  socket-existence or requested-state substitute is permitted.
+  `{cell, state, supervisor, generation, desired}`: `state` is the existing closed cell lifecycle
+  enum from actual child/supervisor observation, `supervisor` is the current `membrane.status`
+  result, and `desired` is the complete last published DesiredCell retained by this supervisor,
+  with `generation == desired.generation`. Generation and content are retained atomically.
+  A fresh supervisor starts with the empty generation-0 record. Missing retained content is an
+  observation failure, not permission to reconstruct it from the requesting controller.
+  This publication record is not evidence of liveness or holdings: those still require actual
+  supervisor and enforcement-side observation. No PID-file or socket-existence substitute is allowed.
 - `membrane.residue.snapshot` params are `{cell, deadline_ms}`. Result is
   `{cell, state: OsState, grants: [LedgerEntry, ...]}`. `state` is fresh enforcement-side
   observation, including unrequested residue, using spec017 identities and spec008 CellOwner.
@@ -504,17 +508,23 @@ must not operate a quarantine's effects merely because its supervisor answered.
   backend_fault, not successful model operations. The human message is never a selector.
   Protocol parse/parameter/internal errors keep §1's existing meanings.
 - `membrane.cell.desired` params are `{cell, generation, desired}` with spec008's complete,
-  settled DesiredCell; the outer and desired cell generations must agree. Result is
-  `{cell, generation}` echoing the request generation. Equal/older generations acknowledge
-  without changing anything. A newer generation publishes the full record only after its
-  individual effects, cleanup and durable finish have completed; it is not an instruction to
-  infer missing operations, allocate replacement IDs or resurrect withdrawn holdings.
-  The controller requires matching request-ID/cell/generation acknowledgement and fresh
-  equal-generation observation before returning mutation success or completed rollback.
-  An aborted transaction publishes its unchanged attachments at the consumed new generation.
-  Lost acknowledgement may resend the same complete record without repeating effects.
-  An acknowledgement alone is not evidence of the membrane's current generation, readiness
-  or snapshot contents: in particular an older request still receives a no-op acknowledgement.
+  settled DesiredCell reconstructed from the journal; the outer and desired generations must
+  agree. Result is `{cell, generation, desired}`, carrying the complete currently published
+  record and its generation, not an unchecked echo of the request. A newer generation atomically
+  publishes the full record only after its individual effects, cleanup and durable finish have
+  completed; it never infers operations, allocates replacement IDs or resurrects holdings.
+  An equal generation is a no-op only if every decoded DesiredCell field matches the retained
+  record, including ordered plasmids/effects and their complete metadata. A mismatch changes
+  nothing and returns code105, `from: "settled"`, `to: "conflicting"`, with
+  `recovery: {kind: "desired_conflict", cell, generation}`. JSON spacing and object-key order
+  are not content differences. An older request changes nothing and returns the newer retained
+  record; it cannot acknowledge publication of the requested older content.
+  The controller requires matching request-ID/cell/generation and complete desired content in
+  the acknowledgement, followed by a fresh observation matching that same complete record,
+  before mutation success or completed rollback. An abort publishes unchanged attachments at
+  its consumed new generation. Lost acknowledgement can resend the identical settled record
+  without repeating effects. Neither the reply nor the observed publication record substitutes
+  for independent readiness and holding observations.
 
 Only the instance's trusted controller can use these private sockets; they are not exposed to
 the cell workload. The writer lock serializes controllers, not arbitrary clients, and is not
@@ -524,21 +534,23 @@ verify resource/process incarnation before enforcing a withdrawal. No recovery R
 an in-memory backend in production and report its ledger as an OS observation.
 
 Before serving, the controller completes spec008 discovery, observation, pending recovery and
-per-cell generation settlement within its single startup deadline. For a settled journal
-generation, a lower membrane generation requires complete desired republication, matching
-acknowledgement and fresh equal observation; equal continues; higher refuses as unaccounted
-participant state, never as a reason to send an older no-op request. Before pending cleanup,
-an ahead generation or a membrane already at that unfinished journal generation also refuses.
-All requests, acknowledgements and re-observations use the remaining deadline. Aborted and empty
-cells follow the same rules. A fresh generation below the request after its ack is not settled
-and can only retry within that budget; a higher observation refuses.
+per-cell generation and complete-content settlement within its single startup deadline. For a
+settled journal generation, a lower membrane generation requires complete desired republication,
+matching acknowledgement and fresh matching observation. Equal generation continues only when
+the complete observed DesiredCell matches journal replay; mismatched content refuses without
+overwrite. Higher generation refuses as unaccounted participant state, never as a reason to
+send an older no-op request. Before pending cleanup, an ahead generation or a membrane already
+at that unfinished journal generation also refuses. All requests, acknowledgements and fresh
+observations use the remaining deadline. Aborted and empty cells follow the same rules.
+A lower post-ack generation can only retry within that budget; higher generation or conflicting
+equal-generation content refuses.
 An instance-wide fault emits one LF-terminated JSON object on stderr:
 `{recovery_error:{kind,path_bytes,detail}, quarantined:[...]}`. `kind` is one of
-`writer_busy`, `discovery`, `identity_conflict`, `observation`, `cleanup`, `deadline`, or `io`;
+`writer_busy`, `discovery`, `identity_conflict`, `desired_conflict`, `observation`, `cleanup`, `deadline`, or `io`;
 `path_bytes` is the exact related Unix path as byte values, omitted if no path applies.
-For a generation observation refusal, recovery_error additionally carries `cell`,
-`journal_generation` and `membrane_generation` as structured values; equal object snapshots
-cannot hide the disagreement in a ready result.
+For a generation observation refusal or equal-generation `desired_conflict`, recovery_error
+additionally carries `cell`, `journal_generation` and `membrane_generation` as structured values.
+Equal generations or object snapshots cannot hide conflicting published content in a ready result.
 Quarantine entries whose observation failed include `observation_error` and omit `found`;
 an empty found list is reserved for an actually observed empty set or an invalid entry with
 no attributable cell. Error exit removes only this invocation's control socket and releases
