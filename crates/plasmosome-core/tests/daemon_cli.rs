@@ -21,11 +21,15 @@ fn plasmosomed(directory: &Path, arguments: &[&OsStr]) -> Command {
 fn output_within(mut command: Command) -> Output {
     let mut child = command.spawn().expect("plasmosomed starts as a process");
     let deadline = Instant::now() + PATIENCE;
-    while child
-        .try_wait()
-        .expect("plasmosomed's state is readable")
-        .is_none()
-    {
+    while match child.try_wait() {
+        Ok(Some(_)) => false,
+        Ok(None) => true,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("plasmosomed's state is readable: {error}");
+        }
+    } {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
