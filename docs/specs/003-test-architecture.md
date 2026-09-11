@@ -127,9 +127,16 @@ only what spans crates.
 
 - `crates/plasmosome-testkit` exists, is a workspace member, `publish = false`.
 - The conformance suite has at least five clauses, each generic over `EnforcementBackend`, and
-  `FakeBackend` passes all of them.
+  `FakeBackend` passes all of them. At spec017's cutover, this gate also requires its
+  [Backend conformance](017-exact-capability-grants.md#backend-conformance) contract and
+  [A12 integration acceptance](017-exact-capability-grants.md#acceptance), including the same
+  shared clauses across all five real adapter classes; model-only evidence cannot satisfy that
+  real-enforcement requirement.
 - At least one integration test in `crates/plasmosome-testkit/tests/` exercises core + backend +
-  ledger together through public APIs and asserts an empty residue after replay.
+  ledger together through public APIs and asserts an empty residue after replay. At spec017's
+  cutover, it exercises the caller-owned preparation and fallible outcomes required by those
+  same canonical clauses and verifies their complete standing/issued/incomplete cleanup account,
+  not merely an empty `OsState`.
 - A guard in `plasmosome-guards` fails the build if any kernel crate depends on
   `plasmosome-testkit` outside dev-dependencies, and the guard is mutation-tested: the violation
   was added, seen to fail, and reverted.
