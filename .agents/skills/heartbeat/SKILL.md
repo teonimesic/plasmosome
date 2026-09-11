@@ -68,62 +68,38 @@ history. Never close unwanted PRs, weaken review or invent approved work to impr
 
 ### Recommend capacity from measured flow
 
-Use the [Kanban Guide's flow measures](https://kanbanguides.org/the-kanban-guide/2025.5/#flow-metrics):
-work started but unfinished, throughput, age and completed elapsed time, with explicit boundaries.
+Use [Kanban flow measures](https://kanbanguides.org/the-kanban-guide/2025.5/#flow-metrics) with
+explicit work units and boundaries. For each status report the observation window, comparable
+work class, time-weighted WIP, completed-visit count, mean elapsed time, stated tail percentile
+and maximum. Include waiting in committed WIP and elapsed time; distinguish service time only
+where observed. Keep rework visits, unfinished/right-censored ages and missing samples visible.
 
-The heartbeat's LLM orchestrator makes the allocation decision; no fixed author count, per-status
-WIP limit, ready-reserve size or stage timer is enforced here. Keep admission, atomic ownership
-and review gates hard. Recommendations adapt to the delivery goal, observed flow and available
-agents. State the evidence and uncertainty behind each decision, rather than filling idle agents
-or treating a calculated average as an instruction to start more work.
+Apply spec016's history contract. When native samples are unavailable, use event-bounded
+dispatch/result, process or GitHub proxy cohorts, explicitly separate from native residence.
+Do not relabel legacy status time, mix task/PR/attempt units or turn unfinished work into a
+completion. Capture future real transitions and results in native evidence to improve estimates.
 
-Choose and report an observation window and comparable work classes. For each native status,
-measure time-weighted WIP and completed visits: sample count, mean elapsed time, a stated tail
-percentile and maximum. Include waiting and blocked ownership in committed WIP; separate active
-service from waiting only where timestamps support it. Track re-entry/rework visits and total
-residence per task without treating repeated snapshots as independent samples. Show current ages
-and right-censored visits separately; unfinished work is not a fast completion. Report missing
-history and the population excluded, not just the successful sample.
+Use [Little's Law](https://web.mit.edu/urban_or_book/www/book/chapter4/4.4.html) as a diagnostic
+baseline with consistent units, visit/rework rates and valid flow assumptions, not compulsory
+slots. Compare required service demand per merged PR with actual service capacity first;
+congested cycle times do not justify increasing WIP. Report historical throughput and a
+next-window delivery outlook, including unfinished work, review demand and external waits.
+State sample/forecast uncertainty: an empirical percentile is not a future guarantee, and an
+average merge/hour does not guarantee a merge in each rolling hour.
 
-Use spec016's status-history evidence rules. Before the new statuses have usable observations,
-their sample count is zero, not the old `in_progress` duration relabeled as planning or review.
-Use actual dispatch/acknowledgement/finished notes, process events and GitHub timestamps as
-separate, explicitly named proxy cohorts when their boundaries are known. PR creation-to-merge,
-an independent-review attempt, and native review residence are different measurements. Preserve
-their sample sizes, censoring and comparability limits; do not pool them to manufacture precision.
-Capture real future transitions and results in native evidence so missing history does not become
-a permanent excuse for not learning.
+The LLM orchestrator records **observed WIP → recommendation → explicit allocation decision →
+assigned agent action → outcome comparison**, per status, with evidence, expected benefit and
+next checkpoint. Choose that checkpoint from relevant history, progress and actual capacity
+events; revise the decision on the next observation. There are no fixed author/WIP/reserve
+counts or universal stage budgets here; admission, ownership and review gates remain hard.
+Keep cohorts, calculations and provisional choices in native evidence, not permanent rules.
 
-[Little's Law](https://web.mit.edu/urban_or_book/www/book/chapter4/4.4.html) supplies a baseline,
-not a WIP controller: for a stable, consistently bounded flow,
-`mean occupancy = throughput × mean elapsed time`. To reason per status at the target merge rate,
-use `target merges/hour × observed visits to that status per merged PR × mean hours per visit`.
-Measure the conversion: tasks, taskless spec/intent PRs, revisits and merges are not interchangeable.
-Do not round this result into compulsory slots, or increase WIP because congestion lengthened the
-cycle time. Check the limiting service first: available service capacity divided by service demand
-per merged PR bounds sustainable throughput. More authors cannot fix insufficient review allowance.
-
-Show the historical throughput distribution, age/tail risk and a next-window delivery outlook,
-including the unfinished queue, review demand, rework and known external waits. State assumptions,
-sample sizes and forecast uncertainty. An empirical percentile is not a confidence guarantee;
-one merge/hour on average does not guarantee a merge in every rolling hour. Sparse, censored or
-changing-policy data calls for a provisional recommendation and explicit next observations, not
-an invented probability or a claim that the owner's delivery floor was met.
-
-For each status, record **observed WIP → recommended allocation → orchestrator decision**, with
-the source cohort, limiting cause, assigned agent action and next evidence checkpoint. Compare
-actual results with that recommendation on the following sweep and revise it. Choose checkpoints
-from task progress, relevant historical elapsed-time/age distributions and actual provider events,
-not universal countdowns. Collect settled agents/processes at handoffs before waiting on unrelated
-work; unchanged notes do not establish advance.
-
-Pull eligible work when an author and downstream capacity can use it; otherwise prioritize
-finishing, reviewing or unblocking committed work. Replenish approved plans when expected
-consumption over the observed planning lead time threatens to exhaust eligible work, accounting
-for variability and uncertainty rather than a fixed reserve. Missing data does not justify idle
-sweeps: assign a bounded approved prerequisite or missing measurement while preserving existing
-ownership. Persist changed recommendations, decisions and results in native notes, not a new
-scheduler, dashboard, timer or task store.
+Pull eligible work on actual author and downstream capacity; prioritize finishing/unblocking
+committed work over filling agents. Replenish approved plans when expected consumption over
+observed planning lead time risks exhausting eligible work, accounting for variability.
+Insufficient data calls for a provisional decision and assigned measurement or approved
+prerequisite, not idle sweeps. Collect settled agent/process results at handoffs before waiting
+on unrelated work. This is the existing heartbeat's decision loop, not a new scheduler or store.
 
 ### Provider capacity
 
@@ -136,9 +112,9 @@ identity; do not assume one author lane is one provider slot.
 
 Distinguish the owner's plan entitlement, effective allowance/refill, admitted reviews and
 completed reviews. CodeRabbit's [rate-limit documentation](https://docs.coderabbit.ai/management/rate-limits)
-describes per-developer rolling and adaptive limits, not a universal repository quota. A nominal
-ten-per-hour plan is not proof of ten available now; a one-per-hour diagnostic is not proof every
-identity has that limit. Without account-specific evidence the cause of the difference is unknown.
+describes per-developer rolling and adaptive limits, not a universal repository quota. Nominal
+entitlement is not current availability, and one identity's diagnostic does not describe all
+identities. Without account-specific evidence the cause of a discrepancy is unknown.
 Rate-limited pushes consume no review and do not delay refill; completion time plus an hour is
 not a reset calculation.
 
