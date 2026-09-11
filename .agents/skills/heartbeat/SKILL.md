@@ -14,6 +14,12 @@ The task queue is shared native Beads,
 accessed only through `./tools/work-state`; the contents of a chat, branch or old task snapshot
 cannot replace it. `.agents/skills/tasks` describes the records and operations.
 
+At session start, recover the current management checkpoint from any open native pipeline bug,
+then reconcile it with the sweep below. Its design keeps the latest owner-capacity authority,
+allocation, assigned actions and next checkpoints; dated notes retain evidence and outcomes.
+Update that checkpoint at handoffs so the next orchestrator can resume without this chat.
+Preserve unknowns; an old observation is not current availability.
+
 Local reads do not synchronize. If this session needs an updated remote replica, explicitly
 coordinate `./tools/work-state dolt pull` before relying on it. A successful local read is not
 proof of remote freshness, and an unreachable remote is not an empty queue. Do not dispatch from
@@ -107,16 +113,30 @@ Use current PR status histories, provider comments and accessible read-only usag
 evidence. For each pending PR report required rounds from `.agents/skills/pr-review`, actual
 completed rounds, missing current-head coverage and remaining demand. Keep the minimum-round
 shortfall distinct from a further review needed after a repair. Compare aggregate pending demand
-and the demand needed for hourly delivery with the allowance actually observed for the author
-identity; do not assume one author lane is one provider slot.
+and the demand needed for hourly delivery with confirmed total capacity; keep per-identity
+constraints within their verified scope. Do not assume one author lane is one provider slot.
 
-Distinguish the owner's plan entitlement, effective allowance/refill, admitted reviews and
-completed reviews. CodeRabbit's [rate-limit documentation](https://docs.coderabbit.ai/management/rate-limits)
-describes per-developer rolling and adaptive limits, not a universal repository quota. Nominal
-entitlement is not current availability, and one identity's diagnostic does not describe all
-identities. Without account-specific evidence the cause of a discrepancy is unknown.
-Rate-limited pushes consume no review and do not delay refill; completion time plus an hour is
-not a reset calculation.
+Use the owner's confirmed total capacity as the planning baseline, not a claim about remaining
+availability. Preserve its source and scope in the native checkpoint. Distinguish entitlement,
+effective allowance/refill, admitted reviews and completed reviews. A PR or identity diagnostic
+constrains the affected request; verify its scope before applying it to the whole pipeline.
+Conflicting evidence calls for a consumption/admission investigation, not an inferred global
+hold or a reset computed as completion time plus an hour.
+
+Reconcile actual automatic, manual and superseded review events across PRs with the documented
+capacity. Record request, head/run identity, admission and completion evidence; repeated queued,
+in-progress or completed status updates are not additional reviews. Draft skips, nonreview
+diagnostics and [rate-limited pushes](https://docs.coderabbit.ai/management/rate-limits) consume
+no review. Report unobserved account/outside-repository usage and ambiguous event identities as
+unknown, not zero; without account-specific evidence, remaining capacity and the cause of a
+discrepancy may remain unknown.
+
+Main allocates and revises review budgets against pending demand, observed capacity and expected
+delivery benefit, including extra independent reviewers where they remove blockers. Apply
+[the review skill's floors, budget-use and gate rules](../pr-review/SKILL.md#3-obtain-actual-coderabbit-rounds).
+Record the task/PR/head, authorized budget and purpose in the current checkpoint. Revisit the
+allocation on findings, head changes, admission/results or usage evidence; do not leave eligible
+candidates idle merely because unused authorized capacity was not assigned.
 
 Delegate read-only diagnosis of a capacity mismatch, batch settled repairs before publication,
 and overlap eligible independent review/validation across disjoint work. Requests and merge gates
@@ -148,10 +168,11 @@ Ask GitHub about its PR **before** interpreting a missing branch: squash merging
 branch without making its old tip an ancestor of main. `gh pr view NUMBER --json state,mergeCommit,mergedAt,url`
 is the forge observation; only `MERGED` with a merge commit is delivery evidence.
 
-The author records merge evidence and closes in Beads. If it is gone, the orchestrator performs
-that same reconciliation, recording what established the result. Do not make a task-status
-commit or closure PR. A closed-but-unmerged PR is not done. Release a claim only through the
-confirmed abandonment procedure in the tasks skill; uncertainty about the owner is not release.
+The author records merge evidence and applies the tasks/review skills' full-acceptance closure
+gate; source publication alone is not completion. If the author is gone, the orchestrator assigns
+that reconciliation under the tasks skill. Do not make a task-status commit or closure PR. A
+closed-but-unmerged PR is not done. Release a claim only through the confirmed abandonment
+procedure in the tasks skill; uncertainty about the owner is not release.
 
 ## 3. Inspect planning gaps and the governing documents
 
