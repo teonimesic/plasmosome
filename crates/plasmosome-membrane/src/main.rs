@@ -4,7 +4,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
-const USAGE: &str = "usage: membraned <config.json>";
+const USAGE: &str = "usage: membraned <config.json>
+       membraned -h | --help";
+
+const HELP: &str = "membraned — membrane status daemon
+
+usage: membraned <config.json>
+       membraned -h | --help
+
+Runs in the foreground with required JSON configuration:
+  {\"control_socket\":\"/private/path/membrane.uds\",\"status_deadline_ms\":500,\"brokers\":[]}
+
+The configured Unix socket currently serves only membrane.status.
+status_deadline_ms is a broker probe budget, not a strict elapsed-time bound.
+SIGINT or SIGTERM requests a clean shutdown.
+See the repository README for a bounded status-only demonstration.
+";
 
 extern "C" fn note_shutdown(_signal: libc::c_int) {
     SHUTDOWN.store(true, Ordering::Relaxed);
@@ -30,6 +45,10 @@ fn main() {
         eprintln!("{USAGE}");
         std::process::exit(2);
     };
+    if path == "-h" || path == "--help" {
+        print!("{HELP}");
+        return;
+    }
     let path = Path::new(&path);
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,

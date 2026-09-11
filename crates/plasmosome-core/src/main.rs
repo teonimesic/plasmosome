@@ -4,7 +4,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
-const USAGE: &str = "usage: plasmosomed <config.json>";
+const USAGE: &str = "usage: plasmosomed <config.json>
+       plasmosomed -h | --help";
+
+const HELP: &str = "plasmosomed — controller status daemon
+
+usage: plasmosomed <config.json>
+       plasmosomed -h | --help
+
+Runs in the foreground with required JSON configuration:
+  {\"control_socket\":\"/private/path/control.uds\",\"name\":\"quickstart\"}
+
+The configured Unix socket currently serves only plasmosome.status.
+SIGINT or SIGTERM requests a clean shutdown.
+See the repository README for a bounded status-only demonstration.
+";
 
 extern "C" fn note_shutdown(_signal: libc::c_int) {
     SHUTDOWN.store(true, Ordering::Relaxed);
@@ -30,6 +44,10 @@ fn main() {
         eprintln!("{USAGE}");
         std::process::exit(2);
     };
+    if path == "-h" || path == "--help" {
+        print!("{HELP}");
+        return;
+    }
     let path = Path::new(&path);
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
