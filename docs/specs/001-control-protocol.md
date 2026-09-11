@@ -526,9 +526,27 @@ must not operate a quarantine's effects merely because its supervisor answered.
   without repeating effects. Neither the reply nor the observed publication record substitutes
   for independent readiness and holding observations.
 
-Only the instance's trusted controller can use these private sockets; they are not exposed to
-the cell workload. The writer lock serializes controllers, not arbitrary clients, and is not
-authentication. Supervisor sockets and their directories stay outside cell write authority.
+Recovery sockets are restricted to the instance's trusted host UID: the controller and its
+membranes run under that same effective UID. Before binding, the membrane opens and validates
+the socket's private parent directory without following symlinks: it is owned by that UID,
+mode0700, with no ACL granting access to another principal. Ancestors cannot be replaced by
+an untrusted principal. The bound socket is owned by that UID and mode0600 before listening;
+umask alone is not the boundary. An existing unsafe directory/socket is refused, not silently
+adopted, chmodded or unlinked. The controller validates this same path boundary before connecting.
+Both endpoints obtain the connected peer's effective UID from the kernel (`getpeereid` on
+macOS, `SO_PEERCRED` on Linux) and require it to equal their own. Missing credentials, a mismatch,
+or failure to establish the path boundary closes/refuses the connection before request parsing,
+method dispatch or trusting a response. No recovery result is returned on an unauthorized
+connection. Client-supplied cell, PID, operator or UID fields are not authentication.
+
+Processes under that host UID, and host root, are inside the trusted boundary; this is not
+protection against their compromise or a multi-user authorization service. A cell workload must
+not share that host principal's access to the socket namespace: it runs under a different host
+UID or confinement that denies the socket path and connections, and receives no connected/listening
+socket descriptors. Merely removing cell write permission is insufficient. The launcher must
+establish this exclusion before starting a workload; an unsupported or failed confinement is
+a refusal, not permission to expose the recovery endpoint. The instance writer lock serializes
+controllers, not arbitrary clients, and is not authentication.
 The supervisor retains exact resource associations independently of controller memory and must
 verify resource/process incarnation before enforcing a withdrawal. No recovery RPC may create
 an in-memory backend in production and report its ledger as an OS observation.

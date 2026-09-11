@@ -59,6 +59,8 @@ The daemon receives an explicit absolute `instance_root`, independently of its c
 layout in spec001 does not imply that today's arbitrary configured socket identifies a root.
 The trusted operator supplies the root. The root and its ancestors are outside the cell's write
 authority; cell workloads must not be able to replace journal directories or files.
+Private supervisor sockets additionally require spec001 §4.1's owner/mode, kernel peer-UID and
+workload-confinement boundary. A trusted path or writer lock alone does not authorize an RPC.
 
 There is one controller writer per instance. Startup opens `<root>/controller.lock` without
 following a symlink and takes a nonblocking exclusive OS file lock before discovery; contention
@@ -166,6 +168,8 @@ states, newly introduced operations and old effects to retire without changing t
 The sequence is:
 
 1. Append and sync prepare. The previous committed desired state remains authoritative.
+   If prepare carries Force, durably append its session-log assertion as specified below before
+   using that authority. Failure stops this cell; it does not continue toward a forced result.
 2. Apply only newly introduced operations, in recorded order, through the owning supervisor.
    Retained IDs are not reapplied. The supervisor enforces the exact operations; an independent
    snapshot, not an echoed request, establishes which holdings exist.
@@ -220,8 +224,24 @@ or GrantId never permits signalling a replacement process.
 Finish records completion of all obligations, not a cursor or a claim that every historical
 effect was undone twice. Crash after removal but before finish is safe because restart observes
 the exact ID absent. Crash during an uncompleted rollback cannot drop the old desired state.
-Force authorizes only the exact obligations recorded in that prepared operation, with the
-assertion also written to the existing session log before an acknowledged forced result.
+Force authorizes only the exact obligations recorded in that prepared operation. After its
+prepare is durable and before using Force, append a `force` session-log event carrying the
+cell, generation and exact operator/reason pair. `SessionLog::append` becomes
+`Result<u64, SessionLogError>`: successful append means the complete LF-terminated event was
+written, flushed and `File::sync_all` succeeded, not just that a sequence number was reserved.
+Creating the log or its parent directories also durably syncs their containing entries.
+Propagate write, flush, file-sync and directory-sync errors; none may be swallowed.
+An audit error blocks this cell before forced cleanup and prevents a forced acknowledgement
+or further mutation, even if the journal prepare is already durable. Reopen/recover rather
+than proceeding from guessed memory. The session log is not a second recovery authority:
+the strict cell journal still determines exact obligations. Recovery durably appends the same
+cell/generation assertion before resuming Force; duplicate audit assertions after an uncertain
+append are allowed and do not mean the operation ran twice. They attest authorization, not
+completion. This does not require an atomic commit across the journal and session log.
+The shared log writer refuses every later append after an IO error until it is reopened and
+validated. Before extending an existing log, require complete LF-terminated UTF-8 JSON objects;
+a torn or malformed audit log refuses further audit rather than appending onto a corrupt suffix,
+skipping it or truncating it. Reopening re-establishes the required directory durability too.
 Quarantine is never an implicit Force and has no automatic cleanup path.
 
 This deliberately replaces the earlier draft's boundary-free partial-reload proposal. That
@@ -427,6 +447,9 @@ carriers and daemon integration; ledger owns the typed journal reader/writer. Ba
 shared CellId/CellOwner/MockMode and exact-operation types; core never depends on a VMM crate.
 All affected ownership constructors, comparisons, serde consumers and conformance factories
 migrate together. No plugin-only or lossy compatibility fallback remains in the recovery path.
+The session-log return-contract change includes all append callers and benchmarks; no infallible
+audit fallback remains. Socket creation, both connection endpoints and workload launch must
+establish the spec001 authorization boundary before exposing recovery operations.
 Native implementation plans, ownership, API migration lists, proof output and admission state
 remain in Beads under specs012/016, not duplicated as a task in this document.
 
@@ -471,6 +494,14 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   survives. Inject UnknownObject/lost reply/conflicting payload/unavailable observation: only
   verified exact absence completes an obligation. Preserve graceful timeout and explicit Force
   requirements, external assertions and broker incarnation refusal. No blanket error swallowing.
+  For Force, independently reopen the session log and match its cell/generation/operator/reason
+  to the prepared assertion. Inject write, flush, file-sync and new-parent-sync failures: no
+  forced cleanup, successful acknowledgement or next mutation may pass the failed audit.
+  Kill between prepare, audit persistence and forced cleanup; restart must durably reassert
+  authorization before resuming exact obligations, without treating an audit event as completion.
+  A partial audit write must also prevent another cell from appending to that shared writer;
+  reopening a torn audit log refuses without changing its bytes. A complete uncertain append
+  may be followed by another durable assertion with the same cell/generation after validation.
 - **R8 — quarantine blast radius:** a corrupt cell is absent from desired and ordinary status,
   excluded from generation maximum and never mutated. Its report names raw path, fault/line,
   parsed count, every cell-owned found object and every refusal. Same-plugin siblings are
@@ -499,6 +530,12 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   Aborted generations publish unchanged settled attachments at the consumed cell generation.
   A Backend handle without original supervisor records remains unmatched, even with a matching
   planted observation; a UUID or reused PID cannot restore authority.
+  Exercise the actual private UDS boundary on each supported platform: the trusted peer can
+  observe, while a different-UID local client and a confined cell workload cannot reach any
+  recovery handler or change holdings/publication. Wrong-owner, permissive/ACL-exposed or symlinked
+  socket parents refuse startup; peer-credential lookup failure or mismatch closes before
+  dispatch. A passing same-UID client alone does not prove workload exclusion. Report any
+  unavailable distinct-UID/confinement fixture as unproved, never as a successful authorization test.
 - **R11 — discriminating proof:** in disposable mutations, skipping daemon recovery fails the
   nonzero restart case; adopting a parsed prefix fails quarantine; comparing expected to itself
   fails the missing/stray case; collapsing owners/IDs fails cross-cell and repeated-grant cases;
@@ -508,6 +545,9 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   or checking reply content without fresh observed content must fail the publication/restart
   cases. Record actual failures for the claimed reason, restored passes and limitations, not
   source wording checks or calls to an inert mock.
+  Accepting a recovery connection without its authorization boundary must fail the unauthorized
+  client case; ignoring audit IO errors or acknowledging Force before durable audit must fail
+  the Force crash/fault cases.
 - **R12 — integration:** the complete accepted control/recovery contract is served, all affected
   consumers migrate and the root gate passes. Independent review checks the acceptance against
   the actual final head. Portable journal/model proofs are reported separately from macOS/Linux
