@@ -343,6 +343,9 @@ ProxyMap DNS/address/TUN-flow binding. Closed staged attachments do not particip
 Activation is per operation after durable prepare, not an atomic visibility change for an
 entire transaction; failed later operations are durably aborted and all new bindings withdrawn.
 Already acquired bytes or remote side effects are not rolled back by that cleanup.
+Effective unqualified selection is host-authoritative through spec001's bounded4091grant.select,
+not a stale guest-side active list. It excludes a host-closed/incomplete grant before delayed
+guest cleanup finishes, so fresh peer access survives as well as existing peer handles.
 
 ### Five actual enforcement adapters
 
@@ -415,6 +418,11 @@ loading from it, even while its grant is active. It must not reject ordinary ano
 An already-authorized copy into ordinary private guest scratch may be mapped or executed;
 those acquired bytes are not a continuing host capability and cannot be erased by revocation.
 There is no promise to revoke a secret or data already delivered to the cell.
+Managed multiplexed targets use zero FUSE entry, attribute and negative-entry cache timeouts.
+Every fresh unqualified resolution obtains host-authoritative selection before exposing a
+grant-specific inode or using its metadata; a cached revoked dentry cannot conceal a surviving
+peer. An already-bound inode/handle is never rebound to a different grant. Revalidation races
+refuse or restart a fresh lookup under its original bound, not an IO replay across roots.
 
 The policy binds immutable filesystem-lifetime/inode identity to grant generation before
 workload access; map misses for managed files deny. Different grants never share cache identity,
@@ -642,6 +650,10 @@ source acceptance still supplies neither deployed artifacts nor successful platf
   the latter stays selected-incomplete and denied while equal-peer access survives. Deliver the
   old drain reply after Force; it cannot reopen the gate. Mutants that serialize Force behind
   drain or reactivate from its late callback must fail against actual selected/peer access.
+  Make A lexicographically first, Force A, and stall its guest cleanup. In a new consumer with
+  no pre-opened B handle/stream, a fresh unqualified lookup/connection must select and actually
+  use B. The old A binding must remain denied, never retargeted. A stale guest-selector mutant
+  that black-holes this fresh request must fail; pre-opened B traffic alone is insufficient.
 - **A5 — apply identity:** replay of one live recorded op is a no-op; two equal ops with fresh IDs
   create two holdings. Standing payload collision refuses without mutation. Apply or plant after
   exact removal does not revive a spent grant handle; new grants still use fresh identities.

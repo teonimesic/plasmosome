@@ -615,6 +615,9 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   With the old drain still unanswered, durably authorized Force closes only the selected host
   gate and uses the independent withdrawal lane. Stalled cleanup remains selected-incomplete;
   the peer still serves and a late drain reply cannot reopen forced access.
+  Also test a new unqualified consumer with no pre-opened peer handle after forcing the
+  lexicographically first grant while guest cleanup is stalled: host-authoritative selection
+  must serve the surviving peer, while existing selected bindings remain denied, not retargeted.
   After real fork and successful bind, inject access/association failure before successful
   publication. Observe the typed incomplete operation with no complete object or fabricated
   entry. Kill the controller, restart, durably abort, then exact-withdraw using retained original

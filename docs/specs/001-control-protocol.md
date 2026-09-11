@@ -870,11 +870,13 @@ On the first installed ProxyMap the shim creates the shared DNS listener (UDP/TC
 and synthetic-prefix TUN/route in the controlled guest namespace, initially admitting no grant.
 The trusted image supplies that resolver address and no fallback. These are actual attachments
 of the installed grant; later grants add their own independently gated bindings. It answers
-A queries for active exact hosts (ASCII DNS query case is ignored) with their assigned address;
-AAAA has no data and unknown/inactive hosts return NXDOMAIN. No external DNS forwarding,
-fallback route or arbitrary destination service exists. At a new TCP connection/UDP flow, the
-shim selects the smallest active full GrantId for that host and checks that packet transport
-and destination port equal its ProxyRecipe; mismatches refuse, not fall through to another rule.
+A queries for effectively active exact hosts (ASCII DNS query case is ignored) with their
+assigned address, after host-authoritative grant.select below. AAAA has no data and
+unknown/inactive hosts return NXDOMAIN. No external DNS forwarding, fallback route or arbitrary
+destination service exists. At a new TCP connection/UDP flow, the shim obtains that host's
+smallest currently eligible GrantId through4091grant.select before checking packet transport
+and destination port against the selected recipe. Mismatches refuse, never fall through to
+another rule. A stale locally active grant is not an authority to bypass this host selection.
 It binds the actual guest flow and4091stream/datagram handle to that original grant. Existing
 flows never follow a later selector change. Each UDP five-tuple is one flow until closed;
 drain/remove closes that grant's flows, not a peer's. Last active-host removal withdraws its DNS
@@ -884,14 +886,16 @@ them and verifies their absence. Each actual DNS listener, TUN, route, per-grant
 independently inventoried, including a rule with no flows. Workload edits of resolver
 configuration grant no bypass.
 
-4091 carries only bounded data operations. Each params object contains `grant:GrantId` and
-`deadline_ms`, plus the fields in the table. A host-issued `handle:u64` is nonzero,
+4091 carries bounded selection and data operations. Every params object contains `deadline_ms`.
+Except for grant.select, it also contains `grant:GrantId`, plus the fields in the table.
+A host-issued `handle:u64` is nonzero,
 connection-local, never recycled on that connection and bound to the exact original grant.
 Exhaustion refuses a new open. Amounts/offsets are unsigned64-bit values checked for overflow;
 one byte payload/read is at most65,536bytes, also subject to the enclosing frame limit.
 
 | Method | Additional params | Result |
 | --- | --- | --- |
+| `grant.select` | `{target:SelectionTarget}` (no grant parameter) | `{grant:GrantId}` |
 | `file.open` | `{components:[String], access:FileAccess}` | `{handle}` |
 | `file.read` | `{handle, offset, length}` | `{bytes:[u8], eof:bool}` |
 | `file.write` | `{handle, offset, bytes:[u8]}` | `{written:u64}` |
@@ -915,6 +919,33 @@ one byte payload/read is at most65,536bytes, also subject to the enclosing frame
 | `datagram.send` | `{handle, bytes:[u8]}` | `{written:u64}` |
 | `datagram.receive` | `{handle, length}` | `{bytes:[u8], truncated:bool}` |
 | `datagram.close` | `{handle}` | `{closed:true}` |
+
+`SelectionTarget` is the closed record `{kind:SelectionKind,key:String}`. SelectionKind is
+exactly `session_file | uds_socket | proxy_map | broker | mount`; key is respectively the
+recorded guest_path, guest_path, host, name or target. Strings retain their exact recorded
+identity and validation rules. Selection searches only this authenticated cell's original
+standing holdings whose host gate currently admits new IO, and returns the lexicographically
+smallest full GrantId at that target. It never creates a holding or selects an incomplete,
+closed, staged or foreign object. If no grant is eligible, return code105 with
+`detail:{kind:"no_active_grant",target:SelectionTarget}`, never an invented ID.
+
+The trusted shim must make this host selection before each fresh unqualified path lookup,
+DNS answer or new flow, before local recipe/permission/transport checks. A guest-side eligibility
+cache or pre-opened peer handle cannot substitute for it. The returned ID must match an actual
+local binding at that target; a missing/mismatched binding is an observation fault, not permission
+to invent one. Thus Force's local gate transition immediately excludes A from fresh selection
+even while its guest cleanup is delayed, and a surviving eligible B still serves fresh requests.
+
+Selection does not reserve future admission. If a selected grant becomes non-admitting before
+the following operation is admitted, the host may return code105 with the closed
+`detail:{kind:"grant_inactive",grant:GrantId}`. This refusal is issued only before admission or
+any OS effect. Only a fresh unqualified operation whose concrete binding has not yet been
+exposed may repeat grant.select under the original request deadline, never retrying an already
+tried ID. Exhaustion/deadline or no_active_grant refuses. Recipe/transport/permission mismatch,
+IO failure, unknown/foreign handles and any post-effect result do not authorize fallback or
+replay. An already-bound inode, file/directory handle or flow propagates refusal instead of
+switching grants; a stale pathname resolution must be revalidated as a new lookup, never by
+rebinding the old inode. This is bounded selection, not another lifecycle or recovery API.
 
 `FileMetadata` is `{inode:String, kind:FileKind, size:u64, modified_ns:i64}`;
 FileKind is `file | directory`. The opaque inode identity remains bound to this grant and
