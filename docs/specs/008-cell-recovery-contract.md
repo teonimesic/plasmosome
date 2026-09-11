@@ -196,6 +196,11 @@ The sequence is:
 2. Apply only newly introduced operations, in recorded order, through the owning supervisor.
    Retained IDs are not reapplied. The supervisor enforces the exact operations; an independent
    snapshot, not an echoed request, establishes which holdings exist.
+   Spec001 §4.2 installs closed guest bindings from the exact prepared operations and activates
+   each after its host authority is ready. These per-effect accesses can become visible before
+   commit; there is no atomic-access or acquired-byte rollback promise. All partial bindings
+   remain owned and independently observable through abort cleanup. A reload that cannot meet
+   the preflight non-widening/retained-holding condition below is refused, not staged unsafely.
 3. If all new operations succeeded, append and sync commit. This atomically publishes all
    replacements in that cell's desired state. Only now may old, unretained effects be retired,
    in reverse original grant order, preserving order across changed plugins from the replayed
@@ -372,6 +377,8 @@ resources, policy loss or incomplete guest inventory are Observation errors nami
 not empty projections or guessed grant IDs. The actual guest system image and private copied data
 are not managed capability projections; the observer must explicitly delimit the managed
 namespaces rather than classify arbitrary guest processes as trusted evidence.
+Every projection array, including all nested network kinds, and actual per-binding admission
+states are mandatory even when empty; omitting an otherwise-empty array fails the observation.
 
 Cell records and the resulting `observed_cells` diagnostic retain this guest account so a
 controller cannot silently discard it while preserving only OsState. No journal field grants
@@ -656,6 +663,7 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   managed guest projections cannot disappear from a complete observation. Use the strict-file
   denial/private-copy witnesses in spec017A14; ordinary chmod/unlink and an existing Docker
   process are not substitutes for managed guest FUSE/LSM enforcement.
+  Omitting one otherwise-empty projection-kind array must likewise fail complete observation.
 - **R11 — discriminating proof:** in disposable mutations, skipping daemon recovery fails the
   nonzero restart case; adopting a parsed prefix fails quarantine; comparing expected to itself
   fails the missing/stray case; collapsing owners/IDs fails cross-cell and repeated-grant cases;

@@ -334,6 +334,11 @@ lookups/connections choose the lexicographically smallest active full GrantId at
 target; an already-open file handle or flow stays bound to its original grant. Withdrawal never
 silently retargets it to a surviving peer. Each covered root/rule still has an actual independent
 access attachment, not only an entry in a desired-state count.
+Spec001 §4.2 defines the exact host-to-guest install/activate/drain/remove transitions and the
+ProxyMap DNS/address/TUN-flow binding. Closed staged attachments do not participate in selection.
+Activation is per operation after durable prepare, not an atomic visibility change for an
+entire transaction; failed later operations are durably aborted and all new bindings withdrawn.
+Already acquired bytes or remote side effects are not rolled back by that cleanup.
 
 ### Five actual enforcement adapters
 
@@ -366,6 +371,10 @@ fault, never a made-up GrantId or an empty class. Requested configuration is not
   Guest synthetic addresses use198.18.0.0/15 only inside this isolated bridge; refuse an
   operator-route overlap rather than silently altering inputs or the reserved10.29.0.0/24
   subject range. Network revocation cannot undo a remote side effect already issued.
+  Its complete host/route/recipe and original per-boot address reach the shim through the
+  closed install schema; data requests alone cannot create or activate a rule. Inspect a rule
+  even when it has no flows, and preserve its exact grant binding through DNS caching and
+  equal-host selector changes, as specified by spec001 §4.2.
 - **Broker:** use the original owned child and answered private control readiness described
   below, plus a separately declared data endpoint and independently withdrawable access relay
   for each grant. Inspect actual process authority, answered readiness and access resources.

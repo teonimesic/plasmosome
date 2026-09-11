@@ -683,20 +683,97 @@ rather than a success-shaped empty result. Framing failures retain §1's protoco
 `deadline_ms` is a positive remaining
 budget, never renewed internally. `boot` is the original association's opaque nonempty token.
 
-4090 is private control, not another controller API:
+4090 is private control, not another controller API. The shim initiates the mapped transport,
+but the original host supervisor is the sole RPC caller and the shim is the responder. The host
+calls hello before any other verb. On4091 the shim is the sole caller and the host the responder;
+the host admits that stream only within the same verified original VMM association. Neither
+stream uses notifications or accepts requests in the opposite direction. One control request is
+outstanding at a time; bounded data requests may overlap with distinct IDs. Losing either stream
+closes both admission gates and preserves unfinished original resources. Reconnection first
+repeats hello and complete observation; it neither reinstalls nor reactivates grants by replay.
 
 | Method | Params | Result |
 | --- | --- | --- |
 | `hello` | `{}` | `{boot, runtime:RuntimeRecipe, policy:Artifact}` |
 | `observe` | `{deadline_ms}` | `GuestObservation` |
+| `install` | `{operation:UniverseOp, address:String|null, deadline_ms}` | `{boot, grant, installed:true}` |
+| `activate` | `{grant:GrantId, deadline_ms}` | `{boot, grant, active:true}` |
 | `drain` | `{grant:GrantId, deadline_ms}` | `{boot, grant, drained:true}` |
+| `remove` | `{inverse:UniverseOp, force:bool, deadline_ms}` | `{boot, grant, removed:true}` |
 | `shutdown` | `{deadline_ms}` | `{boot, shutdown_requested:true}` |
 
 Hello is compared to the original supervisor's verified runtime and effective guest policy,
-not accepted as authentication from an arbitrary guest. Drain succeeds only after that grant's
-guest admission barrier and admitted work have settled. Shutdown requests orderly guest exit;
-only actual original-child terminal/reap observation establishes completion. Lost channels or
-handshakes are faults, not assumed graceful shutdown.
+not accepted as authentication from an arbitrary guest. Install accepts only one of spec017's
+five complete grant operations, never an inverse. It carries all original capability/owner/ID
+fields, including the full recipe; it is not a mutable guest-side lookup. Only the original host
+supervisor may issue it, after the corresponding cell prepare is durable and host original
+resource authority has been retained. An address is the original per-boot ProxyMap binding
+specified below; it is null for every other class. Conflicting reuse of an ID or address refuses.
+The shim creates the actual grant-bound filesystem/listener/route attachments with admission
+closed (`staged`), before returning installed:true. Broker data is exposed at the reserved guest
+Unix path `/.plasmosome/brokers/<hex-encoded UTF-8 name>.sock`; this exposes only its data relay,
+never its host control socket. Unrepresentable names/paths and cross-class projection collisions
+refuse in preflight; no truncation, unowned path replacement or implicit dependency is allowed.
+
+The host then enables its exact gate and calls activate. The shim enables this existing binding
+and the spec017 selector; only independently observed active bindings plus the real host
+resources complete `apply`. Install/activate acknowledgements are not this independent proof.
+This is per-effect visibility after prepare and before commit, not an atomic workload-access
+transaction. Commit atomically publishes desired state, not bytes already acquired. A later
+effect failure durably aborts before withdrawing all newly created complete/incomplete
+bindings in reverse prepare order; retained holdings remain intact. Spec008's preflight refusal
+of a reload that would widen access or disturb retained holdings still applies.
+
+Graceful removal first closes host admission and calls drain, which closes guest admission
+(`draining`) and waits for actual admitted work under the same remaining deadline. The host also
+drains its own original work. Before destructive progress, a timeout restores both gates using
+activate and preserves all original resources. The single budget includes restoration; the
+host must begin it while time remains. Expiry without proven restoration is incomplete, not
+DrainTimedOut and not permission to renew the budget. Once both sides are drained, remove with
+force:false verifies the exact
+inverse against the retained installed operation and destroys only that grant's original guest
+attachments. Force authority is checked/durably recorded by the host under spec008; force:true
+closes guest admission and releases cancellable original attachments without pretending
+uncancellable work is terminal. Neither form returns removed:true until fresh observation proves
+the selected guest bindings absent. Host resource cleanup is separately required. Failure/lost
+acknowledgement preserves original associations and incomplete state, never reacquires by path
+or ID. A matching already-installed/active operation may be acknowledged only after actual
+inspection; a retry cannot create another attachment or rebind an old handle.
+Shutdown requests orderly guest exit; only actual original-child terminal/reap observation
+establishes completion. Lost channels or handshakes are faults, not assumed graceful shutdown.
+
+**Proxy projection.** The recorded `host` is a lower-case ASCII DNS name (nonempty1..63-byte
+labels, total at most253bytes, letters/digits/hyphen with no leading/trailing hyphen); invalid
+forms and numeric IP literals refuse before prepare without normalizing the capability.
+`route` is an opaque exact
+operator label for its complete ProxyRecipe, not a guest-supplied CIDR, HTTP path or lookup key.
+After prepare, the original host supervisor allocates one address per distinct host from
+198.18.0.1 through198.19.255.254 in numeric order, retaining the binding through this boot and
+never assigning it to a different
+host or recycling it after removal. Exhaustion refuses materialization with normal rollback.
+Install carries that address and the full operation to the shim. Equal-host grants share the
+host/address mapping but retain independent effective rules. Conflicting operator-supplied
+routes in the controlled guest namespace are rejected in preflight; an unrelated host default
+route is not such a collision. The binding is original runtime authority, not a journal field
+or a recovery guess.
+
+On the first installed ProxyMap the shim creates the shared DNS listener (UDP/TCP127.0.0.53:53)
+and synthetic-prefix TUN/route in the controlled guest namespace, initially admitting no grant.
+The trusted image supplies that resolver address and no fallback. These are actual attachments
+of the installed grant; later grants add their own independently gated bindings. It answers
+A queries for active exact hosts (ASCII DNS query case is ignored) with their assigned address;
+AAAA has no data and unknown/inactive hosts return NXDOMAIN. No external DNS forwarding,
+fallback route or arbitrary destination service exists. At a new TCP connection/UDP flow, the
+shim selects the smallest active full GrantId for that host and checks that packet transport
+and destination port equal its ProxyRecipe; mismatches refuse, not fall through to another rule.
+It binds the actual guest flow and4091stream/datagram handle to that original grant. Existing
+flows never follow a later selector change. Each UDP five-tuple is one flow until closed;
+drain/remove closes that grant's flows, not a peer's. Last active-host removal withdraws its DNS
+answer and forwarding rule; stale cached addresses refuse rather than reaching a reused host.
+The shared resolver/TUN/route persist while peer bindings exist; last ProxyMap removal destroys
+them and verifies their absence. Each actual DNS listener, TUN, route, per-grant rule and flow is
+independently inventoried, including a rule with no flows. Workload edits of resolver
+configuration grant no bypass.
 
 4091 carries only bounded data operations. Each params object contains `grant:GrantId` and
 `deadline_ms`, plus the fields in the table. A host-issued `handle:u64` is nonzero,
@@ -753,26 +830,39 @@ or foreign handles, closed grants, invalid lengths and overflow refuse before an
 Returned byte/write counts describe actual IO, including short operations. Datagram truncation
 is explicit; an empty timed-out read is not an invented EOF.
 
-These verbs grant no capability-lifecycle or recovery authority. Handles cannot transfer across channels or
+The4091data verbs grant no capability-lifecycle or recovery authority. Handles cannot transfer across channels or
 rebind to a replacement grant. The host checks the effective grant on every request, bounds
 admitted work and propagates real errors. Channel loss closes its original data handles but
 does not manufacture grant withdrawal or clear remaining incomplete IO. Neither a service
 acknowledgement nor a guest claim replaces independent resource cleanup observation.
 
-`GuestObservation` is the strict record `{boot:String, policy:String, projections:[GuestProjection]}`.
-The nonempty boot token identifies this original supervisor/guest association and is never reused
-or reconstructed from journal contents. Policy is the SHA256 of the exact effectively loaded
-guest-policy artifact, not requested configuration.
-GuestProjection is a closed tagged record with `kind` in
-`fs_mount | fs_handle | socket_listener | network_flow`, `id:String`, `grants:[GrantId]`.
-IDs identify actual objects within this boot/namespace lifetime, not logical capability addresses.
-Each grant is bound to independently verified host authority and the proper cell. Empty grant
-lists, duplicate IDs, unknown objects, missing enforcement policy or an unverifiable association
-are named observation faults, not rows invented from desired state. Actual mountinfo,
-filesystem connection/handle state, listeners and network flows must agree with this inventory.
-A compromised workload cannot write this account; the host separately verifies the effective
-resource gates. All guest projection kinds must be observable even when empty. An unknown or
-unattributable object fails complete observation rather than disappearing from stop/recovery.
+`GuestObservation` is the strict record
+`{boot:String, policy:String, fs_mounts:[GuestProjection], fs_handles:[GuestProjection],
+socket_listeners:[GuestProjection], network:GuestNetworkObservation}`. Every field and nested
+array is required even when independently observed empty; omission of an otherwise-empty kind refuses
+the entire observation. The nonempty boot token identifies this original supervisor/guest
+association and is never reused or reconstructed from journal contents. Policy is the SHA256 of
+the exact effectively loaded guest-policy artifact, not requested configuration.
+GuestProjection is `{id:String, bindings:[GuestBinding]}`; its containing array fixes its kind.
+GuestNetworkObservation is the strict record `{dns_listeners:[GuestProjection],
+tuns:[GuestProjection], routes:[GuestProjection], proxy_rules:[GuestProjection],
+tcp_flows:[GuestProjection], udp_flows:[GuestProjection]}`. All six arrays are required, including
+empty arrays; coverage of one network kind cannot stand in for another. DNS listeners appear
+only in network, not again in socket_listeners; the latter contains UdsSocket/Broker data
+listeners. Network infrastructure first created by install and shared by several grants carries
+each actual binding; it cannot persist with an empty binding list after last removal.
+GuestBinding is `{grant:GrantId, admission:GuestAdmission}` and GuestAdmission is exactly
+`staged | active | draining | closed`. Admission describes the actually inspected gate, not the
+last requested transition. IDs identify actual objects within this boot/namespace lifetime, not
+logical capability addresses. Each binding is associated with independently verified original
+host authority and the proper cell. Empty binding lists, duplicate object IDs within a kind,
+duplicate bindings on an object, unknown objects, missing enforcement policy or an unverifiable
+association are named observation faults, not rows invented from desired state. Actual
+mountinfo, filesystem connection/handle state, listeners, rules and flows must agree with this
+inventory. Closed/staged attachments remain visible until physically removed; a rule is
+inventoried even with no active flow. A compromised workload cannot write this account; the host
+separately verifies effective resource gates. Unknown or unattributable managed objects fail
+complete observation rather than disappearing from stop/recovery.
 Physical projections do not create new logical granted classes or authorize cleanup by ID alone.
 
 **Platform admission.** Darwin uses Apple Silicon/macOS14+ with Hypervisor.framework, a correctly
