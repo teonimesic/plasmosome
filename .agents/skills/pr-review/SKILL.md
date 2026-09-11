@@ -48,11 +48,13 @@ by opening an unvalidated draft.
 For a work PR, record the PR immediately:
 
 ```shell
-./tools/work-state update ID --external-ref PR_URL --add-label in-review
+./tools/work-state update ID --external-ref PR_URL --status review
 ```
 
 For a work PR, retain task ownership through review and record verification and important
-decisions in Beads notes. These updates never require a commit, extra push or status-only PR.
+decisions in Beads notes. Spec016 defines entry into `review` for a settled local candidate,
+active repairs in `in_progress`, and genuine blockers; follow those phases rather than the
+retired `in-review` label. These updates never require a commit, extra push or status-only PR.
 
 Obtain independent review while draft, after local validation. CodeRabbit skips draft PRs;
 a skipped green is not a completed review. The owner-approval rule in `docs/intents/README.md`
@@ -81,15 +83,19 @@ author's pre-push gate.
 
 Post the review as a PR issue comment starting with `Model: <name>` and the reviewed head SHA.
 Name the examined behavior and spec acceptance items, findings, observed proof and limits. The
-author answers findings on the PR. At least one independent review is required; changes beyond
-what that review asked for require another pass. A rebase-only head move may retain coverage
-only after comparing the old and new base-to-head diffs and establishing no content change.
+author answers findings on the PR. At least one independent review is required. A focused
+requested-repair recheck names the previous reviewed head and retained coverage, examines the
+actual delta and affected callers, and distinguishes new observations from unchanged evidence.
+Changes beyond what that review asked for require another pass. A rebase-only head move may
+retain coverage only after comparing the old and new base-to-head diffs and establishing no
+content change.
 
 ## 3. Obtain actual CodeRabbit rounds
 
 Update the branch before spending reviews, then mark ready only when the change is ready to read
 and its approval gate permits it. Watch checks and review activity through completion; do not
-stop after one empty poll. CodeRabbit throughput is shared across the repository, not per PR.
+stop after one empty poll. Use the heartbeat skill's provider-capacity diagnosis when admission
+is refused; do not assume a repository-wide allowance from another PR's review timing.
 
 A round is a completed review, with its findings addressed. Count completed statuses over the
 PR's commits, not only its latest head; still require a completed review on the head being merged.
@@ -100,6 +106,14 @@ Exclude lockfiles and generated files from the diff size:
 | Under 100 | 1 |
 | 100–1000 | 2 |
 | Over 1000 | 3 |
+
+These minimums are floors, not per-task caps. The orchestrator may allocate additional rounds
+and independent reviewer capacity where findings, risk or progress toward completion warrant
+them, within the actual shared review budget. The author uses that allocation for justified
+reviews without a new permission round-trip each time, checking current capacity and avoiding
+duplicate or already in-flight requests. Use step 2's retained evidence and focused rechecks
+instead of repeating unaffected proof; extra capacity never waives the required first review,
+the author's pre-push gate or current-head coverage.
 
 Every fix that moves the head needs current-head coverage regardless of the table's minimum.
 The independent review is separate. A clean unchanged head needing another round uses
@@ -162,14 +176,16 @@ gh pr merge "$PR" --squash --match-head-commit "$HEAD"
 If the head moved, restart the affected checks. A clean mergeability signal does not establish
 any of the review conditions.
 
-## 5. Observe the merge and close the work task
+## 5. Observe the merge and verify task completion
 
 Ask GitHub for `state,mergeCommit,mergedAt,url`. Only `MERGED` with the actual squash commit
-establishes delivery; the old branch tip is not that commit. For a work PR, append the observed
-PR, squash SHA, merge time and verification references to Beads notes. Remove `in-review` and close the task
-with native `close ID --reason`, as specified in the tasks skill. Keep its plan and evidence.
-There is no later closure commit, next-branch status edit or `chore(tasks)` PR.
-Intent- and spec-filing PRs have no Beads task to close.
+establishes source publication; the old branch tip is not that commit. For a work PR, append
+the observed PR, squash SHA, merge time and verification references to Beads notes, then follow
+spec016's full-acceptance closure contract through the tasks skill. If post-merge work remains,
+the author keeps ownership, records the next action and continues in its actual phase rather
+than closing on source publication alone. Close only after all required acceptance is verified;
+keep the plan and evidence. There is no later closure commit, next-branch status edit or
+`chore(tasks)` PR. Intent- and spec-filing PRs have no Beads task to close.
 
 Remove your code worktree by its actual path only after its work is committed and its owner is
 finished, then prune and delete the merged branch as appropriate. Preserve anyone else's or any

@@ -114,8 +114,9 @@ ID or state, duplicate resolved ID, invalid intent list, dangling link, or accep
 an approved intent chain is an input fault. Non-document files such as the folder README are not
 coverage inputs. A directory containing only files without intent records refuses, not passes.
 
-Native IDs and statuses must be well-formed; the statuses consumed are `open`, `in_progress`,
-`blocked` and `closed`. Link arrays must be arrays of three-digit strings with uniquely resolving
+Native IDs and statuses must be well-formed under spec016's lifecycle, including actual
+`planning` and `review`. Every nonclosed status remains outstanding work, not delivery or an
+owner coverage judgment. Link arrays must be arrays of three-digit strings with uniquely resolving
 targets. Existing imported empty links remain visible history, not permission to admit new
 unmapped work. For a task with spec links, its copied intent list must equal the first-seen ordered
 union from those specs; a mismatch is a repairable input fault, not another approval gate. An

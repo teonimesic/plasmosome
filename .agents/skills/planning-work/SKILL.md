@@ -15,6 +15,11 @@ One finishable capability belongs to one author, code worktree and PR. All task 
 `./tools/work-state`; `.agents/skills/tasks` defines admission, planning contents and the native
 claim procedure. A plan in chat or a worktree file is not a handoff and cannot be its authority.
 
+Before authoring a native task's plan, take its owned `planning` phase using the tasks skill.
+Planning is visible work even when implementation awaits prerequisites; preserve those blockers
+instead of hiding the active planner in `blocked`. The native phase follows the work actually
+assigned, not a taskless prerequisite spec PR. Such PRs retain spec012's distinct shape.
+
 ## Roles and dispatch
 
 The orchestrator dispatches and makes cross-task decisions: order, non-overlapping ownership,
@@ -33,7 +38,8 @@ Dispatch by full native ID: **“Work Beads ID; start with `./tools/work-state s
 record carries the problem, plan, acceptance and references. Add only constraints or decisions
 not yet available there, then persist those in Beads too. Name other live agents and their file
 ownership, so overlapping edits can be coordinated before either party changes the file.
-The executor uses its own unique actor and performs the atomic claim before code work. A losing
+Name whether this assignment is planning, implementation or review repair. The dispatched
+actor follows spec016's claim or existing-owner transition for that phase before work. A losing
 claim ends that dispatch; an orchestrator's message does not override Beads ownership.
 
 For review repairs, dispatch by task ID and PR URL: let the author read the actual threads,
@@ -65,5 +71,5 @@ of `.worktrees/`.
 
 Before handing off, append important attempts, surprises, references and verification results to
 Beads notes. Report only evidence actually observed; a test that passes before and after a fix
-has not proved that fix. A blocker remains recorded as blocked work, not a weakened acceptance
-condition or a claim that the deliverable is finished.
+has not proved that fix. Record blockers against the actual phase under spec016, not as a
+weakened acceptance condition or a claim that the deliverable is finished.

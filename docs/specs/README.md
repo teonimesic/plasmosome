@@ -18,11 +18,13 @@ there is no additional owner spec-approval gate. Set `accepted` in the final rev
 before merging its PR, after those approvals exist. If they do not exist, it remains draft,
 including on main, until a later reviewed acceptance change.
 
-An implementation task reads the accepted spec on main before it is claimed or its code worktree
-opens. Work needing a new spec therefore lands that spec first. Spec012 governs the chain and
-its two structural taskless PR shapes. Every accepted spec names intents; the former spec001
-exception is closed, not a general amnesty. Imported unmapped tasks keep their history in Beads,
-but cannot start on an empty chain.
+Before an implementation claim, transition to implementation or code worktree, read every
+governing spec accepted on main. Work needing a new spec therefore lands that spec before
+implementation. A mapped task may be claimed for planning before acceptance, authorizing design
+only under [spec016](016-native-beads-task-authority.md#lifecycle-admission-and-ownership).
+Spec012 governs the chain and its two structural taskless PR shapes. Every accepted spec names
+intents; the former spec001 exception is closed, not a general amnesty. Imported unmapped tasks
+keep their history in Beads, but cannot start on an empty chain.
 
 ## Native task authority
 
