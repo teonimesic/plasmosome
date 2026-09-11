@@ -30,9 +30,10 @@ a local acceptance candidate or a model experiment is neither admission nor prod
 
 `CellId` moves from core to `plasmosome-backend`; core consumes that one type. `CellOwner` is
 `{ cell: CellId, plugin: PluginId }`. It replaces plugin-only ownership in `OsObject`,
-`UniverseOp`, `Grant`, `LedgerEntry`, owner comparisons and removal arguments. `Grant` becomes
-`{ owner: CellOwner, capability, kind }`; `LedgerEntry` becomes `{ handle, owner: CellOwner,
-capability, kind }`. Universe operations keep the field name `owner` with its widened type.
+`UniverseOp`, `LedgerEntry`, owner comparisons and removal arguments. LedgerEntry becomes
+`{ handle, owner: CellOwner, capability, kind }`. Spec017 removes the old Grant input:
+the fallible grant method takes a predeclared UniverseOp and GrantKind. Universe operations
+keep the field name `owner` with its widened type.
 This independently extends spec017's owner representation, not its grant identity semantics.
 Journal changes still name a plugin and infer their cell from the validated directory; embedded
 operations must carry that same cell in their owner. This is decision003's already-decided
@@ -171,8 +172,11 @@ allowance in spec017 remains a different API and is never used for cell recovery
 A mutation validates the full dependency closure, resolved mock modes, exact ownership,
 identity conflicts and safe-removal/Force requirements before preparing. It computes replacement
 states, newly introduced operations and old effects to retire without changing the world.
-`UniverseOp` supplies a fresh ID and `op.removal()` before `apply`; using
-`grant()` followed by recording its returned handle is expressly not this writer.
+The caller chooses a fresh ID and constructs the complete UniverseOp and `op.removal()`
+before preparation or either public actuation method. This controller uses direct `apply`;
+a caller using spec017's fallible `grant(op, kind)` follows the same write-ahead protocol with
+the predeclared operation and universe inverse. Neither grant-then-record nor backend ID
+minting is permitted; receipt metadata does not introduce another journal or RPC writer.
 
 Broker preflight validates the complete trusted launch description and endpoint conflict/staging
 conditions without creating a process or listener. Only after prepare is durable may the
@@ -194,8 +198,8 @@ The sequence is:
    replacements in that cell's desired state. Only now may old, unretained effects be retired,
    in reverse original grant order, preserving order across changed plugins from the replayed
    cell history. Safe-removal assertions were checked before prepare, not after publication.
-4. If application fails before commit, append and sync abort BEFORE withdrawing newly applied
-   operations, in reverse prepare order. Old desired state and old holdings remain unchanged.
+4. If application fails before commit, append and sync abort BEFORE withdrawing newly introduced
+   complete or incomplete effects, in reverse prepare order. Old desired state and old holdings remain unchanged.
    A failed attach's `CommitFailed` reply names this rollback; no rolled-back success is
    reported until cleanup and finish are durable. If abort cannot be made durable, stop and
    let startup resolve the pending prepare; do not acknowledge a rollback that is not recorded.
@@ -219,8 +223,8 @@ withdrawing an old holding or widening access, validation refuses it before prep
 does not bypass that backend constraint. A multi-plugin attach uses one prepare/commit pair
 for the cell, so a failure cannot publish only a prefix of its closure.
 
-On restart, a prepare without commit is resolved to abort, then only its newly introduced
-holdings are cleaned up. A commit without finish retains its new desired state and resumes the
+On restart, a prepare without commit is durably resolved to abort, then only its newly introduced
+complete or incomplete effects are cleaned up. A commit without finish retains its new desired state and resumes the
 old effects' cleanup. An abort without finish retains the prior desired state and resumes new
 effects' cleanup. A completed generation is not replayed as new operations. Recovery never
 reapplies a withdrawn ID or automatically creates a missing desired holding; it reports that
@@ -228,18 +232,31 @@ drift for an explicit new mutation. This prevents stale recovery from resurrecti
 A valid finish with a stale membrane generation still requires publication reconciliation below.
 It is not an unfinished journal transaction, but it is not a settled controller/supervisor pair.
 
-Before each resumed withdrawal, request a fresh independent snapshot and match exact address,
-full capability and cell/plugin owner. If the exact address is absent, record completion of that
-obligation by observation; do not invoke its inverse again. A present conflicting payload is a
-fault and blocks cleanup. A matching holding is withdrawn via its exact universe inverse and
-then observed absent. `UnknownObject`, `UnknownHandle`, a timeout or a lost response is NOT
-success: obtain a new observation and use the same rules. A live conflicting or unobservable
-holding remains unfinished. Spec017's backend refusal contract is not weakened. For brokers,
-only the surviving supervisor's original process-incarnation authority can act; a diagnostic PID
-or GrantId never permits signalling a replacement process. Directly applied holdings retain
-their actual removal authority without fabricating opaque grant records. A lost apply response
-does not permit another spawn: observe the surviving exact association, then resolve the journal
-decision. Startup still aborts an uncommitted prepare; it does not replay apply to revive it.
+Before each resumed withdrawal, request a fresh complete EnforcementSnapshot. Match exact
+address, full capability and cell/plugin owner against both its standing `state` and typed
+`incomplete` operations. Only absence from BOTH sets establishes completion by observation.
+An empty OsState with a matching incomplete effect is unfinished, not successful cleanup.
+A present conflicting payload or duplicate classification blocks that cleanup obligation.
+An incomplete effect without a matching durable cleanup obligation remains named and keeps
+readiness false; it is not selected for cleanup. A matching complete or incomplete
+effect is withdrawn through the same exact universe inverse and DrainSpec, using the surviving
+supervisor's original authority, then freshly observed absent from both sets.
+
+`UnknownObject`, `UnknownHandle`, IncompleteEffect, timeout and lost reply are not success.
+Get a fresh complete observation and apply those same rules. A failed partial cleanup retains
+the incomplete marker and all remaining original authority; it cannot disappear on a retry.
+Once incomplete, grant/apply cannot resume activation or create another child. Only exact
+withdrawal may complete it. Direct application and failed grant never fabricate opaque records.
+The controller is this cleanup actor: it durably aborts before invoking cleanup of an uncommitted
+introduction, and cannot append finish, publish settlement or return completed rollback while
+any matching incomplete resource remains. No undefined autonomous cleanup is assumed.
+
+For brokers, a post-fork/bind access or association failure exposes the original operation as
+incomplete even though no successful OsObject was published. Only original child authority may
+clean it; neither a diagnostic PID nor a GrantId permits signalling a replacement or unlinking
+another process's endpoint. Loss of authority or unobservable residue is a blocking observation
+fault. A lost successful apply response instead retains its complete standing association.
+Startup resolves the durable decision and never repeats apply to revive either case.
 
 Finish records completion of all obligations, not a cursor or a claim that every historical
 effect was undone twice. Crash after removal but before finish is safe because restart observes
@@ -320,9 +337,9 @@ provides that order; it is not an additional durable identity.
 ordinal; newly committed effects take prepare position plus their changes/effects position.
 The ordinal is a tuple, not a plugin-name sort or a wrapping arithmetic counter.
 
-`RecoveryObservation` contains a fresh `OsState` plus observed cell records, observation faults
-and the independently verified recoverable handle records, if any. The observer has no desired
-state input. Each observed record names its cell, actual lifecycle/readiness and the complete
+`RecoveryObservation` contains `snapshot: EnforcementSnapshot` plus observed cell
+records and observation faults. Its original issued records are the only recoverable handles.
+The observer has no desired-state input. Each cell record names actual lifecycle/readiness and the complete
 last published `desired: DesiredCell`, retained by the supervisor atomically with its generation.
 That record proves publication content only, never liveness or enforcement. A snapshot includes
 all holdings reported by the queried supervisor,
@@ -335,14 +352,19 @@ broker launch. That launch identifies the intended capability, not evidence that
 exists. The original runtime association is required independently.
 
 `RecoveryOutcome` contains `desired`, `tombstones`, `expected: OsState`, `drift: Diff`,
-`unmatched: Vec<UnmatchedRecord>`, `pending`, `quarantined: Vec<QuarantineReport>` and the
-independently observed cells. Expected contains exact objects of standing committed
+`unmatched: Vec<UnmatchedRecord>`, `incomplete: Vec<IncompleteEffect>`, `pending`,
+`quarantined: Vec<QuarantineReport>` and independently observed cells.
+Incomplete contains every independently observed incomplete operation, with exact cell/plugin
+ownership; it is a separate unfinished-effects account, not coerced into an OsObject or silently
+removed from drift. Matching cleanup obligations are resolved as above; other incomplete effects
+remain reported and block readiness without authorizing guessed cleanup.
+Expected contains exact objects of standing committed
 universe/compensating effects. A standing backend-handle effect can additionally contribute the
 object from an independently retained original LedgerEntry only when its exact handle and
 cell/plugin owner match; the entry is original grant authority, not a snapshot row converted
 into a receipt. Otherwise it is `UnmatchedRecord { cell, plugin, effect }` and contributes no
 expected object. An equal capability or planted observation is never substituted.
-For `Diff::between(&expected, &observation.objects)`, added means observed but not desired,
+For `Diff::between(&expected, &observation.snapshot.state)`, added means observed but not desired,
 removed means desired but missing. Pending and quarantined holdings may therefore be in added;
 their reports explain attribution rather than erase differences. Replayed exact operations
 produce one object; fresh IDs remain distinct. External and published delayed assertions stay
@@ -364,17 +386,19 @@ without being turned into requests to arbitrary socket paths.
 ### Quarantine and startup integration
 
 `QuarantineReport` carries instance, optional validated cell, raw entry name bytes, raw path,
-fault, optional line, lines_parsed, found objects and refusal claims. A valid cell's `found`
-is every independently observed object whose `owner.cell` is that cell, even if the first
-journal line is corrupt and no plugin was parsed. Another cell's same-plugin objects are
-excluded. An invalid raw name has no validated cell and no guessed object attribution.
+fault, optional line, lines_parsed, found objects, found incomplete effects and refusal claims.
+A valid cell's `found` is every independently observed object whose owner.cell is that cell;
+`incomplete` likewise contains every incomplete operation owned by the cell, even if the first
+journal line is corrupt and no plugin was parsed. Neither set authorizes cleanup.
+Another cell's same-plugin records are excluded. Invalid raw names have no guessed attribution.
 The report does not expose an adoptable prefix and claims no generation.
 `fault` is `NotACell` for a refused directory entry or `Journal(CellJournalFault)` for its
 journal. A non-regular/symlinked journal is a Journal Io fault with no parsed lines; a
 directory entry's invalid name is never passed to the journal opener.
 
 Display escapes raw bytes and control characters unambiguously, names the instance, entry/path
-and fault, emits one FOUND line per full `OsObject::describe()`, and states these refusals:
+and fault, emits one FOUND line per full OsObject and one INCOMPLETE line per full operation,
+and states these refusals:
 not adopted; no trusted prefix; no claimed generation; no withdrawal without separately recorded
 operator Force and independently verified exact authority. The wire report encodes raw names and
 paths as arrays of byte values, not lossy strings. `cell` and `line` are omitted when absent.
@@ -437,7 +461,7 @@ On successful startup, construct ControllerState from recovered identities/modes
 supervisor state, retain the entire recovery account, and pass desired.generation to
 Controller::new. Quarantined cells are absent from the ordinary cell registry and visible in
 `plasmosome.recovery`. The controller's ready flag is false if any quarantine, unmatched effect,
-drift or unsettled publication remains; an empty instance is ready only after the same startup
+incomplete effect, drift or unsettled publication remains; an empty instance is ready only after the same startup
 requirements. An observed ready cell is not relabelled dead because its desired holdings drift.
 The diagnostic surface states that discrepancy separately. Equal object snapshots do not
 establish equal participant generations or publication content. Matching published records do
@@ -477,9 +501,10 @@ carriers and daemon integration; ledger owns the typed journal reader/writer. Ba
 shared CellId/CellOwner/MockMode and exact-operation types; core never depends on a VMM crate.
 All affected ownership constructors, comparisons, serde consumers and conformance factories
 migrate together. No plugin-only or lossy compatibility fallback remains in the recovery path.
-This includes broker launch constructors and embedded inverse payloads, all fallible snapshot
-consumers and every `apply_removal(removal, &CellOwner, DrainSpec)` call. No infallible/partial
-observation, default recipe, PID fallback or drain-free exact-removal wrapper remains.
+This includes broker launch constructors and embedded inverses, caller-prepared fallible grant
+calls, all complete-snapshot consumers and every `apply_removal(removal, &CellOwner, DrainSpec)`
+call. No Grant input, backend ID minting, infallible/partial observation, absence-only completion,
+default recipe, PID fallback or drain-free exact-removal wrapper remains.
 The session-log return-contract change includes all append callers and benchmarks; no infallible
 audit fallback remains. Socket creation, both connection endpoints and workload launch must
 establish the spec001 authorization boundary before exposing recovery operations.
@@ -519,6 +544,9 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   The broker case independently inspects a complete, synced prepare and inverse before the
   actual fork. A spawn-before-prepare or post-fork-PID-backfill mutant exposes an unlogged child
   and fails; a recipe-only policy check is not that real-child ordering proof.
+  Exercise that same order through public grant(op, kind), not only direct apply; the returned
+  entry must preserve the prepared ID and full operation. A post-preflight resource race is a
+  fallible result with no new issued entry, not a panic-based orphan or hidden grant-side WAL.
 - **R6 — transaction publication:** exercise a multi-plugin attach and reload at every event
   boundary and after each apply/withdrawal. Before commit, old desired survives and new holdings
   roll back in reverse order. After commit, complete replacement desired survives and old
@@ -529,14 +557,23 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   replacement that cannot preserve old holdings refuses before prepare. Missing desired holdings
   are named, never auto-regranted.
 - **R7 — exact resumption:** kill after an inverse but before finish, then resume against fresh
-  observation. The absent exact holding is not withdrawn again; an equal neighbouring holding
-  survives. Inject UnknownObject/lost reply/conflicting payload/unavailable observation: only
-  verified exact absence completes an obligation. Preserve graceful timeout and explicit Force
-  requirements, external assertions and broker incarnation refusal. No blanket error swallowing.
+  observation. The exact address absent from both standing and incomplete collections is not
+  withdrawn again; an equal neighbouring holding survives. Inject UnknownObject/lost reply,
+  conflicting payload/unavailable observation: only verified complete absence completes.
+  Preserve graceful timeout, explicit Force requirements, external assertions and broker incarnation refusal.
+  No blanket error swallowing.
   Loss of a broker apply response followed by controller restart must retain the original
   association and resolve pending cleanup without a duplicate spawn. An unknown incarnation
   cannot target a same-number replacement. Direct exact removal must enforce its supplied
   graceful deadline and preserve peers on timeout, not bypass drain because it uses an inverse.
+  After real fork and successful bind, inject access/association failure before successful
+  publication. Observe the typed incomplete operation with no complete object or fabricated
+  entry. Kill the controller, restart, durably abort, then exact-withdraw using retained original
+  authority. A timed-out/failed cleanup retains that marker and authority; exact retry cleans
+  only its remaining resources, including no endpoint owned by a competing process.
+  Finish and publication are forbidden while the marker remains. A successful cleanup with
+  lost reply completes only after fresh absence from both sets. Unknown/quarantined incomplete
+  effects remain named, untouched and blocking, not automatically selected for cleanup.
   For Force, independently reopen the session log and match its cell/generation/operator/reason
   to the prepared assertion. Inject write, flush, file-sync and new-parent-sync failures: no
   forced cleanup, successful acknowledgement or next mutation may pass the failed audit.
@@ -547,8 +584,8 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   may be followed by another durable assertion with the same cell/generation after validation.
 - **R8 — quarantine blast radius:** a corrupt cell is absent from desired and ordinary status,
   excluded from generation maximum and never mutated. Its report names raw path, fault/line,
-  parsed count, every cell-owned found object and every refusal. Same-plugin siblings are
-  adopted normally. Unknown observation is represented as unknown and prevents startup success.
+  parsed count, every cell-owned found object and incomplete operation, and every refusal.
+  Same-plugin siblings are adopted normally. Unknown observation prevents startup success.
 - **R9 — observed startup:** run actual plasmosomed over a persistent instance with independently
   surviving supervisors and nonzero journals. While the controller is stopped, remove a promised
   holding, leave a stray, and corrupt one sibling journal. Restart, query status/recovery over
@@ -594,6 +631,10 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   Returning an empty snapshot on a class error, ignoring exact-removal drain, recreating a broker
   after an uncertain apply reply or guessing a launch for an old PID record must fail their
   corresponding cases. Label injected PID aliases separately from actual kernel PID recycling.
+  Omitting incomplete state or deciding completion from OsState alone must fail while the
+  post-fork failed child's resource still serves. Minting an ID inside grant after preparation,
+  or accepting a new issued receipt for a direct-applied object, must fail the public grant
+  identity/order/receipt cases. Preserve the same all-five real-backend conformance contract.
 - **R12 — integration:** the complete accepted control/recovery contract is served, all affected
   consumers migrate and the root gate passes. Independent review checks the acceptance against
   the actual final head. Portable journal/model proofs are reported separately from macOS/Linux

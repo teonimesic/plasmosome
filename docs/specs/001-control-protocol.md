@@ -480,11 +480,13 @@ must not operate a quarantine's effects merely because its supervisor answered.
   This publication record is not evidence of liveness or holdings: those still require actual
   supervisor and enforcement-side observation. No PID-file or socket-existence substitute is allowed.
 - `membrane.residue.snapshot` params are `{cell, deadline_ms}`. Result is
-  `{cell, state: OsState, grants: [LedgerEntry, ...]}`. `state` is fresh enforcement-side
-  observation, including unrequested residue, using spec017 identities and spec008 CellOwner.
-  Every object and grant belongs to the addressed cell. `grants` names only original live grant
-  records for which this surviving backend still has its drain/withdrawal authority; it is
-  not rebuilt by planting observed objects. An unsupported or failed class observation fails
+  `{cell, state: OsState, grants: [LedgerEntry, ...], incomplete: [IncompleteEffect, ...]}`.
+  The three required collections are spec017's strict EnforcementSnapshot; an incomplete record
+  contains its complete original operation, not a successful OsObject. All records belong to the
+  addressed cell. `state` is fresh enforcement-side observation including unrequested residue.
+  `grants` includes only original issued records with retained authority, possibly during partial
+  withdrawal; failed initial application/grant and direct apply fabricate none. No collection
+  is rebuilt from desired state or planted objects. Unsupported or failed class observation fails
   the whole request with `-32603`, never omits the class or returns a requested-state mirror.
   The result contains the five currently specified capability classes; adding guest classes
   requires their explicit enumeration rather than a claim of coverage without an observer.
@@ -493,6 +495,10 @@ must not operate a quarantine's effects merely because its supervisor answered.
   original runtime association. Direct apply does not manufacture a LedgerEntry or opaque handle
   for `grants`. Backend snapshot failures, including a failed Composite leaf, propagate to the
   whole RPC; success requires fresh coverage of every class.
+  Duplicate/conflicting addresses, standing/incomplete overlap or an out-of-cell row refuses the
+  whole response. Post-side-effect failure is represented in incomplete, not hidden because no
+  complete object was published. Empty state alone never establishes cleanup: the exact address
+  must be absent from state AND incomplete. Lost authority is a failure, not an empty collection.
 - `membrane.effect.apply` params are `{cell, generation, operation, deadline_ms}`.
   `operation` is a fully predeclared spec017 UniverseOp with spec008 owner. The trusted
   controller sends it only after that generation's prepare is durable. Result is
@@ -508,24 +514,37 @@ must not operate a quarantine's effects merely because its supervisor answered.
   Equal fresh holdings may share an original resource only with independent enforcement-side
   access. A lost reply cannot cause a duplicate child when the same standing operation is
   repeated. On controller restart, spec008's journal decision governs: an uncommitted prepare
-  is aborted and its observed holdings cleaned, not reapplied. Neither a PID backfill nor
-  adoption of a matching process name is an alternative implementation.
+  is durably aborted and its complete or incomplete introduced effects cleaned, not reapplied.
+  Partial application returns the typed incomplete_effect refusal and retains original cleanup
+  authority; grant/apply retry at that incomplete address cannot launch again or complete access.
+  Neither PID backfill nor adoption of a matching process name is an alternative implementation.
 - `membrane.effect.withdraw` params are `{cell, generation, removal, owner, drain, deadline_ms}`.
   `removal` is the exact spec017 UniverseRemoval, `owner` is CellOwner, and `drain` is the
   existing DrainSpec serde value. Result is `{cell, generation, id, withdrawn: true}`.
   The backend preserves all neighbours, drain behavior and incarnation checks. Unknown-object
   and unknown-handle refusals are not translated into success; the controller must freshly
-  observe exact absence before completing an uncertain obligation.
+  observe exact absence from BOTH standing and incomplete collections before completing an obligation.
   Exact removal passes the supplied DrainSpec through to enforcement, just as original-handle
   revoke does. Graceful timeout retains the exact holding and its peers. Withdrawal of the
   last broker holding cleans the original resource; it never signals a numeric PID copied
   from a request or old record. Loss of original authority is backend_fault, not absence.
+  A matching incomplete operation is selected by the same full inverse and owner, with the same
+  DrainSpec; no new cleanup RPC or authority is invented. Only its original owned partial resources
+  may be released, never a competing endpoint or peer. Timeout/partial failure retains the marker
+  and remaining authority. Success means every owned partial effect is independently absent.
+  The controller must durably abort an uncommitted introduction before this cleanup; an unmatched
+  or quarantined incomplete marker is reported and keeps readiness false, never an automatic withdrawal request.
 - For either effect method, backend refusal is code105 with `from: "prepared"` or `"held"`,
   `to: "applied"` or `"withdrawn"`, plus `recovery: {kind, ...}`. The closed kinds and fields
   are `identity_conflict {class,id}`, `unknown_object {class,id,key,owner}`,
-  `unknown_handle {handle}`, `drain_timeout {handle,deadline_ms}`, and
-  `backend_fault {detail}`. Unsupported enforcement and unverified process incarnation are
-  backend_fault, not successful model operations. The human message is never a selector.
+  `unknown_handle {handle}`, `drain_timeout {handle,deadline_ms}`,
+  `incomplete_effect {class,id,detail}`, and `backend_fault {detail}`. Incomplete_effect means
+  retained partial original effects, not success; the complete snapshot exposes its operation
+  until exact cleanup establishes absence. Unsupported enforcement and lost/unverified original
+  authority are backend_fault, not successful model operations. The human message is not a selector.
+  For incomplete withdrawal, `from: "held"` names retained cleanup responsibility, not proof
+  that a complete holding exists. A deadline after partial release is incomplete_effect;
+  drain_timeout preserves the pre-withdrawal holding and does not pretend partial release was undone.
   Protocol parse/parameter/internal errors keep §1's existing meanings.
 - `membrane.cell.desired` params are `{cell, generation, desired}` with spec008's complete,
   settled DesiredCell reconstructed from the journal; the outer and desired generations must
@@ -635,8 +654,9 @@ is a claim that the text above may not be corrected.
    requires actual controller restart and independently surviving supervisor observation,
    separately from portable journal/model evidence. Accepting the contract does not turn the
    existing status-only daemons into recovery-capable daemons.
-8. Spec017's PID-free BrokerLaunch, fallible backend snapshot, drain-aware exact removal and
-   single-plugin format3 cutover are **not yet implemented**. Current exact-ID model code still
-   carries PID-bearing broker capabilities and format2 records. The new contract permits a
-   complete broker prepare/inverse before fork; it does not make the status-only command
-   launcher an independent observer, prove workload confinement, or deliver all five adapters.
+8. Spec017's PID-free BrokerLaunch, caller-prepared fallible grant API, complete fallible snapshot,
+   typed incomplete effects, drain-aware exact cleanup and single-plugin format3 cutover are
+   **not yet implemented**. Current exact-ID model code still carries PID-bearing capabilities,
+   infallible backend-minted grants and format2 records. The new contract permits complete
+   prepare/inverse before fork and defines cleanup after partial launch; it does not deliver
+   an independent observer, workload confinement or all five real adapters.

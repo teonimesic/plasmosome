@@ -82,18 +82,29 @@ crates; no kernel crate may depend on it outside `dev-dependencies`, and a guard
 `plasmosome-guards` enforces that. Layout:
 
 - `src/builders.rs` — construction helpers for the noisy types: a `PlasmidManifest` builder, a
-  `Grant`/`Effect` sequence builder, a `DesiredState` builder. Tests state only what they are
-  about; the builder supplies the rest.
+  predeclared UniverseOp/Effect sequence builder and a DesiredState builder. Under spec017's
+  cutover there is no Grant request builder or backend-minted identity: the caller chooses the
+  fresh ID, full operation and inverse before preparation and calls fallible grant(op, kind).
 - `src/conformance.rs` — the backend conformance suite: public functions generic over
   `EnforcementBackend`, each one behavioral clause of the backend contract (a grant returns a
   replayable entry; revoke of an unknown handle is `UnknownHandle`; a drained revoke removes
   the object from the snapshot; planted residue survives an unrelated revoke; snapshots never
   invent objects). `FakeBackend` passes it now. Every future real backend passes the same
   functions unchanged — that is what makes the fake a model rather than a hope.
-- `tests/` — the cross-crate scenarios. The first one: build a manifest, register it, grant its
-  capabilities through `FakeBackend`, record effects in a `Ledger`, detach, replay LIFO, and
-  verify the backend snapshot shows no residue. That path crosses core, backend, and ledger
-  and is the kernel's whole reason to exist.
+  Spec017's API migration updates these shared bodies once, without renaming their clauses or
+  changing factory signatures. Fixtures supply caller-owned durable preparation before actual
+  resource creation, never grant-then-record or a hidden backend WAL. Exercise failed grants
+  without issued entries and complete standing/issued/incomplete snapshots; empty OsState alone
+  is not cleanup. The same clauses run against real implementations with all five classes
+  covered, not a model-only or success-only substitute. A real factory may compose assigned-class
+  adapters; all five participating adapters must be real for real-enforcement evidence.
+- `tests/` — the cross-crate scenario still builds/registers a manifest, grants through FakeBackend,
+  records effects in the single-plugin Ledger and detaches LIFO across core, backend and ledger.
+  At spec017's cutover its fixture first predeclares and durably prepares the complete operation
+  and inverse before fallible grant. Recording a returned entry is not that preparation.
+  Verify the complete standing/incomplete residue account after cleanup. The fixture's
+  caller-owned preparation is not a backend WAL or a replacement for spec008's per-cell
+  decision/cleanup/finish/publication protocol. Actual cell recovery remains separate acceptance.
 
 ### Conventions, written where agents look
 
