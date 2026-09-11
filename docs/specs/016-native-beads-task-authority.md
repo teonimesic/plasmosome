@@ -206,10 +206,26 @@ The orchestrator dispatches the task ID, never claims on an executor's behalf.
 
 Ownership is persistent, not an expiring lease. Recovery is explicit: establish the previous
 author is gone, inspect its PR for actual merge evidence, append the reason and observations,
-then release/reassign through native updates if it was not delivered. Missing branches and failed
-network queries cannot establish abandonment. A released task retains `planned` only if its plan
-and chain remain valid; otherwise it returns to `open` + `needs-plan`. Preserve prior PR references
-in history and notes when selecting a replacement current reference.
+then recover the work's actual phase if acceptance remains unfinished. Missing branches and
+failed network queries cannot establish abandonment. Preserve prior PR references in history
+and notes when selecting a replacement current reference.
+
+If a settled candidate still belongs in `review`, do not release it into `open` + `planned`
+or re-claim it into `in_progress`. The orchestrator coordinates one replacement author, not a
+replacement independent reviewer, and excludes competing recovery or dispatch for this task
+through the handoff readback. The replacement revalidates admission, the candidate and current
+PR, then re-reads the expected previous assignee and `review` status. With that evidenced
+release authority, it uses `update ID --assignee UNIQUE_ACTOR` without a status change and
+verifies its assignee and `review` before doing work. This native assignment is cooperative,
+not an atomic claim or compare-and-swap; without exclusive handoff coordination, or if the
+expected record changed, leave ownership unchanged and resolve the conflict first. An
+assignment or note alone does not restart review residence. This explicit recovery handoff
+does not authorize an orchestrator to claim implementation work on an executor's behalf.
+
+For other confirmed releases, clear assignee and set `open`. Retain `planned` only if the
+plan and chain remain valid; otherwise use `needs-plan`. A candidate that is no longer settled
+or admitted needs its actual remaining work and reason recorded, not blind preservation of
+`review` or an implicit assumption that implementation is eligible.
 
 A dependency edge CHILD → PREREQUISITE makes implementation of the child wait. Planning may
 proceed only where that prerequisite does not prevent the assigned design work; keep the edge.

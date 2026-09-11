@@ -152,10 +152,14 @@ Claims persist across sessions and do not expire automatically. Before recoverin
 actor's claim, establish that its owner is no longer working, inspect its PR on GitHub first,
 and preserve the reason and observations in notes. A missing branch, silent agent or failed
 network query alone does not establish abandonment. The author owns this work; the orchestrator
-reconciles only when the author is gone. After confirming release, clear assignee with
-`update ID --assignee '' --status open`; retain `planned` only if its
-plan and admission still hold, otherwise replace it with `needs-plan`. Do not clear a historical
-PR reference without first preserving it in notes/metadata.refs.
+reconciles only when the author is gone. A settled candidate still in `review` uses spec016's
+explicit, coordinated replacement-author handoff: preserve `review`, exclude competing
+recovery/dispatch and verify ownership before work. Do not release it into the ready queue or
+re-claim it into implementation. For other confirmed releases, clear assignee with
+`update ID --assignee '' --status open`; retain `planned` only if its plan and admission
+still hold, otherwise replace it with `needs-plan`. Record the actual remaining work when a
+candidate is no longer settled or admitted. Do not clear a historical PR reference without
+first preserving it in notes/metadata.refs.
 
 ## Review, closure and durable evidence
 
