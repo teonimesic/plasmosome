@@ -446,9 +446,9 @@ The controller drives each cell's `membraned` over a second, private ndjson-UDS
   verbatim from the seam types; the membrane owns the VMM child, shim, and brokers as **its**
   children — never the controller's (86 §4 rule 5), and per-cell vs per-host brokers is an
   explicit parameter in the desired record.
-- RESERVED for P1 step 2: vsock bridge setup, shim lifecycle, broker spawn/supervision verbs,
-  and the credential vsock proxy (port 4041 terminates at the membrane and proxies to the
-  controller; custody state stays kernel-core).
+- RESERVED for P1 step 2: vsock bridge setup, shim lifecycle, broker lifecycle verbs beyond the
+  predeclared exact apply/withdraw contract below, and the credential vsock proxy (port4041
+  terminates at the membrane and proxies to the controller; custody state stays kernel-core).
 
 ### 4.1 Recovery startup and exact operation messages
 
@@ -488,18 +488,38 @@ must not operate a quarantine's effects merely because its supervisor answered.
   the whole request with `-32603`, never omits the class or returns a requested-state mirror.
   The result contains the five currently specified capability classes; adding guest classes
   requires their explicit enumeration rather than a claim of coverage without an observer.
+  Broker capabilities contain the exact launch description, never a predicted PID. That description
+  is not evidence of a running process. The supervisor must independently retain and verify the
+  original runtime association. Direct apply does not manufacture a LedgerEntry or opaque handle
+  for `grants`. Backend snapshot failures, including a failed Composite leaf, propagate to the
+  whole RPC; success requires fresh coverage of every class.
 - `membrane.effect.apply` params are `{cell, generation, operation, deadline_ms}`.
   `operation` is a fully predeclared spec017 UniverseOp with spec008 owner. The trusted
   controller sends it only after that generation's prepare is durable. Result is
   `{cell, generation, id, applied: true}` after enforcement accepted the exact operation.
   Duplicate application of the same standing operation retains spec017's no-op semantics.
   This result does not replace the independent snapshot used for recovery verification.
+  `SpawnBroker` carries `{id,name,launch,owner}` with spec017's strict
+  `BrokerLaunch {command,control_socket}`. PID-bearing, missing or malformed launch fields
+  are invalid parameters, not a request to guess a recipe. Before prepare the controller has
+  validated the trusted recipe and non-destructive staging; the supervisor creates no broker
+  or endpoint before that durable boundary. When the resource is absent, actual launch binds
+  the original owned child to this holding before successful application can be reported.
+  Equal fresh holdings may share an original resource only with independent enforcement-side
+  access. A lost reply cannot cause a duplicate child when the same standing operation is
+  repeated. On controller restart, spec008's journal decision governs: an uncommitted prepare
+  is aborted and its observed holdings cleaned, not reapplied. Neither a PID backfill nor
+  adoption of a matching process name is an alternative implementation.
 - `membrane.effect.withdraw` params are `{cell, generation, removal, owner, drain, deadline_ms}`.
   `removal` is the exact spec017 UniverseRemoval, `owner` is CellOwner, and `drain` is the
   existing DrainSpec serde value. Result is `{cell, generation, id, withdrawn: true}`.
   The backend preserves all neighbours, drain behavior and incarnation checks. Unknown-object
   and unknown-handle refusals are not translated into success; the controller must freshly
   observe exact absence before completing an uncertain obligation.
+  Exact removal passes the supplied DrainSpec through to enforcement, just as original-handle
+  revoke does. Graceful timeout retains the exact holding and its peers. Withdrawal of the
+  last broker holding cleans the original resource; it never signals a numeric PID copied
+  from a request or old record. Loss of original authority is backend_fault, not absence.
 - For either effect method, backend refusal is code105 with `from: "prepared"` or `"held"`,
   `to: "applied"` or `"withdrawn"`, plus `recovery: {kind, ...}`. The closed kinds and fields
   are `identity_conflict {class,id}`, `unknown_object {class,id,key,owner}`,
@@ -584,7 +604,9 @@ observation. A library-only fake or manually constructed Controller cannot demon
 - `cell.clone` / `cell.save` / `cell.load` / `freeze` (D1c tiers 2–3), genome
   `new/show/lint/test/export` details beyond D1's one-line definitions, and exec output
   streaming.
-- The membrane's VMM/shim/broker verb set (P1 step 2 owns it; §4 bounds its shape).
+- The membrane's VMM/shim and remaining broker lifecycle verb set (P1 step2 owns it; §4 bounds
+  its shape). The predeclared broker launch payload in §4.1/spec017 is no longer reserved, but
+  it does not select or implement the missing cell runtime and concrete enforcement adapters.
 - Multi-instance brokers, remote orchestration, multi-tenancy — out of scope per 90.
 
 ## 6. How much of this is delivered
@@ -613,3 +635,8 @@ is a claim that the text above may not be corrected.
    requires actual controller restart and independently surviving supervisor observation,
    separately from portable journal/model evidence. Accepting the contract does not turn the
    existing status-only daemons into recovery-capable daemons.
+8. Spec017's PID-free BrokerLaunch, fallible backend snapshot, drain-aware exact removal and
+   single-plugin format3 cutover are **not yet implemented**. Current exact-ID model code still
+   carries PID-bearing broker capabilities and format2 records. The new contract permits a
+   complete broker prepare/inverse before fork; it does not make the status-only command
+   launcher an independent observer, prove workload confinement, or deliver all five adapters.

@@ -78,9 +78,10 @@ advisory locks are the filesystem seam, not a virtual-machine dependency in core
 
 ### Journal records and generations
 
-The new per-cell format is version 1 of `CellJournalRecord`, distinct from spec017's version-2
-single-plugin `LogRecord`. The former draft's unversioned grant/revoke lines were never a
-production per-cell format and are refused, not inferred or rewritten. Every record is one UTF-8
+The new per-cell format is version1 of `CellJournalRecord`, distinct from spec017's version3
+single-plugin `LogRecord` cutover from the implemented version2. The former draft's unversioned
+grant/revoke lines were never a production per-cell format and are refused, not inferred or
+rewritten. Every record is one UTF-8
 JSON object followed by LF. Required fields have no defaults; unknown fields, enum variants and
 versions refuse. CRLF is accepted as JSON trailing whitespace followed by LF. Empty lines refuse.
 
@@ -109,6 +110,14 @@ record appears at most once in a replacement. Identical capabilities with differ
 separate effects. Across successfully validated journals, a repeated exact address is an instance
 consistency error, including when owners differ; recovery never chooses a file by listing order.
 A quarantined prefix is not used as a trusted identity index.
+
+For brokers the full capability is `{ name, launch: BrokerLaunch }`, not a PID. Spec017 defines
+the required exact command and private endpoint; the operation and its matching inverse are
+therefore complete before a process exists. A PID-bearing record, missing launch, unknown recipe
+field or operation/inverse launch mismatch is a strict-reader fault. Never infer a recipe from
+the supervisor's current command or patch a prepared record after discovering the child PID.
+Version2 single-plugin logs are not cell histories and acquire neither a cell nor a launch by
+being placed at the cell path.
 
 Forensic replay can encounter an `Exact(Backend(handle))`, `External`, or `Delayed` effect with
 null operation. The reader retains it rather than pretending it is a universe operation. A
@@ -165,6 +174,14 @@ states, newly introduced operations and old effects to retire without changing t
 `UniverseOp` supplies a fresh ID and `op.removal()` before `apply`; using
 `grant()` followed by recording its returned handle is expressly not this writer.
 
+Broker preflight validates the complete trusted launch description and endpoint conflict/staging
+conditions without creating a process or listener. Only after prepare is durable may the
+surviving supervisor create the new resource and bind its original child authority to that exact
+holding. The PID is discovered at runtime and is not appended to or substituted into prepare.
+No PID reservation by an unlogged fork, spawn-before-journal shortcut or already-owned-only
+restriction satisfies this transaction. Equal broker holdings may share the original resource
+only with real independently withdrawable access; their last removal cleans it.
+
 The sequence is:
 
 1. Append and sync prepare. The previous committed desired state remains authoritative.
@@ -218,8 +235,11 @@ fault and blocks cleanup. A matching holding is withdrawn via its exact universe
 then observed absent. `UnknownObject`, `UnknownHandle`, a timeout or a lost response is NOT
 success: obtain a new observation and use the same rules. A live conflicting or unobservable
 holding remains unfinished. Spec017's backend refusal contract is not weakened. For brokers,
-only the surviving supervisor's original process-incarnation authority can act; a journal PID
-or GrantId never permits signalling a replacement process.
+only the surviving supervisor's original process-incarnation authority can act; a diagnostic PID
+or GrantId never permits signalling a replacement process. Directly applied holdings retain
+their actual removal authority without fabricating opaque grant records. A lost apply response
+does not permit another spawn: observe the surviving exact association, then resolve the journal
+decision. Startup still aborts an uncommitted prepare; it does not replay apply to revive it.
 
 Finish records completion of all obligations, not a cursor or a claim that every historical
 effect was undone twice. Crash after removal but before finish is safe because restart observes
@@ -309,6 +329,10 @@ all holdings reported by the queried supervisor,
 including holdings absent from its cell journal. Supervisor lifecycle/readiness comes from
 actual child/broker observation; holdings come from enforcement-side observation bound to
 original identities, not a copy of controller requests or reconstructed ledgers.
+Every backend snapshot is fallible under spec017. A failed or unsupported class fails the
+observation; it cannot be replaced by an empty class, a partial Composite union or the requested
+broker launch. That launch identifies the intended capability, not evidence that its process
+exists. The original runtime association is required independently.
 
 `RecoveryOutcome` contains `desired`, `tombstones`, `expected: OsState`, `drift: Diff`,
 `unmatched: Vec<UnmatchedRecord>`, `pending`, `quarantined: Vec<QuarantineReport>` and the
@@ -432,21 +456,30 @@ specified in spec001. Its adapters must observe and retain actual resource/holdi
 including process incarnation for brokers. Implementing only FakeBackend or serving snapshots
 from remembered requests cannot complete the live-controller acceptance below. No such real
 adapter is claimed to exist today; acceptance of this contract is not evidence that it does.
+The first broker holding must be able to create a real new broker under the predeclared launch
+contract, not merely label a process that happened to exist. A generic subprocess probe does
+not supply the complete cell runtime, per-owner broker enforcement, mounted objects, proxy
+service or independent all-five-class observer. Those concrete realization and confinement
+prerequisites must be settled before implementation admission, without weakening this acceptance.
 
 ### Existing APIs and implementation boundary
 
 Core currently serves only plasmosome.status from an empty registry; its existing daemon has no
 recovery root or live observation client. Membrane currently serves membrane.status, not the
 recovery/operation RPCs below. The current ledger helper's append-whole-history recipe is not a
-cell writer and must no longer be recommended for reopen/extend. Spec017 changes the legacy
-single-plugin reader's compatibility rules independently; this contract does not depend on its
-old skip-malformed-lines implementation or change its narrow torn-tail allowance.
+cell writer and must no longer be recommended for reopen/extend. The implemented legacy reader
+already has spec017's strict version2 rules; the revised broker representation now requires its
+explicit version3 cutover. That reader's narrow torn-tail allowance is unchanged, but append
+refuses an incomplete target. Neither legacy reader supplies this cell reader's strict-LF rule.
 
 Implementation adds core's ledger dependency, the recovery module, explicit recovered-state
 carriers and daemon integration; ledger owns the typed journal reader/writer. Backend owns the
 shared CellId/CellOwner/MockMode and exact-operation types; core never depends on a VMM crate.
 All affected ownership constructors, comparisons, serde consumers and conformance factories
 migrate together. No plugin-only or lossy compatibility fallback remains in the recovery path.
+This includes broker launch constructors and embedded inverse payloads, all fallible snapshot
+consumers and every `apply_removal(removal, &CellOwner, DrainSpec)` call. No infallible/partial
+observation, default recipe, PID fallback or drain-free exact-removal wrapper remains.
 The session-log return-contract change includes all append callers and benchmarks; no infallible
 audit fallback remains. Socket creation, both connection endpoints and workload launch must
 establish the spec001 authorization boundary before exposing recovery operations.
@@ -475,11 +508,17 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   operations retain IDs, changed-payload/recycled-ID records refuse, and duplicate addresses
   across cell histories abort instead of choosing a file. Exact drift detects replacement,
   lost objects and stray objects; canonical equivalence is never used as its substitute.
+  Include broker launch content in exact equality; PID diagnostics cannot manufacture an
+  original association. Equal broker holdings retain distinct actual access until their own
+  withdrawal; the final removal cleans the shared resource.
 - **R5 — one durable append:** independently reopen after each event and observe exactly one
   added record without history duplication. Deterministic write/sync/parent-sync failures block
   further mutation and produce no successful acknowledgement or unlogged effect. Kill the
   writer after append-before-apply and inspect the file independently; fault injection separates
   successful sync ordering from any claim about actual power-loss hardware guarantees.
+  The broker case independently inspects a complete, synced prepare and inverse before the
+  actual fork. A spawn-before-prepare or post-fork-PID-backfill mutant exposes an unlogged child
+  and fails; a recipe-only policy check is not that real-child ordering proof.
 - **R6 — transaction publication:** exercise a multi-plugin attach and reload at every event
   boundary and after each apply/withdrawal. Before commit, old desired survives and new holdings
   roll back in reverse order. After commit, complete replacement desired survives and old
@@ -494,6 +533,10 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   survives. Inject UnknownObject/lost reply/conflicting payload/unavailable observation: only
   verified exact absence completes an obligation. Preserve graceful timeout and explicit Force
   requirements, external assertions and broker incarnation refusal. No blanket error swallowing.
+  Loss of a broker apply response followed by controller restart must retain the original
+  association and resolve pending cleanup without a duplicate spawn. An unknown incarnation
+  cannot target a same-number replacement. Direct exact removal must enforce its supplied
+  graceful deadline and preserve peers on timeout, not bypass drain because it uses an inverse.
   For Force, independently reopen the session log and match its cell/generation/operator/reason
   to the prepared assertion. Inject write, flush, file-sync and new-parent-sync failures: no
   forced cleanup, successful acknowledgement or next mutation may pass the failed audit.
@@ -548,6 +591,9 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   Accepting a recovery connection without its authorization boundary must fail the unauthorized
   client case; ignoring audit IO errors or acknowledging Force before durable audit must fail
   the Force crash/fault cases.
+  Returning an empty snapshot on a class error, ignoring exact-removal drain, recreating a broker
+  after an uncertain apply reply or guessing a launch for an old PID record must fail their
+  corresponding cases. Label injected PID aliases separately from actual kernel PID recycling.
 - **R12 — integration:** the complete accepted control/recovery contract is served, all affected
   consumers migrate and the root gate passes. Independent review checks the acceptance against
   the actual final head. Portable journal/model proofs are reported separately from macOS/Linux
