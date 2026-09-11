@@ -125,16 +125,21 @@ create --type task --title TITLE --description BODY --acceptance CRITERIA
 show ID [--json]
 list [--all] --limit 0 [--json]
 ready --label planned
+list --status planning --limit 0
+list --status review --limit 0
 blocked
 update ID --description BODY --design PLAN --acceptance CRITERIA
 update ID --remove-label needs-plan --add-label planned
 update ID --claim --actor UNIQUE_SESSION_ACTOR
+update ID --claim --status planning --actor UNIQUE_SESSION_ACTOR
+update ID --status in_progress
 dep add CHILD PREREQUISITE
 update ID --status blocked --append-notes REASON
-update ID --external-ref PR_URL --add-label in-review
+update ID --external-ref PR_URL --status review
 update ID --append-notes EVIDENCE
-update ID --remove-label in-review
 close ID --reason REASON
+history ID --limit 0 --json
+vc status --json
 dolt pull
 dolt push
 ```
@@ -148,32 +153,56 @@ or `contract-test` wrapper API.
 
 | Stored status and labels | Meaning |
 | --- | --- |
-| `open` + `needs-plan` | Filed; not yet eligible for dispatch |
-| `open` + `planned` | Planned candidate; native ready also excludes dependency blockers |
-| `in_progress` | Claimed by an author; work underway |
-| `in_progress` + `in-review` | Same author owns PR review; `external_ref` identifies it |
-| `blocked` | Explicitly blocked; notes identify cause and native edges identify prerequisite tasks |
+| `open` + `needs-plan` | Filed, awaiting a planner |
+| `planning` | Owned, active work on this task's executable plan |
+| `open` + `planned` | Admitted implementation candidate; ready also excludes dependency blockers |
+| `in_progress` | Owned implementation, including active review repairs |
+| `review` | Same author owns a submitted candidate through review and merge; `external_ref` identifies its PR when opened |
+| `blocked` | No current task work can advance; notes identify cause and the phase to resume |
 | `closed` | Delivered with merge evidence, or explicitly cancelled with its distinct reason |
 
-`planned` and `needs-plan` are mutually exclusive labels, not statuses. Beads 1.1.2's custom
-planned status was probed: native update accepts it but ready omits it and claim rejects it.
-Do not configure it or translate old `todo`, `in_review` and `done` into custom native statuses.
-The native software has other features; this table is the chosen repository task workflow.
+Configure native `status.custom` as `planning,review` through `config set status.custom` at the
+coordinated cutover below. These are actual stored statuses supported by pinned Beads 1.1.2,
+not labels or a second state engine. `planned` and `needs-plan` remain mutually exclusive labels.
+The former says the plan and implementation admission hold, not that a planner is working.
+Do not configure `planned`, `todo`, `in_review` or `done` as statuses. The former review label
+`in-review` is retired; readers use actual status, not that historical label.
+
+A planner first reads the whole mapped task and its uniquely resolving spec/intent chain and
+records the bounded planning assignment. Drafting a design does not authorize implementation:
+draft specs and implementation prerequisites may remain while useful planning proceeds.
+Keep those prerequisites and acceptance intact. An implementation blocker does not turn active
+plan-writing into `blocked`; use `planning` while the planner can advance this task's design,
+and `blocked` only when it cannot. Taskless intent/spec authorship keeps spec012's two shapes
+and its own PR stage; do not pretend its PR is the implementation task's review or delivery.
 
 Before adding `planned`, the planner supplies a complete design and acceptance, resolves every
-spec link to accepted Git content and checks its approved intent chain. The executor re-reads the
-record and governing documents before claim, including a direct-ID assignment's planned label
-and active dependency blockers. Intent approval remains exclusively the owner's instruction
-under `docs/intents/README.md`; the launcher does not infer or write it. Native ready filters
-dependencies; native claim checks open status and assignee but does not check dependency edges.
-Neither validates Markdown specs or prose adequacy. These admission checks belong to the agents;
-the adapter promises atomic competing ownership, not atomic dependency or spec validation.
+spec link to accepted main content and checks its approved intent chain. Native ready filters
+dependencies; native claim checks status and assignee, not dependencies or Markdown admission.
+The implementation author rechecks the record, `planned`, governing main revisions and all
+active implementation prerequisites before taking `in_progress` or opening its code worktree.
+An existing planning claim is not permission to skip that check. Intent approval remains the
+owner's instruction under `docs/intents/README.md`, never something the launcher infers.
 
-A successful native claim atomically assigns the actor and moves the issue to `in_progress`.
-A competing actor is refused. Repeating a claim as the same actor is idempotent, so each executor
-must have its own session identity. Dispatch names the Beads ID; its executor claims before code
-worktree creation or execution, and a losing executor causes no implementation or further dispatch
-for that task. Neither chat assignment nor branch naming is ownership.
+For an unowned open task, a unique session actor acquires planning with
+`update ID --claim --status planning`; implementation uses `update ID --claim`. Native claim
+atomically assigns ownership and initially selects `in_progress`; the combined planning
+invocation then applies `planning` before releasing the launcher's command lock and commits
+the final state to native history. This is not a claim that both native updates are one
+transaction. A losing actor is refused before the requested status update and does no work.
+Read back both assignee and final status before work. If the combined command fails after
+claim, preserve the acquired owner and inspect history; that owner finishes the missing
+planning transition, rather than releasing or re-claiming to hide the partial result.
+
+Same-actor claim is idempotent only where native claim accepts the current status; in particular
+it refuses `planning` and `review`. Owners change phase with ordinary `update ID --status`,
+not another claim. Those updates are cooperative, not authenticated owner checks. A planner
+who continues as implementer retains its actor and explicitly takes `in_progress` after the
+gate. For a planned handoff to another executor, the current owner publishes design/acceptance,
+sets `open`, clears assignee and adds `planned` in one update; the next executor independently
+checks admission and atomically claims. If the plan is drafted but admission is still pending,
+retain `needs-plan`, record what remains, and wait as `blocked` without falsely admitting it.
+The orchestrator dispatches the task ID, never claims on an executor's behalf.
 
 Ownership is persistent, not an expiring lease. Recovery is explicit: establish the previous
 author is gone, inspect its PR for actual merge evidence, append the reason and observations,
@@ -182,17 +211,91 @@ network queries cannot establish abandonment. A released task retains `planned` 
 and chain remain valid; otherwise it returns to `open` + `needs-plan`. Preserve prior PR references
 in history and notes when selecting a replacement current reference.
 
-A dependency edge CHILD → PREREQUISITE makes the child wait for the prerequisite. Do not remove
-real dependencies to get a claim accepted. An external blocker uses `blocked` and notes; after
-resolution its existing owner resumes, or a confirmed release returns it to the eligible queue.
-Blocking does not automatically abandon ownership.
+A dependency edge CHILD → PREREQUISITE makes implementation of the child wait. Planning may
+proceed only where that prerequisite does not prevent the assigned design work; keep the edge.
+Never delete real dependencies to make ready list a task. Record the phase and cause before
+setting `blocked`; retain the owner. When the cause clears, that owner resumes the actual phase
+with an ordinary status update, or an evidenced release returns the task to `open`.
 
-Review is native status `in_progress` plus `in-review` and the current PR URL. The author keeps
-ownership and answers actual GitHub threads; task notes retain links and verification evidence.
-After GitHub reports `MERGED`, append the PR URL, actual squash commit and observed merge time,
-remove `in-review`, and close with the merge reason. Squash branch ancestry, a deleted branch,
-a successful CLI invocation alone or a closed-but-unmerged PR cannot establish delivery.
-Cancellations record cancellation, never a fabricated merge. No status-only code PR follows.
+Enter `review` when a settled candidate is handed to independent review, including local review
+before a PR exists. Record the actual PR URL as soon as it opens. Keep ownership while reviews,
+CI or an expected provider retry are pending. Active implementation repairs take `in_progress`,
+then return to `review` on resubmission; a real external impediment uses `blocked` with the
+resume phase. Do not flip status for a note, review reply or ordinary polling interval.
+After the full PR-review gate and observed GitHub `MERGED`, append the PR URL, actual squash
+commit and `mergedAt`, then close with the merge reason. A branch tip, deleted branch, successful
+CLI invocation or closed-but-unmerged PR is not delivery. Cancellations record their distinct
+reason. No status-only code PR follows.
+
+### Current-status age
+
+Measure the current uninterrupted stay in the actual native status, not time since the last
+note, label or assignment edit. `updated_at` changes for those edits; `started_at` belongs to
+native claim and is not the entry time for planning, review or a later implementation visit.
+Neither is a status-age source. Re-entry after another status starts a new stay. Preserve
+earlier visits when reporting time in each status; do not sum them into the current age.
+
+Collect `vc status --json`, `show ID --json`, `history ID --limit 0 --json`, and another show
+and vc status. A changed generation or task during this capture is a concurrent observation,
+not an atomic snapshot: retry a bounded capture or report unknown. The launcher serializes
+individual commands only. Record the observation time in UTC and the native generation.
+
+History rows carry `CommitHash`, `CommitDate` and `Issue.status`. Pinned native history emits
+unchanged issue snapshots at unrelated commits and sorts by commit date, not parent lineage.
+For established continuous history, walk the current-status run back to its oldest row before
+the preceding different status; later notes and unchanged rows do not move that boundary.
+Use that row's commit time as the durable native status-entry time, not its Issue.updated_at
+or the latest history commit. Convert timestamp offsets before subtraction. This measures
+committed status residence, not CPU time or sub-command execution latency.
+
+Every reported age includes its evidence class and source:
+
+- **Exact:** the entry transition and uninterrupted path to the observed generation are
+  established, including native auto-commit success. A witnessed transition followed by a
+  complete, known single-writer linear history with a consistent clock provides this proof.
+  State the boundary hash/time, observation time and resulting duration at source precision.
+- **Lower bound:** a continuous suffix in this status is established from a known observation
+  to now, but its entry is not. Report at least that suffix duration and its start evidence;
+  never name that observation the actual transition.
+- **Unknown:** history is unavailable, incomplete or ambiguous, current readback disagrees,
+  commit ordering/clock evidence is unreliable, or continuity cannot be established. Report
+  the reason and any candidate boundary separately, without inventing an age or treating it
+  as zero.
+
+The native history JSON has no parent graph or completeness certificate. Timestamp adjacency,
+a matching head, an old `updated_at`, or two equal endpoint observations alone cannot prove
+no intervening exit/re-entry. In particular, imported, merged, restored or compacted history
+needs independently recorded continuity evidence before a candidate becomes exact or a
+historical suffix becomes a lower bound. Native SQL is unavailable in pinned embedded mode;
+do not bypass the launcher, query raw store tables, add a cache or fabricate a timestamp to
+fill that gap. Fresh coordinated transitions can establish future measurable residence without
+rewriting historical entry times. Measurement artifacts are evidence, not a mutable task store.
+
+### Coordinated lifecycle cutover
+
+Apply the revised lifecycle to the live store only after this contract is reviewed and accepted
+on main. The integration owner explicitly pauses other native writers, dispatch, coverage
+reads and remote pulls from before evidence capture through final readback. Per-command locking
+does not provide that pause. Capture full records, comments, native generation and configuration
+and retain a restorable backup under the recovery rules below.
+
+Inspect existing custom statuses before setting `planning,review`; unexpected values require
+reconciliation, not silent removal. Resolve each active task with its actual owner and work:
+active executable-plan authorship becomes `planning` even with implementation prerequisites;
+submitted implementation candidates become `review`; no advance possible remains `blocked`.
+An uncertain owner or phase remains unresolved with evidence, not a guessed release or status.
+Do not assign a taskless spec PR as an implementation PR to make the transition look complete.
+
+Use ordinary native updates, never reopen/close, re-claim, reset or replay history. Preserve
+assignees, dependencies, external references, design, acceptance, metadata and all comments;
+append the old state, reason, actual phase evidence and cutover observation to notes. Remove
+the obsolete `in-review` label when reconciling its record. Read back every changed record and
+the complete set to prove only intended status/label/notes fields and native automatic update
+timestamps changed. Record the new native generation before resuming writers. Verify every
+new status transition's history
+boundary. Its native age starts at cutover; any evidenced earlier real-world phase duration is
+reported separately, never backdated into native history. On partial failure keep the pause,
+read the affected row, preserve already successful writes and resume only unfinished changes.
 
 ### Full-task migration and historical evidence
 
@@ -213,11 +316,12 @@ uses `plasmosome-043` for the controller task and `plasmosome-delegation` for on
 Imported IDs are stable and a repeat import cannot duplicate tasks or overwrite subsequent
 native edits. The complete native-comment archive is part of both export and restore proofs.
 
-Map old `todo` to `open` + `needs-plan`, `planned` to `open` + `planned`, `in_progress` to its
-native counterpart, `in_review` to `in_progress` + `in-review`, and `done` to `closed`. Reconcile
-stale statuses from GitHub with notes preserving original values and evidence. If an old claim
-has no reliable actor, establish its owner or record a blocker rather than inventing one. Legacy
-missing links survive as history, not new work admitted around the gate.
+The original import mapped old `todo` to `open` + `needs-plan`, `planned` to `open` + `planned`,
+`in_progress` to its native counterpart, `in_review` to `in_progress` + `in-review`, and `done`
+to `closed`. Preserve that migration history; the coordinated lifecycle cutover above replaces
+its active review representation. If an old claim has no reliable actor, establish its owner or
+record a blocker rather than inventing one. Legacy missing links survive as history, not new
+work admitted around the gate.
 
 The old shadow-sync product PR84 and its custom API remain historical. Preserve PR86 benchmark
 results and associated evidence in native notes/provenance (including non-Markdown attachments
@@ -281,11 +385,13 @@ proofs of this contract, not claims already established by accepting this docume
 3. **No escape or silent actor:** alternate flag forms/environment store-routing attempts refuse
    or are bound to the shared store. A claim without explicit identity refuses. Native stdout,
    stderr and nonzero errors propagate. Ordinary commands cannot enable automatic push/export.
-4. **Real native task behavior:** create, read and edit every content field; plan with labels;
-   show ready with `--label planned`; verify a dependency excludes its child until resolved;
-   block/resume, review-reference/label and close with actual merge evidence. Demonstrate that
-   unplanned work is not selected by the prescribed dispatch query. Do not claim native enforcement
-   of the agent-reviewed spec/intent gates.
+4. **Real native task behavior:** create, read and edit every content field; acquire actual
+   `planning`, complete an admitted plan, hand off to implementation ownership, enter `review`,
+   block and resume the correct phase without losing owner or prerequisites. Show ready with
+   `--label planned` excludes planning/review and real dependency blockers. Demonstrate that
+   a planning claim does not satisfy the implementation gate and a losing combined
+   claim/status update leaves the winner's phase unchanged. Close only with actual merge
+   evidence. Do not claim native enforcement of agent-reviewed spec/intent gates.
 5. **Competing claims and restart:** race two processes with distinct actors from linked worktrees
    on one eligible task; exactly one claim wins and the loser does not create a code worktree or
    dispatch work. Restart clients and show the owner and complete task fields remain. Releasing
@@ -305,6 +411,18 @@ proofs of this contract, not claims already established by accepting this docume
    specs/intents. A fresh-context review follows a Beads ID end to end and finds no closure PR or
    worktree task-copy requirement. Run the repository gate after integration, not amid concurrent
    edits, and report exactly what passed and what was not exercised.
+9. **Timed phases:** in an owned isolated pinned runtime, observe planning, implementation and
+   review transitions and retained earlier visits. Append notes and mutate another issue;
+   the current-status entry must remain unchanged although updated_at or latest history moves.
+   Exercise a return to review after another status. Show exact ages only for established
+   uninterrupted history, a lower bound for an evidenced suffix without its entry, and unknown
+   for missing or ambiguous history. Record command outputs, boundary hashes and source
+   precision, not a desired-state model or invented timestamps.
+10. **Live lifecycle preservation:** after accepted review and the explicit all-writer pause,
+    capture the original full set and comments, reconcile actual owner/phase evidence, and
+    verify final records and native history. Preserve implementation prerequisites during
+    active planning, keep taskless PRs distinct and leave uncertain claims unresolved.
+    Report native cutover residence separately from older evidenced real-world phase time.
 
 ## Out of scope
 

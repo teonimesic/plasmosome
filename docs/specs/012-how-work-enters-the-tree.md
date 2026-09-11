@@ -51,13 +51,16 @@ A review finding is not authority to create unmapped work.
 The gates on starting are two:
 
 1. A spec may not become `accepted` until every intent it names is `approved`.
-2. A task may not start until every spec it names is `accepted`.
+2. Task implementation may not start until every spec it names is `accepted`.
 
-Drafting is not starting. A draft spec can name a draft intent; a task filed against a draft
-spec is not an implementation merge ticket. Its governing spec lands accepted before the work
-is claimed or its code branch opens. Plans, acceptance and copied links are the complete record
-for applying these gates, not a third owner approval process. The lifecycle and representation
-of planned work are defined only in spec016.
+Drafting is not implementation. A draft spec can name a draft intent; a mapped task may have
+an owned native planning phase while its design or implementation prerequisites are unresolved.
+That claim authorizes planning only. Its governing spec lands accepted before an implementation
+claim, transition to implementation or code branch. This corrects the former undifferentiated
+“claim” wording, which hid active planning as blocked implementation. Plans, acceptance and
+copied links remain the complete gate record, not another owner approval process. Spec016 alone
+defines native planning ownership and implementation admission; the two taskless shapes above
+are unchanged.
 
 Intent approval originates with the owner. An agent may record or relay that actual decision,
 but may not generate one and cite it as an independent check. The approval workflow and visible
@@ -124,8 +127,9 @@ design wrong; the closed lists bind where that change is reviewed, not whether c
   skill identifies the two taskless shapes, preserves their distinct parentage and refuses size
   or category exemptions and an unmapped area masquerading as a third shape.
 - Planning and dispatch read `show ID`, the native design and acceptance, and every governing
-  spec/intent. Ready does not itself claim those checks were performed. Native claim follows
-  them with a unique actor; spec016 supplies the runtime proofs.
+  spec/intent. Planning ownership is visibly distinct from implementation admission, including
+  active planning while implementation awaits prerequisites. Ready does not itself validate
+  that gate; spec016 supplies the unique-actor claim and phase-transition proofs.
 - The owner-approval rule is in the intent README; heartbeat treats a draft waiting on that
   approval as waiting on the owner, and review never promotes it on an agent's own judgement.
 - PR review requires current-head empirical/review evidence and responses to every finding.

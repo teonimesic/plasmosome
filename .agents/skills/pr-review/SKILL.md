@@ -48,11 +48,13 @@ by opening an unvalidated draft.
 For a work PR, record the PR immediately:
 
 ```shell
-./tools/work-state update ID --external-ref PR_URL --add-label in-review
+./tools/work-state update ID --external-ref PR_URL --status review
 ```
 
 For a work PR, retain task ownership through review and record verification and important
-decisions in Beads notes. These updates never require a commit, extra push or status-only PR.
+decisions in Beads notes. Spec016 defines entry into `review` for a settled local candidate,
+active repairs in `in_progress`, and genuine blockers; follow those phases rather than the
+retired `in-review` label. These updates never require a commit, extra push or status-only PR.
 
 Obtain independent review while draft, after local validation. CodeRabbit skips draft PRs;
 a skipped green is not a completed review. The owner-approval rule in `docs/intents/README.md`
@@ -89,7 +91,8 @@ only after comparing the old and new base-to-head diffs and establishing no cont
 
 Update the branch before spending reviews, then mark ready only when the change is ready to read
 and its approval gate permits it. Watch checks and review activity through completion; do not
-stop after one empty poll. CodeRabbit throughput is shared across the repository, not per PR.
+stop after one empty poll. Use the heartbeat skill's provider-capacity diagnosis when admission
+is refused; do not assume a repository-wide allowance from another PR's review timing.
 
 A round is a completed review, with its findings addressed. Count completed statuses over the
 PR's commits, not only its latest head; still require a completed review on the head being merged.
@@ -166,8 +169,8 @@ any of the review conditions.
 
 Ask GitHub for `state,mergeCommit,mergedAt,url`. Only `MERGED` with the actual squash commit
 establishes delivery; the old branch tip is not that commit. For a work PR, append the observed
-PR, squash SHA, merge time and verification references to Beads notes. Remove `in-review` and close the task
-with native `close ID --reason`, as specified in the tasks skill. Keep its plan and evidence.
+PR, squash SHA, merge time and verification references to Beads notes. Close the task with native
+`close ID --reason`, as specified in the tasks skill. Keep its plan and evidence.
 There is no later closure commit, next-branch status edit or `chore(tasks)` PR.
 Intent- and spec-filing PRs have no Beads task to close.
 
