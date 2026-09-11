@@ -446,9 +446,10 @@ The controller drives each cell's `membraned` over a second, private ndjson-UDS
   verbatim from the seam types; the membrane owns the VMM child, shim, and brokers as **its**
   children — never the controller's (86 §4 rule 5), and per-cell vs per-host brokers is an
   explicit parameter in the desired record.
-- RESERVED for P1 step 2: vsock bridge setup, shim lifecycle, broker lifecycle verbs beyond the
-  predeclared exact apply/withdraw contract below, and the credential vsock proxy (port4041
-  terminates at the membrane and proxies to the controller; custody state stays kernel-core).
+- The selected hardware runtime, shim and noncredential bridge are specified in §4.2.
+  Remaining broker lifecycle verbs beyond the exact apply/withdraw contract stay reserved.
+  The credential vsock proxy remains RESERVED: port4041 terminates at the membrane and proxies
+  to the controller; custody state stays kernel-core.
 
 ### 4.1 Recovery startup and exact operation messages
 
@@ -480,16 +481,18 @@ must not operate a quarantine's effects merely because its supervisor answered.
   This publication record is not evidence of liveness or holdings: those still require actual
   supervisor and enforcement-side observation. No PID-file or socket-existence substitute is allowed.
 - `membrane.residue.snapshot` params are `{cell, deadline_ms}`. Result is
-  `{cell, state: OsState, grants: [LedgerEntry, ...], incomplete: [IncompleteEffect, ...]}`.
-  The three required collections are spec017's strict EnforcementSnapshot; an incomplete record
-  contains its complete original operation, not a successful OsObject. All records belong to the
+  `{cell, state: OsState, grants: [LedgerEntry, ...], incomplete: [IncompleteEffect, ...],
+  guest: GuestObservation}`. The first three required collections are spec017's strict
+  EnforcementSnapshot; guest is the independently obtained physical projection account in §4.2.
+  An incomplete record contains its complete original operation, not a successful OsObject. All records belong to the
   addressed cell. `state` is fresh enforcement-side observation including unrequested residue.
   `grants` includes only original issued records with retained authority, possibly during partial
   withdrawal; failed initial application/grant and direct apply fabricate none. No collection
   is rebuilt from desired state or planted objects. Unsupported or failed class observation fails
   the whole request with `-32603`, never omits the class or returns a requested-state mirror.
-  The result contains the five currently specified capability classes; adding guest classes
-  requires their explicit enumeration rather than a claim of coverage without an observer.
+  The logical result contains the five specified capability classes. GuestObservation explicitly
+  enumerates their physical guest projections; it does not fabricate another logical grant class.
+  Adding a different guest capability still requires explicit enumeration and an actual observer.
   Broker capabilities contain the exact launch description, never a predicted PID. That description
   is not evidence of a running process. The supervisor must independently retain and verify the
   original runtime association. Direct apply does not manufacture a LedgerEntry or opaque handle
@@ -506,9 +509,10 @@ must not operate a quarantine's effects merely because its supervisor answered.
   Duplicate application of the same standing operation retains spec017's no-op semantics.
   This result does not replace the independent snapshot used for recovery verification.
   `SpawnBroker` carries `{id,name,launch,owner}` with spec017's strict
-  `BrokerLaunch {command,control_socket}`. PID-bearing, missing or malformed launch fields
-  are invalid parameters, not a request to guess a recipe. Before prepare the controller has
-  validated the trusted recipe and non-destructive staging; the supervisor creates no broker
+  `BrokerLaunch {command,control_socket,data_socket}`. Other operations include their complete
+  required resource recipes. PID-bearing, missing or malformed recipe fields are invalid
+  parameters, not a request to guess materialization inputs.
+  Before prepare the controller has validated the trusted recipe and non-destructive staging; the supervisor creates no broker
   or endpoint before that durable boundary. When the resource is absent, actual launch binds
   the original owned child to this holding before successful application can be reported.
   Equal fresh holdings may share an original resource only with independent enforcement-side
@@ -616,16 +620,199 @@ the lock; it neither kills the surviving cells nor rewrites their journals.
 Spec008's R9/R10 acceptance exercises this actual socket path and independent enforcement-side
 observation. A library-only fake or manually constructed Controller cannot demonstrate it.
 
+
+### 4.2 Hardware runtime and mediated guest access
+
+This selects the next runtime contract, not an implemented cell. A real cell is a hardware-isolated
+Linux guest whose membrane, VMM and original resource authorities survive controller death.
+An unrestricted host process or model observer cannot substitute. Spec017 defines all five actual
+access adapters; spec008 still requires real restart, complete observation and quarantine.
+
+The membrane execs a dedicated VMM helper linked to libkrun v1.19.4, commit
+`728df8125077d0db44265f6e997c72b81b65c015`. Configuration and `krun_start_enter` run inside that
+already-exec'd helper, never as unsafe Rust work between fork and exec. The context is consumed
+by start; `krun_free_ctx` is not a running-VM shutdown authority. Retain the original child and
+prevent leakage of VM descriptors to descendants. Guest-ready requires the trusted shim's actual
+handshake, not a successful fork, socket file or recorded PID.
+
+Trusted deployment input supplies a `RuntimeRecipe`:
+`{version:1, vcpus:u8, memory_mib:u32, kernel:Artifact, initramfs:Artifact, root_image:Artifact,
+helper:Artifact, libraries:[Artifact], host_policy:Artifact, guest_policy:Artifact,
+architecture:Architecture}`. All fields are required and
+unknown fields refuse. Artifact is `{path:String, sha256:String}` with an absolute NUL-free path
+and64lowercase hexadecimal SHA256 digits; Architecture is `aarch64 | x86_64`. CPU/memory values
+are positive and fit the actual platform's admitted limits. Artifacts are publisher-produced,
+architecture-matched and pinned before launch. The trusted operator selects them, never workload
+text. The root image is explicitly RAW; no format autodetection or guest-selected backing paths.
+Use immutable verified kernel/initramfs/base artifacts and a separately owned RAW per-cell copy
+for writes. Verification/opening must preserve the selected inode/bytes through the library's
+path-based opens; a replaceable parent or mutable artifact is refused, not trusted after hashing.
+A runtime recipe is deployment input retained by the original supervisor, not a mutable recovery
+database or permission to recreate a lost VM. Recovery reconnects, not relaunches.
+
+Call `krun_create_ctx`, `krun_set_vm_config`, `krun_set_kernel` and explicit RAW disk setup.
+The external kernel/initramfs supplies trusted PID1 and root boot policy. Disable implicit init
+and console; pass explicit environment and only declared FDs. Do not export a host directory
+through `krun_set_root` or virtiofs. Call `krun_disable_implicit_vsock` before
+`krun_add_vsock(ctx,0)`; zero disables both TSI flags. Add no NIC, TAP, passt or gvproxy backend,
+and pass an explicitly empty port map. Omitting a NIC alone does not disable implicit TSI.
+Source for these API constraints is the pinned
+[header](https://github.com/libkrun/libkrun/blob/v1.19.4/include/libkrun.h) and
+[implementation](https://github.com/libkrun/libkrun/blob/v1.19.4/src/libkrun/src/lib.rs).
+
+Use `krun_add_vsock_port2(ctx,4090,control_path,false)` and corresponding4091data mapping
+before start. They are fixed guest-initiated mappings; logical grants change over continuing
+streams without altering the VM's boot mappings or rebooting it. Port4041 is not reused.
+Guest CID3 is not cross-cell identity. The host authenticates through the original per-VMM
+mapping/connection and owned private endpoint, not guest-supplied cell/owner/UID/PID fields.
+Paths must remain under owned nonreplaceable directories; reconnect cannot silently attach a
+replacement listener. The host's private recovery socket is not exposed by either mapping.
+
+The trusted guest shim alone owns these channels, its mount/network namespaces and kernel-policy
+loader. Workload uid1000 runs without capabilities, with no-new-privs, and without privileged
+inherited FDs or authority to open AF_VSOCK, mount/setns, load BPF or ptrace the shim. Establish
+the kernel boundary before workload launch and refuse unsupported enforcement. A poisoned model
+or harness is not asked to cooperate. Keep the existing subject attestation/code110 requirement
+and10.29.0.0/24 subject range; this runtime does not implement credential custody or attestation
+by asserting a guest identity.
+
+Both bridge streams use §1's UTF-8 ndjson envelope, matching request IDs and maximum frame size.
+Their method/parameter/result records are closed: all fields below are required, unknown fields
+or methods refuse, and failures use `{code:105,message,from:"guest_request",to:"refused",detail}`
+rather than a success-shaped empty result. Framing failures retain §1's protocol codes.
+`deadline_ms` is a positive remaining
+budget, never renewed internally. `boot` is the original association's opaque nonempty token.
+
+4090 is private control, not another controller API:
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `hello` | `{}` | `{boot, runtime:RuntimeRecipe, policy:Artifact}` |
+| `observe` | `{deadline_ms}` | `GuestObservation` |
+| `drain` | `{grant:GrantId, deadline_ms}` | `{boot, grant, drained:true}` |
+| `shutdown` | `{deadline_ms}` | `{boot, shutdown_requested:true}` |
+
+Hello is compared to the original supervisor's verified runtime and effective guest policy,
+not accepted as authentication from an arbitrary guest. Drain succeeds only after that grant's
+guest admission barrier and admitted work have settled. Shutdown requests orderly guest exit;
+only actual original-child terminal/reap observation establishes completion. Lost channels or
+handshakes are faults, not assumed graceful shutdown.
+
+4091 carries only bounded data operations. Each params object contains `grant:GrantId` and
+`deadline_ms`, plus the fields in the table. A host-issued `handle:u64` is nonzero,
+connection-local, never recycled on that connection and bound to the exact original grant.
+Exhaustion refuses a new open. Amounts/offsets are unsigned64-bit values checked for overflow;
+one byte payload/read is at most65,536bytes, also subject to the enclosing frame limit.
+
+| Method | Additional params | Result |
+| --- | --- | --- |
+| `file.open` | `{components:[String], access:FileAccess}` | `{handle}` |
+| `file.read` | `{handle, offset, length}` | `{bytes:[u8], eof:bool}` |
+| `file.write` | `{handle, offset, bytes:[u8]}` | `{written:u64}` |
+| `file.close` | `{handle}` | `{closed:true}` |
+| `file.stat` | `{handle}` | `FileMetadata` |
+| `file.truncate` | `{handle, length}` | `{length}` |
+| `file.sync` | `{handle}` | `{synced:true}` |
+| `fs.lookup` | `{components:[String]}` | `FileMetadata` |
+| `fs.create` | `{components:[String]}` | `{handle}` |
+| `fs.mkdir` | `{components:[String]}` | `FileMetadata` |
+| `fs.remove` | `{components:[String], directory:bool}` | `{removed:true}` |
+| `fs.rename` | `{source:[String], target:[String], replace:bool}` | `{renamed:true}` |
+| `directory.open` | `{components:[String]}` | `{handle}` |
+| `directory.read` | `{handle, cursor:u64, limit:u32}` | `{entries:[DirectoryEntry], cursor:u64, eof:bool}` |
+| `directory.close` | `{handle}` | `{closed:true}` |
+| `stream.open` | `{}` | `{handle}` |
+| `stream.read` | `{handle, length}` | `{bytes:[u8], eof:bool}` |
+| `stream.write` | `{handle, bytes:[u8]}` | `{written:u64}` |
+| `stream.close` | `{handle}` | `{closed:true}` |
+| `datagram.open` | `{}` | `{handle}` |
+| `datagram.send` | `{handle, bytes:[u8]}` | `{written:u64}` |
+| `datagram.receive` | `{handle, length}` | `{bytes:[u8], truncated:bool}` |
+| `datagram.close` | `{handle}` | `{closed:true}` |
+
+`FileMetadata` is `{inode:String, kind:FileKind, size:u64, modified_ns:i64}`;
+FileKind is `file | directory`. The opaque inode identity remains bound to this grant and
+original object while references survive; it is not a raw host inode reused across roots.
+DirectoryEntry is `{name:String, metadata:FileMetadata}`. Directory handles retain the original
+opened directory; cursor0 starts enumeration, later cursors are only those returned on that
+handle. Limit is1..256 and reply bytes must still fit the frame. Unsupported/non-UTF-8 names
+or enumeration failure return an error, never an apparently complete listing with missing rows.
+Concurrent authorized directory edits may affect later pages; this is not a content snapshot.
+
+Components are relative to the declared Mount root; each is nonempty, is neither `.` nor `..`,
+and contains no slash, backslash or NUL. SessionFile requires an empty list for file.open and
+selects its exact inode; filesystem namespace/directory methods require Mount. Symlinks and
+non-file/non-directory objects refuse. Namespace creation is exclusive (file0600/directory0700);
+removal and rename cannot address the root, cross grants or follow a substituted parent.
+Rename with replace:false refuses an existing target. No method changes host ownership or
+creates device nodes, hardlinks or symlinks. Mutating methods require read_write; requested file
+access cannot exceed the recipe. Sync acknowledges actual synchronization of that original file,
+not journal settlement. Stream/datagram opens use only the declared upstream or
+ProxyRecipe with matching transport, never a supplied host destination. Wrong class, unknown
+or foreign handles, closed grants, invalid lengths and overflow refuse before an OS action.
+Returned byte/write counts describe actual IO, including short operations. Datagram truncation
+is explicit; an empty timed-out read is not an invented EOF.
+
+These verbs grant no capability-lifecycle or recovery authority. Handles cannot transfer across channels or
+rebind to a replacement grant. The host checks the effective grant on every request, bounds
+admitted work and propagates real errors. Channel loss closes its original data handles but
+does not manufacture grant withdrawal or clear remaining incomplete IO. Neither a service
+acknowledgement nor a guest claim replaces independent resource cleanup observation.
+
+`GuestObservation` is the strict record `{boot:String, policy:String, projections:[GuestProjection]}`.
+The nonempty boot token identifies this original supervisor/guest association and is never reused
+or reconstructed from journal contents. Policy is the SHA256 of the exact effectively loaded
+guest-policy artifact, not requested configuration.
+GuestProjection is a closed tagged record with `kind` in
+`fs_mount | fs_handle | socket_listener | network_flow`, `id:String`, `grants:[GrantId]`.
+IDs identify actual objects within this boot/namespace lifetime, not logical capability addresses.
+Each grant is bound to independently verified host authority and the proper cell. Empty grant
+lists, duplicate IDs, unknown objects, missing enforcement policy or an unverifiable association
+are named observation faults, not rows invented from desired state. Actual mountinfo,
+filesystem connection/handle state, listeners and network flows must agree with this inventory.
+A compromised workload cannot write this account; the host separately verifies the effective
+resource gates. All guest projection kinds must be observable even when empty. An unknown or
+unattributable object fails complete observation rather than disappearing from stop/recovery.
+Physical projections do not create new logical granted classes or authorize cleanup by ID alone.
+
+**Platform admission.** Darwin uses Apple Silicon/macOS14+ with Hypervisor.framework, a correctly
+signed VMM helper carrying `com.apple.security.hypervisor`, and a deny-default seatbelt policy
+applied before guest execution. The allowlist is restricted to the chosen artifacts, private
+per-cell writable image, required hypervisor operations and the two declared bridge endpoints.
+Close all other inherited descriptors first: a pathname policy is not proof about existing FDs.
+An actual Darwin25.6 unprivileged witness established allowlisted file/UDS use and EPERM on
+fresh forbidden file/UDS/TCP access, but inherited file and connected sockets remained usable.
+Removing those inherited FDs restored denial; an allow-default mutant exposed all forbidden
+resources. This establishes that narrow mechanism, not an HVF/libkrun-compatible profile.
+`sandbox_init` is deprecated and its raw-profile interface is not a supported portable API
+guarantee. The publisher must supply and prove a compatible signed helper/policy on the supported
+host; an unavailable or incompatible confinement refuses launch, never falls back unrestricted.
+
+Linux requires matching KVM hardware/kernel and operator-delegated `/dev/kvm` access, not blanket
+root for the workload. Confine the helper with separate host UID/namespaces, an allowlisted
+read-only launch root, only owned writable images/endpoints and no ambient host network access.
+The publisher supplies the matching Linux guest kernel/initramfs, effective filesystem/LSM
+policy and userspace shim; the operator supplies the supported host and authorized fixture
+roots/upstreams. No available Docker CLI, compiled kernel option or entitlement alone proves
+this runtime. Missing artifacts, unavailable sandbox/KVM/LSM or a failed confinement test refuse
+launch and are reported as concrete prerequisites, never as a simulated ready cell.
+
+Acceptance requires actual hardware guests on both platforms, all five real adapters, denied
+private-control access and ambient host file/network access, retained original authority across
+controller restart, and spec017's managed-mmap/copy-execution witnesses. Disable TSI protection,
+omit confinement, leak a privileged FD or bypass host grant gating in disposable mutants: the
+corresponding real unauthorized-access witness must fail. A small sandbox/mmap probe establishes
+only the mechanism it exercised, not libkrun/HVF compatibility or whole-cell isolation.
+
 ## 5. What this spec deliberately leaves undecided
 
 - The plasmid WIT world (SDK surface) — deferred by design; `plasmid-sdk` is a reserved crate
   with a placeholder world.
 - `cell.clone` / `cell.save` / `cell.load` / `freeze` (D1c tiers 2–3), genome
-  `new/show/lint/test/export` details beyond D1's one-line definitions, and exec output
-  streaming.
-- The membrane's VMM/shim and remaining broker lifecycle verb set (P1 step2 owns it; §4 bounds
-  its shape). The predeclared broker launch payload in §4.1/spec017 is no longer reserved, but
-  it does not select or implement the missing cell runtime and concrete enforcement adapters.
+  `new/show/lint/test/export` details beyond D1's one-line definitions, and exec output streaming.
+- Remaining VMM/shim and broker lifecycle verbs beyond §4.2's selected launch, observation,
+  data and shutdown contract. Their concrete implementation remains required; the selected
+  runtime and bounded bridge schemas are no longer undecided substitutes for an actual cell.
 - Multi-instance brokers, remote orchestration, multi-tenancy — out of scope per 90.
 
 ## 6. How much of this is delivered
@@ -660,3 +847,7 @@ is a claim that the text above may not be corrected.
    infallible backend-minted grants and format2 records. The new contract permits complete
    prepare/inverse before fork and defines cleanup after partial launch; it does not deliver
    an independent observer, workload confinement or all five real adapters.
+9. The selected hardware runtime, fully resolved resource recipes and physical guest projection
+   account in §4.2/spec017 are **not yet implemented**. Actual guest artifacts, platform
+   confinement and strict managed-file policy witnesses remain deployment/admission obligations.
+   Accepting their specification neither changes the status-only daemon nor completes spec008.

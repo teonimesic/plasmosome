@@ -112,13 +112,15 @@ separate effects. Across successfully validated journals, a repeated exact addre
 consistency error, including when owners differ; recovery never chooses a file by listing order.
 A quarantined prefix is not used as a trusted identity index.
 
-For brokers the full capability is `{ name, launch: BrokerLaunch }`, not a PID. Spec017 defines
-the required exact command and private endpoint; the operation and its matching inverse are
-therefore complete before a process exists. A PID-bearing record, missing launch, unknown recipe
-field or operation/inverse launch mismatch is a strict-reader fault. Never infer a recipe from
-the supervisor's current command or patch a prepared record after discovering the child PID.
-Version2 single-plugin logs are not cell histories and acquire neither a cell nor a launch by
-being placed at the cell path.
+Every complete capability carries spec017's resolved recipe, including broker control and data
+endpoints. Initial file bytes/access/guest projection, upstream, exact destination/transport/port,
+and mount access policy are part of the operation and its full inverse, not mutable lookup keys.
+For brokers the capability is `{name, launch:BrokerLaunch}`, never a PID. Missing recipe fields,
+unknown fields or any operation/inverse mismatch are strict-reader faults. Never infer a recipe
+from the supervisor's current configuration, substitute a hash for its contents, or patch prepare
+after creating a resource. The unimplemented per-cell format1 incorporates these required fields
+before its first writer ships; implemented version2 single-plugin logs are not cell histories
+and acquire neither a cell nor a recipe by being placed at the cell path.
 
 Forensic replay can encounter an `Exact(Backend(handle))`, `External`, or `Delayed` effect with
 null operation. The reader retains it rather than pretending it is a universe operation. A
@@ -178,13 +180,13 @@ a caller using spec017's fallible `grant(op, kind)` follows the same write-ahead
 the predeclared operation and universe inverse. Neither grant-then-record nor backend ID
 minting is permitted; receipt metadata does not introduce another journal or RPC writer.
 
-Broker preflight validates the complete trusted launch description and endpoint conflict/staging
-conditions without creating a process or listener. Only after prepare is durable may the
-surviving supervisor create the new resource and bind its original child authority to that exact
-holding. The PID is discovered at runtime and is not appended to or substituted into prepare.
-No PID reservation by an unlogged fork, spawn-before-journal shortcut or already-owned-only
-restriction satisfies this transaction. Equal broker holdings may share the original resource
-only with real independently withdrawable access; their last removal cleans it.
+Preflight resolves and validates every complete trusted recipe and its non-destructive staging
+conditions without creating a process, listener, host attachment or guest projection. Only after
+prepare is durable may the surviving supervisor create a resource and bind original authority.
+Runtime handles/PIDs never replace the recorded inverse. Shared backing is allowed only with
+spec017's actual independently withdrawable attachments; last removal cleans original resources.
+The selected hardware runtime and trusted host/guest boundary are spec001 §4.2, not a controller
+implementation dependency on libkrun or permission to launch an unrestricted host process.
 
 The sequence is:
 
@@ -257,6 +259,15 @@ clean it; neither a diagnostic PID nor a GrantId permits signalling a replacemen
 another process's endpoint. Loss of authority or unobservable residue is a blocking observation
 fault. A lost successful apply response instead retains its complete standing association.
 Startup resolves the durable decision and never repeats apply to revive either case.
+
+For every class, independently account for the physical resources behind both complete holdings
+and incomplete operations: open file authority, accepted sockets, established flows, guest
+filesystem connections/handles and original children. Neither unlink nor lazy detach nor deleting
+a route table entry establishes absence while the original access still serves. The supervisor
+retains outstanding original IO authority through partial cleanup; an uncancellable operation
+remains incomplete until terminal. Spec017's per-grant barriers preserve equal peers and the
+pre-destructive timeout guarantee. Data already copied into private guest scratch is not an
+ongoing host capability; this does not excuse a live host access path or an unobserved projection.
 
 Finish records completion of all obligations, not a cursor or a claim that every historical
 effect was undone twice. Crash after removal but before finish is safe because restart observes
@@ -350,6 +361,24 @@ Every backend snapshot is fallible under spec017. A failed or unsupported class 
 observation; it cannot be replaced by an empty class, a partial Composite union or the requested
 broker launch. That launch identifies the intended capability, not evidence that its process
 exists. The original runtime association is required independently.
+
+Each observed cell record additionally carries spec001's complete `guest: GuestObservation`,
+obtained independently from that same original supervisor/guest association. Its physical
+projection inventory is not a second requested-state model or additional logical grant class.
+Validate immutable boot/policy identity, actual managed mounts/handles/listeners/flows, and their
+exact associations to this cell's complete or incomplete operations before returning a complete
+observation. Stray verified holdings still appear in exact drift; unknown/unattributable physical
+resources, policy loss or incomplete guest inventory are Observation errors naming the resource,
+not empty projections or guessed grant IDs. The actual guest system image and private copied data
+are not managed capability projections; the observer must explicitly delimit the managed
+namespaces rather than classify arbitrary guest processes as trusted evidence.
+
+Cell records and the resulting `observed_cells` diagnostic retain this guest account so a
+controller cannot silently discard it while preserving only OsState. No journal field grants
+authority to recreate a dead guest, reload a missing policy, adopt a replaced boot or manufacture
+original host handles. A source recipe or matching artifact digest proves intended input, not
+effective isolation. The runtime/configuration and observation faults remain separate from
+the sole durable per-cell generation/decision journal.
 
 `RecoveryOutcome` contains `desired`, `tombstones`, `expected: OsState`, `drift: Diff`,
 `unmatched: Vec<UnmatchedRecord>`, `incomplete: Vec<IncompleteEffect>`, `pending`,
@@ -480,11 +509,13 @@ specified in spec001. Its adapters must observe and retain actual resource/holdi
 including process incarnation for brokers. Implementing only FakeBackend or serving snapshots
 from remembered requests cannot complete the live-controller acceptance below. No such real
 adapter is claimed to exist today; acceptance of this contract is not evidence that it does.
-The first broker holding must be able to create a real new broker under the predeclared launch
-contract, not merely label a process that happened to exist. A generic subprocess probe does
-not supply the complete cell runtime, per-owner broker enforcement, mounted objects, proxy
-service or independent all-five-class observer. Those concrete realization and confinement
-prerequisites must be settled before implementation admission, without weakening this acceptance.
+The first broker holding can create a new broker only under the predeclared launch contract.
+Spec017 now defines the five concrete adapter obligations and spec001 selects the hardware runtime
+and private bridge. Their actual guest artifacts, effective strict-mmap policy, host confinement
+and platform witnesses remain required before implementation-ready claims. A generic subprocess,
+sandbox or file-mapping probe does not supply a complete cell, all-five observer or deployment.
+Missing Linux FUSE/LSM access or Darwin HVF/profile compatibility must be recorded as unavailable,
+not replaced by model success. None weakens the live-recovery acceptance.
 
 ### Existing APIs and implementation boundary
 
@@ -505,6 +536,10 @@ This includes broker launch constructors and embedded inverses, caller-prepared 
 calls, all complete-snapshot consumers and every `apply_removal(removal, &CellOwner, DrainSpec)`
 call. No Grant input, backend ID minting, infallible/partial observation, absence-only completion,
 default recipe, PID fallback or drain-free exact-removal wrapper remains.
+Complete resource recipes, guest observation records and all snapshot/desired/recovery serde
+consumers cut over together; no old three-collection RPC drops the required guest account.
+The public logical backend snapshot remains spec017's three collections; the supervisor's
+physical guest account is additional independently checked observation, not a fake sixth class.
 The session-log return-contract change includes all append callers and benchmarks; no infallible
 audit fallback remains. Socket creation, both connection endpoints and workload launch must
 establish the spec001 authorization boundary before exposing recovery operations.
@@ -616,6 +651,11 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   socket parents refuse startup; peer-credential lookup failure or mismatch closes before
   dispatch. A passing same-UID client alone does not prove workload exclusion. Report any
   unavailable distinct-UID/confinement fixture as unproved, never as a successful authorization test.
+  Exercise both platforms' actual selected hardware guest and all five adapters, including
+  host confinement, privileged-FD exclusion and guest policy/boot identity. Unknown or stray
+  managed guest projections cannot disappear from a complete observation. Use the strict-file
+  denial/private-copy witnesses in spec017A14; ordinary chmod/unlink and an existing Docker
+  process are not substitutes for managed guest FUSE/LSM enforcement.
 - **R11 — discriminating proof:** in disposable mutations, skipping daemon recovery fails the
   nonzero restart case; adopting a parsed prefix fails quarantine; comparing expected to itself
   fails the missing/stray case; collapsing owners/IDs fails cross-cell and repeated-grant cases;
@@ -635,6 +675,10 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   post-fork failed child's resource still serves. Minting an ID inside grant after preparation,
   or accepting a new issued receipt for a direct-applied object, must fail the public grant
   identity/order/receipt cases. Preserve the same all-five real-backend conformance contract.
+  An unlink-only file/socket inverse, table-only flow removal, lazy-detach-only mount cleanup,
+  hidden original IO, discarded guest inventory or changed-boot adoption must fail the matching
+  real held-resource/restart scenario. Disabling strict managed mapping denial must fail while
+  MAP_PRIVATE still succeeds; acquired private copies must not be falsely reported as revoked.
 - **R12 — integration:** the complete accepted control/recovery contract is served, all affected
   consumers migrate and the root gate passes. Independent review checks the acceptance against
   the actual final head. Portable journal/model proofs are reported separately from macOS/Linux

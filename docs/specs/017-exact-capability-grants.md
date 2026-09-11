@@ -51,21 +51,22 @@ must be fresh even across classes; this is an issuance requirement, not a requir
 every backend in existence. Reusing a standing address with another payload is a conflict, not replacement.
 The address is stable for the lifetime of the holding, including when it becomes residue.
 
-`Capability` retains five variants, with total ordering and hashing over every field. `Broker`
-replaces its predeclared PID with the complete launch description defined below:
+`Capability` retains five variants, with total ordering and hashing over every field. Each
+contains the resolved nonsecret recipe needed to materialize and withdraw its exact holding:
 
 | Capability | Complete resource description | Diagnostic key, not an address |
 | --- | --- | --- |
-| `SessionFile` | `path` | `session/{path}` |
-| `UdsSocket` | `path` | `path` |
-| `ProxyMap` | `host`, `route` | `host` |
+| `SessionFile` | `path`, `recipe: SessionFileRecipe` | `session/{path}` |
+| `UdsSocket` | `path`, `recipe: UdsRecipe` | `path` |
+| `ProxyMap` | `host`, `route`, `recipe: ProxyRecipe` | `host` |
 | `Broker` | `name`, `launch: BrokerLaunch` | `broker/{name}` |
-| `Mount` | `source`, `target` | `target` |
+| `Mount` | `source`, `target`, `recipe: MountRecipe` | `target` |
 
-Paths, hosts, routes, and names retain their exact input strings. This specification adds no path
-normalization, delimiter encoding, hostname folding, mount containment, or route priority rule.
-Source and route are never discarded when constructing an object. The typed capability prevents
-strings containing separators from producing another capability's address.
+Paths, hosts, routes, and names retain their exact input strings for equality, ordering, hashing
+and diagnostics. The realization rules below constrain access and choose visibility; they never
+normalize a recorded capability into another one. Source, route and recipe fields are never
+discarded. The typed capability prevents strings containing separators from producing another
+capability's address.
 
 `OsObject` is `{ id: GrantId, owner: CellOwner, capability: Capability }`, using spec008's
 `CellOwner { cell, plugin }`. `PluginId` remains the plasmid/registry identity. `OsObject::class()`
@@ -76,6 +77,51 @@ the identical object is a no-op; inserting a different owner or capability at th
 `BackendError::IdentityConflict { class, id }` and preserves the entire state. Deserializing a
 state containing a conflicting or repeated address refuses it rather than letting set insertion
 silently erase a row. `objects()`, `len()`, and `is_empty()` continue to describe individual objects.
+
+### Resolved recipes and their trusted input
+
+The following records are strict serde objects: every named field is required and unknown fields
+refuse. The caller resolves trusted operator declarations into them before choosing/preparing the
+operation. Recovery never consults a mutable name-to-recipe table or substitutes a digest for the
+complete inverse. A `recipe` has the record type selected by its enclosing capability, not another
+independently selectable class tag.
+
+| Record | Fields |
+| --- | --- |
+| `SessionFileRecipe` | `contents: Vec<u8>`, `mode: FileAccess`, `guest_path: String` |
+| `UdsRecipe` | `upstream: String`, `guest_path: String` |
+| `ProxyRecipe` | `transport: ProxyTransport`, `destination: String`, `port: u16`, `allow_private: bool` |
+| `MountRecipe` | `access: FileAccess` |
+
+`FileAccess` is exactly `read_only | read_write`; `ProxyTransport` is exactly `tcp | udp`.
+`port` is nonzero. Strings are NUL-free. Host paths (`SessionFile.path`, `UdsSocket.path`,
+`Mount.source`, upstream and broker endpoints) and guest paths (`guest_path`, `Mount.target`)
+are absolute. Managed guest projections may not replace the immutable system image, trusted
+shim/control paths or another unowned entry. File contents are at most 65,536 bytes. Complete
+serialized operations/inverses and enclosing messages must fit spec001's existing frame limit;
+oversize closure preparation refuses before effects rather than splitting one transaction.
+File entries are ordinary byte files, initially mode0600; execution is governed below, not by
+an executable mode supplied by workload text.
+`contents` is the immutable initial seed in the recipe, not a snapshot that changes after an
+authorized write. Observation verifies the original inode/access association and independently
+effective permissions; it does not replace the prepared recipe with current file bytes.
+
+`destination` is one ASCII DNS hostname or numeric IP address, with no scheme, path, wildcard,
+userinfo or embedded port. A DNS name is resolved only for this authorized destination. Every
+resolved address is checked before connecting; loopback, link-local, private, multicast and
+unspecified addresses refuse unless the operator explicitly set `allow_private` for that exact
+recipe. That opt-in does not permit arbitrary destinations. Host/route remain exact logical
+selection names, not implicit permission to run a program, follow a redirect or use ambient DNS.
+The operator is responsible for authorizing these nonsecret inputs; the parser cannot determine
+whether arbitrary bytes contain a secret. Credential material must not be placed in contents,
+arguments or recipes. Existing credential references and core custody remain separate.
+
+The manifest resolver produces these complete capabilities before durable prepare; this is not
+a new user-editable manifest grammar. An unavailable declaration, unsupported operation or
+unsafe/non-stageable target refuses before prepare. A resource race after preflight remains a
+fallible grant/apply result, including the incomplete-effect transition after any actual effect.
+The model, all concrete adapters, builders, custom serde and embedded inverses use the same
+required fields. There is no missing-recipe default or compatibility lookup.
 
 ### New grants, recorded operations, and handles
 
@@ -117,7 +163,8 @@ hashing, display, and serde, not
 arithmetic. Knowing an address is not authentication: the existing backend seam is trusted.
 
 Every `UniverseOp` carries required `id: GrantId` and `owner: CellOwner`. The broker variant is
-`SpawnBroker { id, name, launch: BrokerLaunch, owner }`; the other resource fields are unchanged.
+`SpawnBroker { id, name, launch: BrokerLaunch, owner }`; each other variant additionally carries
+the matching required recipe above, retaining its existing path/host/route/source/target fields.
 `op.object()` preserves that ID and every capability field. `op.removal()` produces the exact
 inverse before execution. `apply(op)` remains `Result<(), BackendError>`:
 
@@ -281,11 +328,97 @@ Reference counting a shared resource is permitted. Merely deleting a ledger row 
 exclusive access remains enabled is not revocation. Sharing must not widen either owner's grant.
 
 Different mount sources at one target and different routes at one host are different complete
-capabilities. Both remain represented and independently removable; this specification does not
-pick which stacked mount is visible or which route wins traffic. A real adapter must realize the
-holdings without withdrawing another one as a side effect. The in-memory backend models these
-holdings; passing its tests is not evidence that a platform's bare mount or routing syscalls
-already provide that realization.
+capabilities. Both remain represented and independently removable. A real adapter multiplexes
+them rather than overwriting a path or relying on bare stacked mounts. New unqualified
+lookups/connections choose the lexicographically smallest active full GrantId at that logical
+target; an already-open file handle or flow stays bound to its original grant. Withdrawal never
+silently retargets it to a surviving peer. Each covered root/rule still has an actual independent
+access attachment, not only an entry in a desired-state count.
+
+### Five actual enforcement adapters
+
+Spec001's selected hardware guest and trusted host/guest boundary carry these accesses. No host
+descriptor or uncontrolled host-directory export is passed to the workload. Each adapter keeps
+original authority independently of the controller and inventories actual owned resources,
+including resources not requested by a journal. A verified independently created stray binding
+is an exact extra object. An unbound inode, listener, flow, mount or child is a named observation
+fault, never a made-up GrantId or an empty class. Requested configuration is not inventory.
+
+- **SessionFile:** create an exclusive private per-grant inode, retain its original FD and
+  identity, and expose it through a host-gated byte service and grant-bound guest filesystem
+  inode/handle. Inspect actual inode/link/FD, gate and guest projection. Equal capabilities have
+  separate access attachments even if immutable backing bytes are shared. Cleanup closes this
+  gate and its original handles, then unlinks only a still-matching owned inode. A substituted
+  path is named and left untouched. Removing a pathname while an access path still serves fails.
+- **UdsSocket:** create the owned host listener/selector and a guest Unix listener, relaying to
+  the explicit operator-owned upstream. Retain each accepted stream pair, tagged with its grant,
+  and both original relay ends. Inspect actual listeners, inodes, credentials, stream pairs and
+  guest projection. Never pass SCM_RIGHTS through to the workload. An unavailable upstream is a
+  real service/materialization failure, not readiness inferred from bind. Removal closes this
+  grant's relay streams; the last attachment removes the matching owned listener/projection.
+  Unlink alone is not cleanup. This adapter neither owns nor signals the external upstream.
+- **ProxyMap:** use a real per-cell host egress relay with independently effective grant rules
+  and original TCP/UDP flow sockets, reached through the trusted guest TUN/network bridge and
+  fixed data channel. The host derives the cell from that channel and enforces the exact
+  destination/transport/port. No NIC, TSI, arbitrary raw host socket request or DNS fallback
+  bypasses it. Inspect effective relay rules, actual flow sockets and guest route/TUN state.
+  Removing a rule while its established flow still transports data is a failed withdrawal.
+  Guest synthetic addresses use198.18.0.0/15 only inside this isolated bridge; refuse an
+  operator-route overlap rather than silently altering inputs or the reserved10.29.0.0/24
+  subject range. Network revocation cannot undo a remote side effect already issued.
+- **Broker:** use the original owned child and answered private control readiness described
+  below, plus a separately declared data endpoint and independently withdrawable access relay
+  for each grant. Inspect actual process authority, answered readiness and access resources.
+  The first equal holding may launch; the last shuts down/reaps the original owned child after
+  removing its accesses. Neither a PID nor a launch description reacquires lost authority.
+  No implicit ownership link to another class's upstream exists: any dependency must be an
+  explicit manifest closure, not a removal that secretly takes another independent grant.
+- **Mount:** retain the authorized source-root FD and use descriptor-relative no-follow
+  traversal, rejecting symlinks and escapes. Linux may use
+  `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`; Darwin uses a component-wise
+  `openat(O_NOFOLLOW)` walk with verified directory FDs. The trusted Linux guest filesystem
+  multiplexes one target with distinct root/channel attachments and inode-generation/file-handle
+  identities per grant. Inspect actual root authority, effective host gates, guest mountinfo,
+  connection and handle inventory. Bare mount/unmount calls or requested configuration are not
+  this realization. Never abort a shared filesystem connection while a peer still needs it.
+
+Every class closes only the selected grant's new admission and drains its actual admitted work
+under the supplied single deadline. Before destructive release, timeout restores that holding's
+admission and preserves its full authority and peers. After destructive progress, timeout or
+failure is incomplete, not `DrainTimedOut` with a fictitious rollback. Force first closes the
+selected access gate, then releases only original resources; outstanding uninterruptible host
+IO remains owned/incomplete until actually terminal. Dropping a future is not cancellation.
+Last removal additionally tears down the shared backing only after actual peers are absent.
+For mounts, lazy detach alone does not establish absent connections/handles or closed host
+access. For sockets, closed pathnames do not establish closed established transports.
+
+### Managed files, mappings and acquired data
+
+SessionFile and Mount use a strict mediated Linux guest filesystem. FUSE opens use direct IO;
+writeback cache, passthrough, DAX and shared file mappings are disabled. Direct IO alone is
+insufficient: Linux permits MAP_PRIVATE on that path. A trusted guest kernel policy must reject
+**every file-backed mmap**, private or shared, of a managed inode and reject direct executable
+loading from it, even while its grant is active. It must not reject ordinary anonymous memory.
+An already-authorized copy into ordinary private guest scratch may be mapped or executed;
+those acquired bytes are not a continuing host capability and cannot be erased by revocation.
+There is no promise to revoke a secret or data already delivered to the cell.
+
+The policy binds immutable filesystem-lifetime/inode identity to grant generation before
+workload access; map misses for managed files deny. Different grants never share cache identity,
+and an old inode/handle cannot be rebound while references survive. A trusted privileged guest
+loader owns/pins the policy and its maps/links; the workload cannot detach, replace or update it.
+The exact guest kernel build, effective LSM activation, BTF/hook coverage and fail-closed owner
+lifetime are required runtime artifacts, not inferred from a compiled CONFIG option. Relevant
+Linux MAC hooks include `mmap_file` and `bprm_check_security`; all alternate syscall/loader paths
+must satisfy the same denial contract. The host still checks the active grant on every real
+backend request. Guest policy is not a replacement for that host boundary.
+
+Do not claim `mmap_file` plus `file_permission` revokes existing private mappings: later faults
+can consume cached or prefetched pages without either hook or a new FUSE request. The selected
+contract instead prevents managed mappings from existing. Transparent mmap/exec of revocable
+host-backed files would require another accepted mechanism and discriminating proof; it cannot
+be enabled as a convenience fallback. Both strict denial and private-copy execution must be
+proved on the actual pinned guest before implementation-ready claims.
 
 ### Broker launch without a predicted PID
 
@@ -294,11 +427,14 @@ prepare-before-apply rule: `fork` supplies the PID only after creating the child
 using a placeholder/logical PID, predicting the next PID or backfilling the prepared inverse
 would leave an unlogged effect or change the durable operation. None is a permitted implementation.
 
-`BrokerLaunch` is the strict serde record `{ command: Vec<String>, control_socket: String }`.
-Both fields are required; unknown fields refuse. `command` is nonempty, its first word is an
-absolute executable path, and every word is NUL-free and retained exactly. `control_socket` is
-an absolute, NUL-free host-private endpoint. Structural decoding does not consult the filesystem;
-preflight separately validates the actual executable, private endpoint parent and ability to
+`BrokerLaunch` is the strict serde record
+`{ command: Vec<String>, control_socket: String, data_socket: String }`.
+All fields are required; unknown fields refuse. `command` is nonempty, its first word is an
+absolute executable path, and every word is NUL-free and retained exactly. `control_socket` and
+`data_socket` are distinct absolute, NUL-free host-private endpoints. Only the controlled relay
+exposes the data service; the private control service never becomes workload authority.
+Structural decoding does not consult the filesystem;
+preflight separately validates the actual executable, private endpoint parents and ability to
 stage the operation before preparing. The broker receives the recorded command directly, not
 through a shell, PATH search, interpolation or ambient environment expansion. The exec call
 receives an explicitly empty environment; this does not claim that a runtime never creates
@@ -379,6 +515,10 @@ Writers and readers accept only version3. Unversioned/version2 records, other ve
 handles, identity-less inverses and PID-bearing broker payloads refuse. Preserve old files and
 return an error rather than synthesize IDs or launch descriptions, skip effects or rewrite bytes.
 Even a version2 record that needs no broker recipe is refused at this explicit whole-format cutover.
+The complete nonbroker recipes and broker data endpoint refine that still-unimplemented format3
+before its first writer ships; the repository baseline writes format2, not format3. A future
+already-published incompatible format3 writer would require another explicit version transition,
+not reuse of this refinement as silent compatibility. Missing recipes or data endpoints refuse.
 The separate, not-yet-implemented per-cell `CellJournalRecord` remains spec008's format1.
 
 Before extending a nonempty legacy file, append validates all existing complete LF-terminated
@@ -457,10 +597,10 @@ applied to that owner-only fix, not this new identity contract.
 
 No real OS adapter, process supervisor or recovery coordinator is delivered by this spec change.
 The shared model/API and single-plugin format cutover can be implemented independently, but
-their passing conformance does not settle the actual file/listener/proxy/mount/broker realization,
-workload confinement or complete independent observer that spec008 requires. Its all-five-class
-live-recovery acceptance remains in force. The launch description resolves one concrete ordering
-contradiction without declaring the other reserved runtime interfaces implemented.
+their passing conformance does not implement or prove the actual file/listener/proxy/mount/broker
+realization, workload confinement or complete independent observer that spec008 requires.
+The concrete contracts above and spec001's selected runtime preserve all-five live recovery;
+source acceptance still supplies neither deployed artifacts nor successful platform witnesses.
 
 ## Acceptance
 
@@ -528,3 +668,16 @@ contradiction without declaring the other reserved runtime interfaces implemente
   probe can establish prepare-sync-before-fork, surviving authority and lost-response deduplication,
   but it must identify its surrogate policy and cannot stand in for spec008's actual cell,
   five-class enforcement, private-transport or platform acceptance.
+- **A13 — real realization:** every class's actual access attachment, backing resource and
+  independent inventory meet the five-adapter contract above. Exercise missing and independently
+  introduced stray resources, equal holdings, both peer withdrawal orders, last removal, safe
+  staging refusal and partial cleanup. Unlink-only, route-table-only, lazy-detach-only and
+  requested-refcount observers fail while actual access remains. Actual controller recovery
+  still separately meets spec008R1–R12 on Darwin and Linux; a standalone mechanism is not a cell.
+- **A14 — managed-file boundary:** in the pinned real guest, active and revoked managed file
+  descriptors cannot acquire private/shared mappings or direct executable loads; anonymous
+  mappings and authorized private-copy execution still work. Removing the mandatory denial
+  fails while direct_io alone permits MAP_PRIVATE. Alternate loader/IO paths, policy loss,
+  identity reuse and inherited descriptors cannot bypass the boundary. Capture real refusal,
+  failed mutant and restored pass, with exact kernel/policy artifacts; an unavailable guest is
+  an unproved prerequisite, not successful platform coverage.
