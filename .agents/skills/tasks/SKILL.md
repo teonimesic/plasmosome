@@ -159,8 +159,9 @@ PR reference without first preserving it in notes/metadata.refs.
 
 ## Review, closure and durable evidence
 
-The author enters `review` for a settled candidate under spec016 and records its actual PR
-with `update ID --external-ref PR_URL --status review`, retaining ownership. Task notes contain
+The author enters `review` for a settled candidate with `update ID --status review`, retaining
+ownership under spec016. When the PR opens, record it with `update ID --external-ref PR_URL`.
+Task notes contain
 verification results, abandoned approaches,
 review evidence references and anything the next agent would otherwise rediscover. PR review
 threads remain on GitHub; link them instead of transcribing or treating chat as evidence.
