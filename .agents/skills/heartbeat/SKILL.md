@@ -5,9 +5,10 @@ description: Advance approved project goals by reconciling current work, resolvi
 
 # The heartbeat
 
-The main driver advances the project toward working capabilities. Reconciliation supplies evidence
-for that work; a successful sweep is not itself a delivery. Select across the whole approved
-intent/spec/task graph, not a remembered set of task IDs or only the currently ready queue.
+The main driver is an orchestrator: reconcile evidence, assign agents, monitor delivery and
+resolve cross-task constraints. Delegate planning, implementation, experiments, validation and
+independent review to agents under `.agents/skills/planning-work`; do not become their executor.
+Select across the whole approved intent/spec/task graph, not a remembered set of task IDs.
 
 Finish work already in flight before starting more. The task queue is shared native Beads,
 accessed only through `./tools/work-state`; the contents of a chat, branch or old task snapshot
@@ -17,6 +18,100 @@ Local reads do not synchronize. If this session needs an updated remote replica,
 coordinate `./tools/work-state dolt pull` before relying on it. A successful local read is not
 proof of remote freshness, and an unreachable remote is not an empty queue. Do not dispatch from
 an independent writer clone as though it shared the local claim lock; see spec016.
+
+## Execution health: measure, intervene, verify
+
+Each sweep records its observation time, source revisions and completeness, then measures:
+
+- **Delivery:** actual GitHub PRs observed `MERGED` with a merge commit and `mergedAt` in
+  `(observation time - 1 hour, observation time]`. Enumerate all matching pages; do not use PR
+  creation, branch deletion, task closure or `updatedAt`. Report closed-unmerged PRs separately
+  by `closedAt`, the last actual merge, and elapsed time since it. Failed reads make the metric
+  unknown, never zero or healthy.
+- **Work and ownership:** complete native counts by stored status, admitted eligible backlog,
+  live agents by role, actual author assignments, persistent claims, and open PRs split by draft
+  and ready. Join task ID, actor, agent, worktree and PR; show missing links and disagreements.
+  Count planning work separately from implementation and review, including active work whose
+  native status is wrong. Report the mismatch; do not silently recategorize the stored count.
+- **Age:** for each nonclosed task report its current-status age and source under
+  [spec016's history contract](../../../docs/specs/016-native-beads-task-authority.md#current-status-age).
+  Preserve exact, lower-bound and unknown results. `updated_at`, notes and unchanged history
+  snapshots are not progress and must not reset the clock. Missing age evidence is an
+  observation fault to assign, not a young task.
+- **Stages:** identify each active task/PR's current wait and elapsed time from its actual start
+  evidence: assignment/start acknowledgement, settled candidate, validation process, PR creation
+  and ready event, independent-review dispatch/result, provider admission/completion, CI and
+  merge readiness. Keep total status age distinct from the current attempt's age. Record source
+  timestamps and unknown intervals; overlapping work is not summed into elapsed time.
+
+Show the oldest work and slowest stages with the observed cause, accountable agent, next concrete
+action and a timestamped checkpoint. Separate admission/ownership, agent execution, orchestration
+handoff, local validation, CI, independent review and provider waits. An hour-long review with
+seconds of measured probes is not evidence that tests took the hour; identify the unmeasured
+remainder. Queued, skipped and rate-limited review signals do not satisfy completed review.
+
+The owner's delivery floor is **at least one merged PR per trailing hour**. Below it is a
+**pipeline bug**, even when an external service limits capacity, not a normal blocked summary.
+Reuse the existing open native pipeline bug for the continuing incident; otherwise file one
+through the tasks skill. Assign an agent a concrete intervention against the limiting stage,
+record its evidence and checkpoint in that bug, and continue independent useful work. At the
+checkpoint compare the result with the original failure and measure delivery again. Missing a
+checkpoint requires a revised action or escalation with cause, not another identical idle note.
+If nothing authorized can remove an external blocker, retain the bug and name the precise
+decision/evidence needed; do not call that recovery.
+
+An intervention is not successful merely because a note, plan or PR was created. Keep the bug
+open until its change has passed the full observed merge gate, the limiting-stage correction
+has been exercised, and a later sweep observes the delivery floor. Record those recovery
+observations; a later missed window is a new failure to reconcile, not permanently healthy
+history. Never close unwanted PRs, weaken review or invent approved work to improve the number.
+
+### Management targets and checkpoints
+
+These are intervention targets, not deadlines that authorize unsafe completion, claim expiry or
+quality-gate exceptions. At each boundary collect completed agents/processes before waiting on
+one unfinished job; avoid leaving a settled result undispatched behind an unrelated review.
+
+| Measure | Target and response |
+| --- | --- |
+| Independent delivery authors | Three when admission, disjoint ownership and review capacity permit; report actual planning/implementation/review roles, not three fictitious implementation slots. Reviewers and validators are separate roles. |
+| Approved ready reserve | At least one eligible next deliverable beyond occupied author lanes. When below it, assign bounded planning of the next approved prerequisite now, not after all authors finish. No forced queue padding. |
+| Assignment or settled-result handoff | Acknowledge and route within five minutes; otherwise identify the missing executor/reviewer/validator and delegate the next action. |
+| Planning or implementation | A substantive evidence checkpoint within thirty minutes of start or last demonstrated advance; at sixty minutes without advance, diagnose the concrete obstacle and adjust the assignment. Notes alone do not restart this interval. |
+| Local validation and CI | Inspect at five minutes if unfinished; identify the actual running command/job or queue and preserve its evidence rather than rerunning a duplicate gate. |
+| Independent review | Check at fifteen minutes; at thirty minutes obtain findings, remaining scope and next checkpoint from the reviewer. Preserve independence; time pressure never turns an unfinished review into a pass. |
+| Provider wait | Track the actual admission and completion signals and provider-supplied availability checkpoint. If unavailable, re-observe at the next sweep; do not invent a refill time or duplicate an active request. |
+| Merge-ready result | Route to its author within five minutes after every review/quiet/CI condition is actually met; recheck the exact head under the review skill. |
+
+These initial checkpoints address observed independent-review spans of roughly sixty-two and
+thirty-one minutes while local gates took under a minute and CI under four minutes (native
+pipeline bug `plasmosome-7nw`). They are not runtime guarantees.
+Revise them from measured execution and the owner's delivery goal, recording the reason in
+native evidence instead of lowering the goal to match a stalled pipeline.
+
+### Provider capacity
+
+Use current PR status histories, provider comments and accessible read-only usage/configuration
+evidence. For each pending PR report required rounds from `.agents/skills/pr-review`, actual
+completed rounds, missing current-head coverage and remaining demand. Keep the minimum-round
+shortfall distinct from a further review needed after a repair. Compare aggregate pending demand
+and the demand needed for hourly delivery with the allowance actually observed for the author
+identity; do not assume one author lane is one provider slot.
+
+Distinguish the owner's plan entitlement, effective allowance/refill, admitted reviews and
+completed reviews. CodeRabbit's [rate-limit documentation](https://docs.coderabbit.ai/management/rate-limits)
+describes per-developer rolling and adaptive limits, not a universal repository quota. A nominal
+ten-per-hour plan is not proof of ten available now; a one-per-hour diagnostic is not proof every
+identity has that limit. Without account-specific evidence the cause of the difference is unknown.
+Rate-limited pushes consume no review and do not delay refill; completion time plus an hour is
+not a reset calculation.
+
+Delegate read-only diagnosis of a capacity mismatch, batch settled repairs before publication,
+and overlap eligible independent review/validation across disjoint work. Requests and merge gates
+remain in the review skill. Do not rotate identities to evade limits, change billing/admin
+settings, buy capacity, waive rounds or hold validated work solely on an invented global quota.
+If observed allowance cannot sustain required review demand, record that constraint and its
+owner-supplied decision separately from agent-removable delays; the pipeline bug remains open.
 
 ## 1. Resume PRs and reviews
 
@@ -33,9 +128,7 @@ to prod into marking it ready.
 ## 2. Reconcile existing claims
 
 ```shell
-./tools/work-state list --status in_progress --limit 0
-./tools/work-state list --status blocked --limit 0
-./tools/work-state list --label in-review --limit 0
+./tools/work-state list --all --limit 0 --json
 ```
 
 Inspect each relevant record's assignee, notes, dependencies and `external_ref` with `show ID`.
@@ -101,11 +194,10 @@ Only remove a finished clean worktree after its owner is done; preserve old or u
 and databases. Remove by actual path, not an inferred branch name. Reconcile any native owner
 with no active author, and any active author with no claim, before dispatching over them.
 
-Three independent authors is the standing target when the queue, file ownership and review
-throughput permit it. Reviewers do not own implementation slots. Compare planned write sets,
-not only `metadata.refs` (references are reads). Do not invent overlapping work to fill slots.
-CodeRabbit throughput is repo-wide, historically about ten rounds an hour; account for actual
-review usage rather than treating three authors as a promise of three review slots.
+Apply the author and ready-reserve targets above. Compare planned write sets, not only
+`metadata.refs` (references are reads); preserve blocked claims and uncertain ownership even
+when a target is missed. Review backlog and provider evidence constrain new execution without
+turning unrelated planning into forbidden work.
 
 ## 5. Pick and dispatch
 
@@ -119,14 +211,14 @@ chain. Native ready is dependency eligibility, not a spec validator. Send each e
 Beads ID and its non-overlapping ownership; it uses its unique actor and atomically claims before
 creating a code worktree. A losing claimant stops, not a second implementation.
 
-## 6. Explore the product when planned work runs out
+## 6. Replenish approved work continuously
 
-When no eligible planned task can be dispatched, and existing authors and reviews are accounted
-for, try a bounded real development workflow before concluding there is no useful work. Build
-Plasmosome, run its actual commands and services, and compare the result with its documentation
-and approved goals. Explore performance, security, documentation and usability through concrete
-scenarios, not just source inspection or another queue scan. These are investigation directions,
-not a requirement to repeat an exhaustive checklist on every sweep.
+When eligible backlog falls below the reserve target, account for existing authors and reviews
+and delegate the next useful approved prerequisite. If existing evidence does not settle what
+to build, assign an agent a bounded real development workflow: build Plasmosome, run its actual
+commands and services, and compare behavior with its documentation and approved goals. Explore
+performance, security, documentation and usability through concrete scenarios, not another
+queue scan. Reuse known proof; this is not an exhaustive checklist to repeat each sweep.
 
 Use common software-development needs to choose scenarios and candidate plasmids: workspace and
 local tools, compilation and tests, Git, and API/MCP integrations. Progressively try using
