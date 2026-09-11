@@ -10,7 +10,7 @@ resolve cross-task constraints. Delegate planning, implementation, experiments, 
 independent review to agents under `.agents/skills/planning-work`; do not become their executor.
 Select across the whole approved intent/spec/task graph, not a remembered set of task IDs.
 
-Finish work already in flight before starting more. The task queue is shared native Beads,
+The task queue is shared native Beads,
 accessed only through `./tools/work-state`; the contents of a chat, branch or old task snapshot
 cannot replace it. `.agents/skills/tasks` describes the records and operations.
 
