@@ -633,10 +633,15 @@ source acceptance still supplies neither deployed artifacts nor successful platf
   a neighbouring object. Pre-effect refusal preserves full state; post-effect failure exposes
   an incomplete obligation rather than hiding changed resources. Graceful timeout preserves
   selected authority and peers. Caller UUID failure occurs before prepare/backend invocation.
-  Stall a guest drain reply while keeping both streams live: the host deadline restores original
+  Stall a guest drain reply while keeping all bridge streams live: the host deadline restores original
   access without a remote activation reply. A mutant that closes the guest gate and depends on
   that reply must fail. Separately break a stream: affected exact operations must become
   incomplete, not closed-but-standing or silently absent; reconnection cannot reactivate them.
+  While that original drain is still unanswered, authorized Force must close only the selected
+  host gate without waiting for it. Exercise priority cleanup and deliberately delayed cleanup:
+  the latter stays selected-incomplete and denied while equal-peer access survives. Deliver the
+  old drain reply after Force; it cannot reopen the gate. Mutants that serialize Force behind
+  drain or reactivate from its late callback must fail against actual selected/peer access.
 - **A5 — apply identity:** replay of one live recorded op is a no-op; two equal ops with fresh IDs
   create two holdings. Standing payload collision refuses without mutation. Apply or plant after
   exact removal does not revive a spent grant handle; new grants still use fresh identities.

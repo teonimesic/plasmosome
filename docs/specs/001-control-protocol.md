@@ -637,8 +637,9 @@ handshake, not a successful fork, socket file or recorded PID.
 
 Trusted deployment input supplies a `RuntimeRecipe`:
 `{version:1, vcpus:u8, memory_mib:u32, kernel:Artifact, kernel_format:KernelFormat,
-initramfs:Artifact, root_image:Artifact, writable_root:String, helper:Artifact,
-libraries:[Artifact], host_policy:Artifact, guest_policy:Artifact, architecture:Architecture}`.
+initramfs:Artifact, root_image:Artifact, writable_root:String, control_path:String,
+data_path:String, helper:Artifact, libraries:[Artifact], host_policy:Artifact,
+guest_policy:Artifact, architecture:Architecture}`.
 All fields are required and
 unknown fields refuse. Artifact is `{path:String, sha256:String}` with an absolute NUL-free path
 and64lowercase hexadecimal SHA256 digits; Architecture is `aarch64 | x86_64`. CPU/memory values
@@ -657,18 +658,54 @@ for writes. Verification/opening must preserve the selected inode/bytes through 
 path-based opens; a replaceable parent or mutable artifact is refused, not trusted after hashing.
 A runtime recipe is deployment input retained by the original supervisor, not a mutable recovery
 database or permission to recreate a lost VM. Recovery reconnects, not relaunches.
+`control_path` and `data_path` are distinct absolute NUL-free Unix socket paths under owned,
+nonreplaceable private per-cell directories. The original supervisor creates and retains those
+listeners before launching this helper. Their permissions admit only this supervisor and its
+authorized original helper principal; they never expose the private recovery endpoint.
+
+The membrane uses direct exec, not a shell: argv is exactly
+`[helper.path,"--runtime-fd=3"]` and the **host exec environment is an explicit empty array**.
+Before exec, descriptor0 and1 refer to `/dev/null`, descriptor2 to an owned diagnostic pipe,
+and descriptor3 to the owned read end of a pipe containing exactly one complete UTF-8 ndjson
+RuntimeRecipe and then EOF, within the existing frame bound. No other descriptor survives.
+The helper strict-reads that record and closes3 before guest execution. Runtime configuration
+does not come from argv expansion, inherited environment or a guest-visible file.
+
+Before exec, verify the helper and full publisher-controlled dependency closure against
+`helper`/`libraries` and bind their loading to immutable verified paths. Publisher-fixed absolute
+load names, or loader-relative names confined to the verified immutable bundle, must resolve
+uniquely without environment, working-directory or fallback searches. Unlisted loadable code
+refuses; no unverified plugin/lazy-load path may execute before an after-the-fact inventory.
+Darwin's authenticated sealed system libraries/shared cache are a separate platform trust
+boundary: retain their actual OS build/cache identity, not a claim that those shared-cache
+images are ordinary publisher files. Other Darwin dependencies and every Linux userspace
+dependency/interpreter must belong to the verified library closure. Before guest execution,
+independently inspect the actual loaded image set and compare those original identities; a
+requested library list or removal of LD_*/DYLD_* variables after main starts is not that proof.
+Retain this host launch evidence in the original supervisor. If libkrun logging is initialized,
+use only `krun_init_log(2,KRUN_LOG_LEVEL_WARN,KRUN_LOG_STYLE_NEVER,KRUN_LOG_OPTION_NO_ENV)`.
+The guest-executable environment API below is distinct and cannot sanitize host exec/loading.
 
 Call `krun_create_ctx` and `krun_set_vm_config(ctx,vcpus,memory_mib)`, then
 `krun_set_kernel(ctx,kernel.path,kernel_format,initramfs.path,"rdinit=/init panic=-1")`.
-The command line is fixed on both admitted architectures. The trusted initramfs `/init` is PID1;
-it mounts the single unpartitioned ext4 root from `/dev/vda` and enters that root before starting
-the trusted shim/policy and then the unprivileged workload. Add exactly one disk, first and only,
+The command line is fixed on both admitted architectures. The initramfs is an uncompressed
+Linux newc archive with protected regular entries named `init` and `plasmosome/guest-policy`,
+materialized at `/init` and `/plasmosome/guest-policy` respectively.
+The former is the publisher's trusted PID1/shim/loader; the latter contains exactly the bytes
+of guest_policy, not a host pathname or mutable lookup. Before launch verify that archive
+binding against the pinned artifact and reject duplicate, escaping, symlinked or mismatching entries.
+PID1 remains in the protected initramfs, mounts the single unpartitioned ext4 `/dev/vda` at
+`/workload`, establishes the effective guest policy from that retained policy file, and only
+then starts the unprivileged workload chrooted into `/workload` in its controlled namespaces.
+It does not replace itself with a workload-root executable or make its original root/policy
+accessible to the workload. Managed guest paths are relative to that workload root. Host-only
+RuntimeRecipe fields are never injected into it. Add exactly one disk, first and only,
 with `krun_add_disk3(ctx,"root",writable_root,KRUN_DISK_FORMAT_RAW,false,false,KRUN_SYNC_FULL)`.
 Thus block ID, guest device, writable mode, host-cache mode and sync mode are fixed, not
 publisher-private choices. Do not call the deprecated root-disk API or implicit-init remount.
 Call `krun_disable_implicit_init` and `krun_disable_implicit_console`; add no console. Pass an
-explicit empty environment with `krun_set_env(ctx,empty)` where empty is a non-null array
-containing only the terminating NULL, not NULL (which inherits the host environment).
+explicit empty **guest-executable** environment with `krun_set_env(ctx,empty)` where empty is
+a non-null array containing only the terminating NULL, not NULL (which copies the host environment).
 Only the declared descriptors survive exec. Do not export a host directory through
 `krun_set_root` or virtiofs. Call `krun_disable_implicit_vsock` before `krun_add_vsock(ctx,0)`;
 zero disables both TSI flags. Add no NIC, TAP, passt or gvproxy backend, and call
@@ -695,20 +732,25 @@ or harness is not asked to cooperate. Keep the existing subject attestation/code
 and10.29.0.0/24 subject range; this runtime does not implement credential custody or attestation
 by asserting a guest identity.
 
-Both bridge streams use §1's UTF-8 ndjson envelope, matching request IDs and maximum frame size.
+Every bridge stream uses §1's UTF-8 ndjson envelope, matching request IDs and maximum frame size.
 Their method/parameter/result records are closed: all fields below are required, unknown fields
 or methods refuse, and failures use `{code:105,message,from:"guest_request",to:"refused",detail}`
 rather than a success-shaped empty result. Framing failures retain §1's protocol codes.
 `deadline_ms` is a positive remaining
 budget, never renewed internally. `boot` is the original association's opaque nonempty token.
 
-4090 is private control, not another controller API. The shim initiates the mapped transport,
-but the original host supervisor is the sole RPC caller and the shim is the responder. The host
-calls hello before any other verb. On4091 the shim is the sole caller and the host the responder;
-the host admits that stream only within the same verified original VMM association. Neither
-stream uses notifications or accepts requests in the opposite direction. One control request is
-outstanding at a time; bounded data requests may overlap with distinct IDs. Actual loss of
-either stream closes host admission and moves every affected operation out of standing state
+4090 is private control, not another controller API. The shim opens two connections to that
+same mapping: first the normal lane, then after its hello the prioritized withdrawal lane.
+The original host supervisor is sole RPC caller and assigns that role in hello; the shim is
+the responder. ControlLane is exactly `normal | withdrawal`. Normal admits the table's verbs;
+withdrawal admits only hello, observe and remove. No install, activate, drain or shutdown may
+enter the withdrawal lane. Each lane has its own bounded dispatcher and request IDs; one normal
+request may be outstanding without blocking withdrawal dispatch. A wait in normal drain must
+not hold a lock or executor needed by withdrawal. Readiness requires both hellos and the data
+association before workload launch. On4091 the shim is sole caller and the host the responder,
+within that same verified original VMM association. No stream uses notifications or accepts
+opposite-direction requests. Bounded data requests may overlap with distinct IDs. Actual loss
+of any of these streams closes host admission and moves every affected operation out of standing state
 into `IncompleteEffect`, retaining its original operation, resources and any issued record.
 The guest closes its corresponding admissions when it observes the loss; delayed detection
 cannot bypass the already-closed host gate. Never report a closed complete holding as effective,
@@ -721,7 +763,7 @@ Connection-local data-handle loss remains distinct from the original grant/resou
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `hello` | `{}` | `{boot, runtime:RuntimeRecipe, policy:Artifact}` |
+| `hello` | `{lane:ControlLane}` | `{boot:String, policy:String}` |
 | `observe` | `{deadline_ms}` | `GuestObservation` |
 | `install` | `{operation:UniverseOp, address:String|null, deadline_ms}` | `{boot, grant, installed:true}` |
 | `activate` | `{grant:GrantId, deadline_ms}` | `{boot, grant, active:true}` |
@@ -729,9 +771,21 @@ Connection-local data-handle loss remains distinct from the original grant/resou
 | `remove` | `{inverse:UniverseRemoval, owner:CellOwner, force:bool, deadline_ms}` | `{boot, grant, removed:true}` |
 | `shutdown` | `{deadline_ms}` | `{boot, shutdown_requested:true}` |
 
-Hello is compared to the original supervisor's verified runtime and effective guest policy,
-not accepted as authentication from an arbitrary guest. Install accepts only one of spec017's
-five complete grant operations, never an inverse. It carries all original capability/owner/ID
+Before the first connection the trusted PID1 obtains32random bytes from the guest kernel,
+waiting for initialized cryptographic randomness, and retains their64lowercase-hex encoding
+as this boot token. It never writes the token to workload storage or reconstructs it from a
+journal. Both control lanes return that same token; a reboot produces a fresh one. The first
+host association is authenticated by the original VMM mapping/listener, not by the token.
+Subsequent hellos must match the retained boot. Policy is the SHA256 of the protected guest
+policy bytes whose loading and effective hooks/maps the trusted shim actually verifies before
+hello; it must equal the original supervisor's guest_policy.sha256. A requested-but-unloaded
+policy refuses. The supervisor independently verifies host RuntimeRecipe, helper, libraries,
+kernel/initramfs and root authority; hello neither returns unexplained host paths nor pretends
+to measure them. Its guest policy/boot account still requires the independent effective-state
+observation below and is not an attestation substitute.
+
+Install accepts only one of spec017's five complete grant operations, never an inverse.
+It carries all original capability/owner/ID
 fields, including the full recipe; it is not a mutable guest-side lookup. Only the original host
 supervisor may issue it, after the corresponding cell prepare is durable and host original
 resource authority has been retained. An address is the original per-boot ProxyMap binding
@@ -764,8 +818,9 @@ If the deadline expires before destructive progress, restore the local pause and
 DrainTimedOut with original objects, handles, guest admission and peers unchanged. A delayed
 drain reply cannot authorize removal or change admission after that deadline. Do not close a
 healthy stream merely because this observation timed out. The outstanding drain retains its
-request ID until its eventual reply is discarded; subsequent control mutations wait for that
-request to settle or return a bounded refusal without effects. Actual stream loss is the
+request ID until its eventual reply is discarded; later normal-lane mutations wait for that
+request to settle or return a bounded refusal without effects. They do not block Force's
+independent host transition or the withdrawal lane. Actual stream loss is the
 separate incomplete transition above, not an unproved remote-restoration result relabelled as
 a timeout. This preserves spec017 A4 and spec008 R7 rather than weakening their pure-timeout rule.
 
@@ -774,9 +829,20 @@ close that selected grant's gate and send remove with force:false. This begins d
 withdrawal: the guest verifies UniverseRemoval and the separate CellOwner against the retained
 installed UniverseOp, closes its selected admission and destroys only those original guest
 attachments. A timeout/lost reply after this point is incomplete, not a preserved timeout.
-Force authority is checked/durably recorded by the host under spec008; force:true closes
-admission and releases cancellable original attachments without pretending uncancellable work
-is terminal. Neither form returns removed:true until fresh observation proves the selected
+Force authority is checked/durably recorded by the host under spec008. Without waiting for
+any normal-lane request, the supervisor atomically makes ONLY the selected operation
+withdrawing/incomplete and closes its host gate permanently. A graceful-pause expiry, delayed
+drain reply or cancelled callback cannot restore a non-standing operation. Peers keep their
+existing gates, handles and selectors. Send the exact force:true removal on the independent
+withdrawal lane; its guest handler closes selected admission and releases cancellable original
+attachments without pretending uncancellable work is terminal. Even if that lane is delayed
+or busy, the local Force transition has already denied selected access: return the selected
+IncompleteEffect under the caller's bound and retain all cleanup authority, never a no-effect
+busy refusal with the selected capability still active. Do not close a healthy shared lane
+just to escape an unanswered request. Retried cleanup uses that same original association.
+Withdrawal-lane observe/remove requests may not hold a peer's gate while waiting; pending work
+cannot prevent another locally authorized Force from closing its selected host gate.
+Neither form returns removed:true until fresh observation proves the selected
 guest bindings absent. Host resource cleanup is separately required. Failures preserve original
 associations and incomplete state, never reacquire by path or ID. A matching already-installed
 or active operation may be acknowledged only after actual inspection and only while still
@@ -935,9 +1001,12 @@ launch and are reported as concrete prerequisites, never as a simulated ready ce
 Acceptance requires actual hardware guests on both platforms, all five real adapters, denied
 private-control access and ambient host file/network access, retained original authority across
 controller restart, and spec017's managed-mmap/copy-execution witnesses. Disable TSI protection,
-omit confinement, leak a privileged FD or bypass host grant gating in disposable mutants: the
-corresponding real unauthorized-access witness must fail. A small sandbox/mmap probe establishes
-only the mechanism it exercised, not libkrun/HVF compatibility or whole-cell isolation.
+omit confinement, leak a privileged FD/loader environment or bypass host grant gating in
+disposable mutants: the corresponding real unauthorized-access witness must fail. Check actual
+loaded dependencies, protected initramfs-policy binding and both control-lane boot identities;
+neither a guest echo of host paths nor post-main environment cleanup supplies that evidence.
+A small sandbox/mmap/loader/priority-lane probe establishes only the mechanism it exercised,
+not libkrun/HVF compatibility or whole-cell isolation.
 
 ## 5. What this spec deliberately leaves undecided
 

@@ -612,6 +612,9 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   live: the host-local deadline restores access with no remote activation dependency. Actual
   stream loss instead exposes affected operations as incomplete and permits only exact cleanup
   under original authority; a same-boot reconnect or changed-boot replacement cannot promote them.
+  With the old drain still unanswered, durably authorized Force closes only the selected host
+  gate and uses the independent withdrawal lane. Stalled cleanup remains selected-incomplete;
+  the peer still serves and a late drain reply cannot reopen forced access.
   After real fork and successful bind, inject access/association failure before successful
   publication. Observe the typed incomplete operation with no complete object or fabricated
   entry. Kill the controller, restart, durably abort, then exact-withdraw using retained original
@@ -668,6 +671,11 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   denial/private-copy witnesses in spec017A14; ordinary chmod/unlink and an existing Docker
   process are not substitutes for managed guest FUSE/LSM enforcement.
   Omitting one otherwise-empty projection-kind array must likewise fail complete observation.
+  Exercise the empty host exec environment and actual loaded-dependency check separately from
+  the guest environment API. An injected loader/late-clear mutant must fail before guest
+  readiness. Hello carries only the original boot token and effective guest policy measurement;
+  mismatched protected policy bytes, a replaced boot or an unexplained host-path echo cannot
+  establish readiness.
 - **R11 — discriminating proof:** in disposable mutations, skipping daemon recovery fails the
   nonzero restart case; adopting a parsed prefix fails quarantine; comparing expected to itself
   fails the missing/stray case; collapsing owners/IDs fails cross-cell and repeated-grant cases;
