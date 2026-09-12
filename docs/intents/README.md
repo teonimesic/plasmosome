@@ -1,30 +1,32 @@
 # Intents
 
-One file per intent, named `NNN-slug.md`. An intent says what is wanted and why, with no design
-and no solution. Copy `docs/templates/intent.md`.
+`NNN-slug.md`: goal/why, not design/solution. Copy `docs/templates/intent.md`.
+Declare ID/status once in frontmatter; coordinate permanent three-digit intent IDs against
+Git/open PRs, not native task IDs.
 
-`status:` is `draft` or `approved`. Anyone may write a draft — proposing an intent is real work,
-and this folder is where a proposal belongs — and it does not matter who writes one. **Approval
-originates with the owner**: an agent may record one it is carrying, relayed by another agent or
-heard directly, and may never originate one, its own draft least of all. The question is never who
-typed the line, only whether the owner really approved it.
+Anyone may draft; only the owner originates approval and coverage values/prose.
+Agents may record and cite judgments, never infer them from checks/counts.
+Proposal/approval PRs and either coverage-judgment change (including backfill) stay draft
+until owner GitHub reading/approval and owner-ended draft; agents never mark them ready.
 
-**A pull request proposing an intent, or moving one to `approved`, stays a draft until the owner
-has read it on GitHub and approved it there**; an agent does not mark it ready. That is where their
-reading happens, so it is where the waiting is visible.
+`status:` is `draft`/`approved`; refusal stays draft and fills `outcome:`.
+`served:`: `none` nothing, `partly` some, `substantially` most built.
+`## What is served` records built/remaining, not spec/task IDs/counts; retain its final
+account when settled. No terminal value; open work is normal. Coverage neither approves
+goals nor gates admission/priority.
 
-Intent descriptions, approval state and outcomes remain versioned Markdown; task descriptions,
-plans, notes and lifecycle live entirely in shared native Beads under
-[spec016](../specs/016-native-beads-task-authority.md). Its full-task cutover approves no unrelated
-draft intent. Read tasks by Beads ID using `./tools/work-state show ID`, not a former task path.
+Blank template means missing judgment, not `none`; disclose fault3. The existing local
+gate permits its draft publication; never gate on live coverage.
+Read-only checkout-root commands (no synchronization); invalid inputs/unknown evidence refuse first:
+- `./tools/intent-coverage show INTENT_ID`: JSON Lines of specs/once-only
+  native tasks/statuses/dispositions/merge-or-cancellation evidence; ignores served.
+- `./tools/intent-coverage check`: exit2 refusal; exit1
+  [009](../specs/009-how-much-of-an-intent-is-built.md)'s three faults;
+  exit0/silent means consistency, not satisfaction.
 
-Spec acceptance and task admission are described in [the spec index](../specs/README.md).
-A refused intent stays `draft` and fills `outcome:`, distinguishing it from a forgotten proposal.
-Each intent declares its ID and state once in frontmatter. Its three-digit ID is permanent and
-belongs to the intent namespace, not the native task namespace; coordinate new document IDs
-against Git documents and open document PRs.
-
-**Nothing mechanical enforces any of this, and that is a choice rather than an omission.**
-[`../decisions/008-approving-an-intent-is-an-instruction.md`](../decisions/008-approving-an-intent-is-an-instruction.md)
-records what was rejected, what it costs, and what would reopen it. See
-[the task skill](../../.agents/skills/tasks/SKILL.md) for downstream work.
+Git intents; Beads tasks/plans/notes: `./tools/work-state show ID`, not task files.
+[016](../specs/016-native-beads-task-authority.md): lifecycle;
+[spec index](../specs/README.md): acceptance/admission;
+[tasks](../../.agents/skills/tasks/SKILL.md): downstream work.
+[Decision008](../decisions/008-approving-an-intent-is-an-instruction.md) records the unauthenticated
+approval boundary, costs and reconsideration.
