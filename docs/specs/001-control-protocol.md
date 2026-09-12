@@ -765,7 +765,7 @@ Connection-local data-handle loss remains distinct from the original grant/resou
 | --- | --- | --- |
 | `hello` | `{lane:ControlLane}` | `{boot:String, policy:String}` |
 | `observe` | `{deadline_ms}` | `GuestObservation` |
-| `install` | `{operation:UniverseOp, address:String|null, deadline_ms}` | `{boot, grant, installed:true}` |
+| `install` | `{operation:UniverseOp, address:String\|null, deadline_ms}` | `{boot, grant, installed:true}` |
 | `activate` | `{grant:GrantId, deadline_ms}` | `{boot, grant, active:true}` |
 | `drain` | `{grant:GrantId, deadline_ms}` | `{boot, grant, drained:true}` |
 | `remove` | `{inverse:UniverseRemoval, owner:CellOwner, force:bool, deadline_ms}` | `{boot, grant, removed:true}` |

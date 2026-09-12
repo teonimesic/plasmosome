@@ -464,9 +464,11 @@ not inherited credentials. Trusted configuration supplies non-secret launch inpu
 validation cannot detect arbitrary secret values embedded in strings. This is not a new plasmid
 manifest grammar, credential transport or permission for workload text to execute host commands.
 
-The endpoint requires spec001 §4.1's trusted-directory, socket-mode and kernel peer-UID boundary
-for its host-private control transport. It is not a UdsSocket capability granted to the workload. A
-different launch description cannot silently take over an occupied endpoint. Before prepare,
+Both endpoints require spec001 §4.1's trusted-directory, socket-mode and mutual kernel peer-UID
+boundary for their host-private transports. The broker and controlled relay enforce that boundary
+before exchanging data; a socket path alone authenticates no peer. Neither endpoint is a
+UdsSocket capability granted to the workload. A different launch description cannot silently
+take over either occupied endpoint. Before prepare,
 the adapter must establish that it can stage a replacement without disturbing standing access
 or refuse it. This validation creates no listener or process. Paths and arguments are exact
 payload, not a recipe to be guessed from a broker name or reconstructed from a running PID.
