@@ -506,8 +506,9 @@ The installer verifies the current platform's archive and binary against
 when you need the project's existing task history: obtain the verified backup or explicitly
 pull its configured Dolt remote. There is no tracked task export to reconstruct it from.
 
-Read [AGENTS.md](AGENTS.md) and the [heartbeat](.agents/skills/heartbeat/SKILL.md) before picking
-work. The [task skill](.agents/skills/tasks/SKILL.md) covers native filing, planning and unique-actor
+Read [AGENTS.md](AGENTS.md) before picking work; it names Main's orchestration entry.
+The [pipeline health check](.agents/skills/check-pipeline-health/SKILL.md) runs read-only statistics.
+The [task skill](.agents/skills/tasks/SKILL.md) covers native filing, planning and unique-actor
 claims; [spec016](docs/specs/016-native-beads-task-authority.md) defines the complete API,
 installation, migration and backup contract. Ordinary reads and mutations stay local.
 `./tools/work-state dolt pull` and `dolt push` are explicit replication, not distributed claim

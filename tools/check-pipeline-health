@@ -1,0 +1,513 @@
+#!/usr/bin/env python3
+"""Collect bounded, read-only pipeline facts; collection success is not pipeline health."""
+
+import argparse
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import signal
+import subprocess
+import sys
+import time
+
+
+COMMAND_TIMEOUT = 30
+SOURCE_TIMEOUT = 180
+OUTPUT_LIMIT = 16 * 1024 * 1024
+PAGE_LIMIT = 1000
+PHASES = ("planning", "in_progress", "review")
+STATUSES = {"open", "blocked", "closed", *PHASES}
+REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+\Z")
+PR_QUERY = """query($owner:String!, $name:String!, $cursor:String) {
+  repository(owner:$owner, name:$name) {
+    pullRequests(first:100, after:$cursor, orderBy:{field:CREATED_AT,direction:ASC}) {
+      totalCount pageInfo { hasNextPage endCursor }
+      nodes { number url title state isDraft headRefOid createdAt updatedAt closedAt
+              mergedAt mergeCommit { oid } additions deletions }
+    }
+  }
+}"""
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def timestamp(value):
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def parse_time(value):
+    if not isinstance(value, str):
+        raise ValueError("missing timestamp")
+    result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if result.tzinfo is None or result.utcoffset() is None:
+        raise ValueError("timestamp has no timezone")
+    return result.astimezone(timezone.utc)
+
+
+def diagnostic(message):
+    """Never include command arguments, auth headers or known environment secrets."""
+    text = str(message)
+    for key, value in os.environ.items():
+        if value and re.search(r"TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|AUTH", key, re.I):
+            text = text.replace(value, "[REDACTED]")
+    text = re.sub(r"(?i)(?:authorization|proxy-authorization)\s*[:=][^\r\n]*", "authorization: [REDACTED]", text)
+    text = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b", "[REDACTED]", text)
+    text = re.sub(r"(?i)(https?://)[^/\s@]+@", r"\1[REDACTED]@", text)
+    text = re.sub(r"(https?://[^\s?#]+)[?#][^\s]*", r"\1?[REDACTED]", text)
+    text = re.sub(r"(?i)((?:token|secret|password|api[_-]?key)\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]", text)
+    return "".join(c for c in text if c in "\n\t" or ord(c) >= 32)[:1500]
+
+
+def error(source, operation, message):
+    return {"source": source, "operation": operation, "message": diagnostic(message)}
+
+
+class JsonRunner:
+    """One source budget, bounded pipes, and an owned/reaped child per call."""
+
+    def __init__(self, root, *, timeout=COMMAND_TIMEOUT, budget=SOURCE_TIMEOUT, output_limit=OUTPUT_LIMIT):
+        self.root = root
+        self.timeout = timeout
+        self.deadline = time.monotonic() + budget
+        self.output_limit = output_limit
+        self.calls = 0
+
+    def __call__(self, argv):
+        remaining = min(self.timeout, self.deadline - time.monotonic())
+        if remaining <= 0:
+            raise RuntimeError("source collection time budget exhausted")
+        environment = dict(os.environ)
+        environment.pop("GH_DEBUG", None)
+        environment.update(GH_PROMPT_DISABLED="1", GIT_TERMINAL_PROMPT="0", GH_PAGER="cat")
+        try:
+            child = subprocess.Popen(argv, cwd=self.root, env=environment, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        except OSError as exc:
+            raise RuntimeError(f"cannot start source command: {exc.strerror}") from exc
+        self.calls += 1
+        buffers = {"stdout": bytearray(), "stderr": bytearray()}
+        deadline = time.monotonic() + remaining
+        try:
+            with selectors.DefaultSelector() as selector:
+                for label, stream in (("stdout", child.stdout), ("stderr", child.stderr)):
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, selectors.EVENT_READ, label)
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("source command timed out")
+                    for key, _ in selector.select(remaining):
+                        chunk = os.read(key.fd, 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        target = buffers[key.data]
+                        limit = self.output_limit if key.data == "stdout" else 65536
+                        if len(target) + len(chunk) > limit:
+                            raise RuntimeError(f"source command {key.data} exceeded byte limit {limit}")
+                        target.extend(chunk)
+                try:
+                    child.wait(timeout=max(0.001, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError("source command timed out after closing its output") from exc
+            if child.returncode:
+                detail = diagnostic(buffers["stderr"].decode("utf-8", errors="replace"))
+                raise RuntimeError(f"source command exited {child.returncode}: {detail}")
+            try:
+                return json.loads(buffers["stdout"], parse_constant=lambda value: invalid_constant(value))
+            except (ValueError, UnicodeError) as exc:
+                raise RuntimeError("source command returned invalid JSON") from exc
+        except OSError as exc:
+            raise RuntimeError(f"source command I/O failed: {exc.strerror}") from exc
+        finally:
+            # A reaped leader no longer reserves its process-group identity.
+            if child.returncode is None:
+                # An unwaited leader still protects cleanup of inherited-pipe descendants.
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.wait()
+            child.stdout.close()
+            child.stderr.close()
+
+
+def invalid_constant(value):
+    raise ValueError(f"non-JSON constant {value}")
+
+
+def native_empty(paused=False):
+    return {
+        "collection_status": "paused" if paused else "unavailable",
+        "source": {"command": "./tools/work-state", "commands": [], "generation_before": None,
+                   "generation_after": None, "observed_from": None, "observed_until": None,
+                   "consistency": "not_observed", "selected_snapshot": None,
+                   "history": "not queried: no supported native continuity certificate; history alone cannot establish age"},
+        "total_tasks": None, "counts_by_status": None, "tasks": None,
+        "wip": None, "owned_blocked": None, "errors": [],
+    }
+
+
+def collect_native(run_json, *, paused=False):
+    report = native_empty(paused)
+    if paused:
+        return report
+    source, errors = report["source"], report["errors"]
+    source["observed_from"] = timestamp(utc_now())
+    captures = {}
+    for name, args in (
+        ("generation_before", ["vc", "status", "--json"]),
+        ("list_before", ["list", "--all", "--limit", "0", "--json"]),
+        ("list_after", ["list", "--all", "--limit", "0", "--json"]),
+        ("generation_after", ["vc", "status", "--json"]),
+    ):
+        argv = ["./tools/work-state", "--readonly", *args]
+        source["commands"].append({"operation": name, "argv": argv})
+        try:
+            value = run_json(argv)
+            if name.startswith("generation"):
+                if not isinstance(value, dict) or not isinstance(value.get("commit"), str) or not value["commit"]:
+                    raise RuntimeError("native generation missing commit")
+                if not isinstance(value.get("branch"), str) or not value["branch"]:
+                    raise RuntimeError("native generation missing branch")
+                source[name] = {"commit": value["commit"], "branch": value["branch"],
+                                "schema_version": value.get("schema_version")}
+            else:
+                if not isinstance(value, list):
+                    raise RuntimeError("native task list is not an array")
+                captures[name] = value
+        except RuntimeError as exc:
+            errors.append(error("native", name, exc))
+    source["observed_until"] = timestamp(utc_now())
+    generations_present = source["generation_before"] is not None and source["generation_after"] is not None
+    lists_present = len(captures) == 2
+    generation_drift = generations_present and source["generation_before"] != source["generation_after"]
+    # Full-row comparison detects changes even if a generation is unchanged. Order is not state.
+    row_drift = lists_present and sorted(json.dumps(row, sort_keys=True) for row in captures["list_before"]) != sorted(
+        json.dumps(row, sort_keys=True) for row in captures["list_after"])
+    if generation_drift or row_drift:
+        errors.append(error("native", "capture", "native generation or task rows changed during capture; no atomic snapshot"))
+        source["consistency"] = "changed"
+    elif generations_present and lists_present:
+        source["consistency"] = "stable_observed_bounds_not_atomic"
+    else:
+        source["consistency"] = "unverified"
+    if not captures:
+        return report
+    selected = "list_before" if "list_before" in captures else "list_after"
+    source["selected_snapshot"] = selected
+    rows = captures[selected]
+    source["row_counts"] = {name: len(value) for name, value in captures.items()}
+    counts, tasks, ids = Counter(), [], set()
+    valid_inventory = True
+    unavailable_status = 0
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            errors.append(error("native", "task", f"row {index} is not an object"))
+            valid_inventory = False
+            continue
+        task_id, status = row.get("id"), row.get("status")
+        if not isinstance(task_id, str) or not task_id or task_id in ids:
+            errors.append(error("native", "task", f"row {index} has missing/invalid/duplicate id"))
+            valid_inventory = False
+        else:
+            ids.add(task_id)
+        if isinstance(status, str):
+            counts[status] += 1
+            if status not in STATUSES:
+                errors.append(error("native", "status", f"row {index} has unexpected native status {status!r}; preserved"))
+            if not status.strip():
+                unavailable_status += 1
+        else:
+            unavailable_status += 1
+            errors.append(error("native", "status", f"row {index} has unavailable native status"))
+        if status == "closed":
+            continue
+        # Beads 1.1.2 Issue.Assignee is a string with json omitempty; omission is unassigned.
+        assignee = row.get("assignee", "")
+        if not isinstance(assignee, str):
+            assignment = "unavailable"
+            errors.append(error("native", "assignee", f"row {index} has invalid assignee"))
+        else:
+            assignment = "owned" if assignee.strip() else "unassigned"
+        title = row.get("title")
+        if not isinstance(title, str):
+            errors.append(error("native", "title", f"row {index} has unavailable title"))
+        tasks.append({
+            "id": task_id, "title": title, "status": status, "assignee": assignee,
+            "assignment_state": assignment, "assignee_field_present": "assignee" in row,
+            "labels": row.get("labels", []), "external_ref": row.get("external_ref"),
+            "metadata": row.get("metadata"),
+            "phase_age": {"classification": "unknown", "seconds": None, "since": None,
+                          "source": "native API continuity not certified",
+                          "reason": "No supported proof of uninterrupted current-status residence; timestamps, notes and history JSON are not certificates."},
+        })
+    classified_inventory = valid_inventory and unavailable_status == 0
+    report.update(total_tasks=len(rows) if valid_inventory else None,
+                  counts_by_status=({status: count if classified_inventory else None
+                                     for status, count in sorted(counts.items())}
+                                    if counts or classified_inventory else None),
+                  observed_row_counts_by_status=dict(sorted(counts.items())), tasks=tasks,
+                  unavailable_status_count=unavailable_status)
+    # IDs below are deduplicated observations, not exact cardinalities when input rows are ambiguous.
+    by_status = {phase: sorted({task["id"] for task in tasks
+                               if task["status"] == phase and isinstance(task["id"], str) and task["id"]})
+                 for phase in PHASES}
+    observed_wip = len({task_id for task_ids in by_status.values() for task_id in task_ids})
+    report["wip"] = {"count": observed_wip if classified_inventory else None,
+                     "observed_count": observed_wip, "by_status": {
+        phase: {"count": len(task_ids) if classified_inventory else None,
+                "observed_count": len(task_ids), "ids": task_ids} for phase, task_ids in by_status.items()}}
+    blocked = sorted({task["id"] for task in tasks if task["status"] == "blocked"
+                      and task["assignment_state"] == "owned" and isinstance(task["id"], str) and task["id"]})
+    blocked_ownership_known = classified_inventory and not any(
+        task["status"] == "blocked" and task["assignment_state"] == "unavailable" for task in tasks)
+    report["owned_blocked"] = {"count": len(blocked) if blocked_ownership_known else None,
+                               "observed_count": len(blocked), "ids": blocked}
+    report["collection_status"] = "partial" if errors else "complete"
+    return report
+
+
+def verified_merge_commit(node):
+    commit = node.get("mergeCommit")
+    return (isinstance(commit, dict) and isinstance(commit.get("oid"), str)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", commit["oid"]) is not None)
+
+
+def github_empty():
+    return {
+        "collection_status": "unavailable",
+        "source": {"api": "GitHub GraphQL repository.pullRequests (all states, created ascending)",
+                   "page_count": 0, "page_total_counts": [], "unique_count": 0,
+                   "pagination_complete": False, "inventory_complete": False,
+                   "observed_from": None, "observed_until": None,
+                   "consistency": "paginated observation, not an atomic historical snapshot"},
+        "pull_requests_total": None,
+        "delivery": {"count": None, "observed_count": 0, "entries": [], "floor_required": 1, "floor_met": None,
+                     "closed_unmerged_count": None, "closed_unmerged_observed_count": 0, "closed_unmerged": [],
+                     "last_merge": None, "seconds_since_last_merge": None, "last_merge_observed_candidate": None,
+                     "merge_commit_proof_complete": None, "missing_merge_commit_prs": [],
+                     "reported_unverified_candidates": []},
+        "open_prs": [], "errors": [],
+    }
+
+
+def collect_github(run_json, *, repository, window_start, observed_at):
+    report = github_empty()
+    source, errors = report["source"], report["errors"]
+    source["observed_from"] = timestamp(utc_now())
+    if window_start.tzinfo is None or observed_at.tzinfo is None or window_start >= observed_at:
+        errors.append(error("github", "window", "invalid timezone-aware delivery window"))
+        source["observed_until"] = timestamp(utc_now())
+        return report, []
+    owner, name = repository.split("/", 1)
+    inventory, cursors = {}, set()
+    cursor = None
+    for _ in range(PAGE_LIMIT):
+        argv = ["gh", "api", "graphql", "-f", "query=" + PR_QUERY, "-f", "owner=" + owner, "-f", "name=" + name]
+        if cursor is not None:
+            argv.extend(["-f", "cursor=" + cursor])
+        try:
+            payload = run_json(argv)
+            if not isinstance(payload, dict):
+                raise RuntimeError("GraphQL response is not an object")
+            if payload.get("errors"):
+                errors.append(error("github", "pullRequests", "GraphQL returned errors; any available data is partial"))
+            data = payload.get("data")
+            repo = data.get("repository") if isinstance(data, dict) else None
+            connection = repo.get("pullRequests") if isinstance(repo, dict) else None
+            if not isinstance(connection, dict):
+                raise RuntimeError("GraphQL repository or pullRequests unavailable")
+            nodes, total, page = connection.get("nodes"), connection.get("totalCount"), connection.get("pageInfo")
+            if not isinstance(nodes, list) or type(total) is not int or total < 0 or not isinstance(page, dict):
+                raise RuntimeError("invalid pullRequests connection")
+            source["page_count"] += 1
+            source["page_total_counts"].append(total)
+            for node in nodes:
+                if not isinstance(node, dict) or type(node.get("number")) is not int or node["number"] < 1:
+                    errors.append(error("github", "pullRequests", "missing/invalid PR identity"))
+                    continue
+                number = node["number"]
+                if number in inventory:
+                    errors.append(error("github", "pagination", f"duplicate PR {number} across pages; inventory drift"))
+                    continue
+                inventory[number] = node
+            if type(page.get("hasNextPage")) is not bool:
+                raise RuntimeError("missing/invalid hasNextPage")
+            if not page["hasNextPage"]:
+                source["pagination_complete"] = True
+                break
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor or cursor in cursors or not nodes:
+                raise RuntimeError("nonadvancing PR pagination cursor")
+            cursors.add(cursor)
+        except RuntimeError as exc:
+            errors.append(error("github", "pullRequests", exc))
+            break
+    else:
+        errors.append(error("github", "pagination", f"PR pagination exceeded {PAGE_LIMIT} pages"))
+    source["observed_until"] = timestamp(utc_now())
+    source["unique_count"] = len(inventory)
+    totals = source["page_total_counts"]
+    if totals and (len(set(totals)) != 1 or (source["pagination_complete"] and totals[-1] != len(inventory))):
+        errors.append(error("github", "pagination", "PR totalCount changed or differs from unique inventory"))
+    if totals and len(set(totals)) == 1:
+        report["pull_requests_total"] = totals[0]
+    merged, closed, unverified = [], [], []
+    last_merge, last_merged_at = None, None
+    missing_commits = []
+    for node in inventory.values():
+        number = node["number"]
+        try:
+            state = node.get("state")
+            if state not in {"OPEN", "CLOSED", "MERGED"}:
+                raise ValueError("missing/invalid state")
+            for field in ("url", "title", "headRefOid"):
+                if not isinstance(node.get(field), str) or not node[field]:
+                    raise ValueError(f"missing/invalid {field}")
+            for field in ("createdAt", "updatedAt"):
+                parse_time(node.get(field))
+            for field in ("additions", "deletions"):
+                if type(node.get(field)) is not int or node[field] < 0:
+                    raise ValueError(f"missing/invalid {field}")
+            if type(node.get("isDraft")) is not bool:
+                raise ValueError("missing/invalid isDraft")
+            if state == "OPEN":
+                report["open_prs"].append(node)
+            elif state == "MERGED":
+                when = parse_time(node.get("mergedAt"))
+                if when <= observed_at and (last_merged_at is None or when > last_merged_at):
+                    last_merge, last_merged_at = node, when
+                if window_start < when <= observed_at:
+                    if verified_merge_commit(node):
+                        merged.append(node)
+                    else:
+                        unverified.append(node)
+                        missing_commits.append(number)
+            elif node.get("mergedAt") is not None:
+                raise ValueError("CLOSED PR has contradictory mergedAt")
+            elif window_start < parse_time(node.get("closedAt")) <= observed_at:
+                closed.append(node)
+        except (ValueError, TypeError) as exc:
+            errors.append(error("github", "pullRequest", f"PR {number}: {exc}"))
+    source["inventory_complete"] = source["pagination_complete"] and not errors
+    last_proven = last_merge is None or verified_merge_commit(last_merge)
+    if not last_proven and last_merge["number"] not in missing_commits:
+        missing_commits.append(last_merge["number"])
+    for number in missing_commits:
+        errors.append(error("github", "mergeProof", f"PR {number}: reported merge lacks a valid 40-hex mergeCommit oid"))
+    complete = source["inventory_complete"] and not errors
+    delivery_complete = source["inventory_complete"] and not unverified
+    last_complete = source["inventory_complete"] and last_proven
+    report["collection_status"] = "complete" if complete else "partial" if totals or inventory else "unavailable"
+    report["delivery"].update(count=len(merged) if delivery_complete else None, observed_count=len(merged), entries=merged,
+                              floor_met=len(merged) >= 1 if delivery_complete else None,
+                              closed_unmerged_count=len(closed) if source["inventory_complete"] else None,
+                              closed_unmerged_observed_count=len(closed), closed_unmerged=closed)
+    report["delivery"].update(
+        last_merge=last_merge if last_complete else None,
+        seconds_since_last_merge=(observed_at - last_merged_at).total_seconds() if last_complete and last_merged_at else None,
+        last_merge_observed_candidate=last_merge if not last_complete else None,
+        merge_commit_proof_complete=not missing_commits if source["inventory_complete"] else None,
+        missing_merge_commit_prs=missing_commits,
+        reported_unverified_candidates=unverified,
+    )
+    return report, list(inventory.values())
+
+
+def reviews_unavailable(reason):
+    return {
+        "collection_status": "unavailable", "provider": "coderabbit",
+        "baseline": {"reviews_per_hour": 10, "source": "owner", "scope": "shared total, not remaining"},
+        "preferred_api": {"status": "unavailable", "reason": reason},
+        "measurement_scope": "not observed", "counts": {"admitted_in_window": None, "completed_in_window": None,
+                                                          "admission_time_unknown": None, "ambiguous_identities": None},
+        "remaining": None, "events": [], "excluded": [], "ambiguities": [], "coverage": {},
+        "not_merge_gate": True, "errors": [error("reviews", "collection", reason)],
+    }
+
+
+def collect_report(root, *, repository=None, native_paused=False):
+    observed_at = utc_now()
+    window_start = observed_at - timedelta(hours=1)
+    errors = []
+    report = {
+        "schema_version": 1, "observed_at": timestamp(observed_at), "completed_at": None,
+        "window": {"start_exclusive": timestamp(window_start), "end_inclusive": timestamp(observed_at)},
+        "repository": {"path": str(root), "github": repository, "input": "--repo" if repository else "gh repo view"},
+        "collection_status": "failed", "native": native_empty(native_paused), "github": github_empty(),
+        "reviews": reviews_unavailable("GitHub repository not yet resolved"), "errors": errors,
+    }
+    try:
+        report["native"] = collect_native(JsonRunner(root), paused=native_paused)
+    except Exception as exc:
+        # An unexpected source shape must not discard independently collected sources.
+        report["native"]["errors"].append(error("native", "collection", exc))
+    github_runner = JsonRunner(root)
+    if repository is None:
+        try:
+            value = github_runner(["gh", "repo", "view", "--json", "nameWithOwner"])
+            repository = value.get("nameWithOwner") if isinstance(value, dict) else None
+            if not isinstance(repository, str) or not REPOSITORY.fullmatch(repository):
+                raise RuntimeError("gh repo view returned no valid OWNER/REPO")
+            report["repository"]["github"] = repository
+        except RuntimeError as exc:
+            errors.append(error("github", "repository", exc))
+            repository = None
+    inventory = []
+    if repository:
+        try:
+            report["github"], inventory = collect_github(github_runner, repository=repository,
+                                                       window_start=window_start, observed_at=observed_at)
+        except Exception as exc:
+            report["github"]["errors"].append(error("github", "collection", exc))
+        try:
+            from pipeline_review_usage import collect_review_usage
+            report["reviews"] = collect_review_usage(JsonRunner(root), repository=repository, pull_requests=inventory,
+                                                     window_start=window_start, observed_at=observed_at,
+                                                     baseline_per_hour=10)
+            if not isinstance(report["reviews"], dict) or report["reviews"].get("collection_status") not in {"complete", "partial", "unavailable"}:
+                raise RuntimeError("review collector returned invalid report")
+            if not report["github"]["source"]["inventory_complete"]:
+                if report["reviews"]["collection_status"] == "complete":
+                    report["reviews"]["collection_status"] = "partial"
+                report["reviews"].setdefault("errors", []).append(error("reviews", "inventory", "shared PR inventory is incomplete; unobserved PR review usage is unknown"))
+        except Exception as exc:
+            report["reviews"] = reviews_unavailable(diagnostic(exc))
+    else:
+        report["github"]["errors"].append(error("github", "collection", "GitHub repository unavailable"))
+        report["reviews"] = reviews_unavailable("GitHub repository unavailable")
+    for name in ("native", "github", "reviews"):
+        for item in report[name].get("errors", []):
+            if isinstance(item, dict):
+                errors.append(error(name, item.get("operation", "collection"), item.get("message", "source error")))
+            else:
+                errors.append(error(name, "collection", item))
+    statuses = [report[name]["collection_status"] for name in ("native", "github", "reviews")]
+    report["collection_status"] = "complete" if all(status == "complete" for status in statuses) and not errors else (
+        "failed" if all(status == "unavailable" for status in statuses) else "partial")
+    report["completed_at"] = timestamp(utc_now())
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", metavar="OWNER/REPO", help="GitHub repository (default: gh repo view in this worktree)")
+    parser.add_argument("--native-paused", action="store_true", help="make zero native calls; report paused, not empty")
+    options = parser.parse_args()
+    if options.repo and not REPOSITORY.fullmatch(options.repo):
+        parser.error("--repo must be OWNER/REPO, without a URL or credentials")
+    root = Path(__file__).resolve().parent.parent
+    result = collect_report(root, repository=options.repo, native_paused=options.native_paused)
+    print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+    return 0 if result["collection_status"] == "complete" else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

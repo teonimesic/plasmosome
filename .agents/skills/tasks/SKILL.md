@@ -14,7 +14,7 @@ Intents and specs remain versioned Markdown in `docs/intents/` and `docs/specs/`
 vision and architecture stay in the root and crate docs; decisions stay in `docs/decisions/`.
 A decision can be a task reference but cannot substitute for its governing spec.
 
-Start a session with `.agents/skills/heartbeat`. For a task you have been given, read it by its
+For a task you have been given, read it by its
 complete Beads ID with `./tools/work-state show ID`; never infer its current contents from a PR
 body or a worktree's old files.
 
