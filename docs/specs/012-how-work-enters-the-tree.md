@@ -157,7 +157,7 @@ not filename. Report other effective instruction roots separately; project owner
 authorize changing user-managed or global guidance.
 
 Before each reusable change, the curator measures its before/after inventory and loading.
-Overflow requires evidenced consolidation, replacement or retirement, or deferring the
+Overflow requires evidence for any consolidation, replacement or retirement, or deferring the
 candidate outside active instructions. Never silently enlarge a limit or truncate safety and
 approval rules. A necessary scoped exception records its reason, scope, expiry and restoration
 condition; it does not raise the standing budget. A permanent budget change needs a separately
