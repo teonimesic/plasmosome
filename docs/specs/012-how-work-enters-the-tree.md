@@ -191,6 +191,14 @@ evidence. Selection does not prove activation, phone access, direct worker repli
 permission handling or automatic Beads integration, and authorizes no additional gateway or
 router/public-hostname exposure.
 
+End the shared room with `/collab stop` when withdrawing its bearer authority. This disconnects
+the room without stopping the underlying agent; a later start creates a new room and keys.
+`/collab view` only presents a read-only link: it does not revoke an earlier full-control link.
+Before declaring revocation complete, observe that existing guests disconnect and old full
+links cannot reconnect, read further live content or submit accepted writes, including against
+any replacement room. A leak or uncertain revocation keeps affected work blocked. A replacement
+link does not establish human identity or approval, and revocation cannot recall copied history.
+
 The responsible specialist asks directly through the selected, available channel, with the
 GitHub proposal URL and exact revision. Before sending, record in native notes the request ID,
 task, owner/actor, originating agent/session, question and decision scope, proposal revision,
@@ -306,6 +314,9 @@ design wrong; the closed lists bind where that change is reviewed, not whether c
   correlated current replies resume the same owner and correct phase only with required evidence.
   Stale, ambiguous, unauthenticated, refused, duplicate and disconnected cases cannot approve.
   An affected wait leaves unrelated eligible work runnable and preserves taskless proposal shape.
+- Owner-channel proof withdraws an existing full-control room, observes old-link reconnect/read/
+  write refusal and verifies replacement-room isolation. A read-only link is not revocation;
+  uncertainty leaves affected work blocked without claiming already-copied history was erased.
 - Source acceptance does not claim deployed roles, compliant loading, live Collab routing or
   automated blocked/resume behavior. Their native implementation tasks retain those proofs.
 
