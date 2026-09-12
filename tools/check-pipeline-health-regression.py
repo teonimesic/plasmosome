@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 
+from unittest.mock import patch
 
 SOURCE = Path(__file__).resolve().with_name("check-pipeline-health")
 API = runpy.run_path(str(SOURCE))
@@ -255,6 +256,24 @@ def runner_boundaries():
             raise AssertionError("nonzero source command accepted")
 
 
+def runner_exit_metadata():
+    with tempfile.TemporaryDirectory(prefix="pipeline-health-exit-regression-") as directory:
+        with patch.dict(os.environ, {"AWS_AUTH_RETRIES": "1", "PIPELINE_TEST_TOKEN": "xy"}, clear=True):
+            runner = API["JsonRunner"](Path(directory))
+            try:
+                runner([sys.executable, "-c",
+                        "import sys; print('1 xy AWS_AUTH_RETRIES=1 token=xy', file=sys.stderr); sys.exit(1)"])
+            except RuntimeError as exc:
+                message = API["error"]("github", "collection", exc)["message"]
+                prefix, detail = message.split(": ", 1)
+                assert prefix == "source command exited 1"
+                assert "1" not in detail and "xy" not in detail
+                assert "AWS_AUTH_RETRIES=[REDACTED]" in detail and "token=[REDACTED]" in detail
+                assert API["diagnostic"]("xy") == "[REDACTED]"
+            else:
+                raise AssertionError("nonzero source command accepted")
+
+
 def runner_released_group_identity():
     # Reuse is injected at the syscall boundary; its replacement is a real owned process.
     namespace = API["JsonRunner"].__call__.__globals__
@@ -311,6 +330,7 @@ def main():
     delivery_boundaries()
     cli_failure_isolation()
     runner_boundaries()
+    runner_exit_metadata()
     runner_released_group_identity()
     print("PASS: native uncertainty/ownership/drift/pause, complete-or-unknown delivery windows/pagination, CLI clock/failure isolation, bounded reaped source commands")
 

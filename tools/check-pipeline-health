@@ -52,6 +52,8 @@ def parse_time(value):
 
 def diagnostic(message):
     """Never include command arguments, auth headers or known environment secrets."""
+    if isinstance(message, CommandFailure):
+        return str(message)
     text = str(message)
     for key, value in os.environ.items():
         if value and re.search(r"TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|AUTH", key, re.I):
@@ -62,6 +64,13 @@ def diagnostic(message):
     text = re.sub(r"(https?://[^\s?#]+)[?#][^\s]*", r"\1?[REDACTED]", text)
     text = re.sub(r"(?i)((?:token|secret|password|api[_-]?key)\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]", text)
     return "".join(c for c in text if c in "\n\t" or ord(c) >= 32)[:1500]
+
+
+class CommandFailure(RuntimeError):
+    """Keep generated exit metadata separate from already-sanitized source stderr."""
+
+    def __init__(self, returncode, detail):
+        super().__init__(f"source command exited {returncode}: {diagnostic(detail)}"[:1500])
 
 
 def error(source, operation, message):
@@ -117,8 +126,7 @@ class JsonRunner:
                 except subprocess.TimeoutExpired as exc:
                     raise RuntimeError("source command timed out after closing its output") from exc
             if child.returncode:
-                detail = diagnostic(buffers["stderr"].decode("utf-8", errors="replace"))
-                raise RuntimeError(f"source command exited {child.returncode}: {detail}")
+                raise CommandFailure(child.returncode, buffers["stderr"].decode("utf-8", errors="replace"))
             try:
                 return json.loads(buffers["stdout"], parse_constant=lambda value: invalid_constant(value))
             except (ValueError, UnicodeError) as exc:
