@@ -160,7 +160,10 @@ workspace root. A valid tree with no consumer violation is assumed unless stated
   unheld publication and changed readiness verb as well as `StaleTarget`; restoring those
   mutations leaves only staleness. Rebuilding for that tree permits the clean consumers to
   pass. Moving the original gives the same stale refusal without reading the old location.
-  Direct outside-workspace execution and Cargo manifest selection meet the matrix above.
+  Every matrix row is exercised, including symlink-equivalent roots and external
+  `CARGO_TARGET_DIR`. With the same prebuilt component, these aliases and target locations
+  preserve the selected tree, the consumer's outcome and the staleness verdict. Direct
+  outside-workspace execution and Cargo manifest selection meet their stated outcomes.
   Independently restoring either compile-root consumer must break the copy-observation
   regression; an early mismatch-only panic must break it too. A generic nonzero exit is not
   proof of reading the copy. Root diagnostics are asserted by cause, not exact prose.
