@@ -470,8 +470,44 @@ request IDs and errors. Responses with a wrong request ID or cell, unknown field
 malformed exact objects, incomplete frames or timeout are failed observations. The controller
 must not operate a quarantine's effects merely because its supervisor answered.
 
-- `membrane.cell.observe` params are `{cell, deadline_ms}`. `deadline_ms` is a positive
-  remaining budget capped by the controller's recovery deadline. Result is
+The observation methods `membrane.cell.observe`, `membrane.residue.snapshot` and §4.2's4090
+`observe` return bounded pages of one complete logical result, not a growing JSON response.
+Their request IDs are unsigned64-bit integers. Each params record includes required
+`snapshot:u64` and `offset:u64`: zero/zero captures a fresh complete observation and returns its
+first page; later requests use that returned nonzero snapshot and the next byte offset.
+Their wire result is the strict
+`ObservationPage {snapshot:u64, offset:u64, total:u64, sha256:String, bytes:[u8], complete:bool}`.
+The logical results below are compact UTF-8 JSON without a trailing newline. Freeze those exact
+bytes only after complete independent collection and validation succeeds. `total` is their
+positive byte length; `sha256` is their64lowercase-hex SHA256. Each page contains1–65,536bytes;
+offset arithmetic is checked, and `complete` is true exactly when offset plus page length equals
+total. Compact encoding of the page and bounded request ID fits the1,048,576-byte frame limit
+even when each byte takes three decimal digits. No inventory cardinality cap or array truncation
+is substituted for paging; both request and page response retain that frame limit.
+
+Snapshot IDs are connection-local, never reused, and bound to the method, cell and original
+supervisor/guest association. A new zero/zero capture replaces the prior capture on that
+connection; at most one is retained. It never resumes another connection's capture. Later pages
+read the same immutable bytes, not fresh rows mixed with older pages. A repeated valid offset
+returns the same page, allowing a lost reply to be recovered without recapturing. Reject an
+unknown snapshot, changed scope or out-of-range offset with `-32602`. Capture/resource failure,
+expiry or loss of the original association is `-32603`, not an empty page.
+The first request's remaining deadline bounds capture and all pages; later deadline_ms values
+may shorten but never renew it. Retained bytes expire at that original deadline or connection
+close, even after the last page; no page wait holds an enforcement lock or blocks the independent
+withdrawal dispatcher. Replacing a capture discards only observation bytes, not resource authority.
+
+The caller accepts only contiguous pages beginning at zero, with one snapshot/total/hash,
+positive bounded payloads and the exact completion flag. It checks the assembled length and hash,
+then strictly decodes and validates the complete logical record, including all required arrays
+and original identities. No prefix, early completion, missing/overlapping page or mixed capture
+can authorize publication, readiness, drift or cleanup. Connection loss, deadline expiry or
+failure at either observation hop fails the whole observation; a new capture uses only the
+remaining outer recovery budget. Paging preserves the original capture's observation semantics;
+it does not claim that resources stop changing while bytes are transported.
+
+- `membrane.cell.observe` params are `{cell, deadline_ms, snapshot, offset}`. `deadline_ms` is a positive
+  remaining budget capped by the controller's recovery deadline. Its assembled logical result is
   `{cell, state, supervisor, generation, desired}`: `state` is the existing closed cell lifecycle
   enum from actual child/supervisor observation, `supervisor` is the current `membrane.status`
   result, and `desired` is the complete last published DesiredCell retained by this supervisor,
@@ -480,7 +516,7 @@ must not operate a quarantine's effects merely because its supervisor answered.
   observation failure, not permission to reconstruct it from the requesting controller.
   This publication record is not evidence of liveness or holdings: those still require actual
   supervisor and enforcement-side observation. No PID-file or socket-existence substitute is allowed.
-- `membrane.residue.snapshot` params are `{cell, deadline_ms}`. Result is
+- `membrane.residue.snapshot` params are `{cell, deadline_ms, snapshot, offset}`. Its assembled logical result is
   `{cell, state: OsState, grants: [LedgerEntry, ...], incomplete: [IncompleteEffect, ...],
   guest: GuestObservation}`. The first three required collections are spec017's strict
   EnforcementSnapshot; guest is the independently obtained physical projection account in §4.2.
@@ -777,7 +813,7 @@ Connection-local data-handle loss remains distinct from the original grant/resou
 | Method | Params | Result |
 | --- | --- | --- |
 | `hello` | `{lane:ControlLane}` | `{boot:String, policy:String}` |
-| `observe` | `{deadline_ms}` | `GuestObservation` |
+| `observe` | `{deadline_ms, snapshot:u64, offset:u64}` | `ObservationPage` of `GuestObservation` |
 | `install` | `{operation:UniverseOp, address:String\|null, deadline_ms}` | `{boot, grant, installed:true}` |
 | `activate` | `{grant:GrantId, deadline_ms}` | `{boot, grant, active:true}` |
 | `drain` | `{grant:GrantId, deadline_ms}` | `{boot, grant, drained:true}` |
@@ -991,7 +1027,8 @@ acknowledgement nor a guest claim replaces independent resource cleanup observat
 
 `GuestObservation` is the strict record
 `{boot:String, policy:String, fs_mounts:[GuestProjection], fs_handles:[GuestProjection],
-socket_listeners:[GuestProjection], network:GuestNetworkObservation}`. Every field and nested
+socket_listeners:[GuestProjection], socket_streams:[SocketStreamProjection],
+network:GuestNetworkObservation}`. Every field and nested
 array is required even when independently observed empty; omission of an otherwise-empty kind refuses
 the entire observation. The nonempty boot token identifies this original supervisor/guest
 association and is never reused or reconstructed from journal contents. Policy is the SHA256 of
@@ -1004,6 +1041,20 @@ empty arrays; coverage of one network kind cannot stand in for another. DNS list
 only in network, not again in socket_listeners; the latter contains UdsSocket/Broker data
 listeners. Network infrastructure first created by install and shared by several grants carries
 each actual binding; it cannot persist with an empty binding list after last removal.
+`socket_streams` independently inventories accepted UdsSocket and Broker data streams, not
+just their listeners. `SocketStreamProjection` is `{id:String, grant:GrantId, ends:[SocketStreamEnd]}`;
+SocketStreamEnd is `{side:StreamSide, id:String}`, with StreamSide exactly `accepted | relay`.
+The ends array contains each still-present actual guest accepted endpoint and its original
+per-stream guest bridge binding, at most one of each and at least one. These are original
+resource identities, not a pathname, reused FD number or the shared4091channel mistaken for
+one stream. A half-cleaned pair remains with its surviving end; it disappears only after both
+are freshly verified absent. A missing required socket_streams array is not an empty inventory.
+The supervisor independently joins that original bridge binding to its retained host relay
+endpoint and inspects the actual host end too; the guest cannot attest to host cleanup.
+Unknown or lost associations fail observation instead of inventing IDs or omitting the pair.
+Host gate closure, listener unlink or disappearance of only one end cannot complete withdrawal:
+the operation remains incomplete until this guest pair and its original host access resources
+are all freshly absent. Equal-peer streams keep their own grants and cannot be retargeted.
 GuestBinding is `{grant:GrantId, admission:GuestAdmission}` and GuestAdmission is exactly
 `staged | active | draining | closed`. Admission describes the actually inspected gate, not the
 last requested transition. IDs identify actual objects within this boot/namespace lifetime, not

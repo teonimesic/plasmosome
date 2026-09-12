@@ -379,6 +379,14 @@ are not managed capability projections; the observer must explicitly delimit the
 namespaces rather than classify arbitrary guest processes as trusted evidence.
 Every projection array, including all nested network kinds, and actual per-binding admission
 states are mandatory even when empty; omitting an otherwise-empty array fails the observation.
+This includes accepted UdsSocket/Broker streams and both per-stream guest ends, not merely
+listeners. A surviving accepted endpoint or bridge binding keeps its exact pair visible, while
+the supervisor independently verifies the corresponding original host relay endpoint. A guest
+empty account alone cannot discharge a still-live host end or a lost association.
+Transport uses spec001's bounded ObservationPage contract at both observation hops. Only a fully
+assembled, length/hash-checked and strictly validated logical result becomes RecoveryObservation.
+Missing, mixed, expired or partially decoded pages fail under the original recovery deadline;
+neither a prefix nor the last page alone can authorize cleanup or publication.
 
 Cell records and the resulting `observed_cells` diagnostic retain this guest account so a
 controller cannot silently discard it while preserving only OsState. No journal field grants
@@ -618,6 +626,10 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   Also test a new unqualified consumer with no pre-opened peer handle after forcing the
   lexicographically first grant while guest cleanup is stalled: host-authoritative selection
   must serve the surviving peer, while existing selected bindings remain denied, not retargeted.
+  Keep an accepted UdsSocket/Broker stream alive after listener unlink and after closing only
+  one relay end. Fresh guest socket_streams plus independent original host-end observation must
+  prevent completion until every selected end is absent; an equal peer's stream still serves.
+  Omitting the stream account or reporting only listeners must fail this cleanup witness.
   After real fork and successful bind, inject access/association failure before successful
   publication. Observe the typed incomplete operation with no complete object or fabricated
   entry. Kill the controller, restart, durably abort, then exact-withdraw using retained original
@@ -674,6 +686,11 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   denial/private-copy witnesses in spec017A14; ordinary chmod/unlink and an existing Docker
   process are not substitutes for managed guest FUSE/LSM enforcement.
   Omitting one otherwise-empty projection-kind array must likewise fail complete observation.
+  Exercise complete observations larger than one ndjson frame at both guest and controller hops.
+  Every page stays within the frame bound and the assembled logical inventory is unchanged.
+  Missing, overlapping, reordered or mixed-snapshot pages, false early completion, changed
+  length/hash and expiry fail the whole observation without consuming a prefix as authority.
+  Retrieving a page again returns the same capture, not rows from a later live inventory.
   Exercise the empty host exec environment and actual loaded-dependency check separately from
   the guest environment API. An injected loader/late-clear mutant must fail before guest
   readiness. Hello carries only the original boot token and effective guest policy measurement;

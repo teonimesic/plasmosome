@@ -369,6 +369,9 @@ fault, never a made-up GrantId or an empty class. Requested configuration is not
   real service/materialization failure, not readiness inferred from bind. Removal closes this
   grant's relay streams; the last attachment removes the matching owned listener/projection.
   Unlink alone is not cleanup. This adapter neither owns nor signals the external upstream.
+  Spec001's required socket_streams account retains accepted guest endpoints and their original
+  per-stream bridge bindings, including half-cleaned pairs; the host independently observes the
+  matching original relay endpoints rather than trusting a guest report of their absence.
 - **ProxyMap:** use a real per-cell host egress relay with independently effective grant rules
   and original TCP/UDP flow sockets, reached through the trusted guest TUN/network bridge and
   fixed data channel. The host derives the cell from that channel and enforces the exact
@@ -710,6 +713,10 @@ source acceptance still supplies neither deployed artifacts nor successful platf
   staging refusal and partial cleanup. Unlink-only, route-table-only, lazy-detach-only and
   requested-refcount observers fail while actual access remains. Actual controller recovery
   still separately meets spec008R1–R12 on Darwin and Linux; a standalone mechanism is not a cell.
+  For UdsSocket and Broker, retain a connected stream after listener unlink or removal of one
+  relay end. Required guest socket_streams and independently observed original host ends must
+  keep that selected operation incomplete until all its access ends are absent; peers still serve.
+  A listener-only inventory or omitted accepted-stream array must fail, not authorize completion.
 - **A14 — managed-file boundary:** in the pinned real guest, active and revoked managed file
   descriptors cannot acquire private/shared mappings or direct executable loads; anonymous
   mappings and authorized private-copy execution still work. Removing the mandatory denial
