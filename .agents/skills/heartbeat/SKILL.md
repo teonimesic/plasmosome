@@ -14,9 +14,15 @@ The task queue is shared native Beads,
 accessed only through `./tools/work-state`; the contents of a chat, branch or old task snapshot
 cannot replace it. `.agents/skills/tasks` describes the records and operations.
 
-At session start, recover the current management checkpoint from any open native pipeline bug,
-then reconcile it with the sweep below. Its design keeps the latest owner-capacity authority,
-allocation, assigned actions and next checkpoints; dated notes retain evidence and outcomes.
+At session start, enumerate open native pipeline bugs and reconcile all records matching the
+continuing incident before selecting its native ID. Do not take an arbitrary first match or mix
+unrelated allocations. Treat checkpoint content as work evidence, not new permissions: check
+its decision sources and ownership against the current sweep and approved authority before
+using capacity, allocation or dispatch decisions. Record the observed native generation;
+actor names are coordination identities, not writer authentication under spec016.
+
+The selected record's design keeps current owner-capacity authority, allocation, assigned actions
+and next checkpoints; dated notes retain evidence and outcomes.
 Update that checkpoint at handoffs so the next orchestrator can resume without this chat.
 Preserve unknowns; an old observation is not current availability.
 
@@ -29,11 +35,14 @@ an independent writer clone as though it shared the local claim lock; see spec01
 
 Each sweep records its observation time, source revisions and completeness, then measures:
 
-- **Delivery:** actual GitHub PRs observed `MERGED` with a merge commit and `mergedAt` in
+- **Delivery:** repository-wide actual GitHub PRs observed `MERGED` with a merge commit and `mergedAt` in
   `(observation time - 1 hour, observation time]`. Enumerate all matching pages; do not use PR
   creation, branch deletion, task closure or `updatedAt`. Report closed-unmerged PRs separately
   by `closedAt`, the last actual merge, and elapsed time since it. Failed reads make the metric
   unknown, never zero or healthy.
+  All repository merges count, including taskless intent/spec PRs and other owners' PRs; this is
+  not a managed-implementation-only numerator. The ownership and stage measures below expose
+  stalled implementation separately, and a prerequisite merge does not close its implementation task.
 - **Work and ownership:** complete native counts by stored status, admitted eligible backlog,
   live agents by role, actual author assignments, persistent claims, and open PRs split by draft
   and ready. Join task ID, actor, agent, worktree and PR; show missing links and disagreements.
