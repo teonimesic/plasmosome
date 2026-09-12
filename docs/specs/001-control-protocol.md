@@ -176,8 +176,8 @@ observed by probing control-`status`, not by reading a pidfile).
 Spec008 defines recovered `ledger_generation` as the maximum adopted cell generation, or 0.
 It is not a cross-cell acknowledgement watermark. Recovered cells retain their actual observed
 supervisor state; replay does not prove readiness. After successful recovery startup, `ready`
-is false while the account contains drift, quarantine or unmatched effects. Quarantined cells
-are absent from `cells` and remain named in `plasmosome.recovery`. A recovered unknown genome
+is false while the account contains drift, quarantine, unmatched effects or any incomplete
+effect. Quarantined cells are absent from `cells` and remain named in `plasmosome.recovery`. A recovered unknown genome
 is omitted, as §1 requires.
 
 ### 3.3a `plasmosome.recovery`
@@ -185,11 +185,23 @@ is omitted, as §1 requires.
 Read-only diagnostics for the most recent completed recovery observation:
 
 ```json
-{"id": 30, "method": "plasmosome.recovery", "params": {"name": "work"}}
+{"id": 30, "method": "plasmosome.recovery", "params": {"name": "work", "deadline_ms": 5000, "snapshot": 0, "offset": 0}}
 ```
 
-The result is `{name, ledger_generation, desired, tombstones, observed_cells, expected, drift,
-unmatched, pending, quarantined}`. `desired`, exact objects, pending transactions and quarantine
+The wire result is §4.1's `ObservationPage`; request IDs are unsigned64-bit integers and
+`deadline_ms`, `snapshot` and `offset` are required. Zero/zero pins the most recent completed
+RecoveryOutcome for this resolved instance, not a fresh observation. All pages retain that same
+outcome even if a newer observation completes. The positive deadline is capped by the configured
+recovery_deadline_ms and bounds the entire transfer; later requests cannot renew it.
+Connection, method, resolved instance and original controller lifetime bind the capture.
+Apply the same bounded retention, exact-page retry, complete assembly, length/hash validation
+and failure rules as internal observations. A supported client presents only the fully validated
+logical account, never pages or a prefix as a complete recovery diagnostic.
+
+The assembled logical result is `{name, ledger_generation, desired, tombstones, observed_cells,
+expected, drift, unmatched, incomplete, pending, quarantined}`. `incomplete` is the required
+`[IncompleteEffect, ...]`, preserving every complete operation and its original cell/plugin owner;
+it is not coerced into drift, unmatched or an OsObject. `desired`, exact objects, pending transactions and quarantine
 reports use spec008's typed records with this wire projection: absent genome/cell/line,
 operation and force fields are omitted; a journal change whose replacement is null becomes
 `{plugin, remove: true}`, while a replacement change is `{plugin, replacement: ...}`.
@@ -206,6 +218,8 @@ and wrong-name errors are the same as `plasmosome.status`. Recovery startup with
 observation or blocked cleanup does not serve this or any other method: it exits with the
 structured stderr diagnostic described in §4.1. Quarantine alone can coexist with a serving
 controller when all live observations are complete; readiness remains false.
+A complete observation containing unrequested incomplete effects may serve this diagnostic,
+with readiness false. That does not turn unresolved required startup cleanup into success.
 
 ### 3.4 `plasmosome.stop`
 
@@ -446,9 +460,10 @@ The controller drives each cell's `membraned` over a second, private ndjson-UDS
   verbatim from the seam types; the membrane owns the VMM child, shim, and brokers as **its**
   children — never the controller's (86 §4 rule 5), and per-cell vs per-host brokers is an
   explicit parameter in the desired record.
-- RESERVED for P1 step 2: vsock bridge setup, shim lifecycle, broker lifecycle verbs beyond the
-  predeclared exact apply/withdraw contract below, and the credential vsock proxy (port4041
-  terminates at the membrane and proxies to the controller; custody state stays kernel-core).
+- The selected hardware runtime, shim and noncredential bridge are specified in §4.2.
+  Remaining broker lifecycle verbs beyond the exact apply/withdraw contract stay reserved.
+  The credential vsock proxy remains RESERVED: port4041 terminates at the membrane and proxies
+  to the controller; custody state stays kernel-core.
 
 ### 4.1 Recovery startup and exact operation messages
 
@@ -469,8 +484,47 @@ request IDs and errors. Responses with a wrong request ID or cell, unknown field
 malformed exact objects, incomplete frames or timeout are failed observations. The controller
 must not operate a quarantine's effects merely because its supervisor answered.
 
-- `membrane.cell.observe` params are `{cell, deadline_ms}`. `deadline_ms` is a positive
-  remaining budget capped by the controller's recovery deadline. Result is
+The observation methods `membrane.cell.observe`, `membrane.residue.snapshot`, §4.2's4090
+`observe` and public `plasmosome.recovery` return bounded pages of one complete logical result.
+Their request IDs are unsigned64-bit integers. Each params record includes required
+`snapshot:u64` and `offset:u64`: zero/zero starts a capture and returns its first page; later
+requests use that returned nonzero snapshot and the next byte offset.
+Their wire result is the strict
+`ObservationPage {snapshot:u64, offset:u64, total:u64, sha256:String, bytes:[u8], complete:bool}`.
+The logical results are compact UTF-8 JSON without a trailing newline. Internal methods freeze
+those exact bytes only after fresh independent collection and validation succeeds; the public
+method pins an already completed RecoveryOutcome without refreshing it. `total` is their
+positive byte length; `sha256` is their64lowercase-hex SHA256. Each page contains1–65,536bytes;
+offset arithmetic is checked, and `complete` is true exactly when offset plus page length equals
+total. Compact encoding of the page and bounded request ID fits the1,048,576-byte frame limit
+even when each byte takes three decimal digits. No inventory cardinality cap or array truncation
+is substituted for paging; both request and page response retain that frame limit.
+
+Snapshot IDs are connection-local, never reused, and bound to the method and resolved cell or
+instance. Internal observations additionally bind the original supervisor/guest association;
+public diagnostics bind the original controller and the selected retained outcome.
+A new zero/zero capture replaces the prior capture on that
+connection; at most one is retained. It never resumes another connection's capture. Later pages
+read the same immutable bytes, not fresh rows mixed with older pages. A repeated valid offset
+returns the same page, allowing a lost reply to be recovered without recapturing. Reject an
+unknown snapshot, changed scope or out-of-range offset with `-32602`. Capture/resource failure,
+expiry or loss of the original association is `-32603`, not an empty page.
+The first request's remaining deadline bounds capture and all pages; later deadline_ms values
+may shorten but never renew it. Retained bytes expire at that original deadline or connection
+close, even after the last page; no page wait holds an enforcement lock or blocks the independent
+withdrawal dispatcher. Replacing a capture discards only observation bytes, not resource authority.
+
+The caller accepts only contiguous pages beginning at zero, with one snapshot/total/hash,
+positive bounded payloads and the exact completion flag. It checks the assembled length and hash,
+then strictly decodes and validates the complete logical record, including all required arrays
+and original identities. No prefix, early completion, missing/overlapping page or mixed capture
+can authorize publication, readiness, drift, cleanup or a complete public diagnostic. Connection
+loss, deadline expiry or failure at any observation/diagnostic hop fails that whole operation;
+a new internal capture uses only the remaining outer recovery budget. Paging preserves the
+selected record's observation semantics; it does not stop resources changing during transport.
+
+- `membrane.cell.observe` params are `{cell, deadline_ms, snapshot, offset}`. `deadline_ms` is a positive
+  remaining budget capped by the controller's recovery deadline. Its assembled logical result is
   `{cell, state, supervisor, generation, desired}`: `state` is the existing closed cell lifecycle
   enum from actual child/supervisor observation, `supervisor` is the current `membrane.status`
   result, and `desired` is the complete last published DesiredCell retained by this supervisor,
@@ -479,17 +533,19 @@ must not operate a quarantine's effects merely because its supervisor answered.
   observation failure, not permission to reconstruct it from the requesting controller.
   This publication record is not evidence of liveness or holdings: those still require actual
   supervisor and enforcement-side observation. No PID-file or socket-existence substitute is allowed.
-- `membrane.residue.snapshot` params are `{cell, deadline_ms}`. Result is
-  `{cell, state: OsState, grants: [LedgerEntry, ...], incomplete: [IncompleteEffect, ...]}`.
-  The three required collections are spec017's strict EnforcementSnapshot; an incomplete record
-  contains its complete original operation, not a successful OsObject. All records belong to the
+- `membrane.residue.snapshot` params are `{cell, deadline_ms, snapshot, offset}`. Its assembled logical result is
+  `{cell, state: OsState, grants: [LedgerEntry, ...], incomplete: [IncompleteEffect, ...],
+  guest: GuestObservation}`. The first three required collections are spec017's strict
+  EnforcementSnapshot; guest is the independently obtained physical projection account in §4.2.
+  An incomplete record contains its complete original operation, not a successful OsObject. All records belong to the
   addressed cell. `state` is fresh enforcement-side observation including unrequested residue.
   `grants` includes only original issued records with retained authority, possibly during partial
   withdrawal; failed initial application/grant and direct apply fabricate none. No collection
   is rebuilt from desired state or planted objects. Unsupported or failed class observation fails
   the whole request with `-32603`, never omits the class or returns a requested-state mirror.
-  The result contains the five currently specified capability classes; adding guest classes
-  requires their explicit enumeration rather than a claim of coverage without an observer.
+  The logical result contains the five specified capability classes. GuestObservation explicitly
+  enumerates their physical guest projections; it does not fabricate another logical grant class.
+  Adding a different guest capability still requires explicit enumeration and an actual observer.
   Broker capabilities contain the exact launch description, never a predicted PID. That description
   is not evidence of a running process. The supervisor must independently retain and verify the
   original runtime association. Direct apply does not manufacture a LedgerEntry or opaque handle
@@ -506,9 +562,10 @@ must not operate a quarantine's effects merely because its supervisor answered.
   Duplicate application of the same standing operation retains spec017's no-op semantics.
   This result does not replace the independent snapshot used for recovery verification.
   `SpawnBroker` carries `{id,name,launch,owner}` with spec017's strict
-  `BrokerLaunch {command,control_socket}`. PID-bearing, missing or malformed launch fields
-  are invalid parameters, not a request to guess a recipe. Before prepare the controller has
-  validated the trusted recipe and non-destructive staging; the supervisor creates no broker
+  `BrokerLaunch {command,control_socket,data_socket}`. Other operations include their complete
+  required resource recipes. PID-bearing, missing or malformed recipe fields are invalid
+  parameters, not a request to guess materialization inputs.
+  Before prepare the controller has validated the trusted recipe and non-destructive staging; the supervisor creates no broker
   or endpoint before that durable boundary. When the resource is absent, actual launch binds
   the original owned child to this holding before successful application can be reported.
   Equal fresh holdings may share an original resource only with independent enforcement-side
@@ -616,16 +673,473 @@ the lock; it neither kills the surviving cells nor rewrites their journals.
 Spec008's R9/R10 acceptance exercises this actual socket path and independent enforcement-side
 observation. A library-only fake or manually constructed Controller cannot demonstrate it.
 
+
+### 4.2 Hardware runtime and mediated guest access
+
+This selects the next runtime contract, not an implemented cell. A real cell is a hardware-isolated
+Linux guest whose membrane, VMM and original resource authorities survive controller death.
+An unrestricted host process or model observer cannot substitute. Spec017 defines all five actual
+access adapters; spec008 still requires real restart, complete observation and quarantine.
+
+The membrane execs a dedicated VMM helper linked to libkrun v1.19.4, commit
+`728df8125077d0db44265f6e997c72b81b65c015`. Configuration and `krun_start_enter` run inside that
+already-exec'd helper, never as unsafe Rust work between fork and exec. The context is consumed
+by start; `krun_free_ctx` is not a running-VM shutdown authority. Retain the original child and
+prevent leakage of VM descriptors to descendants. Guest-ready requires the trusted shim's actual
+handshake, not a successful fork, socket file or recorded PID.
+
+Trusted deployment input supplies a `RuntimeRecipe`:
+`{version:1, vcpus:u8, memory_mib:u32, kernel:Artifact, kernel_format:KernelFormat,
+initramfs:Artifact, root_image:Artifact, writable_root:String, control_path:String,
+data_path:String, helper:Artifact, libraries:[Artifact], host_policy:Artifact,
+guest_policy:Artifact, architecture:Architecture}`.
+All fields are required and
+unknown fields refuse. Artifact is `{path:String, sha256:String}` with an absolute NUL-free path
+and64lowercase hexadecimal SHA256 digits; Architecture is `aarch64 | x86_64`. CPU/memory values
+are positive and fit the actual platform's admitted limits. Artifacts are publisher-produced,
+architecture-matched and pinned before launch. The trusted operator selects them, never workload
+text. The root image is explicitly RAW; no format autodetection or guest-selected backing paths.
+KernelFormat is exactly `raw | elf | pe_gz | image_bz2 | image_gz | image_zstd`, mapped to the
+pinned header's KRUN_KERNEL_FORMAT constants0 through5 respectively. Reject `x86_64` with
+kernel format `raw` before launch: the pinned `krun_set_kernel` returns through `map_kernel`
+without retaining the supplied initramfs or command line, so it cannot supply this bootstrap.
+Every admitted format/architecture pair must preserve the exact protected initramfs and fixed
+command line below. The publisher proves that pair supported by the pinned library; enum
+membership alone is not admission, and no format guessing or hidden command-line override is
+allowed. `writable_root` is an absolute NUL-free path under
+an owned nonreplaceable private per-cell directory. Create that copy exclusively from root_image
+before VMM launch and retain its original inode/authority; it is never the immutable source path
+or a caller-selected existing file. This path is an explicit launch input, not recovery authority.
+Use immutable verified kernel/initramfs/base artifacts and a separately owned RAW per-cell copy
+for writes. Verification/opening must preserve the selected inode/bytes through the library's
+path-based opens; a replaceable parent or mutable artifact is refused, not trusted after hashing.
+A runtime recipe is deployment input retained by the original supervisor, not a mutable recovery
+database or permission to recreate a lost VM. Recovery reconnects, not relaunches.
+`control_path` and `data_path` are distinct absolute NUL-free Unix socket paths under owned,
+nonreplaceable private per-cell directories. The original supervisor creates and retains those
+listeners before launching this helper. Their permissions admit only this supervisor and its
+authorized original helper principal; they never expose the private recovery endpoint.
+
+The membrane uses direct exec, not a shell: argv is exactly
+`[helper.path,"--runtime-fd=3"]` and the **host exec environment is an explicit empty array**.
+Before exec, descriptor0 and1 refer to `/dev/null`, descriptor2 to an owned diagnostic pipe,
+and descriptor3 to the owned read end of a pipe containing exactly one complete UTF-8 ndjson
+RuntimeRecipe and then EOF, within the existing frame bound. No other descriptor survives.
+The helper strict-reads that record and closes3 before guest execution. Runtime configuration
+does not come from argv expansion, inherited environment or a guest-visible file.
+
+Before exec, verify the helper and full publisher-controlled dependency closure against
+`helper`/`libraries` and bind their loading to immutable verified paths. Publisher-fixed absolute
+load names, or loader-relative names confined to the verified immutable bundle, must resolve
+uniquely without environment, working-directory or fallback searches. Unlisted loadable code
+refuses; no unverified plugin/lazy-load path may execute before an after-the-fact inventory.
+Darwin's authenticated sealed system libraries/shared cache are a separate platform trust
+boundary: retain their actual OS build/cache identity, not a claim that those shared-cache
+images are ordinary publisher files. Other Darwin dependencies and every Linux userspace
+dependency/interpreter must belong to the verified library closure. Before guest execution,
+independently inspect the actual loaded image set and compare those original identities; a
+requested library list or removal of LD_*/DYLD_* variables after main starts is not that proof.
+Retain this host launch evidence in the original supervisor. If libkrun logging is initialized,
+use only `krun_init_log(2,KRUN_LOG_LEVEL_WARN,KRUN_LOG_STYLE_NEVER,KRUN_LOG_OPTION_NO_ENV)`.
+The guest-executable environment API below is distinct and cannot sanitize host exec/loading.
+
+Before helper exec, the original supervisor verifies `host_policy.sha256` against the exact
+immutable policy bytes and retains their original identity. Apply that verified policy to the
+original helper before guest execution; a different generic deny-default policy is not equivalent.
+Retain host-side evidence binding the verified policy, its successful installation and that
+original process. Before readiness and during every recovery observation, verify that retained
+binding and the effective host restrictions independently of guest reports or requested settings.
+A changed policy, lost application evidence or unverifiable confinement fails readiness/observation;
+neither rehashing a pathname nor a guest-policy hash establishes active host confinement.
+
+Call `krun_create_ctx` and `krun_set_vm_config(ctx,vcpus,memory_mib)`, then
+`krun_set_kernel(ctx,kernel.path,kernel_format,initramfs.path,"rdinit=/init panic=-1")`.
+The command line is fixed on both admitted architectures. The initramfs is an uncompressed
+Linux newc archive with protected regular entries named `init` and `plasmosome/guest-policy`,
+materialized at `/init` and `/plasmosome/guest-policy` respectively.
+The former is the publisher's trusted PID1/shim/loader; the latter contains exactly the bytes
+of guest_policy, not a host pathname or mutable lookup. Before launch verify that archive
+binding against the pinned artifact and reject duplicate, escaping, symlinked or mismatching entries.
+PID1 remains in the protected initramfs, mounts the single unpartitioned ext4 `/dev/vda` at
+`/workload`, establishes the effective guest policy from that retained policy file, and only
+then starts the unprivileged workload chrooted into `/workload` in its controlled namespaces.
+It does not replace itself with a workload-root executable or make its original root/policy
+accessible to the workload. Managed guest paths are relative to that workload root. Host-only
+RuntimeRecipe fields are never injected into it. Add exactly one disk, first and only,
+with `krun_add_disk3(ctx,"root",writable_root,KRUN_DISK_FORMAT_RAW,false,false,KRUN_SYNC_FULL)`.
+Thus block ID, guest device, writable mode, host-cache mode and sync mode are fixed, not
+publisher-private choices. Do not call the deprecated root-disk API or implicit-init remount.
+Call `krun_disable_implicit_init` and `krun_disable_implicit_console`; add no console. Pass an
+explicit empty **guest-executable** environment with `krun_set_env(ctx,empty)` where empty is
+a non-null array containing only the terminating NULL, not NULL (which copies the host environment).
+Only the declared descriptors survive exec. Do not export a host directory through
+`krun_set_root` or virtiofs. Call `krun_disable_implicit_vsock` before `krun_add_vsock(ctx,0)`;
+zero disables both TSI flags. Add no NIC, TAP, passt or gvproxy backend, and call
+`krun_set_port_map(ctx,empty)` with the same explicit empty-array convention.
+Omitting a NIC alone does not disable implicit TSI. A negative context ID or nonzero setter
+status refuses launch and cleans only this attempt's original resources; no failed call is skipped.
+Source for these API constraints is the pinned
+[header](https://github.com/libkrun/libkrun/blob/v1.19.4/include/libkrun.h) and
+[implementation](https://github.com/libkrun/libkrun/blob/v1.19.4/src/libkrun/src/lib.rs).
+
+Use `krun_add_vsock_port2(ctx,4090,control_path,false)` and corresponding4091data mapping
+before start. They are fixed guest-initiated mappings; logical grants change over continuing
+streams without altering the VM's boot mappings or rebooting it. Port4041 is not reused.
+Guest CID3 is not cross-cell identity. The host authenticates through the original per-VMM
+mapping/connection and owned private endpoint, not guest-supplied cell/owner/UID/PID fields.
+Paths must remain under owned nonreplaceable directories; reconnect cannot silently attach a
+replacement listener. The host's private recovery socket is not exposed by either mapping.
+
+The trusted guest shim alone owns these channels, its mount/network namespaces and kernel-policy
+loader. Workload uid1000 runs without capabilities, with no-new-privs, and without privileged
+inherited FDs or authority to open AF_VSOCK, mount/setns, load BPF or ptrace the shim. Establish
+the kernel boundary before workload launch and refuse unsupported enforcement. A poisoned model
+or harness is not asked to cooperate. Keep the existing subject attestation/code110 requirement
+and10.29.0.0/24 subject range; this runtime does not implement credential custody or attestation
+by asserting a guest identity.
+
+Every bridge stream uses §1's UTF-8 ndjson envelope, matching request IDs and maximum frame size.
+Their method/parameter/result records are closed: all fields below are required, unknown fields
+or methods refuse, and failures use `{code:105,message,from:"guest_request",to:"refused",detail}`
+rather than a success-shaped empty result. Framing failures retain §1's protocol codes.
+`deadline_ms` is a positive remaining
+budget, never renewed internally. `boot` is the original association's opaque nonempty token.
+
+4090 is private control, not another controller API. The shim opens two connections to that
+same mapping: first the normal lane, then after its hello the prioritized withdrawal lane.
+The original host supervisor is sole RPC caller and assigns that role in hello; the shim is
+the responder. ControlLane is exactly `normal | withdrawal`. Normal admits the table's verbs;
+withdrawal admits only hello, observe and remove. No install, activate, drain or shutdown may
+enter the withdrawal lane. Each lane has its own bounded dispatcher and request IDs; one normal
+request may be outstanding without blocking withdrawal dispatch. A wait in normal drain must
+not hold a lock or executor needed by withdrawal. Readiness requires both hellos and the data
+association before workload launch. On4091 the shim is sole caller and the host the responder,
+within that same verified original VMM association. No stream uses notifications or accepts
+opposite-direction requests. Bounded data requests may overlap with distinct IDs. Actual loss
+of any of these streams closes host admission and moves every affected operation out of standing state
+into `IncompleteEffect`, retaining its original operation, resources and any issued record.
+The guest closes its corresponding admissions when it observes the loss; delayed detection
+cannot bypass the already-closed host gate. Never report a closed complete holding as effective,
+place one address in both collections or hide its resources. This is a transport/enforcement
+fault, not a graceful drain timeout. A controller restart does not close these supervisor-owned
+streams. Reconnection first repeats hello and complete observation of the same original boot
+and associations; it permits only exact cleanup of these incomplete effects, not activation,
+reinstallation or promotion. A changed boot cannot take this path or recreate lost authority.
+Connection-local data-handle loss remains distinct from the original grant/resource identity.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `hello` | `{lane:ControlLane}` | `{boot:String, policy:String}` |
+| `observe` | `{deadline_ms, snapshot:u64, offset:u64}` | `ObservationPage` of `GuestObservation` |
+| `install` | `{operation:UniverseOp, address:String\|null, deadline_ms}` | `{boot, grant, installed:true}` |
+| `activate` | `{grant:GrantId, deadline_ms}` | `{boot, grant, active:true}` |
+| `drain` | `{grant:GrantId, deadline_ms}` | `{boot, grant, drained:true}` |
+| `remove` | `{inverse:UniverseRemoval, owner:CellOwner, force:bool, deadline_ms}` | `{boot, grant, guest_removed:true}` |
+| `shutdown` | `{deadline_ms}` | `{boot, shutdown_requested:true}` |
+
+Before the first connection the trusted PID1 obtains32random bytes from the guest kernel,
+waiting for initialized cryptographic randomness, and retains their64lowercase-hex encoding
+as this boot token. It never writes the token to workload storage or reconstructs it from a
+journal. Both control lanes return that same token; a reboot produces a fresh one. The first
+host association is authenticated by the original VMM mapping/listener, not by the token.
+Subsequent hellos must match the retained boot. Policy is the SHA256 of the protected guest
+policy bytes whose loading and effective hooks/maps the trusted shim actually verifies before
+hello; it must equal the original supervisor's guest_policy.sha256. A requested-but-unloaded
+policy refuses. The supervisor independently verifies host RuntimeRecipe, helper, libraries,
+kernel/initramfs and root authority; hello neither returns unexplained host paths nor pretends
+to measure them. Its guest policy/boot account still requires the independent effective-state
+observation below and is not an attestation substitute.
+
+Install accepts only one of spec017's five complete grant operations, never an inverse.
+It carries all original capability/owner/ID
+fields, including the full recipe; it is not a mutable guest-side lookup. Only the original host
+supervisor may issue it, after the corresponding cell prepare is durable and host original
+resource authority has been retained. An address is the original per-boot ProxyMap binding
+specified below; it is null for every other class. Conflicting reuse of an ID or address refuses.
+The shim creates the actual grant-bound filesystem/listener/route attachments with admission
+closed (`staged`), before returning installed:true. Broker data is exposed at the reserved guest
+Unix path `/.plasmosome/brokers/<hex-encoded UTF-8 name>.sock`; this exposes only its data relay,
+never its host control socket. Unrepresentable names/paths and cross-class projection collisions
+refuse in preflight; no truncation, unowned path replacement or implicit dependency is allowed.
+
+The host then enables its exact gate and calls activate. The shim enables this existing binding
+and the spec017 selector; only independently observed active bindings plus the real host
+resources complete `apply`. Install/activate acknowledgements are not this independent proof.
+This is per-effect visibility after prepare and before commit, not an atomic workload-access
+transaction. Commit atomically publishes desired state, not bytes already acquired. A later
+effect failure durably aborts before withdrawing all newly created complete/incomplete
+bindings in reverse prepare order; retained holdings remain intact. Spec008's preflight refusal
+of a reload that would widen access or disturb retained holdings still applies.
+
+Graceful removal uses a reversible **host-local** admission pause until the original host
+monotonic deadline. Every4091admission check treats that pause as expired at that deadline;
+restoration needs neither a timer callback nor a guest RPC. The existing guest binding and
+selector remain active during this reversible phase. The host admits no new actual IO while
+paused and waits for already-admitted host work. `drain` only observes/waits for the guest
+requests pending when that control request arrived; it neither closes a guest gate nor destroys,
+rebinds or forgets any resource. Later attempts cannot perform host effects through the paused
+gate. Guest drain and host drain share the one remaining budget.
+
+If the deadline expires before destructive progress, restore the local pause and return
+DrainTimedOut with original objects, handles, guest admission and peers unchanged. A delayed
+drain reply cannot authorize removal or change admission after that deadline. Do not close a
+healthy stream merely because this observation timed out. The outstanding drain retains its
+request ID until its eventual reply is discarded; later normal-lane mutations wait for that
+request to settle or return a bounded refusal without effects. They do not block Force's
+independent host transition or the withdrawal lane. Actual stream loss is the
+separate incomplete transition above, not an unproved remote-restoration result relabelled as
+a timeout. This preserves spec017 A4 and spec008 R7 rather than weakening their pure-timeout rule.
+
+Only while the deadline is still live and both drains have completed may the host irreversibly
+close that selected grant's gate and send remove with force:false. This begins destructive
+withdrawal: the guest verifies UniverseRemoval and the separate CellOwner against the retained
+installed UniverseOp, closes its selected admission and destroys only those original guest
+attachments. A timeout/lost reply after this point is incomplete, not a preserved timeout.
+Force authority is checked/durably recorded by the host under spec008. Without waiting for
+any normal-lane request, the supervisor atomically makes ONLY the selected operation
+withdrawing/incomplete and closes its host gate permanently. A graceful-pause expiry, delayed
+drain reply or cancelled callback cannot restore a non-standing operation. Peers keep their
+existing gates, handles and selectors. Send the exact force:true removal on the independent
+withdrawal lane; its guest handler closes selected admission and releases cancellable original
+attachments without pretending uncancellable work is terminal. Even if that lane is delayed
+or busy, the local Force transition has already denied selected access: return the selected
+IncompleteEffect under the caller's bound and retain all cleanup authority, never a no-effect
+busy refusal with the selected capability still active. Do not close a healthy shared lane
+just to escape an unanswered request. Retried cleanup uses that same original association.
+Withdrawal-lane observe/remove requests may not hold a peer's gate while waiting; pending work
+cannot prevent another locally authorized Force from closing its selected host gate.
+For either form, the shim returns guest_removed:true only after fresh observation proves the
+selected guest bindings absent. This guest-only acknowledgement never attests host cleanup.
+The host's `apply_removal` succeeds only after fresh independent observation proves both those
+guest bindings and every original host effect of the selected operation absent, including its
+holding on shared resources. Equal peers and shared resources still required by them remain
+intact; absence concerns this selected holding and its owned effects, not another grant's resources.
+A guest acknowledgement, closed gate or unlinked listener alone cannot discharge the operation.
+Any remaining effect or unconfirmed cleanup returns `BackendError::IncompleteEffect`, retaining
+the original operation, associations, incomplete marker and remaining cleanup authority; never
+reacquire by path or ID. Retire the marker and any issued record only under spec017's complete
+absence rule; recovery must also observe absence from both standing and incomplete accounts
+before finish or publication. A matching already-installed
+or active operation may be acknowledged only after actual inspection and only while still
+standing; no retry creates another attachment, rebinds an old handle or promotes an incomplete
+operation. Install/activate refuse an address made incomplete by a lost stream or other failure.
+Shutdown requests orderly guest exit; only actual original-child terminal/reap observation
+establishes completion. Lost channels or handshakes are faults, not assumed graceful shutdown.
+
+**Proxy projection.** The recorded `host` is a lower-case ASCII DNS name (nonempty1..63-byte
+labels, total at most253bytes, letters/digits/hyphen with no leading/trailing hyphen); invalid
+forms and numeric IP literals refuse before prepare without normalizing the capability.
+`route` is an opaque exact
+operator label for its complete ProxyRecipe, not a guest-supplied CIDR, HTTP path or lookup key.
+After prepare, the original host supervisor allocates one address per distinct host from
+198.18.0.1 through198.19.255.254 in numeric order, retaining the binding through this boot and
+never assigning it to a different
+host or recycling it after removal. Exhaustion refuses materialization with normal rollback.
+Install carries that address and the full operation to the shim. Equal-host grants share the
+host/address mapping but retain independent effective rules. Conflicting operator-supplied
+routes in the controlled guest namespace are rejected in preflight; an unrelated host default
+route is not such a collision. The binding is original runtime authority, not a journal field
+or a recovery guess.
+
+On the first installed ProxyMap the shim creates the shared DNS listener (UDP/TCP127.0.0.53:53)
+and synthetic-prefix TUN/route in the controlled guest namespace, initially admitting no grant.
+The trusted image supplies that resolver address and no fallback. These are actual attachments
+of the installed grant; later grants add their own independently gated bindings. It answers
+A queries for effectively active exact hosts (ASCII DNS query case is ignored) with their
+assigned address, after host-authoritative grant.select below. AAAA has no data and
+unknown/inactive hosts return NXDOMAIN. No external DNS forwarding, fallback route or arbitrary
+destination service exists. At a new TCP connection/UDP flow, the shim obtains that host's
+smallest currently eligible GrantId through4091grant.select before checking packet transport
+and destination port against the selected recipe. Mismatches refuse, never fall through to
+another rule. A stale locally active grant is not an authority to bypass this host selection.
+It binds the actual guest flow and4091stream/datagram handle to that original grant. Existing
+flows never follow a later selector change. Each UDP five-tuple is one flow until closed;
+drain/remove closes that grant's flows, not a peer's. Last active-host removal withdraws its DNS
+answer and forwarding rule; stale cached addresses refuse rather than reaching a reused host.
+The shared resolver/TUN/route persist while peer bindings exist; last ProxyMap removal destroys
+them and verifies their absence. Each actual DNS listener, TUN, route, per-grant rule and flow is
+independently inventoried, including a rule with no flows. Workload edits of resolver
+configuration grant no bypass.
+
+4091 carries bounded selection and data operations. Every params object contains `deadline_ms`.
+Except for grant.select, it also contains `grant:GrantId`, plus the fields in the table.
+A host-issued `handle:u64` is nonzero,
+connection-local, never recycled on that connection and bound to the exact original grant.
+Exhaustion refuses a new open. Amounts/offsets are unsigned64-bit values checked for overflow;
+one byte payload/read is at most65,536bytes, also subject to the enclosing frame limit.
+
+| Method | Additional params | Result |
+| --- | --- | --- |
+| `grant.select` | `{target:SelectionTarget}` (no grant parameter) | `{grant:GrantId}` |
+| `file.open` | `{components:[String], access:FileAccess}` | `{handle}` |
+| `file.read` | `{handle, offset, length}` | `{bytes:[u8], eof:bool}` |
+| `file.write` | `{handle, offset, bytes:[u8]}` | `{written:u64}` |
+| `file.close` | `{handle}` | `{closed:true}` |
+| `file.stat` | `{handle}` | `FileMetadata` |
+| `file.truncate` | `{handle, length}` | `{length}` |
+| `file.sync` | `{handle}` | `{synced:true}` |
+| `fs.lookup` | `{components:[String]}` | `FileMetadata` |
+| `fs.create` | `{components:[String]}` | `{handle}` |
+| `fs.mkdir` | `{components:[String]}` | `FileMetadata` |
+| `fs.remove` | `{components:[String], directory:bool}` | `{removed:true}` |
+| `fs.rename` | `{source:[String], target:[String], replace:bool}` | `{renamed:true}` |
+| `directory.open` | `{components:[String]}` | `{handle}` |
+| `directory.read` | `{handle, cursor:u64, limit:u32}` | `{entries:[DirectoryEntry], cursor:u64, eof:bool}` |
+| `directory.close` | `{handle}` | `{closed:true}` |
+| `stream.open` | `{}` | `{handle}` |
+| `stream.read` | `{handle, length}` | `{bytes:[u8], eof:bool}` |
+| `stream.write` | `{handle, bytes:[u8]}` | `{written:u64}` |
+| `stream.close` | `{handle}` | `{closed:true}` |
+| `datagram.open` | `{}` | `{handle}` |
+| `datagram.send` | `{handle, bytes:[u8]}` | `{written:u64}` |
+| `datagram.receive` | `{handle, length}` | `{bytes:[u8], truncated:bool}` |
+| `datagram.close` | `{handle}` | `{closed:true}` |
+
+`SelectionTarget` is the closed record `{kind:SelectionKind,key:String}`. SelectionKind is
+exactly `session_file | uds_socket | proxy_map | broker | mount`; key is respectively the
+recorded guest_path, guest_path, host, name or target. Strings retain their exact recorded
+identity and validation rules. Selection searches only this authenticated cell's original
+standing holdings whose host gate currently admits new IO, and returns the lexicographically
+smallest full GrantId at that target. It never creates a holding or selects an incomplete,
+closed, staged or foreign object. If no grant is eligible, return code105 with
+`detail:{kind:"no_active_grant",target:SelectionTarget}`, never an invented ID.
+
+The trusted shim must make this host selection before each fresh unqualified path lookup,
+DNS answer or new flow, before local recipe/permission/transport checks. A guest-side eligibility
+cache or pre-opened peer handle cannot substitute for it. The returned ID must match an actual
+local binding at that target; a missing/mismatched binding is an observation fault, not permission
+to invent one. Thus Force's local gate transition immediately excludes A from fresh selection
+even while its guest cleanup is delayed, and a surviving eligible B still serves fresh requests.
+
+Selection does not reserve future admission. If a selected grant becomes non-admitting before
+the following operation is admitted, the host may return code105 with the closed
+`detail:{kind:"grant_inactive",grant:GrantId}`. This refusal is issued only before admission or
+any OS effect. Only a fresh unqualified operation whose concrete binding has not yet been
+exposed may repeat grant.select under the original request deadline, never retrying an already
+tried ID. Exhaustion/deadline or no_active_grant refuses. Recipe/transport/permission mismatch,
+IO failure, unknown/foreign handles and any post-effect result do not authorize fallback or
+replay. An already-bound inode, file/directory handle or flow propagates refusal instead of
+switching grants; a stale pathname resolution must be revalidated as a new lookup, never by
+rebinding the old inode. This is bounded selection, not another lifecycle or recovery API.
+
+`FileMetadata` is `{inode:String, kind:FileKind, size:u64, modified_ns:i64}`;
+FileKind is `file | directory`. The opaque inode identity remains bound to this grant and
+original object while references survive; it is not a raw host inode reused across roots.
+DirectoryEntry is `{name:String, metadata:FileMetadata}`. Directory handles retain the original
+opened directory; cursor0 starts enumeration, later cursors are only those returned on that
+handle. Limit is1..256 and reply bytes must still fit the frame. Unsupported/non-UTF-8 names
+or enumeration failure return an error, never an apparently complete listing with missing rows.
+Concurrent authorized directory edits may affect later pages; this is not a content snapshot.
+
+Components are relative to the declared Mount root; each is nonempty, is neither `.` nor `..`,
+and contains no slash, backslash or NUL. SessionFile requires an empty list for file.open and
+selects its exact inode; filesystem namespace/directory methods require Mount. Symlinks and
+non-file/non-directory objects refuse. Namespace creation is exclusive (file0600/directory0700);
+removal and rename cannot address the root, cross grants or follow a substituted parent.
+Rename with replace:false refuses an existing target. No method changes host ownership or
+creates device nodes, hardlinks or symlinks. Mutating methods require read_write; requested file
+access cannot exceed the recipe. Sync acknowledges actual synchronization of that original file,
+not journal settlement. Stream/datagram opens use only the declared upstream or
+ProxyRecipe with matching transport, never a supplied host destination. Wrong class, unknown
+or foreign handles, closed grants, invalid lengths and overflow refuse before an OS action.
+Returned byte/write counts describe actual IO, including short operations. Datagram truncation
+is explicit; an empty timed-out read is not an invented EOF.
+
+The4091data verbs grant no capability-lifecycle or recovery authority. Handles cannot transfer across channels or
+rebind to a replacement grant. The host checks the effective grant on every request, bounds
+admitted work and propagates real errors. Channel loss closes its original data handles but
+does not manufacture grant withdrawal or clear remaining incomplete IO. Neither a service
+acknowledgement nor a guest claim replaces independent resource cleanup observation.
+
+`GuestObservation` is the strict record
+`{boot:String, policy:String, fs_mounts:[GuestProjection], fs_handles:[GuestProjection],
+socket_listeners:[GuestProjection], socket_streams:[SocketStreamProjection],
+network:GuestNetworkObservation}`. Every field and nested
+array is required even when independently observed empty; omission of an otherwise-empty kind refuses
+the entire observation. The nonempty boot token identifies this original supervisor/guest
+association and is never reused or reconstructed from journal contents. Policy is the SHA256 of
+the exact effectively loaded guest-policy artifact, not requested configuration.
+GuestProjection is `{id:String, bindings:[GuestBinding]}`; its containing array fixes its kind.
+GuestNetworkObservation is the strict record `{dns_listeners:[GuestProjection],
+tuns:[GuestProjection], routes:[GuestProjection], proxy_rules:[GuestProjection],
+tcp_flows:[GuestProjection], udp_flows:[GuestProjection]}`. All six arrays are required, including
+empty arrays; coverage of one network kind cannot stand in for another. DNS listeners appear
+only in network, not again in socket_listeners; the latter contains UdsSocket/Broker data
+listeners. Network infrastructure first created by install and shared by several grants carries
+each actual binding; it cannot persist with an empty binding list after last removal.
+`socket_streams` independently inventories accepted UdsSocket and Broker data streams, not
+just their listeners. `SocketStreamProjection` is `{id:String, grant:GrantId, ends:[SocketStreamEnd]}`;
+SocketStreamEnd is `{side:StreamSide, id:String}`, with StreamSide exactly `accepted | relay`.
+The ends array contains each still-present actual guest accepted endpoint and its original
+per-stream guest bridge binding, at most one of each and at least one. These are original
+resource identities, not a pathname, reused FD number or the shared4091channel mistaken for
+one stream. A half-cleaned pair remains with its surviving end; it disappears only after both
+are freshly verified absent. A missing required socket_streams array is not an empty inventory.
+The supervisor independently joins that original bridge binding to its retained host relay
+endpoint and inspects the actual host end too; the guest cannot attest to host cleanup.
+Unknown or lost associations fail observation instead of inventing IDs or omitting the pair.
+Host gate closure, listener unlink or disappearance of only one end cannot complete withdrawal:
+the operation remains incomplete until this guest pair and its original host access resources
+are all freshly absent. Equal-peer streams keep their own grants and cannot be retargeted.
+GuestBinding is `{grant:GrantId, admission:GuestAdmission}` and GuestAdmission is exactly
+`staged | active | draining | closed`. Admission describes the actually inspected gate, not the
+last requested transition. IDs identify actual objects within this boot/namespace lifetime, not
+logical capability addresses. Each binding is associated with independently verified original
+host authority and the proper cell. Empty binding lists, duplicate object IDs within a kind,
+duplicate bindings on an object, unknown objects, missing enforcement policy or an unverifiable
+association are named observation faults, not rows invented from desired state. Actual
+mountinfo, filesystem connection/handle state, listeners, rules and flows must agree with this
+inventory. Closed/staged attachments remain visible until physically removed; a rule is
+inventoried even with no active flow. A compromised workload cannot write this account; the host
+separately verifies effective resource gates. Unknown or unattributable managed objects fail
+complete observation rather than disappearing from stop/recovery.
+The observational drain leaves guest admission active; `draining` is reserved for an already
+irreversible withdrawal with admission closed and original work still pending.
+Physical projections do not create new logical granted classes or authorize cleanup by ID alone.
+
+**Platform admission.** Darwin uses Apple Silicon/macOS14+ with Hypervisor.framework, a correctly
+signed VMM helper carrying `com.apple.security.hypervisor`, and a deny-default seatbelt policy
+applied before guest execution. The allowlist is restricted to the chosen artifacts, private
+per-cell writable image, required hypervisor operations and the two declared bridge endpoints.
+Close all other inherited descriptors first: a pathname policy is not proof about existing FDs.
+An actual Darwin25.6 unprivileged witness established allowlisted file/UDS use and EPERM on
+fresh forbidden file/UDS/TCP access, but inherited file and connected sockets remained usable.
+Removing those inherited FDs restored denial; an allow-default mutant exposed all forbidden
+resources. This establishes that narrow mechanism, not an HVF/libkrun-compatible profile.
+`sandbox_init` is deprecated and its raw-profile interface is not a supported portable API
+guarantee. The publisher must supply and prove a compatible signed helper/policy on the supported
+host; an unavailable or incompatible confinement refuses launch, never falls back unrestricted.
+
+Linux requires matching KVM hardware/kernel and operator-delegated `/dev/kvm` access, not blanket
+root for the workload. Confine the helper with separate host UID/namespaces, an allowlisted
+read-only launch root, only owned writable images/endpoints and no ambient host network access.
+The publisher supplies the matching Linux guest kernel/initramfs, effective filesystem/LSM
+policy and userspace shim; the operator supplies the supported host and authorized fixture
+roots/upstreams. No available Docker CLI, compiled kernel option or entitlement alone proves
+this runtime. Missing artifacts, unavailable sandbox/KVM/LSM or a failed confinement test refuse
+launch and are reported as concrete prerequisites, never as a simulated ready cell.
+
+Acceptance requires actual hardware guests on both platforms, all five real adapters, denied
+private-control access and ambient host file/network access, retained original authority across
+controller restart, and spec017's managed-mmap/copy-execution witnesses. Disable TSI protection,
+omit confinement, leak a privileged FD/loader environment or bypass host grant gating in
+disposable mutants: the corresponding real unauthorized-access witness must fail. Check actual
+loaded dependencies, protected initramfs-policy binding and both control-lane boot identities;
+neither a guest echo of host paths nor post-main environment cleanup supplies that evidence.
+Verify the declared host-policy hash, original installation binding and effective confinement at
+readiness and recovery. Substituting another policy, even one called deny-default, must fail.
+A small sandbox/mmap/loader/priority-lane probe establishes only the mechanism it exercised,
+not libkrun/HVF compatibility or whole-cell isolation.
+
 ## 5. What this spec deliberately leaves undecided
 
 - The plasmid WIT world (SDK surface) — deferred by design; `plasmid-sdk` is a reserved crate
   with a placeholder world.
 - `cell.clone` / `cell.save` / `cell.load` / `freeze` (D1c tiers 2–3), genome
-  `new/show/lint/test/export` details beyond D1's one-line definitions, and exec output
-  streaming.
-- The membrane's VMM/shim and remaining broker lifecycle verb set (P1 step2 owns it; §4 bounds
-  its shape). The predeclared broker launch payload in §4.1/spec017 is no longer reserved, but
-  it does not select or implement the missing cell runtime and concrete enforcement adapters.
+  `new/show/lint/test/export` details beyond D1's one-line definitions, and exec output streaming.
+- Remaining VMM/shim and broker lifecycle verbs beyond §4.2's selected launch, observation,
+  data and shutdown contract. Their concrete implementation remains required; the selected
+  runtime and bounded bridge schemas are no longer undecided substitutes for an actual cell.
 - Multi-instance brokers, remote orchestration, multi-tenancy — out of scope per 90.
 
 ## 6. How much of this is delivered
@@ -660,3 +1174,7 @@ is a claim that the text above may not be corrected.
    infallible backend-minted grants and format2 records. The new contract permits complete
    prepare/inverse before fork and defines cleanup after partial launch; it does not deliver
    an independent observer, workload confinement or all five real adapters.
+9. The selected hardware runtime, fully resolved resource recipes and physical guest projection
+   account in §4.2/spec017 are **not yet implemented**. Actual guest artifacts, platform
+   confinement and strict managed-file policy witnesses remain deployment/admission obligations.
+   Accepting their specification neither changes the status-only daemon nor completes spec008.

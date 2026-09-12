@@ -106,6 +106,31 @@ crates; no kernel crate may depend on it outside `dev-dependencies`, and a guard
   caller-owned preparation is not a backend WAL or a replacement for spec008's per-cell
   decision/cleanup/finish/publication protocol. Actual cell recovery remains separate acceptance.
 
+### Real runtime evidence and its limits
+
+Spec001 §4.2 selects the hardware Linux guest, private bridge, artifact/configuration and
+host/guest confinement contract. Spec017's five-adapter realization and managed-file boundary
+are the concrete obligations behind real conformance, not new fake-only factory entrypoints.
+The actual controller-restart scenario remains spec008R1–R12. Core's unit/integration layers
+remain VM-independent; only the actual end-to-end path uses the selected runtime.
+
+Report three different kinds of proof separately: model/API behavior; bounded OS mechanisms;
+and complete pinned-runtime enforcement. A deny-default Darwin helper that denies new file or
+socket access is not proof that inherited FDs are absent or that HVF/libkrun still works under
+its profile. Linux chmod/unlink with a surviving descriptor/private mapping disproves an
+overbroad revocation claim; copying and executing acquired bytes proves only that data-retention
+boundary. Neither experiment proves the managed FUSE/LSM denial rule. Kernel configuration,
+a Docker CLI/container or an unavailable securityfs path cannot be reported as effective policy.
+
+The real-runtime witness must identify the exact publisher-supplied kernel/initramfs/image,
+VMM/helper libraries, host confinement and guest policy; actual effective hooks, protected
+policy lifetime and denied bypasses matter, not names in configuration. Run the meaningful
+strict-mmap/direct-exec refusal, private-copy execution, inherited-FD and omitted-confinement
+mutants through those actual boundaries. If FUSE access, a privileged trusted policy loader,
+signed helper or supported host is unavailable, name the prerequisite and supplier and preserve
+the unproved acceptance. A different VM, privilege boundary or cooperative check is evidence
+about that different setup, not a passing witness for the specified boundary.
+
 ### Conventions, written where agents look
 
 The layer table and the seam rule go into `crates/plasmosome-testkit/AGENTS.md`. Each existing
@@ -137,6 +162,10 @@ only what spans crates.
   cutover, it exercises the caller-owned preparation and fallible outcomes required by those
   same canonical clauses and verifies their complete standing/issued/incomplete cleanup account,
   not merely an empty `OsState`.
+  Real-enforcement evidence additionally meets spec017A13/A14 and spec001 §4.2 on the supported
+  Darwin and Linux platforms; the mechanism/runtime distinction above is part of that gate.
+  Unavailable strict managed-mapping or host confinement proof is recorded as unproved, not an
+  ignored/skipped success or a reason to narrow spec008's actual recovery acceptance.
 - A guard in `plasmosome-guards` fails the build if any kernel crate depends on
   `plasmosome-testkit` outside dev-dependencies, and the guard is mutation-tested: the violation
   was added, seen to fail, and reverted.
