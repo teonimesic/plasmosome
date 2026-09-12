@@ -496,7 +496,9 @@ def collect_report(root, *, repository=None, native_paused=False):
     for name in ("native", "github", "reviews"):
         for item in report[name].get("errors", []):
             if isinstance(item, dict):
-                errors.append(error(name, item.get("operation", "collection"), item.get("message", "source error")))
+                # These source-local messages are already public; preserve generated metadata.
+                errors.append({"source": name, "operation": item.get("operation", "collection"),
+                               "message": item.get("message", "source error")})
             else:
                 errors.append(error(name, "collection", item))
     statuses = [report[name]["collection_status"] for name in ("native", "github", "reviews")]
