@@ -235,7 +235,8 @@ def collect_native(run_json, *, paused=False):
             assignment = "unavailable"
             errors.append(error("native", "assignee", f"row {index} has invalid assignee"))
         else:
-            assignment = "owned" if assignee.strip() else "unassigned"
+            # Native ownership compares literal identifiers with the empty string.
+            assignment = "owned" if assignee else "unassigned"
         title = row.get("title")
         if not isinstance(title, str):
             errors.append(error("native", "title", f"row {index} has unavailable title"))

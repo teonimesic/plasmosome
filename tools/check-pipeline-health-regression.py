@@ -74,6 +74,9 @@ def native_uncertainty():
     assert report["counts_by_status"]["closed"] == 1
     unassigned = next(task for task in report["tasks"] if task["id"] == "review")
     assert unassigned["assignment_state"] == "unassigned"
+    literal_owner = native_rows([{**rows[2], "assignee": "\t"}])
+    assert literal_owner["tasks"][0]["assignment_state"] == "owned"
+    assert literal_owner["owned_blocked"]["count"] == 1
 
     missing = native_rows([{**rows[0], "assignee": None}, {"id": "bad", "title": "Unavailable status"},
                            {"id": "custom", "title": "Future phase", "status": "unexpected"}])
