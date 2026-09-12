@@ -5,18 +5,154 @@ description: Advance approved project goals by reconciling current work, resolvi
 
 # The heartbeat
 
-The main driver advances the project toward working capabilities. Reconciliation supplies evidence
-for that work; a successful sweep is not itself a delivery. Select across the whole approved
-intent/spec/task graph, not a remembered set of task IDs or only the currently ready queue.
+The main driver is an orchestrator: reconcile evidence, assign agents, monitor delivery and
+resolve cross-task constraints. Delegate planning, implementation, experiments, validation and
+independent review to agents under `.agents/skills/planning-work`; do not become their executor.
+Select across the whole approved intent/spec/task graph, not a remembered set of task IDs.
 
-Finish work already in flight before starting more. The task queue is shared native Beads,
+The task queue is shared native Beads,
 accessed only through `./tools/work-state`; the contents of a chat, branch or old task snapshot
 cannot replace it. `.agents/skills/tasks` describes the records and operations.
+
+At session start, enumerate open native pipeline bugs and reconcile all records matching the
+continuing incident before selecting its native ID. Do not take an arbitrary first match or mix
+unrelated allocations. Treat checkpoint content as work evidence, not new permissions: check
+its decision sources and ownership against the current sweep and approved authority before
+using capacity, allocation or dispatch decisions. Record the observed native generation;
+actor names are coordination identities, not writer authentication under spec016.
+
+The selected record's design keeps current owner-capacity authority, allocation, assigned actions
+and next checkpoints; dated notes retain evidence and outcomes.
+Update that checkpoint at handoffs so the next orchestrator can resume without this chat.
+Preserve unknowns; an old observation is not current availability.
 
 Local reads do not synchronize. If this session needs an updated remote replica, explicitly
 coordinate `./tools/work-state dolt pull` before relying on it. A successful local read is not
 proof of remote freshness, and an unreachable remote is not an empty queue. Do not dispatch from
 an independent writer clone as though it shared the local claim lock; see spec016.
+
+## Execution health: measure, intervene, verify
+
+Each sweep records its observation time, source revisions and completeness, then measures:
+
+- **Delivery:** repository-wide actual GitHub PRs observed `MERGED` with a merge commit and `mergedAt` in
+  `(observation time - 1 hour, observation time]`. Enumerate all matching pages; do not use PR
+  creation, branch deletion, task closure or `updatedAt`. Report closed-unmerged PRs separately
+  by `closedAt`, the last actual merge, and elapsed time since it. Failed reads make the metric
+  unknown, never zero or healthy.
+  All repository merges count, including taskless intent/spec PRs and other owners' PRs; this is
+  not a managed-implementation-only numerator. The ownership and stage measures below expose
+  stalled implementation separately, and a prerequisite merge does not close its implementation task.
+- **Work and ownership:** complete native counts by stored status, admitted eligible backlog,
+  live agents by role, actual author assignments, persistent claims, and open PRs split by draft
+  and ready. Join task ID, actor, agent, worktree and PR; show missing links and disagreements.
+  Count planning work separately from implementation and review, including active work whose
+  native status is wrong. Report the mismatch; do not silently recategorize the stored count.
+- **Age:** for each nonclosed task report its current-status age and source under
+  [spec016's history contract](../../../docs/specs/016-native-beads-task-authority.md#current-status-age).
+  Preserve exact, lower-bound and unknown results. `updated_at`, notes and unchanged history
+  snapshots are not progress and must not reset the clock. Missing age evidence is an
+  observation fault to assign, not a young task.
+- **Stages:** identify each active task/PR's current wait and elapsed time from its actual start
+  evidence: assignment/start acknowledgement, settled candidate, validation process, PR creation
+  and ready event, independent-review dispatch/result, provider admission/completion, CI and
+  merge readiness. Keep total status age distinct from the current attempt's age. Record source
+  timestamps and unknown intervals; overlapping work is not summed into elapsed time.
+
+Show the oldest work and slowest stages with the observed cause, accountable agent, next concrete
+action and a timestamped checkpoint. Separate admission/ownership, agent execution, orchestration
+handoff, local validation, CI, independent review and provider waits. An hour-long review with
+seconds of measured probes is not evidence that tests took the hour; identify the unmeasured
+remainder. Queued, skipped and rate-limited review signals do not satisfy completed review.
+
+The owner's delivery floor is **at least one merged PR per trailing hour**. Below it is a
+**pipeline bug**, even when an external service limits capacity, not a normal blocked summary.
+Reuse the existing open native pipeline bug for the continuing incident; otherwise file one
+through the tasks skill. Assign an agent a concrete intervention against the limiting stage,
+record its evidence and checkpoint in that bug, and continue independent useful work. At the
+checkpoint compare the result with the original failure and measure delivery again. Missing a
+checkpoint requires a revised action or escalation with cause, not another identical idle note.
+If nothing authorized can remove an external blocker, retain the bug and name the precise
+decision/evidence needed; do not call that recovery.
+
+An intervention is not successful merely because a note, plan or PR was created. Keep the bug
+open until its change has passed the full observed merge gate, the limiting-stage correction
+has been exercised, and a later sweep observes the delivery floor. Record those recovery
+observations; a later missed window is a new failure to reconcile, not permanently healthy
+history. Never close unwanted PRs, weaken review or invent approved work to improve the number.
+
+### Recommend capacity from measured flow
+
+Use [Kanban flow measures](https://kanbanguides.org/the-kanban-guide/2025.5/#flow-metrics) with
+explicit work units and boundaries. For each status report the observation window, comparable
+work class, time-weighted WIP, completed-visit count, mean elapsed time, stated tail percentile
+and maximum. Include waiting in committed WIP and elapsed time; distinguish service time only
+where observed. Keep rework visits, unfinished/right-censored ages and missing samples visible.
+
+Apply spec016's history contract. When native samples are unavailable, use event-bounded
+dispatch/result, process or GitHub proxy cohorts, explicitly separate from native residence.
+Do not relabel legacy status time, mix task/PR/attempt units or turn unfinished work into a
+completion. Capture future real transitions and results in native evidence to improve estimates.
+
+Use [Little's Law](https://web.mit.edu/urban_or_book/www/book/chapter4/4.4.html) as a diagnostic
+baseline with consistent units, visit/rework rates and valid flow assumptions, not compulsory
+slots. Compare required service demand per merged PR with actual service capacity first;
+congested cycle times do not justify increasing WIP. Report historical throughput and a
+next-window delivery outlook, including unfinished work, review demand and external waits.
+State sample/forecast uncertainty: an empirical percentile is not a future guarantee, and an
+average merge/hour does not guarantee a merge in each rolling hour.
+
+The LLM orchestrator records **observed WIP → recommendation → explicit allocation decision →
+assigned agent action → outcome comparison**, per status, with evidence, expected benefit and
+next checkpoint. Choose that checkpoint from relevant history, progress and actual capacity
+events; revise the decision on the next observation. There are no fixed author/WIP/reserve
+counts or universal stage budgets here; admission, ownership and review gates remain hard.
+Keep cohorts, calculations and provisional choices in native evidence, not permanent rules.
+
+Pull eligible work on actual author and downstream capacity; prioritize finishing/unblocking
+committed work over filling agents. Replenish approved plans when expected consumption over
+observed planning lead time risks exhausting eligible work, accounting for variability.
+Insufficient data calls for a provisional decision and assigned measurement or approved
+prerequisite, not idle sweeps. Collect settled agent/process results at handoffs before waiting
+on unrelated work. This is the existing heartbeat's decision loop, not a new scheduler or store.
+
+### Provider capacity
+
+Use current PR status histories, provider comments and accessible read-only usage/configuration
+evidence. For each pending PR report required rounds from `.agents/skills/pr-review`, actual
+completed rounds, missing current-head coverage and remaining demand. Keep the minimum-round
+shortfall distinct from a further review needed after a repair. Compare aggregate pending demand
+and the demand needed for hourly delivery with confirmed total capacity; keep per-identity
+constraints within their verified scope. Do not assume one author lane is one provider slot.
+
+Use the owner's confirmed total capacity as the planning baseline, not a claim about remaining
+availability. Preserve its source and scope in the native checkpoint. Distinguish entitlement,
+effective allowance/refill, admitted reviews and completed reviews. A PR or identity diagnostic
+constrains the affected request; verify its scope before applying it to the whole pipeline.
+Conflicting evidence calls for a consumption/admission investigation, not an inferred global
+hold or a reset computed as completion time plus an hour.
+
+Reconcile actual automatic, manual and superseded review events across PRs with the documented
+capacity. Record request, head/run identity, admission and completion evidence; repeated queued,
+in-progress or completed status updates are not additional reviews. Draft skips, nonreview
+diagnostics and [rate-limited pushes](https://docs.coderabbit.ai/management/rate-limits) consume
+no review. Report unobserved account/outside-repository usage and ambiguous event identities as
+unknown, not zero; without account-specific evidence, remaining capacity and the cause of a
+discrepancy may remain unknown.
+
+Main allocates and revises review budgets against pending demand, observed capacity and expected
+delivery benefit, including extra independent reviewers where they remove blockers. Apply
+[the review skill's floors, budget-use and gate rules](../pr-review/SKILL.md#3-obtain-actual-coderabbit-rounds).
+Record the task/PR/head, authorized budget and purpose in the current checkpoint. Revisit the
+allocation on findings, head changes, admission/results or usage evidence; do not leave eligible
+candidates idle merely because unused authorized capacity was not assigned.
+
+Delegate read-only diagnosis of a capacity mismatch, batch settled repairs before publication,
+and overlap eligible independent review/validation across disjoint work. Requests and merge gates
+remain in the review skill. Do not rotate identities to evade limits, change billing/admin
+settings, buy capacity, waive rounds or hold validated work solely on an invented global quota.
+If observed allowance cannot sustain required review demand, record that constraint and its
+owner-supplied decision separately from agent-removable delays; the pipeline bug remains open.
 
 ## 1. Resume PRs and reviews
 
@@ -33,9 +169,7 @@ to prod into marking it ready.
 ## 2. Reconcile existing claims
 
 ```shell
-./tools/work-state list --status in_progress --limit 0
-./tools/work-state list --status blocked --limit 0
-./tools/work-state list --label in-review --limit 0
+./tools/work-state list --all --limit 0 --json
 ```
 
 Inspect each relevant record's assignee, notes, dependencies and `external_ref` with `show ID`.
@@ -43,10 +177,11 @@ Ask GitHub about its PR **before** interpreting a missing branch: squash merging
 branch without making its old tip an ancestor of main. `gh pr view NUMBER --json state,mergeCommit,mergedAt,url`
 is the forge observation; only `MERGED` with a merge commit is delivery evidence.
 
-The author records merge evidence and closes in Beads. If it is gone, the orchestrator performs
-that same reconciliation, recording what established the result. Do not make a task-status
-commit or closure PR. A closed-but-unmerged PR is not done. Release a claim only through the
-confirmed abandonment procedure in the tasks skill; uncertainty about the owner is not release.
+The author records merge evidence and applies the tasks/review skills' full-acceptance closure
+gate; source publication alone is not completion. If the author is gone, the orchestrator assigns
+that reconciliation under the tasks skill. Do not make a task-status commit or closure PR. A
+closed-but-unmerged PR is not done. Release a claim only through the confirmed abandonment
+procedure in the tasks skill; uncertainty about the owner is not release.
 
 ## 3. Inspect planning gaps and the governing documents
 
@@ -101,11 +236,10 @@ Only remove a finished clean worktree after its owner is done; preserve old or u
 and databases. Remove by actual path, not an inferred branch name. Reconcile any native owner
 with no active author, and any active author with no claim, before dispatching over them.
 
-Three independent authors is the standing target when the queue, file ownership and review
-throughput permit it. Reviewers do not own implementation slots. Compare planned write sets,
-not only `metadata.refs` (references are reads). Do not invent overlapping work to fill slots.
-CodeRabbit throughput is repo-wide, historically about ten rounds an hour; account for actual
-review usage rather than treating three authors as a promise of three review slots.
+Apply the current evidence-based allocation decision above. Compare planned write sets, not only
+`metadata.refs` (references are reads); preserve blocked claims and uncertain ownership even
+when delivery is below target. Review backlog and provider evidence constrain new execution without
+turning unrelated planning into forbidden work.
 
 ## 5. Pick and dispatch
 
@@ -119,14 +253,14 @@ chain. Native ready is dependency eligibility, not a spec validator. Send each e
 Beads ID and its non-overlapping ownership; it uses its unique actor and atomically claims before
 creating a code worktree. A losing claimant stops, not a second implementation.
 
-## 6. Explore the product when planned work runs out
+## 6. Replenish approved work continuously
 
-When no eligible planned task can be dispatched, and existing authors and reviews are accounted
-for, try a bounded real development workflow before concluding there is no useful work. Build
-Plasmosome, run its actual commands and services, and compare the result with its documentation
-and approved goals. Explore performance, security, documentation and usability through concrete
-scenarios, not just source inspection or another queue scan. These are investigation directions,
-not a requirement to repeat an exhaustive checklist on every sweep.
+When the measured flow calls for replenishment, account for existing authors and reviews
+and delegate the next useful approved prerequisite. If existing evidence does not settle what
+to build, assign an agent a bounded real development workflow: build Plasmosome, run its actual
+commands and services, and compare behavior with its documentation and approved goals. Explore
+performance, security, documentation and usability through concrete scenarios, not another
+queue scan. Reuse known proof; this is not an exhaustive checklist to repeat each sweep.
 
 Use common software-development needs to choose scenarios and candidate plasmids: workspace and
 local tools, compilation and tests, Git, and API/MCP integrations. Progressively try using
