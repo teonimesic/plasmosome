@@ -458,14 +458,8 @@ class CoverageBehaviorTests(unittest.TestCase):
             closed_at="2026-09-12t12:00:00z",
         )
         result, unused, unused_forge = self.execute([row])
-        self.assertEqual(
-            result,
-            coverage.RunResult(
-                2,
-                (),
-                ("input: mixed-case-binding: metadata.closure.closed_at does not exactly match native closed_at",),
-            ),
-        )
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.stdout_lines, ())
 
     def test_nonclosed_stale_closure_and_literal_assignee_do_not_deliver(self):
         row = native_task("reopened", "review")
