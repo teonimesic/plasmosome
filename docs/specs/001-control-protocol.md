@@ -686,6 +686,15 @@ Retain this host launch evidence in the original supervisor. If libkrun logging 
 use only `krun_init_log(2,KRUN_LOG_LEVEL_WARN,KRUN_LOG_STYLE_NEVER,KRUN_LOG_OPTION_NO_ENV)`.
 The guest-executable environment API below is distinct and cannot sanitize host exec/loading.
 
+Before helper exec, the original supervisor verifies `host_policy.sha256` against the exact
+immutable policy bytes and retains their original identity. Apply that verified policy to the
+original helper before guest execution; a different generic deny-default policy is not equivalent.
+Retain host-side evidence binding the verified policy, its successful installation and that
+original process. Before readiness and during every recovery observation, verify that retained
+binding and the effective host restrictions independently of guest reports or requested settings.
+A changed policy, lost application evidence or unverifiable confinement fails readiness/observation;
+neither rehashing a pathname nor a guest-policy hash establishes active host confinement.
+
 Call `krun_create_ctx` and `krun_set_vm_config(ctx,vcpus,memory_mib)`, then
 `krun_set_kernel(ctx,kernel.path,kernel_format,initramfs.path,"rdinit=/init panic=-1")`.
 The command line is fixed on both admitted architectures. The initramfs is an uncompressed
@@ -1036,6 +1045,8 @@ omit confinement, leak a privileged FD/loader environment or bypass host grant g
 disposable mutants: the corresponding real unauthorized-access witness must fail. Check actual
 loaded dependencies, protected initramfs-policy binding and both control-lane boot identities;
 neither a guest echo of host paths nor post-main environment cleanup supplies that evidence.
+Verify the declared host-policy hash, original installation binding and effective confinement at
+readiness and recovery. Substituting another policy, even one called deny-default, must fail.
 A small sandbox/mmap/loader/priority-lane probe establishes only the mechanism it exercised,
 not libkrun/HVF compatibility or whole-cell isolation.
 
