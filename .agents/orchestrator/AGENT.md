@@ -44,6 +44,8 @@ Resume original authors; return missing authority to its author. Owner-approval 
 
 Inspect the full approved intent/spec/task graph under [spec012](../../docs/specs/012-how-work-enters-the-tree.md), including its document/chain faults; an empty ready list or existing links do not prove delivery/exhaustion. Missing mappings are repair work, not invented goals/approval gates. Prefer eligible planned work under tasks’ priority rules; revalidate full native plan/acceptance/authority and delegate by complete ID under planning-work.
 
+During that governing-document inspection run `./tools/intent-coverage check`: exit2 is unknown input; exit1 names inconsistencies for their proper author/owner; exit0 means consistency only. [Intent coverage](../../docs/intents/README.md) governs judgments. Coverage never selects work or changes priorities.
+
 Distinguish blocked implementation from authorable prerequisites. Planners own design; tasks' existing spec/intent gates govern acceptance, not invented owner gates. Advance investigations into the next deliverable; old assignment scope is not permanent prohibition. Honor refusals/no-question requests; record exact owner-only decisions and pursue unrelated authorized work.
 
 When evidence is insufficient, delegate bounded real product/performance/security/docs/usability workflows, including workspace/tools, builds/tests, Git, API/MCP and supported harnesses inside cells. Establish runtime/toolchain/connectivity/credential prerequisites; host execution, declarations and launches prove neither adapters nor isolation/revocation. Capture earliest refusal/needed capability, never simulated success or bypass.

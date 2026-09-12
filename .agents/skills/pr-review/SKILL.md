@@ -57,8 +57,9 @@ active repairs in `in_progress`, and genuine blockers; follow those phases rathe
 retired `in-review` label. These updates never require a commit, extra push or status-only PR.
 
 Obtain independent review while draft, after local validation. CodeRabbit skips draft PRs;
-a skipped green is not a completed review. The owner-approval rule in `docs/intents/README.md`
-controls intent PRs. A work PR whose chain reaches an unapproved intent also stays draft, and
+a skipped green is not a completed review. The owner-approval rule in [the intent README](../../../docs/intents/README.md)
+controls intent-filing PRs and changes to either a coverage value or `What is served` prose,
+including backfill; the owner ends that draft wait. A work PR whose chain reaches an unapproved intent also stays draft, and
 that wait is ended by the owner's approval, not an agent's judgement. A missing chain is an
 admission fault to repair, not an alternative way to become ready.
 
