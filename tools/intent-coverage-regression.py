@@ -5,6 +5,7 @@ import contextlib
 import http.server
 import importlib.util
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import shutil
@@ -757,6 +758,58 @@ def tls_server(mode="normal", state="MERGED"):
                 raise RuntimeError("TLS fixture server did not stop")
 
 
+@contextlib.contextmanager
+def connect_stall_listener():
+    with tempfile.TemporaryDirectory(prefix="intent-connect-stall-") as temporary:
+        certificate = Path(temporary) / "certificate.pem"
+        certificate.write_text(CERTIFICATE)
+        listener = socket.socket()
+        listener.bind(("localhost", 0))
+        listener.listen()
+        listener.settimeout(0.05)
+        stop = threading.Event()
+        accepted = []
+
+        def stall():
+            connection = None
+            try:
+                while not stop.is_set():
+                    try:
+                        connection, unused = listener.accept()
+                        break
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        if stop.is_set():
+                            return
+                        raise
+                if connection is None:
+                    return
+                accepted.append(connection)
+                time.sleep(0.5)
+            finally:
+                if connection is not None:
+                    connection.close()
+
+        thread = threading.Thread(target=stall)
+        thread.start()
+        try:
+            yield listener, certificate
+        finally:
+            stop.set()
+            listener.close()
+            for connection in accepted:
+                connection.close()
+            thread.join(timeout=1)
+            if thread.is_alive():
+                raise RuntimeError("connect-stall fixture did not stop")
+
+
+def exit_unused_connect_stall_listener():
+    with connect_stall_listener():
+        pass
+
+
 class RealHttpsAdapterTests(unittest.TestCase):
     def reader(self, server, certificate, limits):
         return coverage.ForgeReader(
@@ -842,40 +895,29 @@ class RealHttpsAdapterTests(unittest.TestCase):
             self.assertLess(elapsed, limits.command)
 
     def test_tls_handshake_stall_hits_connect_deadline_and_reaps_worker(self):
-        with tempfile.TemporaryDirectory(prefix="intent-connect-stall-") as temporary:
-            certificate = Path(temporary) / "certificate.pem"
-            certificate.write_text(CERTIFICATE)
-            listener = socket.socket()
-            listener.bind(("localhost", 0))
-            listener.listen()
-            accepted = []
+        with connect_stall_listener() as (listener, certificate):
+            limits = SCALED_LIMITS
+            reader = coverage.ForgeReader(
+                FixtureTokenReader(),
+                limits=limits,
+                transport=coverage.Transport("localhost", listener.getsockname()[1], str(certificate)),
+            )
+            started = time.monotonic()
+            with self.assertRaisesRegex(coverage.Refusal, "connection deadline"):
+                reader.observe(PR_URL, started + limits.command)
+            self.assertLess(time.monotonic() - started, limits.observation)
 
-            def stall():
-                connection, unused = listener.accept()
-                accepted.append(connection)
-                time.sleep(0.5)
-                connection.close()
-
-            thread = threading.Thread(target=stall)
-            thread.start()
-            try:
-                limits = SCALED_LIMITS
-                reader = coverage.ForgeReader(
-                    FixtureTokenReader(),
-                    limits=limits,
-                    transport=coverage.Transport("localhost", listener.getsockname()[1], str(certificate)),
-                )
-                started = time.monotonic()
-                with self.assertRaisesRegex(coverage.Refusal, "connection deadline"):
-                    reader.observe(PR_URL, started + limits.command)
-                self.assertLess(time.monotonic() - started, limits.observation)
-            finally:
-                listener.close()
-                for connection in accepted:
-                    connection.close()
-                thread.join(timeout=1)
-                if thread.is_alive():
-                    self.fail("connect-stall fixture did not stop")
+    def test_unused_connect_stall_listener_does_not_hold_process_open(self):
+        process = multiprocessing.get_context("spawn").Process(target=exit_unused_connect_stall_listener)
+        process.start()
+        process.join(timeout=2)
+        survived = process.is_alive()
+        if survived:
+            process.kill()
+            process.join(timeout=1)
+        self.assertFalse(process.is_alive(), "owned fixture probe survived cleanup")
+        self.assertFalse(survived, "unused connect-stall fixture held its process open")
+        self.assertEqual(process.exitcode, 0)
 
 
 class ShellBehaviorTests(unittest.TestCase):
