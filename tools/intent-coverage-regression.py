@@ -413,6 +413,11 @@ class CoverageBehaviorTests(unittest.TestCase):
             "2026-09-12T12:34:56.123456+01:00",
             "2016-12-31T23:59:60Z",
             "2017-01-01T00:59:60+01:00",
+            "2026-09-12t12:34:56.123456z",
+            "2026-09-12T12:34:56z",
+            "2026-09-12t12:34:56Z",
+            "2016-12-31t23:59:60z",
+            "2017-01-01t00:59:60+01:00",
         )
         invalid = (
             "2026-09-12T12:00:00+00:60",
@@ -446,6 +451,21 @@ class CoverageBehaviorTests(unittest.TestCase):
                 self.assertEqual(result.exit_code, 2)
                 self.assertEqual(result.stdout_lines, ())
                 self.assertTrue(result.stderr_lines[0].startswith("input: invalid-timestamp:"), result.stderr_lines)
+        row = native_task(
+            "mixed-case-binding",
+            "closed",
+            closure={"kind": "cancelled", "closed_at": "2026-09-12T12:00:00Z", "reason": "Withdrawn"},
+            closed_at="2026-09-12t12:00:00z",
+        )
+        result, unused, unused_forge = self.execute([row])
+        self.assertEqual(
+            result,
+            coverage.RunResult(
+                2,
+                (),
+                ("input: mixed-case-binding: metadata.closure.closed_at does not exactly match native closed_at",),
+            ),
+        )
 
     def test_nonclosed_stale_closure_and_literal_assignee_do_not_deliver(self):
         row = native_task("reopened", "review")

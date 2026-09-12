@@ -30,9 +30,9 @@ NATIVE_PR = re.compile(r"^https://github\.com/teonimesic/plasmosome/pull/([1-9][
 FULL_COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
 RFC3339 = re.compile(
     r"^(?P<year>[0-9]{4})-(?P<month>[0-9]{2})-(?P<day>[0-9]{2})"
-    r"T(?P<hour>[0-9]{2}):(?P<minute>[0-9]{2}):(?P<second>[0-9]{2})"
+    r"[Tt](?P<hour>[0-9]{2}):(?P<minute>[0-9]{2}):(?P<second>[0-9]{2})"
     r"(?:\.(?P<fraction>[0-9]+))?"
-    r"(?P<zone>Z|(?P<offset_sign>[+-])(?P<offset_hour>[0-9]{2}):(?P<offset_minute>[0-9]{2}))$"
+    r"(?P<zone>[Zz]|(?P<offset_sign>[+-])(?P<offset_hour>[0-9]{2}):(?P<offset_minute>[0-9]{2}))$"
 )
 GRAPHQL_QUERY = """query IntentCoveragePullRequest($number: Int!) { repository(owner: \"teonimesic\", name: \"plasmosome\") { pullRequest(number: $number) { state mergeCommit { oid } mergedAt url } } }"""
 CAPTURE_LIMIT = 64 * 1024 * 1024
