@@ -181,6 +181,7 @@ def cli_failure_isolation():
         tools.mkdir()
         binaries.mkdir()
         shutil.copy2(SOURCE, tools / SOURCE.name)
+        shutil.copy2(SOURCE.with_name("pipeline_review_usage.py"), tools / "pipeline_review_usage.py")
         marker = root / "native-calls"
         launcher = tools / "work-state"
         launcher.write_text("#!/usr/bin/env python3\nimport json, pathlib, sys\n"
@@ -205,11 +206,25 @@ def cli_failure_isolation():
             assert API["parse_time"](report["window"]["end_inclusive"]) - API["parse_time"](report["window"]["start_exclusive"]) == timedelta(hours=1)
             assert report["github"]["collection_status"] == "unavailable"
             assert report["github"]["delivery"]["count"] is None
+            assert report["reviews"]["collection_status"] == "partial"
+            assert report["reviews"]["counts"]["completed_in_window"] is None
+            assert report["reviews"]["coverage"]["observed_known_completed_in_window"] == 0
             if paused:
                 assert not marker.exists() and report["native"]["collection_status"] == "paused"
             else:
                 assert marker.exists() and report["native"]["collection_status"] == "complete"
                 assert report["native"]["wip"]["count"] == 1
+        gh.write_text("#!/usr/bin/env python3\nimport json\n"
+                      "print(json.dumps({'data':{'repository':{'pullRequests':{'nodes':[],"
+                      "'totalCount':0,'pageInfo':{'hasNextPage':False,'endCursor':None}}}}}))\n")
+        empty = subprocess.run([sys.executable, str(tools / SOURCE.name), "--repo", "example/repo",
+                                "--native-paused"], cwd=root, env=environment,
+                               text=True, capture_output=True, timeout=15)
+        assert empty.returncode == 2
+        empty_report = json.loads(empty.stdout)
+        assert empty_report["github"]["source"]["inventory_complete"]
+        assert empty_report["reviews"]["collection_status"] == "complete"
+        assert empty_report["reviews"]["counts"]["completed_in_window"] == 0
 
 
 def runner_boundaries():

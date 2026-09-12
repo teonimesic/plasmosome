@@ -478,6 +478,7 @@ def collect_report(root, *, repository=None, native_paused=False):
             if not report["github"]["source"]["inventory_complete"]:
                 if report["reviews"]["collection_status"] == "complete":
                     report["reviews"]["collection_status"] = "partial"
+                report["reviews"]["counts"]["completed_in_window"] = None
                 report["reviews"].setdefault("errors", []).append(error("reviews", "inventory", "shared PR inventory is incomplete; unobserved PR review usage is unknown"))
         except Exception as exc:
             report["reviews"] = reviews_unavailable(diagnostic(exc))
