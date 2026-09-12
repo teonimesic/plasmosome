@@ -17,6 +17,10 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
+
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+sys.dont_write_bytecode = True
 
 import intent_coverage as coverage
 
@@ -148,6 +152,29 @@ def delivered_task(identity="task-delivered", url=PR_URL):
 
 def merged_observation(url=PR_URL):
     return {"state": "MERGED", "merge_commit": COMMIT, "merged_at": MERGED_AT, "url": url}
+
+
+def filesystem_inventory(root):
+    inventory = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_dir():
+            inventory[relative] = ("directory",)
+        elif path.is_file():
+            inventory[relative] = ("file", path.read_bytes())
+        else:
+            inventory[relative] = ("other",)
+    return inventory
+
+
+def wait_for_pid(path, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            return int(path.read_text())
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.01)
+    raise AssertionError(f"helper did not publish its PID at {path}")
 
 
 class FixtureRoot:
@@ -329,27 +356,96 @@ class CoverageBehaviorTests(unittest.TestCase):
 
     def test_closure_annotation_validation_is_exact(self):
         invalid = [
-            None,
-            "delivered",
-            {},
-            {"kind": "other", "closed_at": MERGED_AT},
-            {"kind": "delivered", "closed_at": MERGED_AT, "extra": True},
-            {"kind": "delivered", "closed_at": "2026-09-12T00:00:00Z"},
-            {"kind": "cancelled", "closed_at": MERGED_AT},
-            {"kind": "cancelled", "closed_at": MERGED_AT, "reason": "   "},
-            {"kind": "cancelled", "closed_at": MERGED_AT, "reason": " Closed "},
+            ("absent", None, None, None),
+            ("wrong-annotation-type", "delivered", None, None),
+            ("empty-object", {}, None, None),
+            ("array-kind", {"kind": [], "closed_at": MERGED_AT}, None, None),
+            ("object-kind", {"kind": {}, "closed_at": MERGED_AT}, None, None),
+            ("unknown-kind", {"kind": "other", "closed_at": MERGED_AT}, None, None),
+            (
+                "extra-delivered-key",
+                {"kind": "delivered", "closed_at": MERGED_AT, "extra": True},
+                PR_URL,
+                {PR_URL: merged_observation()},
+            ),
+            (
+                "stale-cancellation-binding",
+                {"kind": "cancelled", "closed_at": "2026-09-12T00:00:00Z", "reason": "Withdrawn"},
+                None,
+                None,
+            ),
+            ("cancelled-missing-reason", {"kind": "cancelled", "closed_at": MERGED_AT}, None, None),
+            (
+                "cancelled-blank-reason",
+                {"kind": "cancelled", "closed_at": MERGED_AT, "reason": "   "},
+                None,
+                None,
+            ),
+            (
+                "cancelled-generic-reason",
+                {"kind": "cancelled", "closed_at": MERGED_AT, "reason": " Closed "},
+                None,
+                None,
+            ),
         ]
-        for closure in invalid:
-            with self.subTest(closure=closure):
-                row = native_task("closed-row", "closed", closure=closure, closed_at=MERGED_AT)
-                result, unused, unused_forge = self.execute([row])
+        for name, closure, external_ref, observations in invalid:
+            with self.subTest(name=name):
+                row = native_task(
+                    "closed-row",
+                    "closed",
+                    closure=closure,
+                    closed_at=MERGED_AT,
+                    external_ref=external_ref,
+                )
+                result, unused, unused_forge = self.execute([row], observations)
                 self.assertEqual(result.exit_code, 2)
                 self.assertEqual(result.stdout_lines, ())
+                self.assertTrue(result.stderr_lines[0].startswith("input: closed-row:"), result.stderr_lines)
         row = native_task("closed-row", "closed", closure={"kind": "cancelled", "closed_at": MERGED_AT, "reason": "Explicit\nreason"}, closed_at=MERGED_AT)
         result, unused, unused_forge = self.execute([row], command="show", requested_id="001")
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(len(result.stdout_lines), 2)
         self.assertNotIn("\n", result.stdout_lines[1])
+
+    def test_rfc3339_component_boundaries_and_exact_cancellation_binding(self):
+        valid = (
+            MERGED_AT,
+            "2026-09-12T12:34:56.123456+01:00",
+            "2016-12-31T23:59:60Z",
+            "2017-01-01T00:59:60+01:00",
+        )
+        invalid = (
+            "2026-09-12T12:00:00+00:60",
+            "2026-09-12T12:00:00+01:99",
+            "2026-09-12T12:00:00+24:00",
+            "2026-09-12T12:00:61Z",
+            "2026-09-12T23:59:60Z",
+            "2026-02-30T12:00:00Z",
+        )
+        for stamp in valid:
+            with self.subTest(stamp=stamp):
+                self.assertTrue(coverage.valid_rfc3339(stamp))
+                row = native_task(
+                    "valid-cancellation",
+                    "closed",
+                    closure={"kind": "cancelled", "closed_at": stamp, "reason": "Withdrawn"},
+                    closed_at=stamp,
+                )
+                result, unused, unused_forge = self.execute([row])
+                self.assertEqual(result, coverage.RunResult(0, (), ()))
+        for stamp in invalid:
+            with self.subTest(stamp=stamp):
+                self.assertFalse(coverage.valid_rfc3339(stamp))
+                row = native_task(
+                    "invalid-timestamp",
+                    "closed",
+                    closure={"kind": "cancelled", "closed_at": stamp, "reason": "Withdrawn"},
+                    closed_at=stamp,
+                )
+                result, unused, unused_forge = self.execute([row])
+                self.assertEqual(result.exit_code, 2)
+                self.assertEqual(result.stdout_lines, ())
+                self.assertTrue(result.stderr_lines[0].startswith("input: invalid-timestamp:"), result.stderr_lines)
 
     def test_nonclosed_stale_closure_and_literal_assignee_do_not_deliver(self):
         row = native_task("reopened", "review")
@@ -450,43 +546,98 @@ class NativeAdapterTests(unittest.TestCase):
             binary = root / "bin"
             tools.mkdir()
             binary.mkdir()
-            native_pid = root / "native.pid"
-            auth_pid = root / "auth.pid"
             native = tools / "work-state"
-            native.write_text(
-                "#!/usr/bin/env python3\n"
-                "import os, pathlib, time\n"
-                f"pathlib.Path({str(native_pid)!r}).write_text(str(os.getpid()))\n"
-                "time.sleep(30)\n"
-            )
+            native.write_text("#!/bin/sh\nexec sleep 30\n")
             native.chmod(0o700)
             environment = {
                 **os.environ,
                 "PATH": f"{binary}:{os.environ['PATH']}",
-                "PID_PATH": str(auth_pid),
             }
             environment.pop("GH_TOKEN", None)
             environment.pop("GITHUB_TOKEN", None)
             gh = binary / "gh"
-            gh.write_text(
-                "#!/usr/bin/env python3\n"
-                "import os, pathlib, time\n"
-                "pathlib.Path(os.environ['PID_PATH']).write_text(str(os.getpid()))\n"
-                "time.sleep(30)\n"
-            )
+            gh.write_text("#!/bin/sh\nexec sleep 30\n")
             gh.chmod(0o700)
-            started = time.monotonic()
-            with self.assertRaises(coverage.Refusal):
-                coverage.NativeReader(root).read(started + 0.6)
-            self.assertLess(time.monotonic() - started, 0.7)
-            started = time.monotonic()
-            with self.assertRaises(coverage.Refusal):
-                coverage.TokenReader(root, environment=environment).read(started + 0.6)
-            self.assertLess(time.monotonic() - started, 0.7)
-            for pid_path in (native_pid, auth_pid):
-                pid = int(pid_path.read_text())
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(pid, 0)
+
+            for name, reader in (
+                ("native", coverage.NativeReader(root)),
+                ("authentication", coverage.TokenReader(root, environment=environment)),
+            ):
+                with self.subTest(name=name):
+                    spawned = []
+                    original_popen = coverage.subprocess.Popen
+
+                    def recording_popen(*arguments, **keywords):
+                        process = original_popen(*arguments, **keywords)
+                        spawned.append(process.pid)
+                        return process
+
+                    started = time.monotonic()
+                    with mock.patch.object(coverage.subprocess, "Popen", side_effect=recording_popen):
+                        with self.assertRaises(coverage.Refusal):
+                            reader.read(started + 0.6)
+                    self.assertLess(time.monotonic() - started, 0.7)
+                    self.assertEqual(len(spawned), 1)
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(spawned[0], 0)
+
+    def test_parent_only_sigterm_reaps_active_native_helper(self):
+        source = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory(prefix="intent-parent-signal-") as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            (root / "docs/intents").mkdir(parents=True)
+            (root / "docs/specs").mkdir(parents=True)
+            for name in ("intent-coverage", "intent_coverage.py"):
+                shutil.copy2(source / name, root / "tools" / name)
+            (root / "docs/intents/001-goal.md").write_text(intent_text())
+            (root / "docs/specs/001-behavior.md").write_text(spec_text())
+            helper_pid_path = root / "helper.pid"
+            helper = root / "tools/work-state"
+            helper.write_text("#!/bin/sh\nprintf '%s' \"$$\" > \"$PID_PATH\"\nexec sleep 30\n")
+            helper.chmod(0o700)
+            environment = dict(os.environ)
+            environment["PID_PATH"] = str(helper_pid_path)
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            process = subprocess.Popen(
+                [str(root / "tools/intent-coverage"), "check"],
+                cwd=root,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            helper_pid = None
+            helper_alive = False
+            cleanup_sent = False
+            try:
+                helper_pid = wait_for_pid(helper_pid_path, 3)
+                os.kill(process.pid, signal.SIGTERM)
+                stdout, stderr = process.communicate(timeout=3)
+                try:
+                    os.kill(helper_pid, 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    helper_alive = True
+                    os.killpg(helper_pid, signal.SIGKILL)
+                    cleanup_sent = True
+                self.assertFalse(helper_alive, f"owned helper {helper_pid} survived parent-only SIGTERM")
+                self.assertEqual((process.returncode, stdout, stderr), (143, "", ""))
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if helper_pid is not None and not cleanup_sent:
+                    try:
+                        os.kill(helper_pid, 0)
+                    except ProcessLookupError:
+                        pass
+                    else:
+                        try:
+                            os.killpg(helper_pid, signal.SIGKILL)
+                        except (PermissionError, ProcessLookupError):
+                            pass
 
 
 
@@ -508,6 +659,8 @@ class GraphqlParsingTests(unittest.TestCase):
             (200, json.dumps({"data": {"repository": None}}).encode()),
             (200, self.payload({**pull, "url": PR_URL + "0"})),
             (200, self.payload({**pull, "mergeCommit": {"oid": COMMIT, "extra": 1}})),
+            (200, self.payload({**pull, "state": []})),
+            (200, self.payload({**pull, "state": {}})),
         ]
         for status, body in malformed:
             with self.subTest(status=status, body=body):
@@ -518,6 +671,7 @@ class GraphqlParsingTests(unittest.TestCase):
 class TlsHandler(http.server.BaseHTTPRequestHandler):
     response_mode = "normal"
     requests = 0
+    pull_state = "MERGED"
 
     def do_POST(self):
         type(self).requests += 1
@@ -531,7 +685,7 @@ class TlsHandler(http.server.BaseHTTPRequestHandler):
                 "data": {
                     "repository": {
                         "pullRequest": {
-                            "state": "MERGED",
+                            "state": type(self).pull_state,
                             "mergeCommit": {"oid": COMMIT},
                             "mergedAt": MERGED_AT,
                             "url": PR_URL,
@@ -563,7 +717,7 @@ class TlsHandler(http.server.BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def tls_server(mode="normal"):
+def tls_server(mode="normal", state="MERGED"):
     with tempfile.TemporaryDirectory(prefix="intent-tls-fixture-") as temporary:
         root = Path(temporary)
         certificate = root / "certificate.pem"
@@ -571,6 +725,7 @@ def tls_server(mode="normal"):
         certificate.write_text(CERTIFICATE)
         key.write_text(PRIVATE_KEY)
         TlsHandler.response_mode = mode
+        TlsHandler.pull_state = state
         TlsHandler.requests = 0
         server = http.server.ThreadingHTTPServer(("localhost", 0), TlsHandler)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -604,6 +759,53 @@ class RealHttpsAdapterTests(unittest.TestCase):
             self.assertEqual(reader.observe(PR_URL, deadline), merged_observation())
             self.assertEqual(reader.observe(PR_URL, deadline), merged_observation())
             self.assertEqual(TlsHandler.requests, 1)
+
+    def test_malformed_environment_token_never_reaches_diagnostics(self):
+        secret = "SYNTHETIC-REVIEW-SECRET\n"
+        with tls_server() as (server, certificate):
+            fixture = FixtureRoot()
+            try:
+                token_reader = coverage.TokenReader(fixture.root, environment={"GH_TOKEN": secret})
+                reader = coverage.ForgeReader(
+                    token_reader,
+                    limits=SCALED_LIMITS,
+                    transport=coverage.Transport("localhost", server.server_port, str(certificate)),
+                )
+                result = coverage.run(
+                    "check",
+                    None,
+                    fixture.root,
+                    FixtureNativeReader([delivered_task()]),
+                    reader,
+                    limits=SCALED_LIMITS,
+                )
+                self.assertEqual(result.exit_code, 2)
+                self.assertEqual(result.stdout_lines, ())
+                self.assertTrue(result.stderr_lines[0].startswith("input: GitHub authentication:"), result.stderr_lines)
+                self.assertNotIn("SYNTHETIC-REVIEW-SECRET", "\n".join(result.stderr_lines))
+                self.assertEqual(TlsHandler.requests, 0)
+            finally:
+                fixture.close()
+
+    def test_mistyped_graphql_state_is_buffered_input_refusal(self):
+        for state in ([], {}):
+            with self.subTest(state=state):
+                with tls_server(state=state) as (server, certificate):
+                    fixture = FixtureRoot()
+                    try:
+                        result = coverage.run(
+                            "show",
+                            "001",
+                            fixture.root,
+                            FixtureNativeReader([delivered_task()]),
+                            self.reader(server, certificate, SCALED_LIMITS),
+                            limits=SCALED_LIMITS,
+                        )
+                        self.assertEqual(result.exit_code, 2)
+                        self.assertEqual(result.stdout_lines, ())
+                        self.assertEqual(result.stderr_lines, (f"input: {PR_URL}: GitHub returned an invalid pull-request state",))
+                    finally:
+                        fixture.close()
 
     def test_stalled_read_hits_idle_deadline_and_reaps_worker(self):
         with tls_server("stalled") as (server, certificate):
@@ -663,22 +865,32 @@ class RealHttpsAdapterTests(unittest.TestCase):
 
 
 class ShellBehaviorTests(unittest.TestCase):
-    def test_wrong_directory_refuses_in_bash_and_zsh(self):
-        root = Path(__file__).resolve().parent.parent
-        command = str(root / "tools/intent-coverage")
-        for shell in ("bash", "zsh"):
-            with self.subTest(shell=shell):
-                completed = subprocess.run(
-                    [shell, "-c", '"$1" check', shell, command],
-                    cwd="/tmp",
-                    text=True,
-                    capture_output=True,
-                    timeout=3,
-                )
-                self.assertEqual(completed.returncode, 2)
-                self.assertEqual(completed.stdout, "")
-                self.assertTrue(completed.stderr.startswith("input: checkout:"), completed.stderr)
-                self.assertNotIn("no matches found", completed.stderr)
+    def test_wrong_directory_refuses_in_bash_and_zsh_without_writes(self):
+        source = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory(prefix="intent-wrong-directory-") as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            for name in ("intent-coverage", "intent_coverage.py"):
+                shutil.copy2(source / name, root / "tools" / name)
+            command = str(root / "tools/intent-coverage")
+            before = filesystem_inventory(root)
+            environment = dict(os.environ)
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            for shell in ("bash", "zsh"):
+                with self.subTest(shell=shell):
+                    completed = subprocess.run(
+                        [shell, "-c", '"$1" check', shell, command],
+                        cwd="/tmp",
+                        env=environment,
+                        text=True,
+                        capture_output=True,
+                        timeout=3,
+                    )
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertEqual(completed.stdout, "")
+                    self.assertTrue(completed.stderr.startswith("input: checkout:"), completed.stderr)
+                    self.assertNotIn("no matches found", completed.stderr)
+                    self.assertEqual(filesystem_inventory(root), before)
 
     def test_valid_offline_root_runs_in_bash_and_zsh_without_writes(self):
         source = Path(__file__).resolve().parent
@@ -694,11 +906,9 @@ class ShellBehaviorTests(unittest.TestCase):
             helper.chmod(0o700)
             (root / "docs/intents/001-goal.md").write_text(intent_text())
             (root / "docs/specs/001-behavior.md").write_text(spec_text())
-            before = {
-                path.relative_to(root).as_posix(): path.read_bytes()
-                for path in root.rglob("*")
-                if path.is_file()
-            }
+            before = filesystem_inventory(root)
+            environment = dict(os.environ)
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
             for shell in ("bash", "zsh"):
                 with self.subTest(shell=shell):
                     checked = subprocess.run(
@@ -707,6 +917,7 @@ class ShellBehaviorTests(unittest.TestCase):
                         text=True,
                         capture_output=True,
                         timeout=3,
+                        env=environment,
                     )
                     self.assertEqual((checked.returncode, checked.stdout, checked.stderr), (0, "", ""))
                     shown = subprocess.run(
@@ -715,15 +926,12 @@ class ShellBehaviorTests(unittest.TestCase):
                         text=True,
                         capture_output=True,
                         timeout=3,
+                        env=environment,
                     )
                     self.assertEqual(shown.returncode, 0)
                     self.assertEqual(shown.stderr, "")
                     self.assertEqual(json.loads(shown.stdout), {"type": "spec", "intent_id": "001", "id": "001", "status": "accepted"})
-            after = {
-                path.relative_to(root).as_posix(): path.read_bytes()
-                for path in root.rglob("*")
-                if path.is_file() and "__pycache__" not in path.parts
-            }
+            after = filesystem_inventory(root)
             self.assertEqual(after, before)
 
     def test_readme_only_intents_refuse_in_bash_and_zsh(self):
