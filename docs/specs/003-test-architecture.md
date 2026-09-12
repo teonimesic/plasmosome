@@ -75,6 +75,40 @@ There is no clock seam today. Durations are passed in as arguments and nothing r
 to make a decision. Open question, left open on purpose: if a flaky time-dependent test ever
 appears, that is the moment to add a clock trait — not before.
 
+### Workspace files belong to the invocation
+
+Repository-reading tests use one checked boundary in `plasmosome-guards`. It supplies the
+runtime workspace root to the check as a path and owns the final result, including
+[spec013's stale-target refusal](013-what-earns-a-guard.md#workspace-check-validity).
+All four guard test files use it; membrane's readiness-verb test uses the same boundary through
+a dev-dependency. Production readiness does not discover a checkout or acquire this dependency.
+Fixture paths remain explicit: selecting a hook script in the invocation tree does not change
+the scratch repository in which that script runs.
+
+The authority is the test process's working directory, captured once before its workspace
+reads. [Cargo guarantees](https://doc.rust-lang.org/cargo/commands/cargo-test.html#working-directory-of-tests)
+the package root as each unit/integration test's working directory, including when the shell
+is elsewhere and selects a manifest with `--manifest-path`. Direct test-binary execution instead
+selects the workspace through its actual working directory. Executable location, `target/`,
+Git discovery and either form of `CARGO_MANIFEST_DIR` do not select the runtime tree; in
+particular, an absent or misleading runtime manifest variable cannot cause a fallback.
+
+From that captured directory, use
+[`cargo locate-project --workspace --message-format plain`](https://doc.rust-lang.org/cargo/commands/cargo-locate-project.html)
+and canonicalize the returned manifest's parent. This follows Cargo's workspace membership,
+including `package.workspace`, rather than guessing an ancestor depth or accepting any file
+named `Cargo.toml`. Cargo is a runtime prerequisite: use `CARGO` when supplied, otherwise
+`cargo` on `PATH`, as the existing workspace checks do. An unreadable working directory,
+failed locator, malformed output or unavailable manifest/root refuses as
+`WorkspaceRootUnavailable`, with the attempted directory and underlying cause. It runs no
+workspace check and does not claim that unavailable context proves a stale binary.
+
+Resolve once per checked body and pass that same root to its helpers and repository child
+commands. Never mutate process-global cwd or retain a root across invocations. The boundary
+must execute the real consumer against the selected tree even when spec013 already identifies
+a stale target; it must not replace that observation with an early stale-root panic.
+Spec013 defines when those observations can support a passing result.
+
 ### The testkit crate
 
 `crates/plasmosome-testkit`, a workspace member with `publish = false`. It depends on the kernel
@@ -170,4 +204,11 @@ only what spans crates.
   `plasmosome-testkit` outside dev-dependencies, and the guard is mutation-tested: the violation
   was added, seen to fail, and reverted.
 - `crates/plasmosome-testkit/AGENTS.md` carries the layer table and the seam rule.
+- The copied-checkout regression exercises the actual publication guard and membrane
+  readiness-verb test through the shared boundary, with the original checkout still present.
+  Binaries compiled only in the original must observe copy-only publication and spec-verb
+  violations, not merely return a different root string or fail before either read. Unset and
+  misleading runtime `CARGO_MANIFEST_DIR` values do not change the observations.
+  The copy, move and outside-workspace outcomes, including stale-target failure rather than
+  missing-original-file errors, meet [spec013](013-what-earns-a-guard.md#workspace-check-validity).
 - The gate in the root `AGENTS.md` is green.
