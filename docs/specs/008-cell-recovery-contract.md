@@ -383,10 +383,11 @@ This includes accepted UdsSocket/Broker streams and both per-stream guest ends, 
 listeners. A surviving accepted endpoint or bridge binding keeps its exact pair visible, while
 the supervisor independently verifies the corresponding original host relay endpoint. A guest
 empty account alone cannot discharge a still-live host end or a lost association.
-Transport uses spec001's bounded ObservationPage contract at both observation hops. Only a fully
-assembled, length/hash-checked and strictly validated logical result becomes RecoveryObservation.
-Missing, mixed, expired or partially decoded pages fail under the original recovery deadline;
-neither a prefix nor the last page alone can authorize cleanup or publication.
+Transport uses spec001's bounded ObservationPage contract at both internal observation hops and
+the public plasmosome.recovery diagnostic. Only a fully assembled, length/hash-checked and
+strictly validated logical result becomes RecoveryObservation or a complete client diagnostic.
+Missing, mixed, expired or partially decoded pages fail under that observation's or diagnostic
+transfer's original deadline; no prefix or last page alone authorizes cleanup or publication.
 
 Cell records and the resulting `observed_cells` diagnostic retain this guest account so a
 controller cannot silently discard it while preserving only OsState. No journal field grants
@@ -686,11 +687,17 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   denial/private-copy witnesses in spec017A14; ordinary chmod/unlink and an existing Docker
   process are not substitutes for managed guest FUSE/LSM enforcement.
   Omitting one otherwise-empty projection-kind array must likewise fail complete observation.
-  Exercise complete observations larger than one ndjson frame at both guest and controller hops.
-  Every page stays within the frame bound and the assembled logical inventory is unchanged.
+  Exercise complete observations larger than one ndjson frame through guest, membrane and the
+  public controller socket to the supported client. Every page stays within the frame bound;
+  the assembled logical inventory and retained RecoveryOutcome are unchanged.
   Missing, overlapping, reordered or mixed-snapshot pages, false early completion, changed
   length/hash and expiry fail the whole observation without consuming a prefix as authority.
   Retrieving a page again returns the same capture, not rows from a later live inventory.
+  A new completed observation during a public transfer cannot replace that transfer's pinned
+  outcome. With empty drift, unmatched and quarantine but one independently observed unrequested
+  IncompleteEffect, public plasmosome.status remains not ready and plasmosome.recovery returns
+  the exact incomplete operation and original owner. Dropping incomplete or deciding readiness
+  from OsState alone must fail at the public wire, not only in a recovery model.
   Exercise the empty host exec environment and actual loaded-dependency check separately from
   the guest environment API. An injected loader/late-clear mutant must fail before guest
   readiness. Hello carries only the original boot token and effective guest policy measurement;

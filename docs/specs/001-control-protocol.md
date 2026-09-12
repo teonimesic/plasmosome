@@ -176,8 +176,8 @@ observed by probing control-`status`, not by reading a pidfile).
 Spec008 defines recovered `ledger_generation` as the maximum adopted cell generation, or 0.
 It is not a cross-cell acknowledgement watermark. Recovered cells retain their actual observed
 supervisor state; replay does not prove readiness. After successful recovery startup, `ready`
-is false while the account contains drift, quarantine or unmatched effects. Quarantined cells
-are absent from `cells` and remain named in `plasmosome.recovery`. A recovered unknown genome
+is false while the account contains drift, quarantine, unmatched effects or any incomplete
+effect. Quarantined cells are absent from `cells` and remain named in `plasmosome.recovery`. A recovered unknown genome
 is omitted, as §1 requires.
 
 ### 3.3a `plasmosome.recovery`
@@ -185,11 +185,23 @@ is omitted, as §1 requires.
 Read-only diagnostics for the most recent completed recovery observation:
 
 ```json
-{"id": 30, "method": "plasmosome.recovery", "params": {"name": "work"}}
+{"id": 30, "method": "plasmosome.recovery", "params": {"name": "work", "deadline_ms": 5000, "snapshot": 0, "offset": 0}}
 ```
 
-The result is `{name, ledger_generation, desired, tombstones, observed_cells, expected, drift,
-unmatched, pending, quarantined}`. `desired`, exact objects, pending transactions and quarantine
+The wire result is §4.1's `ObservationPage`; request IDs are unsigned64-bit integers and
+`deadline_ms`, `snapshot` and `offset` are required. Zero/zero pins the most recent completed
+RecoveryOutcome for this resolved instance, not a fresh observation. All pages retain that same
+outcome even if a newer observation completes. The positive deadline is capped by the configured
+recovery_deadline_ms and bounds the entire transfer; later requests cannot renew it.
+Connection, method, resolved instance and original controller lifetime bind the capture.
+Apply the same bounded retention, exact-page retry, complete assembly, length/hash validation
+and failure rules as internal observations. A supported client presents only the fully validated
+logical account, never pages or a prefix as a complete recovery diagnostic.
+
+The assembled logical result is `{name, ledger_generation, desired, tombstones, observed_cells,
+expected, drift, unmatched, incomplete, pending, quarantined}`. `incomplete` is the required
+`[IncompleteEffect, ...]`, preserving every complete operation and its original cell/plugin owner;
+it is not coerced into drift, unmatched or an OsObject. `desired`, exact objects, pending transactions and quarantine
 reports use spec008's typed records with this wire projection: absent genome/cell/line,
 operation and force fields are omitted; a journal change whose replacement is null becomes
 `{plugin, remove: true}`, while a replacement change is `{plugin, replacement: ...}`.
@@ -206,6 +218,8 @@ and wrong-name errors are the same as `plasmosome.status`. Recovery startup with
 observation or blocked cleanup does not serve this or any other method: it exits with the
 structured stderr diagnostic described in §4.1. Quarantine alone can coexist with a serving
 controller when all live observations are complete; readiness remains false.
+A complete observation containing unrequested incomplete effects may serve this diagnostic,
+with readiness false. That does not turn unresolved required startup cleanup into success.
 
 ### 3.4 `plasmosome.stop`
 
@@ -470,23 +484,26 @@ request IDs and errors. Responses with a wrong request ID or cell, unknown field
 malformed exact objects, incomplete frames or timeout are failed observations. The controller
 must not operate a quarantine's effects merely because its supervisor answered.
 
-The observation methods `membrane.cell.observe`, `membrane.residue.snapshot` and §4.2's4090
-`observe` return bounded pages of one complete logical result, not a growing JSON response.
+The observation methods `membrane.cell.observe`, `membrane.residue.snapshot`, §4.2's4090
+`observe` and public `plasmosome.recovery` return bounded pages of one complete logical result.
 Their request IDs are unsigned64-bit integers. Each params record includes required
-`snapshot:u64` and `offset:u64`: zero/zero captures a fresh complete observation and returns its
-first page; later requests use that returned nonzero snapshot and the next byte offset.
+`snapshot:u64` and `offset:u64`: zero/zero starts a capture and returns its first page; later
+requests use that returned nonzero snapshot and the next byte offset.
 Their wire result is the strict
 `ObservationPage {snapshot:u64, offset:u64, total:u64, sha256:String, bytes:[u8], complete:bool}`.
-The logical results below are compact UTF-8 JSON without a trailing newline. Freeze those exact
-bytes only after complete independent collection and validation succeeds. `total` is their
+The logical results are compact UTF-8 JSON without a trailing newline. Internal methods freeze
+those exact bytes only after fresh independent collection and validation succeeds; the public
+method pins an already completed RecoveryOutcome without refreshing it. `total` is their
 positive byte length; `sha256` is their64lowercase-hex SHA256. Each page contains1–65,536bytes;
 offset arithmetic is checked, and `complete` is true exactly when offset plus page length equals
 total. Compact encoding of the page and bounded request ID fits the1,048,576-byte frame limit
 even when each byte takes three decimal digits. No inventory cardinality cap or array truncation
 is substituted for paging; both request and page response retain that frame limit.
 
-Snapshot IDs are connection-local, never reused, and bound to the method, cell and original
-supervisor/guest association. A new zero/zero capture replaces the prior capture on that
+Snapshot IDs are connection-local, never reused, and bound to the method and resolved cell or
+instance. Internal observations additionally bind the original supervisor/guest association;
+public diagnostics bind the original controller and the selected retained outcome.
+A new zero/zero capture replaces the prior capture on that
 connection; at most one is retained. It never resumes another connection's capture. Later pages
 read the same immutable bytes, not fresh rows mixed with older pages. A repeated valid offset
 returns the same page, allowing a lost reply to be recovered without recapturing. Reject an
@@ -501,10 +518,10 @@ The caller accepts only contiguous pages beginning at zero, with one snapshot/to
 positive bounded payloads and the exact completion flag. It checks the assembled length and hash,
 then strictly decodes and validates the complete logical record, including all required arrays
 and original identities. No prefix, early completion, missing/overlapping page or mixed capture
-can authorize publication, readiness, drift or cleanup. Connection loss, deadline expiry or
-failure at either observation hop fails the whole observation; a new capture uses only the
-remaining outer recovery budget. Paging preserves the original capture's observation semantics;
-it does not claim that resources stop changing while bytes are transported.
+can authorize publication, readiness, drift, cleanup or a complete public diagnostic. Connection
+loss, deadline expiry or failure at any observation/diagnostic hop fails that whole operation;
+a new internal capture uses only the remaining outer recovery budget. Paging preserves the
+selected record's observation semantics; it does not stop resources changing during transport.
 
 - `membrane.cell.observe` params are `{cell, deadline_ms, snapshot, offset}`. `deadline_ms` is a positive
   remaining budget capped by the controller's recovery deadline. Its assembled logical result is
