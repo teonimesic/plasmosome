@@ -430,8 +430,9 @@ proofs of this contract, not claims already established by accepting this docume
    claiming off-machine durability. Ordinary reads work without network and do not synchronize;
    a failed explicit sync leaves committed task content available and is reported as failure.
 8. **Single authority cutover:** no tracked task files, mutable exports, task template, task numbering
-   helper or obsolete shadow-runtime caller remains active. Root, heartbeat, planning, tasks and
-   PR-review entry points all direct task operations to native Beads, while Git still governs
+   helper or obsolete shadow-runtime caller remains active. Root, Main orchestration, pipeline
+   health statistics, planning, tasks and PR-review entry points all direct task operations to
+   native Beads, while Git still governs
    specs/intents. A fresh-context review follows a Beads ID end to end and finds no closure PR or
    worktree task-copy requirement. Run the repository gate after integration, not amid concurrent
    edits, and report exactly what passed and what was not exercised.

@@ -23,10 +23,13 @@ every grant records how to undo it.
 | `.agents/skills/planning-work` | Starting a piece of work, or briefing another agent |
 | `.agents/skills/pr-review` | Opening a PR, addressing review feedback, or merging |
 | `.agents/skills/tasks` | Reading and mutating the shared native Beads task records |
-| `.agents/skills/heartbeat` | Starting or resuming orchestration: recover decisions, measure delivery and allocate agents |
+| `.agents/skills/check-pipeline-health` | Running read-only pipeline statistics |
 
 Read the one that covers what you are about to do. The rules live there, not here — this table
 is an index, and a second copy of a rule is a copy that will disagree.
+
+If you are Main, read [Main orchestration](.agents/orchestrator/AGENT.md) when starting or resuming
+orchestration. That role document governs Main only, not delegated authors.
 
 **All task content lives in shared native Beads.** Start with `./tools/work-state show ID`;
 `.agents/skills/tasks` defines the workflow and
