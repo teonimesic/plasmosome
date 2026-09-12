@@ -217,7 +217,7 @@ def cli_failure_isolation():
         gh.write_text("#!/usr/bin/env python3\nimport json\n"
                       "print(json.dumps({'data':{'repository':{'pullRequests':{'nodes':[],"
                       "'totalCount':0,'pageInfo':{'hasNextPage':False,'endCursor':None}}}}}))\n")
-        empty = subprocess.run([sys.executable, str(tools / SOURCE.name), "--repo", "example/repo",
+        empty = subprocess.run([sys.executable, "-P", str(tools / SOURCE.name), "--repo", "example/repo",
                                 "--native-paused"], cwd=root, env=environment,
                                text=True, capture_output=True, timeout=15)
         assert empty.returncode == 2
@@ -225,6 +225,34 @@ def cli_failure_isolation():
         assert empty_report["github"]["source"]["inventory_complete"]
         assert empty_report["reviews"]["collection_status"] == "complete"
         assert empty_report["reviews"]["counts"]["completed_in_window"] == 0
+
+
+def cli_readonly_startup():
+    with tempfile.TemporaryDirectory(prefix="pipeline-health-startup-regression-") as directory:
+        root = Path(directory)
+        tools = root / "tools"
+        tools.mkdir()
+        shutil.copy2(SOURCE, tools / SOURCE.name)
+        shutil.copy2(SOURCE.with_name("pipeline_review_usage.py"), tools / "pipeline_review_usage.py")
+        payload = {"data": {"repository": {"pullRequests": {
+            "nodes": [], "totalCount": 0, "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}
+        gh = root / "gh"
+        gh.write_text(f"#!{sys.executable}\nprint({json.dumps(payload)!r})\n")
+        gh.chmod(0o755)
+
+        def snapshot():
+            return {str(path.relative_to(root)): (path.lstat().st_mode,
+                    str(path.readlink()) if path.is_symlink() else path.read_bytes() if path.is_file() else None)
+                    for path in root.rglob("*")}
+
+        before = snapshot()
+        result = subprocess.run([sys.executable, str(tools / SOURCE.name), "--repo", "example/repo",
+                                 "--native-paused"], cwd=root,
+                                env={"PATH": str(root) + os.pathsep + os.defpath, "PYTHONSAFEPATH": "1"},
+                                text=True, capture_output=True, timeout=15)
+        assert result.returncode == 2
+        assert json.loads(result.stdout)["reviews"]["collection_status"] == "complete"
+        assert snapshot() == before, "read-only startup changed the checkout inventory"
 
 
 def runner_boundaries():
@@ -334,6 +362,7 @@ def main():
     native_uncertainty()
     delivery_boundaries()
     cli_failure_isolation()
+    cli_readonly_startup()
     runner_boundaries()
     cli_exit_metadata()
     runner_released_group_identity()

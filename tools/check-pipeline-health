@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import selectors
 import signal
 import subprocess
@@ -477,7 +478,10 @@ def collect_report(root, *, repository=None, native_paused=False):
         except Exception as exc:
             report["github"]["errors"].append(error("github", "collection", exc))
         try:
-            from pipeline_review_usage import collect_review_usage
+            # Load the owned sibling in safe-path mode without writing checkout bytecode.
+            collect_review_usage = runpy.run_path(
+                str(Path(__file__).resolve().with_name("pipeline_review_usage.py"))
+            )["collect_review_usage"]
             report["reviews"] = collect_review_usage(JsonRunner(root), repository=repository, pull_requests=inventory,
                                                      window_start=window_start, observed_at=observed_at,
                                                      baseline_per_hour=10)
