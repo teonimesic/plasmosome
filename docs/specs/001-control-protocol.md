@@ -647,9 +647,13 @@ are positive and fit the actual platform's admitted limits. Artifacts are publis
 architecture-matched and pinned before launch. The trusted operator selects them, never workload
 text. The root image is explicitly RAW; no format autodetection or guest-selected backing paths.
 KernelFormat is exactly `raw | elf | pe_gz | image_bz2 | image_gz | image_zstd`, mapped to the
-pinned header's KRUN_KERNEL_FORMAT constants0 through5 respectively. The publisher proves the
-selected format/architecture combination supported by the pinned library; no format guessing
-or hidden command-line override is allowed. `writable_root` is an absolute NUL-free path under
+pinned header's KRUN_KERNEL_FORMAT constants0 through5 respectively. Reject `x86_64` with
+kernel format `raw` before launch: the pinned `krun_set_kernel` returns through `map_kernel`
+without retaining the supplied initramfs or command line, so it cannot supply this bootstrap.
+Every admitted format/architecture pair must preserve the exact protected initramfs and fixed
+command line below. The publisher proves that pair supported by the pinned library; enum
+membership alone is not admission, and no format guessing or hidden command-line override is
+allowed. `writable_root` is an absolute NUL-free path under
 an owned nonreplaceable private per-cell directory. Create that copy exclusively from root_image
 before VMM launch and retain its original inode/authority; it is never the immutable source path
 or a caller-selected existing file. This path is an explicit launch input, not recovery authority.
