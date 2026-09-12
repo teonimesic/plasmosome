@@ -92,6 +92,49 @@ on a whim.
 as one step, `publish = false`. The word "freeze" leaves: nothing here freezes a design, and a
 name promising otherwise invites the rules this spec refuses.
 
+### Workspace-check validity
+
+A check on the compilation checkout cannot certify the invocation checkout. All repository
+reads follow [spec003's shared runtime boundary](003-test-architecture.md#workspace-files-belong-to-the-invocation).
+Root resolution and build validity are separate: the former selects what to inspect; the
+latter can refuse a passing result but can never redirect a read.
+
+The named refusal is **`StaleTarget`**: the canonical runtime workspace root differs from the
+canonical workspace root recorded when the shared checking component was built. Record that
+build root while it exists, using Cargo's workspace location and canonicalization; embed it
+in the component, not in a mutable file beside the executable. At runtime compare the recorded
+path directly with the resolved root. Never reopen or canonicalize the recorded path, or ask
+whether the old checkout still exists. A symlink spelling of the same canonical root is not a
+different root. Target-directory placement is irrelevant.
+
+This is a build-location mismatch, not a source-freshness fingerprint: matching roots do not
+prove that source contents are unchanged, and no hashes, timestamps, Git identities or new
+cache-invalidation protocol are introduced. Cargo retains its ordinary rebuilding role.
+The diagnostic names stale build output, both roots and the need to rebuild the checking
+component and its consuming test binaries for the selected workspace.
+
+**Stale observations are useful, but not a green gate.** On a mismatch the shared boundary
+reports `StaleTarget`, then executes the check with the runtime root. A consumer's violation
+or read failure stays visible alongside that diagnostic; a successful consumer still ends
+in failure for staleness. There is no opt-out or success returned from this boundary for a
+mismatched root. This satisfies both obligations: copied consumers really read their copy,
+and stale build output fails explicitly. Restoring a copy-only violation removes that
+violation, not the stale-target refusal; rebuilding for the copy is what can restore green.
+This is validity handling for the existing checks, not a seventh policy guard.
+
+In this matrix, binaries contain the recorded build root `A`; `B` is a different canonical
+workspace root. A valid tree with no consumer violation is assumed unless stated otherwise.
+
+| Invocation | Tree inspected | Result |
+| --- | --- | --- |
+| In `A`, including a symlink spelling of `A` | `A` | Pass if the consumer passes |
+| Copy source and `target/` to `B`, retain valid `A`, invoke in `B` | `B` | `StaleTarget`; copy-only violations are also observable |
+| Move `A` to `B`, leaving no `A`, invoke in `B` | `B` | The same `StaleTarget`, not a missing file under `A` |
+| Run a binary located under `B/target` with cwd in `A` | `A` | Pass if the consumer passes; binary location does not select `B` |
+| Run a prebuilt binary outside every Cargo workspace | None | `WorkspaceRootUnavailable`; no fallback or asserted staleness |
+| Run Cargo outside the workspace with `--manifest-path B/Cargo.toml` | `B` through Cargo's package cwd | `StaleTarget` if the executed component still records `A`; normal consumer result if rebuilt for `B` |
+| Use an external `CARGO_TARGET_DIR` | Workspace selected by cwd, not the target directory | Compare the recorded and runtime roots exactly as above |
+
 ## Acceptance
 
 - `crates/plasmosome-guards` exists, is a workspace member, carries `publish = false`, and
@@ -112,4 +155,13 @@ name promising otherwise invites the rules this spec refuses.
   architectural rules, and does instruct it to flag a new guard over an unbuilt design.
 - The crate docs that claimed an enforcement which no longer exists — `plasmosome-core`,
   `plasmosome-backend`, spec 001 §6 item 3 — say instead that review holds the line.
+- The workspace validity regression runs the same prebuilt guard and membrane test binaries
+  in a copied tree while the original remains valid. Mutating only the copy must expose its
+  unheld publication and changed readiness verb as well as `StaleTarget`; restoring those
+  mutations leaves only staleness. Rebuilding for that tree permits the clean consumers to
+  pass. Moving the original gives the same stale refusal without reading the old location.
+  Direct outside-workspace execution and Cargo manifest selection meet the matrix above.
+  Independently restoring either compile-root consumer must break the copy-observation
+  regression; an early mismatch-only panic must break it too. A generic nonzero exit is not
+  proof of reading the copy. Root diagnostics are asserted by cause, not exact prose.
 - The gate in the root `AGENTS.md` is green.
