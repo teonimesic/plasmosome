@@ -834,7 +834,7 @@ Connection-local data-handle loss remains distinct from the original grant/resou
 | `install` | `{operation:UniverseOp, address:String\|null, deadline_ms}` | `{boot, grant, installed:true}` |
 | `activate` | `{grant:GrantId, deadline_ms}` | `{boot, grant, active:true}` |
 | `drain` | `{grant:GrantId, deadline_ms}` | `{boot, grant, drained:true}` |
-| `remove` | `{inverse:UniverseRemoval, owner:CellOwner, force:bool, deadline_ms}` | `{boot, grant, removed:true}` |
+| `remove` | `{inverse:UniverseRemoval, owner:CellOwner, force:bool, deadline_ms}` | `{boot, grant, guest_removed:true}` |
 | `shutdown` | `{deadline_ms}` | `{boot, shutdown_requested:true}` |
 
 Before the first connection the trusted PID1 obtains32random bytes from the guest kernel,
@@ -908,9 +908,18 @@ busy refusal with the selected capability still active. Do not close a healthy s
 just to escape an unanswered request. Retried cleanup uses that same original association.
 Withdrawal-lane observe/remove requests may not hold a peer's gate while waiting; pending work
 cannot prevent another locally authorized Force from closing its selected host gate.
-Neither form returns removed:true until fresh observation proves the selected
-guest bindings absent. Host resource cleanup is separately required. Failures preserve original
-associations and incomplete state, never reacquire by path or ID. A matching already-installed
+For either form, the shim returns guest_removed:true only after fresh observation proves the
+selected guest bindings absent. This guest-only acknowledgement never attests host cleanup.
+The host's `apply_removal` succeeds only after fresh independent observation proves both those
+guest bindings and every original host effect of the selected operation absent, including its
+holding on shared resources. Equal peers and shared resources still required by them remain
+intact; absence concerns this selected holding and its owned effects, not another grant's resources.
+A guest acknowledgement, closed gate or unlinked listener alone cannot discharge the operation.
+Any remaining effect or unconfirmed cleanup returns `BackendError::IncompleteEffect`, retaining
+the original operation, associations, incomplete marker and remaining cleanup authority; never
+reacquire by path or ID. Retire the marker and any issued record only under spec017's complete
+absence rule; recovery must also observe absence from both standing and incomplete accounts
+before finish or publication. A matching already-installed
 or active operation may be acknowledged only after actual inspection and only while still
 standing; no retry creates another attachment, rebinds an old handle or promotes an incomplete
 operation. Install/activate refuse an address made incomplete by a lost stream or other failure.

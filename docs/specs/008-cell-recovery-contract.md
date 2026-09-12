@@ -631,6 +631,11 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   one relay end. Fresh guest socket_streams plus independent original host-end observation must
   prevent completion until every selected end is absent; an equal peer's stream still serves.
   Omitting the stream account or reporting only listeners must fail this cleanup witness.
+  Also remove all selected guest bindings and receive guest_removed:true while an original
+  selected host child or stream remains alive. Host apply_removal must still return
+  IncompleteEffect, retaining its exact authority and forbidding finish/publication until fresh
+  independent host-and-guest absence. A mutant treating the guest acknowledgement as complete
+  removal must fail while that original host resource is independently observed alive.
   After real fork and successful bind, inject access/association failure before successful
   publication. Observe the typed incomplete operation with no complete object or fabricated
   entry. Kill the controller, restart, durably abort, then exact-withdraw using retained original
