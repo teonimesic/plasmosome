@@ -36,7 +36,7 @@ Apply [pr-review](../skills/pr-review/SKILL.md) for rounds, current-head evidenc
 
 Use distinct automatic/manual/superseded run evidence, not repeated statuses, skips or refused requests. Unknown account/outside usage and ambiguous identity are not zero or a global hold. Never derive remaining balance from repository counts or reset from completion plus an hour; assign discrepancies for diagnosis. Statistics do not establish merge-gate coverage.
 
-Main records task/PR/head, authorized budget and purpose, including extra independent review; revise on findings/head/admission/results/usage. Do not strand eligible work through unassigned authorized capacity. Delegate diagnosis, batch settled repairs and overlap disjoint validation/review. No quota invention, identity evasion, billing/admin changes, purchases or waivers. Retain unserviceable-demand bugs and distinguish owner decisions from agent-removable delay.
+Main records task/PR/head, authorized budget and purpose, including extra independent review; revise on findings/head/admission/results/usage. Do not strand eligible work through unassigned authorized capacity. Delegate diagnosis, batch settled repairs and overlap validation/review across disjoint tasks. No quota invention, identity evasion, billing/admin changes, purchases or waivers. Retain unserviceable-demand bugs and distinguish owner decisions from agent-removable delay.
 
 ## Resume and replenish
 

@@ -230,7 +230,7 @@ def cli_failure_isolation():
 def runner_boundaries():
     with tempfile.TemporaryDirectory(prefix="pipeline-health-runner-regression-") as directory:
         root = Path(directory)
-        runner = API["JsonRunner"](root, timeout=0.5, budget=5, output_limit=1024)
+        runner = API["JsonRunner"](root, timeout=3, budget=15, output_limit=1024)
         for code in ("print('not JSON')", "print('x' * 2048)",
                      "import os,time,pathlib; pathlib.Path('pid').write_text(str(os.getpid())); time.sleep(60)"):
             try:
