@@ -94,8 +94,9 @@ content change.
 
 Update the branch before spending reviews, then mark ready only when the change is ready to read
 and its approval gate permits it. Watch checks and review activity through completion; do not
-stop after one empty poll. Use the heartbeat skill's provider-capacity diagnosis when admission
-is refused; do not assume a repository-wide allowance from another PR's review timing.
+stop after one empty poll. Use the [pipeline health report](../check-pipeline-health/SKILL.md)
+for scoped provider-usage evidence when admission is refused; Main owns capacity diagnosis
+and allocation. Do not infer a repository-wide allowance from another PR's review timing.
 
 A round is a completed review, with its findings addressed. Count completed statuses over the
 PR's commits, not only its latest head; still require a completed review on the head being merged.
