@@ -3,7 +3,7 @@
 
 import argparse
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import http.client
 import io
 import json
@@ -29,7 +29,10 @@ THREE_DIGIT_ID = re.compile(r"^[0-9]{3}$")
 NATIVE_PR = re.compile(r"^https://github\.com/teonimesic/plasmosome/pull/([1-9][0-9]*)$")
 FULL_COMMIT = re.compile(r"^[0-9a-fA-F]{40}$")
 RFC3339 = re.compile(
-    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    r"^(?P<year>[0-9]{4})-(?P<month>[0-9]{2})-(?P<day>[0-9]{2})"
+    r"T(?P<hour>[0-9]{2}):(?P<minute>[0-9]{2}):(?P<second>[0-9]{2})"
+    r"(?:\.(?P<fraction>[0-9]+))?"
+    r"(?P<zone>Z|(?P<offset_sign>[+-])(?P<offset_hour>[0-9]{2}):(?P<offset_minute>[0-9]{2}))$"
 )
 GRAPHQL_QUERY = """query IntentCoveragePullRequest($number: Int!) { repository(owner: \"teonimesic\", name: \"plasmosome\") { pullRequest(number: $number) { state mergeCommit { oid } mergedAt url } } }"""
 CAPTURE_LIMIT = 64 * 1024 * 1024
@@ -42,6 +45,11 @@ class Refusal(Exception):
         super().__init__(reason)
         self.authority = authority
         self.reason = reason
+
+
+class TerminationSignal(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
 
 
 class CommandParser(argparse.ArgumentParser):
@@ -196,7 +204,7 @@ def _forge_worker(channel, number, token, transport, connect_timeout, read_timeo
         _send_event(channel, ("result", response.status, bytes(received)))
     except BaseException as error:
         if not isinstance(error, SystemExit):
-            _send_event(channel, ("error", f"{type(error).__name__}: {error}"))
+            _send_event(channel, ("error", f"GitHub transport failed: {type(error).__name__}"))
     finally:
         if connection is not None:
             connection.close()
@@ -335,6 +343,18 @@ class NativeReader:
         return value
 
 
+def _validated_token(token):
+    if not isinstance(token, str) or not token:
+        raise Refusal("GitHub authentication", "token must be a nonempty string")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in token):
+        raise Refusal("GitHub authentication", "token contains unsupported control characters")
+    try:
+        token.encode("latin-1")
+    except UnicodeEncodeError:
+        raise Refusal("GitHub authentication", "token contains unsupported header characters") from None
+    return token
+
+
 class TokenReader:
     def __init__(self, root, clock=time.monotonic, environment=None):
         self.root = root
@@ -345,7 +365,7 @@ class TokenReader:
         for name in ("GH_TOKEN", "GITHUB_TOKEN"):
             token = self.environment.get(name)
             if token:
-                return token
+                return _validated_token(token)
         code, stdout, stderr = run_owned_process(
             ["gh", "auth", "token", "--hostname", "github.com"],
             self.root,
@@ -363,7 +383,7 @@ class TokenReader:
             raise Refusal("GitHub authentication", "gh returned a non-UTF-8 token") from error
         if not token:
             raise Refusal("GitHub authentication", "gh returned an empty token")
-        return token
+        return _validated_token(token)
 
 
 class ForgeReader:
@@ -390,7 +410,7 @@ class ForgeReader:
         if match is None:
             raise Refusal(url, "external_ref is not a canonical repository pull-request URL")
         if self.token is None:
-            self.token = self.token_reader.read(command_deadline)
+            self.token = _validated_token(self.token_reader.read(command_deadline))
         number = int(match.group(1))
         observation_deadline = min(command_deadline, self.clock() + self.limits.observation)
         connect_deadline = min(observation_deadline, self.clock() + self.limits.connect)
@@ -481,11 +501,33 @@ class ForgeReader:
 
 
 def valid_rfc3339(value):
-    if not isinstance(value, str) or RFC3339.fullmatch(value) is None:
+    if not isinstance(value, str):
+        return False
+    match = RFC3339.fullmatch(value)
+    if match is None:
+        return False
+    components = {name: int(match.group(name)) for name in ("year", "month", "day", "hour", "minute", "second")}
+    if components["hour"] > 23 or components["minute"] > 59 or components["second"] > 60:
+        return False
+    offset_hour = int(match.group("offset_hour") or 0)
+    offset_minute = int(match.group("offset_minute") or 0)
+    if offset_hour > 23 or offset_minute > 59:
         return False
     try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        local = datetime(
+            components["year"],
+            components["month"],
+            components["day"],
+            components["hour"],
+            components["minute"],
+            min(components["second"], 59),
+        )
+        if components["second"] == 60:
+            direction = -1 if match.group("offset_sign") == "-" else 1
+            utc = local - timedelta(minutes=direction * (offset_hour * 60 + offset_minute))
+            if (utc.month, utc.day, utc.hour, utc.minute) not in ((6, 30, 23, 59), (12, 31, 23, 59)):
+                return False
+    except (OverflowError, ValueError):
         return False
     return True
 
@@ -513,7 +555,7 @@ def parse_graphql_observation(url, status, body):
     if set(pull) != {"state", "mergeCommit", "mergedAt", "url"}:
         raise Refusal(url, "GitHub pull-request fields are incomplete or unexpected")
     state = pull["state"]
-    if state not in {"OPEN", "CLOSED", "MERGED"}:
+    if not isinstance(state, str) or state not in {"OPEN", "CLOSED", "MERGED"}:
         raise Refusal(url, "GitHub returned an invalid pull-request state")
     if pull["url"] != url:
         raise Refusal(url, "GitHub returned a different pull-request URL")
@@ -727,8 +769,10 @@ def parse_closure(task):
     if not isinstance(closure, dict):
         raise Refusal(task.id, "closed task has no valid metadata.closure object")
     kind = closure.get("kind")
+    if not isinstance(kind, str) or kind not in {"delivered", "cancelled"}:
+        raise Refusal(task.id, "metadata.closure has unsupported, missing or extra keys")
     expected = {"kind", "closed_at"} if kind == "delivered" else {"kind", "closed_at", "reason"}
-    if kind not in {"delivered", "cancelled"} or set(closure) != expected:
+    if set(closure) != expected:
         raise Refusal(task.id, "metadata.closure has unsupported, missing or extra keys")
     if not isinstance(closure["closed_at"], str) or closure["closed_at"] != task.closed_at:
         raise Refusal(task.id, "metadata.closure.closed_at does not exactly match native closed_at")
@@ -895,21 +939,36 @@ def _arguments(argv):
 
 
 def main(argv=None):
+    previous_handlers = {}
+
+    def terminate(signum, unused_frame):
+        raise TerminationSignal(signum)
+
     try:
-        command, requested_id = _arguments(sys.argv[1:] if argv is None else argv)
-        root = Path(__file__).resolve().parent.parent
-        if Path.cwd().resolve() != root:
-            raise Refusal("checkout", f"run from repository root {root}")
-        limits = PRODUCTION_LIMITS
-        clock = time.monotonic
-        native_reader = NativeReader(root, clock)
-        token_reader = TokenReader(root, clock)
-        forge_reader = ForgeReader(token_reader, clock, limits)
-        result = run(command, requested_id, root, native_reader, forge_reader, clock, limits)
-    except Refusal as error:
-        result = RunResult(2, (), (f"input: {error.authority}: {error.reason}",))
-    except (OSError, UnicodeError, ValueError) as error:
-        result = RunResult(2, (), (f"input: command: {error}",))
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            previous_handlers[signum] = signal.signal(signum, terminate)
+        try:
+            command, requested_id = _arguments(sys.argv[1:] if argv is None else argv)
+            root = Path(__file__).resolve().parent.parent
+            if Path.cwd().resolve() != root:
+                raise Refusal("checkout", f"run from repository root {root}")
+            limits = PRODUCTION_LIMITS
+            clock = time.monotonic
+            native_reader = NativeReader(root, clock)
+            token_reader = TokenReader(root, clock)
+            forge_reader = ForgeReader(token_reader, clock, limits)
+            result = run(command, requested_id, root, native_reader, forge_reader, clock, limits)
+        except Refusal as error:
+            result = RunResult(2, (), (f"input: {error.authority}: {error.reason}",))
+        except (OSError, UnicodeError, ValueError) as error:
+            result = RunResult(2, (), (f"input: command: {error}",))
+        except TerminationSignal as termination:
+            return 128 + termination.signum
+        except KeyboardInterrupt:
+            return 128 + signal.SIGINT
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
     for line in result.stdout_lines:
         print(line)
     for line in result.stderr_lines:

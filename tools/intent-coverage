@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 
-from intent_coverage import main
+import os
 import sys
+
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+sys.dont_write_bytecode = True
+
+from intent_coverage import main
 
 
 if __name__ == "__main__":
