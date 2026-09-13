@@ -180,6 +180,17 @@ def wait_for_pid(path, timeout):
     raise AssertionError(f"helper did not publish its PID at {path}")
 
 
+class ManualClock:
+    def __init__(self):
+        self.value = 0.0
+
+    def __call__(self):
+        return self.value
+
+    def sleep(self, duration):
+        self.value += duration
+
+
 class FixtureRoot:
     def __init__(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="intent-coverage-regression-")
@@ -534,8 +545,25 @@ class NativeAdapterTests(unittest.TestCase):
             with self.assertRaises(coverage.Refusal):
                 reader.read(time.monotonic() + 2)
 
-    def test_owned_helper_deadline_kills_inherited_pipe_child(self):
-        with tempfile.TemporaryDirectory(prefix="intent-helper-cleanup-") as temporary:
+    def test_group_probe_permission_then_absence_completes_before_deadline(self):
+        clock = ManualClock()
+        outcomes = iter((PermissionError(), ProcessLookupError()))
+
+        def group_probe(unused_group, unused_signal):
+            raise next(outcomes)
+
+        with (
+            mock.patch.object(coverage.os, "waitpid", side_effect=ChildProcessError()),
+            mock.patch.object(coverage.os, "killpg", side_effect=group_probe),
+            mock.patch.object(coverage.time, "sleep", side_effect=clock.sleep),
+        ):
+            completed = coverage._finish_waitable_process_group(200, 0.05, clock)
+
+        self.assertTrue(completed)
+        self.assertLess(clock(), 0.05)
+
+    def test_persistent_group_probe_permission_refuses_at_deadline(self):
+        with tempfile.TemporaryDirectory(prefix="intent-helper-permission-") as temporary:
             root = Path(temporary)
             pid_path = root / "child.pid"
             helper = root / "helper.py"
@@ -544,14 +572,27 @@ class NativeAdapterTests(unittest.TestCase):
                 "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])\n"
                 "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
             )
-            unrelated = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(23)"])
-            try:
-                waitid = getattr(os, "waitid", None)
-                if waitid is not None:
-                    unrelated_exit = waitid(os.P_PID, unrelated.pid, os.WEXITED | os.WNOWAIT)
-                    self.assertEqual(unrelated_exit.si_status, 23)
-                deadline = time.monotonic() + 0.6
-                with self.assertRaises(coverage.Refusal):
+            spawned = []
+            original_popen = coverage.subprocess.Popen
+            original_killpg = coverage.os.killpg
+
+            def recording_popen(*arguments, **keywords):
+                process = original_popen(*arguments, **keywords)
+                spawned.append(process)
+                return process
+
+            def persistent_permission(process_group, selected_signal):
+                if selected_signal == 0:
+                    raise PermissionError()
+                return original_killpg(process_group, selected_signal)
+
+            started = time.monotonic()
+            deadline = started + 0.6
+            with (
+                mock.patch.object(coverage.subprocess, "Popen", side_effect=recording_popen),
+                mock.patch.object(coverage.os, "killpg", side_effect=persistent_permission),
+            ):
+                with self.assertRaises(coverage.Refusal) as caught:
                     coverage.run_owned_process(
                         [sys.executable, str(helper), str(pid_path)],
                         root,
@@ -559,15 +600,53 @@ class NativeAdapterTests(unittest.TestCase):
                         time.monotonic,
                         "fixture helper",
                     )
-                child_pid = int(pid_path.read_text())
-                for unused in range(50):
-                    try:
-                        os.kill(child_pid, 0)
-                    except ProcessLookupError:
-                        break
-                    time.sleep(0.01)
-                else:
-                    self.fail(f"owned helper child {child_pid} remained unreaped after cancellation")
+            finished = time.monotonic()
+
+            self.assertEqual(
+                caught.exception.reason,
+                "owned helper group cleanup did not complete within the command deadline",
+            )
+            self.assertGreaterEqual(finished, deadline)
+            self.assertLess(finished - started, 0.8)
+            child_pid = int(pid_path.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child_pid, 0)
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(spawned[0].pid, 0)
+            self.assertIsNotNone(spawned[0].poll())
+
+    def test_owned_helper_deadline_kills_inherited_pipe_child(self):
+        with tempfile.TemporaryDirectory(prefix="intent-helper-cleanup-") as temporary:
+            root = Path(temporary)
+            pid_path = root / "child.pid"
+            helper = root / "helper.py"
+            helper.write_text(
+                "import os, pathlib, subprocess, sys\n"
+                "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])\n"
+                "pathlib.Path(sys.argv[1]).write_text(f'{os.getpid()} {child.pid}')\n"
+            )
+            unrelated = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(23)"])
+            try:
+                waitid = getattr(os, "waitid", None)
+                if waitid is not None:
+                    unrelated_exit = waitid(os.P_PID, unrelated.pid, os.WEXITED | os.WNOWAIT)
+                    self.assertEqual(unrelated_exit.si_status, 23)
+                deadline = time.monotonic() + 0.6
+                with self.assertRaises(coverage.Refusal) as caught:
+                    coverage.run_owned_process(
+                        [sys.executable, str(helper), str(pid_path)],
+                        root,
+                        deadline,
+                        time.monotonic,
+                        "fixture helper",
+                    )
+                self.assertEqual(caught.exception.authority, "fixture helper")
+                self.assertEqual(caught.exception.reason, "helper deadline exceeded")
+                helper_pid, child_pid = map(int, pid_path.read_text().split())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(child_pid, 0)
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(helper_pid, 0)
                 self.assertEqual(unrelated.wait(timeout=1), 23)
             finally:
                 if unrelated.poll() is None:
