@@ -888,6 +888,7 @@ def tls_server(mode="normal", state="MERGED"):
         TlsHandler.requests = 0
         server = http.server.ThreadingHTTPServer(("localhost", 0), TlsHandler)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(certificate, key)
         server.socket = context.wrap_socket(server.socket, server_side=True)
         thread = threading.Thread(target=server.serve_forever)
