@@ -32,7 +32,8 @@ Do not populate the queue with unmapped new work. Imported unmapped tasks retain
 but cannot become planned or be claimed until mapped. Correcting their notes does not require
 inventing a mapping.
 
-The approval and acceptance gate is in `docs/intents/README.md` and `docs/specs/README.md`.
+The approval and acceptance gate, including owner-only coverage judgments, is in
+[the intent README](../../../docs/intents/README.md) and `docs/specs/README.md`.
 A spec needed for implementation lands accepted before the implementation claim or transition
 and before its code branch opens. A planning claim against a draft spec authorizes design work
 only, under spec016; it does not admit implementation.
@@ -183,6 +184,10 @@ actual phase of that work. Only after every required acceptance item has observe
 
 A successful merge command, deleted branch or closed-but-unmerged PR is not proof.
 Cancellation may close a task with an explicit cancellation reason, never as delivered work.
+
+Prepare closure evidence and clear `metadata.closure` when reopening under
+[spec009](../../../docs/specs/009-how-much-of-an-intent-is-built.md#closing-a-task-is-not-proof-of-delivery);
+spec016 remains the lifecycle authority.
 
 Measure time in native phases with
 [spec016's current-status age procedure](../../../docs/specs/016-native-beads-task-authority.md#current-status-age).
