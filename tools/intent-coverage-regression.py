@@ -544,18 +544,34 @@ class NativeAdapterTests(unittest.TestCase):
                 "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])\n"
                 "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
             )
-            deadline = time.monotonic() + 0.6
-            with self.assertRaises(coverage.Refusal):
-                coverage.run_owned_process([sys.executable, str(helper), str(pid_path)], root, deadline, time.monotonic, "fixture helper")
-            child_pid = int(pid_path.read_text())
-            for unused in range(50):
-                try:
-                    os.kill(child_pid, 0)
-                except ProcessLookupError:
-                    break
-                time.sleep(0.01)
-            else:
-                self.fail(f"owned helper child {child_pid} survived cancellation")
+            unrelated = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(23)"])
+            try:
+                unrelated_exit = os.waitid(os.P_PID, unrelated.pid, os.WEXITED | os.WNOWAIT)
+                self.assertEqual(unrelated_exit.si_status, 23)
+                deadline = time.monotonic() + 0.6
+                with self.assertRaises(coverage.Refusal):
+                    coverage.run_owned_process(
+                        [sys.executable, str(helper), str(pid_path)],
+                        root,
+                        deadline,
+                        time.monotonic,
+                        "fixture helper",
+                    )
+                child_pid = int(pid_path.read_text())
+                for unused in range(50):
+                    try:
+                        os.kill(child_pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail(f"owned helper child {child_pid} remained unreaped after cancellation")
+                self.assertEqual(unrelated.wait(timeout=1), 23)
+            finally:
+                if unrelated.poll() is None:
+                    unrelated.kill()
+                    unrelated.wait()
+
     def test_native_and_auth_stalls_refuse_and_reap(self):
         with tempfile.TemporaryDirectory(prefix="intent-helper-stalls-") as temporary:
             root = Path(temporary)

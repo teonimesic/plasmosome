@@ -234,6 +234,31 @@ def _finish_owned_process(process, deadline, clock):
     return process.poll() is not None
 
 
+def _finish_waitable_process_group(process_group, deadline, clock):
+    if process_group <= 1:
+        return False
+    while True:
+        try:
+            child_pid, unused = os.waitpid(-process_group, os.WNOHANG)
+        except ChildProcessError:
+            child_pid = None
+        except InterruptedError:
+            continue
+        reaped = child_pid not in (None, 0)
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        if clock() >= deadline:
+            return False
+        if not reaped:
+            time.sleep(min(0.02, max(0.0, deadline - clock())))
+
+
+
+
 def run_owned_process(argv, cwd, deadline, clock, authority, env=None):
     try:
         process = subprocess.Popen(
@@ -302,6 +327,8 @@ def run_owned_process(argv, cwd, deadline, clock, authority, env=None):
         _kill_process_group(process)
         if not _finish_owned_process(process, deadline, clock):
             raise Refusal(authority, "owned helper cleanup did not complete within the command deadline") from None
+        if not _finish_waitable_process_group(process.pid, deadline, clock):
+            raise Refusal(authority, "owned helper group cleanup did not complete within the command deadline") from None
         raise
     finally:
         selector.close()
