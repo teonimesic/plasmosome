@@ -250,7 +250,7 @@ def _finish_waitable_process_group(process_group, deadline, clock):
         except ProcessLookupError:
             return True
         except PermissionError:
-            return False
+            pass
         if clock() >= deadline:
             return False
         if not reaped:
