@@ -3,7 +3,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// Shared by build.rs and the runtime boundary. Never derive membership from directory depth.
 pub(crate) fn locate_workspace(directory: &Path, cargo: &OsStr) -> io::Result<PathBuf> {
     if directory.to_str().is_none() {
         return Err(io::Error::new(
@@ -24,7 +23,6 @@ pub(crate) fn locate_workspace(directory: &Path, cargo: &OsStr) -> io::Result<Pa
     }
     let output = std::str::from_utf8(&output.stdout)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    // Cargo terminates the path with LF. Trimming whitespace would select a different path.
     let manifest = output.strip_suffix('\n').ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
