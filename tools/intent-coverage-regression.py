@@ -345,6 +345,31 @@ class CoverageBehaviorTests(unittest.TestCase):
                 self.assertEqual(result.stdout_lines, ())
                 self.assertTrue(result.stderr_lines[0].startswith("input:"))
 
+    def test_numeric_document_metadata_failure_is_input_refusal(self):
+        path = self.fixture.root / "docs/intents/001-goal.md"
+        original_lstat = Path.lstat
+
+        def unavailable(selected):
+            if selected == path:
+                raise PermissionError(errno.EACCES, "fixture metadata unavailable")
+            return original_lstat(selected)
+
+        with mock.patch.object(Path, "lstat", unavailable):
+            result, native, forge = self.execute()
+        self.assertEqual(
+            result,
+            coverage.RunResult(
+                2,
+                (),
+                (
+                    "input: docs/intents/001-goal.md: could not read document metadata: "
+                    "[Errno 13] fixture metadata unavailable",
+                ),
+            ),
+        )
+        self.assertEqual(native.calls, 0)
+        self.assertEqual(forge.calls, [])
+
     def test_native_structural_boundaries_and_all_six_states(self):
         valid = [
             native_task(f"task-{state}", state)

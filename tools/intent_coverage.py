@@ -692,14 +692,18 @@ def _read_kind(root, kind, deadline, clock):
     if not candidates:
         raise Refusal(directory.relative_to(root).as_posix(), "directory contains no numeric records")
     for path in candidates:
-        _remaining(deadline, clock, path.relative_to(root).as_posix())
-        metadata = path.lstat()
+        relative = path.relative_to(root).as_posix()
+        _remaining(deadline, clock, relative)
+        try:
+            metadata = path.lstat()
+        except OSError as error:
+            raise Refusal(relative, f"could not read document metadata: {error}") from error
         if not stat.S_ISREG(metadata.st_mode):
-            raise Refusal(path.relative_to(root).as_posix(), "numeric document is not a regular file")
+            raise Refusal(relative, "numeric document is not a regular file")
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as error:
-            raise Refusal(path.relative_to(root).as_posix(), f"could not read UTF-8 document: {error}") from error
+            raise Refusal(relative, f"could not read UTF-8 document: {error}") from error
         document = parse_document(path, text, kind, root)
         if document.id in documents:
             raise Refusal(document.id, f"duplicate {kind} id in {documents[document.id].relative_path} and {document.relative_path}")
