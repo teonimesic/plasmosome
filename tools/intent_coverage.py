@@ -678,19 +678,23 @@ def parse_document(path, text, kind, root):
 
 def _read_kind(root, kind, deadline, clock):
     directory = root / "docs" / ("intents" if kind == "intent" else "specs")
+    directory_authority = directory.relative_to(root).as_posix()
     try:
         metadata = directory.lstat()
     except OSError as error:
-        raise Refusal(directory.relative_to(root).as_posix(), f"missing or unreadable directory: {error}") from error
+        raise Refusal(directory_authority, f"missing or unreadable directory: {error}") from error
     if not stat.S_ISDIR(metadata.st_mode):
-        raise Refusal(directory.relative_to(root).as_posix(), "authority path is not a directory")
+        raise Refusal(directory_authority, "authority path is not a directory")
     documents = {}
-    candidates = sorted(
-        (entry for entry in directory.iterdir() if DOCUMENT_NAME.fullmatch(entry.name)),
-        key=lambda entry: entry.name,
-    )
+    try:
+        candidates = sorted(
+            (entry for entry in directory.iterdir() if DOCUMENT_NAME.fullmatch(entry.name)),
+            key=lambda entry: entry.name,
+        )
+    except OSError as error:
+        raise Refusal(directory_authority, f"could not enumerate directory: {error}") from error
     if not candidates:
-        raise Refusal(directory.relative_to(root).as_posix(), "directory contains no numeric records")
+        raise Refusal(directory_authority, "directory contains no numeric records")
     for path in candidates:
         relative = path.relative_to(root).as_posix()
         _remaining(deadline, clock, relative)
