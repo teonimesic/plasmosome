@@ -939,6 +939,7 @@ class RealHttpsAdapterTests(unittest.TestCase):
         independent_descriptors = []
         survival_errors = []
         reused_descriptor = None
+        cleanup_error = None
         client = socket.socket()
         baseline_threads = set(threading.enumerate())
         listener = None
@@ -972,8 +973,12 @@ class RealHttpsAdapterTests(unittest.TestCase):
                         finally:
                             try:
                                 close_owned(descriptors, released_descriptors)
+                            except OSError as error:
+                                cleanup_error = error
                             finally:
                                 resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
+                if cleanup_error is not None:
+                    raise cleanup_error
                 self.assertEqual(raised.exception.errno, errno.EMFILE)
                 target_descriptor = min(released_descriptors)
                 while reused_descriptor is None or reused_descriptor < target_descriptor:
