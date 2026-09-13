@@ -573,6 +573,8 @@ class NativeAdapterTests(unittest.TestCase):
                 "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
             )
             spawned = []
+            cleanup_failures = []
+            product_group_absent = False
             original_popen = coverage.subprocess.Popen
             original_killpg = coverage.os.killpg
 
@@ -586,34 +588,77 @@ class NativeAdapterTests(unittest.TestCase):
                     raise PermissionError()
                 return original_killpg(process_group, selected_signal)
 
-            started = time.monotonic()
-            deadline = started + 0.6
-            with (
-                mock.patch.object(coverage.subprocess, "Popen", side_effect=recording_popen),
-                mock.patch.object(coverage.os, "killpg", side_effect=persistent_permission),
-            ):
-                with self.assertRaises(coverage.Refusal) as caught:
-                    coverage.run_owned_process(
-                        [sys.executable, str(helper), str(pid_path)],
-                        root,
-                        deadline,
-                        time.monotonic,
-                        "fixture helper",
-                    )
-            finished = time.monotonic()
+            try:
+                started = time.monotonic()
+                deadline = started + 0.6
+                with (
+                    mock.patch.object(coverage.subprocess, "Popen", side_effect=recording_popen),
+                    mock.patch.object(coverage.os, "killpg", side_effect=persistent_permission),
+                ):
+                    with self.assertRaises(coverage.Refusal) as caught:
+                        coverage.run_owned_process(
+                            [sys.executable, str(helper), str(pid_path)],
+                            root,
+                            deadline,
+                            time.monotonic,
+                            "fixture helper",
+                        )
+                finished = time.monotonic()
 
-            self.assertEqual(
-                caught.exception.reason,
-                "owned helper group cleanup did not complete within the command deadline",
-            )
-            self.assertGreaterEqual(finished, deadline)
-            self.assertLess(finished - started, 0.8)
-            child_pid = int(pid_path.read_text())
-            with self.assertRaises(ProcessLookupError):
-                os.kill(child_pid, 0)
-            with self.assertRaises(ProcessLookupError):
-                os.killpg(spawned[0].pid, 0)
-            self.assertIsNotNone(spawned[0].poll())
+                self.assertEqual(
+                    caught.exception.reason,
+                    "owned helper group cleanup did not complete within the command deadline",
+                )
+                self.assertGreaterEqual(finished, deadline)
+                self.assertLess(finished - started, 0.8)
+                child_pid = int(pid_path.read_text())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(child_pid, 0)
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(spawned[0].pid, 0)
+                product_group_absent = True
+                self.assertIsNotNone(spawned[0].poll())
+            finally:
+                teardown_deadline = time.monotonic() + 1
+                for process in spawned:
+                    if not product_group_absent:
+                        try:
+                            original_killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            product_group_absent = True
+                        except BaseException as error:
+                            cleanup_failures.append(error)
+                    if process.poll() is None:
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                        except BaseException as error:
+                            cleanup_failures.append(error)
+                    try:
+                        process.wait(timeout=max(0.0, teardown_deadline - time.monotonic()))
+                    except BaseException as error:
+                        cleanup_failures.append(error)
+                    if product_group_absent:
+                        continue
+                    while True:
+                        try:
+                            original_killpg(process.pid, 0)
+                        except ProcessLookupError:
+                            break
+                        except PermissionError:
+                            pass
+                        except BaseException as error:
+                            cleanup_failures.append(error)
+                            break
+                        remaining = teardown_deadline - time.monotonic()
+                        if remaining <= 0:
+                            cleanup_failures.append(
+                                AssertionError(f"owned fixture group {process.pid} survived independent teardown")
+                            )
+                            break
+                        time.sleep(min(0.01, remaining))
+            self.assertEqual(cleanup_failures, [])
 
     def test_owned_helper_deadline_kills_inherited_pipe_child(self):
         with tempfile.TemporaryDirectory(prefix="intent-helper-cleanup-") as temporary:
