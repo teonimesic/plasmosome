@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Exercise intent coverage parsing, derivation, evidence, deadlines, and cleanup."""
+"""Exercise intent coverage parsing, derivation, evidence, deadlines, and cleanup.
+
+Requires `bash` and `zsh` on PATH.
+"""
 
 import contextlib
 import errno
@@ -81,6 +84,7 @@ MERGED_AT = "2026-09-12T12:34:56Z"
 COMMIT = "a" * 40
 PR_URL = "https://github.com/teonimesic/plasmosome/pull/6"
 SCALED_LIMITS = coverage.Limits(0.2, 0.6, 1.2, 6.0)
+REQUIRED_SHELLS = ("bash", "zsh")
 
 
 class FixtureNativeReader:
@@ -1152,6 +1156,39 @@ class RealHttpsAdapterTests(unittest.TestCase):
 
 
 class ShellBehaviorTests(unittest.TestCase):
+    def test_runner_refuses_each_missing_shell_without_writes(self):
+        source = Path(__file__).resolve()
+        for missing in REQUIRED_SHELLS:
+            with self.subTest(missing=missing):
+                with tempfile.TemporaryDirectory(prefix="intent-shell-prerequisite-") as temporary:
+                    root = Path(temporary)
+                    runner = root / source.name
+                    shutil.copy2(source, runner)
+                    shutil.copy2(source.with_name("intent_coverage.py"), root / "intent_coverage.py")
+                    binaries = root / "bin"
+                    binaries.mkdir()
+                    available = next(shell for shell in REQUIRED_SHELLS if shell != missing)
+                    shim = binaries / available
+                    shim.write_text("")
+                    shim.chmod(0o700)
+                    before = filesystem_inventory(root)
+                    environment = dict(os.environ)
+                    environment["PATH"] = str(binaries)
+                    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+                    environment.pop("PYTHONPATH", None)
+                    completed = subprocess.run(
+                        [sys.executable, str(runner)],
+                        cwd=root,
+                        env=environment,
+                        text=True,
+                        capture_output=True,
+                        timeout=3,
+                    )
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertEqual(completed.stdout, "")
+                    self.assertEqual(completed.stderr, f"required executable is not on PATH: {missing}\n")
+                    self.assertEqual(filesystem_inventory(root), before)
+
     def test_wrong_directory_refuses_in_bash_and_zsh_without_writes(self):
         source = Path(__file__).resolve().parent
         with tempfile.TemporaryDirectory(prefix="intent-wrong-directory-") as temporary:
@@ -1163,7 +1200,7 @@ class ShellBehaviorTests(unittest.TestCase):
             before = filesystem_inventory(root)
             environment = dict(os.environ)
             environment.pop("PYTHONDONTWRITEBYTECODE", None)
-            for shell in ("bash", "zsh"):
+            for shell in REQUIRED_SHELLS:
                 with self.subTest(shell=shell):
                     completed = subprocess.run(
                         [shell, "-c", '"$1" check', shell, command],
@@ -1196,7 +1233,7 @@ class ShellBehaviorTests(unittest.TestCase):
             before = filesystem_inventory(root)
             environment = dict(os.environ)
             environment.pop("PYTHONDONTWRITEBYTECODE", None)
-            for shell in ("bash", "zsh"):
+            for shell in REQUIRED_SHELLS:
                 with self.subTest(shell=shell):
                     checked = subprocess.run(
                         [shell, "-c", "./tools/intent-coverage check"],
@@ -1232,7 +1269,7 @@ class ShellBehaviorTests(unittest.TestCase):
                 shutil.copy2(source / name, root / "tools" / name)
             (root / "docs/intents/README.md").write_text("index\n")
             (root / "docs/specs/001-behavior.md").write_text(spec_text())
-            for shell in ("bash", "zsh"):
+            for shell in REQUIRED_SHELLS:
                 with self.subTest(shell=shell):
                     completed = subprocess.run(
                         [shell, "-c", "./tools/intent-coverage check"],
@@ -1263,9 +1300,17 @@ class ShellBehaviorTests(unittest.TestCase):
                 self.assertTrue(completed.stderr.startswith("input: command:"), completed.stderr)
 
 
-if __name__ == "__main__":
+def main():
+    for executable in REQUIRED_SHELLS:
+        if shutil.which(executable) is None:
+            print(f"required executable is not on PATH: {executable}", file=sys.stderr)
+            return 2
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if result.wasSuccessful():
         print(f"PASS: {result.testsRun} intent coverage behavioral regressions")
-    sys.exit(0 if result.wasSuccessful() else 1)
+    return 0 if result.wasSuccessful() else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
