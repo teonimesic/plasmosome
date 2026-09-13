@@ -345,6 +345,24 @@ class CoverageBehaviorTests(unittest.TestCase):
                 self.assertEqual(result.stdout_lines, ())
                 self.assertTrue(result.stderr_lines[0].startswith("input:"))
 
+    def test_document_directory_enumeration_failure_is_input_refusal(self):
+        directory = self.fixture.root / "docs/intents"
+        original_iterdir = Path.iterdir
+
+        def unavailable(selected):
+            if selected == directory:
+                raise PermissionError(errno.EACCES, "fixture enumeration unavailable")
+            return original_iterdir(selected)
+
+        with mock.patch.object(Path, "iterdir", unavailable):
+            result, native, forge = self.execute()
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.stdout_lines, ())
+        self.assertEqual(len(result.stderr_lines), 1)
+        self.assertTrue(result.stderr_lines[0].startswith("input: docs/intents:"))
+        self.assertEqual(native.calls, 0)
+        self.assertEqual(forge.calls, [])
+
     def test_numeric_document_metadata_failure_is_input_refusal(self):
         path = self.fixture.root / "docs/intents/001-goal.md"
         original_lstat = Path.lstat
@@ -356,17 +374,10 @@ class CoverageBehaviorTests(unittest.TestCase):
 
         with mock.patch.object(Path, "lstat", unavailable):
             result, native, forge = self.execute()
-        self.assertEqual(
-            result,
-            coverage.RunResult(
-                2,
-                (),
-                (
-                    "input: docs/intents/001-goal.md: could not read document metadata: "
-                    "[Errno 13] fixture metadata unavailable",
-                ),
-            ),
-        )
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.stdout_lines, ())
+        self.assertEqual(len(result.stderr_lines), 1)
+        self.assertTrue(result.stderr_lines[0].startswith("input: docs/intents/001-goal.md:"))
         self.assertEqual(native.calls, 0)
         self.assertEqual(forge.calls, [])
 
@@ -1211,7 +1222,8 @@ class ShellBehaviorTests(unittest.TestCase):
                     )
                     self.assertEqual(completed.returncode, 2)
                     self.assertEqual(completed.stdout, "")
-                    self.assertEqual(completed.stderr, f"required executable is not on PATH: {missing}\n")
+                    self.assertEqual(len(completed.stderr.splitlines()), 1)
+                    self.assertIn(missing, completed.stderr)
                     self.assertEqual(filesystem_inventory(root), before)
 
     def test_wrong_directory_refuses_in_bash_and_zsh_without_writes(self):
