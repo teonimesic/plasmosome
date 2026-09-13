@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-use plasmosome_guards::workspace_root;
+use plasmosome_guards::check_workspace;
 
 const TESTKIT: &str = "plasmosome-testkit";
 
@@ -10,18 +10,14 @@ const HELD_NAMES: &[&str] = &["plasmosome", "plasmid"];
 
 const HELD_REGISTRIES: &[&str] = &["crates-io"];
 
-fn cargo() -> Command {
-    cargo_in(&workspace_root())
-}
-
 fn cargo_in(root: &Path) -> Command {
     let mut command = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()));
     command.current_dir(root);
     command
 }
 
-fn workspace_members() -> Vec<String> {
-    let members = workspace_members_in(&workspace_root());
+fn workspace_members(root: &Path) -> Vec<String> {
+    let members = workspace_members_in(root);
     assert!(
         members.contains(&TESTKIT.to_string()),
         "the workspace manifest no longer lists its members one per line: {members:?}"
@@ -75,8 +71,8 @@ fn workspace_members_in(root: &Path) -> Vec<String> {
     members
 }
 
-fn workspace_packages() -> Vec<serde_json::Value> {
-    let output = cargo()
+fn workspace_packages(root: &Path) -> Vec<serde_json::Value> {
+    let output = cargo_in(root)
         .args(["metadata", "--locked", "--no-deps", "--format-version", "1"])
         .output()
         .expect("cargo metadata runs");
@@ -121,47 +117,49 @@ fn package_name(package: &serde_json::Value) -> String {
 
 #[test]
 fn only_the_held_names_are_publishable_to_a_registry() {
-    let mut reported = Vec::new();
-    for package in workspace_packages() {
-        let name = package_name(&package);
-        let registries = package["publish"].as_array().unwrap_or_else(|| {
+    check_workspace(|root| {
+        let mut reported = Vec::new();
+        for package in workspace_packages(root) {
+            let name = package_name(&package);
+            let registries = package["publish"].as_array().unwrap_or_else(|| {
             panic!(
                 "`{name}` leaves `publish` unset, and `cargo metadata` reports an unset field and `publish = true` identically as null, so this rule cannot tell the two apart; every member of this workspace says where it may go explicitly — `publish = false`, or `publish = {HELD_REGISTRIES:?}` for a name this project holds"
             )
         });
-        let registries: Vec<&str> = registries
-            .iter()
-            .map(|registry| registry.as_str().expect("a registry name is a string"))
-            .collect();
-        if HELD_NAMES.contains(&name.as_str()) {
-            assert_eq!(
-                registries, HELD_REGISTRIES,
-                "`{name}` is a name this project holds on crates.io, so it carries `publish = {HELD_REGISTRIES:?}` and reaches that registry and no other; it currently says {registries:?}, and giving up a public name claim is a deliberate edit of `HELD_NAMES` rather than a manifest quietly closing itself"
-            );
-        } else {
+            let registries: Vec<&str> = registries
+                .iter()
+                .map(|registry| registry.as_str().expect("a registry name is a string"))
+                .collect();
+            if HELD_NAMES.contains(&name.as_str()) {
+                assert_eq!(
+                    registries, HELD_REGISTRIES,
+                    "`{name}` is a name this project holds on crates.io, so it carries `publish = {HELD_REGISTRIES:?}` and reaches that registry and no other; it currently says {registries:?}, and giving up a public name claim is a deliberate edit of `HELD_NAMES` rather than a manifest quietly closing itself"
+                );
+            } else {
+                assert!(
+                    registries.is_empty(),
+                    "`{name}` may be published to {registries:?}; only {HELD_NAMES:?} are claimed on a registry, and releasing anything else from this workspace is a deliberate act that names it here first"
+                );
+            }
+            reported.push(name);
+        }
+
+        reported.sort();
+        for held in HELD_NAMES {
             assert!(
-                registries.is_empty(),
-                "`{name}` may be published to {registries:?}; only {HELD_NAMES:?} are claimed on a registry, and releasing anything else from this workspace is a deliberate act that names it here first"
+                reported.iter().any(|name| name.as_str() == *held),
+                "`{held}` is on the publish allowlist and is not a package in this workspace; the counts below still agree without it, so an entry naming a crate that was renamed or removed would sit here unnoticed and hand its exemption to whatever takes the name next — it reported {reported:?}"
             );
         }
-        reported.push(name);
-    }
 
-    reported.sort();
-    for held in HELD_NAMES {
-        assert!(
-            reported.iter().any(|name| name.as_str() == *held),
-            "`{held}` is on the publish allowlist and is not a package in this workspace; the counts below still agree without it, so an entry naming a crate that was renamed or removed would sit here unnoticed and hand its exemption to whatever takes the name next — it reported {reported:?}"
+        let listed = workspace_members(root).len();
+        assert_eq!(
+            reported.len(),
+            listed,
+            "the workspace manifest lists {listed} members but `cargo metadata` reported {}, so this rule cannot claim to have checked them all; it checked {reported:?}",
+            reported.len()
         );
-    }
-
-    let listed = workspace_members().len();
-    assert_eq!(
-        reported.len(),
-        listed,
-        "the workspace manifest lists {listed} members but `cargo metadata` reported {}, so this rule cannot claim to have checked them all; it checked {reported:?}",
-        reported.len()
-    );
+    });
 }
 
 fn binary_name_collisions(packages: &[serde_json::Value]) -> Vec<String> {
@@ -213,8 +211,10 @@ fn binary_name_collisions(packages: &[serde_json::Value]) -> Vec<String> {
 
 #[test]
 fn no_binary_target_takes_a_name_another_package_owns() {
-    let violations = binary_name_collisions(&workspace_packages());
-    assert!(violations.is_empty(), "{}", violations.join("\n"));
+    check_workspace(|root| {
+        let violations = binary_name_collisions(&workspace_packages(root));
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
+    });
 }
 
 fn metadata_package(name: &str, binaries: &[&str]) -> serde_json::Value {
@@ -275,36 +275,38 @@ fn a_binary_taking_another_packages_name_is_still_reported() {
 
 #[test]
 fn testkit_is_dev_only() {
-    for member in workspace_members() {
-        if member == TESTKIT {
-            continue;
+    check_workspace(|root| {
+        for member in workspace_members(root) {
+            if member == TESTKIT {
+                continue;
+            }
+            let output = cargo_in(root)
+                .args([
+                    "tree",
+                    "--locked",
+                    "-p",
+                    &member,
+                    "--edges",
+                    "normal,build",
+                    "--prefix",
+                    "none",
+                    "--target",
+                    "all",
+                ])
+                .output()
+                .expect("cargo tree runs");
+            assert!(
+                output.status.success(),
+                "cargo tree -p {member} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let graph = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                !graph.lines().any(|line| line.starts_with(TESTKIT)),
+                "`{member}` has a non-dev dependency path to `{TESTKIT}`; the testkit is test support and reaches a kernel crate only through `[dev-dependencies]`, or it ships"
+            );
         }
-        let output = cargo()
-            .args([
-                "tree",
-                "--locked",
-                "-p",
-                &member,
-                "--edges",
-                "normal,build",
-                "--prefix",
-                "none",
-                "--target",
-                "all",
-            ])
-            .output()
-            .expect("cargo tree runs");
-        assert!(
-            output.status.success(),
-            "cargo tree -p {member} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let graph = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            !graph.lines().any(|line| line.starts_with(TESTKIT)),
-            "`{member}` has a non-dev dependency path to `{TESTKIT}`; the testkit is test support and reaches a kernel crate only through `[dev-dependencies]`, or it ships"
-        );
-    }
+    });
 }
 
 fn write_member(root: &Path, directory: &str, manifest: &str) {

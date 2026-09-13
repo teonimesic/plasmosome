@@ -12,6 +12,7 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+plasmosome-guards = { path = "../plasmosome-guards" }
 
 [lib]
 name = "plasmosome_membrane"

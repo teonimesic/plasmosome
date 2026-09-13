@@ -426,6 +426,7 @@ name = "plasmosome-membrane"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "plasmosome-guards",
  "serde_json",
  "tempfile",
 ]

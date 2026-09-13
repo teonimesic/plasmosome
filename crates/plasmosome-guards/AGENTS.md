@@ -35,7 +35,7 @@ reports, then compares only the *number* of them against the members the workspa
 The count is there so a metadata read that silently returned fewer crates cannot let the guard
 claim it saw them all.
 
-Do not upgrade that to a name-by-name comparison. `workspace_members()` resolves each member path
+Do not upgrade that to a name-by-name comparison. `workspace_members(root)` resolves each member path
 to the `[package].name` that member's own manifest declares (task 030), so the names it reports are
 the packages Cargo knows, whatever the directories are called. What stops the upgrade is no longer
 the accuracy of those names: widening what a guard asserts is its own decision, with its own task,

@@ -152,14 +152,8 @@ mod tests {
         received
     }
 
-    fn readiness_verb_named_by_the_spec() -> String {
-        let spec = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .expect("the membrane crate sits two levels below the workspace root")
-            .join("docs")
-            .join("specs")
-            .join("001-control-protocol.md");
+    fn readiness_verb_named_by_the_spec(root: &Path) -> String {
+        let spec = root.join("docs/specs/001-control-protocol.md");
         let text = std::fs::read_to_string(&spec).unwrap_or_else(|error| {
             panic!(
                 "the control protocol spec is readable at {}: {error}",
@@ -296,25 +290,27 @@ mod tests {
 
     #[test]
     fn the_probe_asks_for_the_verb_the_control_protocol_spec_names() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("membraned.control");
-        let requests = serve(socket.clone(), Answer::Ready("serving"));
-        assert!(probe(&socket, DEADLINE).is_ready());
-        let line = requests
-            .recv_timeout(DEADLINE)
-            .expect("the test broker captured the request the probe sent");
-        let request: serde_json::Value =
-            serde_json::from_str(line.trim()).unwrap_or_else(|error| {
-                panic!("the probe sends one JSON request per line, got {line:?}: {error}")
-            });
-        let method = request
-            .get("method")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_else(|| panic!("the probe's request carries a method, got {request}"));
-        assert_eq!(
-            method,
-            readiness_verb_named_by_the_spec(),
-            "the verb the readiness probe sends and the verb the control protocol spec names have diverged"
-        );
+        plasmosome_guards::check_workspace(|root| {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("membraned.control");
+            let requests = serve(socket.clone(), Answer::Ready("serving"));
+            assert!(probe(&socket, DEADLINE).is_ready());
+            let line = requests
+                .recv_timeout(DEADLINE)
+                .expect("the test broker captured the request the probe sent");
+            let request: serde_json::Value =
+                serde_json::from_str(line.trim()).unwrap_or_else(|error| {
+                    panic!("the probe sends one JSON request per line, got {line:?}: {error}")
+                });
+            let method = request
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("the probe's request carries a method, got {request}"));
+            assert_eq!(
+                method,
+                readiness_verb_named_by_the_spec(root),
+                "the verb the readiness probe sends and the verb the control protocol spec names have diverged"
+            );
+        });
     }
 }

@@ -33,6 +33,13 @@ child.kill()?;
 
 Tests: `cargo test -p plasmosome-membrane`
 
+The readiness-verb test reads spec001 through the guards crate's test-only `check_workspace`
+boundary. Cargo selects the package cwd; a directly invoked test binary reads the workspace
+selected by its actual cwd and needs `CARGO` or `cargo` on `PATH`. Relocated build output reports
+`StaleTarget` alongside any spec mismatch and requires rebuilding the checking component and
+consumer binaries for that workspace. Production readiness does not locate a checkout or depend
+on the guards crate. The guards crate's `workspace_roots` regression exercises both real consumers.
+
 ## Readiness is an answered query
 
 A supervisor is ready when its control socket **answers** a control-`status` request — not when
