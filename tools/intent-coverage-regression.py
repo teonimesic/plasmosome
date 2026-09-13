@@ -933,40 +933,75 @@ class RealHttpsAdapterTests(unittest.TestCase):
     def test_unexpected_accept_failure_reaches_caller_after_cleanup(self):
         original_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
         descriptors = []
+        released_descriptors = set()
+        independent_descriptors = []
+        survival_errors = []
+        reused_descriptor = None
         client = socket.socket()
         baseline_threads = set(threading.enumerate())
         listener = None
         certificate = None
+
+        def close_owned(owned, released=None):
+            while owned:
+                descriptor = owned.pop()
+                os.close(descriptor)
+                if released is not None:
+                    released.add(descriptor)
+
         try:
-            with self.assertRaises(OSError) as raised:
-                with connect_stall_listener() as (listener, certificate):
-                    address = ("127.0.0.1", listener.getsockname()[1])
-                    try:
-                        resource.setrlimit(resource.RLIMIT_NOFILE, (min(64, original_limit[0]), original_limit[1]))
-                        while True:
+            try:
+                with self.assertRaises(OSError) as raised:
+                    with connect_stall_listener() as (listener, certificate):
+                        address = ("127.0.0.1", listener.getsockname()[1])
+                        try:
+                            resource.setrlimit(resource.RLIMIT_NOFILE, (min(64, original_limit[0]), original_limit[1]))
+                            while True:
+                                try:
+                                    descriptors.append(os.open("/dev/null", os.O_RDONLY))
+                                except OSError as error:
+                                    if error.errno != errno.EMFILE:
+                                        raise
+                                    break
+                            client.connect(address)
+                            deadline = time.monotonic() + 0.5
+                            while set(threading.enumerate()) != baseline_threads and time.monotonic() < deadline:
+                                time.sleep(0.005)
+                        finally:
                             try:
-                                descriptors.append(os.open("/dev/null", os.O_RDONLY))
-                            except OSError as error:
-                                if error.errno != errno.EMFILE:
-                                    raise
-                                break
-                        client.connect(address)
-                        deadline = time.monotonic() + 0.5
-                        while set(threading.enumerate()) != baseline_threads and time.monotonic() < deadline:
-                            time.sleep(0.005)
-                    finally:
-                        for descriptor in descriptors:
-                            os.close(descriptor)
-                        resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
-            self.assertEqual(raised.exception.errno, errno.EMFILE)
-        finally:
-            client.close()
-            for descriptor in descriptors:
+                                close_owned(descriptors, released_descriptors)
+                            finally:
+                                resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
+                self.assertEqual(raised.exception.errno, errno.EMFILE)
+                target_descriptor = min(released_descriptors)
+                while reused_descriptor is None or reused_descriptor < target_descriptor:
+                    reused_descriptor = os.open("/dev/null", os.O_RDONLY)
+                    independent_descriptors.append(reused_descriptor)
+            finally:
                 try:
+                    client.close()
+                finally:
+                    try:
+                        close_owned(descriptors)
+                    finally:
+                        resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
+            while independent_descriptors:
+                descriptor = independent_descriptors.pop()
+                try:
+                    os.fstat(descriptor)
+                except OSError as error:
+                    survival_errors.append((descriptor, error.errno))
+                else:
                     os.close(descriptor)
-                except OSError:
-                    pass
-            resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
+        finally:
+            try:
+                close_owned(independent_descriptors)
+            finally:
+                resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
+        self.assertEqual(reused_descriptor, min(released_descriptors))
+        self.assertEqual(survival_errors, [])
+        self.assertEqual(descriptors, [])
+        self.assertEqual(resource.getrlimit(resource.RLIMIT_NOFILE), original_limit)
         self.assertEqual(set(threading.enumerate()), baseline_threads)
         self.assertEqual(listener.fileno(), -1)
         self.assertFalse(certificate.exists())
