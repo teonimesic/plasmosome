@@ -546,8 +546,10 @@ class NativeAdapterTests(unittest.TestCase):
             )
             unrelated = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(23)"])
             try:
-                unrelated_exit = os.waitid(os.P_PID, unrelated.pid, os.WEXITED | os.WNOWAIT)
-                self.assertEqual(unrelated_exit.si_status, 23)
+                waitid = getattr(os, "waitid", None)
+                if waitid is not None:
+                    unrelated_exit = waitid(os.P_PID, unrelated.pid, os.WEXITED | os.WNOWAIT)
+                    self.assertEqual(unrelated_exit.si_status, 23)
                 deadline = time.monotonic() + 0.6
                 with self.assertRaises(coverage.Refusal):
                     coverage.run_owned_process(
