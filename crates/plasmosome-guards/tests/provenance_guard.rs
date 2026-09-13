@@ -2,10 +2,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use plasmosome_guards::workspace_root;
+use plasmosome_guards::check_workspace;
 
-fn guard() -> PathBuf {
-    workspace_root().join(".githooks").join("provenance-guard")
+fn guard(root: &Path) -> PathBuf {
+    root.join(".githooks").join("provenance-guard")
 }
 
 fn shadow_git_with(script: &str) -> tempfile::TempDir {
@@ -60,16 +60,16 @@ fn track_everything_in(repository: &Path) {
     );
 }
 
-fn run_guard_in(repository: &Path) -> Output {
-    let mut command = Command::new(guard());
+fn run_guard_in(root: &Path, repository: &Path) -> Output {
+    let mut command = Command::new(guard(root));
     detached_from_any_inherited_repository(&mut command)
         .current_dir(repository)
         .output()
         .expect("the guard runs")
 }
 
-fn first_forbidden_term() -> String {
-    let script = std::fs::read_to_string(guard()).expect("the guard script is readable");
+fn first_forbidden_term(root: &Path) -> String {
+    let script = std::fs::read_to_string(guard(root)).expect("the guard script is readable");
     let declared = script
         .lines()
         .find_map(|line| line.trim().strip_prefix("forbidden=("))
@@ -86,49 +86,55 @@ fn first_forbidden_term() -> String {
 
 #[test]
 fn refuses_a_tree_carrying_a_term_it_forbids() {
-    let repository = scratch_repository();
-    let notes = repository.path().join("notes.md");
+    check_workspace(|root| {
+        let repository = scratch_repository();
+        let notes = repository.path().join("notes.md");
 
-    std::fs::write(&notes, "a tree with nothing in it to refuse\n").expect("the file is written");
-    track_everything_in(repository.path());
-    let clean = run_guard_in(repository.path());
-    assert!(
-        clean.status.success(),
-        "the guard refused a scratch tree carrying no forbidden term, so the refusal asserted below would not distinguish a working guard from one that refuses everything; it said:\n{}{}",
-        String::from_utf8_lossy(&clean.stdout),
-        String::from_utf8_lossy(&clean.stderr)
-    );
+        std::fs::write(&notes, "a tree with nothing in it to refuse\n")
+            .expect("the file is written");
+        track_everything_in(repository.path());
+        let clean = run_guard_in(root, repository.path());
+        assert!(
+            clean.status.success(),
+            "the guard refused a scratch tree carrying no forbidden term, so the refusal asserted below would not distinguish a working guard from one that refuses everything; it said:\n{}{}",
+            String::from_utf8_lossy(&clean.stdout),
+            String::from_utf8_lossy(&clean.stderr)
+        );
 
-    let term = first_forbidden_term();
-    std::fs::write(&notes, format!("a tree that names {term} in passing\n"))
-        .expect("the file is written");
-    track_everything_in(repository.path());
-    let planted = run_guard_in(repository.path());
-    assert!(
-        !planted.status.success(),
-        "the guard cleared a scratch tree carrying a term it forbids; this is the check that keeps the private research corpus out of a public repository, and one that cannot fail on the violation it names proves nothing about the tree it clears"
-    );
+        let term = first_forbidden_term(root);
+        std::fs::write(&notes, format!("a tree that names {term} in passing\n"))
+            .expect("the file is written");
+        track_everything_in(repository.path());
+        let planted = run_guard_in(root, repository.path());
+        assert!(
+            !planted.status.success(),
+            "the guard cleared a scratch tree carrying a term it forbids; this is the check that keeps the private research corpus out of a public repository, and one that cannot fail on the violation it names proves nothing about the tree it clears"
+        );
+    });
 }
 
 #[test]
 fn refuses_when_the_search_it_depends_on_cannot_run() {
-    let shadow = shadow_git_with("#!/bin/sh\necho 'fatal: not a git repository' >&2\nexit 128\n");
-    let inherited = std::env::var("PATH").unwrap_or_default();
-    let output = Command::new(guard())
-        .current_dir(workspace_root())
-        .env(
-            "PATH",
-            format!("{}:{inherited}", shadow.path().to_string_lossy()),
-        )
-        .output()
-        .expect("the guard runs");
-    let said = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !output.status.success(),
-        "the guard reported clean while the search it depends on was failing; `git grep` exits 1 when it finds nothing and 128 when it cannot look, and reading the second as the first turns a broken search into a pass.\nguard said:\n{said}"
-    );
+    check_workspace(|root| {
+        let shadow =
+            shadow_git_with("#!/bin/sh\necho 'fatal: not a git repository' >&2\nexit 128\n");
+        let inherited = std::env::var("PATH").unwrap_or_default();
+        let output = Command::new(guard(root))
+            .current_dir(root)
+            .env(
+                "PATH",
+                format!("{}:{inherited}", shadow.path().to_string_lossy()),
+            )
+            .output()
+            .expect("the guard runs");
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.status.success(),
+            "the guard reported clean while the search it depends on was failing; `git grep` exits 1 when it finds nothing and 128 when it cannot look, and reading the second as the first turns a broken search into a pass.\nguard said:\n{said}"
+        );
+    });
 }

@@ -9,52 +9,45 @@
 //! carries, are decisions this repository is still making; the place to write them down is the
 //! spec and the crate's own notes, not a test that fails before either exists.
 
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::Path;
 
-/// The absolute path to the root of the workspace this crate is checked into.
+mod workspace;
+
+const BUILD_ROOT: &str = include_str!(concat!(env!("OUT_DIR"), "/workspace-root"));
+
+/// Check the workspace selected by this process's working directory.
 ///
-/// Guards address the files they inspect by their path from that root. The caller must not assume
-/// the process working directory matches it, and must not call this from a crate moved to a
-/// different depth in the tree.
+/// Cargo runs tests in their package directory; directly invoked binaries use their actual cwd.
+/// Resolve once and pass this root to every repository-reading helper, keeping scratch fixture
+/// paths separate. Cargo must be available through `CARGO` or `PATH`.
 ///
-/// The path is baked in when the binary is compiled, so it is right wherever that binary was built
-/// and wrong only for one that outlived a move of its own checkout — renaming the directory was
-/// observed not to be enough, on its own, to get such a binary replaced. Panics in that case
-/// naming the stale path and the rebuild, rather than letting each guard fail as though the file it
-/// inspects were missing.
-pub fn workspace_root() -> PathBuf {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("the guards crate sits two levels below the workspace root")
-        .to_path_buf();
-    assert!(root.is_dir(), "{}", stale_root_message(&root));
-    root
-}
-
-fn stale_root_message(root: &Path) -> String {
-    format!(
-        "the workspace root is `{}`, baked into this binary when it was compiled, and there is no \
-         directory there now. This binary outlived a move of the checkout it was built in. Rebuild \
-         before reading the gate as red: `cargo clean -p plasmosome-guards`. Until then every \
-         guard reports the file it inspects as unreadable and blames that file.",
-        root.display()
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::stale_root_message;
-    use std::path::Path;
-
-    #[test]
-    fn the_stale_root_message_names_the_baked_path_and_the_rebuild() {
-        let message = stale_root_message(Path::new("/moved/away/plasmosome"));
-        assert!(message.contains("/moved/away/plasmosome"), "got {message}");
-        assert!(message.contains("cargo clean"), "got {message}");
-        assert!(
-            message.contains("move"),
-            "the message must name the cause, not the symptom, got {message}"
+/// A relocated checking component reports `StaleTarget` before executing the check against the
+/// selected tree. Its observations remain visible, but even a successful check then fails:
+/// rebuild the component and its consuming test binaries in the selected workspace.
+pub fn check_workspace(check: impl FnOnce(&Path)) {
+    let directory = std::env::current_dir().unwrap_or_else(|error| {
+        panic!("WorkspaceRootUnavailable: cannot capture the process working directory: {error}")
+    });
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let root = workspace::locate_workspace(&directory, &cargo).unwrap_or_else(|error| {
+        panic!(
+            "WorkspaceRootUnavailable: cannot resolve workspace from {}: {error}",
+            directory.display()
+        )
+    });
+    let stale = root.as_os_str() != OsStr::new(BUILD_ROOT);
+    if stale {
+        eprintln!(
+            "StaleTarget: the checking component was built in {BUILD_ROOT}, but this invocation \
+             selects {}. Rebuild plasmosome-guards and its consuming test binaries for the \
+             selected workspace; the following check still inspects that workspace.",
+            root.display()
         );
     }
+    check(&root);
+    assert!(
+        !stale,
+        "StaleTarget: the consumer passed, but relocated build output cannot certify this workspace"
+    );
 }

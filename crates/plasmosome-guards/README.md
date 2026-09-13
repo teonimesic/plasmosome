@@ -25,3 +25,16 @@ can be argued with.
 | `skill_discovery` | A skill under `.agents/skills/` with no committed symlink under `.claude/skills/`, which no tool then lists |
 
 Tests: `cargo test -p plasmosome-guards`
+
+Repository-reading tests run through `check_workspace`, which uses Cargo to locate the workspace
+from the test process's working directory. Cargo runs tests in their package directory; direct
+test-binary invocation must supply a cwd in the intended workspace. `CARGO` (or `cargo` on
+`PATH`) is required. Unavailable workspace context fails as `WorkspaceRootUnavailable`, without
+falling back to a build path or runtime `CARGO_MANIFEST_DIR`.
+
+A relocated checking component reports `StaleTarget` and still runs the consumer against the
+selected tree, exposing copy-only violations. Even a clean consumer cannot pass until the
+component and its consuming test binaries are rebuilt for that tree. This compares canonical
+build and runtime locations, not source freshness. The `workspace_roots` regression builds real
+publication and membrane consumers in disposable trees and exercises this copy/move contract;
+it therefore includes two isolated compilations.
