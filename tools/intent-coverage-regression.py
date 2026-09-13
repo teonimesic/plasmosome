@@ -2,12 +2,14 @@
 """Exercise intent coverage parsing, derivation, evidence, deadlines, and cleanup."""
 
 import contextlib
+import errno
 import http.server
 import importlib.util
 import json
 import multiprocessing
 import os
 from pathlib import Path
+import resource
 import shutil
 import signal
 import socket
@@ -769,6 +771,7 @@ def connect_stall_listener():
         listener.settimeout(0.05)
         stop = threading.Event()
         accepted = []
+        failures = []
 
         def stall():
             connection = None
@@ -787,6 +790,8 @@ def connect_stall_listener():
                     return
                 accepted.append(connection)
                 time.sleep(0.5)
+            except BaseException as error:
+                failures.append(error)
             finally:
                 if connection is not None:
                     connection.close()
@@ -803,6 +808,8 @@ def connect_stall_listener():
             thread.join(timeout=1)
             if thread.is_alive():
                 raise RuntimeError("connect-stall fixture did not stop")
+            if failures:
+                raise failures[0]
 
 
 def exit_unused_connect_stall_listener():
@@ -906,6 +913,47 @@ class RealHttpsAdapterTests(unittest.TestCase):
             with self.assertRaisesRegex(coverage.Refusal, "connection deadline"):
                 reader.observe(PR_URL, started + limits.command)
             self.assertLess(time.monotonic() - started, limits.observation)
+
+    def test_unexpected_accept_failure_reaches_caller_after_cleanup(self):
+        original_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        descriptors = []
+        client = socket.socket()
+        baseline_threads = set(threading.enumerate())
+        listener = None
+        certificate = None
+        try:
+            with self.assertRaises(OSError) as raised:
+                with connect_stall_listener() as (listener, certificate):
+                    address = ("127.0.0.1", listener.getsockname()[1])
+                    try:
+                        resource.setrlimit(resource.RLIMIT_NOFILE, (min(64, original_limit[0]), original_limit[1]))
+                        while True:
+                            try:
+                                descriptors.append(os.open("/dev/null", os.O_RDONLY))
+                            except OSError as error:
+                                if error.errno != errno.EMFILE:
+                                    raise
+                                break
+                        client.connect(address)
+                        deadline = time.monotonic() + 0.5
+                        while set(threading.enumerate()) != baseline_threads and time.monotonic() < deadline:
+                            time.sleep(0.005)
+                    finally:
+                        for descriptor in descriptors:
+                            os.close(descriptor)
+                        resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
+            self.assertEqual(raised.exception.errno, errno.EMFILE)
+        finally:
+            client.close()
+            for descriptor in descriptors:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
+        self.assertEqual(set(threading.enumerate()), baseline_threads)
+        self.assertEqual(listener.fileno(), -1)
+        self.assertFalse(certificate.exists())
 
     def test_unused_connect_stall_listener_does_not_hold_process_open(self):
         process = multiprocessing.get_context("spawn").Process(target=exit_unused_connect_stall_listener)
