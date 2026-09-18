@@ -44,10 +44,10 @@ orchestrator's memory. An unpushed branch is not a carrier. Which record carries
 follows one rule: the record of the work the planner will update.
 
 - A design planner plans inside the mapped task, so the task is the carrier. When the sweep
-  hits a draft spec no task implements, it first enumerates open tasks for one naming that
-  spec, files the task when none exists (filing against a draft spec is valid under
-  spec012), then dispatches. The planner's claim into `planning` follows spec016 and is
-  itself visible.
+  hits a draft spec no task implements, it first enumerates non-closed tasks for one
+  naming that spec, files the task when none exists (filing against a draft spec is valid
+  under spec012), then dispatches. The planner's claim into `planning` follows spec016 and
+  is itself visible.
 - A spec author dispatched because a mapped task lacks its governing spec does not take that
   task's phase or claim; its dispatch is a dated note on the task, which is the carrier.
 - A spec author for an approved intent with no spec has no task to anchor on and may not
@@ -60,9 +60,11 @@ follows one rule: the record of the work the planner will update.
   intent. One carrier per subject; there is no shared coordination record.
 
 Standalone carriers are discovered mechanically: a full `list` by the `planner-dispatch`
-label enumerates them, and each names its intent. A sweep creating one enumerates first and
-uses the existing carrier naming its subject instead of creating a second. They are not
-chain records and nothing walks through them upward.
+label enumerates them, and each names its intent. A sweep creating one enumerates first
+and uses an existing non-closed carrier naming its subject instead of creating a second.
+A closed carrier is never reopened: a duplicate names its surviving carrier, and a carrier
+closed on an accepted spec or a cancellation is history. They are not chain records and
+nothing walks through them upward.
 
 ### The dispatch entry and the receipts
 
@@ -141,8 +143,10 @@ sibling beneath its own moves its dispatch there, then closes its carrier as a d
 citing the earlier one. Moving a dispatch means appending dated entries to the survivor
 that restate the moved dispatch and its receipts and outcomes, each citing the closed
 record and the entries it restates; nothing is deleted from the closed record, and state
-classification reads the survivor alone. A closure write follows the same rule — retried,
-then escalated — and the duplicate is not treated as closed until its closure is recorded.
+classification reads the survivor alone, so a transfer is failure-safe: each restatement
+append is retried until it is observed on the survivor, the source stays open and its
+entries still classify the subject until every restatement is durable and the closure is
+recorded — a partially transferred subject is in flight, never half-free.
 The same window exists when the sweep files a task for a draft spec: of two tasks naming
 one draft spec, the earliest-created is the carrier, and the dispatcher who finds a sibling
 beneath its own retracts its dispatch entry there, stops its planner if one was launched,
@@ -182,9 +186,9 @@ is the memory both leave where the next agent can read it.
    branch, commit or PR in existence.
 2. Write-before-launch: a refused or failed carrier append results in no launch; a dispatcher
    either records and launches or does neither.
-3. One planner between two sweeps: two successive sweeps over one subject produce exactly one
-   dispatch, and the second's skip entry cites the carrier ID and the entry that told it to
-   skip.
+3. One planner between two sweeps: over one subject whose first dispatch is in flight, two
+   successive sweeps produce one live dispatch; the second's skip entry cites the carrier
+   ID and the entry that told it to skip, and no second live dispatch is appended.
 4. States are decidable from the record alone: pending launch, started, completed and
    positively dead each name their evidence, and a fresh agent classifies a carrier without
    asking its writers, including a carrier whose entries include skips, reports, retractions
