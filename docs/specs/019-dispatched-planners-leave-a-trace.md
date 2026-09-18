@@ -131,18 +131,25 @@ The launcher's lock covers one command, not a read-decide-write-launch sequence,
 sweeps overlapping inside that window can both record a dispatch. The record reconciles this
 without a fence: of two live dispatch entries for one subject, the earlier one owns it. A
 dispatcher that finds an earlier live entry beneath its own appends the retraction of its
-own entry, stops its own planner if one was launched, and leaves the earlier dispatch
-standing. After reconciliation a subject has at most one live dispatch. The same window
+own entry first — a refused or failed retraction is retried and escalated like any failed
+write, and the planner is stopped only after the retraction is recorded — then leaves the
+earlier dispatch standing; a retracted dispatch is not live even before its planner has
+stopped. After reconciliation a subject has at most one live dispatch. The same window
 exists at standalone-carrier creation, so the reconciliation repeats one level up: of two
 carriers naming one intent, the earliest-created owns the subject, and a sweep that finds a
-sibling beneath its own closes its carrier as a duplicate citing the earlier one, moving any
-dispatch it made there first. The same window exists when the sweep files a task for a
-draft spec: of two tasks naming one draft spec, the earliest-created is the carrier, and
-the dispatcher who finds a sibling beneath its own retracts its dispatch entry there, stops
-its planner if one was launched, and closes that task as a duplicate citing the earlier
-one. A task mapped before any dispatch decision — the ordinary case — is unaffected.
-Preventing the overlap in the first place would need a lease or fence that spec016
-deliberately omits; this spec omits it too.
+sibling beneath its own moves its dispatch there, then closes its carrier as a duplicate
+citing the earlier one. Moving a dispatch means appending dated entries to the survivor
+that restate the moved dispatch and its receipts and outcomes, each citing the closed
+record and the entries it restates; nothing is deleted from the closed record, and state
+classification reads the survivor alone. A closure write follows the same rule — retried,
+then escalated — and the duplicate is not treated as closed until its closure is recorded.
+The same window exists when the sweep files a task for a draft spec: of two tasks naming
+one draft spec, the earliest-created is the carrier, and the dispatcher who finds a sibling
+beneath its own retracts its dispatch entry there, stops its planner if one was launched,
+and closes that task as a duplicate citing the earlier one, transferring entries the same
+append-only way. A task mapped before any dispatch decision — the ordinary case — is
+unaffected. Preventing the overlap in the first place would need a lease or fence that
+spec016 deliberately omits; this spec omits it too.
 
 ### Recovering a dead dispatch
 
@@ -190,10 +197,12 @@ is the memory both leave where the next agent can read it.
    further entry on the same carrier citing the dead entry; the next sweep skips, citing the
    replacement; a native claim is recovered through spec016 before the replacement claims.
 7. Duplicate reconciliation: two dispatch entries for one subject leave the earliest owning
-   it; the later dispatcher retracts and stops its planner; no subject keeps two live
-   dispatches; two standalone carriers naming one intent leave the earliest owning the
-   subject and the later closed as a duplicate citing it; and two tasks filed for one draft
-   spec leave the earliest as the carrier and the later closed as a duplicate citing it.
+   it; the later dispatcher retracts before stopping its planner, retries and escalates a
+   failed retraction, and no subject keeps two live dispatches; two standalone carriers
+   naming one intent, or two tasks filed for one draft spec, leave the earliest as the
+   carrier and the later closed as a duplicate citing it once its closure write succeeds;
+   and a moved dispatch's entries reappear on the survivor citing their source, with state
+   classification reading the survivor alone.
 8. Completion frees the subject: a design planner's recorded deliverable suppresses
    nothing; a spec author's completion keeps the subject in flight until the named spec PR
    merges accepted on main, and a PR closed unmerged frees it; no sweep cites a stale
@@ -209,6 +218,7 @@ is the memory both leave where the next agent can read it.
 12. Scope honesty: the record and this spec claim visibility and deduplication for one
     clone's linked worktrees only, and promise neither prevention of simultaneous dispatch
     nor cross-clone fencing.
-13. Receipt-write failures: a refused or failed receipt append is retried, then escalates to
-    the recovery contact; a planner that cannot write stops rather than working invisibly,
-    and whoever stops a planner records its outcome.
+13. Failed writes: a refused or failed receipt append is retried, then escalates to the
+    recovery contact; a planner that cannot write stops rather than working invisibly, and
+    whoever stops a planner records its outcome; retractions and duplicate closures follow
+    the same retry-and-escalate rule, and a closure is not treated as done until written.
