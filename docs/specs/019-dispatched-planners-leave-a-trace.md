@@ -53,9 +53,10 @@ follows one rule: the record of the work the planner will update.
   invent one: unmapped queue work is refused under spec012. Its carrier is a standalone
   native record of type `chore`, labelled `planner-dispatch`, carrying the intent in
   `metadata.intent_ids`. It never becomes queue work — no `needs-plan`, no `planned`, no
-  claim, no `metadata.spec_ids` — and closes when an accepted spec serving that intent exists
-  on main (the reason names its PR), or when the intent stops wanting one (an explicit
-  cancellation reason). One carrier per subject; there is no shared coordination record.
+  claim, no `metadata.spec_ids` — and closes only with a terminal reason: an accepted spec
+  serving that intent exists on main (the reason names its PR), the intent stops wanting
+  one, or reconciliation closes it as a duplicate of the surviving carrier for the same
+  intent. One carrier per subject; there is no shared coordination record.
 
 Standalone carriers are discovered mechanically: a full `list` by the `planner-dispatch`
 label enumerates them, and each names its intent. A sweep creating one enumerates first and
@@ -67,9 +68,9 @@ chain records and nothing walks through them upward.
 Before launching, the dispatcher appends a dated **dispatch entry** to the carrier, naming the
 subject, the dispatched planner's actor, the dispatching sweep's actor, the time in UTC, a
 recovery contact, and — for a replacement — the earlier entry it succeeds. The dispatcher
-launches only after that append succeeds; a refused or failed write means no launch. A
-dispatch entry with a later start receipt or outcome is closed history; the subject's current
-dispatch is the latest entry.
+launches only after that append succeeds; a refused or failed write means no launch and
+leaves no entry, so the subject is as it was before the attempt: the next sweep, or the
+same dispatcher, retries on the same carrier, again appending its entry before any launch.
 
 The planner appends a dated **start receipt** to the same carrier as its first act on the
 subject, naming its actor and session. A refused or failed append is retried; a planner that
@@ -91,8 +92,10 @@ reports, retractions and corrections only annotate, because a retraction withdra
 the dispatch entry it names and a correction supersedes exactly the entry it names. The
 subject's state is the state of its **owning dispatch**: the earliest dispatch entry that
 is neither retracted nor superseded and is not yet closed by an outcome. A closed dispatch
-stops owning, which is what lets a replacement succeed a dead one. Four states, and only
-these establish them:
+stops owning, which is what lets a replacement succeed a dead one. A carrier with no owning
+dispatch — never written to, or every dispatch retracted or superseded — has no current
+dispatch, and a sweep treats the subject as free, reusing that carrier. Four states, and
+only these establish them:
 
 - **Pending launch** — the owning dispatch has no receipt or outcome yet. In flight; sweeps
   skip.
@@ -184,8 +187,8 @@ is the memory both leave where the next agent can read it.
    acts on the queue and may not cite the stale in-flight entry as a reason to skip.
 9. Standalone carriers: an unspecced-intent record is chore-typed, labelled
    `planner-dispatch`, intent-linked through `metadata.intent_ids`, enumerable by label,
-   never planned, claimed or mapped, and closed only by an accepted spec on main or an
-   explicit cancellation reason.
+   never planned, claimed or mapped, and closed only by an accepted spec on main, an
+   explicit cancellation reason, or duplicate reconciliation naming the surviving carrier.
 10. Task-anchored dispatches add no new phase or claim semantics: design planning claims
     through spec016; a spec author on a mapped task is notes-only and changes no phase.
 11. Append-only history: corrections supersede by later entries; no entry is rewritten or
