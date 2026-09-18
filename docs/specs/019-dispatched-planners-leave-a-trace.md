@@ -34,8 +34,8 @@ are outside spec016's.
 ## Contract
 
 A **sweep** is one heartbeat's pass over the queue. A **planner** is an agent dispatched to
-produce a plan or a spec. Every dispatch names one **subject**: a spec, by its three-digit
-ID, or an intent, by its. The record of a dispatch is called the **carrier**.
+produce a plan or a spec. Every dispatch names one **subject**: a spec or an intent, by its
+three-digit ID. The record of a dispatch is called the **carrier**.
 
 ### Subjects and carriers
 
@@ -58,8 +58,9 @@ follows one rule: the record of the work the planner will update.
   cancellation reason). One carrier per subject; there is no shared coordination record.
 
 Standalone carriers are discovered mechanically: a full `list` by the `planner-dispatch`
-label enumerates them, and each names its intent. They are not chain records and nothing
-walks through them upward.
+label enumerates them, and each names its intent. A sweep creating one enumerates first and
+uses the existing carrier naming its subject instead of creating a second. They are not
+chain records and nothing walks through them upward.
 
 ### The dispatch entry and the receipts
 
@@ -71,27 +72,38 @@ dispatch entry with a later start receipt or outcome is closed history; the subj
 dispatch is the latest entry.
 
 The planner appends a dated **start receipt** to the same carrier as its first act on the
-subject, naming its actor and session. It appends a dated **outcome** when it stops: a spec
-author names the spec PR or the failure; a design planner names the published design and
-acceptance, the phase it left the task in, or the failure. A planner stopped by its
-supervisor has that stop recorded as its outcome by whoever stopped it. Completion and
-failure are both outcomes; only a completion names a deliverable.
+subject, naming its actor and session. A refused or failed append is retried; a planner that
+still cannot write stops and reports through the dispatch entry's recovery contact rather
+than working invisibly. It appends a dated **outcome** when it stops: a spec author names
+the spec PR or the failure; a design planner names the published design and acceptance, the
+phase it left the task in, or the failure. A planner stopped by its supervisor has that stop
+recorded as its outcome by whoever stopped it; when the planner could not record its own
+outcome, the recovery contact records it from that stop report. Completion and failure are
+both outcomes; only a completion names a deliverable.
 
 Entries are append-only. A wrong entry is superseded by a later dated entry that says so;
 nothing rewrites or removes an earlier entry. Native history keeps what was written when.
 
 ### What the record can prove
 
-The latest entry leaves the subject in one of four states, and only these establish them:
+Only dispatch entries, start receipts and outcomes bear state; skip entries, unresolved
+reports, retractions and corrections only annotate, because a retraction withdraws exactly
+the dispatch entry it names and a correction supersedes exactly the entry it names. The
+subject's state is the state of its **owning dispatch**: the earliest dispatch entry that
+is neither retracted nor superseded and is not yet closed by an outcome. A closed dispatch
+stops owning, which is what lets a replacement succeed a dead one. Four states, and only
+these establish them:
 
-- **Pending launch** — a dispatch entry with no later receipt or outcome. In flight; sweeps
+- **Pending launch** — the owning dispatch has no receipt or outcome yet. In flight; sweeps
   skip.
-- **Started** — the planner's own start receipt. In flight; sweeps skip.
-- **Completed** — an outcome naming a deliverable. The subject is free; a stale in-flight
-  entry beneath a completion suppresses nothing.
-- **Positively dead** — an outcome recording that the planner stopped before any deliverable,
-  with the observation named: the planner's own final report, the dispatcher's observed launch
-  failure, or the supervisor's observed termination. Each names who observed, what, and when.
+- **Started** — the owning dispatch has its planner's start receipt and no outcome. In
+  flight; sweeps skip.
+- **Completed** — the owning dispatch closed with an outcome naming a deliverable. The
+  subject is free; a stale in-flight entry beneath a completion suppresses nothing.
+- **Positively dead** — the owning dispatch closed with an outcome recording that the
+  planner stopped before any deliverable, with the observation named: the planner's own
+  final report, the dispatcher's observed launch failure, or the supervisor's observed
+  termination. Each names who observed, what, and when.
 
 Nothing else is evidence of death. Silence, elapsed time, a missing branch, worktree or PR, a
 failed forge or network query, and a timeout establish nothing and dispatch nothing. A sweep
@@ -108,10 +120,15 @@ nothing and appends a dated skip entry citing the carrier and the entry that dec
 
 The launcher's lock covers one command, not a read-decide-write-launch sequence, so two
 sweeps overlapping inside that window can both record a dispatch. The record reconciles this
-without a fence: of two dispatch entries for one subject, the earliest owns it. A dispatcher
-that finds an earlier entry beneath its own appends the retraction, stops its own planner if
-one was launched, and leaves the earlier dispatch standing. After reconciliation a subject
-has at most one live dispatch. Preventing the overlap in the first place would need a lease
+without a fence: of two live dispatch entries for one subject, the earlier one owns it. A
+dispatcher that finds an earlier live entry beneath its own appends the retraction of its
+own entry, stops its own planner if one was launched, and leaves the earlier dispatch
+standing. After reconciliation a subject has at most one live dispatch. The same window
+exists at standalone-carrier creation, so the reconciliation repeats one level up: of two
+carriers naming one intent, the earliest-created owns the subject, and a sweep that finds a
+sibling beneath its own closes its carrier as a duplicate citing the earlier one, moving any
+dispatch it made there first. Task-anchored carriers cannot meet this window; they exist
+before the dispatch decision. Preventing the overlap in the first place would need a lease
 or fence that spec016 deliberately omits; this spec omits it too.
 
 ### Recovering a dead dispatch
@@ -150,7 +167,8 @@ is the memory both leave where the next agent can read it.
    skip.
 4. States are decidable from the record alone: pending launch, started, completed and
    positively dead each name their evidence, and a fresh agent classifies a carrier without
-   asking its writers.
+   asking its writers, including a carrier whose entries include skips, reports, retractions
+   and corrections.
 5. Death evidence is positive: a planner's final report, an observed launch failure or an
    observed termination, each naming observer, observation and time; silence, elapsed time,
    missing branch/worktree/PR, failed queries and timeout establish nothing and dispatch
@@ -160,7 +178,8 @@ is the memory both leave where the next agent can read it.
    replacement; a native claim is recovered through spec016 before the replacement claims.
 7. Duplicate reconciliation: two dispatch entries for one subject leave the earliest owning
    it; the later dispatcher retracts and stops its planner; no subject keeps two live
-   dispatches.
+   dispatches; and two standalone carriers naming one intent leave the earliest owning the
+   subject and the later closed as a duplicate citing it.
 8. Completion frees the subject: a recorded deliverable suppresses nothing; the next sweep
    acts on the queue and may not cite the stale in-flight entry as a reason to skip.
 9. Standalone carriers: an unspecced-intent record is chore-typed, labelled
@@ -174,3 +193,6 @@ is the memory both leave where the next agent can read it.
 12. Scope honesty: the record and this spec claim visibility and deduplication for one
     clone's linked worktrees only, and promise neither prevention of simultaneous dispatch
     nor cross-clone fencing.
+13. Receipt-write failures: a refused or failed receipt append is retried, then escalates to
+    the recovery contact; a planner that cannot write stops rather than working invisibly,
+    and whoever stops a planner records its outcome.
