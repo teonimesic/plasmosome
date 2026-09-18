@@ -450,7 +450,15 @@ impl VmmChild {
             Lifecycle::Owned | Lifecycle::ExitObserved(_) => {}
         }
 
-        match self.observe() {
+        let observed = loop {
+            match self.observe() {
+                Err(error) if error.errno == libc::EINTR => {
+                    note_interrupted_wait();
+                }
+                observed => break observed,
+            }
+        };
+        match observed {
             Ok(VmmState::Lost) => self.report_drop(self.finished_failure(), None),
             Ok(VmmState::Running) => {
                 if let Err(original) = self.signal_leader() {
@@ -501,7 +509,15 @@ impl VmmChild {
         terminal: VmmState,
         group_error: SupervisionError,
     ) -> Option<SupervisionError> {
-        match self.wait_once(SupervisionOperation::Reap, libc::WEXITED | libc::WNOHANG) {
+        let reaped = loop {
+            match self.wait_once(SupervisionOperation::Reap, libc::WEXITED | libc::WNOHANG) {
+                Err(error) if error.errno == libc::EINTR => {
+                    note_interrupted_wait();
+                }
+                reaped => break reaped,
+            }
+        };
+        match reaped {
             Ok(Some(state)) => {
                 self.lifecycle = Lifecycle::Finished {
                     state,
@@ -663,6 +679,8 @@ mod tests {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
+    include!("../tests/support/fixture.rs");
+
     const DEADLINE: Duration = Duration::from_secs(5);
     const SETTLE: Duration = Duration::from_millis(300);
 
@@ -798,7 +816,7 @@ mod tests {
         assert!(liveness >= 0, "the parent opens its private FIFO reader");
         let mode = if leader_exits { "exit" } else { "wait" };
         let command = ExecCommand::new(vec![
-            env!("PLASMOSOME_SUPERVISION_FIXTURE").to_string(),
+            supervision_fixture().display().to_string(),
             mode.to_string(),
             ready_write.0.to_string(),
             control_read.0.to_string(),

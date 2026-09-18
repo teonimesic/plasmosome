@@ -8,6 +8,9 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "support/fixture.rs"]
+mod fixture;
+
 const STATUS_REQUEST: &str = r#"{"id":1,"method":"membrane.status","params":{}}"#;
 const READY: &str = r#"{"id":0,"result":{"ready":true,"state":"serving"}}"#;
 const STARTING: &str = r#"{"id":0,"result":{"ready":false,"state":"starting"}}"#;
@@ -272,7 +275,7 @@ fn leader_first_broker(dir: &Path, socket: &Path, liveness: &Path, control: &Pat
             "name": "egressd",
             "control_socket": socket,
             "command": [
-                env!("PLASMOSOME_SUPERVISION_FIXTURE"),
+                fixture::supervision_fixture().display().to_string(),
                 "named-exit",
                 liveness,
                 control,
