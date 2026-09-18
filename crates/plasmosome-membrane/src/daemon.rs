@@ -286,14 +286,14 @@ impl Drop for BoundSocket {
 /// manufactured. Every broker command is resolved before the first fork, so a
 /// command that cannot run also leaves no children.
 ///
-/// Returning — whether cleanly or with an error raised after the bind — kills
-/// and reaps every broker and removes the socket path.
+/// Returning — whether cleanly or with an error raised after the bind — drops every broker and
+/// removes the socket path. Broker cleanup can report lost authority or operating-system errors;
+/// ordinary return alone is not proof that no residue remains.
 ///
-/// **What this cannot cover is `SIGKILL` of the daemon itself.** Brokers are
-/// their own session leaders and do not die with their parent, and a killed
-/// process runs no destructor, so the brokers keep running and the socket path
-/// stays. That residue is observed rather than prevented, by the
-/// `membrane.residue.snapshot` verb spec 001 §4 reserves for it.
+/// **What this cannot cover is `SIGKILL` of the daemon itself.** Brokers are their own session
+/// leaders and do not die with their parent, and a killed process runs no destructor, so brokers
+/// can keep running and the socket path stays. No residue observation or recovery verb is
+/// implemented.
 pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonError> {
     let listener =
         UnixListener::bind(&config.control_socket).map_err(|source| DaemonError::Bind {

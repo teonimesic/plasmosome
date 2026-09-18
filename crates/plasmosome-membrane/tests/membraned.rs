@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -158,6 +160,155 @@ fn one_broker(dir: &Path, socket: &Path, pidfile: &Path) -> Value {
             "command": ["sh", "-c", format!("echo $$ > {}; exec sleep 300", pidfile.display())],
         }],
     })
+}
+
+struct NamedWorker {
+    liveness: File,
+    control: PathBuf,
+    finished: bool,
+}
+
+impl NamedWorker {
+    fn new(liveness: &Path, control: &Path) -> Self {
+        for path in [liveness, control] {
+            let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+                .expect("the FIFO path has no zero byte");
+            assert_eq!(
+                unsafe { libc::mkfifo(name.as_ptr(), 0o600) },
+                0,
+                "the private worker FIFO is created"
+            );
+        }
+        let liveness = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(liveness)
+            .expect("the parent opens its worker liveness FIFO");
+        Self {
+            liveness,
+            control: control.to_owned(),
+            finished: false,
+        }
+    }
+
+    fn wait_ready(&mut self) {
+        let deadline = Instant::now() + PATIENCE;
+        let mut byte = [0u8; 1];
+        loop {
+            match self.liveness.read(&mut byte) {
+                Ok(1) => return,
+                Ok(0) => {}
+                Ok(_) => unreachable!("the readiness read is one byte"),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => panic!("worker readiness is readable: {error}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the broker leader announced its live worker"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_eof(&mut self) {
+        let deadline = Instant::now() + PATIENCE;
+        let mut byte = [0u8; 1];
+        loop {
+            match self.liveness.read(&mut byte) {
+                Ok(0) => {
+                    self.finished = true;
+                    return;
+                }
+                Ok(_) => panic!("the worker writes only its readiness byte"),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => panic!("worker liveness is readable: {error}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "membraned shutdown closes the managed worker's liveness FIFO"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn release(&self) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&self.control)
+            {
+                Ok(mut control) => {
+                    let _ = control.write_all(b"x");
+                    return;
+                }
+                Err(error)
+                    if matches!(error.raw_os_error(), Some(libc::ENXIO) | Some(libc::ENOENT)) =>
+                {
+                    if Instant::now() >= deadline {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for NamedWorker {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.release();
+        }
+    }
+}
+
+fn leader_first_broker(dir: &Path, socket: &Path, liveness: &Path, control: &Path) -> Value {
+    json!({
+        "control_socket": dir.join("c.uds"),
+        "brokers": [{
+            "name": "egressd",
+            "control_socket": socket,
+            "command": [
+                env!("PLASMOSOME_SUPERVISION_FIXTURE"),
+                "named-exit",
+                liveness,
+                control,
+                "unused"
+            ],
+        }],
+    })
+}
+
+#[test]
+fn membraned_shutdown_cleans_a_worker_whose_broker_leader_exited_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let control_socket = dir.path().join("c.uds");
+    let broker_socket = dir.path().join("b0.uds");
+    let liveness = dir.path().join("worker.live");
+    let worker_control = dir.path().join("worker.control");
+    let config = dir.path().join("config.json");
+    let mut worker = NamedWorker::new(&liveness, &worker_control);
+    write_config(
+        &config,
+        &leader_first_broker(dir.path(), &broker_socket, &liveness, &worker_control),
+    );
+
+    let mut daemon = start(&config);
+    let client = addressable(&control_socket);
+    worker.wait_ready();
+    drop(client);
+
+    daemon.signal(libc::SIGTERM);
+    let status = daemon.wait_for_exit(PATIENCE);
+    assert_eq!(status.code(), Some(0), "SIGTERM completes daemon teardown");
+    worker.wait_eof();
+    assert!(
+        !control_socket.exists(),
+        "the control socket path is removed after worker cleanup"
+    );
 }
 
 #[test]

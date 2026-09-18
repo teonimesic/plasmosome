@@ -27,7 +27,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 use plasmosome_membrane::vmm::{VmmChild, VmmState};
 
 let mut child = VmmChild::spawn(launcher)?;
-assert_eq!(child.state(), VmmState::Running);
+assert_eq!(child.state()?, VmmState::Running);
 child.kill()?;
 ```
 
@@ -56,16 +56,31 @@ a fresh full deadline; it is not a strict bound on elapsed time. The set cannot 
 that overshoots its allowance, and the real probe connects with a blocking socket call before
 setting read/write timeouts. A healthy answer still costs the sum of the sequential probes.
 
-## Dropping a handle cleans up its child
+## Dropping a handle cleans up its managed group
 
-`vmm::VmmChild` owns its forked child end to end — fork, non-blocking state poll, kill, and reap
-on drop. Each broker in a `BrokerSet` has one `VmmChild`, so dropping the set drops those handles.
-The handle must be its child's only reaper: a competing reaper can leave the child's process
-group running. Cleanup also requires the handle to be dropped; `mem::forget` leaks the child.
+`vmm::VmmChild` owns one direct child and the process group that child creates with `setsid`.
+Trusted host helpers must stay in that group, retain signal permissions, and add no members from
+the first terminal group-signal attempt through inspection and reap. Dropping the handle stops
+the leader, applies the group cleanup disposition, and reaps the direct child. `kill` performs
+the same leader teardown synchronously. A group signal does not prove that scheduling has
+finished every worker.
 
-Killing the daemon with `SIGKILL` runs no destructors, so its brokers can keep running and its
-socket path remains. The `membrane.residue.snapshot` verb intended to observe that residue is
-still reserved in spec 001 §4, not an implemented recovery mechanism.
+The handle must be its direct child's only consuming waiter, and the process must leave `SIGCHLD`
+waitable. Once another waiter consumes the status, every lifecycle method records lost authority
+and refuses to signal the released PID or PGID; workers may remain and Drop can only report them
+on stderr as a best-effort diagnostic. Explicit lifecycle calls return `SupervisionError` when
+the caller needs an inspectable result. Closed stderr can lose a Drop diagnostic, and blocked
+stderr can delay it.
+
+On Darwin, a terminal group signal can report `EPERM` when only zombies remain. While the direct
+leader is still waitable, the handle accepts that disposition only when a complete SDK process
+table contains that leader exactly once and every member is a zombie. The table walk is not an
+atomic snapshot, so complete query visibility and the no-new-members requirement are part of the
+trusted-host contract. This does not cover descendants that leave the group, change credentials,
+or keep forking. `mem::forget` leaks an unfinished handle.
+
+Killing `membraned` with `SIGKILL` runs no destructors, so its brokers can keep running and its
+socket path remains. There is no implemented residue observation or recovery mechanism.
 
 The division of labour is a design rule held in review, not by a test: VMs, shims and brokers
 belong here, and the controller (`plasmosome-core`) must never own them. Both halves are written
