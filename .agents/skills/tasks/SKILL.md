@@ -25,6 +25,12 @@ its intents. The only taskless PR shapes are those filing an intent (the top of 
 spec (which still names its parent intent). This closed list belongs to spec012; no size or kind
 of change is exempt, and an area with no spec is not a third shape.
 
+The rule is not retroactive. It replaced the former line-count spec threshold when spec012
+reached accepted main on 2026-09-01 (PRs #61 and #59); pull requests merged before then, including
+#17, #18, #24, #26 and #35, predate the contract and are historical record, not exemptions.
+Their admission retrospective and the merged-set manifest are in native task
+plasmosome-028's notes.
+
 Mapping to an existing spec is normal. A new task must name a spec, even if it is still draft.
 If no spec reaches the work, propose one under an existing intent; if no intent wants it, put a
 draft intent to the owner or drop the work with the reason recorded where the question arose.
