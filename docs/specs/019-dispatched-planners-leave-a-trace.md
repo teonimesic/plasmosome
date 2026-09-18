@@ -44,9 +44,10 @@ orchestrator's memory. An unpushed branch is not a carrier. Which record carries
 follows one rule: the record of the work the planner will update.
 
 - A design planner plans inside the mapped task, so the task is the carrier. When the sweep
-  hits a draft spec no task implements, it files that task first (filing against a draft spec
-  is valid under spec012), then dispatches. The planner's claim into `planning` follows
-  spec016 and is itself visible.
+  hits a draft spec no task implements, it first enumerates open tasks for one naming that
+  spec, files the task when none exists (filing against a draft spec is valid under
+  spec012), then dispatches. The planner's claim into `planning` follows spec016 and is
+  itself visible.
 - A spec author dispatched because a mapped task lacks its governing spec does not take that
   task's phase or claim; its dispatch is a dated note on the task, which is the carrier.
 - A spec author for an approved intent with no spec has no task to anchor on and may not
@@ -101,8 +102,12 @@ only these establish them:
   skip.
 - **Started** — the owning dispatch has its planner's start receipt and no outcome. In
   flight; sweeps skip.
-- **Completed** — the owning dispatch closed with an outcome naming a deliverable. The
-  subject is free; a stale in-flight entry beneath a completion suppresses nothing.
+- **Completed** — the owning dispatch closed with an outcome naming a deliverable. A design
+  planner's completion frees the subject. A spec author's completion does not: the subject
+  stays in flight until the named spec PR is observed merged and accepted on main, and
+  sweeps skip citing it; the carrier then closes with that reason, while a PR closed
+  unmerged is recorded and frees the subject. A stale in-flight entry beneath a completion
+  suppresses nothing either way.
 - **Positively dead** — the owning dispatch closed with an outcome recording that the
   planner stopped before any deliverable, with the observation named: the planner's own
   final report, the dispatcher's observed launch failure, or the supervisor's observed
@@ -118,8 +123,9 @@ recorded differently, because only the second leaves a recovery question.
 ### Skipping, and two dispatches at once
 
 Before dispatching onto a subject, a sweep reads the carrier and decides from the record
-alone. A subject that is pending, started or unresolved is in flight: the sweep dispatches
-nothing and appends a dated skip entry citing the carrier and the entry that decided it.
+alone. A subject that is pending, started, unresolved, or whose completion names a spec PR
+not yet merged accepted is in flight: the sweep dispatches nothing and appends a dated skip
+entry citing the carrier and the entry that decided it.
 
 The launcher's lock covers one command, not a read-decide-write-launch sequence, so two
 sweeps overlapping inside that window can both record a dispatch. The record reconciles this
@@ -130,9 +136,13 @@ standing. After reconciliation a subject has at most one live dispatch. The same
 exists at standalone-carrier creation, so the reconciliation repeats one level up: of two
 carriers naming one intent, the earliest-created owns the subject, and a sweep that finds a
 sibling beneath its own closes its carrier as a duplicate citing the earlier one, moving any
-dispatch it made there first. Task-anchored carriers cannot meet this window; they exist
-before the dispatch decision. Preventing the overlap in the first place would need a lease
-or fence that spec016 deliberately omits; this spec omits it too.
+dispatch it made there first. The same window exists when the sweep files a task for a
+draft spec: of two tasks naming one draft spec, the earliest-created is the carrier, and
+the dispatcher who finds a sibling beneath its own retracts its dispatch entry there, stops
+its planner if one was launched, and closes that task as a duplicate citing the earlier
+one. A task mapped before any dispatch decision — the ordinary case — is unaffected.
+Preventing the overlap in the first place would need a lease or fence that spec016
+deliberately omits; this spec omits it too.
 
 ### Recovering a dead dispatch
 
@@ -181,10 +191,13 @@ is the memory both leave where the next agent can read it.
    replacement; a native claim is recovered through spec016 before the replacement claims.
 7. Duplicate reconciliation: two dispatch entries for one subject leave the earliest owning
    it; the later dispatcher retracts and stops its planner; no subject keeps two live
-   dispatches; and two standalone carriers naming one intent leave the earliest owning the
-   subject and the later closed as a duplicate citing it.
-8. Completion frees the subject: a recorded deliverable suppresses nothing; the next sweep
-   acts on the queue and may not cite the stale in-flight entry as a reason to skip.
+   dispatches; two standalone carriers naming one intent leave the earliest owning the
+   subject and the later closed as a duplicate citing it; and two tasks filed for one draft
+   spec leave the earliest as the carrier and the later closed as a duplicate citing it.
+8. Completion frees the subject: a design planner's recorded deliverable suppresses
+   nothing; a spec author's completion keeps the subject in flight until the named spec PR
+   merges accepted on main, and a PR closed unmerged frees it; no sweep cites a stale
+   in-flight entry as a reason to skip.
 9. Standalone carriers: an unspecced-intent record is chore-typed, labelled
    `planner-dispatch`, intent-linked through `metadata.intent_ids`, enumerable by label,
    never planned, claimed or mapped, and closed only by an accepted spec on main, an
