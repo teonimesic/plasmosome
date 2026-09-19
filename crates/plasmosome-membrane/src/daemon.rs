@@ -1006,12 +1006,17 @@ mod tests {
         .expect_err("a control path whose entry cannot be a bound socket refuses the start");
 
         match &refusal {
-            DaemonError::SocketIdentity { path, .. } => assert_eq!(path, &control),
-            other => panic!("an uninspectable path is an identity failure, got {other:?}"),
+            // Linux refuses a dangling leaf symlink at bind itself; Darwin binds through
+            // the leaf (creating the target) and the identity capture refuses. Either way
+            // the start is refused before any fork and the symlink is left untouched.
+            DaemonError::Bind { path, .. } | DaemonError::SocketIdentity { path, .. } => {
+                assert_eq!(path, &control)
+            }
+            other => panic!("an uninspectable path refuses the start, got {other:?}"),
         }
         assert!(
             !pidfile.exists(),
-            "the identity is captured before any broker command is resolved, so nothing forked"
+            "the refusal happens before any broker command is resolved, so nothing forked"
         );
         assert!(
             std::fs::symlink_metadata(&control)
