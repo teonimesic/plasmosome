@@ -79,16 +79,38 @@ Tests: `cargo test -p plasmosome-core`
 
 ## Socket ownership
 
-`plasmosomed` refuses a control-socket path that already exists, and never unlinks a path it did
-not create. The alternative — clearing whatever is there and binding anyway — cannot tell a stale
-file from a live daemon's socket, and taking the socket out from under a running controller leaves
-it alive but unreachable. Refusing costs an operator one `rm` after a hard kill; the other way
-round produces a controller that is running and cannot be talked to.
+`plasmosomed` refuses a control-socket path that already exists — a live socket, a stale socket,
+a regular file or a symlink — and never unlinks it: bind fails, the start exits naming the path,
+and clearing it is the operator's or caller's job. The alternative — clearing whatever is there
+and binding anyway — cannot tell a stale file from a live daemon's socket, and taking the socket
+out from under a running controller leaves it alive but unreachable. Refusing costs an operator
+one `rm` after a hard kill; the other way round produces a controller that is running and cannot
+be talked to.
 
-A daemon that returns removes its socket path, on every route out: a clean shutdown, an error
-raised after the bind, or a panic unwinding through. `SIGKILL` is the case no destructor covers,
-because a killed process runs none, so the path survives the daemon. That residue is observed
-rather than prevented — the next start refuses the path and says why.
+A daemon that returns removes its socket path on every route out — a clean shutdown, an error
+raised after the bind, or a panic unwinding through — but only when the entry still at that name
+is the socket it bound. Right after binding, the daemon records the socket's device and inode;
+teardown inspects the path without following symlinks and unlinks only on an exact match, as one
+best-effort attempt. So:
+
+- A replacement a caller settles at the pathname after start — a regular file or a leaf symlink,
+  with target present or dangling — is left exactly as it was, contents and all.
+- The original socket, once renamed elsewhere, stays there. The daemon owns the entry it bound,
+  not every name someone later gives its inode; no RPC observes that residue.
+- A missing entry, a non-socket, or a non-matching identity means teardown touches nothing.
+
+This is ownership-correct cleanup under a coordinated namespace, not defense against a hostile
+writer. The path is inspected and then unlinked in two steps that are not atomic together, so
+another process with write authority over the directory — the same UID included; a private 0700
+directory is the recommended setup and does not remove that authority — can substitute a victim
+between them. The identity is not an eternal token either: device and inode tell the daemon's
+socket from a later one only while the original inode stays allocated (its new name keeps it
+alive), and the file-type check still rejects regular files and symlinks even if inode numbers
+are recycled. A start whose identity capture fails — including a leaf symlink at the configured
+path, which `bind` would otherwise follow — refuses without unlinking anything, and can leave
+the just-bound socket for explicit operator cleanup. `SIGKILL` is the case no destructor covers,
+because a killed process runs none, so the path survives the daemon and the next start refuses
+it and says why.
 
 Connections are taken one at a time. The shutdown flag is read between accepts and between reads,
 and both halves of a connection carry a timeout, so neither an idle client nor one that never

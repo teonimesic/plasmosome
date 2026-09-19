@@ -104,6 +104,31 @@ Application error codes (closed set; additions are a contract change):
 | 109 | `widening_forbidden` | `plasmid` |
 | 110 | `attestation_required` | `verb` — the E13b residual: subject spawn needs host-side attestation |
 
+**Control-socket lifecycle, as delivered (both daemons).** Each daemon binds the control socket
+named by its config and never unlinks a path it did not create. A start whose path already
+exists — live socket, stale socket, regular file, directory or symlink — is refused without
+touching it: clearing the path is the caller's job, because unlinking a live daemon's socket is
+how a half-alive controller or supervisor is manufactured. Following a successful bind, the
+daemon records the socket's device and inode; on every route out (clean return, later error,
+unwinding panic) it removes the configured path only if a no-follow inspection finds that exact
+socket still there, as one best-effort attempt. A replacement settled at the pathname after
+start — a regular file or a leaf symlink, target present or dangling — is preserved with its
+contents, entry type and link target, and an original socket renamed elsewhere stays there: the
+daemon owns the entry it bound, not every name later given to its inode. A missing entry, a
+non-socket, or a non-matching identity leaves the namespace untouched. A start whose identity
+capture fails refuses before any fork or other setup, without unlinking anything, and can leave
+the just-bound socket for explicit operator cleanup.
+
+These are host-conditioned guarantees, not race-free protection. The caller supplies a trusted,
+stable directory and coordinated namespace writers: parent, ancestors and their symlink targets
+stay put for the daemon's lifetime, a private 0700 directory is the recommended setup, and none
+of that defends against another process with write authority over the directory — the same UID
+included. The final inspect-then-unlink pair is two steps, not one atomic one. Device+inode
+distinguishes a later socket at the same name only while the original inode stays allocated;
+the file-type check still rejects regular files and symlinks even if inode numbers are recycled.
+`SIGKILL` and equivalent hard exits run no destructor; the resulting residue is observed by the
+next start's refusal, not prevented, and no verb observes or repairs it.
+
 ## 2. Naming and addressing (D1a/D1b/D1c)
 
 - A **kernel instance** has a name (`plasmosome start --name work`); its state lives at
@@ -429,7 +454,9 @@ be changed in the same swap (D2's third layer).
 ## 4. Controller ⇄ membrane (the supervisor side of the contract)
 
 The controller drives each cell's `membraned` over a second, private ndjson-UDS
-(`<instance>/cells/<cell>/membrane.uds`). Same envelope as §1. The subset this spec covers:
+(`<instance>/cells/<cell>/membrane.uds`). Same envelope as §1, and the same §1 control-socket
+lifecycle: `membraned` refuses an occupied path and removes its own bound socket only, by
+no-follow device-and-inode identity. The subset this spec covers:
 
 - `membrane.status` — the F9 readiness probe. Reply `{"ready": true, "state": "serving"}`.
   Readiness = the socket **answers**; accept-without-answer is the half-alive broker and is
@@ -1154,6 +1181,16 @@ is a claim that the text above may not be corrected.
    verb in §3 is **not yet** — nothing serves them. The socket path in §1 is not yet the one it
    binds either: the daemon takes the path from its config, and the
    `~/.plasmosome/instances/<name>/` convention arrives with `plasmosome.start`.
+   The §1 control-socket lifecycle is **delivered** by both this daemon and `membraned`
+   (§4): refuse-occupied paths, then no-follow device-and-inode best-effort cleanup of the
+   bound socket only, with all stated host conditions and race limits. Measured reason for the
+   correction: the delivered daemons' teardown used to unlink whatever entry sat at the
+   configured pathname — a caller-settled regular file left there after renaming the original
+   socket was deleted on ordinary `SIGTERM` shutdown in both daemons — contradicting the
+   earlier unconditional claim that cleanup never removes a path the daemon did not create.
+   That claim was wrong as written and is corrected in §1; the correction is the reviewed
+   reason this spec changes here, per spec012's rule that a spec is corrected with the reason
+   when reality shows its design wrong.
 2. The error code table is closed and every code has a structured-field spec — **delivered**
    (§1).
 3. The controller-side wire types are serde and share no memory — **delivered**, and true of the

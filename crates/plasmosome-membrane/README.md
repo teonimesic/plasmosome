@@ -79,6 +79,21 @@ atomic snapshot, so complete query visibility and the no-new-members requirement
 trusted-host contract. This does not cover descendants that leave the group, change credentials,
 or keep forking. `mem::forget` leaks an unfinished handle.
 
+## Control-socket ownership
+
+`membraned` refuses an occupied control-socket path — a live socket, a stale file or a symlink —
+and never unlinks it: the start exits naming the path, and clearing it is the caller's job. Once
+bound, it records the socket's device and inode; when it returns — cleanly, on a later error, or
+through an unwinding panic — it drops every broker and removes the path only if a no-follow
+inspection finds that exact socket still there, as one best-effort attempt. A replacement a
+caller settles at the pathname after start — a regular file or a leaf symlink, target present or
+dangling — is left exactly as the caller left it, and the original socket renamed elsewhere stays
+there. A start whose identity capture fails refuses before any fork, without unlinking anything.
+The inspect-then-unlink pair is not atomic, so this is ownership-correct cleanup under a
+coordinated namespace with trusted, stable ancestors — not defense against another writer with
+authority over the directory, the same UID included. The same lifecycle holds for the
+controller's socket; spec 001 §1 states it once for both daemons.
+
 Killing `membraned` with `SIGKILL` runs no destructors, so its brokers can keep running and its
 socket path remains. There is no implemented residue observation or recovery mechanism.
 

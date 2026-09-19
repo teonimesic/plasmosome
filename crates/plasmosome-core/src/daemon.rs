@@ -1,4 +1,5 @@
 use std::io::{BufReader, ErrorKind, Read};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,6 +91,10 @@ pub enum DaemonError {
         source: std::io::Error,
     },
     Listener(std::io::Error),
+    SocketIdentity {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 impl std::fmt::Display for DaemonError {
@@ -104,6 +109,11 @@ impl std::fmt::Display for DaemonError {
                 f,
                 "the control socket stopped accepting connections: {source}"
             ),
+            DaemonError::SocketIdentity { path, source } => write!(
+                f,
+                "cannot inspect the control socket {}: {source}",
+                path.display()
+            ),
         }
     }
 }
@@ -113,6 +123,7 @@ impl std::error::Error for DaemonError {
         match self {
             DaemonError::Bind { source, .. } => Some(source),
             DaemonError::Listener(source) => Some(source),
+            DaemonError::SocketIdentity { source, .. } => Some(source),
         }
     }
 }
@@ -132,13 +143,56 @@ fn accept_outcome(error: &std::io::Error) -> Next {
     }
 }
 
+/// The control socket the daemon bound, with the identity it was bound under.
+///
+/// Teardown removes the pathname only when the entry still there is this
+/// exact socket — a no-follow match on device and inode. Anything a caller
+/// later settles at the pathname, or the original socket once it has been
+/// renamed elsewhere, is left alone.
+#[derive(Debug)]
 struct BoundSocket {
     path: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+impl BoundSocket {
+    /// Records the identity of the socket just bound at `path`.
+    ///
+    /// The inspection is no-follow: a leaf symlink or a replacement entry is
+    /// not the socket that was bound, and refusing here leaves the namespace
+    /// untouched for the operator to clear.
+    fn capture(path: PathBuf) -> Result<Self, DaemonError> {
+        let metadata =
+            std::fs::symlink_metadata(&path).map_err(|source| DaemonError::SocketIdentity {
+                path: path.clone(),
+                source,
+            })?;
+        if !metadata.file_type().is_socket() {
+            return Err(DaemonError::SocketIdentity {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the entry at the pathname is not a socket",
+                ),
+            });
+        }
+        Ok(Self {
+            path,
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
 }
 
 impl Drop for BoundSocket {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if let Ok(metadata) = std::fs::symlink_metadata(&self.path)
+            && metadata.file_type().is_socket()
+            && metadata.dev() == self.dev
+            && metadata.ino() == self.ino
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -148,10 +202,21 @@ impl Drop for BoundSocket {
 /// bind has done nothing else. A path already there is refused, whether it
 /// holds a live daemon's socket or a stale file; the daemon never unlinks a
 /// path it did not create, so clearing a stale path is the caller's job.
+/// Right after binding, the daemon records the socket's device and inode; a
+/// start that cannot capture that identity refuses without unlinking
+/// anything, leaving any residue for the operator.
 ///
 /// Returning — cleanly, on an error raised after the bind, or through an
-/// unwinding panic — removes the socket path. A `SIGKILL` runs no destructor,
-/// so callers must not read the path's absence as the daemon being gone.
+/// unwinding panic — removes the socket path only when the entry still at
+/// that name is the socket this daemon bound: a no-follow device-and-inode
+/// match. A replacement a caller settles at the pathname in the meantime — a
+/// regular file or a symlink — is left exactly as it was, and so is the
+/// original socket once renamed elsewhere. The check and the unlink are two
+/// steps, not one atomic one: a writer with authority over the directory can
+/// still substitute a victim between them, so this is ownership-correct
+/// cleanup under a coordinated namespace, not race-free protection. A
+/// `SIGKILL` runs no destructor, so callers must not read the path's absence
+/// as the daemon being gone.
 ///
 /// Requests on a connection are answered in order, and `shutdown` is honored
 /// against a client that stops reading its replies. The instance starts with
@@ -163,9 +228,7 @@ pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonErro
             path: config.control_socket.clone(),
             source,
         })?;
-    let _bound = BoundSocket {
-        path: config.control_socket,
-    };
+    let _bound = BoundSocket::capture(config.control_socket.clone())?;
     listener
         .set_nonblocking(true)
         .map_err(DaemonError::Listener)?;
@@ -575,6 +638,184 @@ mod tests {
             accept_outcome(&std::io::Error::from(ErrorKind::Other)),
             Next::Fail,
             "any other accept error is a listener that stopped working",
+        );
+    }
+
+    #[test]
+    fn shutdown_leaves_a_later_socket_settled_at_the_pathname_alone() {
+        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let control = directory.path().join("control.uds");
+        let daemon = start(config(&control, "work"));
+
+        let mut client = addressable(&control);
+        assert_eq!(
+            ask(&mut client, STATUS_REQUEST).pointer("/result/name"),
+            Some(&json!("work")),
+            "the daemon is serving before its pathname is exchanged"
+        );
+        drop(client);
+
+        let original = std::fs::symlink_metadata(&control).expect("the bound socket is on disk");
+        let saved = directory.path().join("saved.uds");
+        std::fs::rename(&control, &saved).expect("the original socket is renamed");
+
+        let replacement =
+            UnixListener::bind(&control).expect("the test binds its own socket at the pathname");
+        let settled = std::fs::symlink_metadata(&control).expect("the settled socket is on disk");
+        assert_ne!(
+            (settled.dev(), settled.ino()),
+            (original.dev(), original.ino()),
+            "the second bind is a different socket while the original stays allocated"
+        );
+        thread::spawn(move || {
+            while let Ok((mut stream, _)) = replacement.accept() {
+                let mut line = String::new();
+                let _ = BufReader::new(&mut stream).read_line(&mut line);
+                let _ = writeln!(stream, r#"{{"id":7,"result":{{"fixture":true}}}}"#);
+                let _ = stream.flush();
+            }
+        });
+
+        let mut bystander = addressable(&control);
+        assert_eq!(
+            ask(&mut bystander, STATUS_REQUEST).pointer("/result/fixture"),
+            Some(&json!(true)),
+            "the settled socket answers before the daemon shuts down"
+        );
+        drop(bystander);
+
+        daemon.stop().expect("the daemon shuts down cleanly");
+
+        let survivor =
+            std::fs::symlink_metadata(&control).expect("the settled socket outlives shutdown");
+        assert!(
+            survivor.file_type().is_socket(),
+            "teardown removes the socket the daemon bound, not a socket another owner later \
+             settled at the pathname"
+        );
+        assert_eq!(
+            (survivor.dev(), survivor.ino()),
+            (settled.dev(), settled.ino()),
+            "the survivor is the fixture's own socket entry"
+        );
+        let renamed = std::fs::symlink_metadata(&saved).expect("the renamed original is retained");
+        assert!(
+            renamed.file_type().is_socket()
+                && (renamed.dev(), renamed.ino()) == (original.dev(), original.ino()),
+            "the original socket stays allocated under the caller's new name"
+        );
+        let mut after = addressable(&control);
+        assert_eq!(
+            ask(&mut after, STATUS_REQUEST).pointer("/result/fixture"),
+            Some(&json!(true)),
+            "the settled socket still answers once the daemon is gone"
+        );
+    }
+
+    #[test]
+    fn an_unwinding_guard_removes_its_own_socket_and_leaves_a_settled_replacement_alone() {
+        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+
+        let control = directory.path().join("control.uds");
+        let bound = UnixListener::bind(&control).expect("the fixture binds a real socket");
+        let guard = BoundSocket::capture(control.clone()).expect("the guard captures its socket");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = guard;
+            let _still_bound = bound;
+            panic!("the daemon unwinds through the guard");
+        }));
+        assert!(
+            !control.exists(),
+            "an unchanged socket the guard owns is removed even on an unwinding exit"
+        );
+
+        let control = directory.path().join("control.uds");
+        let bound = UnixListener::bind(&control).expect("the fixture binds a real socket");
+        let guard = BoundSocket::capture(control.clone()).expect("the guard captures its socket");
+        let saved = directory.path().join("saved.uds");
+        std::fs::rename(&control, &saved).expect("the original socket is renamed");
+        std::fs::write(&control, b"a settled replacement").expect("the sentinel is written");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = guard;
+            let _still_bound = bound;
+            panic!("the daemon unwinds through the guard");
+        }));
+        let left = std::fs::symlink_metadata(&control).expect("the sentinel survives the unwind");
+        assert!(
+            left.file_type().is_file(),
+            "a replacement settled after capture is not the guard's socket, so an unwinding \
+             teardown leaves it standing"
+        );
+        assert!(
+            std::fs::symlink_metadata(&saved)
+                .expect("the renamed original is retained")
+                .file_type()
+                .is_socket(),
+            "the renamed original socket stays allocated at its new name"
+        );
+    }
+
+    #[test]
+    fn capture_refuses_a_non_socket_or_missing_entry_and_leaves_it_alone() {
+        use std::error::Error as _;
+
+        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+
+        let control = directory.path().join("control.uds");
+        std::fs::write(&control, b"someone else's socket").expect("the test occupies the path");
+        let refusal =
+            BoundSocket::capture(control.clone()).expect_err("a regular file is not a socket");
+        match &refusal {
+            DaemonError::SocketIdentity { path, .. } => assert_eq!(path, &control),
+            other => panic!("a non-socket entry is an identity failure, got {other:?}"),
+        }
+        let source = refusal
+            .source()
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .expect("the identity refusal carries the actual I/O error");
+        assert_eq!(
+            source.kind(),
+            std::io::ErrorKind::InvalidData,
+            "a non-socket entry is invalid data, not a missing one: {source}"
+        );
+        assert_eq!(
+            std::fs::read(&control)
+                .expect("the occupied file is readable")
+                .as_slice(),
+            b"someone else's socket".as_slice(),
+            "capture inspects the namespace, it never clears it: the entry is left for its owner"
+        );
+
+        let link = directory.path().join("link.uds");
+        std::os::unix::fs::symlink("nowhere.uds", &link)
+            .expect("the test plants a dangling leaf symlink");
+        let refusal = BoundSocket::capture(link.clone())
+            .expect_err("a leaf symlink is not a socket, even dangling");
+        assert!(
+            matches!(&refusal, DaemonError::SocketIdentity { path, .. } if path == &link),
+            "the refusal names the symlink, not its target: {refusal:?}"
+        );
+        assert_eq!(
+            std::fs::read_link(&link).expect("the symlink target is readable"),
+            PathBuf::from("nowhere.uds"),
+            "the no-follow inspection preserves the symlink and its exact target"
+        );
+
+        let missing = directory.path().join("absent.uds");
+        let refusal = BoundSocket::capture(missing.clone())
+            .expect_err("a missing path has no identity to capture");
+        let source = refusal
+            .source()
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .expect("the identity refusal carries the actual I/O error");
+        assert_eq!(
+            source.kind(),
+            std::io::ErrorKind::NotFound,
+            "a missing path is a not-found inspection error: {source}"
+        );
+        assert!(
+            !missing.exists(),
+            "a failed capture creates nothing and removes nothing"
         );
     }
 }
