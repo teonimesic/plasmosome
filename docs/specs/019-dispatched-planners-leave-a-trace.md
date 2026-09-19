@@ -76,9 +76,11 @@ leaves no entry, so the subject is as it was before the attempt: the next sweep,
 same dispatcher, retries on the same carrier, again appending its entry before any launch.
 
 The planner appends a dated **start receipt** to the same carrier as its first act on the
-subject, naming its actor and session. A refused or failed append is retried; a planner that
+subject, naming its actor and session and citing the dispatch entry it answers. A refused
+or failed append is retried; a planner that
 still cannot write stops and reports through the dispatch entry's recovery contact rather
-than working invisibly. It appends a dated **outcome** when it stops: a spec author names
+than working invisibly. It appends a dated **outcome** when it stops, citing that dispatch
+entry: a spec author names
 the spec PR or the failure; a design planner names the published design and acceptance, the
 phase it left the task in, or the failure. A planner stopped by its supervisor has that stop
 recorded as its outcome by whoever stopped it; when the planner could not record its own
@@ -107,9 +109,10 @@ only these establish them:
 - **Completed** — the owning dispatch closed with an outcome naming a deliverable. A design
   planner's completion frees the subject. A spec author's completion does not: the subject
   stays in flight until the named spec PR is observed merged and accepted on main, and
-  sweeps skip citing it; the carrier then closes with that reason, while a PR closed
-  unmerged is recorded and frees the subject. A stale in-flight entry beneath a completion
-  suppresses nothing either way.
+  sweeps skip citing it; a standalone carrier then closes with that reason, while the task
+  of a task-anchored spec author is left untouched for spec016's own lifecycle, and a PR
+  closed unmerged is recorded and frees the subject. A stale in-flight entry beneath a
+  completion suppresses nothing either way.
 - **Positively dead** — the owning dispatch closed with an outcome recording that the
   planner stopped before any deliverable, with the observation named: the planner's own
   final report, the dispatcher's observed launch failure, or the supervisor's observed
@@ -190,8 +193,9 @@ is the memory both leave where the next agent can read it.
    successive sweeps produce one live dispatch; the second's skip entry cites the carrier
    ID and the entry that told it to skip, and no second live dispatch is appended.
 4. States are decidable from the record alone: pending launch, started, completed and
-   positively dead each name their evidence, and a fresh agent classifies a carrier without
-   asking its writers, including a carrier whose entries include skips, reports, retractions
+   positively dead each name their evidence; every start receipt and outcome cites the
+   dispatch entry it answers; and a fresh agent classifies a carrier without asking its
+   writers, including a carrier whose entries include skips, reports, retractions
    and corrections.
 5. Death evidence is positive: a planner's final report, an observed launch failure or an
    observed termination, each naming observer, observation and time; silence, elapsed time,
