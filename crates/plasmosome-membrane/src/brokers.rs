@@ -182,8 +182,6 @@ impl<P: Probe> BrokerSet<P> {
         self.status_with(deadline, shutdown, Instant::now)
     }
 
-    /// The same walk on an injected clock, so tests can place expiry and
-    /// cancellation at exact points without sleeping.
     fn status_with(
         &self,
         deadline: Duration,

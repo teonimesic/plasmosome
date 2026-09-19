@@ -71,12 +71,12 @@ There is deliberately no mocking-framework dependency. Expectation-style mocks c
 call sequences; a fake that models the contract couples tests to behavior. Hand-built fakes
 only.
 
-There is still no clock trait. Durations are passed in as arguments, and exactly one decision
-reads elapsed time: the readiness budget (spec001 §4) takes one monotonic start per query, with
-the clock entering at a private seam — production supplies `Instant::now`, tests inject a fake.
-That seam arrived with the 9z0 readiness repair, whose deterministic boundary tests needed an
-injected clock; until then nothing read wall time to make a decision. If a second decision site
-appears, that is the moment to weigh a shared clock trait — not before.
+There is still no clock trait. Durations are passed in as arguments. Two decisions read elapsed
+time, both serving one shared readiness budget (spec001 §4): `BrokerSet::status_with` runs the
+set-level `ProbeBudget` checks and `readiness::probe_with` the socket-operation checks, and each
+takes its own injected clock seam — production supplies `Instant::now` at both, and the 9z0
+deterministic boundary tests inject a fake at each. If more decision sites appear, that is the
+moment to weigh a shared clock trait — not before.
 
 ### Workspace files belong to the invocation
 
