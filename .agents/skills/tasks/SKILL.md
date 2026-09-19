@@ -57,6 +57,23 @@ new tasks from Git branches or request a legacy ID. `plasmosome-NNN` identifies 
 Spec and intent IDs remain three-digit strings in their separate Git namespaces. Their templates
 remain in `docs/templates/`; there is no task template file.
 
+A planner dispatch onto an approved intent with no spec files a standalone carrier instead: a
+chore-typed record that is coordination, not queue work.
+
+```shell
+./tools/work-state create --type chore --title 'Planner dispatch: intent NNN' \
+  --labels planner-dispatch --metadata '{"intent_ids":["NNN"]}'
+```
+
+Never give it `needs-plan` or `planned`, never claim it, and never set `metadata.spec_ids` on
+it. Enumerate first with `./tools/work-state list --label planner-dispatch --limit 0 --json`
+and reuse an existing non-closed carrier naming the subject instead of creating a second. It
+closes only with a terminal reason — an accepted spec serving that intent exists on main (the
+reason names its PR), an explicit cancellation reason, or duplicate reconciliation naming the
+surviving carrier — and a closed carrier is never reopened. Entries on a carrier are
+append-only: a wrong entry is superseded by a later dated entry that says so, and
+`./tools/work-state history ID --limit 0 --json` keeps what was written when.
+
 Use native `update ID --description`, `--design`, `--acceptance` and `--append-notes` for task
 content. `--body-file`, `--design-file` and `--metadata @file.json` can consume temporary input;
 such inputs are not another authority and are not committed. Preserve migration metadata when

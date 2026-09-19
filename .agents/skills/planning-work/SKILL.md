@@ -42,6 +42,59 @@ Name whether this assignment is planning, implementation or review repair. The d
 actor follows spec016's claim or existing-owner transition for that phase before work. A losing
 claim ends that dispatch; an orchestrator's message does not override Beads ownership.
 
+Planner dispatches leave a record before any launch; [spec019](../../../docs/specs/019-dispatched-planners-leave-a-trace.md)
+is the contract and these are its operations. The dispatch is written on its **carrier**, the
+record of the work the planner will update. One carrier per subject: enumerate first and reuse
+an existing non-closed carrier naming the subject.
+
+- Design planner for a draft spec no task implements: enumerate non-closed tasks naming that
+  spec (full `./tools/work-state list --all --limit 0 --json`); file the task when none exists
+  (filing against a draft spec is valid) and it is the carrier.
+- Spec author for a mapped task lacking its governing spec: the task is the carrier and the
+  dispatch is a dated note on it; the planner takes no phase and no claim.
+- Spec author for an approved intent with no spec: the carrier is a standalone chore record,
+  shaped in the tasks skill; the planner may not invent a task.
+
+Before launching, append a dated dispatch entry to the carrier naming the subject, the planner's
+actor, the dispatching sweep's actor, the UTC time and a recovery contact; a replacement entry
+names the earlier entry it succeeds. Launch only after reading the entry back. A refused or
+failed write is re-read first, because a write can commit and still report failure: entry
+present, the dispatch stands; absent, no launch, and a retry appends on the same carrier.
+
+The planner's first act on the subject is a dated start receipt citing the dispatch entry, with
+its actor and session; on stopping it appends a dated outcome citing that entry. A spec author
+names the spec PR or the failure; a design planner names the published design and acceptance and
+the phase it left, or the failure. A planner that cannot write after retrying stops and reports
+through the recovery contact rather than working invisibly; whoever stops a planner records its
+outcome.
+
+A subject that is pending, started, unresolved, or completed with its spec PR not yet merged
+accepted is in flight: dispatch nothing, and append a dated skip entry citing the carrier ID and
+the deciding entry. A failed skip append is retried, then dropped; it bears no state.
+
+Only entries on the carrier move a dispatch between four states: pending launch, started,
+completed and positively dead; the owning dispatch is the earliest live entry in native history
+order. Death evidence is only a planner final report, a dispatcher-observed launch failure, or a
+supervisor-observed termination, each naming observer, observation and time. Silence, elapsed
+time, a missing branch, worktree or PR, failed forge queries and timeouts prove nothing: a sweep
+that finds only absence reports the subject unresolved to the recovery contact and records that
+report on the carrier.
+
+After a positively dead entry a sweep appends exactly one replacement citing it, then launches;
+where a native claim exists it is recovered through spec016 before claiming.
+
+The launcher's lock covers one command, so two sweeps can both record a dispatch. Of two live
+dispatch entries the earliest owns: the later dispatcher retracts its own entry first —
+retrying, then escalating, a failed retraction — and stops its planner only once the retraction
+is recorded. Of two carriers naming one intent, or two tasks filed for one draft spec, the
+earliest-created is the carrier: the moved dispatch and its entries reappear on the survivor as
+dated restatements citing the closed record, the duplicate closes only after every restatement
+is observed there, and classification reads the survivor alone; a partial transfer is in
+flight, never half-free.
+
+These guarantees hold for one clone's linked worktrees; nothing here prevents simultaneous
+dispatch or fences independent clones.
+
 For review repairs, dispatch by task ID and PR URL: let the author read the actual threads,
 rather than replacing the reviewer's words with an orchestrator's transcription. Review findings
 remain on the PR, with task notes linking the durable result.
