@@ -56,7 +56,8 @@ newline-terminated frame, and at most 1,048,576 raw bytes — the same magnitude
 cap — may precede that newline; the first excess byte is refused as `malformed` without draining
 the peer. Silence, an incomplete frame, or end of file before the newline is `timed_out`, even
 when the unterminated bytes look like JSON. There is no unconditional wall-clock guarantee:
-scheduling and syscall overshoot are finite, paid from the same budget, and bounded by it.
+scheduling and syscall overshoot can exceed the budget, but they do not renew it, and any late
+verdict is refused.
 
 Shutdown reaches the probes. SIGINT or SIGTERM cancels the query in flight: the control
 conversation closes with no reply and no invented wire state, and teardown begins without waiting
