@@ -42,7 +42,7 @@ Main records task/PR/head, authorized budget and purpose, including extra indepe
 
 Resume original authors; return missing authority to its author. Owner-approval drafts wait correctly. Reconcile worktrees/claims with live authors before dispatch; unresolved, detached or unreachable work is not free. Preserve blocked claims/uncertain trees/databases; remove only finished clean trees after their owner is done, by actual path. Compare write sets, not metadata read references.
 
-Inspect the full approved intent/spec/task graph under [spec012](../../docs/specs/012-how-work-enters-the-tree.md), including its document/chain faults; an empty ready list or existing links do not prove delivery/exhaustion. Missing mappings are repair work, not invented goals/approval gates. Prefer eligible planned work under tasks’ priority rules; revalidate full native plan/acceptance/authority and delegate by complete ID under planning-work.
+Inspect the full approved intent/spec/task graph under [spec012](../../docs/specs/012-how-work-enters-the-tree.md), including its document/chain faults; an empty ready list or existing links do not prove delivery/exhaustion. Missing mappings are repair work, not invented goals/approval gates. Planner dispatches follow spec019’s carrier rule and entry procedure through planning-work; standalone carriers enumerate by the `planner-dispatch` label.
 
 Distinguish blocked implementation from authorable prerequisites. Planners own design; tasks' existing spec/intent gates govern acceptance, not invented owner gates. Advance investigations into the next deliverable; old assignment scope is not permanent prohibition. Honor refusals/no-question requests; record exact owner-only decisions and pursue unrelated authorized work.
 
