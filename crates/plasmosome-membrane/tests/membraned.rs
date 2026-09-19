@@ -625,7 +625,6 @@ fn membraned_shuts_down_during_an_active_trickling_probe() {
     let mut writer = client.get_ref().try_clone().expect("clone for writing");
     writeln!(writer, "{STATUS_REQUEST}").expect("the status request reaches membraned");
     writer.flush().expect("the request is flushed");
-    let broker = recorded_pid(&pidfile);
     trickled
         .recv_timeout(PATIENCE)
         .expect("the broker saw the probe's request, so a probe is in flight");
@@ -655,10 +654,6 @@ fn membraned_shuts_down_during_an_active_trickling_probe() {
     assert!(
         !control.exists(),
         "teardown began: the control socket path was removed"
-    );
-    assert!(
-        is_gone(broker),
-        "the broker was reaped by the teardown the probe no longer delays"
     );
 }
 

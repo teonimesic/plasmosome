@@ -166,7 +166,15 @@ where
         Err(ProbeStopped::Cancelled) => return Err(Cancelled),
         Err(ProbeStopped::TimedOut) => return Ok(spent()),
     }
-    exchange(stream, STATUS_REQUEST, budget, now, wait)
+    let verdict = exchange(stream, STATUS_REQUEST, budget, &now, wait);
+    // One gate before anything leaves the probe, whichever path produced it:
+    // cancellation wins over expiry and over every verdict, and nothing
+    // survives an allowance it outlived.
+    match budget.remaining_at(now()) {
+        Err(ProbeStopped::Cancelled) => Err(Cancelled),
+        Err(ProbeStopped::TimedOut) => Ok(spent()),
+        Ok(_) => verdict,
+    }
 }
 
 fn exchange<S, N, W>(
