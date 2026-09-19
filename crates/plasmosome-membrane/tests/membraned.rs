@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -423,5 +423,189 @@ fn membraned_exits_nonzero_naming_the_failure() {
         String::from_utf8_lossy(&occupied.stderr).contains("taken.uds"),
         "the refusal names the path it could not bind, got: {}",
         String::from_utf8_lossy(&occupied.stderr)
+    );
+
+    let live = dir.path().join("live.uds");
+    let holder = UnixListener::bind(&live).expect("the test binds a live control socket");
+    let held = dir.path().join("live.json");
+    write_config(&held, &json!({"control_socket": live}));
+    let refused = membraned(&[&held]).output().expect("membraned runs");
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "a live daemon's listening socket refuses the start"
+    );
+    assert!(
+        UnixStream::connect(&live).is_ok(),
+        "the listening socket that refused the start is still addressable"
+    );
+    drop(holder);
+
+    let link = dir.path().join("link.uds");
+    std::os::unix::fs::symlink("nowhere.uds", &link)
+        .expect("the test plants a dangling leaf symlink");
+    let linked = dir.path().join("link.json");
+    write_config(&linked, &json!({"control_socket": link}));
+    let refused = membraned(&[&linked]).output().expect("membraned runs");
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "a control path holding a symlink, not a socket, refuses the start"
+    );
+    let planted = std::fs::symlink_metadata(&link).expect("the symlink survives the refusal");
+    assert!(
+        planted.file_type().is_symlink()
+            && std::fs::read_link(&link).expect("the link target is readable")
+                == Path::new("nowhere.uds"),
+        "the refusal preserves the planted symlink and its exact target"
+    );
+}
+
+#[test]
+fn membraned_leaves_a_replacement_settled_at_its_socket_path_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let control = dir.path().join("c.uds");
+    let config = dir.path().join("config.json");
+    write_config(&config, &json!({"control_socket": control}));
+
+    let mut daemon = start(&config);
+    let mut client = addressable(&control);
+    assert_eq!(
+        ask(&mut client).pointer("/result/state"),
+        Some(&json!("empty")),
+        "the daemon answers before its pathname is exchanged"
+    );
+    drop(client);
+
+    let original = std::fs::symlink_metadata(&control).expect("the bound socket is on disk");
+    let saved = dir.path().join("saved.uds");
+    std::fs::rename(&control, &saved).expect("the original socket is renamed");
+
+    let sentinel = b"a caller's regular file, settled after the first status answer";
+    std::fs::write(&control, sentinel).expect("the sentinel is written");
+
+    daemon.signal(libc::SIGTERM);
+    let status = daemon.wait_for_exit(PATIENCE);
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a signalled shutdown is a clean one"
+    );
+
+    let left = std::fs::symlink_metadata(&control).expect("the replacement survives shutdown");
+    assert!(
+        left.file_type().is_file(),
+        "shutdown removes the socket the daemon bound, not an entry a caller settled at the \
+         pathname afterwards"
+    );
+    assert_eq!(
+        std::fs::read(&control)
+            .expect("the sentinel is readable")
+            .as_slice(),
+        sentinel.as_slice(),
+        "the replacement's contents are preserved exactly"
+    );
+    let renamed = std::fs::symlink_metadata(&saved).expect("the renamed original survives");
+    assert!(
+        renamed.file_type().is_socket()
+            && (renamed.dev(), renamed.ino()) == (original.dev(), original.ino()),
+        "the original socket, renamed away by the caller, survives as the very socket the \
+         daemon bound"
+    );
+}
+
+#[test]
+fn membraned_leaves_a_symlink_settled_at_its_socket_path_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let control = dir.path().join("c.uds");
+    let config = dir.path().join("config.json");
+    write_config(&config, &json!({"control_socket": control}));
+
+    let mut daemon = start(&config);
+    let mut client = addressable(&control);
+    assert_eq!(
+        ask(&mut client).pointer("/result/state"),
+        Some(&json!("empty")),
+        "the daemon answers before its pathname is exchanged"
+    );
+    drop(client);
+
+    let saved = dir.path().join("saved.uds");
+    std::fs::rename(&control, &saved).expect("the original socket is renamed");
+    std::os::unix::fs::symlink("saved.uds", &control).expect("the test settles a leaf symlink");
+
+    daemon.signal(libc::SIGTERM);
+    let status = daemon.wait_for_exit(PATIENCE);
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a signalled shutdown is a clean one"
+    );
+
+    let left = std::fs::symlink_metadata(&control).expect("the symlink survives shutdown");
+    assert!(
+        left.file_type().is_symlink(),
+        "the settled symlink is preserved: the teardown check never follows the leaf entry"
+    );
+    assert_eq!(
+        std::fs::read_link(&control).expect("the link target is readable"),
+        PathBuf::from("saved.uds"),
+        "the exact link target is preserved"
+    );
+    assert!(
+        std::fs::symlink_metadata(&saved)
+            .expect("the renamed original survives")
+            .file_type()
+            .is_socket(),
+        "the symlink's target — the original socket — is not removed through the link"
+    );
+}
+
+#[test]
+fn membraned_leaves_a_dangling_symlink_settled_at_its_socket_path_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let control = dir.path().join("c.uds");
+    let config = dir.path().join("config.json");
+    write_config(&config, &json!({"control_socket": control}));
+
+    let mut daemon = start(&config);
+    let mut client = addressable(&control);
+    assert_eq!(
+        ask(&mut client).pointer("/result/state"),
+        Some(&json!("empty")),
+        "the daemon answers before its pathname is exchanged"
+    );
+    drop(client);
+
+    let saved = dir.path().join("saved.uds");
+    std::fs::rename(&control, &saved).expect("the original socket is renamed");
+    std::os::unix::fs::symlink("nowhere.uds", &control)
+        .expect("the test settles a dangling leaf symlink");
+
+    daemon.signal(libc::SIGTERM);
+    let status = daemon.wait_for_exit(PATIENCE);
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a signalled shutdown is a clean one"
+    );
+
+    let left = std::fs::symlink_metadata(&control).expect("the symlink survives shutdown");
+    assert!(
+        left.file_type().is_symlink()
+            && std::fs::read_link(&control).expect("the link target is readable")
+                == Path::new("nowhere.uds"),
+        "a dangling leaf symlink is preserved exactly: a missing target is not a missing entry"
+    );
+    assert!(
+        !dir.path().join("nowhere.uds").exists(),
+        "the dangling target stays absent"
+    );
+    assert!(
+        std::fs::symlink_metadata(&saved)
+            .expect("the renamed original survives")
+            .file_type()
+            .is_socket(),
+        "the original socket stays allocated under the caller's new name"
     );
 }
