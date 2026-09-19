@@ -33,13 +33,6 @@ child.kill()?;
 
 Tests: `cargo test -p plasmosome-membrane`
 
-The readiness-verb test reads spec001 through the guards crate's test-only `check_workspace`
-boundary. Cargo selects the package cwd; a directly invoked test binary reads the workspace
-selected by its actual cwd and needs `CARGO` or `cargo` on `PATH`. Relocated build output reports
-`StaleTarget` alongside any spec mismatch and requires rebuilding the checking component and
-consumer binaries for that workspace. Production readiness does not locate a checkout or depend
-on the guards crate. The guards crate's `workspace_roots` regression exercises both real consumers.
-
 ## Readiness is an answered query
 
 A supervisor is ready when its control socket **answers** a control-`status` request — not when
@@ -50,11 +43,24 @@ treats accept-without-answer as not ready.
 
 The broker set inherits the same rule. It answers ready only once every broker answers its own
 control socket, and it asks again on every call rather than caching a past yes. One `status` call
-shares one budget across the whole set: brokers are asked in turn, each given whatever time
-is left, and no further probe starts once that budget is spent. This avoids giving every broker
-a fresh full deadline; it is not a strict bound on elapsed time. The set cannot interrupt a probe
-that overshoots its allowance, and the real probe connects with a blocking socket call before
-setting read/write timeouts. A healthy answer still costs the sum of the sequential probes.
+has **one fixed budget** for the whole set: the clock starts once and nothing renews it, and each
+probe — connection, request, reply, classification — spends the same allowance. A broker cannot
+stretch the call by trickling its reply, dribbling an oversized one, or withholding the frame
+terminator, and a verdict that finishes after the budget is refused, never blessed ready. A broker
+the budget never reached is `deadline_spent`.
+
+The probe connects with a nonblocking socket and stays nonblocking: waits are requested in slices
+of at most 25ms of what is left, partial writes and interrupts never restart the clock, and a
+connect that returns after the budget is discarded unread. A broker reply is the first
+newline-terminated frame, and at most 1,048,576 raw bytes — the same magnitude as the §1 request
+cap — may precede that newline; the first excess byte is refused as `malformed` without draining
+the peer. Silence, an incomplete frame, or end of file before the newline is `timed_out`, even
+when the unterminated bytes look like JSON. There is no unconditional wall-clock guarantee:
+scheduling and syscall overshoot are finite, paid from the same budget, and bounded by it.
+
+Shutdown reaches the probes. SIGINT or SIGTERM cancels the query in flight: the control
+conversation closes with no reply and no invented wire state, and teardown begins without waiting
+out the allowance.
 
 ## Dropping a handle cleans up its managed group
 

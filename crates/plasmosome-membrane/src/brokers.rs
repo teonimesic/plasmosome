@@ -1,14 +1,18 @@
-use crate::readiness::{NotReady, Readiness};
+use crate::readiness::{Cancelled, NotReady, ProbeBudget, ProbeStopped, Readiness};
 use crate::vmm::{SpawnError, VmmChild};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 /// Asks one broker's control socket whether it is serving.
 pub trait Probe {
-    /// Returns what the socket answered within `deadline`. An implementation
+    /// Returns what the socket answered inside the borrowed `budget`, or
+    /// `Err(Cancelled)` when the daemon is shutting down. An implementation
     /// must ask again on every call: an answer kept from last time cannot
-    /// report a broker that has since stopped serving.
-    fn probe(&self, socket: &Path, deadline: Duration) -> Readiness;
+    /// report a broker that has since stopped serving. The budget is the set's
+    /// whole remaining allowance; spending it is reported as
+    /// [`NotReady::TimedOut`] by the implementation, never renewed.
+    fn probe(&self, socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled>;
 }
 
 /// One broker to spawn, and the control socket it answers on.
@@ -161,38 +165,78 @@ impl<P: Probe> BrokerSet<P> {
     }
 
     /// Asks every broker whether it is serving and returns `Ready` only when
-    /// all of them answered ready. Every call asks again. `deadline` is the
-    /// budget for the whole call, not for one broker: each probe is given what
-    /// is left of it, so a set of any size answers within one deadline. A
-    /// broker the budget never reached is `DeadlineSpent`, and an empty set is
-    /// `Empty` — neither is `Ready`.
-    pub fn status(&self, deadline: Duration) -> SetStatus {
+    /// all of them answered ready. Every call asks again. `deadline` is one
+    /// fixed budget for the whole call, not for one broker: the probes share
+    /// the same clock, so a broker cannot extend the call by trickling its
+    /// reply, and a probe that comes back after the budget gets no vote —
+    /// that broker reports timed out. A broker the budget never reached is
+    /// `DeadlineSpent`, and an empty set is `Empty` — neither is `Ready`.
+    ///
+    /// `Err(Cancelled)` is not a broker verdict: the daemon is shutting down,
+    /// the query has no answer, and no wire state is fabricated for it.
+    pub fn status(
+        &self,
+        deadline: Duration,
+        shutdown: &AtomicBool,
+    ) -> Result<SetStatus, Cancelled> {
+        self.status_with(deadline, shutdown, Instant::now)
+    }
+
+    /// The same walk on an injected clock, so tests can place expiry and
+    /// cancellation at exact points without sleeping.
+    fn status_with(
+        &self,
+        deadline: Duration,
+        shutdown: &AtomicBool,
+        now: impl Fn() -> Instant,
+    ) -> Result<SetStatus, Cancelled> {
+        let budget = ProbeBudget::new_at(deadline, shutdown, now());
         if self.brokers.is_empty() {
-            return SetStatus::Empty;
+            return match budget.remaining_at(now()) {
+                Err(ProbeStopped::Cancelled) => Err(Cancelled),
+                Ok(_) | Err(ProbeStopped::TimedOut) => Ok(SetStatus::Empty),
+            };
         }
-        let started = Instant::now();
         let mut asked = Vec::with_capacity(self.brokers.len());
         for broker in &self.brokers {
-            let left = deadline
-                .checked_sub(started.elapsed())
-                .filter(|left| !left.is_zero());
-            let Some(remaining) = left else {
-                return SetStatus::DeadlineSpent {
-                    unreached: broker.name.clone(),
-                    asked,
-                };
-            };
-            if let Readiness::NotReady(reason) =
-                self.prober.probe(&broker.control_socket, remaining)
-            {
-                return SetStatus::NotReady {
-                    broker: broker.name.clone(),
-                    reason,
-                };
+            // Cancellation wins over expiry when one check sees both: a set
+            // that is shutting down has no verdict, spent budget or not.
+            match budget.remaining_at(now()) {
+                Err(ProbeStopped::Cancelled) => return Err(Cancelled),
+                Err(ProbeStopped::TimedOut) => {
+                    return Ok(SetStatus::DeadlineSpent {
+                        unreached: broker.name.clone(),
+                        asked,
+                    });
+                }
+                Ok(_) => {}
             }
-            asked.push(broker.name.clone());
+            let answer = self.prober.probe(&broker.control_socket, &budget);
+            // Whatever the probe came back with, it only counts if the budget
+            // survived it: a late answer is refused as timed out, never
+            // blessed as ready.
+            match budget.remaining_at(now()) {
+                Err(ProbeStopped::Cancelled) => return Err(Cancelled),
+                Err(ProbeStopped::TimedOut) => {
+                    return Ok(SetStatus::NotReady {
+                        broker: broker.name.clone(),
+                        reason: NotReady::TimedOut,
+                    });
+                }
+                Ok(_) => {}
+            }
+            match answer {
+                Err(Cancelled) => return Err(Cancelled),
+                Ok(Readiness::NotReady(reason)) => {
+                    return Ok(SetStatus::NotReady {
+                        broker: broker.name.clone(),
+                        reason,
+                    });
+                }
+                Ok(Readiness::Ready { .. }) => asked.push(broker.name.clone()),
+            }
         }
-        SetStatus::Ready
+        Ok(SetStatus::Ready)
     }
 
     /// The process ids of the set's brokers, in spawn order. Once the set has
@@ -210,9 +254,11 @@ impl<P: Probe> BrokerSet<P> {
 mod tests {
     use super::*;
     use crate::vmm::Launch;
+    use std::cell::Cell;
     use std::collections::HashMap;
+    use std::rc::Rc;
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
-    use std::time::Instant;
 
     const DEADLINE: Duration = Duration::from_millis(500);
 
@@ -247,7 +293,7 @@ mod tests {
     }
 
     impl Probe for ScriptedProbe {
-        fn probe(&self, socket: &Path, _deadline: Duration) -> Readiness {
+        fn probe(&self, socket: &Path, _budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
             let mut scripts = self
                 .scripts
                 .lock()
@@ -256,51 +302,52 @@ mod tests {
                 panic!("no scripted answer for the broker at {}", socket.display())
             });
             if script.len() > 1 {
-                script.remove(0)
+                Ok(script.remove(0))
             } else {
-                script[0].clone()
+                Ok(script[0].clone())
             }
         }
     }
 
     struct CostlyProbe {
         cost: Duration,
-        deadlines: Mutex<Vec<Duration>>,
+        budgets: Mutex<Vec<Option<Duration>>>,
     }
 
     impl CostlyProbe {
         fn costing(cost: Duration) -> CostlyProbe {
             CostlyProbe {
                 cost,
-                deadlines: Mutex::new(Vec::new()),
+                budgets: Mutex::new(Vec::new()),
             }
         }
 
-        fn deadlines_handed_out(&self) -> Vec<Duration> {
-            self.deadlines
+        fn budgets_handed_out(&self) -> Vec<Option<Duration>> {
+            self.budgets
                 .lock()
-                .expect("the record of probe deadlines is uncontended")
+                .expect("the record of probe budgets is uncontended")
                 .clone()
         }
     }
 
     impl Probe for CostlyProbe {
-        fn probe(&self, _socket: &Path, deadline: Duration) -> Readiness {
-            self.deadlines
+        fn probe(&self, _socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
+            let left = budget.remaining().ok();
+            self.budgets
                 .lock()
-                .expect("the record of probe deadlines is uncontended")
-                .push(deadline);
-            std::thread::sleep(self.cost.min(deadline));
-            if self.cost > deadline {
-                return Readiness::NotReady(NotReady::TimedOut);
+                .expect("the record of probe budgets is uncontended")
+                .push(left);
+            std::thread::sleep(self.cost.min(left.unwrap_or_default()));
+            if left.is_none_or(|left| self.cost > left) {
+                return Ok(Readiness::NotReady(NotReady::TimedOut));
             }
-            ready()
+            Ok(ready())
         }
     }
 
     impl Probe for Arc<CostlyProbe> {
-        fn probe(&self, socket: &Path, deadline: Duration) -> Readiness {
-            CostlyProbe::probe(self, socket, deadline)
+        fn probe(&self, socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
+            CostlyProbe::probe(self, socket, budget)
         }
     }
 
@@ -309,9 +356,74 @@ mod tests {
     }
 
     impl Probe for OvershootingProbe {
-        fn probe(&self, _socket: &Path, _deadline: Duration) -> Readiness {
+        fn probe(&self, _socket: &Path, _budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
             std::thread::sleep(self.cost);
-            ready()
+            Ok(ready())
+        }
+    }
+
+    /// A probe that places the shared clock where its script says and answers
+    /// what it says, so the set's checks land on exact clock values.
+    struct TimedProbe {
+        clock: Clock,
+        script: Mutex<Vec<(u64, Readiness)>>,
+    }
+
+    impl TimedProbe {
+        fn scripted(clock: Clock, script: Vec<(u64, Readiness)>) -> TimedProbe {
+            TimedProbe {
+                clock,
+                script: Mutex::new(script),
+            }
+        }
+    }
+
+    impl Probe for TimedProbe {
+        fn probe(&self, _socket: &Path, _budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
+            let mut script = self.script.lock().expect("the probe script is uncontended");
+            let (at, answer) = if script.len() > 1 {
+                script.remove(0)
+            } else {
+                script[0].clone()
+            };
+            // A real clock never runs backwards, so neither does this one.
+            self.clock.advance_to(at);
+            Ok(answer)
+        }
+    }
+
+    /// The injected clock for `status_with`: every read ticks one millisecond,
+    /// so the set's own checks — pre-entry, post-probe — each spend a
+    /// millisecond, while scripted probes place the clock exactly.
+    #[derive(Clone)]
+    struct Clock {
+        base: Instant,
+        ms: Rc<Cell<u64>>,
+    }
+
+    impl Clock {
+        fn new() -> Clock {
+            Clock {
+                base: Instant::now(),
+                ms: Rc::new(Cell::new(0)),
+            }
+        }
+
+        fn now(&self) -> impl Fn() -> Instant + '_ {
+            let ms = Rc::clone(&self.ms);
+            let base = self.base;
+            move || {
+                let next = ms.get() + 1;
+                ms.set(next);
+                base.checked_add(Duration::from_millis(next))
+                    .expect("the test clock stays in range")
+            }
+        }
+
+        fn advance_to(&self, ms: u64) {
+            if ms > self.ms.get() {
+                self.ms.set(ms);
+            }
         }
     }
 
@@ -357,6 +469,7 @@ mod tests {
     #[test]
     fn a_set_is_ready_only_when_every_broker_answers() {
         let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
         let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
 
         let all_answering = ScriptedProbe::new()
@@ -365,8 +478,8 @@ mod tests {
         let serving =
             BrokerSet::spawn(specs.clone(), forking(), all_answering).expect("every broker forks");
         assert_eq!(
-            serving.status(DEADLINE),
-            SetStatus::Ready,
+            serving.status(DEADLINE, &flag),
+            Ok(SetStatus::Ready),
             "a set whose brokers all answer ready must be ready"
         );
 
@@ -376,13 +489,13 @@ mod tests {
         let held_back =
             BrokerSet::spawn(specs.clone(), forking(), one_short).expect("every broker forks");
         assert_eq!(
-            held_back.status(DEADLINE),
-            SetStatus::NotReady {
+            held_back.status(DEADLINE, &flag),
+            Ok(SetStatus::NotReady {
                 broker: "dnsd".to_string(),
                 reason: NotReady::Reported {
                     state: "starting".to_string()
                 }
-            },
+            }),
             "`dnsd` is not serving, so the set must not report ready"
         );
     }
@@ -390,22 +503,23 @@ mod tests {
     #[test]
     fn a_broker_that_stops_answering_flips_the_set_to_not_ready() {
         let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
         let only = spec(dir.path(), "egressd");
         let socket = only.control_socket.clone();
         let prober = ScriptedProbe::new().answering(&socket, vec![ready(), gone(&socket)]);
         let set = BrokerSet::spawn(vec![only], forking(), prober).expect("the broker forks");
 
         assert_eq!(
-            set.status(DEADLINE),
-            SetStatus::Ready,
+            set.status(DEADLINE, &flag),
+            Ok(SetStatus::Ready),
             "`egressd` answered ready, so the set is ready"
         );
         assert_eq!(
-            set.status(DEADLINE),
-            SetStatus::NotReady {
+            set.status(DEADLINE, &flag),
+            Ok(SetStatus::NotReady {
                 broker: "egressd".to_string(),
                 reason: NotReady::Unreachable { path: socket }
-            },
+            }),
             "`egressd` stopped answering, so the set must ask again and report it rather than repeat the ready it got before"
         );
     }
@@ -413,6 +527,7 @@ mod tests {
     #[test]
     fn a_set_reports_which_broker_is_not_ready() {
         let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
         let specs = vec![
             spec(dir.path(), "egressd"),
             spec(dir.path(), "dnsd"),
@@ -424,8 +539,8 @@ mod tests {
             .answering(&specs[2].control_socket, vec![ready()]);
         let set = BrokerSet::spawn(specs, forking(), prober).expect("every broker forks");
 
-        match set.status(DEADLINE) {
-            SetStatus::NotReady { broker, reason } => {
+        match set.status(DEADLINE, &flag) {
+            Ok(SetStatus::NotReady { broker, reason }) => {
                 assert_eq!(
                     broker, "dnsd",
                     "the set must name the broker holding it back"
@@ -466,6 +581,7 @@ mod tests {
     #[test]
     fn one_deadline_covers_the_whole_set_however_many_brokers_it_has() {
         let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
         let names = [
             "egressd",
             "dnsd",
@@ -483,13 +599,13 @@ mod tests {
         let budget = Duration::from_millis(200);
 
         let started = Instant::now();
-        let status = set.status(budget);
+        let status = set.status(budget, &flag);
         let elapsed = started.elapsed();
 
-        let handed_out = prober.deadlines_handed_out();
+        let handed_out = prober.budgets_handed_out();
         assert!(
             handed_out.windows(2).all(|pair| pair[1] < pair[0]),
-            "each probe must be given what is left of the set's budget, but the deadlines handed out were {handed_out:?}"
+            "each probe must see what is left of the set's budget, but the budgets handed out were {handed_out:?}"
         );
         assert!(
             elapsed < budget * 2,
@@ -497,64 +613,175 @@ mod tests {
             names.len()
         );
         assert!(
-            !status.is_ready(),
+            !status.as_ref().is_ok_and(SetStatus::is_ready),
             "the budget ran out before every broker had answered, so the set cannot be ready, got {status:?}"
+        );
+    }
+
+    #[test]
+    fn a_probe_that_overshoots_the_budget_gets_no_vote() {
+        let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
+        let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
+        let prober = OvershootingProbe {
+            cost: Duration::from_millis(150),
+        };
+        let set = BrokerSet::spawn(specs, forking(), prober).expect("every broker forks");
+
+        let status = set.status(Duration::from_millis(100), &flag);
+
+        assert!(
+            !status.as_ref().is_ok_and(SetStatus::is_ready),
+            "a set with an overshooting broker cannot be ready"
+        );
+        assert_eq!(
+            status,
+            Ok(SetStatus::NotReady {
+                broker: "egressd".to_string(),
+                reason: NotReady::TimedOut,
+            }),
+            "`egressd` spent the whole budget and answered late, so its ready is refused and it reports timed out"
         );
     }
 
     #[test]
     fn a_broker_the_budget_never_reached_is_named_with_the_ones_that_spent_it() {
         let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
         let specs = vec![
             spec(dir.path(), "egressd"),
             spec(dir.path(), "dnsd"),
             spec(dir.path(), "credentiald"),
         ];
-        let prober = OvershootingProbe {
-            cost: Duration::from_millis(150),
-        };
+        let clock = Clock::new();
+        // `egressd` answers ready at 99ms of a 100ms budget; the checks around
+        // the walk spend the last millisecond, so `dnsd` is never entered.
+        let prober = TimedProbe::scripted(
+            clock.clone(),
+            vec![(99, ready()), (0, ready()), (0, ready())],
+        );
         let set = BrokerSet::spawn(specs, forking(), prober).expect("every broker forks");
 
-        let status = set.status(Duration::from_millis(100));
+        let status = set.status_with(Duration::from_millis(100), &flag, clock.now());
 
         assert!(
-            !status.is_ready(),
+            !status.as_ref().is_ok_and(SetStatus::is_ready),
             "a set with a broker that was never asked cannot be ready"
         );
-        match status {
-            SetStatus::DeadlineSpent { unreached, asked } => {
-                assert_eq!(
-                    unreached, "dnsd",
-                    "the set must name the broker the budget never reached"
-                );
-                assert_eq!(
-                    asked,
-                    vec!["egressd".to_string()],
-                    "the set must name the brokers that spent the budget, so the last of them is the one that ran the clock out"
-                );
-            }
-            other => panic!(
-                "`egressd` spent the whole budget, so `dnsd` was never asked, but the set answered {other:?}"
-            ),
-        }
+        assert_eq!(
+            status,
+            Ok(SetStatus::DeadlineSpent {
+                unreached: "dnsd".to_string(),
+                asked: vec!["egressd".to_string()],
+            }),
+            "expiry between completed probes names the broker the budget never reached"
+        );
+    }
+
+    #[test]
+    fn a_last_broker_that_answers_at_expiry_reports_timed_out() {
+        let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
+        let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
+        let clock = Clock::new();
+        // `egressd` answers in time; `dnsd`, the last broker, places its ready
+        // far past the allowance.
+        let prober = TimedProbe::scripted(clock.clone(), vec![(0, ready()), (150, ready())]);
+        let set = BrokerSet::spawn(specs, forking(), prober).expect("every broker forks");
+
+        let status = set.status_with(Duration::from_millis(100), &flag, clock.now());
+
+        assert_eq!(
+            status,
+            Ok(SetStatus::NotReady {
+                broker: "dnsd".to_string(),
+                reason: NotReady::TimedOut,
+            }),
+            "a ready that landed on the budget's last moment is a late answer, and the set refuses it"
+        );
     }
 
     #[test]
     fn a_set_with_no_brokers_is_never_ready() {
+        let flag = AtomicBool::new(false);
         let set = match BrokerSet::spawn(Vec::new(), forking(), ScriptedProbe::new()) {
             Ok(set) => set,
             Err(failure) => panic!("an empty set spawns nothing and cannot fail: {failure}"),
         };
 
         assert_eq!(
-            set.status(Duration::from_millis(50)),
-            SetStatus::Empty,
+            set.status(Duration::from_millis(50), &flag),
+            Ok(SetStatus::Empty),
             "a cell with no brokers has nothing enforcing and must not answer ready"
         );
         assert!(
-            !set.status(Duration::from_millis(50)).is_ready(),
+            !set.status(Duration::from_millis(50), &flag)
+                .as_ref()
+                .is_ok_and(SetStatus::is_ready),
             "an empty set must not read as ready"
         );
+    }
+
+    #[test]
+    fn a_set_with_no_brokers_still_reports_cancellation() {
+        let flag = AtomicBool::new(true);
+        let set = BrokerSet::spawn(Vec::new(), forking(), ScriptedProbe::new())
+            .expect("an empty set spawns nothing");
+        assert_eq!(
+            set.status(Duration::from_secs(10), &flag),
+            Err(Cancelled),
+            "shutdown is checked even when there is nothing to ask"
+        );
+    }
+
+    #[test]
+    fn a_spent_budget_names_the_first_broker_unreached_with_nothing_asked() {
+        let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
+        let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
+        let prober = ScriptedProbe::new().answering(&specs[0].control_socket, vec![ready()]);
+        let set = BrokerSet::spawn(specs, forking(), prober).expect("every broker forks");
+
+        let status = set.status(Duration::ZERO, &flag);
+
+        assert_eq!(
+            status,
+            Ok(SetStatus::DeadlineSpent {
+                unreached: "egressd".to_string(),
+                asked: Vec::new(),
+            }),
+            "a zero budget enters no broker at all"
+        );
+    }
+
+    #[test]
+    fn a_shutdown_during_a_probe_cancels_the_whole_status() {
+        let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = Arc::new(AtomicBool::new(false));
+        let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
+        let cancelling = CancellingProbe {
+            flag: Arc::clone(&flag),
+        };
+        let set = BrokerSet::spawn(specs, forking(), cancelling).expect("every broker forks");
+
+        assert_eq!(
+            set.status(DEADLINE, &flag),
+            Err(Cancelled),
+            "a shutdown seen inside a probe cancels the query: no verdict, no next broker"
+        );
+    }
+
+    /// A probe that flips the shutdown flag and reports cancellation, the way
+    /// a real probe observes the daemon's flag mid-query.
+    struct CancellingProbe {
+        flag: Arc<AtomicBool>,
+    }
+
+    impl Probe for CancellingProbe {
+        fn probe(&self, _socket: &Path, _budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
+            self.flag.store(true, Ordering::Relaxed);
+            Err(Cancelled)
+        }
     }
 
     #[test]

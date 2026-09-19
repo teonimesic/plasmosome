@@ -6,12 +6,9 @@ use std::process::{Command, Output};
 use plasmosome_guards::check_workspace;
 
 const PUBLICATION: &str = "only_the_held_names_are_publishable_to_a_registry";
-const READINESS: &str =
-    "readiness::tests::the_probe_asks_for_the_verb_the_control_protocol_spec_names";
 const UNHELD: &str = "plasmosome-backend";
-const CHANGED_VERB: &str = "membrane.workspace_root_regression_copy_only";
-const SPEC: &str = "docs/specs/001-control-protocol.md";
 
+#[derive(Clone)]
 struct Consumer {
     executable: PathBuf,
     filter: &'static str,
@@ -47,7 +44,7 @@ fn copy_tree(source: &Path, destination: &Path) {
 
 fn copy_source(source: &Path, destination: &Path) {
     fs::create_dir_all(destination.join("docs/specs")).expect("the fixture spec directory exists");
-    for name in ["Cargo.toml", "Cargo.lock", "crates", SPEC] {
+    for name in ["Cargo.toml", "Cargo.lock", "crates"] {
         copy_tree(&source.join(name), &destination.join(name));
     }
 }
@@ -71,7 +68,7 @@ fn transcript(output: &Output) -> String {
     )
 }
 
-fn build_consumers(root: &Path, target: &Path) -> [Consumer; 2] {
+fn build_consumers(root: &Path, target: &Path) -> Vec<Consumer> {
     assert!(
         !target.exists(),
         "each compilation uses an unused owned target"
@@ -84,9 +81,6 @@ fn build_consumers(root: &Path, target: &Path) -> [Consumer; 2] {
             "plasmosome-guards",
             "--test",
             "workspace_guards",
-            "-p",
-            "plasmosome-membrane",
-            "--lib",
             "--no-run",
             "--message-format=json",
         ])
@@ -94,7 +88,6 @@ fn build_consumers(root: &Path, target: &Path) -> [Consumer; 2] {
         .expect("Cargo compiles the actual consumer test executables");
     assert!(output.status.success(), "{}", transcript(&output));
     let mut publication = None;
-    let mut readiness = None;
     for line in output.stdout.split(|byte| *byte == b'\n') {
         let Ok(artifact) = serde_json::from_slice::<serde_json::Value>(line) else {
             continue;
@@ -107,7 +100,6 @@ fn build_consumers(root: &Path, target: &Path) -> [Consumer; 2] {
         };
         let slot = match artifact["target"]["name"].as_str() {
             Some("workspace_guards") => &mut publication,
-            Some("plasmosome_membrane") => &mut readiness,
             _ => continue,
         };
         assert_eq!(
@@ -116,33 +108,29 @@ fn build_consumers(root: &Path, target: &Path) -> [Consumer; 2] {
         );
         assert!(slot.replace(PathBuf::from(executable)).is_none());
     }
-    [
-        Consumer {
-            executable: publication.expect("Cargo reports the publication integration executable"),
-            filter: PUBLICATION,
-            violation: UNHELD,
-        },
-        Consumer {
-            executable: readiness.expect("Cargo reports the membrane unit-test executable"),
-            filter: READINESS,
-            violation: CHANGED_VERB,
-        },
-    ]
+    [Consumer {
+        executable: publication.expect("Cargo reports the publication integration executable"),
+        filter: PUBLICATION,
+        violation: UNHELD,
+    }]
+    .to_vec()
 }
 
-fn copied_consumers(consumers: &[Consumer; 2], destination: &Path) -> [Consumer; 2] {
+fn copied_consumers(consumers: &[Consumer], destination: &Path) -> Vec<Consumer> {
     fs::create_dir_all(destination).expect("the copied binary directory exists");
-    std::array::from_fn(|index| {
-        let original = &consumers[index];
-        let executable = destination.join(original.executable.file_name().unwrap());
-        fs::copy(&original.executable, &executable)
-            .expect("the linked executable is copied unchanged");
-        Consumer {
-            executable,
-            filter: original.filter,
-            violation: original.violation,
-        }
-    })
+    consumers
+        .iter()
+        .map(|original| {
+            let executable = destination.join(original.executable.file_name().unwrap());
+            fs::copy(&original.executable, &executable)
+                .expect("the linked executable is copied unchanged");
+            Consumer {
+                executable,
+                filter: original.filter,
+                violation: original.violation,
+            }
+        })
+        .collect()
 }
 
 fn run(consumer: &Consumer, cwd: &Path, target: &Path, manifest: Option<&Path>) -> Output {
@@ -228,36 +216,17 @@ fn observe(
 }
 
 fn mutate_copy(root: &Path, consumer: &Consumer) -> (PathBuf, String) {
-    let path = if consumer.filter == PUBLICATION {
-        root.join("crates/plasmosome-backend/Cargo.toml")
-    } else {
-        root.join(SPEC)
-    };
+    assert_eq!(
+        consumer.filter, PUBLICATION,
+        "one consumer drives the mutation"
+    );
+    let path = root.join("crates/plasmosome-backend/Cargo.toml");
     let original = fs::read_to_string(&path).expect("the actual consumer input is readable");
-    let changed = if consumer.filter == PUBLICATION {
-        let manifest: toml::Value = original.parse().expect("the member manifest is valid TOML");
-        assert_eq!(manifest["package"]["name"].as_str(), Some(UNHELD));
-        assert_eq!(manifest["package"]["publish"].as_bool(), Some(false));
-        assert_eq!(original.matches("publish = false").count(), 1);
-        original.replacen("publish = false", "publish = [\"crates-io\"]", 1)
-    } else {
-        let section = original
-            .split("\n## ")
-            .find(|section| section.starts_with("4. Controller"))
-            .expect("spec001 names the controller-to-membrane contract");
-        let mut bullets = section
-            .lines()
-            .filter(|line| line.contains("the F9 readiness probe"));
-        let bullet = bullets.next().expect("the F9 readiness bullet exists");
-        assert!(
-            bullets.next().is_none(),
-            "the F9 readiness bullet is unique"
-        );
-        let verb = bullet.split('`').nth(1).expect("the verb is quoted");
-        assert!(!original.contains(CHANGED_VERB));
-        let changed_bullet = bullet.replacen(&format!("`{verb}`"), &format!("`{CHANGED_VERB}`"), 1);
-        original.replacen(bullet, &changed_bullet, 1)
-    };
+    let manifest: toml::Value = original.parse().expect("the member manifest is valid TOML");
+    assert_eq!(manifest["package"]["name"].as_str(), Some(UNHELD));
+    assert_eq!(manifest["package"]["publish"].as_bool(), Some(false));
+    assert_eq!(original.matches("publish = false").count(), 1);
+    let changed = original.replacen("publish = false", "publish = [\"crates-io\"]", 1);
     fs::write(&path, changed).expect("only the copy's consumer input changes");
     (path, original)
 }
@@ -391,11 +360,7 @@ fn prebuilt_real_consumers_inspect_the_invocation_tree_but_cannot_certify_a_copy
             command
                 .args(["test", "--locked", "--manifest-path"])
                 .arg(b.join("Cargo.toml"));
-            if consumer.filter == PUBLICATION {
-                command.args(["-p", "plasmosome-guards", "--test", "workspace_guards"]);
-            } else {
-                command.args(["-p", "plasmosome-membrane", "--lib"]);
-            }
+            command.args(["-p", "plasmosome-guards", "--test", "workspace_guards"]);
             let output = command
                 .args([
                     "--",

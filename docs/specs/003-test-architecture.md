@@ -71,17 +71,22 @@ There is deliberately no mocking-framework dependency. Expectation-style mocks c
 call sequences; a fake that models the contract couples tests to behavior. Hand-built fakes
 only.
 
-There is no clock seam today. Durations are passed in as arguments and nothing reads wall time
-to make a decision. Open question, left open on purpose: if a flaky time-dependent test ever
-appears, that is the moment to add a clock trait — not before.
+There is still no clock trait. Durations are passed in as arguments, and exactly one decision
+reads elapsed time: the readiness budget (spec001 §4) takes one monotonic start per query, with
+the clock entering at a private seam — production supplies `Instant::now`, tests inject a fake.
+That seam arrived with the 9z0 readiness repair, whose deterministic boundary tests needed an
+injected clock; until then nothing read wall time to make a decision. If a second decision site
+appears, that is the moment to weigh a shared clock trait — not before.
 
 ### Workspace files belong to the invocation
 
 Repository-reading tests use one checked boundary in `plasmosome-guards`. It supplies the
 runtime workspace root to the check as a path and owns the final result, including
 [spec013's stale-target refusal](013-what-earns-a-guard.md#workspace-check-validity).
-All four guard test files use it; membrane's readiness-verb test uses the same boundary through
-a dev-dependency. Production readiness does not discover a checkout or acquire this dependency.
+All five guard test files use it. Membrane's readiness-verb test also used this boundary through
+a dev-dependency, until the 9z0 readiness repair removed that spec-text comparison as a
+wording-pinned test; the dev-dependency went with it, and production readiness never discovered
+a checkout or acquired the dependency.
 Fixture paths remain explicit: selecting a hook script in the invocation tree does not change
 the scratch repository in which that script runs.
 
