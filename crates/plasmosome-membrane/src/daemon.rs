@@ -338,7 +338,8 @@ impl Drop for BoundSocket {
 /// writer with authority over the directory can still substitute a victim between them, so this
 /// is ownership-correct cleanup under a coordinated namespace, not race-free protection. Broker
 /// cleanup can report lost authority or operating-system errors; ordinary return alone is not
-/// proof that no residue remains.
+/// proof that no residue remains. The shutdown flag also reaches the broker probes: a status
+/// answer interrupted by shutdown is dropped, never fabricated, and teardown begins.
 /// **What this cannot cover is `SIGKILL` of the daemon itself.** Brokers are their own session
 /// leaders and do not die with their parent, and a killed process runs no destructor, so brokers
 /// can keep running and the socket path stays. No residue observation or recovery verb is
@@ -384,7 +385,8 @@ pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonErro
     )
     .map_err(DaemonError::Spawn)?;
 
-    control::serve(listener, shutdown, || set.status(deadline)).map_err(DaemonError::Listener)?;
+    control::serve(listener, shutdown, || set.status(deadline, shutdown))
+        .map_err(DaemonError::Listener)?;
     Ok(())
 }
 

@@ -5,6 +5,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -458,6 +459,201 @@ fn membraned_exits_nonzero_naming_the_failure() {
             && std::fs::read_link(&link).expect("the link target is readable")
                 == Path::new("nowhere.uds"),
         "the refusal preserves the planted symlink and its exact target"
+    );
+}
+
+fn trickling_broker(
+    socket: PathBuf,
+    spaces: usize,
+    drip: Duration,
+    terminator: Option<&'static str>,
+) -> mpsc::Receiver<()> {
+    let listener = UnixListener::bind(&socket).expect("the test broker binds its control socket");
+    let (rendezvous, received) = mpsc::channel();
+    thread::spawn(move || {
+        while let Ok((mut stream, _)) = listener.accept() {
+            let Ok(reading) = stream.try_clone() else {
+                return;
+            };
+            let mut line = String::new();
+            let _ = BufReader::new(reading).read_line(&mut line);
+            if line.is_empty() {
+                return;
+            }
+            let _ = rendezvous.send(());
+            if drip.is_zero() {
+                if stream.write_all(&vec![b' '; spaces]).is_err() {
+                    return;
+                }
+            } else {
+                for _ in 0..spaces {
+                    thread::sleep(drip);
+                    if stream.write_all(b" ").is_err() {
+                        return;
+                    }
+                }
+            }
+            if let Some(ready_line) = terminator
+                && (stream.write_all(ready_line.as_bytes()).is_err()
+                    || stream.write_all(b"\n").is_err())
+            {
+                return;
+            }
+            let _ = stream.flush();
+        }
+    });
+    received
+}
+
+#[test]
+fn membraned_times_out_a_trickling_broker_instead_of_accepting_a_late_ready() {
+    let dir = tempfile::tempdir().unwrap();
+    let control = dir.path().join("c.uds");
+    let broker_socket = dir.path().join("b0.uds");
+    let pidfile = dir.path().join("b0.pid");
+    let config = dir.path().join("config.json");
+    trickling_broker(
+        broker_socket.clone(),
+        30,
+        Duration::from_millis(20),
+        Some(READY),
+    );
+    write_config(
+        &config,
+        &json!({
+            "control_socket": control,
+            "status_deadline_ms": 100u64,
+            "brokers": [{
+                "name": "egressd",
+                "control_socket": broker_socket,
+                "command": ["sh", "-c", format!("echo $$ > {}; exec sleep 300", pidfile.display())],
+            }],
+        }),
+    );
+
+    let _daemon = start(&config);
+    let mut client = addressable(&control);
+    let started = Instant::now();
+    let answer = ask(&mut client);
+    let elapsed = started.elapsed();
+    eprintln!("trickle probe answer after {elapsed:?}: {answer}");
+    assert_eq!(
+        answer.get("result"),
+        Some(
+            &json!({"ready": false, "state": "not_serving", "broker": "egressd",
+                      "reason": "timed_out"})
+        ),
+        "a broker trickling past the deadline is timed out, never the late ready it would have given"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the query ended near its 100ms budget, not after the trickle: {elapsed:?}"
+    );
+}
+
+#[test]
+fn membraned_refuses_an_oversized_broker_reply_as_malformed() {
+    let dir = tempfile::tempdir().unwrap();
+    let control = dir.path().join("c.uds");
+    let broker_socket = dir.path().join("b0.uds");
+    let pidfile = dir.path().join("b0.pid");
+    let config = dir.path().join("config.json");
+    trickling_broker(
+        broker_socket.clone(),
+        1_048_577,
+        Duration::ZERO,
+        Some(READY),
+    );
+    write_config(
+        &config,
+        &json!({
+            "control_socket": control,
+            "status_deadline_ms": 5_000u64,
+            "brokers": [{
+                "name": "egressd",
+                "control_socket": broker_socket,
+                "command": ["sh", "-c", format!("echo $$ > {}; exec sleep 300", pidfile.display())],
+            }],
+        }),
+    );
+
+    let _daemon = start(&config);
+    let mut client = addressable(&control);
+    let started = Instant::now();
+    let answer = ask(&mut client);
+    let elapsed = started.elapsed();
+    eprintln!("oversize probe answer after {elapsed:?}: {answer}");
+    assert_eq!(
+        answer.get("result"),
+        Some(
+            &json!({"ready": false, "state": "not_serving", "broker": "egressd",
+                      "reason": "malformed"})
+        ),
+        "a reply with more than the cap of bytes before its newline is refused as malformed, \
+         whatever terminated it later"
+    );
+}
+
+#[test]
+fn membraned_shuts_down_during_an_active_trickling_probe() {
+    let dir = tempfile::tempdir().unwrap();
+    let control = dir.path().join("c.uds");
+    let broker_socket = dir.path().join("b0.uds");
+    let pidfile = dir.path().join("b0.pid");
+    let config = dir.path().join("config.json");
+    let trickled = trickling_broker(
+        broker_socket.clone(),
+        400,
+        Duration::from_millis(20),
+        Some(READY),
+    );
+    write_config(
+        &config,
+        &json!({
+            "control_socket": control,
+            "status_deadline_ms": 10_000u64,
+            "brokers": [{
+                "name": "egressd",
+                "control_socket": broker_socket,
+                "command": ["sh", "-c", format!("echo $$ > {}; exec sleep 300", pidfile.display())],
+            }],
+        }),
+    );
+
+    let mut daemon = start(&config);
+    let mut client = addressable(&control);
+    let mut writer = client.get_ref().try_clone().expect("clone for writing");
+    writeln!(writer, "{STATUS_REQUEST}").expect("the status request reaches membraned");
+    writer.flush().expect("the request is flushed");
+    trickled
+        .recv_timeout(PATIENCE)
+        .expect("the broker saw the probe's request, so a probe is in flight");
+
+    let started = Instant::now();
+    daemon.signal(libc::SIGTERM);
+    client
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("the test bounds its own read");
+    let mut reply = String::new();
+    let read = client
+        .read_line(&mut reply)
+        .expect("control EOF arrives within the two-second watchdog");
+    assert_eq!(
+        read, 0,
+        "the conversation closes with no fabricated answer, got {reply:?}"
+    );
+    let status = daemon.wait_for_exit(Duration::from_secs(2));
+    let elapsed = started.elapsed();
+    eprintln!("shutdown during probe: exit={status:?} after {elapsed:?}");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the daemon exits cleanly without waiting out the 10s allowance"
+    );
+    assert!(
+        !control.exists(),
+        "teardown began: the control socket path was removed"
     );
 }
 
