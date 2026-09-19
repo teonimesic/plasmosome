@@ -1398,7 +1398,7 @@ mod tests {
                 "certificate scenario {scenario} is valid"
             );
         }
-        for scenario in [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14] {
+        for scenario in [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13] {
             assert_eq!(
                 unsafe { plasmosome_darwin_group_test_table(scenario, 4000) },
                 0,

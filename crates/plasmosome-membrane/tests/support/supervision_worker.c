@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 static int descriptor(const char *text) {
     char *end = NULL;
@@ -37,6 +38,11 @@ static void descriptor_worker(int ready, int control, const char *liveness_path)
 }
 
 static void named_worker(const char *liveness_path, const char *control_path) {
+    pid_t leader = getppid();
+    struct timespec pause = {0, 1000000};
+    while (getppid() == leader) {
+        nanosleep(&pause, NULL);
+    }
     int liveness = open(liveness_path, O_WRONLY);
     if (liveness < 0) {
         _exit(70);

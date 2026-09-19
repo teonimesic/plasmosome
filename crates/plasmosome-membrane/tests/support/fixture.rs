@@ -20,10 +20,12 @@ static FIXTURE: LazyLock<PathBuf> = LazyLock::new(|| {
     output
 });
 
-/// Returns the path of the supervision worker fixture, compiling it with the
-/// host C compiler once per test process. Tests run this; production builds
-/// of the crate never need a C toolchain for the fixture, because the build
-/// script compiles only the product Darwin helper.
+/// Takes no arguments and returns the path of the supervision worker fixture.
+///
+/// The fixture is compiled once per test process with the host C compiler.
+/// Callers must not remove or replace the returned executable. Production
+/// builds of the crate never compile the fixture; the build script compiles
+/// only the product Darwin helper.
 pub fn supervision_fixture() -> PathBuf {
     FIXTURE.clone()
 }
