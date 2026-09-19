@@ -1,7 +1,7 @@
 ---
 id: 019
 title: A dispatched planner leaves a trace before any push
-status: draft
+status: accepted
 intents: [008]
 ---
 
