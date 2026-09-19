@@ -71,16 +71,18 @@ nothing walks through them upward.
 Before launching, the dispatcher appends a dated **dispatch entry** to the carrier, naming the
 subject, the dispatched planner's actor, the dispatching sweep's actor, the time in UTC, a
 recovery contact, and — for a replacement — the earlier entry it succeeds. The dispatcher
-launches only after that append succeeds; a refused or failed write means no launch and
-leaves no entry, so the subject is as it was before the attempt: the next sweep, or the
-same dispatcher, retries on the same carrier, again appending its entry before any launch.
+launches only after that write is confirmed by reading the entry back from the carrier. A
+refused or failed write is re-read first, because a write can commit and still report
+failure: if the entry is there, the dispatch stands and the planner launches; if it is not,
+the subject is as it was before the attempt, and the retry — by the next sweep or the same
+dispatcher — appends on the same carrier before any launch.
 
 The planner appends a dated **start receipt** to the same carrier as its first act on the
-subject, naming its actor and session and citing the dispatch entry it answers. A refused
-or failed append is retried; a planner that
-still cannot write stops and reports through the dispatch entry's recovery contact rather
-than working invisibly. It appends a dated **outcome** when it stops, citing that dispatch
-entry: a spec author names
+subject, naming its actor and session and citing the dispatch entry it answers. Receipt
+writes follow the same readback rule: re-read, adopt the entry if it landed, retry only
+what did not; a planner that still cannot write stops and reports through the dispatch
+entry's recovery contact rather than working invisibly. It appends a dated **outcome** when
+it stops, citing that dispatch entry: a spec author names
 the spec PR or the failure; a design planner names the published design and acceptance, the
 phase it left the task in, or the failure. A planner stopped by its supervisor has that stop
 recorded as its outcome by whoever stopped it; when the planner could not record its own
@@ -95,7 +97,8 @@ nothing rewrites or removes an earlier entry. Native history keeps what was writ
 Only dispatch entries, start receipts and outcomes bear state; skip entries, unresolved
 reports, retractions and corrections only annotate, because a retraction withdraws exactly
 the dispatch entry it names and a correction supersedes exactly the entry it names. The
-subject's state is the state of its **owning dispatch**: the earliest dispatch entry that
+subject's state is the state of its **owning dispatch**: the earliest dispatch entry —
+earliest in native history order, the order the store recorded, not by timestamp — that
 is neither retracted nor superseded and is not yet closed by an outcome. A closed dispatch
 stops owning, which is what lets a replacement succeed a dead one. A carrier with no owning
 dispatch — never written to, or every dispatch retracted or superseded — has no current
@@ -111,8 +114,8 @@ only these establish them:
   stays in flight until the named spec PR is observed merged and accepted on main, and
   sweeps skip citing it; a standalone carrier then closes with that reason, while the task
   of a task-anchored spec author is left untouched for spec016's own lifecycle, and a PR
-  closed unmerged is recorded and frees the subject. A stale in-flight entry beneath a
-  completion suppresses nothing either way.
+  closed unmerged is recorded and frees the subject. An entry superseded or retracted
+  beneath a completion suppresses nothing either way.
 - **Positively dead** — the owning dispatch closed with an outcome recording that the
   planner stopped before any deliverable, with the observation named: the planner's own
   final report, the dispatcher's observed launch failure, or the supervisor's observed
@@ -130,7 +133,8 @@ recorded differently, because only the second leaves a recovery question.
 Before dispatching onto a subject, a sweep reads the carrier and decides from the record
 alone. A subject that is pending, started, unresolved, or whose completion names a spec PR
 not yet merged accepted is in flight: the sweep dispatches nothing and appends a dated skip
-entry citing the carrier and the entry that decided it.
+entry citing the carrier and the entry that decided it. A failed skip or report append is
+retried and then dropped: it bears no state, and losing it does not change the decision.
 
 The launcher's lock covers one command, not a read-decide-write-launch sequence, so two
 sweeps overlapping inside that window can both record a dispatch. The record reconciles this
