@@ -71,8 +71,9 @@ There is deliberately no mocking-framework dependency. Expectation-style mocks c
 call sequences; a fake that models the contract couples tests to behavior. Hand-built fakes
 only.
 
-There is still no clock trait. Durations are passed in as arguments. Two decisions read elapsed
-time, both serving one shared readiness budget (spec001 §4): `BrokerSet::status_with` runs the
+There is still no clock trait. Durations are passed in as arguments. Three decisions read elapsed
+time. `VmmChild::wait_terminal` spends a fixed child-termination allowance with no seam. The
+other two serve one shared readiness budget (spec001 §4): `BrokerSet::status_with` runs the
 set-level `ProbeBudget` checks and `readiness::probe_with` the socket-operation checks, and each
 takes its own injected clock seam — production supplies `Instant::now` at both, and the 9z0
 deterministic boundary tests inject a fake at each. If more decision sites appear, that is the
