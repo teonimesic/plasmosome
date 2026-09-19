@@ -1,5 +1,5 @@
 use crate::brokers::SetStatus;
-use crate::readiness::NotReady;
+use crate::readiness::{Cancelled, NotReady};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -22,16 +22,26 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 /// `line` is one ndjson request without its newline. `status` is asked exactly
 /// once, and only when the line is a well-formed `membrane.status` request, so a
 /// caller may put a live probe behind it. The returned string is a complete JSON
-/// response and never carries a newline of its own.
+/// response and never carries a newline of its own. A protocol failure is
+/// answered with `Ok` carrying the serialized failure — `status` is never asked
+/// for one — while `Err(Cancelled)` means the daemon is shutting down and there
+/// is no reply at all.
 ///
 /// A caller must not use the reply to decide whether the connection closes:
 /// nothing in a response says that, and only an over-long line closes one.
-pub fn respond(line: &str, status: &mut impl FnMut() -> SetStatus) -> String {
+pub fn respond(
+    line: &str,
+    status: &mut impl FnMut() -> Result<SetStatus, Cancelled>,
+) -> Result<String, Cancelled> {
     let Ok(envelope) = serde_json::from_str::<Value>(line) else {
-        return failure(Value::Null, PARSE_ERROR, "request line is not JSON");
+        return Ok(failure(
+            Value::Null,
+            PARSE_ERROR,
+            "request line is not JSON",
+        ));
     };
     let id = envelope.get("id").cloned().unwrap_or(Value::Null);
-    let not_a_request = |reason| failure(id.clone(), INVALID_REQUEST, reason);
+    let not_a_request = |reason| Ok(failure(id.clone(), INVALID_REQUEST, reason));
     let Some(fields) = envelope.as_object() else {
         return not_a_request("request is not an object");
     };
@@ -46,9 +56,10 @@ pub fn respond(line: &str, status: &mut impl FnMut() -> SetStatus) -> String {
         return not_a_request("request carries no object `params`");
     }
     if method != STATUS_METHOD {
-        return failure(id, METHOD_NOT_FOUND, "no such method");
+        return Ok(failure(id, METHOD_NOT_FOUND, "no such method"));
     }
-    json!({"id": id, "result": wire_status(status())}).to_string()
+    let status = status()?;
+    Ok(json!({"id": id, "result": wire_status(status)}).to_string())
 }
 
 fn failure(id: Value, code: i64, message: &str) -> String {
@@ -93,7 +104,11 @@ fn reason_name(reason: &NotReady) -> &'static str {
 /// The flag is checked between accepts and between reads, and both halves of a
 /// connection are bounded by a timeout, so neither an idle client nor one that
 /// never reads its replies can hold the server open past shutdown. `status` is
-/// called once per `membrane.status` request, never cached.
+/// called once per `membrane.status` request, never cached. When `status`
+/// returns `Err(Cancelled)` — the daemon's shutdown flag seen inside its probe
+/// — the conversation being answered closes with no reply, and the already-set
+/// flag then ends the loop: that is a requested shutdown, not a listener
+/// failure.
 ///
 /// Returns `Ok` when the flag is set, and `Err` when the listener stopped being
 /// usable — a caller that treats both alike reports a broken socket as a
@@ -101,7 +116,7 @@ fn reason_name(reason: &NotReady) -> &'static str {
 pub fn serve(
     listener: UnixListener,
     shutdown: &AtomicBool,
-    mut status: impl FnMut() -> SetStatus,
+    mut status: impl FnMut() -> Result<SetStatus, Cancelled>,
 ) -> Result<(), ListenerFailed> {
     listener.set_nonblocking(true).map_err(ListenerFailed)?;
     while !shutdown.load(Ordering::Relaxed) {
@@ -144,7 +159,11 @@ enum Request {
     Ended,
 }
 
-fn converse(stream: UnixStream, shutdown: &AtomicBool, status: &mut impl FnMut() -> SetStatus) {
+fn converse(
+    stream: UnixStream,
+    shutdown: &AtomicBool,
+    status: &mut impl FnMut() -> Result<SetStatus, Cancelled>,
+) {
     if stream.set_nonblocking(false).is_err()
         || stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err()
@@ -157,7 +176,10 @@ fn converse(stream: UnixStream, shutdown: &AtomicBool, status: &mut impl FnMut()
     let mut reader = BufReader::new(stream);
     loop {
         let reply = match read_request(&mut reader, shutdown) {
-            Request::Line(line) => respond(&line, status),
+            Request::Line(line) => match respond(&line, status) {
+                Ok(reply) => reply,
+                Err(Cancelled) => return,
+            },
             Request::NotUtf8 => failure(Value::Null, PARSE_ERROR, "request line is not UTF-8"),
             Request::TooLong => {
                 let refusal = failure(Value::Null, INVALID_REQUEST, "request line is too long");
@@ -167,6 +189,9 @@ fn converse(stream: UnixStream, shutdown: &AtomicBool, status: &mut impl FnMut()
             }
             Request::Ended => return,
         };
+        if shutdown.load(Ordering::Relaxed) {
+            return;
+        }
         if writeln!(writer, "{reply}").is_err() || writer.flush().is_err() {
             return;
         }
@@ -225,8 +250,11 @@ mod tests {
 
     fn answer(line: &str, status: SetStatus) -> Value {
         let mut once = Some(status);
-        let mut supply = move || once.take().expect("the status is asked once per request");
+        let mut supply = move || Ok(once.take().expect("the status is asked once per request"));
         let reply = respond(line, &mut supply);
+        let reply = reply.unwrap_or_else(|error| {
+            panic!("a plain status answer is a reply, not a cancellation: {error}")
+        });
         serde_json::from_str(&reply)
             .unwrap_or_else(|error| panic!("the reply to {line:?} is JSON, got {reply:?}: {error}"))
     }
@@ -275,11 +303,17 @@ mod tests {
         }
     }
 
-    fn serving(status: impl FnMut() -> SetStatus + Send + 'static) -> Serving {
+    fn serving(status: impl FnMut() -> Result<SetStatus, Cancelled> + Send + 'static) -> Serving {
+        serving_flagged(Arc::new(AtomicBool::new(false)), status)
+    }
+
+    fn serving_flagged(
+        shutdown: Arc<AtomicBool>,
+        status: impl FnMut() -> Result<SetStatus, Cancelled> + Send + 'static,
+    ) -> Serving {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("c.uds");
         let listener = UnixListener::bind(&socket).expect("the test binds its control socket");
-        let shutdown = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&shutdown);
         let (done, finished) = mpsc::channel();
         let handle = thread::spawn(move || {
@@ -313,6 +347,12 @@ mod tests {
         );
         serde_json::from_str(&reply)
             .unwrap_or_else(|error| panic!("the server answers JSON, got {reply:?}: {error}"))
+    }
+
+    fn send(client: &mut BufReader<UnixStream>, line: &str) {
+        let mut stream = client.get_ref().try_clone().expect("clone for writing");
+        writeln!(stream, "{line}").expect("the request reaches the server");
+        stream.flush().expect("the request is flushed");
     }
 
     fn padded_request(total: usize) -> String {
@@ -453,7 +493,7 @@ mod tests {
 
     #[test]
     fn a_connection_carries_many_requests_in_order_and_survives_a_parse_error() {
-        let served = serving(|| SetStatus::Empty);
+        let served = serving(|| Ok(SetStatus::Empty));
         let mut client = served.client();
         assert_eq!(
             ask(&mut client, "not json at all").pointer("/error/code"),
@@ -476,7 +516,7 @@ mod tests {
 
     #[test]
     fn a_request_line_at_the_cap_is_answered_and_one_byte_over_is_refused_and_closed() {
-        let served = serving(|| SetStatus::Ready);
+        let served = serving(|| Ok(SetStatus::Ready));
 
         let mut at_cap = served.client();
         let request = padded_request(MAX_REQUEST_BYTES);
@@ -507,7 +547,7 @@ mod tests {
 
     #[test]
     fn shutdown_stops_serve_even_with_an_idle_connection_open() {
-        let served = serving(|| SetStatus::Ready);
+        let served = serving(|| Ok(SetStatus::Ready));
         let mut client = served.client();
         assert_eq!(
             ask(&mut client, STATUS_REQUEST).pointer("/result/ready"),
@@ -528,7 +568,7 @@ mod tests {
 
     #[test]
     fn shutdown_stops_serve_even_with_a_client_that_never_reads_its_replies() {
-        let served = serving(|| SetStatus::Ready);
+        let served = serving(|| Ok(SetStatus::Ready));
         let client = served.client();
         let mut writer = client
             .get_ref()
@@ -561,7 +601,7 @@ mod tests {
 
     #[test]
     fn a_line_that_is_not_utf8_is_answered_32700_rather_than_silently_repaired() {
-        let served = serving(|| SetStatus::Ready);
+        let served = serving(|| Ok(SetStatus::Ready));
         let mut client = served.client();
         let mut writer = client
             .get_ref()
@@ -609,7 +649,7 @@ mod tests {
 
     #[test]
     fn a_requested_shutdown_reports_success_and_a_broken_listener_would_not() {
-        let served = serving(|| SetStatus::Ready);
+        let served = serving(|| Ok(SetStatus::Ready));
         let mut client = served.client();
         assert_eq!(
             ask(&mut client, STATUS_REQUEST).pointer("/result/ready"),
@@ -637,6 +677,84 @@ mod tests {
             }),
             json!({"ready": false, "state": "deadline_spent", "unreached": "dnsd"}),
             "spec 001 never sends a field with nothing in it",
+        );
+    }
+
+    #[test]
+    fn a_cancelled_status_is_no_reply_at_all() {
+        let mut cancelled = || Err(Cancelled);
+        assert!(
+            respond(STATUS_REQUEST, &mut cancelled).is_err(),
+            "a cancelled probe produces no reply, not even a failure envelope"
+        );
+    }
+
+    #[test]
+    fn a_protocol_failure_never_invokes_the_status_probe() {
+        let mut asked = false;
+        let mut watch = || {
+            asked = true;
+            Ok(SetStatus::Ready)
+        };
+        let reply = respond("this is not json", &mut watch);
+        assert!(reply.is_ok(), "a protocol failure is still a reply");
+        assert!(
+            !asked,
+            "the probe is never asked to answer a broken request"
+        );
+    }
+
+    #[test]
+    fn a_probe_that_saw_shutdown_closes_the_conversation_without_a_reply() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let for_status = Arc::clone(&flag);
+        let served = serving_flagged(Arc::clone(&flag), move || {
+            for_status.store(true, Ordering::Relaxed);
+            Err(Cancelled)
+        });
+        let mut client = served.client();
+        send(&mut client, STATUS_REQUEST);
+
+        let mut reply = String::new();
+        assert_eq!(
+            client.read_line(&mut reply).ok(),
+            Some(0),
+            "the client observes EOF, not a fabricated answer, got {reply:?}"
+        );
+        assert!(
+            served
+                .finished
+                .recv_timeout(PATIENCE)
+                .expect("the server settles")
+                .is_ok(),
+            "a cancellation the probe saw is a requested shutdown, not a listener failure"
+        );
+    }
+
+    #[test]
+    fn a_reply_constructed_after_shutdown_is_never_written() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let for_status = Arc::clone(&flag);
+        let served = serving_flagged(Arc::clone(&flag), move || {
+            for_status.store(true, Ordering::Relaxed);
+            Ok(SetStatus::Ready)
+        });
+        let mut client = served.client();
+        send(&mut client, STATUS_REQUEST);
+
+        let mut reply = String::new();
+        assert_eq!(
+            client.read_line(&mut reply).ok(),
+            Some(0),
+            "no stale ready may leave after cancellation was observed inside the probe, got {reply:?}"
+        );
+        assert!(
+            served
+                .finished
+                .recv_timeout(PATIENCE)
+                .expect("the server settles")
+                .is_ok(),
+            "the server returns cleanly once the flag is set"
         );
     }
 }

@@ -474,6 +474,60 @@ no-follow device-and-inode identity. The subset this spec covers:
   there, it did not answer inside the deadline, it answered something that was not a status, or
   it answered that it is not serving and said so in `broker_state`. Delivered in
   `plasmosome-membrane::{control, daemon}` and served by `membraned`.
+
+  **Response size, one fixed budget, and shutdown.** These are new normative decisions, announced
+  here as such — not restatements of earlier promises. Measured reason for the addition: on
+  b5127d5 (Darwin25.6.0, arm64) a broker that trickled thirty spaces at 20ms intervals before its
+  `ready` frame was answered `ready:true, state:serving` after 813.829ms against a 100ms
+  `status_deadline_ms`, because nothing bounded the whole query. Delivered in
+  `plasmosome-membrane::{readiness, brokers, control, daemon}` and served by `membraned`.
+
+  1. A broker status response is the first newline-terminated NDJSON frame. At most 1,048,576 raw
+     bytes may precede that newline, counting every byte including whitespace and CR, before
+     UTF-8 decoding or trimming; the newline itself is excluded. The first excess non-newline byte
+     is refused immediately as `malformed`, without draining the peer. At-cap plus newline remains
+     valid. This is a readiness-broker response limit, not a blanket cap on every controller
+     response and not an inference from §1's request limit; the magnitude avoids a second
+     arbitrary transport limit while making retention finite.
+  2. A missing, refused or invalid socket address, and failed connection establishment, stay
+     `unreachable`. A connection still pending when the allowance expires, or temporary
+     noncompletion from a full nonblocking AF_UNIX backlog (EAGAIN/EWOULDBLOCK), is `timed_out`.
+     A connected peer's silence, an incomplete frame, or EOF before the newline is `timed_out`,
+     even when the unterminated bytes form JSON. A terminated non-UTF-8, invalid-JSON, non-status
+     or over-cap frame is `malformed`. A valid `ready:false` keeps `reported` with its exact
+     `broker_state`; a valid `ready:true` keeps its meaning. Ids are not newly validated, `state`
+     need not be nonempty, and no other classification behavior tightens here.
+  3. One readiness call takes one monotonic start and one fixed duration covering connect, request
+     transmission, reply acquisition and classification. Reaching or exceeding it prevents another
+     I/O, poll or probe step and refuses a late answer, including the last broker's. Checks follow
+     every system call and the bounded classification. A probe that used its allowance yields
+     `not_serving`/`timed_out` naming that broker. `deadline_spent` means a broker was never
+     entered because the set budget was already gone, retaining `unreached` and `asked` in order.
+     Empty remains empty; no readiness result is cached. A custom synchronous `Probe` cannot be
+     preempted by the set; its contract requires observing the supplied budget and cancellation,
+     and the set rejects a result that returns late instead of blessing it ready.
+  4. SIGINT/SIGTERM's existing shutdown flag is propagated into probes. Cancellation wins when
+     both cancellation and expiry are observed at one check. Cancellation is not a new wire reason
+     or broker state: the in-flight control connection closes with no status reply, probing and
+     accepting stop, and the daemon enters its existing teardown. A status may have been sent if
+     shutdown arrives after the final cancellation check, so no transactional signal/reply
+     ordering is promised. The reply is re-checked against the flag after construction and before
+     writing: no stale `ready` response may be emitted after cancellation was observed inside the
+     probe.
+  5. Production sockets are nonblocking before `connect` and stay nonblocking through request and
+     reply. Each wait is requested for at most min(remaining, 25ms), recalculated from the same
+     start, with budget and cancellation checks around waits and every bounded I/O chunk. Partial
+     progress, EINTR, WouldBlock and readiness notifications never renew the deadline. Millisecond
+     poll rounding adds less than 1ms to a requested wait; OS clock granularity, scheduling, path
+     lookup, kernel execution and bounded decoding can overshoot, and there is no unconditional
+     wall-clock deadline or universal numerical syscall-overrun bound on macOS or Linux. A finite
+     connect overshoot consumes the original budget and is discarded on return; it never grants a
+     fresh budget or a late ready. Nonblocking mode removes the intentional wait for socket and
+     backlog readiness, not all kernel or filesystem latency. Cancellation is recognized at the
+     next check — normally within one requested 25ms wait plus those explicitly unbounded OS
+     scheduling and syscall delays and one bounded processing step. This bounds application
+     waiting and work, not entire daemon exit: child termination, reaping and destructor limits
+     remain separate. No blocking connect is retained behind a claim of cancellability.
 - `membrane.cell.desired` — desired-state push, **idempotent and generation-numbered**: the
   full desired cell record plus `generation: u64`. An identical equal-generation request is
   a no-op; conflicting content at that generation refuses. An older request is ignored and

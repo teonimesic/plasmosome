@@ -443,7 +443,6 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "libc",
- "plasmosome-guards",
  "serde_json",
  "tempfile",
 ]
