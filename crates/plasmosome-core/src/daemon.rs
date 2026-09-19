@@ -50,7 +50,6 @@ impl std::error::Error for ConfigError {
 }
 
 /// Reads a config out of JSON text, or says which part of it is not a config.
-///
 /// `control_socket` and `name` are both required, and a key the daemon does
 /// not know is refused rather than ignored, so a misspelled setting stops the
 /// daemon instead of silently not applying. `name` is parsed into an
@@ -143,12 +142,6 @@ fn accept_outcome(error: &std::io::Error) -> Next {
     }
 }
 
-/// The control socket the daemon bound, with the identity it was bound under.
-///
-/// Teardown removes the pathname only when the entry still there is this
-/// exact socket — a no-follow match on device and inode. Anything a caller
-/// later settles at the pathname, or the original socket once it has been
-/// renamed elsewhere, is left alone.
 #[derive(Debug)]
 struct BoundSocket {
     path: PathBuf,
@@ -156,11 +149,6 @@ struct BoundSocket {
     ino: u64,
 }
 impl BoundSocket {
-    /// Records the identity of the socket just bound at `path`.
-    ///
-    /// The inspection is no-follow: a leaf symlink or a replacement entry is
-    /// not the socket that was bound, and refusing here leaves the namespace
-    /// untouched for the operator to clear.
     fn capture(path: PathBuf) -> Result<Self, DaemonError> {
         let metadata =
             std::fs::symlink_metadata(&path).map_err(|source| DaemonError::SocketIdentity {
@@ -197,7 +185,6 @@ impl Drop for BoundSocket {
 }
 
 /// Runs the controller daemon until `shutdown` is set, then tears it down.
-///
 /// Binds the control socket named by `config` first, so a start that cannot
 /// bind has done nothing else. A path already there is refused, whether it
 /// holds a live daemon's socket or a stale file; the daemon never unlinks a
@@ -205,7 +192,6 @@ impl Drop for BoundSocket {
 /// Right after binding, the daemon records the socket's device and inode; a
 /// start that cannot capture that identity refuses without unlinking
 /// anything, leaving any residue for the operator.
-///
 /// Returning — cleanly, on an error raised after the bind, or through an
 /// unwinding panic — removes the socket path only when the entry still at
 /// that name is the socket this daemon bound: a no-follow device-and-inode
@@ -217,7 +203,6 @@ impl Drop for BoundSocket {
 /// cleanup under a coordinated namespace, not race-free protection. A
 /// `SIGKILL` runs no destructor, so callers must not read the path's absence
 /// as the daemon being gone.
-///
 /// Requests on a connection are answered in order, and `shutdown` is honored
 /// against a client that stops reading its replies. The instance starts with
 /// no cells at ledger generation zero. A handler panic answers `-32603` and

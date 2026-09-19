@@ -131,7 +131,6 @@ impl std::error::Error for DaemonError {
 }
 
 /// Reads a config out of JSON text, or says which part of it is not a config.
-///
 /// `control_socket` is required. `status_deadline_ms` defaults to 500 and may
 /// not be zero. `brokers` defaults to none. Keys the daemon does not know are
 /// refused rather than ignored, at the top level and inside each broker, so a
@@ -278,12 +277,6 @@ fn required_words(
     Ok(words)
 }
 
-/// The control socket the daemon bound, with the identity it was bound under.
-///
-/// Teardown removes the pathname only when the entry still there is this
-/// exact socket — a no-follow match on device and inode. Anything a caller
-/// later settles at the pathname, or the original socket once it has been
-/// renamed elsewhere, is left alone.
 #[derive(Debug)]
 struct BoundSocket {
     path: PathBuf,
@@ -292,11 +285,6 @@ struct BoundSocket {
 }
 
 impl BoundSocket {
-    /// Records the identity of the socket just bound at `path`.
-    ///
-    /// The inspection is no-follow: a leaf symlink or a replacement entry is
-    /// not the socket that was bound, and refusing here leaves the namespace
-    /// untouched for the operator to clear.
     fn capture(path: PathBuf) -> Result<Self, DaemonError> {
         let metadata =
             std::fs::symlink_metadata(&path).map_err(|source| DaemonError::SocketIdentity {
@@ -333,7 +321,6 @@ impl Drop for BoundSocket {
 }
 
 /// Runs the daemon until `shutdown` is set, then tears it down.
-///
 /// Binds the control socket first, so a start that cannot bind has forked
 /// nothing. An address already in use is refused whether it is a live daemon's
 /// socket or a stale file: the daemon never unlinks a path it did not create,
@@ -343,7 +330,6 @@ impl Drop for BoundSocket {
 /// anything, leaving any residue for the operator. Every broker command is
 /// resolved before the first fork, so a command that cannot run also leaves no
 /// children.
-///
 /// Returning — whether cleanly or with an error raised after the bind — drops every broker and
 /// removes the socket path only when the entry still at that name is the socket this daemon
 /// bound: a no-follow device-and-inode match. A replacement a caller settles at the pathname in
@@ -353,7 +339,6 @@ impl Drop for BoundSocket {
 /// is ownership-correct cleanup under a coordinated namespace, not race-free protection. Broker
 /// cleanup can report lost authority or operating-system errors; ordinary return alone is not
 /// proof that no residue remains.
-///
 /// **What this cannot cover is `SIGKILL` of the daemon itself.** Brokers are their own session
 /// leaders and do not die with their parent, and a killed process runs no destructor, so brokers
 /// can keep running and the socket path stays. No residue observation or recovery verb is
@@ -1006,13 +991,14 @@ mod tests {
         .expect_err("a control path whose entry cannot be a bound socket refuses the start");
 
         match &refusal {
-            // Linux refuses a dangling leaf symlink at bind itself; Darwin binds through
-            // the leaf (creating the target) and the identity capture refuses. Either way
-            // the start is refused before any fork and the symlink is left untouched.
             DaemonError::Bind { path, .. } | DaemonError::SocketIdentity { path, .. } => {
                 assert_eq!(path, &control)
             }
-            other => panic!("an uninspectable path refuses the start, got {other:?}"),
+            other => panic!(
+                "an uninspectable path refuses the start as Bind or SocketIdentity — Linux \
+                 refuses the dangling leaf at bind itself, Darwin at identity capture — got \
+                 {other:?}"
+            ),
         }
         assert!(
             !pidfile.exists(),
