@@ -108,8 +108,9 @@ struct Broker {
     child: VmmChild,
 }
 
-/// A cell's brokers, each one an owned child process. Dropping the set kills
-/// and reaps every broker, so a dropped set leaves no broker running.
+/// A cell's brokers, each one an owned direct child and managed process group.
+/// Dropping the set attempts group cleanup and direct-child reap for every broker. Authority
+/// loss or an operating-system error is reported by [`VmmChild`] and can leave residue.
 pub struct BrokerSet<P> {
     brokers: Vec<Broker>,
     prober: P,
@@ -117,8 +118,8 @@ pub struct BrokerSet<P> {
 
 impl<P: Probe> BrokerSet<P> {
     /// Spawns one child per spec, in order, through `launcher`. When a spawn
-    /// fails the brokers already spawned are killed and reaped before the
-    /// error is returned, so a part-way failure leaves nothing behind.
+    /// fails, dropping the brokers that already started applies the same managed-group cleanup.
+    /// Cleanup failure is reported as a Drop diagnostic because this error reports the spawn.
     ///
     /// Two specs may not share a control socket. One socket answering for two
     /// brokers makes a dead broker read as ready, which is the false positive

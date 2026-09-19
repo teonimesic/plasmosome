@@ -12,8 +12,8 @@ Runs on the host, one per cell. This is where enforcement lives.
 - **Readiness is an answered query.** A broker that is alive but not serving is not ready; a
   socket file that exists proves nothing. Half-alive daemons are the failure mode this rule
   exists for.
-- **Never signal a pid after its terminal state was observed.** The pid may have been reused by
-  an unrelated process. Terminal states are cached precisely so this cannot happen.
+- **Never signal after child identity was released.** A non-consuming terminal observation still
+  retains authority to clean the managed group. A completed reap or measured `ECHILD` does not.
 - **After `fork`, before `exec` or `_exit`, only async-signal-safe work.** The parent is
   multi-threaded; allocation, locking, and stdio in the child can deadlock. Implementations of
   the fork seam must not panic — an unwind runs the panic hook in the child.
@@ -26,8 +26,9 @@ Runs on the host, one per cell. This is where enforcement lives.
 
 ## Testing
 
-`cargo test -p plasmosome-membrane`. Process-lifecycle tests must prove absence of orphans by
-observation (a raw `waitpid` returning `ECHILD`), not by asserting the code path ran.
+`cargo test -p plasmosome-membrane`. Process-lifecycle tests use a successful exact-child wait
+to attribute a reap, `ECHILD` only to prove no waitable direct child remains, and descriptor EOF
+to prove the fixture worker stopped.
 
 A test that applies signal pressure must do two more things. It must **prove the pressure landed
 where it was aimed** — a signal sent to the process can be handled on any thread, so a test of an

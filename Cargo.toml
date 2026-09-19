@@ -26,6 +26,7 @@ toml_edit = { version = "0.22", default-features = false, features = ["display"]
 proptest = "1"
 tempfile = "3"
 libc = "0.2"
+cc = "1"
 criterion = "0.7"
 
 plasmosome-backend = { path = "crates/plasmosome-backend" }

@@ -160,7 +160,9 @@ mod tests {
         let command = ExecCommand::new(argv.iter().map(|word| word.to_string()).collect())
             .unwrap_or_else(|error| panic!("{argv:?} resolves into a command: {error}"));
         let mut child = VmmChild::spawn(command).expect("the fork succeeds");
-        child.wait_terminal(DEADLINE)
+        child
+            .wait_terminal(DEADLINE)
+            .unwrap_or_else(|error| panic!("{argv:?} supervision succeeds: {error}"))
     }
 
     #[test]
@@ -219,7 +221,9 @@ mod tests {
             .expect("a file that exists resolves, whether or not it can be executed");
         let mut child = VmmChild::spawn(command).expect("the fork succeeds");
         assert_eq!(
-            child.wait_terminal(DEADLINE),
+            child
+                .wait_terminal(DEADLINE)
+                .expect("the non-executable child is supervised"),
             VmmState::Exited { code: 127 }
         );
     }
