@@ -462,12 +462,6 @@ fn membraned_exits_nonzero_naming_the_failure() {
     );
 }
 
-/// A broker that answers every probe connection the way a stalled real broker
-/// does: it reads the request, signals the rendezvous once it has one, then
-/// trickles `spaces` blanks one `drip` apart before its terminator — or closes
-/// without one. Each connection gets the same script, so retries see a
-/// consistent peer, and every connection is finished when the daemon lets go
-/// of its end because the writes then fail.
 fn trickling_broker(
     socket: PathBuf,
     spaces: usize,
@@ -487,12 +481,16 @@ fn trickling_broker(
                 return;
             }
             let _ = rendezvous.send(());
-            for _ in 0..spaces {
-                if !drip.is_zero() {
-                    thread::sleep(drip);
-                }
-                if stream.write_all(b" ").is_err() {
+            if drip.is_zero() {
+                if stream.write_all(&vec![b' '; spaces]).is_err() {
                     return;
+                }
+            } else {
+                for _ in 0..spaces {
+                    thread::sleep(drip);
+                    if stream.write_all(b" ").is_err() {
+                        return;
+                    }
                 }
             }
             if let Some(ready_line) = terminator
@@ -603,8 +601,6 @@ fn membraned_shuts_down_during_an_active_trickling_probe() {
     let broker_socket = dir.path().join("b0.uds");
     let pidfile = dir.path().join("b0.pid");
     let config = dir.path().join("config.json");
-    // A long trickle: the allowance (10s) sits well above it, so only real
-    // cancellation — not the trickle finishing — can end this probe promptly.
     let trickled = trickling_broker(
         broker_socket.clone(),
         400,
@@ -636,8 +632,6 @@ fn membraned_shuts_down_during_an_active_trickling_probe() {
 
     let started = Instant::now();
     daemon.signal(libc::SIGTERM);
-    // The watchdog bounds signal-to-EOF, so a daemon that waits out the
-    // trickle instead of cancelling the probe fails here rather than late.
     client
         .get_ref()
         .set_read_timeout(Some(Duration::from_secs(2)))

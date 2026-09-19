@@ -178,8 +178,6 @@ fn converse(
         let reply = match read_request(&mut reader, shutdown) {
             Request::Line(line) => match respond(&line, status) {
                 Ok(reply) => reply,
-                // The status probe saw the shutdown flag: this conversation is
-                // over, with no reply to the request it was answering.
                 Err(Cancelled) => return,
             },
             Request::NotUtf8 => failure(Value::Null, PARSE_ERROR, "request line is not UTF-8"),
@@ -191,8 +189,6 @@ fn converse(
             }
             Request::Ended => return,
         };
-        // A reply built after shutdown was observed is never written: no stale
-        // answer may leave after cancellation was seen.
         if shutdown.load(Ordering::Relaxed) {
             return;
         }

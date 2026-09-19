@@ -12,21 +12,12 @@ use std::time::{Duration, Instant};
 /// UTF-8 decoding or trimming; the newline itself does not.
 pub const MAX_RESPONSE_BYTES: usize = 1_048_576;
 
-/// The longest lossy prefix kept for a malformed-reply diagnostic. Truncated
-/// before decoding so a huge invalid reply cannot expand through replacement
-/// characters. Diagnostic only: never sent on the wire, never parsed for policy.
 const DIAGNOSTIC_BYTES: usize = 1024;
 
-/// How many bytes one read asks for at most, so oversize is detected with a
-/// single lookahead byte.
 const READ_CHUNK: usize = 8 * 1024;
 
-/// The longest single wait requested of the operating system. Nothing renews
-/// the budget: waits are slices of what is left of it.
 const MAX_WAIT: Duration = Duration::from_millis(25);
 
-/// The one request a probe sends, as a static byte string: writing it resumes
-/// from an explicit offset instead of re-formatting and restarting.
 const STATUS_REQUEST: &[u8] = b"{\"id\":0,\"method\":\"membrane.status\",\"params\":{}}\n";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +41,6 @@ impl Readiness {
 }
 
 /// One fixed elapsed-time allowance for one readiness query.
-///
 /// The clock starts once and never renews: connection establishment, request
 /// transmission, reply acquisition and classification all spend the same
 /// allowance, so a broker cannot stretch a query by trickling bytes, dribbling
@@ -101,15 +91,14 @@ impl<'a> ProbeBudget<'a> {
         }
     }
 
+    /// How much of the allowance is left, or why the query must stop.
+    ///
+    /// Time is only ever subtracted from the allowance, so an extreme
+    /// configuration cannot overflow an instant.
     pub fn remaining(&self) -> Result<Duration, ProbeStopped> {
         self.remaining_at(Instant::now())
     }
 
-    /// Shutdown is checked first, so cancellation wins over expiry at the same
-    /// check. A spent allowance is an error, not a zero duration: the caller
-    /// stops rather than starting work it has no time for. Time is only ever
-    /// subtracted from the allowance, so an extreme configuration cannot
-    /// overflow an instant.
     pub(crate) fn remaining_at(&self, now: Instant) -> Result<Duration, ProbeStopped> {
         if self.shutdown.load(Ordering::Relaxed) {
             return Err(ProbeStopped::Cancelled);
@@ -128,7 +117,12 @@ impl<'a> ProbeBudget<'a> {
 /// [`NotReady::Unreachable`]. The socket is connected nonblockingly and stays
 /// nonblocking, so no single step can outlive the budget unnoticed: whatever a
 /// connect or a reply costs is paid out of the one allowance, and a connect
-/// that comes back after it is discarded.
+/// that comes back after it is discarded. Waits are requested in slices of at
+/// most 25ms of what is left; a full nonblocking backlog and an interrupted
+/// connect establish nothing and report as timed out. The reply is the first
+/// newline-terminated frame within [`MAX_RESPONSE_BYTES`], everything after
+/// that first newline is ignored, and no verdict that finished after the
+/// allowance is accepted — a late answer reports as timed out, never ready.
 pub fn probe(socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
     probe_with(
         socket,
@@ -167,8 +161,6 @@ where
         Connected::Stopped(ProbeStopped::Cancelled) => return Err(Cancelled),
         Connected::Stopped(ProbeStopped::TimedOut) => return Ok(spent()),
     };
-    // A connect that came back after the allowance is discarded: no request is
-    // written, and whatever it returned can never become a late ready.
     match budget.remaining_at(now()) {
         Ok(_) => {}
         Err(ProbeStopped::Cancelled) => return Err(Cancelled),
@@ -177,10 +169,6 @@ where
     exchange(stream, STATUS_REQUEST, budget, now, wait)
 }
 
-/// Writes the request and reads the first newline-terminated frame, all inside
-/// one budget. Every syscall return is followed by a budget check before the
-/// next step, so partial writes, interrupts and WouldBlocks cannot stretch the
-/// query, and no verdict that finished after the allowance is accepted.
 fn exchange<S, N, W>(
     mut stream: S,
     request: &[u8],
@@ -209,8 +197,6 @@ where
                     return Ok(spent());
                 }
             }
-            // An interrupted write is re-checked at the top of the loop and
-            // retried from the same offset; progress never renews the clock.
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(_) => return Ok(spent()),
         }
@@ -226,12 +212,8 @@ where
         };
         let room = MAX_RESPONSE_BYTES + 1 - frame.len();
         match stream.read(&mut chunk[..READ_CHUNK.min(room)]) {
-            // EOF before the frame terminator: silence or a partial frame is
-            // timed out, even when the unterminated bytes look like JSON.
             Ok(0) => return Ok(spent()),
             Ok(read) => {
-                // A reply that arrived after the allowance is refused before it
-                // can become an answer.
                 match budget.remaining_at(now()) {
                     Ok(_) => {}
                     Err(ProbeStopped::Cancelled) => return Err(Cancelled),
@@ -241,8 +223,6 @@ where
                 if let Some(end) = new_bytes.iter().position(|byte| *byte == b'\n') {
                     frame.extend_from_slice(&new_bytes[..end]);
                     let verdict = classify(&frame);
-                    // Classification spends the same allowance: a verdict that
-                    // finished after expiry is refused.
                     return match budget.remaining_at(now()) {
                         Ok(_) => Ok(verdict),
                         Err(ProbeStopped::Cancelled) => Err(Cancelled),
@@ -251,8 +231,6 @@ where
                 }
                 frame.extend_from_slice(new_bytes);
                 if frame.len() > MAX_RESPONSE_BYTES {
-                    // The first excess non-newline byte: refuse immediately,
-                    // without draining whatever else the peer still sends.
                     return Ok(Readiness::NotReady(NotReady::Malformed {
                         line: diagnostic(&frame),
                     }));
@@ -269,11 +247,6 @@ where
     }
 }
 
-/// Waits for `interest` within the common budget. Every return — ready,
-/// timeout, or interrupt — is followed by a fresh budget check before the next
-/// wait, so cancellation and expiry land at the first check after the wait.
-/// `Ok(false)` means the budget is gone; a permanent wait failure fails closed
-/// as spent rather than passing as ready.
 fn wait_ready<N, W>(
     fd: RawFd,
     interest: Interest,
@@ -316,8 +289,6 @@ impl crate::brokers::Probe for ControlSocketProbe {
     }
 }
 
-/// Decodes and classifies one newline-terminated frame. The newline is already
-/// gone; what is left is at most `MAX_RESPONSE_BYTES` raw bytes.
 fn classify(frame: &[u8]) -> Readiness {
     let malformed = |bytes: &[u8]| {
         Readiness::NotReady(NotReady::Malformed {
@@ -348,24 +319,12 @@ fn diagnostic(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..bytes.len().min(DIAGNOSTIC_BYTES)]).into_owned()
 }
 
-/// What a connect attempt concluded. `Unreachable` is a definite failure to
-/// reach the socket; `Stopped` ends the query without inventing a broker
-/// verdict — cancellation, or a temporary inability to complete a nonblocking
-/// connection, which reports as timed out.
 enum Connected<S> {
     Yes(S),
     Unreachable,
     Stopped(ProbeStopped),
 }
 
-/// Connects a nonblocking pathname socket, staying inside `budget`.
-///
-/// The descriptor is owned from creation, so every refusal path closes it. A
-/// connect that reports progress is waited out in slices of the remaining
-/// budget; writability is never taken as success — the socket's own pending
-/// error decides. An interrupted connect or a full nonblocking backlog
-/// establishes nothing and stops the query rather than retrying on a
-/// descriptor whose state is unspecified.
 fn connect_budgeted(socket: &Path, budget: &ProbeBudget<'_>) -> Connected<UnixStream> {
     let (address, address_length) = match address_for(socket) {
         Ok(pair) => pair,
@@ -388,8 +347,6 @@ fn connect_budgeted(socket: &Path, budget: &ProbeBudget<'_>) -> Connected<UnixSt
             match error.raw_os_error() {
                 Some(libc::EINPROGRESS | libc::EALREADY) => {}
                 Some(libc::EINTR) => return Connected::Stopped(halted(budget)),
-                // EWOULDBLOCK is EAGAIN's alias on both platforms: a full
-                // nonblocking backlog established nothing.
                 Some(libc::EAGAIN) => return Connected::Stopped(halted(budget)),
                 _ => return Connected::Unreachable,
             }
@@ -415,8 +372,6 @@ fn connect_budgeted(socket: &Path, budget: &ProbeBudget<'_>) -> Connected<UnixSt
     }
 }
 
-/// A connect that stopped without a verdict reports timed out, unless shutdown
-/// was observed first — cancellation wins at every check.
 fn halted(budget: &ProbeBudget<'_>) -> ProbeStopped {
     match budget.remaining() {
         Err(stop) => stop,
@@ -439,9 +394,6 @@ fn socket_error(fd: RawFd) -> Result<libc::c_int, ()> {
     if outcome == 0 { Ok(code) } else { Err(()) }
 }
 
-/// Creates a close-on-exec, nonblocking stream socket. The owned descriptor
-/// takes over closing immediately, so a failure part way through the
-/// configuration leaves nothing behind.
 fn open_nonblocking() -> std::io::Result<OwnedFd> {
     #[cfg(target_os = "linux")]
     let raw = unsafe {
@@ -475,16 +427,6 @@ fn open_nonblocking() -> std::io::Result<OwnedFd> {
     Ok(fd)
 }
 
-/// Builds a pathname address, refusing anything that cannot be one: an empty
-/// path, an interior NUL, or a path too long for the structure with its
-/// trailing NUL. The structure is zero-initialized, so the terminating NUL is
-/// already in place; the path is copied at the start of `sun_path` — the field
-/// itself, not the offset of the field in the structure — and the address
-/// length covers exactly the path-field offset, the path, and that NUL. Only
-/// pathname sockets are supported. `sun_len` stays zeroed, the shape the
-/// standard library's own connector sends: Darwin resolves the pathname from
-/// the length passed to `connect`, and the integration tests exercise this
-/// construction against a real listener.
 fn address_for(socket: &Path) -> std::io::Result<(libc::sockaddr_un, libc::socklen_t)> {
     let bytes = socket.as_os_str().as_bytes();
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -517,21 +459,13 @@ impl Interest {
     }
 }
 
-/// Waits once for one descriptor, for at most the requested slice rounded up
-/// to a whole millisecond. `Ok(true)` means the descriptor reported the
-/// interest or a hang-up — the following read or write decides what that
-/// meant. `Ok(false)` means the slice elapsed. A poll that cannot run,
-/// including an invalid descriptor, is an error the caller fails closed on.
 fn wait_fd(fd: RawFd, interest: Interest, slice: Duration) -> std::io::Result<bool> {
     let mut polling = [libc::pollfd {
         fd,
         events: interest.events(),
         revents: 0,
     }];
-    let mut timeout = slice.as_millis().min(i32::MAX as u128) as i32;
-    if slice.subsec_nanos() > 0 {
-        timeout += 1;
-    }
+    let timeout = slice.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32;
     let counted = unsafe { libc::poll(polling.as_mut_ptr(), 1, timeout.max(1)) };
     if counted < 0 {
         return Err(std::io::Error::last_os_error());
@@ -734,10 +668,6 @@ mod tests {
         );
     }
 
-    /// A deterministic peer for the connected exchange: a scripted sequence of
-    /// deliveries, stalls and interrupts, with the bytes the probe wrote and a
-    /// drop flag observable after the fact. Its descriptor is meaningless, so
-    /// the injected wait never looks at one.
     struct Scripted {
         events: Rc<RefCell<VecDeque<Event>>>,
         written: Rc<RefCell<Vec<u8>>>,
@@ -746,13 +676,9 @@ mod tests {
 
     #[derive(Clone, PartialEq)]
     enum Event {
-        /// The peer delivers these bytes now.
         Deliver(Vec<u8>),
-        /// The peer is not ready: the injected wait runs.
         Stalled,
-        /// The syscall reports interruption.
         Interrupted,
-        /// The peer closed its half; reads return end of file.
         Gone,
     }
 
@@ -765,8 +691,6 @@ mod tests {
             }
         }
 
-        /// A twin sharing this peer's queues and records, so a test can observe
-        /// the peer after `probe_with` has consumed it.
         fn handles(&self) -> Scripted {
             Scripted {
                 events: Rc::clone(&self.events),
@@ -828,9 +752,6 @@ mod tests {
         }
     }
 
-    /// A fake clock the tests drive in whole milliseconds. `now()` reads it;
-    /// the injected wait also advances it, so waits cost exactly what they
-    /// claim.
     #[derive(Clone)]
     struct FakeClock {
         base: Instant,
@@ -860,15 +781,11 @@ mod tests {
             self.now_ms.set(ms);
         }
 
-        /// A budget that starts at the clock's zero.
         fn budget<'a>(&self, allowance: Duration, flag: &'a AtomicBool) -> ProbeBudget<'a> {
             ProbeBudget::new_at(allowance, flag, self.base)
         }
     }
 
-    /// The injected wait: advances the fake clock by the requested slice, then
-    /// reports the descriptor ready. `flip_at` turns the shutdown flag on once
-    /// the clock passes it, so cancellation is deterministic.
     fn fake_wait<'a>(
         clock: &'a FakeClock,
         flag: Option<(&'a AtomicBool, u64)>,
@@ -909,9 +826,6 @@ mod tests {
         let clock = FakeClock::new();
         let flag = AtomicBool::new(false);
         let budget = clock.budget(Duration::from_millis(100), &flag);
-        // Trickling fragment pairs separated by waits, then the ready frame a
-        // real broker eventually finishes: the query must give up before the
-        // frame arrives, because the waits spent the allowance.
         let mut events: VecDeque<Event> = (0..15)
             .flat_map(|_| [Event::Stalled, Event::Deliver(b"  ".to_vec())])
             .collect();
@@ -935,9 +849,6 @@ mod tests {
 
     #[test]
     fn fragments_that_arrive_without_waiting_are_still_bounded() {
-        // A peer that floods immediately: on this clock every check costs one
-        // millisecond, so the checks around reads — not only the WouldBlock
-        // path — must end the query.
         let base = Instant::now();
         let tick_ms = Rc::new(Cell::new(0u64));
         let reader = Rc::clone(&tick_ms);
@@ -965,9 +876,6 @@ mod tests {
 
         let clock = FakeClock::new();
         let budget = clock.budget(DEADLINE, &flag);
-        // An at-cap frame whose newline arrives — as the first byte of the
-        // final read — with trailing bytes after it: everything past the first
-        // newline is ignored.
         let events: VecDeque<Event> = [
             Event::Deliver(at_cap[..MAX_RESPONSE_BYTES / 2].to_vec()),
             Event::Deliver(at_cap[MAX_RESPONSE_BYTES / 2..].to_vec()),
@@ -984,9 +892,6 @@ mod tests {
             "an at-cap frame plus newline is valid, trailing bytes ignored"
         );
 
-        // The same frame with one excess byte before any newline: the first
-        // excess non-newline byte is refused, and the terminator is never
-        // requested.
         let clock = FakeClock::new();
         let budget = clock.budget(DEADLINE, &flag);
         let mut events: VecDeque<Event> = [Event::Deliver(at_cap)].into();
@@ -1011,8 +916,6 @@ mod tests {
         let clock = FakeClock::new();
         let flag = AtomicBool::new(false);
         let budget = clock.budget(DEADLINE, &flag);
-        // Cap+1 non-newline bytes and then more: the refusal lands on the
-        // lookahead byte and nothing further is requested.
         let mut events: VecDeque<Event> =
             [Event::Deliver(vec![b' '; MAX_RESPONSE_BYTES + 1])].into();
         events.push_back(Event::Deliver(b"\n".to_vec()));
@@ -1059,7 +962,6 @@ mod tests {
     fn unterminated_and_silent_replies_are_timed_out_not_malformed() {
         let flag = AtomicBool::new(false);
 
-        // Valid JSON whose terminator never comes, then EOF.
         let clock = FakeClock::new();
         let budget = clock.budget(DEADLINE, &flag);
         let partial: Vec<u8> = READY_LINE[..READY_LINE.len() - 1].to_vec();
@@ -1068,7 +970,6 @@ mod tests {
             run_scripted(&budget, events, clock.now(), fake_wait(&clock, None));
         assert_eq!(verdict, Ok(spent()), "EOF before the newline is timed out");
 
-        // An empty connection that closes.
         let clock = FakeClock::new();
         let budget = clock.budget(DEADLINE, &flag);
         let (verdict, _stream) = run_scripted(
@@ -1079,7 +980,6 @@ mod tests {
         );
         assert_eq!(verdict, Ok(spent()), "an empty EOF is timed out");
 
-        // Partial JSON, then silence for the rest of the budget.
         let clock = FakeClock::new();
         let budget = clock.budget(Duration::from_millis(80), &flag);
         let partial: Vec<u8> = READY_LINE[..10].to_vec();
@@ -1119,10 +1019,6 @@ mod tests {
 
     #[test]
     fn a_verdict_that_finishes_after_the_allowance_is_refused() {
-        // On this clock every check costs one millisecond, so the frame
-        // completes just inside the 86ms allowance and the final check after
-        // classification lands exactly on the line: the completed answer is
-        // discarded rather than blessed ready.
         let base = Instant::now();
         let tick_ms = Rc::new(Cell::new(0u64));
         let reader = Rc::clone(&tick_ms);
@@ -1228,8 +1124,6 @@ mod tests {
         for _ in 0..8 {
             events.push_back(Event::Stalled);
         }
-        // The wait flips the shutdown flag once the clock passes 40ms, so the
-        // next budget check — not a signal lottery — lands the cancellation.
         let (verdict, stream) = run_scripted(
             &budget,
             events,
@@ -1270,9 +1164,6 @@ mod tests {
         let clock = FakeClock::new();
         let flag = AtomicBool::new(false);
         let budget = clock.budget(Duration::from_millis(100), &flag);
-        // An interrupted read, then stall-and-wait cycles: every wait advances
-        // the fake clock 25ms and nothing restores it, so the query ends spent
-        // with the eventual ready frame still unconsumed.
         let mut events: VecDeque<Event> = [Event::Interrupted].into();
         for _ in 0..5 {
             events.push_back(Event::Stalled);

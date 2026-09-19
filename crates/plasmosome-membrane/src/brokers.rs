@@ -199,8 +199,6 @@ impl<P: Probe> BrokerSet<P> {
         }
         let mut asked = Vec::with_capacity(self.brokers.len());
         for broker in &self.brokers {
-            // Cancellation wins over expiry when one check sees both: a set
-            // that is shutting down has no verdict, spent budget or not.
             match budget.remaining_at(now()) {
                 Err(ProbeStopped::Cancelled) => return Err(Cancelled),
                 Err(ProbeStopped::TimedOut) => {
@@ -212,9 +210,6 @@ impl<P: Probe> BrokerSet<P> {
                 Ok(_) => {}
             }
             let answer = self.prober.probe(&broker.control_socket, &budget);
-            // Whatever the probe came back with, it only counts if the budget
-            // survived it: a late answer is refused as timed out, never
-            // blessed as ready.
             match budget.remaining_at(now()) {
                 Err(ProbeStopped::Cancelled) => return Err(Cancelled),
                 Err(ProbeStopped::TimedOut) => {
@@ -362,8 +357,6 @@ mod tests {
         }
     }
 
-    /// A probe that places the shared clock where its script says and answers
-    /// what it says, so the set's checks land on exact clock values.
     struct TimedProbe {
         clock: Clock,
         script: Mutex<Vec<(u64, Readiness)>>,
@@ -386,15 +379,11 @@ mod tests {
             } else {
                 script[0].clone()
             };
-            // A real clock never runs backwards, so neither does this one.
             self.clock.advance_to(at);
             Ok(answer)
         }
     }
 
-    /// The injected clock for `status_with`: every read ticks one millisecond,
-    /// so the set's own checks — pre-entry, post-probe — each spend a
-    /// millisecond, while scripted probes place the clock exactly.
     #[derive(Clone)]
     struct Clock {
         base: Instant,
@@ -654,8 +643,6 @@ mod tests {
             spec(dir.path(), "credentiald"),
         ];
         let clock = Clock::new();
-        // `egressd` answers ready at 99ms of a 100ms budget; the checks around
-        // the walk spend the last millisecond, so `dnsd` is never entered.
         let prober = TimedProbe::scripted(
             clock.clone(),
             vec![(99, ready()), (0, ready()), (0, ready())],
@@ -684,8 +671,6 @@ mod tests {
         let flag = AtomicBool::new(false);
         let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
         let clock = Clock::new();
-        // `egressd` answers in time; `dnsd`, the last broker, places its ready
-        // far past the allowance.
         let prober = TimedProbe::scripted(clock.clone(), vec![(0, ready()), (150, ready())]);
         let set = BrokerSet::spawn(specs, forking(), prober).expect("every broker forks");
 
@@ -771,8 +756,6 @@ mod tests {
         );
     }
 
-    /// A probe that flips the shutdown flag and reports cancellation, the way
-    /// a real probe observes the daemon's flag mid-query.
     struct CancellingProbe {
         flag: Arc<AtomicBool>,
     }
