@@ -229,7 +229,7 @@ Clients use the same deadline and do not turn a timeout into success. Large tran
 | `GET /v1` | `{registry_id, schema:1}` |
 | `PUT /v1/blobs/<digest>` | Authenticated upload; `201 {registry_id,digest,size}` or `200` for identical existing bytes |
 | `POST /v1/releases` | Authenticated exact descriptor bytes; `201` with receipt, or `200` with original receipt for an identical retry |
-| `GET /v1/releases/<kind>/<population>/<publisher>/<name>/<version>` | Release descriptor bytes, digest, receipt and current `active | yanked` state |
+| `GET /v1/releases/<kind>/<population>/<publisher>/<name>/<version>` | Release descriptor bytes, digest, receipt and current `active \| yanked` state |
 | `GET /v1/blobs/<digest>` | Exact bytes of a blob referenced by a committed release, with length and digest headers |
 | `GET /v1/catalog?kind=...&population=...&query=...&limit=...` | Catalog page described below |
 | `POST /v1/releases/<kind>/<population>/<publisher>/<name>/<version>/yank` | Authorized `{digest,reason}`; `200 {registry_id,release:ReleaseRef,yank:YankInfo}` |
