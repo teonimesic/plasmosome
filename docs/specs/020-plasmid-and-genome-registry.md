@@ -232,7 +232,7 @@ Clients use the same deadline and do not turn a timeout into success. Large tran
 | `GET /v1/releases/<kind>/<population>/<publisher>/<name>/<version>` | Release descriptor bytes, digest, receipt and current `active | yanked` state |
 | `GET /v1/blobs/<digest>` | Exact bytes of a blob referenced by a committed release, with length and digest headers |
 | `GET /v1/catalog?kind=...&population=...&query=...&limit=...` | Catalog page described below |
-| `POST /v1/releases/<kind>/<population>/<publisher>/<name>/<version>/yank` | Authorized `{digest,reason}`; receipt of terminal yanked state |
+| `POST /v1/releases/<kind>/<population>/<publisher>/<name>/<version>/yank` | Authorized `{digest,reason}`; `200 {registry_id,release:ReleaseRef,yank:YankInfo}` |
 
 The JSON release response encodes descriptor bytes as base64 in `descriptor`, so hashing does
 not depend on a response serializer. A registration receipt is
@@ -252,9 +252,10 @@ are rechecked inside the publication transaction, not only during upload.
 
 Yank requires the original population's namespace/curator authority. It retains content, creator,
 receipt and digest, records the authenticated yanker and nonblank public reason, and increments
-generation once. A matching repeated yank returns the original yank receipt; a different reason
-is a conflict. There is no unyank, deletion or version reuse. Yanking neither detaches running
-cells nor deletes already imported content. New online resolution refuses a yanked root or
+generation once. An identical retry returns200 with the same body and original YankInfo;
+a different reason is a conflict. There is no unyank, deletion or version reuse.
+Yanking neither detaches running cells nor deletes already imported content.
+New online resolution refuses a yanked root or
 provider. An already materialized graph remains an exact historical artifact, not proof that
 its current catalog endorsement is unchanged. Publish a new version to distribute a correction.
 

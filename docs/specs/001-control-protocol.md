@@ -578,6 +578,17 @@ durable finish, its publication exchange gets one recovery_deadline_ms budget, l
 reset on retry. Exhaustion refuses startup or blocks further mutation of that cell; it is never
 an empty observation or successful client result. JSON configuration rejects unknown keys as before.
 
+The same strict JSON configuration also admits optional `registry_root`, an explicitly supplied
+absolute trusted import path under spec020. It is independent of instance_root and control_socket;
+neither those paths, the caller's HOME nor a request field supplies a default. A relative or
+non-string value is invalid configuration. Omission preserves purely local operation. Validate
+ownership, no-follow traversal and immutable imported content at every use under spec020.
+An artifact-bearing request with no configured root or no matching import refuses with101 and
+the full artifact reference as target; unsafe/corrupt imported content refuses with108.
+A settled recovered registry source with no configured root, missing bytes or failed validation
+refuses startup with ArtifactSource/artifact_source as below, without fallback. If no root was
+configured, that diagnostic omits path_bytes; it still includes the complete recorded references.
+
 The controller holds spec008's instance writer lock and discovers validated cell directories
 before sending requests to their membrane sockets. A membrane is configured for one validated
 cell and rejects a request naming another cell with code101. Each connection uses §1 framing,
