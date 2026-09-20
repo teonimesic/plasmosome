@@ -96,7 +96,8 @@ The serde envelope is `{ "format": 1, "generation": N, "event": EVENT }`. `EVENT
 `force` is required and is either null or `{ "operator": STRING, "reason": STRING }`, both
 nonblank. It is a recorded operator assertion, not authentication. Each change is
 `{ "plugin": PluginId, "replacement": Replacement-or-null }`; a replacement is
-`{ "mock": MockMode, "effects": [RecordedEffect, ...] }`. Null removes the attachment. An empty
+`{ "mock": MockMode, "source": AttachmentSource, "effects": [RecordedEffect, ...] }`.
+Null removes the attachment. An empty
 effects array is a real attached plasmid with a known mode, not an accidental removal. Changes
 contain each plugin at most once, are nonempty, and carry the complete replacement for each
 changed attachment. Unmentioned attachments remain unchanged. Effect order is grant order.
@@ -121,6 +122,28 @@ from the supervisor's current configuration, substitute a hash for its contents,
 after creating a resource. The unimplemented per-cell format1 incorporates these required fields
 before its first writer ships; implemented version2 single-plugin logs are not cell histories
 and acquire neither a cell nor a recipe by being placed at the cell path.
+
+`AttachmentSource` is a required strict tagged record. `{ "kind": "local" }` preserves the
+existing unregistered selection semantics; it asserts no registry provenance or content pin.
+The registry form is `{ "kind": "registry", "registry_id": UUID, "root": ReleaseRef,
+"member": ReleaseRef }`, using spec020's exact reference grammar. Root identifies the imported
+plasmid/genome graph and member identifies this plugin's plasmid release within it. Member must
+be a plasmid whose name matches the change's PluginId and must belong to root's verified graph.
+Journal reading checks source/reference syntax and member kind/name; orchestration separately
+verifies membership against the imported graph. An unknown tag, incomplete reference or
+inconsistent member is InvalidSource, never inferred from PluginId, effects, filesystem contents
+or registry search. Shared source/reference serde records
+are defined once alongside the journal records and consumed by desired-state projections.
+
+Every newly attached member records this source before effects. Reusing an already attached
+provider is permitted only when its registry ID and exact member reference match; retain that
+provider's original root/source rather than rewriting it to the new requirer's root. A local
+provider with the same name is not a matching registry member. Source and mock/effects change
+together in prepare/commit/abort, including empty attachments; unmentioned sources stay unchanged.
+This registry-source addition is part of the still-unimplemented per-cell format1 before its
+first writer ships. Missing source is refused, not defaulted to local. Existing single-plugin
+version2/version3 contracts and the refusal to migrate them into cell histories are unchanged.
+No second file/database maps journal generations or PluginIds back to artifact origins.
 
 Forensic replay can encounter an `Exact(Backend(handle))`, `External`, or `Delayed` effect with
 null operation. The reader retains it rather than pretending it is a universe operation. A
@@ -308,7 +331,7 @@ database, multi-file atomic commit, or a second durable generation store. No rec
 Result<Vec<CellJournalRecord>, CellJournalFault>` returns every record or no history.
 `CellJournalFault` carries `path: PathBuf`, `line: Option<u64>`, `lines_parsed: u64`, and kind
 `Io | Unparseable | UnsupportedFormat | GenerationZero | GenerationOrder | EventOrder |
-InvalidEffect`. Read framing as bytes: invalid UTF-8, a malformed complete record and any
+InvalidEffect | InvalidSource`. Read framing as bytes: invalid UTF-8, a malformed complete record and any
 non-LF-terminated final record all fault. A nonempty physical line is counted once; CRLF does
 not add a line. The reader stops at the first fault. `lines_parsed` counts only complete,
 syntactically and semantically accepted records before it, including terminal records.
@@ -326,7 +349,7 @@ strict reads are never raced against another controller append.
 `DesiredState` retains `generation: u64` and `cells: BTreeMap<CellId, DesiredCell>`.
 `DesiredCell` is `{ generation: u64, genome: Option<GenomeName>,
 plasmids: Vec<DesiredPlasmid> }`. `DesiredPlasmid` is `{ plugin: PluginId, mock: MockMode,
-generation: u64, effects: Vec<RecordedEffect> }`. This is separate from the existing compact
+source: AttachmentSource, generation: u64, effects: Vec<RecordedEffect> }`. This is separate from the existing compact
 status `PlasmidRecord`; a status projection cannot replace the recovered effects.
 `RecoveryOutcome.tombstones` is `BTreeMap<CellId, BTreeMap<PluginId, u64>>`, retaining removed
 attachments' last committed change generations rather than fake attached plasmids. A cell's
@@ -335,10 +358,12 @@ committed attachment generations only change on commit. The instance generation 
 adopted cell generation, or 0. It is a status aggregate, never a watermark deciding whether
 another cell's mutation should run. Per-cell desired pushes carry the cell's settled generation.
 For publication, both live execution and restart use the same settled journal replay: plasmids
-are ordered by PluginId, effects retain recorded order, and genome is None because this journal
-does not persist it. Unrecorded live metadata cannot enter the published record and disappear
-on restart. Complete-content equality compares every decoded field, including attachment
-generations, modes, ordered effects and exact operations, not JSON formatting or only OS holdings.
+are ordered by PluginId, effects and sources retain their recorded values, and genome is None
+because this journal persists no separate cell-level genome label. Per-attachment registry root
+provenance does not infer that label. Unrecorded live metadata cannot enter the published record
+and disappear on restart. Complete-content equality compares every decoded field, including
+attachment generations, source tags/full references, modes, ordered effects and exact operations,
+not JSON formatting or only OS holdings.
 
 An empty journal adopts an empty generation-0 desired cell; an empty attachment remains an
 attachment. No recovered genome is invented: it is None internally and omitted on spec001's
@@ -465,6 +490,24 @@ without cleanup. A pending generation cannot already have been published at that
 publication follows durable finish, so that case also refuses rather than acknowledging an
 unfinished or subsequently aborted payload.
 
+
+After required pending cleanup and durable finish, and before desired-state publication or
+serving, orchestration validates every settled registry AttachmentSource against the configured
+trusted import root. It reopens/verifies the exact root graph and member and retains the verified
+declaration/implementation objects for reconstruction of registry-selected runtime metadata.
+The pure `recover` function carries recorded source data but does no import-cache/network IO.
+Missing or corrupt import content produces
+`RecoveryError::ArtifactSource { cell, plugin, registry_id, root, member, detail }` and prevents
+startup success; it never substitutes a local namesake, downloads another artifact, reparses a
+mutable version address or guesses a source from the grant recipe. Spec001 defines its stderr
+projection. Do not kill a surviving cell or discard its recorded source on this refusal.
+
+Source content is not withdrawal authority. Pending cleanup uses the journal's complete original
+operations/inverses and independent supervisor observation even if content for a retiring source
+is gone. Only settled attached sources must pass the pre-serving source validation. It runs within
+the existing single recovery deadline. A local source adds no registry lookup or new provenance
+claim; its pre-existing semantics are unchanged. Registry-source loss is an availability failure,
+not authorization to rewrite the journal or create a second recovery store.
 After cleanup and durable finish, reconcile each adopted, non-quarantined cell independently:
 
 | Observed membrane generation versus settled journal generation | Startup action |
@@ -668,6 +711,14 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   deadline; equal continues only with identical complete content; higher refuses even when all
   holdings match. Change an empty attachment's mode at the same generation: equal empty OS
   snapshots must not hide the publication conflict. Refuse without overwriting either record.
+  Repeat with two same-name imported releases from different publishers available locally.
+  A finished attachment's recorded registry/root/member identity survives restart, appears in
+  complete desired publication, and determines reload even while the registry is unavailable.
+  Changing only source at equal generation must trigger desired_conflict. Missing/corrupt source
+  content refuses serving without fallback or withdrawal of surviving holdings; pending retirement
+  can still finish from original recorded inverses. Crash before/after commit retains respectively
+  old/new source together with its complete effects. A local tag remains local and no source-less
+  record is silently adopted.
 - **R10 — wire and liveness:** recovery observer replies preserve exact typed ownership and grant
   IDs, distinguish lifecycle/readiness from desired state, and bound deadlines. Wrong-cell,
   malformed, partial or wrong-ID replies cannot pass as complete observation or successful undo.
