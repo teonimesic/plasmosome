@@ -114,11 +114,45 @@ ID or state, duplicate resolved ID, invalid intent list, dangling link, or accep
 an approved intent chain is an input fault. Non-document files such as the folder README are not
 coverage inputs. A directory containing only files without intent records refuses, not passes.
 
-Native IDs and statuses must be well-formed under spec016's lifecycle, including actual
-`planning` and `review`. Every nonclosed status remains outstanding work, not delivery or an
-owner coverage judgment. Link arrays must be arrays of three-digit strings with uniquely resolving
-targets. Existing imported empty links remain visible history, not permission to admit new
-unmapped work. For a task with spec links, its copied intent list must equal the first-seen ordered
+Validate native IDs, duplicate identities and spec016 lifecycle statuses across the complete
+array, before excluding any row from work coverage. This includes actual `planning` and `review`.
+Labels, when present, must be an array of strings. A standalone coordination carrier under
+[spec019](019-dispatched-planners-leave-a-trace.md#subjects-and-carriers) is not a work task:
+
+- Its markers are jointly `issue_type: chore` and the exact `planner-dispatch` label. A labelled
+  row of another type refuses; a chore without that label remains an ordinary work task.
+  Names, notes and missing task links alone do not identify a carrier.
+- Its metadata is an object with `intent_ids` containing exactly one three-digit string resolving
+  to an intent. `spec_ids` must be absent, not an empty array or null. Neither `needs-plan` nor
+  `planned` is allowed, and its native status is `open` or `closed`, not a task work phase.
+- Its assignee is absent, null or the exact empty string. Any other value refuses, including a
+  whitespace-only string; trimming must not hide ownership. The native `owner` field is not a
+  claim and is not this test.
+- An open carrier's intent must be approved. Spec019 requires that approval before dispatch.
+  A closed carrier must still resolve its intent, but does not require that intent to remain
+  approved: cancellation can record that the intent stopped wanting the work. Its `close_reason`
+  must be a string nonempty after trimming; it records coordination termination, not delivery or
+  cancellation of a work task.
+  Spec019 governs the permitted reasons and dispatch history; this command neither classifies
+  that prose by keywords nor authenticates a past approval from current fields.
+
+A malformed carrier refuses as input; it is not silently dropped or retried as ordinary work.
+A valid one remains in complete-input identity validation but contributes no task link, closure
+evidence, forge query, `show` row or landed work. It needs no task closure annotation or task PR.
+Closing it because a spec reached main does not mean that spec's implementation was delivered.
+This is a distinction between native record kinds, not a third task outcome or a history rewrite.
+Task-anchored dispatch notes confer no exclusion: their carriers remain ordinary work tasks.
+
+Duplicate identity means the same full native ID, including between two carriers, not the same
+intent subject. Check distinct-ID carriers individually even when their subjects match: closed
+duplicates remain history, and spec019 permits overlapping records during reconciliation. That
+spec still governs which dispatch owns the subject; this consumer neither resolves nor certifies
+dispatch ownership. Distinct subjects likewise do not conflict merely because both have carriers.
+
+For every work task, nonclosed status remains outstanding work, not delivery or an owner coverage
+judgment. Both link arrays must be arrays of three-digit strings with uniquely resolving targets;
+missing arrays still refuse. Imported empty links remain visible history, not permission to admit
+new unmapped work. For a task with spec links, its copied intent list must equal the first-seen ordered
 union from those specs; a mismatch is a repairable input fault, not another approval gate. An
 imported task with empty spec links may still reach intents through its direct links. No missing
 link is silently replaced by an inferred goal.
@@ -387,6 +421,22 @@ claim that these implementation proofs have run:
   Exercise the exact unbounded native invocation and successful empty and nonempty arrays.
   Do not claim detection of a valid shorter native array: native completeness is a trusted
   dependency, not an independently observed cardinality guarantee.
+- A valid open standalone spec019 carrier is omitted from `show` and contributes no delivery.
+  So are closed carriers with accepted-spec, cancellation and duplicate terminal reasons, without
+  task closure annotations, task PRs or forge reads. A closed cancellation carrier whose intent
+  is now draft remains coordination history; an open carrier to that draft intent refuses.
+  Current fields must not be presented as proof of historical owner approval.
+- Malformed carrier markers, non-chore `planner-dispatch`, missing/malformed/multiple/dangling
+  intent links, present `spec_ids` (including null or empty), task-phase status, forbidden labels,
+  or any nonempty assignee including whitespace refuse with exit 2 and no derived stdout.
+  Include a closed carrier with missing or blank terminal reason. An ordinary chore without the
+  dispatch label and a task with dispatch notes still require ordinary task links and evidence.
+  Repeating a full native ID in carrier/task rows or in two carrier rows refuses before coverage.
+  Two individually valid carriers with different IDs and different subjects pass these input
+  checks, as do a closed duplicate and its surviving same-subject carrier. Distinct-ID carriers
+  overlapping during spec019 reconciliation are not a duplicate-ID fault or a certification of
+  correct dispatch ownership. A valid carrier cannot mask an unrelated ordinary-task link or
+  closure fault, or change input-fault precedence.
 - Invoke from a wrong directory and one holding only non-record intent files under both `bash`
   and `zsh`: the command produces its own refusal, not a shell glob error or quiet success. Normal
   invocations also work in both shells; do not use zsh's read-only `status` variable.
