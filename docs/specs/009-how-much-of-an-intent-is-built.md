@@ -143,6 +143,12 @@ Closing it because a spec reached main does not mean that spec's implementation 
 This is a distinction between native record kinds, not a third task outcome or a history rewrite.
 Task-anchored dispatch notes confer no exclusion: their carriers remain ordinary work tasks.
 
+Duplicate identity means the same full native ID, including between two carriers, not the same
+intent subject. Check distinct-ID carriers individually even when their subjects match: closed
+duplicates remain history, and spec019 permits overlapping records during reconciliation. That
+spec still governs which dispatch owns the subject; this consumer neither resolves nor certifies
+dispatch ownership. Distinct subjects likewise do not conflict merely because both have carriers.
+
 For every work task, nonclosed status remains outstanding work, not delivery or an owner coverage
 judgment. Both link arrays must be arrays of three-digit strings with uniquely resolving targets;
 missing arrays still refuse. Imported empty links remain visible history, not permission to admit
@@ -425,8 +431,12 @@ claim that these implementation proofs have run:
   or any nonempty assignee including whitespace refuse with exit 2 and no derived stdout.
   Include a closed carrier with missing or blank terminal reason. An ordinary chore without the
   dispatch label and a task with dispatch notes still require ordinary task links and evidence.
-  Duplicate IDs across carrier/task rows or two carriers refuse before coverage; a valid carrier
-  cannot mask an unrelated ordinary-task link or closure fault, or change input-fault precedence.
+  Repeating a full native ID in carrier/task rows or in two carrier rows refuses before coverage.
+  Two individually valid carriers with different IDs and different subjects pass these input
+  checks, as do a closed duplicate and its surviving same-subject carrier. Distinct-ID carriers
+  overlapping during spec019 reconciliation are not a duplicate-ID fault or a certification of
+  correct dispatch ownership. A valid carrier cannot mask an unrelated ordinary-task link or
+  closure fault, or change input-fault precedence.
 - Invoke from a wrong directory and one holding only non-record intent files under both `bash`
   and `zsh`: the command produces its own refusal, not a shell glob error or quiet success. Normal
   invocations also work in both shells; do not use zsh's read-only `status` variable.
