@@ -147,6 +147,24 @@ def native_task(
     return row
 
 
+def native_carrier(
+    identity="carrier-alpha",
+    status="open",
+    intent_ids=("001",),
+    close_reason=None,
+):
+    row = {
+        "id": identity,
+        "status": status,
+        "issue_type": "chore",
+        "labels": ["planner-dispatch"],
+        "metadata": {"intent_ids": list(intent_ids)},
+    }
+    if close_reason is not None:
+        row["close_reason"] = close_reason
+    return row
+
+
 def delivered_task(identity="task-delivered", url=PR_URL):
     return native_task(
         identity,
@@ -401,6 +419,157 @@ class CoverageBehaviorTests(unittest.TestCase):
                 result, unused, unused_forge = self.execute(rows)
                 self.assertEqual(result.exit_code, 2)
                 self.assertEqual(result.stdout_lines, ())
+
+    def test_valid_standalone_carriers_are_excluded_from_coverage(self):
+        self.fixture.write_intent(intent_text("002"), "002-other.md")
+        null_assignee = native_carrier("null-assignee")
+        null_assignee["assignee"] = None
+        empty_assignee = native_carrier("empty-assignee")
+        empty_assignee["assignee"] = ""
+        rows = [
+            native_carrier("open-carrier"),
+            native_carrier("accepted-spec-carrier", "closed", close_reason="Accepted spec reached main"),
+            native_carrier("cancelled-carrier", "closed", close_reason="Intent no longer wants a spec"),
+            native_carrier("duplicate-carrier", "closed", close_reason="Duplicate of surviving carrier"),
+            native_carrier("other-subject-carrier", intent_ids=("002",)),
+            null_assignee,
+            empty_assignee,
+        ]
+        result, unused, forge = self.execute(rows, command="show", requested_id="001")
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(
+            [json.loads(line) for line in result.stdout_lines],
+            [{"type": "spec", "intent_id": "001", "id": "001", "status": "accepted"}],
+        )
+        self.assertEqual(forge.calls, [])
+        ordinary_chore = native_task("ordinary-chore")
+        ordinary_chore["issue_type"] = "chore"
+        task_dispatch_notes = native_task("task-dispatch-notes")
+        task_dispatch_notes["notes"] = "planner dispatch entry"
+        result, unused, forge = self.execute(
+            [ordinary_chore, task_dispatch_notes],
+            command="show",
+            requested_id="001",
+        )
+        task_ids = [json.loads(line)["id"] for line in result.stdout_lines if json.loads(line)["type"] == "task"]
+        self.assertEqual(task_ids, ["ordinary-chore", "task-dispatch-notes"])
+        self.assertEqual(forge.calls, [])
+
+    def test_closed_carrier_may_retain_a_now_draft_intent(self):
+        self.fixture.write_intent(intent_text("002", status="draft"), "002-other.md")
+        closed = native_carrier("closed-carrier", "closed", ("002",), "Intent no longer wants a spec")
+        result, unused, forge = self.execute([closed])
+        self.assertEqual(result, coverage.RunResult(0, (), ()))
+        self.assertEqual(forge.calls, [])
+        result, unused, forge = self.execute([native_carrier("open-carrier", intent_ids=("002",))])
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.stdout_lines, ())
+        self.assertEqual(forge.calls, [])
+
+    def test_malformed_carrier_and_near_marker_shapes_refuse(self):
+        non_chore = native_carrier("non-chore")
+        non_chore["issue_type"] = "task"
+        ordinary_chore = native_carrier("ordinary-chore")
+        ordinary_chore["labels"] = []
+        task_dispatch_notes = {
+            "id": "task-dispatch-notes",
+            "status": "open",
+            "notes": "planner dispatch entry",
+            "metadata": {"intent_ids": ["001"]},
+        }
+        labels_wrong_type = native_task("labels-wrong-type")
+        labels_wrong_type["labels"] = "planner-dispatch"
+        labels_null = native_task("labels-null")
+        labels_null["labels"] = None
+        label_member_wrong_type = native_task("label-member-wrong-type")
+        label_member_wrong_type["labels"] = [1]
+        metadata_wrong_type = native_carrier("metadata-wrong-type")
+        metadata_wrong_type["metadata"] = "metadata"
+        missing_intent = native_carrier("missing-intent")
+        missing_intent["metadata"] = {}
+        multiple_intents = native_carrier("multiple-intents", intent_ids=("001", "002"))
+        dangling_intent = native_carrier("dangling-intent", intent_ids=("999",))
+        empty_intents = native_carrier("empty-intents", intent_ids=())
+        malformed_intent = native_carrier("malformed-intent", intent_ids=("1",))
+        spec_ids_null = native_carrier("spec-ids-null")
+        spec_ids_null["metadata"]["spec_ids"] = None
+        spec_ids_empty = native_carrier("spec-ids-empty")
+        spec_ids_empty["metadata"]["spec_ids"] = []
+        planned = native_carrier("planned")
+        planned["labels"].append("planned")
+        needs_plan = native_carrier("needs-plan")
+        needs_plan["labels"].append("needs-plan")
+        task_phase = native_carrier("task-phase", status="planning")
+        assigned_space = native_carrier("assigned-space")
+        assigned_space["assignee"] = " "
+        assigned_tab = native_carrier("assigned-tab")
+        assigned_tab["assignee"] = "\t"
+        assigned_wrong_type = native_carrier("assigned-wrong-type")
+        assigned_wrong_type["assignee"] = 0
+        missing_reason = native_carrier("missing-reason", status="closed")
+        blank_reason = native_carrier("blank-reason", status="closed", close_reason=" ")
+        cases = [
+            non_chore,
+            ordinary_chore,
+            task_dispatch_notes,
+            labels_wrong_type,
+            label_member_wrong_type,
+            metadata_wrong_type,
+            missing_intent,
+            multiple_intents,
+            labels_null,
+            dangling_intent,
+            spec_ids_null,
+            spec_ids_empty,
+            planned,
+            empty_intents,
+            malformed_intent,
+            needs_plan,
+            task_phase,
+            assigned_space,
+            assigned_tab,
+            assigned_wrong_type,
+            missing_reason,
+            blank_reason,
+        ]
+        for row in cases:
+            with self.subTest(identity=row["id"]):
+                result, unused, forge = self.execute([row])
+                self.assertEqual(result.exit_code, 2)
+                self.assertEqual(result.stdout_lines, ())
+                self.assertEqual(forge.calls, [])
+
+    def test_carrier_duplicate_identity_is_global_but_subject_is_not_identity(self):
+        carrier = native_carrier("same")
+        task = native_task("same")
+        for rows in ([carrier, task], [task, carrier], [carrier, native_carrier("same")]):
+            with self.subTest(order=[row["issue_type"] if "issue_type" in row else "task" for row in rows]):
+                result, unused, unused_forge = self.execute(rows)
+                self.assertEqual(result.exit_code, 2)
+                self.assertEqual(result.stdout_lines, ())
+        result, unused, forge = self.execute(
+            [native_carrier("first"), native_carrier("second")],
+            command="show",
+            requested_id="001",
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(len(result.stdout_lines), 1)
+        self.assertEqual(forge.calls, [])
+
+    def test_carrier_cannot_mask_ordinary_input_fault_precedence(self):
+        self.fixture.write_intent(intent_text(served="mostly"))
+        bad_link = native_task("bad-link", spec_ids=("999",))
+        result, unused, forge = self.execute([native_carrier(), bad_link])
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.stdout_lines, ())
+        self.assertTrue(result.stderr_lines[0].startswith("input: bad-link:"))
+        self.assertEqual(forge.calls, [])
+        unknown_closure = native_task("unknown-closure", status="closed", closed_at=MERGED_AT)
+        result, unused, forge = self.execute([native_carrier(), unknown_closure])
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.stdout_lines, ())
+        self.assertTrue(result.stderr_lines[0].startswith("input: unknown-closure:"))
+        self.assertEqual(forge.calls, [])
 
     def test_literal_native_ids_remain_distinct(self):
         rows = [native_task("plasmosome-043-a", "open"), native_task("plasmosome-043-b", "open")]

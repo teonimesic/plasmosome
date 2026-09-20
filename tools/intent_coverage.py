@@ -746,20 +746,55 @@ def parse_tasks(rows, intents, specs):
     if not isinstance(rows, list):
         raise Refusal("native store", "native input must be an array")
     tasks = {}
+    seen = set()
     for row in rows:
         if not isinstance(row, dict):
             raise Refusal("native store", "every native row must be an object")
         identity = row.get("id")
         if not isinstance(identity, str) or identity == "":
             raise Refusal("native store", "every native row must have a nonempty literal id")
-        if identity in tasks:
+        if identity in seen:
             raise Refusal(identity, "duplicate native id")
+        seen.add(identity)
         status_value = row.get("status")
         if not isinstance(status_value, str) or status_value not in TASK_STATES:
             raise Refusal(identity, "status must be one of open,planning,in_progress,review,blocked,closed")
+        labels_value = row.get("labels", [])
+        if not isinstance(labels_value, list) or any(not isinstance(label, str) for label in labels_value):
+            raise Refusal(identity, "labels must be an array of strings when present")
         metadata = row.get("metadata")
         if not isinstance(metadata, dict):
             raise Refusal(identity, "metadata must be an object")
+
+        planner_dispatch = "planner-dispatch" in labels_value
+        chore = row.get("issue_type") == "chore"
+        if planner_dispatch and not chore:
+            raise Refusal(identity, "planner-dispatch label requires issue_type chore")
+        if planner_dispatch:
+            intent_ids = _link_array(identity, metadata, "intent_ids")
+            if len(intent_ids) != 1:
+                raise Refusal(identity, "carrier metadata.intent_ids must contain exactly one intent")
+            intent_id = intent_ids[0]
+            if intent_id not in intents:
+                raise Refusal(identity, f"metadata.intent_ids names missing intent {intent_id}")
+            if "spec_ids" in metadata:
+                raise Refusal(identity, "carrier metadata.spec_ids must be absent")
+            if "needs-plan" in labels_value or "planned" in labels_value:
+                raise Refusal(identity, "carrier labels must not include needs-plan or planned")
+            if status_value not in {"open", "closed"}:
+                raise Refusal(identity, "carrier status must be open or closed")
+            assignee = row.get("assignee")
+            if assignee not in (None, ""):
+                raise Refusal(identity, "carrier assignee must be absent, null or the empty string")
+            if status_value == "open":
+                if intents[intent_id].status != "approved":
+                    raise Refusal(identity, "open carrier intent must be approved")
+            else:
+                close_reason = row.get("close_reason")
+                if not isinstance(close_reason, str) or not close_reason.strip():
+                    raise Refusal(identity, "closed carrier requires a nonempty close_reason")
+            continue
+
         spec_ids = _link_array(identity, metadata, "spec_ids")
         intent_ids = _link_array(identity, metadata, "intent_ids")
         for spec_id in spec_ids:
