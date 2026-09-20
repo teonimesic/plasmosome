@@ -40,6 +40,12 @@ intent014. This spec defines distribution identities, the genome distribution gr
 exact handoff to the controller. It does not freeze the component WIT world or settle spec011's
 owner-controlled approval gate.
 
+The `plasmosome` command belongs to the existing `crates/plasmosome` package. Spec010's
+name-holding stage permits its transition only when this usable command is actually implemented;
+accepting this specification leaves the current lib-only placeholder unchanged. No other package
+may own that binary name. This spec authorizes neither Rust-crate publication, a release version,
+an expanded publish allowlist nor release of private dependencies; draft spec007 remains separate.
+
 ## Contract
 
 ### 1. Identities and references

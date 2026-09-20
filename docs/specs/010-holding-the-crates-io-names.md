@@ -26,6 +26,27 @@ no agent working notes, describe themselves honestly, and are the only two the g
 through. Running `cargo publish` is a separate deliberate act by the owner, and no line below
 waits on it.
 
+## After the name-holding delivery
+
+The lib-only target, version `0.0.0`, install refusal and README assertions below describe the
+original name-holding artifact. They are not a permanent ban on a real command or on instructions
+for using a later source checkout. Decision010 already places that transition in the existing
+`crates/plasmosome`: it gains a binary only when there is a usable tool to install, never a
+placeholder binary or a second package claiming its command name.
+
+Spec020 specifies such a future host registry command. Accepting that spec does not implement
+it or change the present checkout's lib-only state. A later implementation must deliver the
+usable command before adding its binary target and update the crate's metadata, working notes
+and README to describe what actually works. Documentation must distinguish the held `0.0.0`
+artifact from any later usable checkout rather than claim that the published placeholder
+already includes the new command.
+
+The publish allowlist, explicit registry declarations, package metadata and agent-note exclusion,
+and unique binary ownership continue to apply. This transition chooses no real release version,
+publishes nothing, authorizes no private dependency's release, and neither freezes the SDK nor
+waives any remaining prerequisite of draft spec007. The owner's separate publishing decision
+and the historical name-holding acceptance remain unchanged.
+
 ## Design
 
 **`plasmosome` is a new workspace member at `crates/plasmosome`, library only.** It has a library
