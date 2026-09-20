@@ -17,7 +17,11 @@ goals nor gates admission/priority.
 
 Blank template means missing judgment, not `none`; disclose fault3. The existing local
 gate permits its draft publication; never gate on live coverage.
-Read-only checkout-root commands (no synchronization); invalid inputs/unknown evidence refuse first:
+Read-only checkout-root commands (no synchronization); invalid inputs/unknown evidence refuse first.
+Both commands observe PRs for tasks reaching any intent: delivered tasks and cancelled tasks
+with PR references, even outside the requested intent. This requires GitHub reachability and
+credentials (`GH_TOKEN`, `GITHUB_TOKEN`, or existing `gh auth`); unavailable access refuses
+with exit2. Without such observations, neither command needs GitHub access.
 - `./tools/intent-coverage show INTENT_ID`: JSON Lines of specs/once-only
   native tasks/statuses/dispositions/merge-or-cancellation evidence; ignores served.
 - `./tools/intent-coverage check`: exit2 refusal; exit1
