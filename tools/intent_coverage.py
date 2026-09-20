@@ -163,6 +163,7 @@ def _send_event(channel, event):
 def _forge_worker(channel, number, token, transport, connect_timeout, read_timeout):
     connection = None
     try:
+        _send_event(channel, ("started",))
         context = ssl.create_default_context(cafile=transport.cafile)
         connection = http.client.HTTPSConnection(
             transport.host,
@@ -440,7 +441,7 @@ class ForgeReader:
             self.token = _validated_token(self.token_reader.read(command_deadline))
         number = int(match.group(1))
         observation_deadline = min(command_deadline, self.clock() + self.limits.observation)
-        connect_deadline = min(observation_deadline, self.clock() + self.limits.connect)
+        connect_deadline = None
         receive, send = self.process_context.Pipe(duplex=False)
         process = self.process_context.Process(
             target=_forge_worker,
@@ -455,6 +456,7 @@ class ForgeReader:
         )
         process.start()
         send.close()
+        started = False
         connected = False
         last_progress = None
         result = None
@@ -465,13 +467,13 @@ class ForgeReader:
             while result is None and failure is None:
                 now = self.clock()
                 bounds = [active_deadline]
-                if not connected:
+                if started and not connected:
                     bounds.append(connect_deadline)
-                elif last_progress is not None:
+                elif connected and last_progress is not None:
                     bounds.append(last_progress + self.limits.idle)
                 event_deadline = min(bounds)
                 if now >= event_deadline:
-                    if not connected and event_deadline == connect_deadline:
+                    if started and not connected and event_deadline == connect_deadline:
                         failure = Refusal(url, "connection deadline exceeded")
                     elif connected and last_progress is not None and event_deadline == last_progress + self.limits.idle:
                         failure = Refusal(url, "read-progress deadline exceeded")
@@ -485,9 +487,18 @@ class ForgeReader:
                         failure = Refusal(url, "GitHub worker exited without a result")
                         break
                     kind = event[0]
-                    if kind == "connected":
-                        connected = True
-                        last_progress = self.clock()
+                    if kind == "started":
+                        if started or connected:
+                            failure = Refusal(url, "GitHub worker returned an invalid startup event")
+                        else:
+                            started = True
+                            connect_deadline = min(observation_deadline, self.clock() + self.limits.connect)
+                    elif kind == "connected":
+                        if not started:
+                            failure = Refusal(url, "GitHub worker connected before startup")
+                        else:
+                            connected = True
+                            last_progress = self.clock()
                     elif kind == "progress":
                         if connected and event[1] > 0:
                             last_progress = self.clock()

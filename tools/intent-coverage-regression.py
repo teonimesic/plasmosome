@@ -213,6 +213,26 @@ class ManualClock:
         self.value += duration
 
 
+def delayed_worker_start(delay, target, arguments):
+    time.sleep(delay)
+    target(*arguments)
+
+
+class DelayedStartContext:
+    def __init__(self, delay):
+        self.context = multiprocessing.get_context("spawn")
+        self.delay = delay
+
+    def Pipe(self, duplex=True):
+        return self.context.Pipe(duplex)
+
+    def Process(self, target, args):
+        return self.context.Process(
+            target=delayed_worker_start,
+            args=(self.delay, target, args),
+        )
+
+
 class FixtureRoot:
     def __init__(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="intent-coverage-regression-")
@@ -1185,6 +1205,22 @@ class RealHttpsAdapterTests(unittest.TestCase):
             self.assertEqual(reader.observe(PR_URL, deadline), merged_observation())
             self.assertEqual(reader.observe(PR_URL, deadline), merged_observation())
             self.assertEqual(TlsHandler.requests, 1)
+
+    def test_worker_startup_does_not_consume_connect_deadline(self):
+        with tls_server() as (server, certificate):
+            limits = SCALED_LIMITS
+            reader = coverage.ForgeReader(
+                FixtureTokenReader(),
+                limits=limits,
+                transport=coverage.Transport("localhost", server.server_port, str(certificate)),
+                process_context=DelayedStartContext(limits.connect * 1.5),
+            )
+            started = time.monotonic()
+            self.assertEqual(
+                reader.observe(PR_URL, started + limits.command),
+                merged_observation(),
+            )
+            self.assertGreater(time.monotonic() - started, limits.connect)
 
     def test_malformed_environment_token_never_reaches_diagnostics(self):
         secret = "SYNTHETIC-REVIEW-SECRET\n"
