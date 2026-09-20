@@ -185,8 +185,8 @@ release address/digest and catalog generation. Its population is determined by a
 state, not an unverified manifest label. The same checks apply to either artifact kind. Tokens,
 HTTP authorization headers and credential file contents never enter descriptors, catalog rows,
 receipts, logs, errors, locks or cells. A publisher may put secrets into arbitrary file bytes;
-the service does not claim that parsing proves their absence. Publication is explicit and shows
-the complete file list and destination before the caller supplies the publishing command.
+the service does not claim that parsing proves their absence. Publication uses the explicit
+inspect/expected-digest sequence in §5, without an interactive prompt or an implicit upload.
 
 ### 4. Registry service and HTTP API
 
@@ -273,8 +273,8 @@ no credential and grants no publishing authority; a client may retry the same cu
 same page while it remains live. The terminal page omits `next_cursor`.
 A client follows all pages before reporting a complete search; failure is not an empty registry.
 
-Errors are `{registry_id,error:{code,message}}`, with an optional `field` or `release` only when
-that context exists. Missing fields are omitted, not null. The closed string codes are
+Errors are `{registry_id,error:{code,message}}`, with optional `field` or `release` inside error
+only when that context exists. Missing fields are omitted, not null. The closed string codes are
 `invalid_request`, `package_invalid`, `unauthenticated`, `forbidden`, `not_found`,
 `version_conflict`, `digest_mismatch`, `dependency_unavailable`, `dependency_conflict`,
 `cycle`, `limit_exceeded`, `yanked`, `cursor_expired`, `busy`, `io_failure` and `internal`.
@@ -288,6 +288,10 @@ filesystem paths. A registry error is not a new code in spec001's controller err
 
 `plasmosome registry` is the common CLI for both kinds, outside a cell. It has these commands:
 
+`ALIAS` uses the publisher/name grammar in §1, including its 64-byte limit. It is nonempty,
+lower-case ASCII and compared exactly for uniqueness. Reject invalid aliases before profile IO;
+`/`, `@`, `#`, whitespace and control characters cannot be profile delimiters or aliases.
+
 - `source add ALIAS --url URL --registry-id UUID [--token-file PATH] [--allow-loopback-http]`
   stores an explicit profile; `source list` reports profiles with credentials omitted. Reusing an
   alias refuses; changing a source requires `source remove ALIAS` and re-addition. Removal drops
@@ -295,27 +299,77 @@ filesystem paths. A registry error is not a new code in spec001's controller err
 - `search --source ALIAS [--kind plasmid|genome] [--population curated|user] [--query TEXT]`
   obtains the complete catalog result. `show REF` obtains the descriptor, purpose, tools,
   complete exact graph, populations and yanks without executing anything.
-- `register DIRECTORY --source ALIAS` validates `package.json` and every named file locally,
-  uploads missing content, then registers the descriptor. It requires an explicit directory,
-  so there is no current-directory upload default. Only listed files are sent. Publication
-  authority is checked by the server, never inferred from a successful local parse.
+- `inspect DIRECTORY --source ALIAS` checks the descriptor and every listed local file without
+  upload, publication or network access. It displays the exact destination, descriptor digest
+  and file list. Remote dependency availability and publishing authority remain unchecked.
+- `register DIRECTORY --source ALIAS --expect-digest DIGEST` revalidates those bytes and refuses
+  a changed descriptor or file before upload. It stages all verified bytes in private immutable
+  snapshots before its first upload and uploads only those snapshots, not reread mutable inputs.
+  The required digest is the one returned by inspect;
+  there is no implicit confirmation, interactive prompt or noninteractive bypass flag. It then
+  uploads missing content and registers the descriptor. The directory is required: no implicit
+  current-directory upload. Only listed files are sent; the server checks authority and the
+  complete dependency graph regardless of local inspection.
 - `fetch REF --output DIRECTORY [--offline]` verifies and materializes the full graph. It never
   starts a controller, creates a cell, grants credentials, or runs package code.
 - `yank REF --reason TEXT` uses the exact version and expected digest; no wildcard yanks.
 
 `REF` is `ALIAS/KIND/POPULATION/PUBLISHER/NAME@VERSION`, optionally followed by `#sha256:HEX`.
-The six-field resolved reference and registry ID are always in results. Omitting a digest makes
+Every artifact result includes its full resolved reference and registry ID as specified below.
+Omitting a digest makes
 one exact-version lookup, after which the returned digest pins the whole operation. Supplying one
 requires an exact match. No command accepts an unqualified package name or searches a different
 source after failure. These registry commands do not change the `plasmid new` contract.
 
-All commands support `--json`, emit one complete success object on stdout, and exit0. Failure
-emits the structured error on stderr and exits2 for a typed refusal or1 for transport/local IO;
-it emits no success prefix. Human output escapes control characters in all remote prose. Private
-client state defaults to `$HOME/.plasmosome/registry`, overridable with `--registry-root PATH`
-for every command. Profiles and token files are owner-only regular files; a token file is read
-only for its configured origin and never copied into the artifact cache. HTTPS is required except
-an explicit loopback HTTP profile. Source URLs may not contain embedded credentials or fragments.
+All commands support `--json`, emit one complete success object on stdout, and exit0. In JSON
+mode that strict envelope is `{schema:1,command:COMMAND,result:RESULT}`. `COMMAND` and `RESULT`
+are fixed by this table; JSON object ordering is not significant:
+
+| COMMAND | Required RESULT fields |
+| --- | --- |
+| `source.add` | `profile: Profile` |
+| `source.list` | `profiles: [Profile,...]`, sorted by alias |
+| `source.remove` | `alias` |
+| `search` | `registry_id`, `generation`, `items: [CatalogEntry,...]` after all pages |
+| `show` | `registry_id`, `root: ReleaseRef`, `packages: [PackageView,...]` |
+| `inspect` | `destination: Profile`, `registry_id`, `release: ReleaseRef`, `files: [{path,digest,size},...]`, `dependency_state: "not_checked"` |
+| `register` | `receipt: RegistrationReceipt` |
+| `fetch` | `state: "fetched"`, `registry_id`, `root: ReleaseRef`, `releases: [ReleaseRef,...]`, `output`, `online_checked` |
+| `import` | `state: "imported"`, `registry_id`, `root: ReleaseRef`, `releases: [ReleaseRef,...]`, `output` |
+| `yank` | `registry_id`, `release: ReleaseRef`, `yank: YankInfo` |
+
+`Profile` is `{alias,url,registry_id,has_token,allow_loopback_http}`; token paths/bytes are
+absent. `RegistrationReceipt` is §4's receipt. `YankInfo` is
+`{principal,reason,yanked_at,generation}`. `CatalogEntry` is
+`{registry_id,release:ReleaseRef,description,receipt:RegistrationReceipt,state}` plus `yank`
+exactly when state is yanked. `PackageView` is `{release:ReleaseRef,descriptor,description,
+tools:[{name,description},...],receipt:RegistrationReceipt,state}` plus the same conditional yank;
+`descriptor` is base64 exact descriptor bytes, and a genome's tools array is empty. The show
+array contains the full graph sorted by digest, not just its root. These definitions also fix
+the corresponding HTTP catalog row and release-response contents; the latter adds registry_id
+to PackageView. Show may inspect a yanked graph, but never reports it usable. An unavailable
+dependency still refuses a complete show. Inspect derives the full reference from its descriptor
+and computed digest. File lists sort by path; graph lists sort by digest; outputs are absolute
+local directory paths. Empty collections are arrays, never omitted or null.
+
+Failure emits no stdout success or partial result. JSON stderr is one strict envelope
+`{schema:1,command:COMMAND,error:{domain,code,message}}`, with optional `registry_id`, `release`,
+`field` and `path` inside error only when known. Invalid command syntax uses COMMAND `invalid`.
+Domain `registry` preserves §4's closed error code and supplied context. Domain `client` has
+closed codes `invalid_argument`, `invalid_path`, `profile_exists`, `profile_missing`,
+`profile_invalid`, `transport`, `tls`, `deadline`, `local_io`, `integrity_mismatch`, `cache_miss`,
+`destination_exists`, `registry_identity_mismatch` and `publication_changed`. Client transport,
+tls, deadline and local_io exit1; every other client code and every registry refusal exits2.
+Paths appear only for caller-supplied inputs or owned residual staging, never credentials.
+Human mode has the same completion/refusal semantics and escapes remote control characters.
+Inspect is the complete preview; register requires its expected descriptor digest and never
+prints a success before the server's receipt. No failure prints a success prefix.
+
+Private client state defaults to `$HOME/.plasmosome/registry`, overridable with
+`--registry-root PATH` for every command. Profiles and token files are owner-only regular files;
+a token file is read only for its configured origin and never copied into the artifact cache.
+HTTPS is required except an explicit loopback HTTP profile. Source URLs may not contain embedded
+credentials or fragments.
 
 A fetch's output directory must not exist. The client first validates the entire online graph's
 release records, hashes and bounds, then stages all files in a private sibling directory. It
@@ -369,7 +423,8 @@ On the wire, `artifact` is `{registry_id,release:ReleaseRef}` with a required di
 be a genome whose ID equals `genome`, which is required when artifact is present. The host CLI
 requires the graph already imported; it does not fetch inside the controller request. Requests
 without `artifact` retain existing local selection semantics. Responses retain their existing
-shapes; this spec adds no application error number and does not change `plasmid.reload`.
+shapes; this spec adds no application error number. Reload keeps its request shape but its
+source-selection semantics are pinned as described below.
 Missing import is code101 with target naming the full reference; corrupt or mismatched imported
 content is108 with detail/path. Existing closure, authority, widening and mock conflicts use
 their existing codes. No malformed artifact falls back to local name resolution.
@@ -381,6 +436,31 @@ a same-name installed release, or lets a cell choose a host cache path. Mutable 
 cannot change the bytes between verification and execution: retain opened immutable objects or
 an equivalent verified owned copy for the lifetime of the prepared attachment. A corrupt cache
 refuses; it is not repaired by an ambient network fetch.
+
+For every attached member, spec008's sole per-cell journal records an AttachmentSource
+`{kind:"registry",registry_id,root:ReleaseRef,member:ReleaseRef}` alongside mock and complete
+effects. Root is the imported graph selected by this request; member is the exact plasmid
+within it. For a reused shared provider, require the same registry ID/member and retain its
+original root/source. A local provider or a different reference with the same manifest ID is
+not interchangeable. No source side store or in-memory-only mapping substitutes for prepare,
+commit/abort, finish and the complete DesiredPlasmid publication. Ordinary unregistered
+attachments record `{kind:"local"}` without inventing registry provenance.
+
+`plasmid.reload` reuses the attached member's recorded root graph and exact member, while its
+normal mock override and generation-swap checks still apply. It accepts no new artifact parameter.
+Use an explicit permitted detach/add or a new cell to select a different release. Reload cannot
+consult a mutable version address or local namesake, even after restart. Missing/corrupt bytes
+refuse before effects with101/108 and preserve the old attachment. A reused provider's own saved
+source continues to govern that provider.
+
+Recovery carries complete sources through spec008 replay, publication, comparison and controller
+reconstruction. After recorded pending cleanup and before serving, the recovery orchestrator
+validates every settled imported source and retains verified declaration/implementation objects;
+it never fetches from a registry. Unavailable/corrupt source yields spec001's artifact_source
+startup diagnostic without killing the surviving cell or guessing a replacement. Exact cleanup
+uses recorded operations/inverses and does not require retiring source bytes. Imported graphs
+are not automatically evicted or mutated; removing a profile never removes them. Source bytes
+are content storage, not a second durable record of attachment ownership/generation.
 
 A graph only supplies candidates. The ordinary trusted operator path, any applicable external
 authoring approval, exact grant preparation, cell ownership and rollback checks still decide
@@ -443,6 +523,11 @@ supported backend and workload process, not `ToolRegistry` alone.
 - Yank is authenticated, terminal and retains exact content/history. New online resolution of a
   yanked root or provider refuses, but existing imported content and an already running cell are
   not deleted or silently detached. Offline output explicitly lacks a fresh catalog check.
+- Reject invalid/ambiguous aliases before profile mutation. Inspect reports all upload bytes
+  and the exact destination without contacting the service. Alter descriptor or file after
+  inspect: register with its expected digest refuses without uploading or publishing a prefix.
+  Exercise every command's closed JSON envelope, complete-result rule and typed failure exits,
+  including a failed later search page and a missing-token refusal.
 
 ### Graph, bytes and filesystem boundaries
 
@@ -469,6 +554,11 @@ supported backend and workload process, not `ToolRegistry` alone.
 - Compare the imported graph selected by the real controller with every digest in the fetched
   lock. A service outage or newer same-name release cannot change its provider selection.
   A missing/corrupt import fails without fallback and without a cell/grant/tool prefix.
+- Restart with the service unavailable and competing same-name imports present: journal source,
+  full desired publication and reload all retain the original exact member/provider graph.
+  Missing/corrupt settled imports block serving without namesake fallback; loss of a retiring
+  source does not block original-inverse cleanup. Source changes only with the journal's
+  transaction decision; changing source alone at equal generation is a desired_conflict.
 - Attach the same imported release to two cells. Exercise its actual boundary access, detach it
   from one, then prove the first is denied and the second still works with distinct cell owners.
   A same-ID different-release conflict within one cell refuses without disturbing the first.

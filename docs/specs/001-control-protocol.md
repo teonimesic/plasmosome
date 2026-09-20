@@ -237,6 +237,8 @@ preserved. This is not a canonical-equivalence comparison. Empty collections are
 empty map, not an omitted failure. Quarantine raw names and paths are arrays of unsigned byte
 values; human messages escape them and are not machine selectors. The same optional-field
 projection applies to the DesiredCell sent to a membrane.
+The required spec008 AttachmentSource is retained in every replacement and DesiredPlasmid,
+including its full registry/root/member references; it is never omitted as incidental metadata.
 
 The call neither forces cleanup nor claims to refresh a failed observation. Name resolution
 and wrong-name errors are the same as `plasmosome.status`. Recovery startup with incomplete
@@ -285,6 +287,11 @@ or authorize removing a different holding with an equal resource description.
 ```
 
 - `genome` is optional; without it the cell starts empty (plasmids attach later).
+- Optional `artifact: {registry_id,release:ReleaseRef}` selects the exact already imported
+  spec020 genome, with required digest and a matching required `genome` name. It does not fetch,
+  authorize widening or bypass normal closure checks. Missing import is101; corrupt/mismatched
+  content is108. An absent artifact preserves local selection. Spec008 journals each attached
+  member's source as part of the same transaction; it does not infer a cell-level genome label.
 - `mock` is optional; **bare `--mock` ⇒ `simulate`** (D2). When a genome is named, its
   `[plasmids.X] mock = …` table is the default layer; the request-level `mock` overrides it
   per D2's layering (genome table → `plasmid add --mock` → `plasmid reload --mock`).
@@ -419,6 +426,12 @@ contract change. Absent declarations mean `passthrough`.
   `inject` requires an absolute `path_scope`, and `[commands.<id>]` refs gain exactly one
   extra field, `subject`. A mismatch is a named attach-time error (code `108`), never a silent
   downgrade.
+- Optional `artifact: {registry_id,release:ReleaseRef}` selects an already imported spec020
+  plasmid whose name matches `plasmid`; the digest is required. Missing import is101 and
+  corrupt/mismatched content is108, without local fallback. Normal authority/mock/closure
+  refusal codes remain unchanged. Every attached closure member carries spec008's durable
+  AttachmentSource, and existing shared providers retain their original matching source.
+  Without artifact, existing local selection remains unchanged.
 
 ### 3.11 `plasmid.remove`
 
@@ -450,6 +463,13 @@ be changed in the same swap (D2's third layer).
 ```json
 {"id": 14, "result": {"plasmid": "github-pr", "mock": "simulate", "generation": 5, "state": "active"}}
 ```
+
+Reload preserves the attachment's spec008 AttachmentSource. A registry source reuses the exact
+saved registry/root/member graph and verified imported bytes, including provider bindings;
+it never picks the newest version or a local namesake. No artifact parameter is accepted here.
+Mock overrides and ordinary generation-swap checks are unchanged. Selecting a different release
+requires an explicit permitted detach/add or a separate new cell, not an implicit source switch.
+Missing/corrupt imported bytes use101/108 before effects and leave the old attachment intact.
 
 ## 4. Controller ⇄ membrane (the supervisor side of the contract)
 
@@ -741,10 +761,17 @@ A lower post-ack generation can only retry within that budget; higher generation
 equal-generation content refuses.
 An instance-wide fault emits one LF-terminated JSON object on stderr:
 `{recovery_error:{kind,path_bytes,detail}, quarantined:[...]}`. `kind` is one of
-`writer_busy`, `discovery`, `identity_conflict`, `desired_conflict`, `observation`, `cleanup`, `deadline`, or `io`;
+`writer_busy`, `discovery`, `identity_conflict`, `desired_conflict`, `artifact_source`,
+`observation`, `cleanup`, `deadline`, or `io`;
 `path_bytes` is the exact related Unix path as byte values, omitted if no path applies.
 For a generation observation refusal or equal-generation `desired_conflict`, recovery_error
 additionally carries `cell`, `journal_generation` and `membrane_generation` as structured values.
+An `artifact_source` refusal additionally carries `cell`, `plugin`, `registry_id`, `root` and
+`member` with full spec020 references, projecting spec008's ArtifactSource error. It means the
+settled registry source could not be verified under the trusted import root before serving,
+not that its journal or enforcement holding may be discarded. Pending recorded cleanup remains
+independent of artifact availability. This adds a startup diagnostic kind, not an application
+error number or a network lookup during replay.
 Equal generations or object snapshots cannot hide conflicting published content in a ready result.
 Quarantine entries whose observation failed include `observation_error` and omit `found`;
 an empty found list is reserved for an actually observed empty set or an invalid entry with
