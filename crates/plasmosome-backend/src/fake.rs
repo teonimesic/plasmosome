@@ -464,6 +464,22 @@ mod tests {
         }
     }
 
+    fn mount_by(owner: &CellOwner) -> UniverseOp {
+        UniverseOp::AddMount {
+            id: GrantId::new(),
+            source: "/code".to_string(),
+            target: "/workspace".to_string(),
+            owner: owner.clone(),
+        }
+    }
+
+    fn address_of(op: &UniverseOp) -> Handle {
+        Handle {
+            class: op.class(),
+            id: op.id(),
+        }
+    }
+
     fn grant_to(owner: &CellOwner, capability: Capability) -> Grant {
         Grant {
             owner: owner.clone(),
@@ -517,16 +533,8 @@ mod tests {
     #[test]
     fn a_stuck_applied_address_times_out_graceful_removal_until_forced() {
         let workspace = cell_owner("cell-1", "workspace");
-        let op = UniverseOp::AddMount {
-            id: GrantId::new(),
-            source: "/code".to_string(),
-            target: "/workspace".to_string(),
-            owner: workspace.clone(),
-        };
-        let address = Handle {
-            class: op.class(),
-            id: op.id(),
-        };
+        let op = mount_by(&workspace);
+        let address = address_of(&op);
         let mut backend = FakeBackend::new();
         backend.apply(op.clone()).unwrap();
         backend.mark_stuck(address);
@@ -554,18 +562,10 @@ mod tests {
     #[test]
     fn a_forced_removal_clears_the_stuck_mark_so_a_later_holding_drains() {
         let workspace = cell_owner("cell-1", "workspace");
-        let op = UniverseOp::AddMount {
-            id: GrantId::new(),
-            source: "/code".to_string(),
-            target: "/workspace".to_string(),
-            owner: workspace.clone(),
-        };
+        let op = mount_by(&workspace);
         let mut backend = FakeBackend::new();
         backend.apply(op.clone()).unwrap();
-        backend.mark_stuck(Handle {
-            class: op.class(),
-            id: op.id(),
-        });
+        backend.mark_stuck(address_of(&op));
         backend
             .apply_removal(op.removal(), &workspace, DrainSpec::forcing())
             .unwrap();
@@ -615,10 +615,7 @@ mod tests {
                 .apply_removal(op.removal(), &stalled, graceful)
                 .unwrap_err(),
             BackendError::DrainTimedOut {
-                handle: Handle {
-                    class: op.class(),
-                    id: op.id(),
-                },
+                handle: address_of(&op),
                 deadline_ms: 9,
             }
         );
@@ -648,19 +645,11 @@ mod tests {
     #[test]
     fn exact_removal_resolves_owner_and_capability_before_draining() {
         let stalled = cell_owner("cell-1", "workspace");
-        let op = UniverseOp::AddMount {
-            id: GrantId::new(),
-            source: "/code".to_string(),
-            target: "/workspace".to_string(),
-            owner: stalled.clone(),
-        };
+        let op = mount_by(&stalled);
         let mut backend = FakeBackend::new();
         backend.stall_graceful_drains_for_owner(stalled.clone());
         backend.apply(op.clone()).unwrap();
-        backend.mark_stuck(Handle {
-            class: op.class(),
-            id: op.id(),
-        });
+        backend.mark_stuck(address_of(&op));
         let before = backend.snapshot_os_state();
         let other_source = UniverseRemoval {
             id: op.id(),

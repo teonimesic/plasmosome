@@ -439,18 +439,10 @@ pub fn revoke_takes_its_owners_object<B: EnforcementBackend>(make: impl Fn() -> 
             for drain in drains() {
                 for order in orders() {
                     let mut backend = make();
-                    let first_request = Grant {
-                        owner: first_owner.clone(),
-                        capability: capability.clone(),
-                        kind: GrantKind::Hot,
-                    };
+                    let first_request = hot_grant(first_owner.clone(), &capability);
                     let first = backend.grant(first_request.clone());
                     let first_object = requested_object(&first, &first_request);
-                    let second_request = Grant {
-                        owner: second_owner.clone(),
-                        capability: capability.clone(),
-                        kind: GrantKind::Hot,
-                    };
+                    let second_request = hot_grant(second_owner.clone(), &capability);
                     let second = backend.grant(second_request.clone());
                     let second_object = requested_object(&second, &second_request);
                     let mut expected = vec![first_object.clone(), second_object.clone()];
@@ -625,19 +617,11 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
         for granted in [true, false] {
             for order in [WithdrawalOrder::StalledFirst, WithdrawalOrder::PeerFirst] {
                 let mut backend = make();
-                let peer_request = Grant {
-                    owner: conformance_owner(),
-                    capability: capability.clone(),
-                    kind: GrantKind::Hot,
-                };
+                let peer_request = hot_grant(conformance_owner(), &capability);
                 let peer = backend.grant(peer_request.clone());
                 let peer_object = requested_object(&peer, &peer_request);
                 let (stalled, stalled_entry) = if granted {
-                    let request = Grant {
-                        owner: stalled_owner(),
-                        capability: capability.clone(),
-                        kind: GrantKind::Hot,
-                    };
+                    let request = hot_grant(stalled_owner(), &capability);
                     let entry = backend.grant(request.clone());
                     (requested_object(&entry, &request), Some(entry))
                 } else {
@@ -696,32 +680,21 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                     &both,
                     "a refused wrong-owner removal changed the state",
                 );
-                let (first, survivor) = match order {
-                    WithdrawalOrder::StalledFirst => (&stalled, &peer_object),
-                    WithdrawalOrder::PeerFirst => (&peer_object, &stalled),
+                let forced_stalled = (&stalled, stalled_entry.as_ref(), DrainSpec::forcing());
+                let graceful_peer = (&peer_object, Some(&peer), DrainSpec::graceful(DRAIN));
+                let steps = match order {
+                    WithdrawalOrder::StalledFirst => [forced_stalled, graceful_peer],
+                    WithdrawalOrder::PeerFirst => [graceful_peer, forced_stalled],
                 };
-                for (object, remaining) in [(first, vec![survivor.clone()]), (survivor, vec![])] {
-                    let outcome = if *object == stalled {
-                        withdraw(
-                            &mut backend,
-                            &stalled,
-                            stalled_entry.as_ref(),
-                            DrainSpec::forcing(),
-                        )
-                    } else {
-                        withdraw(
-                            &mut backend,
-                            &peer_object,
-                            Some(&peer),
-                            DrainSpec::graceful(DRAIN),
-                        )
-                    };
-                    outcome.unwrap_or_else(|error| {
+                let mut remaining = both.to_vec();
+                for (object, entry, drain) in steps {
+                    withdraw(&mut backend, object, entry, drain).unwrap_or_else(|error| {
                         contract_panic!(
                             "withdrawing {} failed on the {pass}: {error}",
                             object.describe()
                         )
                     });
+                    remove_expected(&mut remaining, object);
                     assert_exact_state(
                         &backend.snapshot_os_state(),
                         &remaining,
@@ -764,6 +737,14 @@ fn withdraw<B: EnforcementBackend>(
         "revoking a handle must return the entry the grant issued"
     );
     Ok(())
+}
+
+fn hot_grant(owner: CellOwner, capability: &Capability) -> Grant {
+    Grant {
+        owner,
+        capability: capability.clone(),
+        kind: GrantKind::Hot,
+    }
 }
 
 fn removal_of(object: &OsObject) -> UniverseRemoval {
