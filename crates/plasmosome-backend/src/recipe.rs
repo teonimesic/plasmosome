@@ -43,14 +43,15 @@ pub struct SessionFileRecipe {
 
 impl SessionFileRecipe {
     /// Returns the first rule this recipe breaks, in field order: `contents` holds at most
-    /// `MAX_SESSION_FILE_BYTES`, then `guest_path` is NUL-free and starts with `/`.
+    /// `MAX_SESSION_FILE_BYTES`, then `guest_path` is a canonical absolute path as
+    /// `RecipeError` defines it.
     pub fn validate(&self) -> Result<(), RecipeError> {
         if self.contents.len() > MAX_SESSION_FILE_BYTES {
             return Err(RecipeError::ContentsTooLarge {
                 len: self.contents.len(),
             });
         }
-        absolute("guest_path", &self.guest_path)
+        canonical_path("guest_path", &self.guest_path)
     }
 }
 
@@ -89,10 +90,10 @@ pub struct UdsRecipe {
 
 impl UdsRecipe {
     /// Returns the first rule this recipe breaks, in field order: `upstream`, then
-    /// `guest_path`, each NUL-free and starting with `/`.
+    /// `guest_path`, each a canonical absolute path as `RecipeError` defines it.
     pub fn validate(&self) -> Result<(), RecipeError> {
-        absolute("upstream", &self.upstream)?;
-        absolute("guest_path", &self.guest_path)
+        canonical_path("upstream", &self.upstream)?;
+        canonical_path("guest_path", &self.guest_path)
     }
 }
 
@@ -221,8 +222,13 @@ pub struct BrokerLaunch {
 
 impl BrokerLaunch {
     /// Returns the first rule this launch breaks, in field order: `command` is not empty,
-    /// every word is NUL-free and the first starts with `/`; then `control_socket` and
-    /// `data_socket` are each NUL-free and start with `/`; then they differ.
+    /// every word is NUL-free and the first is a canonical absolute path; then
+    /// `control_socket` and `data_socket` are each canonical absolute paths, as `RecipeError`
+    /// defines them; then they differ.
+    ///
+    /// Endpoints differ when their canonical spellings differ. That is all this check can see:
+    /// preflight must still establish that they are different files, because a symlink or a
+    /// mount can give one file two canonical names.
     pub fn validate(&self) -> Result<(), RecipeError> {
         let Some(program) = self.command.first() else {
             return Err(RecipeError::EmptyCommand);
@@ -230,9 +236,9 @@ impl BrokerLaunch {
         for word in &self.command {
             nul_free("command", word)?;
         }
-        absolute("command", program)?;
-        absolute("control_socket", &self.control_socket)?;
-        absolute("data_socket", &self.data_socket)?;
+        canonical_path("command", program)?;
+        canonical_path("control_socket", &self.control_socket)?;
+        canonical_path("data_socket", &self.data_socket)?;
         if self.control_socket == self.data_socket {
             return Err(RecipeError::SharedEndpoint {
                 path: self.control_socket.clone(),
@@ -265,10 +271,17 @@ impl TryFrom<BrokerLaunchWire> for BrokerLaunch {
 
 /// The first structural rule a recipe breaks. `field` is the serde field name; every word of
 /// `command` reports as `"command"`.
+///
+/// A path field must be a canonical absolute path: NUL-free, starting with `/`, with no empty,
+/// `.` or `..` component and no trailing `/`. `/` alone is refused, because every path field
+/// names a file, a socket or a program. A path that breaks this is refused, never rewritten,
+/// so an accepted path has one spelling and round-trips unchanged. Later `command` words are
+/// arguments, not paths, and only need to be NUL-free.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecipeError {
     ContainsNul { field: &'static str },
     NotAbsolute { field: &'static str, value: String },
+    NotCanonical { field: &'static str, value: String },
     ContentsTooLarge { len: usize },
     ZeroPort,
     InvalidDestination { value: String },
@@ -283,6 +296,10 @@ impl fmt::Display for RecipeError {
             RecipeError::NotAbsolute { field, value } => {
                 write!(f, "`{field}` must be an absolute path, not {value:?}")
             }
+            RecipeError::NotCanonical { field, value } => write!(
+                f,
+                "`{field}` has an empty, `.` or `..` component or a trailing `/`: {value:?}"
+            ),
             RecipeError::ContentsTooLarge { len } => write!(
                 f,
                 "session file contents are {len} bytes, over the {MAX_SESSION_FILE_BYTES}-byte cap"
@@ -310,10 +327,19 @@ fn nul_free(field: &'static str, value: &str) -> Result<(), RecipeError> {
     Ok(())
 }
 
-fn absolute(field: &'static str, value: &str) -> Result<(), RecipeError> {
+fn canonical_path(field: &'static str, value: &str) -> Result<(), RecipeError> {
     nul_free(field, value)?;
-    if !value.starts_with('/') {
+    let Some(rest) = value.strip_prefix('/') else {
         return Err(RecipeError::NotAbsolute {
+            field,
+            value: value.to_string(),
+        });
+    };
+    if rest
+        .split('/')
+        .any(|component| matches!(component, "" | "." | ".."))
+    {
+        return Err(RecipeError::NotCanonical {
             field,
             value: value.to_string(),
         });
@@ -540,6 +566,11 @@ mod tests {
         RecipeError::NotAbsolute { field, value }
     }
 
+    fn uncanonical(field: &'static str, value: &str) -> RecipeError {
+        let value = value.to_string();
+        RecipeError::NotCanonical { field, value }
+    }
+
     fn invalid_destination(value: &str) -> RecipeError {
         let value = value.to_string();
         RecipeError::InvalidDestination { value }
@@ -705,10 +736,64 @@ mod tests {
     }
 
     #[test]
+    fn a_path_with_an_empty_dot_or_dot_dot_component_is_refused() {
+        for value in [
+            "/",
+            "//run/p/e.sock",
+            "/run/p//e.sock",
+            "/run/p/./e.sock",
+            "/run/q/../p/e.sock",
+            "/run/../etc/shadow",
+            "/run/p/",
+            "/run/p/.",
+            "/run/p/..",
+        ] {
+            let seed = b"seed\n".to_vec();
+            assert_refused(&session_file(seed, value), uncanonical("guest_path", value));
+            assert_refused(&uds(value, GUEST_SOCKET), uncanonical("upstream", value));
+            assert_refused(&uds(UPSTREAM, value), uncanonical("guest_path", value));
+            assert_refused(
+                &launch(&[value], CONTROL, DATA),
+                uncanonical("command", value),
+            );
+            let control = uncanonical("control_socket", value);
+            assert_refused(&launch(&[PROGRAM], value, DATA), control);
+            let data = uncanonical("data_socket", value);
+            assert_refused(&launch(&[PROGRAM], CONTROL, value), data);
+        }
+    }
+
+    #[test]
+    fn names_made_of_dots_are_ordinary_components_kept_exactly() {
+        for value in [
+            "/run/.hidden",
+            "/run/..x",
+            "/run/x.",
+            "/run/x..y",
+            "/run/...",
+        ] {
+            assert_accepted(&session_file(b"seed\n".to_vec(), value));
+            assert_accepted(&uds(value, GUEST_SOCKET));
+            assert_accepted(&uds(UPSTREAM, value));
+            assert_accepted(&launch(&[value], CONTROL, DATA));
+            assert_accepted(&launch(&[PROGRAM], value, DATA));
+            assert_accepted(&launch(&[PROGRAM], CONTROL, value));
+        }
+    }
+
+    #[test]
     fn only_the_program_word_must_be_absolute() {
         assert_accepted(&launch(&[PROGRAM], CONTROL, DATA));
         assert_accepted(&launch(
-            &[PROGRAM, "relative/config", "", "-"],
+            &[
+                PROGRAM,
+                "relative/config",
+                "",
+                "-",
+                "../up",
+                "//twice",
+                "/trailing/",
+            ],
             CONTROL,
             DATA,
         ));
@@ -888,6 +973,19 @@ mod tests {
             &launch(&[PROGRAM], CONTROL, same),
             relative("data_socket", same),
         );
+        let seed = b"seed\n".to_vec();
+        assert_refused(
+            &session_file(seed.clone(), "run//x"),
+            relative("guest_path", "run//x"),
+        );
+        assert_refused(&session_file(seed, "/run//x\0"), nul("guest_path"));
+        let spelled_twice = uncanonical("data_socket", "/run/p//e.sock");
+        assert_refused(
+            &launch(&[PROGRAM], "/run/p/e.sock", "/run/p//e.sock"),
+            spelled_twice,
+        );
+        let both = uncanonical("control_socket", "/run//e.sock");
+        assert_refused(&launch(&[PROGRAM], "/run//e.sock", "/run//e.sock"), both);
     }
 
     #[test]
@@ -898,6 +996,10 @@ mod tests {
             (
                 relative("upstream", "relative.sock"),
                 vec!["upstream", "relative.sock"],
+            ),
+            (
+                uncanonical("data_socket", "/run/p//e.sock"),
+                vec!["data_socket", "/run/p//e.sock"],
             ),
             (too_large(), vec!["contents", "65537", "65536"]),
             (RecipeError::ZeroPort, vec!["port"]),
