@@ -30,14 +30,18 @@ A clause that stops discriminating fails there. Run those witnesses directly wit
 
 Owners are a plugin in one cell. `revoke_takes_its_owners_object` pairs two plugins in one cell
 and one plugin in two cells, and `apply_and_removal_reach_the_universe` tries the same plugin in
-another cell before every exact removal.
+another cell and another plugin in the same cell before every exact removal.
 
 `graceful_timeouts_preserve_the_selected_holding` needs a backend that cannot drain. Its factory
 must stall every graceful withdrawal of a holding owned by `conformance::stalled_owner()`, before
 any release, while Force still succeeds; the fake factories arm this with
 `FakeBackend::stall_graceful_drains_for_owner`. A future real factory must arrange the same stall
-with real resources. The clause withdraws the stalled holding and an equal peer in both orders,
-through `revoke` and through `apply_removal`, and each order has its own defective backend.
+with real resources. The clause times the stalled holding out with a 50 ms and a zero deadline,
+checks that a removal naming the wrong owner is refused before any drain in both directions,
+drains the same plugin's holding in another cell normally, and withdraws the stalled holding and
+an equal peer in both orders. It runs once through `revoke` and once through `apply_removal`.
+Each order, each entry point and each of those steps has its own defective backend, so deleting
+any one of them turns its witness red.
 
 The order a clause revokes in is part of what it proves. A detach replays a ledger in reverse push
 order, so a backend that accepts revokes only in grant order was conformant right up until task 012

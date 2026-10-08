@@ -46,6 +46,14 @@ enum Defect {
     TimeoutReleasesBeforeRefusing,
     ForceRefusedWhilePeerStands,
     StallBlocksEqualPeers,
+    ApplyRemovalIgnoresDrain,
+    RevokeIgnoresDrain,
+    DrainsBeforeResolving,
+    DrainsBeforeResolvingTheNamedOwner,
+    RemovalComparesOnlyTheCell,
+    StallKeyedByPlugin,
+    ZeroDeadlineForces,
+    TimeoutReportsAZeroDeadline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +186,13 @@ impl DefectiveBackend {
                     && held.owner.plugin == owner.plugin
             });
         }
+        if self.defect == Defect::RemovalComparesOnlyTheCell {
+            return self.state.objects().any(|held| {
+                held.id == removal.id
+                    && held.capability == removal.capability
+                    && held.owner.cell == owner.cell
+            });
+        }
         self.state.selects(removal, owner)
     }
 
@@ -203,6 +218,8 @@ impl DefectiveBackend {
         }
         let times_out = match self.defect {
             Defect::IgnoresDrainTimeouts => false,
+            Defect::ZeroDeadlineForces if drain.deadline.is_zero() => false,
+            Defect::StallKeyedByPlugin => owner.plugin == stalled.plugin,
             Defect::StallBlocksEqualPeers => {
                 *owner == stalled
                     || self
@@ -214,7 +231,11 @@ impl DefectiveBackend {
         };
         times_out.then_some(BackendError::DrainTimedOut {
             handle: address,
-            deadline_ms: drain.deadline.as_millis() as u64,
+            deadline_ms: if self.defect == Defect::TimeoutReportsAZeroDeadline {
+                0
+            } else {
+                drain.deadline_ms()
+            },
         })
     }
 
@@ -254,7 +275,7 @@ impl DefectiveBackend {
             return Err(unknown_object(removal, owner));
         }
         let holder = match self.defect {
-            Defect::RemovalComparesOnlyThePlugin => self
+            Defect::RemovalComparesOnlyThePlugin | Defect::RemovalComparesOnlyTheCell => self
                 .state
                 .objects()
                 .find(|held| held.id == removal.id && held.capability == removal.capability)
@@ -327,6 +348,26 @@ impl DefectiveBackend {
             .remove(&removal_of(&object), &object.owner)
             .map(|_| ())
             .ok_or_else(|| unknown_object(&entry.removal(), &entry.owner))
+    }
+
+    fn drain_before_resolving(
+        &self,
+        removal: &UniverseRemoval,
+        owner: &CellOwner,
+        address: Handle,
+        drain: DrainSpec,
+    ) -> Option<BackendError> {
+        let drained_owner = match self.defect {
+            Defect::DrainsBeforeResolving => self
+                .state
+                .objects()
+                .find(|held| held.class() == address.class && held.id == address.id)?
+                .owner
+                .clone(),
+            Defect::DrainsBeforeResolvingTheNamedOwner => owner.clone(),
+            _ => return None,
+        };
+        self.drain_refusal(&drained_owner, &removal.capability, address, drain)
     }
 
     fn applied_order_refuses(&self, removal: &UniverseRemoval) -> bool {
@@ -438,6 +479,11 @@ impl EnforcementBackend for DefectiveBackend {
                 _ => Err(BackendError::UnknownHandle { handle }),
             };
         };
+        let drain = if self.defect == Defect::RevokeIgnoresDrain {
+            DrainSpec::forcing()
+        } else {
+            drain
+        };
         self.drained(&entry.owner, &entry.capability, handle, drain, |backend| {
             backend.withdraw(&entry, drain.policy)
         })?;
@@ -491,12 +537,20 @@ impl EnforcementBackend for DefectiveBackend {
         if self.defect == Defect::RemovalIsANoOp {
             return Ok(());
         }
-        if self.applied_order_refuses(&removal) || !self.selects(&removal, owner) {
-            return Err(unknown_object(&removal, owner));
-        }
         let address = Handle {
             class: removal.class(),
             id: removal.id,
+        };
+        if let Some(refusal) = self.drain_before_resolving(&removal, owner, address, drain) {
+            return Err(refusal);
+        }
+        if self.applied_order_refuses(&removal) || !self.selects(&removal, owner) {
+            return Err(unknown_object(&removal, owner));
+        }
+        let drain = if self.defect == Defect::ApplyRemovalIgnoresDrain {
+            DrainSpec::forcing()
+        } else {
+            drain
         };
         self.drained(owner, &removal.capability, address, drain, |backend| {
             backend.remove_exact(&removal, owner)
@@ -905,6 +959,78 @@ fn peer_first_pass_rejects_a_stall_that_blocks_equal_peers() {
     assert_rejected(|| {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::StallBlocksEqualPeers,
+        ))
+    });
+}
+
+#[test]
+fn revoke_leg_rejects_a_revoke_that_ignores_the_drain() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::RevokeIgnoresDrain,
+        ))
+    });
+}
+
+#[test]
+fn apply_removal_leg_rejects_an_apply_removal_that_ignores_the_drain() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::ApplyRemovalIgnoresDrain,
+        ))
+    });
+}
+
+#[test]
+fn wrong_owner_step_rejects_draining_the_holder_before_resolving() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::DrainsBeforeResolving,
+        ))
+    });
+}
+
+#[test]
+fn stalled_owner_step_rejects_draining_the_named_owner_before_resolving() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::DrainsBeforeResolvingTheNamedOwner,
+        ))
+    });
+}
+
+#[test]
+fn applied_removal_clause_rejects_a_cell_only_owner_comparison() {
+    assert_rejected(|| {
+        conformance::apply_and_removal_reach_the_universe(carrying(
+            Defect::RemovalComparesOnlyTheCell,
+        ))
+    });
+}
+
+#[test]
+fn other_cell_step_rejects_a_stall_keyed_by_plugin() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::StallKeyedByPlugin,
+        ))
+    });
+}
+
+#[test]
+fn zero_deadline_step_rejects_a_zero_deadline_that_forces() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::ZeroDeadlineForces,
+        ))
+    });
+}
+
+#[test]
+fn timeout_step_rejects_a_timeout_that_misreports_its_deadline() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::TimeoutReportsAZeroDeadline,
         ))
     });
 }
