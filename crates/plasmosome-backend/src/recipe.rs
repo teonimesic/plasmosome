@@ -1,5 +1,5 @@
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use serde::de::Error as _;
 use serde::de::value::StringDeserializer;
@@ -146,6 +146,12 @@ impl ProxyRecipe {
     /// Returns the first rule this recipe breaks, in field order: `destination` is NUL-free
     /// and is either one IP literal or one ASCII DNS name, then `port` is not 0.
     ///
+    /// An IPv6 literal must not carry an IPv4 address in IPv4-mapped (`::ffff:a.b.c.d`) or
+    /// IPv4-compatible (`::a.b.c.d`) form, because the IPv4 spelling names the same host. `::`
+    /// and `::1` are the unspecified and loopback addresses, not IPv4-compatible ones. Other
+    /// prefixes that carry an IPv4 address, such as NAT64's `64:ff9b::/96`, are left to the
+    /// connect-time address policy.
+    ///
     /// A DNS name is 1 to 253 bytes of dot-separated labels, each 1 to 63 bytes of ASCII letters,
     /// digits and `-`, not starting or ending with `-`, with no trailing dot. Its last label must
     /// not be a number in the sense of the WHATWG URL Standard's "ends in a number" check: all
@@ -284,6 +290,7 @@ pub enum RecipeError {
     ContentsTooLarge { len: usize },
     ZeroPort,
     InvalidDestination { value: String },
+    EmbeddedIpv4 { value: String, ipv4: Ipv4Addr },
     EmptyCommand,
     SharedEndpoint { path: String },
 }
@@ -307,6 +314,10 @@ impl fmt::Display for RecipeError {
             RecipeError::InvalidDestination { value } => write!(
                 f,
                 "`destination` must be one DNS name or IP address, not {value:?}"
+            ),
+            RecipeError::EmbeddedIpv4 { value, ipv4 } => write!(
+                f,
+                "`destination` must spell the IPv4 address {ipv4} as IPv4, not as IPv6 {value:?}"
             ),
             RecipeError::EmptyCommand => write!(f, "`command` must name a program"),
             RecipeError::SharedEndpoint { path } => write!(
@@ -348,12 +359,34 @@ fn canonical_path(field: &'static str, value: &str) -> Result<(), RecipeError> {
 
 fn destination(value: &str) -> Result<(), RecipeError> {
     nul_free("destination", value)?;
-    if value.parse::<IpAddr>().is_err() && !is_dns_name(value) {
-        return Err(RecipeError::InvalidDestination {
+    match value.parse::<IpAddr>() {
+        Ok(address) => ip_literal(value, address),
+        Err(_) if is_dns_name(value) => Ok(()),
+        Err(_) => Err(RecipeError::InvalidDestination {
             value: value.to_string(),
+        }),
+    }
+}
+
+fn ip_literal(value: &str, address: IpAddr) -> Result<(), RecipeError> {
+    if let IpAddr::V6(address) = address
+        && let Some(ipv4) = embedded_ipv4(address)
+    {
+        return Err(RecipeError::EmbeddedIpv4 {
+            value: value.to_string(),
+            ipv4,
         });
     }
     Ok(())
+}
+
+fn embedded_ipv4(address: Ipv6Addr) -> Option<Ipv4Addr> {
+    let compatible =
+        address.segments()[..6] == [0; 6] && !address.is_unspecified() && !address.is_loopback();
+    match address.to_ipv4_mapped() {
+        None if compatible => address.to_ipv4(),
+        mapped => mapped,
+    }
 }
 
 fn is_dns_name(value: &str) -> bool {
@@ -600,6 +633,12 @@ mod tests {
     fn invalid_destination(value: &str) -> RecipeError {
         let value = value.to_string();
         RecipeError::InvalidDestination { value }
+    }
+
+    fn embedded_ipv4(value: &str, ipv4: &str) -> RecipeError {
+        let value = value.to_string();
+        let ipv4 = ipv4.parse().unwrap();
+        RecipeError::EmbeddedIpv4 { value, ipv4 }
     }
 
     fn too_large() -> RecipeError {
@@ -935,8 +974,10 @@ mod tests {
             longest_name.as_str(),
             "10.0.0.1",
             "::1",
+            "::",
+            "::1:0:0",
+            "::ffff:1:0:0",
             "2001:db8::1",
-            "::ffff:10.0.0.1",
         ] {
             assert_accepted(&proxy(destination, 443));
         }
@@ -983,6 +1024,23 @@ mod tests {
             "",
         ] {
             assert_refused(&proxy(destination, 443), invalid_destination(destination));
+        }
+    }
+
+    #[test]
+    fn destination_refuses_an_ipv6_spelling_of_an_ipv4_address() {
+        for (destination, ipv4) in [
+            ("::ffff:127.0.0.1", "127.0.0.1"),
+            ("::ffff:10.0.0.1", "10.0.0.1"),
+            ("::ffff:0.0.0.0", "0.0.0.0"),
+            ("::7f00:1", "127.0.0.1"),
+            ("::a00:1", "10.0.0.1"),
+            ("::2", "0.0.0.2"),
+            ("::127.0.0.1", "127.0.0.1"),
+            ("::FFFF:7f00:1", "127.0.0.1"),
+            ("0:0:0:0:0:ffff:7f00:1", "127.0.0.1"),
+        ] {
+            assert_refused(&proxy(destination, 443), embedded_ipv4(destination, ipv4));
         }
     }
 
@@ -1074,6 +1132,10 @@ mod tests {
             (too_large(), vec!["contents", "65537", "65536"]),
             (RecipeError::ZeroPort, vec!["port"]),
             (invalid_destination("x:443"), vec!["destination", "x:443"]),
+            (
+                embedded_ipv4("::7f00:1", "127.0.0.1"),
+                vec!["destination", "::7f00:1", "127.0.0.1"],
+            ),
             (RecipeError::EmptyCommand, vec!["command"]),
             (
                 RecipeError::SharedEndpoint {
