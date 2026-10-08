@@ -87,6 +87,21 @@ atomic snapshot, so complete query visibility and the no-new-members requirement
 trusted-host contract. This does not cover descendants that leave the group, change credentials,
 or keep forking. `mem::forget` leaks an unfinished handle.
 
+## A fork waits while descriptors are created
+
+Darwin cannot create a pipe, a socket or an accepted connection already close-on-exec, so each one
+exists for a moment before `FD_CLOEXEC` is set, and a fork in that moment hands it to the child.
+`VmmChild::spawn` forks holding the read side of one process-wide lock. The Darwin readiness probe
+creates its socket holding the write side, so a spawn waits while a probe socket is created. A
+spawn from the thread that holds the write side returns `SpawnError::DescriptorLockHeld` instead of
+waiting on itself.
+
+The lock covers only those two paths. Forks that do not go through `VmmChild::spawn`, such as
+`std::process::Command`, do not take it, and neither do the standard library's `bind` in
+`daemon.rs` and `accept` in `control.rs`. Those two are safe only because `membraned` binds its
+control socket, spawns its brokers and serves requests on one thread, so none of them can overlap
+a fork. Code that creates descriptors or forks on a second thread must take the lock first.
+
 ## Control-socket ownership
 
 `membraned` refuses an occupied control-socket path — a live socket, a stale file or a symlink —
