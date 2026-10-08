@@ -987,4 +987,87 @@ mod tests {
         assert_poisoned(log.append("c", json!({})));
         assert_eq!(seqs_on_disk(&path), [u64::MAX - 1, u64::MAX]);
     }
+
+    #[test]
+    fn open_refuses_a_log_that_is_not_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG);
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo {path:?}");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let opening = path.clone();
+        std::thread::spawn(move || sender.send(open_error(opening, &OsLogStore)));
+        match receiver.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(SessionLogError::Io {
+                path: at,
+                step,
+                source,
+            }) => {
+                assert_eq!(step, LogStep::Open);
+                assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+                assert_eq!(at, path);
+            }
+            other => panic!("expected an Io error at Open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn errors_name_the_path_and_the_step_or_line() {
+        use std::error::Error;
+        let path = PathBuf::from("/logs/session.ndjson");
+        let io = SessionLogError::Io {
+            path: path.clone(),
+            step: LogStep::SyncFile,
+            source: std::io::Error::other("disk gone"),
+        };
+        assert_eq!(
+            io.to_string(),
+            "session log /logs/session.ndjson: sync file failed: disk gone"
+        );
+        assert_eq!(io.source().unwrap().to_string(), "disk gone");
+        let malformed = SessionLogError::Malformed {
+            path: path.clone(),
+            line: 7,
+            fault: LogFault::MissingNewline,
+        };
+        assert_eq!(
+            malformed.to_string(),
+            "session log /logs/session.ndjson line 7: no final newline"
+        );
+        assert!(malformed.source().is_none());
+        let poisoned = SessionLogError::Poisoned { path };
+        assert_eq!(
+            poisoned.to_string(),
+            "session log /logs/session.ndjson refuses appends after an earlier failure; reopen it"
+        );
+        assert!(poisoned.source().is_none());
+        let steps = [
+            LogStep::CreateDirectory,
+            LogStep::SyncDirectory,
+            LogStep::Open,
+            LogStep::Write,
+            LogStep::Flush,
+            LogStep::SyncFile,
+            LogStep::Read,
+        ]
+        .map(|step| step.to_string());
+        let faults = [
+            LogFault::MissingNewline,
+            LogFault::NotUtf8,
+            LogFault::NotJson,
+            LogFault::NotAnObject,
+            LogFault::MissingEnvelope,
+            LogFault::SequenceNotIncreasing,
+            LogFault::SequenceExhausted,
+        ]
+        .map(|fault| fault.to_string());
+        for names in [&steps[..], &faults[..]] {
+            let distinct: std::collections::BTreeSet<&String> = names.iter().collect();
+            assert_eq!(distinct.len(), names.len(), "{names:?}");
+            assert!(names.iter().all(|name| !name.is_empty()), "{names:?}");
+        }
+    }
 }
