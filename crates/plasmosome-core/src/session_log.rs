@@ -283,9 +283,9 @@ impl SessionLog {
     /// flushed and synced with `sync_all`. The first write, flush or sync error poisons this log:
     /// that call returns [`SessionLogError::Io`] and every later append, from any thread, returns
     /// [`SessionLogError::Poisoned`]. A panic while appending poisons it the same way, and so does
-    /// writing `seq` `u64::MAX`, after which no event can be numbered. An error
-    /// does not mean the line is absent: it may be on disk whole or in part, so open a new
-    /// `SessionLog` to validate the file before continuing.
+    /// writing `seq` `u64::MAX`, after which no event can be numbered. An error does not mean
+    /// the line is absent: it may be on disk whole or in part, so open a new `SessionLog` to
+    /// validate the file before continuing.
     pub fn append(&self, kind: &str, payload: serde_json::Value) -> Result<u64, SessionLogError> {
         let poisoned = || SessionLogError::Poisoned {
             path: self.path.clone(),
