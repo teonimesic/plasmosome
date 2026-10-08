@@ -111,10 +111,6 @@ impl<'de> Visitor<'de> for Strict<'_> {
         Ok(Value::String(value.to_owned()))
     }
 
-    fn visit_string<E: de::Error>(self, value: String) -> Result<Value, E> {
-        Ok(Value::String(value))
-    }
-
     fn visit_seq<A: SeqAccess<'de>>(self, mut items: A) -> Result<Value, A::Error> {
         let mut read = Vec::new();
         while let Some(item) = items.next_element_seed(Strict {
