@@ -32,10 +32,14 @@ the holding. The `recipe` module holds those records — `SessionFileRecipe`, `U
 their structural rules: NUL-free strings, absolute paths with no empty, `.` or `..` component
 and no trailing `/`, at most 65,536 bytes of file contents, a nonzero port, a destination that
 is one DNS name or one IP literal in its canonical spelling and never an IPv6 spelling of an
-IPv4 address, and a launch with an absolute program path and two distinct endpoints. A path that
-breaks these rules is refused, never rewritten. Decoding refuses a missing, unknown or repeated
-field, and decoding and encoding both refuse any value `validate` refuses; neither reads the
-filesystem or resolves a name. `Capability` does not carry these records yet.
+IPv4 address, and a launch with an absolute program path and two endpoints with different
+canonical spellings. A path that breaks these rules is refused, never rewritten. Different
+spellings are not different files: a symlink, a hard link, a mount, or a filesystem that ignores
+case or Unicode normalization, such as default APFS, can give one file two names, so preflight
+must compare the endpoints by `(st_dev, st_ino)`. Decoding refuses a missing or unknown field,
+and decoding JSON text also refuses a repeated field; a `serde_json::Value` or `Map` keeps only
+the last copy of a repeated key. Decoding and encoding both refuse any value `validate` refuses;
+neither reads the filesystem or resolves a name. `Capability` does not carry these records yet.
 
 ## What's inside
 

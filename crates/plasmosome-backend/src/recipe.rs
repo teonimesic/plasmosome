@@ -67,9 +67,11 @@ string_serde!(
 /// The resolved recipe of a session file: its initial bytes, the guest's access, and the
 /// absolute guest path it appears at.
 ///
-/// Decoding refuses a missing, unknown or repeated field. Decoding and encoding both refuse any
-/// value `validate` refuses. A value built in memory is not checked: call `validate` before
-/// acting on it. `contents` must not carry credential material.
+/// Decoding refuses a missing or unknown field. Decoding JSON text also refuses a repeated
+/// field, but a `serde_json::Value` or `Map` keeps only the last copy of a repeated key, so a
+/// decode through one sees no repeat. Decoding and encoding both refuse any value `validate`
+/// refuses. A value built in memory is not checked: call `validate` before acting on it.
+/// `contents` must not carry credential material.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionFileRecipe {
     pub contents: Vec<u8>,
@@ -102,9 +104,10 @@ struct SessionFileShape {
 /// The resolved recipe of a socket grant: the absolute host socket it relays to and the
 /// absolute guest path it appears at.
 ///
-/// Decoding refuses a missing, unknown or repeated field. Decoding and encoding both refuse any
-/// value `validate` refuses. A value built in memory is not checked: call `validate` before
-/// acting on it.
+/// Decoding refuses a missing or unknown field. Decoding JSON text also refuses a repeated
+/// field, but a `serde_json::Value` or `Map` keeps only the last copy of a repeated key, so a
+/// decode through one sees no repeat. Decoding and encoding both refuse any value `validate`
+/// refuses. A value built in memory is not checked: call `validate` before acting on it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UdsRecipe {
     pub upstream: String,
@@ -130,10 +133,11 @@ struct UdsShape {
 /// The resolved recipe of a proxy route: its transport, the one host or address it reaches,
 /// the port, and whether private addresses are allowed for this recipe alone.
 ///
-/// Decoding refuses a missing, unknown or repeated field. Decoding and encoding both refuse any
-/// value `validate` refuses. A value built in memory is not checked: call `validate` before
-/// acting on it. Passing `validate` resolves no name and says nothing about the addresses a
-/// name resolves to.
+/// Decoding refuses a missing or unknown field. Decoding JSON text also refuses a repeated
+/// field, but a `serde_json::Value` or `Map` keeps only the last copy of a repeated key, so a
+/// decode through one sees no repeat. Decoding and encoding both refuse any value `validate`
+/// refuses. A value built in memory is not checked: call `validate` before acting on it.
+/// Passing `validate` resolves no name and says nothing about the addresses a name resolves to.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProxyRecipe {
     pub transport: ProxyTransport,
@@ -180,7 +184,9 @@ struct ProxyShape {
 
 /// The resolved recipe of a mount: the access the guest gets.
 ///
-/// Decoding refuses a missing, unknown or repeated field.
+/// Decoding refuses a missing or unknown field. Decoding JSON text also refuses a repeated
+/// field, but a `serde_json::Value` or `Map` keeps only the last copy of a repeated key, so a
+/// decode through one sees no repeat.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MountRecipe {
     pub access: FileAccess,
@@ -200,13 +206,14 @@ struct MountShape {
 }
 
 /// How to launch a broker: the exact argument vector, whose first word is an absolute program
-/// path, and two distinct absolute host-private endpoints.
+/// path, and two differently spelled absolute host-private endpoints.
 ///
 /// Every word is data. Nothing here runs a shell, searches `PATH` or expands `$HOME` or `~`.
-/// Decoding refuses a missing, unknown or repeated field. Decoding and encoding both refuse any
-/// value `validate` refuses. A value built in memory is not checked: call `validate` before
-/// acting on it. Passing `validate` does not mean the program exists or the endpoints can be
-/// bound.
+/// Decoding refuses a missing or unknown field. Decoding JSON text also refuses a repeated
+/// field, but a `serde_json::Value` or `Map` keeps only the last copy of a repeated key, so a
+/// decode through one sees no repeat. Decoding and encoding both refuse any value `validate`
+/// refuses. A value built in memory is not checked: call `validate` before acting on it.
+/// Passing `validate` does not mean the program exists or the endpoints can be bound.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BrokerLaunch {
     pub command: Vec<String>,
@@ -220,9 +227,11 @@ impl BrokerLaunch {
     /// `control_socket` and `data_socket` are each canonical absolute paths, as `RecipeError`
     /// defines them; then they differ.
     ///
-    /// Endpoints differ when their canonical spellings differ. That is all this check can see:
-    /// preflight must still establish that they are different files, because a symlink or a
-    /// mount can give one file two canonical names.
+    /// Equal strings name the same path. Unequal strings can still name one file: through a
+    /// symlink, a hard link or a mount, or on a filesystem that ignores case or Unicode
+    /// normalization, such as the macOS host's default APFS. Passing this check therefore does
+    /// not mean the endpoints are different files. Preflight must establish that by comparing
+    /// their `(st_dev, st_ino)` after opening or binding them, never by comparing strings.
     pub fn validate(&self) -> Result<(), RecipeError> {
         let Some(program) = self.command.first() else {
             return Err(RecipeError::EmptyCommand);
@@ -282,9 +291,10 @@ validated_serde!(
 ///
 /// A path field must be a canonical absolute path: NUL-free, starting with `/`, with no empty,
 /// `.` or `..` component and no trailing `/`. `/` alone is refused, because every path field
-/// names a file, a socket or a program. A path that breaks this is refused, never rewritten,
-/// so an accepted path has one spelling and round-trips unchanged. Later `command` words are
-/// arguments, not paths, and only need to be NUL-free.
+/// names a file, a socket or a program. A path that breaks this is refused, never rewritten, so
+/// an accepted path has one textual spelling and round-trips unchanged. One textual spelling is
+/// not one file: see `BrokerLaunch::validate`. Later `command` words are arguments, not paths,
+/// and only need to be NUL-free.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecipeError {
     ContainsNul { field: &'static str },
