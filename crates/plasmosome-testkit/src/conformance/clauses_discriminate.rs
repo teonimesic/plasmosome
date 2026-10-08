@@ -54,6 +54,10 @@ enum Defect {
     StallKeyedByPlugin,
     ZeroDeadlineForces,
     TimeoutReportsAZeroDeadline,
+    StallKeyedByCell,
+    ZeroDeadlineNeverReleases,
+    ApplyRemovalDropsTheRecordOnTimeout,
+    ApplyRemovalLeavesAStaleHandle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,14 +174,7 @@ impl DefectiveBackend {
 
     fn selects(&self, removal: &UniverseRemoval, owner: &CellOwner) -> bool {
         if self.mirrors_its_ledger() {
-            return self
-                .applied
-                .iter()
-                .any(|op| holds_exactly(&op.object(), removal, owner))
-                || self
-                    .planted
-                    .iter()
-                    .any(|object| holds_exactly(object, removal, owner));
+            return self.mirrored_state().selects(removal, owner);
         }
         if self.defect == Defect::RemovalComparesOnlyThePlugin {
             return self.state.objects().any(|held| {
@@ -220,6 +217,8 @@ impl DefectiveBackend {
             Defect::IgnoresDrainTimeouts => false,
             Defect::ZeroDeadlineForces if drain.deadline.is_zero() => false,
             Defect::StallKeyedByPlugin => owner.plugin == stalled.plugin,
+            Defect::StallKeyedByCell => owner.cell == stalled.cell,
+            Defect::ZeroDeadlineNeverReleases if drain.deadline.is_zero() => true,
             Defect::StallBlocksEqualPeers => {
                 *owner == stalled
                     || self
@@ -266,7 +265,12 @@ impl DefectiveBackend {
             id: removal.id,
         };
         if self.mirrors_its_ledger() {
-            if remove_recorded(&mut self.applied, removal, owner)
+            let granted = self
+                .ledger
+                .get(&address)
+                .is_some_and(|entry| holds_exactly(&entry.object(), removal, owner));
+            if granted
+                || remove_recorded(&mut self.applied, removal, owner)
                 || remove_planted(&mut self.planted, removal, owner)
             {
                 self.ledger.remove(&address);
@@ -286,7 +290,9 @@ impl DefectiveBackend {
             return Err(unknown_object(removal, owner));
         }
         self.applied.retain(|op| op.id() != removal.id);
-        self.ledger.remove(&address);
+        if self.defect != Defect::ApplyRemovalLeavesAStaleHandle {
+            self.ledger.remove(&address);
+        }
         if self.defect == Defect::ApplyRemovalDeletesOtherClasses {
             let survivors: Vec<OsObject> = self
                 .state
@@ -547,7 +553,13 @@ impl EnforcementBackend for DefectiveBackend {
         if self.applied_order_refuses(&removal) || !self.selects(&removal, owner) {
             return Err(unknown_object(&removal, owner));
         }
-        let drain = if self.defect == Defect::ApplyRemovalIgnoresDrain {
+        if self.defect == Defect::ApplyRemovalDropsTheRecordOnTimeout {
+            self.ledger.remove(&address);
+            self.grant_order.retain(|held| *held != address);
+        }
+        let drain = if self.defect == Defect::ApplyRemovalIgnoresDrain
+            && !self.ledger.contains_key(&address)
+        {
             DrainSpec::forcing()
         } else {
             drain
@@ -1031,6 +1043,42 @@ fn timeout_step_rejects_a_timeout_that_misreports_its_deadline() {
     assert_rejected(|| {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::TimeoutReportsAZeroDeadline,
+        ))
+    });
+}
+
+#[test]
+fn neighbour_step_rejects_a_stall_keyed_by_cell() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::StallKeyedByCell,
+        ))
+    });
+}
+
+#[test]
+fn zero_release_step_rejects_a_zero_deadline_that_never_releases() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::ZeroDeadlineNeverReleases,
+        ))
+    });
+}
+
+#[test]
+fn granted_removal_timeout_step_rejects_dropping_the_record() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::ApplyRemovalDropsTheRecordOnTimeout,
+        ))
+    });
+}
+
+#[test]
+fn granted_removal_step_rejects_a_stale_handle() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::ApplyRemovalLeavesAStaleHandle,
         ))
     });
 }

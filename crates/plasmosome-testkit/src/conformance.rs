@@ -599,8 +599,9 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
 /// `graceful_timeouts_preserve_the_selected_holding` must return a backend in which every
 /// graceful withdrawal of a holding owned by exactly this owner, through `revoke` or
 /// `apply_removal` and with any deadline including zero, times out before any release, while a
-/// forced withdrawal succeeds. Other owners, including this plugin in another cell, must drain
-/// normally. `FakeBackend` is armed with `stall_graceful_drains_for_owner(stalled_owner())`.
+/// forced withdrawal succeeds. Every other owner must drain normally, including another plugin in
+/// this cell and this plugin in another cell. `FakeBackend` is armed with
+/// `stall_graceful_drains_for_owner(stalled_owner())`.
 pub fn stalled_owner() -> CellOwner {
     CellOwner {
         cell: CellId::from("conformance-stalled-cell"),
@@ -610,9 +611,11 @@ pub fn stalled_owner() -> CellOwner {
 
 /// Checks that a graceful timeout, with a 50 ms or a zero deadline, keeps the selected holding,
 /// its issued record and every peer; that a removal naming the wrong owner is refused before any
-/// drain, whichever side is stalled; that the same plugin in another cell drains normally; and
-/// that Force then withdraws only the stalled holding. The factory's backend must stall every
-/// graceful withdrawal owned by `stalled_owner()`.
+/// drain, whichever side is stalled; that another plugin in the stalled cell and the same plugin
+/// in another cell drain normally, one of them under a zero deadline; that `apply_removal` of a
+/// granted holding keeps its handle on a timeout and retires it on success; and that Force then
+/// withdraws only the stalled holding. The factory's backend must stall every graceful withdrawal
+/// owned by `stalled_owner()`.
 pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
     make: impl Fn() -> B,
 ) {
@@ -631,33 +634,63 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                     &capability,
                     granted,
                 );
+                let (neighbour, neighbour_entry) = hold(
+                    &mut backend,
+                    neighbour_of(&stalled_owner()),
+                    &capability,
+                    granted,
+                );
                 let pass = format!(
                     "{} {} pass",
                     if granted { "revoke" } else { "apply_removal" },
                     order.name()
                 );
-                let all = [peer_object.clone(), stalled.clone(), elsewhere.clone()];
+                let all = [
+                    peer_object.clone(),
+                    stalled.clone(),
+                    elsewhere.clone(),
+                    neighbour.clone(),
+                ];
                 assert_exact_state(
                     &backend.snapshot_os_state(),
                     &all,
                     "a stalled holding must coexist with its equal peers",
                 );
+                let address = Handle {
+                    class: stalled.class(),
+                    id: stalled.id,
+                };
+                if granted {
+                    let refused = backend.apply_removal(
+                        removal_of(&stalled),
+                        &stalled_owner(),
+                        DrainSpec::graceful(DRAIN),
+                    );
+                    contract_assert!(
+                        matches!(refused, Err(BackendError::DrainTimedOut { handle, .. }) if handle == address),
+                        "a graceful apply_removal of the stalled grant must time out at its address on the {pass}, not {refused:?}"
+                    );
+                    assert_exact_state(
+                        &backend.snapshot_os_state(),
+                        &all,
+                        "a timed-out apply_removal of a grant must keep the holding and every peer",
+                    );
+                }
                 for deadline in [DRAIN, Duration::ZERO] {
+                    let drain = DrainSpec::graceful(deadline);
                     contract_assert_eq!(
                         withdraw(
                             &mut backend,
                             &stalled,
                             stalled_entry.as_ref(),
-                            DrainSpec::graceful(deadline)
+                            granted,
+                            drain
                         ),
                         Err(BackendError::DrainTimedOut {
-                            handle: Handle {
-                                class: stalled.class(),
-                                id: stalled.id,
-                            },
-                            deadline_ms: deadline.as_millis() as u64,
+                            handle: address,
+                            deadline_ms: drain.deadline_ms(),
                         }),
-                        "a graceful withdrawal of the stalled holding with a {deadline:?} deadline must time out on the {pass}"
+                        "a graceful withdrawal of the stalled holding with a {deadline:?} deadline must time out, its handle still issued, on the {pass}"
                     );
                     assert_exact_state(
                         &backend.snapshot_os_state(),
@@ -692,25 +725,37 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                 }
                 let forced_stalled = (&stalled, stalled_entry.as_ref(), DrainSpec::forcing());
                 let graceful_peer = (&peer_object, Some(&peer), DrainSpec::graceful(DRAIN));
-                let graceful_elsewhere = (
+                let zero_elsewhere = (
                     &elsewhere,
                     elsewhere_entry.as_ref(),
+                    DrainSpec::graceful(Duration::ZERO),
+                );
+                let graceful_neighbour = (
+                    &neighbour,
+                    neighbour_entry.as_ref(),
                     DrainSpec::graceful(DRAIN),
                 );
                 let steps = match order {
-                    WithdrawalOrder::StalledFirst => {
-                        [forced_stalled, graceful_peer, graceful_elsewhere]
-                    }
-                    WithdrawalOrder::PeerFirst => {
-                        [graceful_peer, graceful_elsewhere, forced_stalled]
-                    }
+                    WithdrawalOrder::StalledFirst => [
+                        forced_stalled,
+                        graceful_peer,
+                        zero_elsewhere,
+                        graceful_neighbour,
+                    ],
+                    WithdrawalOrder::PeerFirst => [
+                        graceful_peer,
+                        zero_elsewhere,
+                        graceful_neighbour,
+                        forced_stalled,
+                    ],
                 };
                 let mut remaining = all.to_vec();
                 for (object, entry, drain) in steps {
-                    withdraw(&mut backend, object, entry, drain).unwrap_or_else(|error| {
+                    withdraw(&mut backend, object, entry, granted, drain).unwrap_or_else(|error| {
                         contract_panic!(
-                            "withdrawing {} failed on the {pass}: {error}",
-                            object.describe()
+                            "withdrawing {} with {} failed on the {pass}: {error}",
+                            object.describe(),
+                            policy_of(drain)
                         )
                     });
                     remove_expected(&mut remaining, object);
@@ -761,17 +806,31 @@ fn withdraw<B: EnforcementBackend>(
     backend: &mut B,
     object: &OsObject,
     entry: Option<&LedgerEntry>,
+    through_revoke: bool,
     drain: DrainSpec,
 ) -> Result<(), BackendError> {
-    let Some(entry) = entry else {
-        return backend.apply_removal(removal_of(object), &object.owner, drain);
-    };
-    let returned = backend.revoke(entry.handle, drain)?;
-    contract_assert_eq!(
-        returned,
-        *entry,
-        "revoking a handle must return the entry the grant issued"
-    );
+    match entry {
+        Some(entry) if through_revoke => {
+            let returned = backend.revoke(entry.handle, drain)?;
+            contract_assert_eq!(
+                returned,
+                *entry,
+                "revoking a handle must return the entry the grant issued"
+            );
+        }
+        _ => {
+            backend.apply_removal(removal_of(object), &object.owner, drain)?;
+            if let Some(entry) = entry {
+                contract_assert_eq!(
+                    backend.revoke(entry.handle, DrainSpec::forcing()),
+                    Err(BackendError::UnknownHandle {
+                        handle: entry.handle
+                    }),
+                    "a successful apply_removal of a granted holding must retire its handle"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -848,6 +907,13 @@ fn second_owner() -> CellOwner {
 
 fn abandoned_owner() -> CellOwner {
     owned_by("abandoned")
+}
+
+fn neighbour_of(owner: &CellOwner) -> CellOwner {
+    CellOwner {
+        cell: owner.cell.clone(),
+        plugin: PluginId::from("conformance-neighbour"),
+    }
 }
 
 fn other_cell(owner: &CellOwner) -> CellOwner {
