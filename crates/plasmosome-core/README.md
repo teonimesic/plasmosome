@@ -22,6 +22,7 @@ one.
 | `session_log` | Append-only record of everything that happened in a cell |
 | `state` | Wire types: instances, cells, genomes, mock modes |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
+| `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends |
 
 ## Use
 
@@ -115,3 +116,26 @@ it and says why.
 Connections are taken one at a time. The shutdown flag is read between accepts and between reads,
 and both halves of a connection carry a timeout, so neither an idle client nor one that never
 reads its replies can hold the daemon open past shutdown.
+
+## Private recovery sockets
+
+`private_socket` gives a recovery socket the boundary spec 001 §4.1 requires, on macOS and Linux:
+only processes running under the instance's own effective UID can reach it. It does not change
+the public control socket described above.
+
+- `PrivateDir::open` walks the socket's parent directory from `/` with no-follow opens. Every
+  ancestor must be owned by root or the effective UID and writable by neither group nor other; a
+  sticky `/tmp` refuses too. The directory itself must be owned by the effective UID, have no group
+  or other permission bits and carry no ACL. An ACL on an ancestor is allowed, because the macOS
+  home directory carries one. The directory stays open for the checks that follow.
+- `PrivateListener::bind` refuses any entry already at the name and never unlinks it. It binds,
+  sets the socket to mode 0600 through the held directory before `listen`, and on drop removes
+  only the socket it created, matched by device and inode.
+- `PrivateListener::accept` reads the peer's effective UID from the kernel (`getpeereid` on macOS,
+  `SO_PEERCRED` on Linux) and closes an untrusted peer before reading a byte.
+- A client calls `check_private_path` before its own nonblocking connect, and `check_peer_uid` on
+  the connected stream before it sends anything.
+
+Tests that bind a private socket need a root whose every ancestor passes: the canonical temp
+directory on macOS, because `/var` and `/tmp` are symlinks and `/private/tmp` is mode 1777, and
+`CARGO_TARGET_TMPDIR` on Linux.
