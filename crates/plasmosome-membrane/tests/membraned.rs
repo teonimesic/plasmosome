@@ -269,7 +269,13 @@ impl Drop for NamedWorker {
     }
 }
 
-fn leader_first_broker(dir: &Path, socket: &Path, liveness: &Path, control: &Path) -> Value {
+fn leader_first_broker(
+    dir: &Path,
+    socket: &Path,
+    mode: &str,
+    liveness: &Path,
+    control: &Path,
+) -> Value {
     json!({
         "control_socket": dir.join("c.uds"),
         "brokers": [{
@@ -277,7 +283,7 @@ fn leader_first_broker(dir: &Path, socket: &Path, liveness: &Path, control: &Pat
             "control_socket": socket,
             "command": [
                 fixture::supervision_fixture().display().to_string(),
-                "named-exit",
+                mode,
                 liveness,
                 control,
                 "unused"
@@ -288,6 +294,15 @@ fn leader_first_broker(dir: &Path, socket: &Path, liveness: &Path, control: &Pat
 
 #[test]
 fn membraned_shutdown_cleans_a_worker_whose_broker_leader_exited_first() {
+    shutdown_cleans_a_leader_first_worker("named-exit");
+}
+
+#[test]
+fn membraned_shutdown_cleans_a_worker_that_ran_only_after_its_broker_leader_exited() {
+    shutdown_cleans_a_leader_first_worker("named-exit-late");
+}
+
+fn shutdown_cleans_a_leader_first_worker(mode: &str) {
     let dir = tempfile::tempdir().unwrap();
     let control_socket = dir.path().join("c.uds");
     let broker_socket = dir.path().join("b0.uds");
@@ -297,7 +312,7 @@ fn membraned_shutdown_cleans_a_worker_whose_broker_leader_exited_first() {
     let mut worker = NamedWorker::new(&liveness, &worker_control);
     write_config(
         &config,
-        &leader_first_broker(dir.path(), &broker_socket, &liveness, &worker_control),
+        &leader_first_broker(dir.path(), &broker_socket, mode, &liveness, &worker_control),
     );
 
     let mut daemon = start(&config);
