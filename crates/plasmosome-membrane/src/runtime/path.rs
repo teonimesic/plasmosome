@@ -133,13 +133,8 @@ mod tests {
     const PATH_MAX: usize = libc::PATH_MAX as usize;
 
     fn path_of_length(bytes: usize) -> String {
-        let mut text: String =
-            std::iter::repeat_n("/".to_string() + &"a".repeat(99), bytes / 100 + 1)
-                .collect::<String>();
+        let mut text = format!("/{}", "a".repeat(99)).repeat(bytes / 100 + 1);
         text.truncate(bytes);
-        if text.ends_with('/') {
-            text.replace_range(bytes - 1..bytes, "b");
-        }
         text
     }
 
