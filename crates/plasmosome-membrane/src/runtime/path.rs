@@ -10,6 +10,13 @@ const MAX_BYTES: usize = libc::PATH_MAX as usize - 1;
 /// Canonical form is about spelling only. Parsing touches no filesystem, so a
 /// `RecipePath` may still name a symlink or nothing at all; a caller that opens
 /// it must walk its components without following symlinks.
+///
+/// Equality compares spelling. Equal values name the same file, but unequal
+/// values may too: `/A` and `/a`, or two Unicode normalizations of one name,
+/// are one file on a case- or normalization-insensitive volume. Decide whether
+/// two paths are the same or distinct file, such as a control path against a
+/// data path, or a writable root against its root image, from `(st_dev,
+/// st_ino)` after opening them, never from `RecipePath` equality.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RecipePath {
     text: String,
@@ -18,7 +25,7 @@ pub struct RecipePath {
 
 /// Why a text is not a canonical absolute path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PathFault {
+pub enum PathError {
     /// The text is empty.
     Empty,
     /// The text does not start with `/`.
@@ -41,33 +48,33 @@ pub enum PathFault {
 
 impl RecipePath {
     /// Accepts `text` only in canonical form, checking the rules in the order
-    /// `PathFault` lists them and reporting the first one broken.
-    pub fn parse(text: &str) -> Result<RecipePath, PathFault> {
+    /// `PathError` lists them and reporting the first one broken.
+    pub fn parse(text: &str) -> Result<RecipePath, PathError> {
         if text.is_empty() {
-            return Err(PathFault::Empty);
+            return Err(PathError::Empty);
         }
         let Some(relative) = text.strip_prefix('/') else {
-            return Err(PathFault::NotAbsolute);
+            return Err(PathError::NotAbsolute);
         };
         if relative.is_empty() {
-            return Err(PathFault::Root);
+            return Err(PathError::Root);
         }
-        let c = CString::new(text).map_err(|_| PathFault::Nul)?;
+        let c = CString::new(text).map_err(|_| PathError::Nul)?;
         if relative.ends_with('/') {
-            return Err(PathFault::TrailingSlash);
+            return Err(PathError::TrailingSlash);
         }
         let components = relative.split('/');
         if components.clone().any(str::is_empty) {
-            return Err(PathFault::EmptyComponent);
+            return Err(PathError::EmptyComponent);
         }
         if components.clone().any(|component| component == ".") {
-            return Err(PathFault::DotComponent);
+            return Err(PathError::DotComponent);
         }
         if components.clone().any(|component| component == "..") {
-            return Err(PathFault::DotDotComponent);
+            return Err(PathError::DotDotComponent);
         }
         if text.len() > MAX_BYTES {
-            return Err(PathFault::TooLong {
+            return Err(PathError::TooLong {
                 bytes: text.len(),
                 max: MAX_BYTES,
             });
@@ -81,6 +88,11 @@ impl RecipePath {
     /// The path as a `Path`.
     pub fn as_path(&self) -> &Path {
         Path::new(&self.text)
+    }
+
+    /// The path's text, exactly as parsed.
+    pub fn as_str(&self) -> &str {
+        &self.text
     }
 
     /// The path's bytes followed by one terminating NUL, for a system call.
@@ -105,18 +117,24 @@ impl RecipePath {
     }
 }
 
-impl std::fmt::Display for PathFault {
+impl AsRef<Path> for RecipePath {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
+    }
+}
+
+impl std::fmt::Display for PathError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PathFault::Empty => f.write_str("the path is empty"),
-            PathFault::NotAbsolute => f.write_str("the path does not start with /"),
-            PathFault::Root => f.write_str("the path is / itself"),
-            PathFault::Nul => f.write_str("the path holds a NUL byte"),
-            PathFault::TrailingSlash => f.write_str("the path ends with /"),
-            PathFault::EmptyComponent => f.write_str("the path holds an empty component"),
-            PathFault::DotComponent => f.write_str("the path holds a . component"),
-            PathFault::DotDotComponent => f.write_str("the path holds a .. component"),
-            PathFault::TooLong { bytes, max } => write!(
+            PathError::Empty => f.write_str("the path is empty"),
+            PathError::NotAbsolute => f.write_str("the path does not start with /"),
+            PathError::Root => f.write_str("the path is / itself"),
+            PathError::Nul => f.write_str("the path holds a NUL byte"),
+            PathError::TrailingSlash => f.write_str("the path ends with /"),
+            PathError::EmptyComponent => f.write_str("the path holds an empty component"),
+            PathError::DotComponent => f.write_str("the path holds a . component"),
+            PathError::DotDotComponent => f.write_str("the path holds a .. component"),
+            PathError::TooLong { bytes, max } => write!(
                 f,
                 "the path is {bytes} bytes long; at most {max} are allowed"
             ),
@@ -124,7 +142,7 @@ impl std::fmt::Display for PathFault {
     }
 }
 
-impl std::error::Error for PathFault {}
+impl std::error::Error for PathError {}
 
 #[cfg(test)]
 mod tests {
@@ -145,16 +163,16 @@ mod tests {
     #[test]
     fn each_broken_rule_refuses_with_its_own_fault() {
         let cases = [
-            ("", PathFault::Empty),
-            ("a/b", PathFault::NotAbsolute),
-            ("/", PathFault::Root),
-            ("/a\0b", PathFault::Nul),
-            ("/a/", PathFault::TrailingSlash),
-            ("/a//b", PathFault::EmptyComponent),
-            ("/a/./b", PathFault::DotComponent),
-            ("/a/.", PathFault::DotComponent),
-            ("/a/../b", PathFault::DotDotComponent),
-            ("/..", PathFault::DotDotComponent),
+            ("", PathError::Empty),
+            ("a/b", PathError::NotAbsolute),
+            ("/", PathError::Root),
+            ("/a\0b", PathError::Nul),
+            ("/a/", PathError::TrailingSlash),
+            ("/a//b", PathError::EmptyComponent),
+            ("/a/./b", PathError::DotComponent),
+            ("/a/.", PathError::DotComponent),
+            ("/a/../b", PathError::DotDotComponent),
+            ("/..", PathError::DotDotComponent),
         ];
         for (text, fault) in cases {
             assert_eq!(RecipePath::parse(text), Err(fault), "{text:?}");
@@ -176,7 +194,7 @@ mod tests {
         let too_long = path_of_length(PATH_MAX);
         assert_eq!(
             RecipePath::parse(&too_long),
-            Err(PathFault::TooLong {
+            Err(PathError::TooLong {
                 bytes: PATH_MAX,
                 max: PATH_MAX - 1
             })
@@ -186,11 +204,11 @@ mod tests {
     #[test]
     fn rules_are_checked_in_their_documented_order() {
         let cases = [
-            ("a\0/", PathFault::NotAbsolute),
-            ("/a\0/", PathFault::Nul),
-            ("/a//./", PathFault::TrailingSlash),
-            ("/a//.", PathFault::EmptyComponent),
-            ("/./..", PathFault::DotComponent),
+            ("a\0/", PathError::NotAbsolute),
+            ("/a\0/", PathError::Nul),
+            ("/a//./", PathError::TrailingSlash),
+            ("/a//.", PathError::EmptyComponent),
+            ("/./..", PathError::DotComponent),
         ];
         for (text, fault) in cases {
             assert_eq!(RecipePath::parse(text), Err(fault), "{text:?}");
@@ -198,7 +216,7 @@ mod tests {
         let long_with_dot = format!("{}/.", path_of_length(PATH_MAX));
         assert_eq!(
             RecipePath::parse(&long_with_dot),
-            Err(PathFault::DotComponent)
+            Err(PathError::DotComponent)
         );
     }
 
@@ -226,21 +244,32 @@ mod tests {
     }
 
     #[test]
+    fn the_text_is_readable_without_a_fallible_conversion() {
+        let path = parsed("/usr/local/var");
+        assert_eq!(path.as_str(), "/usr/local/var");
+        assert_eq!(AsRef::<Path>::as_ref(&path), Path::new("/usr/local/var"));
+        assert_eq!(
+            std::path::PathBuf::from(path.as_str()).join("x"),
+            Path::new("/usr/local/var").join("x")
+        );
+    }
+
+    #[test]
     fn faults_describe_themselves() {
         let described = [
-            (PathFault::Empty, "the path is empty"),
-            (PathFault::NotAbsolute, "the path does not start with /"),
-            (PathFault::Root, "the path is / itself"),
-            (PathFault::Nul, "the path holds a NUL byte"),
-            (PathFault::TrailingSlash, "the path ends with /"),
+            (PathError::Empty, "the path is empty"),
+            (PathError::NotAbsolute, "the path does not start with /"),
+            (PathError::Root, "the path is / itself"),
+            (PathError::Nul, "the path holds a NUL byte"),
+            (PathError::TrailingSlash, "the path ends with /"),
             (
-                PathFault::EmptyComponent,
+                PathError::EmptyComponent,
                 "the path holds an empty component",
             ),
-            (PathFault::DotComponent, "the path holds a . component"),
-            (PathFault::DotDotComponent, "the path holds a .. component"),
+            (PathError::DotComponent, "the path holds a . component"),
+            (PathError::DotDotComponent, "the path holds a .. component"),
             (
-                PathFault::TooLong {
+                PathError::TooLong {
                     bytes: 1024,
                     max: 1023,
                 },

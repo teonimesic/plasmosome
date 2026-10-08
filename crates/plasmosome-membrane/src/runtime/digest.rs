@@ -11,7 +11,7 @@ pub struct Digest([u8; 32]);
 
 /// Why a text is not 64 lowercase hexadecimal digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DigestFault {
+pub enum DigestError {
     /// The text is `bytes` bytes long, not 64.
     WrongLength { bytes: usize },
     /// The byte at offset `at` is not one of `0-9` or `a-f`.
@@ -21,10 +21,10 @@ pub enum DigestFault {
 impl Digest {
     /// Reads exactly 64 lowercase hexadecimal digits. Uppercase digits,
     /// any other byte, and any other length are refused with the first fault.
-    pub fn parse_hex(text: &str) -> Result<Digest, DigestFault> {
+    pub fn parse_hex(text: &str) -> Result<Digest, DigestError> {
         let digits = text.as_bytes();
         if digits.len() != 64 {
-            return Err(DigestFault::WrongLength {
+            return Err(DigestError::WrongLength {
                 bytes: digits.len(),
             });
         }
@@ -33,7 +33,7 @@ impl Digest {
             let nibble = match digit {
                 b'0'..=b'9' => digit - b'0',
                 b'a'..=b'f' => digit - b'a' + 10,
-                _ => return Err(DigestFault::NotLowercaseHex { at }),
+                _ => return Err(DigestError::NotLowercaseHex { at }),
             };
             bytes[at / 2] |= if at % 2 == 0 { nibble << 4 } else { nibble };
         }
@@ -90,14 +90,14 @@ impl std::fmt::Debug for Digest {
     }
 }
 
-impl std::fmt::Display for DigestFault {
+impl std::fmt::Display for DigestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DigestFault::WrongLength { bytes } => write!(
+            DigestError::WrongLength { bytes } => write!(
                 f,
                 "a SHA-256 digest is 64 lowercase hexadecimal digits, not {bytes} bytes"
             ),
-            DigestFault::NotLowercaseHex { at } => write!(
+            DigestError::NotLowercaseHex { at } => write!(
                 f,
                 "byte {at} of a SHA-256 digest is not a lowercase hexadecimal digit"
             ),
@@ -105,7 +105,7 @@ impl std::fmt::Display for DigestFault {
     }
 }
 
-impl std::error::Error for DigestFault {}
+impl std::error::Error for DigestError {}
 
 #[cfg(test)]
 mod tests {
@@ -173,15 +173,15 @@ mod tests {
     fn a_length_other_than_sixty_four_bytes_refuses() {
         assert_eq!(
             Digest::parse_hex(&ABC[..63]),
-            Err(DigestFault::WrongLength { bytes: 63 })
+            Err(DigestError::WrongLength { bytes: 63 })
         );
         assert_eq!(
             Digest::parse_hex(&format!("{ABC}0")),
-            Err(DigestFault::WrongLength { bytes: 65 })
+            Err(DigestError::WrongLength { bytes: 65 })
         );
         assert_eq!(
             Digest::parse_hex(""),
-            Err(DigestFault::WrongLength { bytes: 0 })
+            Err(DigestError::WrongLength { bytes: 0 })
         );
     }
 
@@ -189,11 +189,11 @@ mod tests {
     fn uppercase_digits_refuse_at_their_offset() {
         assert_eq!(
             Digest::parse_hex(&ABC.to_uppercase()),
-            Err(DigestFault::NotLowercaseHex { at: 0 })
+            Err(DigestError::NotLowercaseHex { at: 0 })
         );
         assert_eq!(
             Digest::parse_hex(&with_byte(ABC, 40, "F")),
-            Err(DigestFault::NotLowercaseHex { at: 40 })
+            Err(DigestError::NotLowercaseHex { at: 40 })
         );
     }
 
@@ -201,15 +201,15 @@ mod tests {
     fn non_hex_and_multibyte_text_refuses_by_byte_offset() {
         assert_eq!(
             Digest::parse_hex(&with_byte(ABC, 10, "g")),
-            Err(DigestFault::NotLowercaseHex { at: 10 })
+            Err(DigestError::NotLowercaseHex { at: 10 })
         );
         assert_eq!(
             Digest::parse_hex(&format!("{}é", &ABC[..62])),
-            Err(DigestFault::NotLowercaseHex { at: 62 })
+            Err(DigestError::NotLowercaseHex { at: 62 })
         );
         assert_eq!(
             Digest::parse_hex(&format!("{}é", &ABC[..63])),
-            Err(DigestFault::WrongLength { bytes: 65 })
+            Err(DigestError::WrongLength { bytes: 65 })
         );
     }
 
@@ -247,11 +247,11 @@ mod tests {
     #[test]
     fn faults_describe_themselves() {
         assert_eq!(
-            DigestFault::WrongLength { bytes: 63 }.to_string(),
+            DigestError::WrongLength { bytes: 63 }.to_string(),
             "a SHA-256 digest is 64 lowercase hexadecimal digits, not 63 bytes"
         );
         assert_eq!(
-            DigestFault::NotLowercaseHex { at: 40 }.to_string(),
+            DigestError::NotLowercaseHex { at: 40 }.to_string(),
             "byte 40 of a SHA-256 digest is not a lowercase hexadecimal digit"
         );
     }
