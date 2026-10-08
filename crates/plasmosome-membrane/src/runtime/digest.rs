@@ -86,7 +86,7 @@ mod tests {
     impl Read for Trickle<'_> {
         fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
             self.reads += 1;
-            if self.reads % 97 == 0 {
+            if self.reads.is_multiple_of(97) {
                 return Err(Error::from(ErrorKind::Interrupted));
             }
             let size = (self.reads % 4099 + 1)
