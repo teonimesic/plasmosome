@@ -1,8 +1,10 @@
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -420,6 +422,31 @@ fn accept_refuses_a_peer_whose_uid_is_not_trusted_before_reading() {
     );
 }
 
+fn poll_readable(listener: &PrivateListener) -> bool {
+    let mut descriptor = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
+    assert!(ready >= 0, "poll: {}", std::io::Error::last_os_error());
+    ready == 1 && descriptor.revents & libc::POLLIN != 0
+}
+
+#[test]
+fn the_listening_descriptor_polls_readable_while_a_client_waits() {
+    let root = private_root();
+    let listener = bind(&root, "sock");
+    assert!(!poll_readable(&listener), "nothing is pending yet");
+    let _client = UnixStream::connect(&listener.entry().path).expect("connect");
+    assert!(
+        poll_readable(&listener),
+        "the pending client shows as readable"
+    );
+    assert!(matches!(accept_one(&listener), Accepted::Trusted(_)));
+    assert!(!poll_readable(&listener), "the client was taken");
+}
+
 #[test]
 fn check_peer_uid_on_a_client_stream_compares_the_server_uid() {
     let root = private_root();
@@ -500,6 +527,18 @@ fn check_private_path_checks_the_parent_and_the_entry() {
         check_private_path(Path::new("relative/sock"), euid),
         Err(PrivateSocketError::NotAbsolute {
             path: PathBuf::from("relative/sock")
+        })
+    );
+    assert_eq!(
+        check_private_path(Path::new("/"), euid),
+        Err(PrivateSocketError::NotAbsolute {
+            path: PathBuf::from("/")
+        })
+    );
+    assert_eq!(
+        check_private_path(Path::new(OsStr::from_bytes(b"/x/\xffsock")), euid),
+        Err(PrivateSocketError::BadName {
+            name: "\u{fffd}sock".to_string()
         })
     );
     set_mode(root.path(), 0o755);
