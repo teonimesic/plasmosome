@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, btree_map};
 use std::fmt;
 
-use serde::de::Error as _;
+use serde::de::{Error as _, MapAccess, Visitor};
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::{Uuid, Variant, Version};
@@ -65,10 +65,10 @@ impl fmt::Display for CellId {
 }
 
 /// The owner of a holding: a plugin as attached to one cell. The same plugin in two cells is two
-/// owners, so every ownership comparison must compare both fields. Its JSON is exactly
-/// `{"cell": ..., "plugin": ...}`; a missing or unknown field is refused.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// owners, so every ownership comparison must compare both fields. Its JSON is exactly the object
+/// `{"cell": ..., "plugin": ...}`; an array, a missing, repeated or unknown field is refused. It
+/// displays as both names quoted, `"cell"/"plugin"`, because neither name is validated yet.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct CellOwner {
     pub cell: CellId,
     pub plugin: PluginId,
@@ -76,7 +76,41 @@ pub struct CellOwner {
 
 impl fmt::Display for CellOwner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}", self.cell, self.plugin)
+        write!(f, "{:?}/{:?}", self.cell.as_str(), self.plugin.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CellOwner {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<CellOwner, D::Error> {
+        deserializer.deserialize_map(CellOwnerVisitor)
+    }
+}
+
+struct CellOwnerVisitor;
+
+impl<'de> Visitor<'de> for CellOwnerVisitor {
+    type Value = CellOwner;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a cell owner object with exactly a cell and a plugin")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<CellOwner, A::Error> {
+        let mut cell: Option<CellId> = None;
+        let mut plugin: Option<PluginId> = None;
+        while let Some(key) = entries.next_key::<String>()? {
+            match key.as_str() {
+                "cell" if cell.is_some() => return Err(A::Error::duplicate_field("cell")),
+                "cell" => cell = Some(entries.next_value()?),
+                "plugin" if plugin.is_some() => return Err(A::Error::duplicate_field("plugin")),
+                "plugin" => plugin = Some(entries.next_value()?),
+                other => return Err(A::Error::unknown_field(other, &["cell", "plugin"])),
+            }
+        }
+        Ok(CellOwner {
+            cell: cell.ok_or_else(|| A::Error::missing_field("cell"))?,
+            plugin: plugin.ok_or_else(|| A::Error::missing_field("plugin"))?,
+        })
     }
 }
 
@@ -794,14 +828,35 @@ mod tests {
             serde_json::json!({"plugin": "github-pr"}),
             serde_json::json!({"cell": "cell-1", "plugin": "github-pr", "instance": "work"}),
             serde_json::json!("github-pr"),
+            serde_json::json!(["cell-1", "github-pr"]),
+            serde_json::json!({"cell": "cell-1", "plugin": 7}),
         ] {
             assert!(
                 serde_json::from_value::<CellOwner>(refused.clone()).is_err(),
                 "{refused} must not decode as a cell owner"
             );
         }
-        assert_eq!(owner.to_string(), "cell-1/github-pr");
+        let duplicated = r#"{"cell": "cell-1", "plugin": "github-pr", "cell": "cell-2"}"#;
+        assert!(
+            serde_json::from_str::<CellOwner>(duplicated)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate field `cell`")
+        );
         assert_eq!(owner.cell.as_str(), "cell-1");
+    }
+
+    #[test]
+    fn a_cell_owner_displays_both_names_quoted_so_a_slash_cannot_blur_them() {
+        assert_eq!(
+            cell_owner("cell-1", "github-pr").to_string(),
+            r#""cell-1"/"github-pr""#
+        );
+        assert_ne!(
+            cell_owner("a/b", "c").to_string(),
+            cell_owner("a", "b/c").to_string()
+        );
+        assert_eq!(cell_owner("a\"/\"b", "c").to_string(), r#""a\"/\"b"/"c""#);
     }
 
     #[test]
@@ -876,7 +931,7 @@ mod tests {
         };
         right.insert(moved.clone()).unwrap();
         assert!(!left.canonically_equivalent(&right));
-        assert!(moved.describe().contains("cell-2/github-pr"));
+        assert!(moved.describe().contains(r#""cell-2"/"github-pr""#));
     }
 
     impl OsObject {

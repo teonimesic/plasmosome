@@ -139,7 +139,7 @@ impl EnforcementBackend for FakeBackend {
         if drain.policy == RevokePolicy::Graceful && stalled {
             return Err(BackendError::DrainTimedOut {
                 handle,
-                deadline_ms: drain.deadline.as_millis() as u64,
+                deadline_ms: drain.deadline_ms(),
             });
         }
         self.state.remove(&removal, owner);
@@ -640,6 +640,78 @@ mod tests {
             .apply_removal(op.removal(), &stalled, DrainSpec::forcing())
             .unwrap();
         assert!(backend.snapshot_os_state().is_empty());
+    }
+
+    #[test]
+    fn a_zero_graceful_deadline_checks_once_and_never_forces() {
+        let workspace = cell_owner("cell-1", "workspace");
+        let op = mount_by(&workspace);
+        let mut backend = FakeBackend::new();
+        let stuck = backend.grant(grant_to(
+            &workspace,
+            Capability::SessionFile {
+                path: "skills/pr.md".to_string(),
+            },
+        ));
+        backend.apply(op.clone()).unwrap();
+        backend.mark_stuck(address_of(&op));
+        backend.mark_stuck(stuck.handle);
+        let before = backend.snapshot_os_state();
+        let zero = DrainSpec::graceful(Duration::ZERO);
+        assert_eq!(
+            backend
+                .apply_removal(op.removal(), &workspace, zero)
+                .unwrap_err(),
+            BackendError::DrainTimedOut {
+                handle: address_of(&op),
+                deadline_ms: 0,
+            }
+        );
+        assert_eq!(
+            backend.revoke(stuck.handle, zero).unwrap_err(),
+            BackendError::DrainTimedOut {
+                handle: stuck.handle,
+                deadline_ms: 0,
+            }
+        );
+        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.peek_entry(stuck.handle).unwrap(), stuck);
+        let drained = backend.grant(grant_to(
+            &workspace,
+            Capability::SessionFile {
+                path: "skills/drained.md".to_string(),
+            },
+        ));
+        assert_eq!(backend.revoke(drained.handle, zero).unwrap(), drained);
+        assert_eq!(backend.snapshot_os_state(), before);
+    }
+
+    #[test]
+    fn a_timeout_reports_its_deadline_in_whole_milliseconds_rounded_up() {
+        let workspace = cell_owner("cell-1", "workspace");
+        let op = mount_by(&workspace);
+        let mut backend = FakeBackend::new();
+        backend.apply(op.clone()).unwrap();
+        backend.mark_stuck(address_of(&op));
+        for (deadline, deadline_ms) in [
+            (Duration::ZERO, 0),
+            (Duration::from_nanos(1), 1),
+            (Duration::from_micros(999), 1),
+            (Duration::from_millis(1), 1),
+            (Duration::from_micros(1_001), 2),
+            (Duration::from_millis(7), 7),
+        ] {
+            assert_eq!(
+                backend
+                    .apply_removal(op.removal(), &workspace, DrainSpec::graceful(deadline))
+                    .unwrap_err(),
+                BackendError::DrainTimedOut {
+                    handle: address_of(&op),
+                    deadline_ms,
+                },
+                "{deadline:?}"
+            );
+        }
     }
 
     #[test]

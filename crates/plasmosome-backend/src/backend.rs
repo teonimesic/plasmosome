@@ -176,6 +176,9 @@ pub struct DrainSpec {
 }
 
 impl DrainSpec {
+    /// A drain that waits up to `deadline` for the holding's admitted work to finish before it
+    /// releases. A zero deadline checks once: a holding that has not drained returns
+    /// `DrainTimedOut` and is kept. Zero never means `RevokePolicy::Force`.
     pub fn graceful(deadline: Duration) -> DrainSpec {
         DrainSpec {
             deadline,
@@ -188,6 +191,12 @@ impl DrainSpec {
             deadline: Duration::ZERO,
             policy: RevokePolicy::Force,
         }
+    }
+
+    /// The deadline in whole milliseconds for `DrainTimedOut`, rounded up, so only a zero
+    /// deadline reports 0.
+    pub fn deadline_ms(&self) -> u64 {
+        u64::try_from(self.deadline.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX)
     }
 }
 
