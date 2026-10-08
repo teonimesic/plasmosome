@@ -836,13 +836,24 @@ mod tests {
                 "{refused} must not decode as a cell owner"
             );
         }
-        let duplicated = r#"{"cell": "cell-1", "plugin": "github-pr", "cell": "cell-2"}"#;
-        assert!(
-            serde_json::from_str::<CellOwner>(duplicated)
-                .unwrap_err()
-                .to_string()
-                .contains("duplicate field `cell`")
-        );
+        for (duplicated, field) in [
+            (
+                r#"{"cell": "cell-1", "plugin": "github-pr", "cell": "cell-2"}"#,
+                "cell",
+            ),
+            (
+                r#"{"cell": "cell-1", "plugin": "github-pr", "plugin": "audit"}"#,
+                "plugin",
+            ),
+        ] {
+            assert!(
+                serde_json::from_str::<CellOwner>(duplicated)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(&format!("duplicate field `{field}`")),
+                "{duplicated} must not decode as a cell owner"
+            );
+        }
         assert_eq!(owner.cell.as_str(), "cell-1");
         assert_eq!(owner.cell.to_string(), "cell-1");
     }
