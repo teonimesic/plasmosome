@@ -1492,7 +1492,7 @@ mod signal_pressure {
                 move || {
                     while running.load(Ordering::Relaxed) {
                         let claimed = budget
-                            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
                                 left.checked_sub(1)
                             })
                             .is_ok();
