@@ -504,6 +504,15 @@ mod tests {
         );
     }
 
+    fn assert_duplicate_field_refused<R: Recipe>(recipe: R, field: &str) {
+        let json = serde_json::to_string(&recipe).unwrap();
+        let value = serde_json::to_value(&recipe).unwrap()[field].to_string();
+        let doubled = format!("{{\"{field}\":{value},{}", &json[1..]);
+        let error = serde_json::from_str::<R>(&doubled).unwrap_err().to_string();
+        let duplicate = format!("duplicate field `{field}`");
+        assert!(error.starts_with(&duplicate), "{doubled} gave: {error}");
+    }
+
     fn assert_distinct<R: Recipe>(recipes: Vec<R>) {
         let count = recipes.len();
         let ordered: BTreeSet<R> = recipes.iter().cloned().collect();
@@ -617,6 +626,15 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_field_refuses_decode_from_text() {
+        assert_duplicate_field_refused(valid_session_file(), "guest_path");
+        assert_duplicate_field_refused(valid_uds(), "upstream");
+        assert_duplicate_field_refused(valid_proxy(), "port");
+        assert_duplicate_field_refused(valid_mount(), "access");
+        assert_duplicate_field_refused(valid_launch(), "data_socket");
+    }
+
+    #[test]
     fn a_nul_in_any_string_field_is_refused() {
         let seed = b"seed\n".to_vec();
         assert_refused(
@@ -695,6 +713,10 @@ mod tests {
             &session_file(vec![b'x'; MAX_SESSION_FILE_BYTES + 1], SEED),
             too_large(),
         );
+        assert_refused(
+            &session_file(vec![b'x'; 70_000], SEED),
+            RecipeError::ContentsTooLarge { len: 70_000 },
+        );
     }
 
     #[test]
@@ -738,6 +760,9 @@ mod tests {
             "1password.com",
             "xn--bcher-kva.example",
             "example.c0m",
+            "0.pool.ntp.org",
+            "1.example",
+            "123.example.com",
             longest_label.as_str(),
             longest_name.as_str(),
             "10.0.0.1",
@@ -772,6 +797,10 @@ mod tests {
             "api.github.com-",
             "api.github.com.",
             "999.1.1.1",
+            "example.123",
+            "a.1.1.1",
+            "api.github.443",
+            "api.-github.com",
             "10.0.0",
             "010.0.0.1",
             "bücher.example",
