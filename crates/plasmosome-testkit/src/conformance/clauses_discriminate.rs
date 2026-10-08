@@ -40,6 +40,12 @@ enum Defect {
     GrantSubstitutesRequestedCapability,
     GrantPanics,
     SnapshotPanicsLikeAssertion,
+    RevokeTakesTheSamePluginInAnotherCell,
+    RemovalComparesOnlyThePlugin,
+    IgnoresDrainTimeouts,
+    TimeoutReleasesBeforeRefusing,
+    ForceRefusedWhilePeerStands,
+    StallBlocksEqualPeers,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,8 +137,149 @@ impl DefectiveBackend {
             Defect::RevokeTakesAnotherResourceOfClass => self.take_another_resource_of_class(entry),
             Defect::RevokeTakesWrongOwner => self.take_wrong_owner(entry),
             Defect::RevokeTakesWrongInstance => self.take_wrong_instance(entry),
-            _ => self.apply_removal(entry.removal(), &entry.owner, DrainSpec::forcing()),
+            Defect::RevokeTakesTheSamePluginInAnotherCell => {
+                self.take_same_plugin_in_another_cell(entry)
+            }
+            _ => self.remove_exact(&entry.removal(), &entry.owner),
         }
+    }
+
+    fn take_same_plugin_in_another_cell(
+        &mut self,
+        entry: &LedgerEntry,
+    ) -> Result<(), BackendError> {
+        let object = self
+            .state
+            .objects()
+            .find(|held| {
+                held.capability == entry.capability
+                    && held.owner.plugin == entry.owner.plugin
+                    && held.owner.cell != entry.owner.cell
+            })
+            .cloned();
+        self.remove_selected(object.or_else(|| Some(entry.object())), entry)
+    }
+
+    fn selects(&self, removal: &UniverseRemoval, owner: &CellOwner) -> bool {
+        if self.mirrors_its_ledger() {
+            return self
+                .applied
+                .iter()
+                .any(|op| holds_exactly(&op.object(), removal, owner))
+                || self
+                    .planted
+                    .iter()
+                    .any(|object| holds_exactly(object, removal, owner));
+        }
+        if self.defect == Defect::RemovalComparesOnlyThePlugin {
+            return self.state.objects().any(|held| {
+                held.id == removal.id
+                    && held.capability == removal.capability
+                    && held.owner.plugin == owner.plugin
+            });
+        }
+        self.state.selects(removal, owner)
+    }
+
+    fn drain_refusal(
+        &self,
+        owner: &CellOwner,
+        capability: &Capability,
+        address: Handle,
+        drain: DrainSpec,
+    ) -> Option<BackendError> {
+        let stalled = conformance::stalled_owner();
+        if drain.policy == RevokePolicy::Force {
+            let peer_stands = self
+                .state
+                .objects()
+                .any(|held| held.capability == *capability && held.owner != *owner);
+            return (self.defect == Defect::ForceRefusedWhilePeerStands
+                && *owner == stalled
+                && peer_stands)
+                .then(|| {
+                    BackendError::Fault("another holder still uses the resource".to_string())
+                });
+        }
+        let times_out = match self.defect {
+            Defect::IgnoresDrainTimeouts => false,
+            Defect::StallBlocksEqualPeers => {
+                *owner == stalled
+                    || self
+                        .state
+                        .objects()
+                        .any(|held| held.owner == stalled && held.capability == *capability)
+            }
+            _ => *owner == stalled,
+        };
+        times_out.then_some(BackendError::DrainTimedOut {
+            handle: address,
+            deadline_ms: drain.deadline.as_millis() as u64,
+        })
+    }
+
+    fn drained(
+        &mut self,
+        owner: &CellOwner,
+        capability: &Capability,
+        address: Handle,
+        drain: DrainSpec,
+        release: impl FnOnce(&mut Self) -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        let Some(refusal) = self.drain_refusal(owner, capability, address, drain) else {
+            return release(self);
+        };
+        if self.defect == Defect::TimeoutReleasesBeforeRefusing {
+            release(self)?;
+        }
+        Err(refusal)
+    }
+
+    fn remove_exact(
+        &mut self,
+        removal: &UniverseRemoval,
+        owner: &CellOwner,
+    ) -> Result<(), BackendError> {
+        let address = Handle {
+            class: removal.class(),
+            id: removal.id,
+        };
+        if self.mirrors_its_ledger() {
+            if remove_recorded(&mut self.applied, removal, owner)
+                || remove_planted(&mut self.planted, removal, owner)
+            {
+                self.ledger.remove(&address);
+                return Ok(());
+            }
+            return Err(unknown_object(removal, owner));
+        }
+        let holder = match self.defect {
+            Defect::RemovalComparesOnlyThePlugin => self
+                .state
+                .objects()
+                .find(|held| held.id == removal.id && held.capability == removal.capability)
+                .map_or_else(|| owner.clone(), |held| held.owner.clone()),
+            _ => owner.clone(),
+        };
+        if self.state.remove(removal, &holder).is_none() {
+            return Err(unknown_object(removal, owner));
+        }
+        self.applied.retain(|op| op.id() != removal.id);
+        self.ledger.remove(&address);
+        if self.defect == Defect::ApplyRemovalDeletesOtherClasses {
+            let survivors: Vec<OsObject> = self
+                .state
+                .objects()
+                .filter(|object| object.class() == address.class)
+                .cloned()
+                .collect();
+            let mut damaged = OsState::new();
+            for object in survivors {
+                damaged.insert(object).unwrap();
+            }
+            self.state = damaged;
+        }
+        Ok(())
     }
 
     fn take_another_resource_of_class(&mut self, entry: &LedgerEntry) -> Result<(), BackendError> {
@@ -291,7 +438,9 @@ impl EnforcementBackend for DefectiveBackend {
                 _ => Err(BackendError::UnknownHandle { handle }),
             };
         };
-        self.withdraw(&entry, drain.policy)?;
+        self.drained(&entry.owner, &entry.capability, handle, drain, |backend| {
+            backend.withdraw(&entry, drain.policy)
+        })?;
         self.ledger.remove(&handle);
         self.grant_order.retain(|held| *held != handle);
         self.freed.push(handle);
@@ -337,49 +486,21 @@ impl EnforcementBackend for DefectiveBackend {
         &mut self,
         removal: UniverseRemoval,
         owner: &CellOwner,
-        _drain: DrainSpec,
+        drain: DrainSpec,
     ) -> Result<(), BackendError> {
         if self.defect == Defect::RemovalIsANoOp {
             return Ok(());
         }
-        if self.applied_order_refuses(&removal) {
+        if self.applied_order_refuses(&removal) || !self.selects(&removal, owner) {
             return Err(unknown_object(&removal, owner));
         }
-        if self.mirrors_its_ledger() {
-            if remove_recorded(&mut self.applied, &removal, owner)
-                || remove_planted(&mut self.planted, &removal, owner)
-            {
-                self.ledger.remove(&Handle {
-                    class: removal.class(),
-                    id: removal.id,
-                });
-                return Ok(());
-            }
-            return Err(unknown_object(&removal, owner));
-        }
-        let removed_class = removal.class();
-        if self.state.remove(&removal, owner).is_none() {
-            return Err(unknown_object(&removal, owner));
-        }
-        self.applied.retain(|op| op.id() != removal.id);
-        self.ledger.remove(&Handle {
-            class: removed_class,
+        let address = Handle {
+            class: removal.class(),
             id: removal.id,
-        });
-        if self.defect == Defect::ApplyRemovalDeletesOtherClasses {
-            let survivors: Vec<OsObject> = self
-                .state
-                .objects()
-                .filter(|object| object.class() == removed_class)
-                .cloned()
-                .collect();
-            let mut damaged = OsState::new();
-            for object in survivors {
-                damaged.insert(object).unwrap();
-            }
-            self.state = damaged;
-        }
-        Ok(())
+        };
+        self.drained(owner, &removal.capability, address, drain, |backend| {
+            backend.remove_exact(&removal, owner)
+        })
     }
 
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError> {
@@ -407,15 +528,18 @@ fn unknown_object(removal: &UniverseRemoval, owner: &CellOwner) -> BackendError 
     }
 }
 
+fn holds_exactly(object: &OsObject, removal: &UniverseRemoval, owner: &CellOwner) -> bool {
+    object.id == removal.id && object.owner == *owner && object.capability == removal.capability
+}
+
 fn remove_recorded(
     applied: &mut Vec<UniverseOp>,
     removal: &UniverseRemoval,
     owner: &CellOwner,
 ) -> bool {
-    let position = applied.iter().position(|op| {
-        let object = op.object();
-        object.id == removal.id && object.owner == *owner && object.capability == removal.capability
-    });
+    let position = applied
+        .iter()
+        .position(|op| holds_exactly(&op.object(), removal, owner));
     position.is_some_and(|index| {
         applied.remove(index);
         true
@@ -427,9 +551,9 @@ fn remove_planted(
     removal: &UniverseRemoval,
     owner: &CellOwner,
 ) -> bool {
-    let position = planted.iter().position(|object| {
-        object.id == removal.id && object.owner == *owner && object.capability == removal.capability
-    });
+    let position = planted
+        .iter()
+        .position(|object| holds_exactly(object, removal, owner));
     position.is_some_and(|index| {
         planted.remove(index);
         true
@@ -532,6 +656,7 @@ fn run_all(defect: Defect) {
     conformance::revoke_of_a_revoked_handle_is_error(carrying(defect));
     conformance::revoke_takes_its_owners_object(carrying(defect));
     conformance::repeated_grants_are_independently_removable(carrying(defect));
+    conformance::graceful_timeouts_preserve_the_selected_holding(carrying(defect));
 }
 
 #[test]
@@ -726,6 +851,60 @@ fn applied_removal_order_witnesses_are_independent() {
     assert_rejected(|| {
         conformance::apply_and_removal_reach_the_universe(carrying(
             Defect::AppliedRemovalsOnlyInReverseOrder,
+        ))
+    });
+}
+
+#[test]
+fn owner_clause_rejects_revoking_the_same_plugin_in_another_cell() {
+    assert_rejected(|| {
+        conformance::revoke_takes_its_owners_object(carrying(
+            Defect::RevokeTakesTheSamePluginInAnotherCell,
+        ))
+    });
+}
+
+#[test]
+fn applied_removal_clause_rejects_a_plugin_only_owner_comparison() {
+    assert_rejected(|| {
+        conformance::apply_and_removal_reach_the_universe(carrying(
+            Defect::RemovalComparesOnlyThePlugin,
+        ))
+    });
+}
+
+#[test]
+fn graceful_timeout_clause_rejects_an_ignored_timeout() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::IgnoresDrainTimeouts,
+        ))
+    });
+}
+
+#[test]
+fn graceful_timeout_clause_rejects_a_release_before_the_refusal() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::TimeoutReleasesBeforeRefusing,
+        ))
+    });
+}
+
+#[test]
+fn stalled_first_pass_rejects_force_refused_while_a_peer_stands() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::ForceRefusedWhilePeerStands,
+        ))
+    });
+}
+
+#[test]
+fn peer_first_pass_rejects_a_stall_that_blocks_equal_peers() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::StallBlocksEqualPeers,
         ))
     });
 }
