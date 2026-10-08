@@ -574,7 +574,7 @@ fn a_different_uid_client_cannot_reach_the_socket() {
     if other == 0 {
         assert!(
             matches!(
-                outcomes.as_slice(),
+                &outcomes[..],
                 [Accepted::Refused(PrivateSocketError::PeerMismatch { trusted, found: 0 })]
                     if *trusted == euid
             ),
