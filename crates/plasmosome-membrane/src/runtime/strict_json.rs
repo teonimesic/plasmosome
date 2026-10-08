@@ -1,4 +1,4 @@
-use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use serde_core::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 use std::cell::RefCell;
 
