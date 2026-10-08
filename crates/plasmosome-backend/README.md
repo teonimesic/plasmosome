@@ -45,6 +45,15 @@ decoding JSON text also refuses a repeated field; a `serde_json::Value` or `Map`
 last copy of a repeated key. Decoding and encoding both refuse any value `validate` refuses;
 neither reads the filesystem or resolves a name. `Capability` does not carry these records yet.
 
+Every holding is owned by a `CellOwner { cell, plugin }`: the same plugin attached to two cells is
+two owners, and no comparison looks at the plugin alone. `CellId` lives here, and core uses this
+one type. An exact removal takes the owner and a `DrainSpec`. It first resolves the holding at the
+removal's exact address with that owner and full capability, and refuses anything else with
+`UnknownObject`. A graceful drain that times out returns `DrainTimedOut` and keeps the holding, its
+issued record and every peer; `Force` then withdraws only that holding. `revoke` follows the same
+rule. `FakeBackend::mark_stuck` and `stall_graceful_drains_for_owner` make graceful withdrawals of
+one address or one owner time out.
+
 ## What's inside
 
 | Piece | Responsibility |

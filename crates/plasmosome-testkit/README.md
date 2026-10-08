@@ -9,7 +9,7 @@ the trait. Every backend is held to the same functions, unchanged; a backend tha
 the thing that is wrong. That is what makes the fake a model of enforcement rather than a hope
 about it.
 
-`FakeBackend` and `CompositeBackend` over three fake leaves both pass all ten clauses. The
+`FakeBackend` and `CompositeBackend` over three fake leaves both pass all eleven clauses. The
 composite failed three of the original clauses when it was first wired in, because it lost the
 handle its leaf issued; task 008 fixed the backend rather than the clauses, which is the point of
 holding every backend to the same functions.
@@ -27,6 +27,17 @@ remembered: the private unit-test module `src/conformance/clauses_discriminate.r
 defective backend per defect and accepts only failures recorded by the clause's semantic checks.
 A clause that stops discriminating fails there. Run those witnesses directly with
 `cargo test -p plasmosome-testkit --lib conformance::clauses_discriminate`.
+
+Owners are a plugin in one cell. `revoke_takes_its_owners_object` pairs two plugins in one cell
+and one plugin in two cells, and `apply_and_removal_reach_the_universe` tries the same plugin in
+another cell before every exact removal.
+
+`graceful_timeouts_preserve_the_selected_holding` needs a backend that cannot drain. Its factory
+must stall every graceful withdrawal of a holding owned by `conformance::stalled_owner()`, before
+any release, while Force still succeeds; the fake factories arm this with
+`FakeBackend::stall_graceful_drains_for_owner`. A future real factory must arrange the same stall
+with real resources. The clause withdraws the stalled holding and an equal peer in both orders,
+through `revoke` and through `apply_removal`, and each order has its own defective backend.
 
 The order a clause revokes in is part of what it proves. A detach replays a ledger in reverse push
 order, so a backend that accepts revokes only in grant order was conformant right up until task 012
@@ -50,7 +61,7 @@ and verifies the backend snapshot shows no residue.
 | Module | Holds |
 | --- | --- |
 | `builders` | `PlasmidManifest`, `Grant` sequences, `Effect`s and `DesiredState` — a test states only what it is about |
-| `conformance` | Ten clauses of the backend contract, each generic over `EnforcementBackend` |
+| `conformance` | Eleven clauses of the backend contract, each generic over `EnforcementBackend` |
 | `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |
 
