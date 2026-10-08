@@ -46,12 +46,12 @@ last copy of a repeated key. Decoding and encoding both refuse any value `valida
 neither reads the filesystem or resolves a name. `Capability` does not carry these records yet.
 
 Every holding is owned by a `CellOwner { cell, plugin }`: the same plugin attached to two cells is
-two owners, and no comparison looks at the plugin alone. `CellId` lives here, and core uses this
-one type. An exact removal takes the owner and a `DrainSpec`. It first resolves the holding at the
+two owners, and no comparison looks at the plugin alone. It decodes only from a JSON object with
+exactly those two fields. `CellId` lives here, and core uses this one type. An exact removal takes the owner and a `DrainSpec`. It first resolves the holding at the
 removal's exact address with that owner and full capability, and refuses anything else with
 `UnknownObject`. A graceful drain that times out returns `DrainTimedOut` and keeps the holding, its
-issued record and every peer; `Force` then withdraws only that holding. `revoke` follows the same
-rule. `FakeBackend::mark_stuck` and `stall_graceful_drains_for_owner` make graceful withdrawals of
+issued record and every peer; `Force` then withdraws only that holding. A zero graceful deadline
+checks once and never forces. `revoke` follows the same rule. `FakeBackend::mark_stuck` and `stall_graceful_drains_for_owner` make graceful withdrawals of
 one address or one owner time out.
 
 ## What's inside

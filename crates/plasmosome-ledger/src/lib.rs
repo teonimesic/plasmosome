@@ -298,7 +298,9 @@ impl SealedLedger {
     /// `{cell, plugin}`, and every removal and revoke uses `drain`. The cell is
     /// never read from the log or defaulted. On an error the pending cursor stays
     /// on the failed effect, so a later detach resumes there without replaying
-    /// what already succeeded.
+    /// what already succeeded. Every call for one ledger, including each resume,
+    /// must pass the same `cell`: the log does not record it, so this format
+    /// cannot detect a different one.
     pub fn detach(
         &mut self,
         backend: &mut dyn EnforcementBackend,
@@ -346,6 +348,8 @@ impl ForcedLedger {
 
     /// Replays the pending effects like `SealedLedger::detach`, with the same
     /// `cell` and `drain` rules, and records the operator's `force` in the report.
+    /// Every call for one ledger, including each resume, must pass the same `cell`;
+    /// this format cannot detect a different one.
     pub fn detach_forced(
         &mut self,
         backend: &mut dyn EnforcementBackend,
