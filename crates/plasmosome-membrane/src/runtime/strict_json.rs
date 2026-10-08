@@ -4,21 +4,29 @@ use std::cell::RefCell;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StrictJsonError {
-    NotJson { line: usize, column: usize },
-    DuplicateKey { path: String },
+    NotJson {
+        line: usize,
+        column: usize,
+        reason: String,
+    },
+    DuplicateKey {
+        path: String,
+    },
 }
 
 impl std::fmt::Display for StrictJsonError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StrictJsonError::NotJson { line, column } => {
-                write!(
-                    f,
-                    "not one JSON value: refused at line {line}, column {column}"
-                )
-            }
+            StrictJsonError::NotJson {
+                line,
+                column,
+                reason,
+            } => write!(
+                f,
+                "refused as JSON at line {line}, column {column}: {reason}"
+            ),
             StrictJsonError::DuplicateKey { path } => {
-                write!(f, "duplicate object key at {path}")
+                write!(f, "duplicate object key at {path:?}")
             }
         }
     }
@@ -40,8 +48,18 @@ pub(crate) fn parse_value(bytes: &[u8]) -> Result<Value, StrictJsonError> {
         None => StrictJsonError::NotJson {
             line: error.line(),
             column: error.column(),
+            reason: reason_without_position(&error),
         },
     })
+}
+
+fn reason_without_position(error: &serde_json::Error) -> String {
+    let shown = error.to_string();
+    let position = format!(" at line {} column {}", error.line(), error.column());
+    match shown.strip_suffix(&position) {
+        Some(reason) => reason.to_owned(),
+        None => shown,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -152,12 +170,35 @@ mod tests {
         }
     }
 
-    fn serde_json_position(text: &str) -> StrictJsonError {
-        let error = serde_json::from_str::<serde_json::Value>(text)
+    fn assert_refused_as_serde_json_refuses(text: &str) {
+        let expected = serde_json::from_str::<serde_json::Value>(text)
             .expect_err("serde_json refuses the same text");
+        match parse_value(text.as_bytes()) {
+            Err(StrictJsonError::NotJson {
+                line,
+                column,
+                reason,
+            }) => {
+                assert_eq!(
+                    (line, column),
+                    (expected.line(), expected.column()),
+                    "{text:?}"
+                );
+                assert_eq!(
+                    format!("{reason} at line {line} column {column}"),
+                    expected.to_string(),
+                    "{text:?} keeps serde_json's reason"
+                );
+            }
+            other => panic!("{text:?} is not JSON, got {other:?}"),
+        }
+    }
+
+    fn not_json(line: usize, column: usize, reason: &str) -> StrictJsonError {
         StrictJsonError::NotJson {
-            line: error.line(),
-            column: error.column(),
+            line,
+            column,
+            reason: reason.to_string(),
         }
     }
 
@@ -200,12 +241,12 @@ mod tests {
     #[test]
     fn text_after_the_single_value_refuses() {
         for text in ["{} {}", "{}x"] {
-            assert_eq!(
-                parse_value(text.as_bytes()),
-                Err(serde_json_position(text)),
-                "{text:?} holds more than one value"
-            );
+            assert_refused_as_serde_json_refuses(text);
         }
+        assert_eq!(
+            parse_value(b"{} {}"),
+            Err(not_json(1, 4, "trailing characters"))
+        );
         assert_eq!(parse_value(b"{} \n"), Ok(json!({})));
     }
 
@@ -233,12 +274,23 @@ mod tests {
             "{\"a\" 1}",
             "\"\u{0}\"",
         ] {
-            assert_eq!(
-                parse_value(text.as_bytes()),
-                Err(serde_json_position(text)),
-                "{text:?} is not JSON"
-            );
+            assert_refused_as_serde_json_refuses(text);
         }
+    }
+
+    #[test]
+    fn a_single_value_refused_for_its_content_keeps_the_reason() {
+        assert_refused_as_serde_json_refuses("[1e400]");
+        assert_eq!(
+            parse_value(b"[1e400]"),
+            Err(not_json(1, 6, "number out of range"))
+        );
+        assert_eq!(
+            parse_value(b"[1e400]")
+                .expect_err("an infinite number refuses")
+                .to_string(),
+            "refused as JSON at line 1, column 6: number out of range"
+        );
     }
 
     #[test]
@@ -252,24 +304,47 @@ mod tests {
     #[test]
     fn nesting_past_the_recursion_limit_refuses_instead_of_overflowing() {
         let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
-        assert!(matches!(
+        assert_refused_as_serde_json_refuses(&deep);
+        assert_eq!(
             parse_value(deep.as_bytes()),
-            Err(StrictJsonError::NotJson { .. })
-        ));
+            Err(not_json(1, 128, "recursion limit exceeded"))
+        );
     }
 
     #[test]
     fn faults_describe_themselves() {
         assert_eq!(
-            StrictJsonError::NotJson { line: 3, column: 7 }.to_string(),
-            "not one JSON value: refused at line 3, column 7"
+            not_json(3, 7, "trailing characters").to_string(),
+            "refused as JSON at line 3, column 7: trailing characters"
         );
         assert_eq!(
             StrictJsonError::DuplicateKey {
                 path: "/l/1/p".to_string()
             }
             .to_string(),
-            "duplicate object key at /l/1/p"
+            "duplicate object key at \"/l/1/p\""
+        );
+    }
+
+    #[test]
+    fn a_duplicate_path_is_quoted_and_escaped_when_shown() {
+        let shown = |text: &str| {
+            parse_value(text.as_bytes())
+                .expect_err("a repeated key refuses")
+                .to_string()
+        };
+        assert_eq!(
+            shown(r#"{"a\nb":1,"a\nb":2}"#),
+            r#"duplicate object key at "/a\nb""#
+        );
+        assert_eq!(
+            shown(r#"{"\u001b[31mX":1,"\u001b[31mX":2}"#),
+            r#"duplicate object key at "/\u{1b}[31mX""#
+        );
+        assert_eq!(shown(r#"{"":1,"":2}"#), r#"duplicate object key at "/""#);
+        assert_eq!(
+            shown(r#"{"a":{"":1,"":2}}"#),
+            r#"duplicate object key at "/a/""#
         );
     }
 }
