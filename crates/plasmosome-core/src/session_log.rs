@@ -1,3 +1,4 @@
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -154,15 +155,37 @@ impl LogStore for OsLogStore {
     }
 
     fn open_log(&self, path: &Path) -> std::io::Result<OpenedLog> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        Ok(OpenedLog {
-            file: Box::new(file),
-            existing: Vec::new(),
-            created: false,
-        })
+        let options = |create: bool| {
+            let mut options = std::fs::OpenOptions::new();
+            options
+                .read(true)
+                .append(true)
+                .create_new(create)
+                .custom_flags(libc::O_NOFOLLOW);
+            options
+        };
+        match options(true).open(path) {
+            Ok(file) => Ok(OpenedLog {
+                file: Box::new(file),
+                existing: Vec::new(),
+                created: true,
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let file = options(false).open(path)?;
+                if !file.metadata()?.is_file() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "the session log path is not a regular file",
+                    ));
+                }
+                Ok(OpenedLog {
+                    file: Box::new(file),
+                    existing: Vec::new(),
+                    created: false,
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -200,25 +223,32 @@ impl SessionLog {
     }
 
     /// Opens the log at `path` through `store`, creating it and any missing parent directories.
+    ///
+    /// Each directory this creates, and the file if this creates it, has its containing directory
+    /// synced. The nearest existing ancestor must be a directory; a symlink at `path` itself is
+    /// refused. The file and its directory are synced before this returns, so reopening a log
+    /// also makes durable whatever an earlier writer left unsynced. Any failed step is returned.
     pub fn open_with(path: PathBuf, store: &dyn LogStore) -> Result<SessionLog, SessionLogError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| SessionLogError::Io {
-                path: parent.to_path_buf(),
-                step: LogStep::CreateDirectory,
-                source,
-            })?;
-        }
+        let parent = parent_of(&path);
+        create_parents(parent, store)?;
         let opened = store
             .open_log(&path)
-            .map_err(|source| SessionLogError::Io {
-                path: path.clone(),
-                step: LogStep::Open,
-                source,
-            })?;
+            .map_err(io_error(&path, LogStep::Open))?;
+        if opened.created {
+            store
+                .sync_dir(parent)
+                .map_err(io_error(parent, LogStep::SyncDirectory))?;
+        }
+        let mut file = opened.file;
+        file.sync_all()
+            .map_err(io_error(&path, LogStep::SyncFile))?;
+        store
+            .sync_dir(parent)
+            .map_err(io_error(parent, LogStep::SyncDirectory))?;
         Ok(SessionLog {
             path,
             state: Mutex::new(LogState {
-                file: opened.file,
+                file,
                 next_seq: 1,
                 poisoned: false,
             }),
@@ -260,6 +290,56 @@ impl SessionLog {
         state.next_seq = seq + 1;
         Ok(seq)
     }
+}
+
+fn io_error(path: &Path, step: LogStep) -> impl FnOnce(std::io::Error) -> SessionLogError {
+    let path = path.to_path_buf();
+    move |source| SessionLogError::Io { path, step, source }
+}
+
+fn parent_of(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+fn create_parents(parent: &Path, store: &dyn LogStore) -> Result<(), SessionLogError> {
+    let mut missing = Vec::new();
+    let mut cursor = parent;
+    loop {
+        match std::fs::symlink_metadata(cursor) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let above = parent_of(cursor);
+                if above == cursor {
+                    return Err(io_error(cursor, LogStep::CreateDirectory)(error));
+                }
+                missing.push(cursor);
+                cursor = above;
+            }
+            Err(error) => return Err(io_error(cursor, LogStep::CreateDirectory)(error)),
+        }
+    }
+    let existing = std::fs::metadata(cursor).map_err(io_error(cursor, LogStep::CreateDirectory))?;
+    if !existing.is_dir() {
+        return Err(io_error(cursor, LogStep::CreateDirectory)(
+            std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "an existing ancestor of the session log is not a directory",
+            ),
+        ));
+    }
+    for directory in missing.into_iter().rev() {
+        store
+            .create_dir(directory)
+            .map_err(io_error(directory, LogStep::CreateDirectory))?;
+        let above = parent_of(directory);
+        store
+            .sync_dir(above)
+            .map_err(io_error(above, LogStep::SyncDirectory))?;
+    }
+    Ok(())
 }
 
 fn write_durably(file: &mut dyn LogFile, bytes: &[u8]) -> Result<(), (LogStep, std::io::Error)> {
@@ -362,6 +442,23 @@ mod tests {
     }
 
     fn assert_send_sync<T: Send + Sync>() {}
+
+    fn open_error(path: PathBuf, store: &dyn LogStore) -> SessionLogError {
+        match SessionLog::open_with(path, store) {
+            Ok(_) => panic!("open succeeded"),
+            Err(error) => error,
+        }
+    }
+
+    fn assert_open_io(error: SessionLogError, expected: LogStep, at: &Path) {
+        match error {
+            SessionLogError::Io { path, step, .. } => {
+                assert_eq!(step, expected);
+                assert_eq!(path, at);
+            }
+            other => panic!("expected an Io error at {expected:?}, got {other:?}"),
+        }
+    }
 
     #[test]
     fn events_are_appended_with_monotonic_seq_and_kind() {
@@ -521,5 +618,108 @@ mod tests {
         assert!(panicked.is_err(), "the injected write panics");
         assert_poisoned(log.append("force", json!({ "n": 2 })));
         assert_eq!(store.count(Step::Write), 1, "{:?}", store.calls());
+    }
+
+    #[test]
+    fn open_creates_missing_parents_and_syncs_each_new_entry() {
+        let store = FaultLogStore::new();
+        let root = store.root().to_path_buf();
+        let path = root.join("a").join("b").join(LOG);
+        SessionLog::open_with(path.clone(), &store).unwrap();
+        assert_eq!(
+            store.calls(),
+            [
+                Call::CreateDir(root.join("a")),
+                Call::SyncDir(root.clone()),
+                Call::CreateDir(root.join("a").join("b")),
+                Call::SyncDir(root.join("a")),
+                Call::Open(path.clone()),
+                Call::SyncDir(root.join("a").join("b")),
+                Call::SyncFile,
+                Call::SyncDir(root.join("a").join("b")),
+            ]
+        );
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn a_failed_parent_sync_refuses_open() {
+        let synced = |root: &Path| {
+            [
+                root.to_path_buf(),
+                root.join("a"),
+                root.join("a").join("b"),
+                root.join("a").join("b"),
+            ]
+        };
+        for (index, _) in synced(Path::new("")).iter().enumerate() {
+            let store = FaultLogStore::new().fail(Step::SyncDir, index + 1);
+            let directory = synced(store.root())[index].clone();
+            let error = open_error(store.root().join("a").join("b").join(LOG), &store);
+            assert_open_io(error, LogStep::SyncDirectory, &directory);
+        }
+    }
+
+    #[test]
+    fn a_failed_create_open_or_file_sync_refuses_open() {
+        let cases = [
+            (Step::CreateDir, LogStep::CreateDirectory),
+            (Step::Open, LogStep::Open),
+            (Step::SyncFile, LogStep::SyncFile),
+        ];
+        for (fault, expected) in cases {
+            let store = FaultLogStore::new().fail(fault, 1);
+            let path = store.root().join("a").join(LOG);
+            let at = match fault {
+                Step::CreateDir => store.root().join("a"),
+                _ => path.clone(),
+            };
+            assert_open_io(open_error(path, &store), expected, &at);
+        }
+    }
+
+    #[test]
+    fn open_refuses_a_parent_that_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"keep").unwrap();
+        for path in [blocker.join(LOG), blocker.join("sub").join(LOG)] {
+            match open_error(path.clone(), &OsLogStore) {
+                SessionLogError::Io { step, source, .. } => {
+                    assert_eq!(step, LogStep::CreateDirectory, "{path:?}");
+                    assert_eq!(source.kind(), std::io::ErrorKind::NotADirectory, "{path:?}");
+                }
+                other => panic!("expected an Io error for {path:?}, got {other:?}"),
+            }
+        }
+        assert_eq!(std::fs::read(&blocker).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn open_refuses_a_symlinked_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"victim\n").unwrap();
+        let planted = dir.path().join(LOG);
+        std::os::unix::fs::symlink(&target, &planted).unwrap();
+        assert_open_io(
+            open_error(planted.clone(), &OsLogStore),
+            LogStep::Open,
+            &planted,
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"victim\n");
+
+        let missing = dir.path().join("missing");
+        let dangling = dir.path().join("dangling.ndjson");
+        std::os::unix::fs::symlink(&missing, &dangling).unwrap();
+        assert_open_io(
+            open_error(dangling.clone(), &OsLogStore),
+            LogStep::Open,
+            &dangling,
+        );
+        assert!(
+            !missing.exists(),
+            "a dangling symlink's target is never created"
+        );
     }
 }
