@@ -405,12 +405,10 @@ fn ip_literal(value: &str, address: IpAddr) -> Result<(), RecipeError> {
 }
 
 fn embedded_ipv4(address: Ipv6Addr) -> Option<Ipv4Addr> {
-    let compatible =
-        address.segments()[..6] == [0; 6] && !address.is_unspecified() && !address.is_loopback();
-    match address.to_ipv4_mapped() {
-        None if compatible => address.to_ipv4(),
-        mapped => mapped,
+    if address.is_unspecified() || address.is_loopback() {
+        return None;
     }
+    address.to_ipv4()
 }
 
 fn is_dns_name(value: &str) -> bool {
