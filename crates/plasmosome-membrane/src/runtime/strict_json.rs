@@ -1,3 +1,7 @@
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use serde_json::{Map, Number, Value};
+use std::cell::RefCell;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StrictJsonError {
     NotJson { line: usize, column: usize },
@@ -5,15 +9,139 @@ pub(crate) enum StrictJsonError {
 }
 
 impl std::fmt::Display for StrictJsonError {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StrictJsonError::NotJson { line, column } => {
+                write!(
+                    f,
+                    "not one JSON value: refused at line {line}, column {column}"
+                )
+            }
+            StrictJsonError::DuplicateKey { path } => {
+                write!(f, "duplicate object key at {path}")
+            }
+        }
     }
 }
 
 impl std::error::Error for StrictJsonError {}
 
-pub(crate) fn parse_value(_bytes: &[u8]) -> Result<serde_json::Value, StrictJsonError> {
-    todo!()
+pub(crate) fn parse_value(bytes: &[u8]) -> Result<Value, StrictJsonError> {
+    let duplicate = RefCell::new(None);
+    let mut reader = serde_json::Deserializer::from_slice(bytes);
+    let read = Strict {
+        at: Location::Root,
+        duplicate: &duplicate,
+    }
+    .deserialize(&mut reader)
+    .and_then(|value| reader.end().map(|()| value));
+    read.map_err(|error| match duplicate.into_inner() {
+        Some(path) => StrictJsonError::DuplicateKey { path },
+        None => StrictJsonError::NotJson {
+            line: error.line(),
+            column: error.column(),
+        },
+    })
+}
+
+#[derive(Clone, Copy)]
+enum Location<'a> {
+    Root,
+    Key(&'a Location<'a>, &'a str),
+    Index(&'a Location<'a>, usize),
+}
+
+impl Location<'_> {
+    fn pointer(&self) -> String {
+        match self {
+            Location::Root => String::new(),
+            Location::Key(parent, key) => format!(
+                "{}/{}",
+                parent.pointer(),
+                key.replace('~', "~0").replace('/', "~1")
+            ),
+            Location::Index(parent, index) => format!("{}/{index}", parent.pointer()),
+        }
+    }
+}
+
+struct Strict<'a> {
+    at: Location<'a>,
+    duplicate: &'a RefCell<Option<String>>,
+}
+
+impl<'de> DeserializeSeed<'de> for Strict<'_> {
+    type Value = Value;
+
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Strict<'_> {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_bool<E: de::Error>(self, value: bool) -> Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Value, E> {
+        Ok(Value::from(value))
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Value, E> {
+        Number::from_f64(value)
+            .map(Value::Number)
+            .ok_or_else(|| E::custom("a number that is not finite"))
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Value, E> {
+        Ok(Value::String(value.to_owned()))
+    }
+
+    fn visit_string<E: de::Error>(self, value: String) -> Result<Value, E> {
+        Ok(Value::String(value))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut items: A) -> Result<Value, A::Error> {
+        let mut read = Vec::new();
+        while let Some(item) = items.next_element_seed(Strict {
+            at: Location::Index(&self.at, read.len()),
+            duplicate: self.duplicate,
+        })? {
+            read.push(item);
+        }
+        Ok(Value::Array(read))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Value, A::Error> {
+        let mut read = Map::new();
+        while let Some(key) = entries.next_key::<String>()? {
+            let at = Location::Key(&self.at, &key);
+            if read.contains_key(&key) {
+                self.duplicate.replace(Some(at.pointer()));
+                return Err(de::Error::custom("duplicate object key"));
+            }
+            let value = entries.next_value_seed(Strict {
+                at,
+                duplicate: self.duplicate,
+            })?;
+            read.insert(key, value);
+        }
+        Ok(Value::Object(read))
+    }
 }
 
 #[cfg(test)]

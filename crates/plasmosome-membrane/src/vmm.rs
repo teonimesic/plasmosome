@@ -136,6 +136,7 @@ impl VmmChild {
     /// Forks and runs `launcher` in a new session. Fork success does not prove
     /// session setup or launch success. A `setsid` failure exits with code 71.
     pub fn spawn(launcher: impl Launch) -> Result<VmmChild, SpawnError> {
+        let _fork_guard = crate::spawn_lock::hold_for_fork();
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             return Err(SpawnError::ForkFailed(std::io::Error::last_os_error()));

@@ -1,3 +1,8 @@
+use sha2::{Digest as _, Sha256};
+use std::io::{ErrorKind, Read};
+
+const READ_CHUNK: usize = 64 * 1024;
+
 /// A SHA-256 digest: 32 bytes, written as 64 lowercase hexadecimal digits.
 ///
 /// `Debug` and `Display` both print those 64 digits.
@@ -16,25 +21,55 @@ pub enum DigestFault {
 impl Digest {
     /// Reads exactly 64 lowercase hexadecimal digits. Uppercase digits,
     /// any other byte, and any other length are refused with the first fault.
-    pub fn parse_hex(_text: &str) -> Result<Digest, DigestFault> {
-        todo!()
+    pub fn parse_hex(text: &str) -> Result<Digest, DigestFault> {
+        let digits = text.as_bytes();
+        if digits.len() != 64 {
+            return Err(DigestFault::WrongLength {
+                bytes: digits.len(),
+            });
+        }
+        let mut bytes = [0u8; 32];
+        for (at, &digit) in digits.iter().enumerate() {
+            let nibble = match digit {
+                b'0'..=b'9' => digit - b'0',
+                b'a'..=b'f' => digit - b'a' + 10,
+                _ => return Err(DigestFault::NotLowercaseHex { at }),
+            };
+            bytes[at / 2] |= if at % 2 == 0 { nibble << 4 } else { nibble };
+        }
+        Ok(Digest(bytes))
     }
 
     /// Hashes `bytes` with SHA-256.
-    pub fn of(_bytes: &[u8]) -> Digest {
-        todo!()
+    pub fn of(bytes: &[u8]) -> Digest {
+        Digest(Sha256::digest(bytes).into())
     }
 
     /// Hashes everything `reader` yields until end of input, retrying
     /// interrupted reads. Any other read error is returned and no digest is
     /// produced.
-    pub fn of_reader(_reader: impl std::io::Read) -> std::io::Result<Digest> {
-        todo!()
+    pub fn of_reader(mut reader: impl Read) -> std::io::Result<Digest> {
+        let mut hasher = Sha256::new();
+        let mut chunk = [0u8; READ_CHUNK];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => return Ok(Digest(hasher.finalize().into())),
+                Ok(read) => hasher.update(&chunk[..read]),
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// The 64 lowercase hexadecimal digits.
     pub fn hex(&self) -> String {
-        todo!()
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut text = String::with_capacity(64);
+        for byte in self.0 {
+            text.push(char::from(DIGITS[usize::from(byte >> 4)]));
+            text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+        }
+        text
     }
 
     /// The 32 raw bytes.
@@ -44,20 +79,29 @@ impl Digest {
 }
 
 impl std::fmt::Display for Digest {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.hex())
     }
 }
 
 impl std::fmt::Debug for Digest {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.hex())
     }
 }
 
 impl std::fmt::Display for DigestFault {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DigestFault::WrongLength { bytes } => write!(
+                f,
+                "a SHA-256 digest is 64 lowercase hexadecimal digits, not {bytes} bytes"
+            ),
+            DigestFault::NotLowercaseHex { at } => write!(
+                f,
+                "byte {at} of a SHA-256 digest is not a lowercase hexadecimal digit"
+            ),
+        }
     }
 }
 

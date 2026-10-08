@@ -1,9 +1,9 @@
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 static SPAWN_LOCK: RwLock<()> = RwLock::new(());
 
 pub(crate) fn hold_for_fork() -> RwLockReadGuard<'static, ()> {
-    todo!()
+    SPAWN_LOCK.read().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg_attr(
@@ -14,7 +14,7 @@ pub(crate) fn hold_for_fork() -> RwLockReadGuard<'static, ()> {
     )
 )]
 pub(crate) fn hold_for_descriptors() -> RwLockWriteGuard<'static, ()> {
-    todo!()
+    SPAWN_LOCK.write().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]

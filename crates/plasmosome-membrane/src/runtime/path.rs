@@ -1,6 +1,8 @@
 use std::ffi::{CStr, CString};
 use std::path::Path;
 
+const MAX_BYTES: usize = libc::PATH_MAX as usize - 1;
+
 /// An absolute path in canonical form: it starts with `/`, is not `/` itself,
 /// holds no NUL byte, has no trailing `/`, no empty component and no `.` or
 /// `..` component, and is shorter than `PATH_MAX` bytes.
@@ -40,40 +42,85 @@ pub enum PathFault {
 impl RecipePath {
     /// Accepts `text` only in canonical form, checking the rules in the order
     /// `PathFault` lists them and reporting the first one broken.
-    pub fn parse(_text: &str) -> Result<RecipePath, PathFault> {
-        todo!()
+    pub fn parse(text: &str) -> Result<RecipePath, PathFault> {
+        if text.is_empty() {
+            return Err(PathFault::Empty);
+        }
+        let Some(relative) = text.strip_prefix('/') else {
+            return Err(PathFault::NotAbsolute);
+        };
+        if relative.is_empty() {
+            return Err(PathFault::Root);
+        }
+        let c = CString::new(text).map_err(|_| PathFault::Nul)?;
+        if relative.ends_with('/') {
+            return Err(PathFault::TrailingSlash);
+        }
+        let components = relative.split('/');
+        if components.clone().any(str::is_empty) {
+            return Err(PathFault::EmptyComponent);
+        }
+        if components.clone().any(|component| component == ".") {
+            return Err(PathFault::DotComponent);
+        }
+        if components.clone().any(|component| component == "..") {
+            return Err(PathFault::DotDotComponent);
+        }
+        if text.len() > MAX_BYTES {
+            return Err(PathFault::TooLong {
+                bytes: text.len(),
+                max: MAX_BYTES,
+            });
+        }
+        Ok(RecipePath {
+            text: text.to_owned(),
+            c,
+        })
     }
 
     /// The path as a `Path`.
     pub fn as_path(&self) -> &Path {
-        todo!()
+        Path::new(&self.text)
     }
 
     /// The path's bytes followed by one terminating NUL, for a system call.
     pub fn as_c_str(&self) -> &CStr {
-        todo!()
+        &self.c
     }
 
     /// The components after the leading `/`, in order; never empty, `.` or `..`.
     pub fn components(&self) -> impl Iterator<Item = &str> {
-        let parts: std::str::Split<'_, char> = todo!();
-        parts
+        self.text.split('/').skip(1)
     }
 
     /// The path without its last component, or `None` when that would be `/`.
     pub fn parent(&self) -> Option<RecipePath> {
-        todo!()
+        let (parent, _) = self.text.rsplit_once('/')?;
+        RecipePath::parse(parent).ok()
     }
 
     /// The last component.
     pub fn file_name(&self) -> &str {
-        todo!()
+        self.text.rsplit('/').next().unwrap_or_default()
     }
 }
 
 impl std::fmt::Display for PathFault {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PathFault::Empty => f.write_str("the path is empty"),
+            PathFault::NotAbsolute => f.write_str("the path does not start with /"),
+            PathFault::Root => f.write_str("the path is / itself"),
+            PathFault::Nul => f.write_str("the path holds a NUL byte"),
+            PathFault::TrailingSlash => f.write_str("the path ends with /"),
+            PathFault::EmptyComponent => f.write_str("the path holds an empty component"),
+            PathFault::DotComponent => f.write_str("the path holds a . component"),
+            PathFault::DotDotComponent => f.write_str("the path holds a .. component"),
+            PathFault::TooLong { bytes, max } => write!(
+                f,
+                "the path is {bytes} bytes long; at most {max} are allowed"
+            ),
+        }
     }
 }
 
