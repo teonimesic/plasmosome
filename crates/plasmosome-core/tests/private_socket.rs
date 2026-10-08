@@ -164,7 +164,10 @@ fn an_ancestor_acl_does_not_refuse() {
     make_dir(&cell, 0o700);
     let opened = PrivateDir::open(&cell);
     clear_acl(&home);
-    assert_eq!(opened.expect("an ancestor ACL does not refuse").path(), cell);
+    assert_eq!(
+        opened.expect("an ancestor ACL does not refuse").path(),
+        cell
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -272,8 +275,14 @@ fn bind_refuses_an_existing_entry_and_leaves_it() {
         );
     }
     assert_eq!(fs::read(at("file")).expect("read"), b"contents");
-    assert_eq!(fs::read_link(at("dangling")).expect("readlink"), at("absent"));
-    assert_eq!(fs::read_link(at("pointer")).expect("readlink"), at("victim"));
+    assert_eq!(
+        fs::read_link(at("dangling")).expect("readlink"),
+        at("absent")
+    );
+    assert_eq!(
+        fs::read_link(at("pointer")).expect("readlink"),
+        at("victim")
+    );
     assert_eq!(fs::read(at("victim")).expect("read"), b"victim");
     assert!(
         fs::symlink_metadata(at("stale"))
@@ -323,7 +332,10 @@ fn drop_removes_only_the_bound_socket() {
     let path = root.path().join("sock");
 
     drop(bind(&root, "sock"));
-    assert!(fs::symlink_metadata(&path).is_err(), "the bound socket stays");
+    assert!(
+        fs::symlink_metadata(&path).is_err(),
+        "the bound socket stays"
+    );
 
     let listener = bind(&root, "sock");
     fs::remove_file(&path).expect("unlink");
@@ -371,9 +383,7 @@ fn accept_returns_a_trusted_stream_for_a_same_uid_client() {
     assert_eq!(request, "ping\n");
     (&server).write_all(b"pong\n").expect("reply");
     let mut reply = String::new();
-    BufReader::new(&client)
-        .read_line(&mut reply)
-        .expect("read");
+    BufReader::new(&client).read_line(&mut reply).expect("read");
     assert_eq!(reply, "pong\n");
 }
 
@@ -382,8 +392,7 @@ fn accept_refuses_a_peer_whose_uid_is_not_trusted_before_reading() {
     let root = private_root();
     let euid = effective_uid();
     let trusted = euid.wrapping_add(1);
-    let listener =
-        PrivateListener::bind(private_dir(&root), "sock", trusted).expect("bind");
+    let listener = PrivateListener::bind(private_dir(&root), "sock", trusted).expect("bind");
     let mut client = UnixStream::connect(&listener.entry().path).expect("connect");
     client
         .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"plasmosome.recovery\"}\n")

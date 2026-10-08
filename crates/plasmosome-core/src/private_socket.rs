@@ -1351,7 +1351,10 @@ mod tests {
                 "/r/cell is not a socket",
             ),
             (
-                PrivateSocketError::SocketOwner { path: at(), uid: 42 },
+                PrivateSocketError::SocketOwner {
+                    path: at(),
+                    uid: 42,
+                },
                 "/r/cell is owned by uid 42, not by the trusted uid",
             ),
             (
