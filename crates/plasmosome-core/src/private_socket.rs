@@ -1,6 +1,9 @@
-use std::ffi::CString;
+use std::ffi::{CStr, CString, OsStr};
 use std::fmt;
-use std::os::fd::{OwnedFd, RawFd};
+use std::io;
+use std::net::Shutdown;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -32,23 +35,101 @@ struct Walk {
     judge_start: bool,
 }
 
+impl Walk {
+    fn path(&self) -> PathBuf {
+        let mut path = self.start_path.clone();
+        for component in &self.components {
+            path.push(OsStr::from_bytes(component.as_bytes()));
+        }
+        path
+    }
+
+    fn run(&self, euid: u32) -> Result<(OwnedFd, Facts), PrivateSocketError> {
+        let mut at = self.start_path.clone();
+        let mut facts = stat_fd(&self.start, &at)?;
+        let mut held: Option<OwnedFd> = None;
+        for (index, component) in self.components.iter().enumerate() {
+            if index > 0 || self.judge_start {
+                judge_ancestor(&facts, euid, &at)?;
+            }
+            at.push(OsStr::from_bytes(component.as_bytes()));
+            let next = open_child(held.as_ref().unwrap_or(&self.start), component, &at)?;
+            facts = stat_fd(&next, &at)?;
+            held = Some(next);
+        }
+        let dir = match held {
+            Some(dir) => dir,
+            None => self
+                .start
+                .try_clone()
+                .map_err(|error| io_failure("dup", &at, &error))?,
+        };
+        Ok((dir, facts))
+    }
+
+    fn judged(&self, path: &Path) -> Result<(OwnedFd, Facts), PrivateSocketError> {
+        let euid = effective_uid();
+        let (dir, facts) = self.run(euid)?;
+        judge_private(&facts, euid, path)?;
+        refuse_acl(&dir, path)?;
+        Ok((dir, facts))
+    }
+}
+
 impl PrivateDir {
     /// Walks `path` from "/" without following symlinks, judges every ancestor and the final
     /// directory, and keeps the final directory open. `path` must be absolute and normal: no
     /// `.` or `..` components and no empty components. Returns the first rule broken, naming
     /// the component that broke it.
     pub fn open(path: &Path) -> Result<PrivateDir, PrivateSocketError> {
-        let _ = path;
-        todo!()
+        let bytes = path.as_os_str().as_bytes();
+        let Some(relative) = bytes.strip_prefix(b"/") else {
+            return Err(PrivateSocketError::NotAbsolute {
+                path: path.to_path_buf(),
+            });
+        };
+        let components = if relative.is_empty() {
+            Vec::new()
+        } else {
+            components_of(relative, path)?
+        };
+        let root = Path::new("/");
+        let start = open_root().map_err(|error| io_failure("open", root, &error))?;
+        Self::from_walk(Walk {
+            start,
+            start_path: root.to_path_buf(),
+            components,
+            judge_start: true,
+        })
     }
 
+    #[cfg(test)]
     pub(crate) fn open_from(
         start: OwnedFd,
         start_path: &Path,
         relative: &Path,
     ) -> Result<PrivateDir, PrivateSocketError> {
-        let _ = (start, start_path, relative);
-        todo!()
+        let components = components_of(relative.as_os_str().as_bytes(), relative)?;
+        Self::from_walk(Walk {
+            start,
+            start_path: start_path.to_path_buf(),
+            components,
+            judge_start: false,
+        })
+    }
+
+    fn from_walk(walk: Walk) -> Result<PrivateDir, PrivateSocketError> {
+        let path = walk.path();
+        let (dir, facts) = walk.judged(&path)?;
+        Ok(PrivateDir {
+            path,
+            dir,
+            identity: DirIdentity {
+                dev: facts.dev,
+                ino: facts.ino,
+            },
+            walk,
+        })
     }
 
     /// The path this directory was opened at.
@@ -64,7 +145,14 @@ impl PrivateDir {
     /// Walks the path again and requires the same judgments and the same directory identity.
     /// A directory renamed away and replaced at the path is `Replaced`.
     pub fn reconfirm(&self) -> Result<(), PrivateSocketError> {
-        todo!()
+        let (_, facts) = self.walk.judged(&self.path)?;
+        if facts.dev == self.identity.dev && facts.ino == self.identity.ino {
+            Ok(())
+        } else {
+            Err(PrivateSocketError::Replaced {
+                path: self.path.clone(),
+            })
+        }
     }
 
     /// Inspects `name` inside this directory without following it, and requires a socket owned
@@ -75,8 +163,15 @@ impl PrivateDir {
         name: &str,
         trusted_uid: u32,
     ) -> Result<SocketEntry, PrivateSocketError> {
-        let _ = (name, trusted_uid);
-        todo!()
+        let c_name = entry_name(name)?;
+        let path = self.path.join(name);
+        let facts = stat_at(&self.dir, &c_name).map_err(|errno| missing_or_io(errno, &path))?;
+        judge_socket(&facts, trusted_uid, &path)?;
+        Ok(SocketEntry {
+            path,
+            dev: facts.dev,
+            ino: facts.ino,
+        })
     }
 }
 
@@ -105,6 +200,18 @@ struct BoundEntry {
     entry: SocketEntry,
 }
 
+impl Drop for BoundEntry {
+    fn drop(&mut self) {
+        if let Ok(facts) = stat_at(&self.dir.dir, &self.name)
+            && facts.kind == Kind::Socket
+            && facts.dev == self.entry.dev
+            && facts.ino == self.entry.ino
+        {
+            unsafe { libc::unlinkat(self.dir.dir.as_raw_fd(), self.name.as_ptr(), 0) };
+        }
+    }
+}
+
 impl PrivateListener {
     /// Binds `name` inside `dir` for peers whose effective UID is `trusted_uid`. Production
     /// passes `effective_uid()`; a test passes another value to force a real mismatch. `name` is
@@ -118,8 +225,23 @@ impl PrivateListener {
         name: &str,
         trusted_uid: u32,
     ) -> Result<PrivateListener, PrivateSocketError> {
-        let _ = (dir, name, trusted_uid);
-        todo!()
+        let (socket, bound) = prepare(dir, name)?;
+        if unsafe { libc::listen(socket.as_raw_fd(), 16) } != 0 {
+            return Err(io_failure(
+                "listen",
+                &bound.entry.path,
+                &io::Error::last_os_error(),
+            ));
+        }
+        let listener = UnixListener::from(socket);
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| io_failure("fcntl", &bound.entry.path, &error))?;
+        Ok(PrivateListener {
+            listener,
+            bound,
+            trusted_uid,
+        })
     }
 
     /// The socket entry this listener created.
@@ -129,7 +251,7 @@ impl PrivateListener {
 
     /// The listening descriptor, for polling. The caller must not close it or accept on it.
     pub fn as_raw_fd(&self) -> RawFd {
-        todo!()
+        self.listener.as_raw_fd()
     }
 
     /// Accepts one pending connection without blocking. `Ok(None)`: nothing pending. A peer
@@ -138,8 +260,18 @@ impl PrivateListener {
     /// returned in blocking mode; the caller sets its timeouts. A caller that forks from another
     /// thread must hold its descriptor lock around this call, because on macOS the accepted
     /// descriptor is marked close-on-exec only after it exists.
-    pub fn accept(&self) -> std::io::Result<Option<Accepted>> {
-        todo!()
+    pub fn accept(&self) -> io::Result<Option<Accepted>> {
+        let stream = match self.listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if let Err(refusal) = check_peer_uid(&stream, self.trusted_uid) {
+            let _ = stream.shutdown(Shutdown::Both);
+            return Ok(Some(Accepted::Refused(refusal)));
+        }
+        stream.set_nonblocking(false)?;
+        Ok(Some(Accepted::Trusted(stream)))
     }
 }
 
@@ -153,16 +285,54 @@ pub enum Accepted {
 /// Reads the connected peer's effective UID from the kernel: `getpeereid` on macOS,
 /// `SO_PEERCRED` on Linux. Both report the credentials captured when the connection was made.
 /// A socket with no peer credentials fails with `ENOTCONN`.
-pub fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
-    let _ = stream;
-    todo!()
+pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    kernel_peer_uid(stream.as_raw_fd())
+}
+
+#[cfg(target_os = "macos")]
+fn kernel_peer_uid(fd: RawFd) -> io::Result<u32> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    if unsafe { libc::getpeereid(fd, &mut uid, &mut gid) } == 0 {
+        Ok(uid)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn kernel_peer_uid(fd: RawFd) -> io::Result<u32> {
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let outcome = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut length,
+        )
+    };
+    if outcome != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if credentials.uid == libc::uid_t::MAX {
+        return Err(io::Error::from_raw_os_error(libc::ENOTCONN));
+    }
+    Ok(credentials.uid)
 }
 
 /// Requires the kernel peer UID of `stream` to equal `expected`. Call it before sending or
 /// reading any byte; on refusal, close the stream unread.
 pub fn check_peer_uid(stream: &UnixStream, expected: u32) -> Result<(), PrivateSocketError> {
-    let _ = (stream, expected);
-    todo!()
+    let found = peer_uid(stream).map_err(|error| PrivateSocketError::PeerCredentials {
+        errno: errno_of(&error),
+    })?;
+    judge_peer(expected, found)
 }
 
 /// The client half of the path boundary, for a caller-owned nonblocking connect: opens the
@@ -173,44 +343,181 @@ pub fn check_private_path(
     socket_path: &Path,
     trusted_uid: u32,
 ) -> Result<SocketEntry, PrivateSocketError> {
-    let _ = (socket_path, trusted_uid);
-    todo!()
+    let not_absolute = || PrivateSocketError::NotAbsolute {
+        path: socket_path.to_path_buf(),
+    };
+    if !socket_path.is_absolute() {
+        return Err(not_absolute());
+    }
+    let (Some(parent), Some(name)) = (socket_path.parent(), socket_path.file_name()) else {
+        return Err(not_absolute());
+    };
+    let name = name.to_str().ok_or_else(|| PrivateSocketError::BadName {
+        name: name.to_string_lossy().into_owned(),
+    })?;
+    PrivateDir::open(parent)?.socket_entry(name, trusted_uid)
 }
 
 /// The effective UID of this process.
 pub fn effective_uid() -> u32 {
-    todo!()
+    unsafe { libc::geteuid() }
 }
 
 /// Why a private socket path, socket or peer was refused. `Display` names the path and the
 /// rule broken; callers branch on the variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrivateSocketError {
-    NotAbsolute { path: PathBuf },
-    SymlinkInPath { at: PathBuf },
-    Missing { at: PathBuf },
-    NotDirectory { at: PathBuf },
-    ForeignOwner { at: PathBuf, uid: u32 },
-    Replaceable { at: PathBuf, mode: u32 },
-    NotPrivate { path: PathBuf, mode: u32 },
-    AclPresent { path: PathBuf },
-    Replaced { path: PathBuf },
-    BadName { name: String },
-    PathTooLong { path: PathBuf, max: usize },
-    AddressInUse { path: PathBuf },
-    NotASocket { path: PathBuf },
-    SocketOwner { path: PathBuf, uid: u32 },
-    SocketMode { path: PathBuf, mode: u32 },
-    BindEscaped { path: PathBuf },
-    PeerCredentials { errno: i32 },
-    PeerMismatch { trusted: u32, found: u32 },
-    Io { op: &'static str, at: PathBuf, errno: i32 },
+    NotAbsolute {
+        path: PathBuf,
+    },
+    SymlinkInPath {
+        at: PathBuf,
+    },
+    Missing {
+        at: PathBuf,
+    },
+    NotDirectory {
+        at: PathBuf,
+    },
+    ForeignOwner {
+        at: PathBuf,
+        uid: u32,
+    },
+    Replaceable {
+        at: PathBuf,
+        mode: u32,
+    },
+    NotPrivate {
+        path: PathBuf,
+        mode: u32,
+    },
+    AclPresent {
+        path: PathBuf,
+    },
+    Replaced {
+        path: PathBuf,
+    },
+    BadName {
+        name: String,
+    },
+    PathTooLong {
+        path: PathBuf,
+        max: usize,
+    },
+    AddressInUse {
+        path: PathBuf,
+    },
+    NotASocket {
+        path: PathBuf,
+    },
+    SocketOwner {
+        path: PathBuf,
+        uid: u32,
+    },
+    SocketMode {
+        path: PathBuf,
+        mode: u32,
+    },
+    BindEscaped {
+        path: PathBuf,
+    },
+    PeerCredentials {
+        errno: i32,
+    },
+    PeerMismatch {
+        trusted: u32,
+        found: u32,
+    },
+    Io {
+        op: &'static str,
+        at: PathBuf,
+        errno: i32,
+    },
 }
 
 impl fmt::Display for PrivateSocketError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            PrivateSocketError::NotAbsolute { path } => write!(
+                f,
+                "{} is not an absolute path of normal components (no empty, . or .. components)",
+                path.display()
+            ),
+            PrivateSocketError::SymlinkInPath { at } => write!(
+                f,
+                "{} is a symlink; a private socket path must not pass through one",
+                at.display()
+            ),
+            PrivateSocketError::Missing { at } => write!(f, "{} does not exist", at.display()),
+            PrivateSocketError::NotDirectory { at } => {
+                write!(f, "{} is not a directory", at.display())
+            }
+            PrivateSocketError::ForeignOwner { at, uid } => write!(
+                f,
+                "{} is owned by uid {uid}, which is not trusted here",
+                at.display()
+            ),
+            PrivateSocketError::Replaceable { at, mode } => write!(
+                f,
+                "{} has mode {mode:04o}: group or other can replace entries in it",
+                at.display()
+            ),
+            PrivateSocketError::NotPrivate { path, mode } => write!(
+                f,
+                "{} has mode {mode:04o}: a private socket directory grants group and other nothing",
+                path.display()
+            ),
+            PrivateSocketError::AclPresent { path } => write!(
+                f,
+                "{} carries an ACL: a private socket directory has none",
+                path.display()
+            ),
+            PrivateSocketError::Replaced { path } => write!(
+                f,
+                "{} no longer names the directory that was opened",
+                path.display()
+            ),
+            PrivateSocketError::BadName { name } => {
+                write!(f, "{name:?} is not a single path component")
+            }
+            PrivateSocketError::PathTooLong { path, max } => write!(
+                f,
+                "{} is longer than the {max} bytes a socket address holds",
+                path.display()
+            ),
+            PrivateSocketError::AddressInUse { path } => {
+                write!(f, "{} already exists and is left untouched", path.display())
+            }
+            PrivateSocketError::NotASocket { path } => {
+                write!(f, "{} is not a socket", path.display())
+            }
+            PrivateSocketError::SocketOwner { path, uid } => write!(
+                f,
+                "{} is owned by uid {uid}, not by the trusted uid",
+                path.display()
+            ),
+            PrivateSocketError::SocketMode { path, mode } => write!(
+                f,
+                "{} has mode {mode:04o}: a private socket is exactly 0600",
+                path.display()
+            ),
+            PrivateSocketError::BindEscaped { path } => write!(
+                f,
+                "the socket bound at {} cannot be shown to be inside the directory that was opened",
+                path.display()
+            ),
+            PrivateSocketError::PeerCredentials { errno } => write!(
+                f,
+                "the kernel did not report the peer's credentials (errno {errno})"
+            ),
+            PrivateSocketError::PeerMismatch { trusted, found } => write!(
+                f,
+                "the peer runs as uid {found}, not the trusted uid {trusted}"
+            ),
+            PrivateSocketError::Io { op, at, errno } => {
+                write!(f, "{op} failed at {} (errno {errno})", at.display())
+            }
+        }
     }
 }
 
@@ -233,29 +540,418 @@ struct Facts {
     ino: u64,
 }
 
+impl Facts {
+    fn of(stat: &libc::stat) -> Facts {
+        let kind = match stat.st_mode & libc::S_IFMT {
+            libc::S_IFDIR => Kind::Directory,
+            libc::S_IFSOCK => Kind::Socket,
+            libc::S_IFLNK => Kind::Symlink,
+            _ => Kind::Other,
+        };
+        let (mode, dev) = mode_and_device(stat);
+        Facts {
+            kind,
+            uid: stat.st_uid,
+            mode: mode & 0o7777,
+            dev,
+            ino: stat.st_ino,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mode_and_device(stat: &libc::stat) -> (u32, u64) {
+    (u32::from(stat.st_mode), stat.st_dev as u64)
+}
+
+#[cfg(target_os = "linux")]
+fn mode_and_device(stat: &libc::stat) -> (u32, u64) {
+    (stat.st_mode, stat.st_dev)
+}
+
 fn judge_ancestor(facts: &Facts, euid: u32, at: &Path) -> Result<(), PrivateSocketError> {
-    let _ = (facts, euid, at);
-    todo!()
+    if facts.kind != Kind::Directory {
+        return Err(PrivateSocketError::NotDirectory {
+            at: at.to_path_buf(),
+        });
+    }
+    if facts.uid != 0 && facts.uid != euid {
+        return Err(PrivateSocketError::ForeignOwner {
+            at: at.to_path_buf(),
+            uid: facts.uid,
+        });
+    }
+    if facts.mode & 0o022 != 0 {
+        return Err(PrivateSocketError::Replaceable {
+            at: at.to_path_buf(),
+            mode: facts.mode,
+        });
+    }
+    Ok(())
 }
 
 fn judge_private(facts: &Facts, euid: u32, path: &Path) -> Result<(), PrivateSocketError> {
-    let _ = (facts, euid, path);
-    todo!()
+    if facts.kind != Kind::Directory {
+        return Err(PrivateSocketError::NotDirectory {
+            at: path.to_path_buf(),
+        });
+    }
+    if facts.uid != euid {
+        return Err(PrivateSocketError::ForeignOwner {
+            at: path.to_path_buf(),
+            uid: facts.uid,
+        });
+    }
+    if facts.mode & 0o077 != 0 {
+        return Err(PrivateSocketError::NotPrivate {
+            path: path.to_path_buf(),
+            mode: facts.mode,
+        });
+    }
+    Ok(())
 }
 
 fn judge_socket(facts: &Facts, trusted_uid: u32, path: &Path) -> Result<(), PrivateSocketError> {
-    let _ = (facts, trusted_uid, path);
-    todo!()
+    if facts.kind != Kind::Socket {
+        return Err(PrivateSocketError::NotASocket {
+            path: path.to_path_buf(),
+        });
+    }
+    if facts.uid != trusted_uid {
+        return Err(PrivateSocketError::SocketOwner {
+            path: path.to_path_buf(),
+            uid: facts.uid,
+        });
+    }
+    if facts.mode & 0o777 != 0o600 {
+        return Err(PrivateSocketError::SocketMode {
+            path: path.to_path_buf(),
+            mode: facts.mode,
+        });
+    }
+    Ok(())
 }
 
 fn judge_peer(trusted: u32, found: u32) -> Result<(), PrivateSocketError> {
-    let _ = (trusted, found);
-    todo!()
+    if trusted == found {
+        Ok(())
+    } else {
+        Err(PrivateSocketError::PeerMismatch { trusted, found })
+    }
 }
 
 fn prepare(dir: PrivateDir, name: &str) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
-    let _ = (dir, name);
-    todo!()
+    let c_name = entry_name(name)?;
+    let path = dir.path.join(name);
+    let (address, length) = address_for(&path)?;
+    match stat_at(&dir.dir, &c_name) {
+        Ok(_) => return Err(PrivateSocketError::AddressInUse { path }),
+        Err(errno) if errno == libc::ENOENT => {}
+        Err(errno) => {
+            return Err(PrivateSocketError::Io {
+                op: "fstatat",
+                at: path,
+                errno,
+            });
+        }
+    }
+    let socket = unix_socket().map_err(|error| io_failure("socket", &path, &error))?;
+    let outcome = unsafe {
+        libc::bind(
+            socket.as_raw_fd(),
+            (&address as *const libc::sockaddr_un).cast(),
+            length,
+        )
+    };
+    if outcome != 0 {
+        let error = io::Error::last_os_error();
+        return Err(if error.raw_os_error() == Some(libc::EADDRINUSE) {
+            PrivateSocketError::AddressInUse { path }
+        } else {
+            io_failure("bind", &path, &error)
+        });
+    }
+    let created = match (dir.reconfirm(), stat_at(&dir.dir, &c_name)) {
+        (Ok(()), Ok(facts)) if facts.kind == Kind::Socket => facts,
+        _ => return Err(PrivateSocketError::BindEscaped { path }),
+    };
+    let bound = BoundEntry {
+        dir,
+        name: c_name,
+        entry: SocketEntry {
+            path,
+            dev: created.dev,
+            ino: created.ino,
+        },
+    };
+    restrict_to_owner(&bound)?;
+    let facts = stat_at(&bound.dir.dir, &bound.name)
+        .map_err(|errno| missing_or_io(errno, &bound.entry.path))?;
+    if facts.dev != created.dev || facts.ino != created.ino {
+        return Err(PrivateSocketError::BindEscaped {
+            path: bound.entry.path.clone(),
+        });
+    }
+    judge_socket(&facts, effective_uid(), &bound.entry.path)?;
+    Ok((socket, bound))
+}
+
+fn restrict_to_owner(bound: &BoundEntry) -> Result<(), PrivateSocketError> {
+    let dir = bound.dir.dir.as_raw_fd();
+    let name = bound.name.as_ptr();
+    if unsafe { libc::fchmodat(dir, name, 0o600, libc::AT_SYMLINK_NOFOLLOW) } == 0 {
+        return Ok(());
+    }
+    let errno = last_errno();
+    if errno != libc::EOPNOTSUPP && errno != libc::ENOTSUP {
+        return Err(PrivateSocketError::Io {
+            op: "fchmodat",
+            at: bound.entry.path.clone(),
+            errno,
+        });
+    }
+    match stat_at(&bound.dir.dir, &bound.name) {
+        Ok(facts)
+            if facts.kind == Kind::Socket
+                && facts.dev == bound.entry.dev
+                && facts.ino == bound.entry.ino => {}
+        _ => {
+            return Err(PrivateSocketError::BindEscaped {
+                path: bound.entry.path.clone(),
+            });
+        }
+    }
+    if unsafe { libc::fchmodat(dir, name, 0o600, 0) } == 0 {
+        Ok(())
+    } else {
+        Err(PrivateSocketError::Io {
+            op: "fchmodat",
+            at: bound.entry.path.clone(),
+            errno: last_errno(),
+        })
+    }
+}
+
+fn components_of(relative: &[u8], whole: &Path) -> Result<Vec<CString>, PrivateSocketError> {
+    relative
+        .split(|byte| *byte == b'/')
+        .map(|component| match component {
+            b"" | b"." | b".." => None,
+            component => CString::new(component).ok(),
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| PrivateSocketError::NotAbsolute {
+            path: whole.to_path_buf(),
+        })
+}
+
+fn entry_name(name: &str) -> Result<CString, PrivateSocketError> {
+    let bad = || PrivateSocketError::BadName {
+        name: name.to_string(),
+    };
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+        return Err(bad());
+    }
+    CString::new(name).map_err(|_| bad())
+}
+
+fn address_for(path: &Path) -> Result<(libc::sockaddr_un, libc::socklen_t), PrivateSocketError> {
+    let bytes = path.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let max = address.sun_path.len() - 1;
+    if bytes.len() > max {
+        return Err(PrivateSocketError::PathTooLong {
+            path: path.to_path_buf(),
+            max,
+        });
+    }
+    address.sun_family = libc::AF_UNIX as _;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+    Ok((address, length as libc::socklen_t))
+}
+
+fn open_root() -> io::Result<OwnedFd> {
+    let raw = unsafe {
+        libc::open(
+            c"/".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+    }
+}
+
+fn open_child(parent: &OwnedFd, name: &CStr, at: &Path) -> Result<OwnedFd, PrivateSocketError> {
+    let raw = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw >= 0 {
+        return Ok(unsafe { OwnedFd::from_raw_fd(raw) });
+    }
+    let at = at.to_path_buf();
+    Err(match last_errno() {
+        libc::ELOOP => PrivateSocketError::SymlinkInPath { at },
+        libc::ENOENT => PrivateSocketError::Missing { at },
+        libc::ENOTDIR => match stat_at(parent, name) {
+            Ok(facts) if facts.kind == Kind::Symlink => PrivateSocketError::SymlinkInPath { at },
+            _ => PrivateSocketError::NotDirectory { at },
+        },
+        errno => PrivateSocketError::Io {
+            op: "openat",
+            at,
+            errno,
+        },
+    })
+}
+
+fn stat_fd(fd: &OwnedFd, at: &Path) -> Result<Facts, PrivateSocketError> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } == 0 {
+        Ok(Facts::of(&stat))
+    } else {
+        Err(io_failure("fstat", at, &io::Error::last_os_error()))
+    }
+}
+
+fn stat_at(dir: &OwnedFd, name: &CStr) -> Result<Facts, i32> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let outcome = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if outcome == 0 {
+        Ok(Facts::of(&stat))
+    } else {
+        Err(last_errno())
+    }
+}
+
+fn unix_socket() -> io::Result<OwnedFd> {
+    #[cfg(target_os = "linux")]
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    #[cfg(target_os = "macos")]
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let socket = unsafe { OwnedFd::from_raw_fd(raw) };
+    #[cfg(target_os = "macos")]
+    if unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(socket)
+}
+
+fn refuse_acl(dir: &OwnedFd, path: &Path) -> Result<(), PrivateSocketError> {
+    match acl_present(dir) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(PrivateSocketError::AclPresent {
+            path: path.to_path_buf(),
+        }),
+        Err((op, errno)) => Err(PrivateSocketError::Io {
+            op,
+            at: path.to_path_buf(),
+            errno,
+        }),
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod darwin_acl {
+    use std::os::raw::{c_int, c_void};
+
+    pub(super) const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
+    pub(super) const ACL_FIRST_ENTRY: c_int = 0;
+
+    unsafe extern "C" {
+        pub(super) fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
+        pub(super) fn acl_get_entry(
+            acl: *mut c_void,
+            entry_id: c_int,
+            entry: *mut *mut c_void,
+        ) -> c_int;
+        pub(super) fn acl_free(object: *mut c_void) -> c_int;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn acl_present(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
+    use darwin_acl::{ACL_FIRST_ENTRY, ACL_TYPE_EXTENDED, acl_free, acl_get_entry, acl_get_fd_np};
+
+    let acl = unsafe { acl_get_fd_np(dir.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let errno = last_errno();
+        return if errno == libc::ENOENT {
+            Ok(false)
+        } else {
+            Err(("acl_get_fd_np", errno))
+        };
+    }
+    let mut entry = std::ptr::null_mut();
+    let first = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) };
+    unsafe { acl_free(acl) };
+    Ok(first == 0)
+}
+
+#[cfg(target_os = "linux")]
+fn acl_present(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
+    for attribute in [c"system.posix_acl_access", c"system.posix_acl_default"] {
+        let size = unsafe {
+            libc::fgetxattr(dir.as_raw_fd(), attribute.as_ptr(), std::ptr::null_mut(), 0)
+        };
+        if size >= 0 {
+            return Ok(true);
+        }
+        let errno = last_errno();
+        if errno != libc::ENODATA && errno != libc::ENOTSUP {
+            return Err(("fgetxattr", errno));
+        }
+    }
+    Ok(false)
+}
+
+fn missing_or_io(errno: i32, path: &Path) -> PrivateSocketError {
+    if errno == libc::ENOENT {
+        PrivateSocketError::Missing {
+            at: path.to_path_buf(),
+        }
+    } else {
+        PrivateSocketError::Io {
+            op: "fstatat",
+            at: path.to_path_buf(),
+            errno,
+        }
+    }
+}
+
+fn io_failure(op: &'static str, at: &Path, error: &io::Error) -> PrivateSocketError {
+    PrivateSocketError::Io {
+        op,
+        at: at.to_path_buf(),
+        errno: errno_of(error),
+    }
+}
+
+fn errno_of(error: &io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(libc::EIO)
+}
+
+fn last_errno() -> i32 {
+    errno_of(&io::Error::last_os_error())
 }
 
 #[cfg(test)]
