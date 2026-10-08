@@ -3,14 +3,13 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use plasmosome_backend::{
-    BackendError, Capability, DrainSpec, EnforcementBackend, Grant, GrantId, GrantKind, Handle,
-    LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass, UniverseOp,
+    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, Grant, GrantId,
+    GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass,
+    UniverseOp,
 };
 
 use crate::builders::GrantSequence;
 
-const CONFORMANCE_PLUGIN: &str = "conformance";
-const SECOND_PLUGIN: &str = "conformance-second";
 const DRAIN: Duration = Duration::from_millis(50);
 
 #[cfg(test)]
@@ -142,7 +141,7 @@ pub fn grant_is_replayable<B: EnforcementBackend>(make: impl Fn() -> B) {
         let mut backend = make();
         for grant in sample_grants() {
             let entry = backend.grant(grant.clone());
-            contract_assert_eq!(entry.plugin, grant.plugin);
+            contract_assert_eq!(entry.owner, grant.owner);
             contract_assert_eq!(entry.capability, grant.capability);
             contract_assert_eq!(entry.kind, grant.kind);
             contract_assert_eq!(
@@ -312,7 +311,7 @@ where
                 .collect();
             let residue = OsObject {
                 id: new_id(),
-                owner: PluginId::from(SECOND_PLUGIN),
+                owner: second_owner(),
                 capability: capability.clone(),
             };
             expected.push(residue.clone());
@@ -322,8 +321,8 @@ where
                     "the residue fixture must plant"
                 );
             }
-            let first = op_for(new_id(), CONFORMANCE_PLUGIN, capability.clone());
-            let second = op_for(new_id(), CONFORMANCE_PLUGIN, capability.clone());
+            let first = op_for(new_id(), conformance_owner(), capability.clone());
+            let second = op_for(new_id(), conformance_owner(), capability.clone());
             contract_unwrap!(backend.apply(first.clone()));
             contract_unwrap!(backend.apply(second.clone()));
             expected.extend([first.object(), second.object()]);
@@ -336,7 +335,7 @@ where
             for (index, op) in arranged.into_iter().enumerate() {
                 let object = op.object();
                 backend
-                    .apply_removal(op.removal(), &object.owner)
+                    .apply_removal(op.removal(), &object.owner, DrainSpec::graceful(DRAIN))
                     .unwrap_or_else(|error| {
                         contract_panic!(
                             "removing the applied {} on the {} pass failed: {error}",
@@ -405,14 +404,14 @@ pub fn revoke_takes_its_owners_object<B: EnforcementBackend>(make: impl Fn() -> 
             for order in orders() {
                 let mut backend = make();
                 let audit_request = Grant {
-                    plugin: PluginId::from("audit-owner"),
+                    owner: owned_by("audit-owner"),
                     capability: capability.clone(),
                     kind: GrantKind::Hot,
                 };
                 let audit = backend.grant(audit_request.clone());
                 let audit_object = requested_object(&audit, &audit_request);
                 let deploy_request = Grant {
-                    plugin: PluginId::from("deploy-owner"),
+                    owner: owned_by("deploy-owner"),
                     capability: capability.clone(),
                     kind: GrantKind::Hot,
                 };
@@ -483,14 +482,14 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
             for order in orders() {
                 let mut backend = make();
                 let first_request = Grant {
-                    plugin: PluginId::from(CONFORMANCE_PLUGIN),
+                    owner: conformance_owner(),
                     capability: first_capability.clone(),
                     kind: GrantKind::Hot,
                 };
                 let first = backend.grant(first_request.clone());
                 let first_object = requested_object(&first, &first_request);
                 let second_request = Grant {
-                    plugin: PluginId::from(CONFORMANCE_PLUGIN),
+                    owner: conformance_owner(),
                     capability: second_capability.clone(),
                     kind: GrantKind::Hot,
                 };
@@ -532,12 +531,12 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
         let mut backend = make();
         let residue = OsObject {
             id: GrantId::new(),
-            owner: PluginId::from(CONFORMANCE_PLUGIN),
+            owner: conformance_owner(),
             capability: capability.clone(),
         };
         contract_expect!(backend.plant(residue.clone()), "broker residue must plant");
         let live_request = Grant {
-            plugin: residue.owner.clone(),
+            owner: residue.owner.clone(),
             capability: capability.clone(),
             kind: GrantKind::Hot,
         };
@@ -560,6 +559,7 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
                 capability: residue.capability.clone(),
             },
             &residue.owner,
+            drain,
         ));
         contract_assert!(backend.snapshot_os_state().is_empty());
     }
@@ -602,8 +602,31 @@ fn orders() -> [RevokeOrder; 2] {
     [RevokeOrder::ReversePush, RevokeOrder::GrantOrder]
 }
 
+fn conformance_cell() -> CellId {
+    CellId::from("conformance-cell")
+}
+
+fn owned_by(plugin: &str) -> CellOwner {
+    CellOwner {
+        cell: conformance_cell(),
+        plugin: PluginId::from(plugin),
+    }
+}
+
+fn conformance_owner() -> CellOwner {
+    owned_by("conformance")
+}
+
+fn second_owner() -> CellOwner {
+    owned_by("conformance-second")
+}
+
+fn abandoned_owner() -> CellOwner {
+    owned_by("abandoned")
+}
+
 fn sample_grants() -> Vec<Grant> {
-    let mut sequence = GrantSequence::for_plugin(CONFORMANCE_PLUGIN);
+    let mut sequence = GrantSequence::for_owner(conformance_owner());
     for capability in sample_capabilities() {
         sequence = if matches!(&capability, Capability::Broker { .. }) {
             sequence.generation_bound(capability)
@@ -640,7 +663,7 @@ fn sample_capabilities() -> Vec<Capability> {
 fn grants_with_two_of_one_class() -> Vec<Grant> {
     let mut grants = sample_grants();
     grants.push(Grant {
-        plugin: PluginId::from(SECOND_PLUGIN),
+        owner: second_owner(),
         capability: Capability::SessionFile {
             path: "skills/review.md".to_string(),
         },
@@ -660,8 +683,8 @@ fn requested_object(entry: &LedgerEntry, request: &Grant) -> OsObject {
         "a grant handle must name the requested capability class"
     );
     contract_assert_eq!(
-        entry.plugin,
-        request.plugin,
+        entry.owner,
+        request.owner,
         "a grant must retain its requested owner"
     );
     contract_assert_eq!(
@@ -676,7 +699,7 @@ fn requested_object(entry: &LedgerEntry, request: &Grant) -> OsObject {
     );
     OsObject {
         id: entry.handle.id,
-        owner: request.plugin.clone(),
+        owner: request.owner.clone(),
         capability: request.capability.clone(),
     }
 }
@@ -697,14 +720,13 @@ fn residue_objects_with(mut new_id: impl FnMut() -> GrantId) -> Vec<OsObject> {
         .into_iter()
         .map(|capability| OsObject {
             id: new_id(),
-            owner: PluginId::from("abandoned"),
+            owner: abandoned_owner(),
             capability,
         })
         .collect()
 }
 
-fn op_for(id: GrantId, owner: &str, capability: Capability) -> UniverseOp {
-    let owner = PluginId::from(owner);
+fn op_for(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
     match capability {
         Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
         Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
@@ -733,7 +755,7 @@ fn holds_exact(state: &OsState, expected: &OsObject) -> bool {
     state.objects().any(|object| object == expected)
 }
 
-fn owner_holds_key(state: &OsState, owner: &PluginId, class: UniverseClass, key: &str) -> bool {
+fn owner_holds_key(state: &OsState, owner: &CellOwner, class: UniverseClass, key: &str) -> bool {
     state
         .objects()
         .any(|object| &object.owner == owner && object.class() == class && object.key() == key)

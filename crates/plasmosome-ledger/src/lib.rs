@@ -16,7 +16,8 @@ use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use plasmosome_backend::{
-    BackendError, DrainSpec, EnforcementBackend, Handle, PluginId, UniverseRemoval,
+    BackendError, CellId, CellOwner, DrainSpec, EnforcementBackend, Handle, PluginId,
+    UniverseRemoval,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,9 +72,11 @@ impl Effect {
     /// Records an effect whose inverse undoes it exactly.
     ///
     /// An `InverseVia::Universe` removal is replayed on behalf of the ledger's
-    /// own plugin, so it must name an object that plugin owns. A removal naming
-    /// another plugin's object is refused at detach, and refusing it stops the
-    /// replay — pass `InverseVia::Backend` for anything granted to someone else.
+    /// own plugin in the cell its detach names, so it must name an object that
+    /// owner holds. A removal naming another owner's object, including the same
+    /// plugin's object in another cell, is refused at detach, and refusing it
+    /// stops the replay — pass `InverseVia::Backend` for anything granted to
+    /// someone else.
     pub fn exact(description: impl Into<String>, via: InverseVia) -> Effect {
         let text: String = description.into();
         Effect {
@@ -88,9 +91,9 @@ impl Effect {
     /// Records an effect that cannot be undone exactly, with the removal that
     /// stands as its compensation.
     ///
-    /// The witness is replayed on behalf of the ledger's own plugin and must
-    /// name an object that plugin owns. A compensation cannot retract another
-    /// plugin's object.
+    /// The witness is replayed on behalf of the ledger's own plugin in the cell
+    /// its detach names, and must name an object that owner holds. A
+    /// compensation cannot retract another owner's object.
     pub fn compensating(description: impl Into<String>, witness: UniverseRemoval) -> Effect {
         Effect {
             description: description.into(),
@@ -290,9 +293,16 @@ impl SealedLedger {
         &self.plugin
     }
 
+    /// Replays the pending effects last first. `cell` is the cell this plugin
+    /// is attached to: every universe and compensation removal names the owner
+    /// `{cell, plugin}`, and every removal and revoke uses `drain`. The cell is
+    /// never read from the log or defaulted. On an error the pending cursor stays
+    /// on the failed effect, so a later detach resumes there without replaying
+    /// what already succeeded.
     pub fn detach(
         &mut self,
         backend: &mut dyn EnforcementBackend,
+        cell: &CellId,
         drain: DrainSpec,
     ) -> Result<DetachReport, DetachError> {
         let SealedLedger {
@@ -301,7 +311,11 @@ impl SealedLedger {
             pending,
             asserted,
         } = self;
-        replay(plugin, effects, pending, asserted, backend, drain, None)
+        let owner = CellOwner {
+            cell: cell.clone(),
+            plugin: plugin.clone(),
+        };
+        replay(&owner, effects, pending, asserted, backend, drain, None)
     }
 
     pub fn unseal(self) -> Ledger {
@@ -330,9 +344,12 @@ impl ForcedLedger {
             .collect()
     }
 
+    /// Replays the pending effects like `SealedLedger::detach`, with the same
+    /// `cell` and `drain` rules, and records the operator's `force` in the report.
     pub fn detach_forced(
         &mut self,
         backend: &mut dyn EnforcementBackend,
+        cell: &CellId,
         drain: DrainSpec,
         force: Force,
     ) -> Result<DetachReport, DetachError> {
@@ -342,8 +359,12 @@ impl ForcedLedger {
             pending,
             asserted,
         } = self;
+        let owner = CellOwner {
+            cell: cell.clone(),
+            plugin: plugin.clone(),
+        };
         replay(
-            plugin,
+            &owner,
             effects,
             pending,
             asserted,
@@ -362,7 +383,7 @@ impl ForcedLedger {
 }
 
 fn replay(
-    plugin: &PluginId,
+    owner: &CellOwner,
     effects: &[Effect],
     pending: &mut usize,
     asserted: &mut Vec<String>,
@@ -370,7 +391,7 @@ fn replay(
     drain: DrainSpec,
     forced: Option<Force>,
 ) -> Result<DetachReport, DetachError> {
-    let mut report = DetachReport::new(plugin.clone());
+    let mut report = DetachReport::new(owner.plugin.clone());
     for index in (0..*pending).rev() {
         let effect = &effects[index];
         match &effect.reversibility {
@@ -379,11 +400,11 @@ fn replay(
                     backend.revoke(*handle, drain)?;
                 }
                 InverseVia::Universe(removal) => {
-                    backend.apply_removal(removal.clone(), plugin)?;
+                    backend.apply_removal(removal.clone(), owner, drain)?;
                 }
             },
             Reversibility::Compensating(compensation) => {
-                backend.apply_removal(compensation.witness.clone(), plugin)?;
+                backend.apply_removal(compensation.witness.clone(), owner, drain)?;
             }
             Reversibility::Delayed(outbox) => {
                 if outbox.published {
@@ -569,12 +590,48 @@ impl Ledger {
 mod tests {
     use super::*;
     use plasmosome_backend::{
-        Capability, Diff, FakeBackend, Grant, GrantId, GrantKind, UniverseOp,
+        Capability, CellId, CellOwner, Diff, FakeBackend, Grant, GrantId, GrantKind, UniverseOp,
     };
+    use std::time::Duration;
+
+    fn cell() -> CellId {
+        CellId::from("cell-1")
+    }
+
+    fn cell_owner(plugin: &str) -> CellOwner {
+        CellOwner {
+            cell: cell(),
+            plugin: PluginId::from(plugin),
+        }
+    }
+
+    fn detach_either(
+        closure: &mut Closure,
+        backend: &mut FakeBackend,
+        cell: &CellId,
+        drain: DrainSpec,
+    ) -> Result<DetachReport, DetachError> {
+        match closure {
+            Closure::ExternalFree(sealed) => sealed.detach(backend, cell, drain),
+            Closure::OutstandingExternal(forced) => forced.detach_forced(
+                backend,
+                cell,
+                drain,
+                Force::operator_asserted("test", "the emission was approved"),
+            ),
+        }
+    }
+
+    fn universe_removal_effects() -> [fn(&str, UniverseRemoval) -> Effect; 2] {
+        [
+            |description, removal| Effect::exact(description, InverseVia::Universe(removal)),
+            |description, removal| Effect::compensating(description, removal),
+        ]
+    }
 
     fn grant_uds(backend: &mut FakeBackend, path: &str) -> (Handle, UniverseRemoval) {
         let entry = backend.grant(Grant {
-            plugin: PluginId::from("network"),
+            owner: cell_owner("network"),
             capability: Capability::UdsSocket {
                 path: path.to_string(),
             },
@@ -585,7 +642,7 @@ mod tests {
 
     fn grant_file(backend: &mut FakeBackend, path: &str) -> (Handle, UniverseRemoval) {
         let entry = backend.grant(Grant {
-            plugin: PluginId::from("github-pr"),
+            owner: cell_owner("github-pr"),
             capability: Capability::SessionFile {
                 path: path.to_string(),
             },
@@ -608,7 +665,7 @@ mod tests {
         let op = UniverseOp::WriteSessionFile {
             id: GrantId::new(),
             path: "skills/pr.md".to_string(),
-            owner: PluginId::from("workspace-bind"),
+            owner: cell_owner("workspace-bind"),
         };
         let removal = op.removal();
         backend.apply(op).unwrap();
@@ -623,6 +680,7 @@ mod tests {
         let error = sealed
             .detach(
                 &mut backend,
+                &cell(),
                 DrainSpec::graceful(std::time::Duration::from_millis(1)),
             )
             .expect_err("a plugin may not withdraw an object another plugin owns");
@@ -657,6 +715,7 @@ mod tests {
         let report = sealed
             .detach(
                 &mut backend,
+                &cell(),
                 DrainSpec::graceful(std::time::Duration::from_millis(1)),
             )
             .unwrap();
@@ -677,7 +736,7 @@ mod tests {
                 id: GrantId::new(),
                 host: "api.github.com".to_string(),
                 route: "staged".to_string(),
-                owner: PluginId::from("github-pr"),
+                owner: cell_owner("github-pr"),
             })
             .unwrap();
         let before = backend.snapshot_os_state();
@@ -696,7 +755,7 @@ mod tests {
             id: GrantId::new(),
             host: "api.github.com".to_string(),
             route: "staged".to_string(),
-            owner: PluginId::from("github-pr"),
+            owner: cell_owner("github-pr"),
         };
         ledger.push(Effect::compensating(
             "posted a comment; compensation retracts the staged row",
@@ -713,6 +772,7 @@ mod tests {
         let report = sealed
             .detach(
                 &mut backend,
+                &cell(),
                 DrainSpec::graceful(std::time::Duration::from_millis(1)),
             )
             .unwrap();
@@ -742,6 +802,7 @@ mod tests {
         let report = forced
             .detach_forced(
                 &mut backend,
+                &cell(),
                 DrainSpec::forcing(),
                 Force::operator_asserted("stefano", "the emission was approved"),
             )
@@ -801,12 +862,12 @@ mod tests {
         };
         let graceful = DrainSpec::graceful(std::time::Duration::from_millis(2));
         assert!(
-            sealed.detach(&mut backend, graceful).is_err(),
+            sealed.detach(&mut backend, &cell(), graceful).is_err(),
             "stuck handle must refuse graceful drain"
         );
         assert!(!backend.snapshot_os_state().is_empty());
         let forced = DrainSpec::forcing();
-        let report = sealed.detach(&mut backend, forced).unwrap();
+        let report = sealed.detach(&mut backend, &cell(), forced).unwrap();
         assert_eq!(
             report.replayed,
             vec!["effect 0"],
@@ -870,12 +931,13 @@ mod tests {
         let first_force = Force::operator_asserted("t", "r");
         assert!(
             forced
-                .detach_forced(&mut backend, graceful, first_force)
+                .detach_forced(&mut backend, &cell(), graceful, first_force)
                 .is_err()
         );
         let report = forced
             .detach_forced(
                 &mut backend,
+                &cell(),
                 DrainSpec::forcing(),
                 Force::operator_asserted("t", "r"),
             )
@@ -883,5 +945,113 @@ mod tests {
         assert_eq!(report.replayed, vec!["effect 0"]);
         assert_eq!(report.asserted, vec!["emission"]);
         assert!(backend.snapshot_os_state().is_empty());
+    }
+
+    #[test]
+    fn a_graceful_detach_keeps_a_stuck_universe_inverse_pending_until_force_replays_it_once() {
+        for make_effect in universe_removal_effects() {
+            for with_external in [false, true] {
+                let owner = cell_owner("github-pr");
+                let stuck = UniverseOp::WriteSessionFile {
+                    id: GrantId::new(),
+                    path: "skills/pr.md".to_string(),
+                    owner: owner.clone(),
+                };
+                let healthy = UniverseOp::WriteSessionFile {
+                    id: GrantId::new(),
+                    path: "skills/pr.md".to_string(),
+                    owner,
+                };
+                let address = Handle {
+                    class: stuck.class(),
+                    id: stuck.id(),
+                };
+                let mut backend = FakeBackend::new();
+                backend.apply(stuck.clone()).unwrap();
+                backend.apply(healthy.clone()).unwrap();
+                backend.mark_stuck(address);
+                let mut ledger = Ledger::new("github-pr");
+                if with_external {
+                    ledger.push(Effect::external("the PR comment already left the host"));
+                }
+                ledger.push(make_effect("stuck skill file", stuck.removal()));
+                ledger.push(make_effect("healthy skill file", healthy.removal()));
+                let mut closure = ledger.close();
+                assert_eq!(
+                    detach_either(
+                        &mut closure,
+                        &mut backend,
+                        &cell(),
+                        DrainSpec::graceful(Duration::from_millis(4))
+                    )
+                    .unwrap_err(),
+                    DetachError::Backend(BackendError::DrainTimedOut {
+                        handle: address,
+                        deadline_ms: 4,
+                    })
+                );
+                assert_eq!(
+                    backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                    vec![&stuck.object()]
+                );
+                let resumed =
+                    detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
+                        .unwrap();
+                assert_eq!(resumed.replayed, vec!["stuck skill file"]);
+                assert!(backend.snapshot_os_state().is_empty());
+                let again =
+                    detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
+                        .unwrap();
+                assert!(again.replayed.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_universe_inverse_naming_the_same_plugins_object_in_another_cell_is_refused() {
+        for make_effect in universe_removal_effects() {
+            for with_external in [false, true] {
+                let elsewhere = CellId::from("cell-2");
+                let op = UniverseOp::WriteSessionFile {
+                    id: GrantId::new(),
+                    path: "skills/pr.md".to_string(),
+                    owner: CellOwner {
+                        cell: elsewhere.clone(),
+                        plugin: PluginId::from("github-pr"),
+                    },
+                };
+                let mut backend = FakeBackend::new();
+                backend.apply(op.clone()).unwrap();
+                let mut ledger = Ledger::new("github-pr");
+                if with_external {
+                    ledger.push(Effect::external("the PR comment already left the host"));
+                }
+                ledger.push(make_effect("skill file in cell-2", op.removal()));
+                let mut closure = ledger.close();
+                for drain in [
+                    DrainSpec::graceful(Duration::from_millis(1)),
+                    DrainSpec::forcing(),
+                ] {
+                    assert_eq!(
+                        detach_either(&mut closure, &mut backend, &cell(), drain).unwrap_err(),
+                        DetachError::Backend(BackendError::UnknownObject {
+                            class: "session-file",
+                            key: "session/skills/pr.md".to_string(),
+                            owner: cell_owner("github-pr"),
+                            id: op.id(),
+                        })
+                    );
+                    assert_eq!(
+                        backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                        vec![&op.object()]
+                    );
+                }
+                let report =
+                    detach_either(&mut closure, &mut backend, &elsewhere, DrainSpec::forcing())
+                        .unwrap();
+                assert_eq!(report.replayed, vec!["skill file in cell-2"]);
+                assert!(backend.snapshot_os_state().is_empty());
+            }
+        }
     }
 }

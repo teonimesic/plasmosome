@@ -3,9 +3,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use super as conformance;
 use plasmosome_backend::{
-    BackendError, Capability, DrainSpec, EnforcementBackend, Grant, GrantId, GrantKind, Handle,
-    LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass, UniverseOp,
-    UniverseRemoval,
+    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, Grant, GrantId,
+    GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass,
+    UniverseOp, UniverseRemoval,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,7 +131,7 @@ impl DefectiveBackend {
             Defect::RevokeTakesAnotherResourceOfClass => self.take_another_resource_of_class(entry),
             Defect::RevokeTakesWrongOwner => self.take_wrong_owner(entry),
             Defect::RevokeTakesWrongInstance => self.take_wrong_instance(entry),
-            _ => self.apply_removal(entry.removal(), &entry.plugin),
+            _ => self.apply_removal(entry.removal(), &entry.owner, DrainSpec::forcing()),
         }
     }
 
@@ -150,7 +150,7 @@ impl DefectiveBackend {
         let object = self
             .state
             .objects()
-            .find(|held| held.capability == entry.capability && held.owner != entry.plugin)
+            .find(|held| held.capability == entry.capability && held.owner != entry.owner)
             .cloned();
         self.remove_selected(object.or_else(|| Some(entry.object())), entry)
     }
@@ -161,7 +161,7 @@ impl DefectiveBackend {
             .objects()
             .find(|held| {
                 held.capability == entry.capability
-                    && held.owner == entry.plugin
+                    && held.owner == entry.owner
                     && held.id != entry.handle.id
             })
             .cloned();
@@ -174,12 +174,12 @@ impl DefectiveBackend {
         entry: &LedgerEntry,
     ) -> Result<(), BackendError> {
         let Some(object) = object else {
-            return Err(unknown_object(&entry.removal(), &entry.plugin));
+            return Err(unknown_object(&entry.removal(), &entry.owner));
         };
         self.state
             .remove(&removal_of(&object), &object.owner)
             .map(|_| ())
-            .ok_or_else(|| unknown_object(&entry.removal(), &entry.plugin))
+            .ok_or_else(|| unknown_object(&entry.removal(), &entry.owner))
     }
 
     fn applied_order_refuses(&self, removal: &UniverseRemoval) -> bool {
@@ -200,7 +200,7 @@ impl EnforcementBackend for DefectiveBackend {
             std::panic::panic_any(InfrastructureFailure::Grant);
         }
         if self.defect == Defect::GrantSubstitutesRequestedOwner {
-            grant.plugin = PluginId::from("substituted-owner");
+            grant.owner.plugin = PluginId::from("substituted-owner");
         }
         if self.defect == Defect::GrantSubstitutesRequestedCapability {
             grant.capability = substituted_capability(&grant.capability);
@@ -210,9 +210,9 @@ impl EnforcementBackend for DefectiveBackend {
                 .ledger
                 .values()
                 .find(|entry| entry.capability == grant.capability)
-                .map(|entry| entry.plugin.clone())
+                .map(|entry| entry.owner.clone())
         {
-            grant.plugin = owner;
+            grant.owner = owner;
         }
         let substitutes_colliding_capability = matches!(
             (self.defect, grant.capability.class()),
@@ -236,7 +236,7 @@ impl EnforcementBackend for DefectiveBackend {
         let handle = self.mint(grant.capability.class());
         let entry = LedgerEntry {
             handle,
-            plugin: grant.plugin,
+            owner: grant.owner,
             capability: grant.capability,
             kind: grant.kind,
         };
@@ -245,7 +245,7 @@ impl EnforcementBackend for DefectiveBackend {
                 && self
                     .state
                     .objects()
-                    .any(|held| held.owner == entry.plugin && held.capability == entry.capability);
+                    .any(|held| held.owner == entry.owner && held.capability == entry.capability);
             if !duplicate {
                 self.state.insert(entry.object()).unwrap();
             }
@@ -336,7 +336,8 @@ impl EnforcementBackend for DefectiveBackend {
     fn apply_removal(
         &mut self,
         removal: UniverseRemoval,
-        owner: &PluginId,
+        owner: &CellOwner,
+        _drain: DrainSpec,
     ) -> Result<(), BackendError> {
         if self.defect == Defect::RemovalIsANoOp {
             return Ok(());
@@ -397,7 +398,7 @@ fn removal_of(object: &OsObject) -> UniverseRemoval {
     }
 }
 
-fn unknown_object(removal: &UniverseRemoval, owner: &PluginId) -> BackendError {
+fn unknown_object(removal: &UniverseRemoval, owner: &CellOwner) -> BackendError {
     BackendError::UnknownObject {
         class: removal.class().as_str(),
         key: removal.key(),
@@ -409,7 +410,7 @@ fn unknown_object(removal: &UniverseRemoval, owner: &PluginId) -> BackendError {
 fn remove_recorded(
     applied: &mut Vec<UniverseOp>,
     removal: &UniverseRemoval,
-    owner: &PluginId,
+    owner: &CellOwner,
 ) -> bool {
     let position = applied.iter().position(|op| {
         let object = op.object();
@@ -424,7 +425,7 @@ fn remove_recorded(
 fn remove_planted(
     planted: &mut Vec<OsObject>,
     removal: &UniverseRemoval,
-    owner: &PluginId,
+    owner: &CellOwner,
 ) -> bool {
     let position = planted.iter().position(|object| {
         object.id == removal.id && object.owner == *owner && object.capability == removal.capability
@@ -461,7 +462,7 @@ fn substituted_capability(capability: &Capability) -> Capability {
 fn shadow_of(entry: &LedgerEntry) -> OsObject {
     OsObject {
         id: GrantId::new(),
-        owner: entry.plugin.clone(),
+        owner: entry.owner.clone(),
         capability: Capability::SessionFile {
             path: format!("shadow/{}", entry.handle.id),
         },
@@ -491,7 +492,10 @@ fn a_stranger(handle: Handle) -> LedgerEntry {
     };
     LedgerEntry {
         handle,
-        plugin: PluginId::from("stranger"),
+        owner: CellOwner {
+            cell: CellId::from("stranger-cell"),
+            plugin: PluginId::from("stranger"),
+        },
         capability,
         kind: GrantKind::Hot,
     }

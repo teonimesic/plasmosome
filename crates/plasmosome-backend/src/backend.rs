@@ -6,7 +6,7 @@ use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::universe::{
-    GrantId, OsObject, OsState, PluginId, UniverseClass, UniverseOp, UniverseRemoval,
+    CellOwner, GrantId, OsObject, OsState, UniverseClass, UniverseOp, UniverseRemoval,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -75,7 +75,7 @@ impl Capability {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grant {
-    pub plugin: PluginId,
+    pub owner: CellOwner,
     pub capability: Capability,
     pub kind: GrantKind,
 }
@@ -83,7 +83,7 @@ pub struct Grant {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerEntry {
     pub handle: Handle,
-    pub plugin: PluginId,
+    pub owner: CellOwner,
     pub capability: Capability,
     pub kind: GrantKind,
 }
@@ -92,7 +92,7 @@ impl LedgerEntry {
     pub fn object(&self) -> OsObject {
         OsObject {
             id: self.handle.id,
-            owner: self.plugin.clone(),
+            owner: self.owner.clone(),
             capability: self.capability.clone(),
         }
     }
@@ -119,14 +119,14 @@ impl Serialize for LedgerEntry {
         #[derive(Serialize)]
         struct Wire<'a> {
             handle: &'a Handle,
-            plugin: &'a PluginId,
+            owner: &'a CellOwner,
             capability: &'a Capability,
             kind: &'a GrantKind,
         }
 
         Wire {
             handle: &self.handle,
-            plugin: &self.plugin,
+            owner: &self.owner,
             capability: &self.capability,
             kind: &self.kind,
         }
@@ -143,7 +143,7 @@ impl<'de> Deserialize<'de> for LedgerEntry {
         #[serde(deny_unknown_fields)]
         struct Wire {
             handle: Handle,
-            plugin: PluginId,
+            owner: CellOwner,
             capability: Capability,
             kind: GrantKind,
         }
@@ -156,7 +156,7 @@ impl<'de> Deserialize<'de> for LedgerEntry {
         }
         Ok(LedgerEntry {
             handle: wire.handle,
-            plugin: wire.plugin,
+            owner: wire.owner,
             capability: wire.capability,
             kind: wire.kind,
         })
@@ -203,7 +203,7 @@ pub enum BackendError {
     UnknownObject {
         class: &'static str,
         key: String,
-        owner: PluginId,
+        owner: CellOwner,
         id: GrantId,
     },
     IdentityConflict {
@@ -254,11 +254,16 @@ pub trait EnforcementBackend {
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError>;
     fn snapshot_os_state(&self) -> OsState;
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError>;
-    /// Withdraws only the object matching the exact removal and named owner.
+    /// Withdraws only the holding at the removal's exact address whose full capability and
+    /// cell-qualified owner match. It resolves that holding before draining: a mismatch returns
+    /// `UnknownObject` and changes nothing. A graceful drain that cannot finish within its
+    /// deadline returns `DrainTimedOut` naming the exact address and keeps the holding, its
+    /// issued record and every peer; `RevokePolicy::Force` then withdraws only that holding.
     fn apply_removal(
         &mut self,
         removal: UniverseRemoval,
-        owner: &PluginId,
+        owner: &CellOwner,
+        drain: DrainSpec,
     ) -> Result<(), BackendError>;
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError>;
 }
