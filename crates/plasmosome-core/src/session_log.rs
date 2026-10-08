@@ -25,7 +25,7 @@ pub struct SessionLog {
 }
 
 impl SessionLog {
-    pub fn create(path: PathBuf) -> Result<SessionLog, SessionLogError> {
+    pub fn open(path: PathBuf) -> Result<SessionLog, SessionLogError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(SessionLogError::Io)?;
         }
@@ -45,7 +45,7 @@ impl SessionLog {
         &self.path
     }
 
-    pub fn append(&self, kind: &str, payload: serde_json::Value) -> u64 {
+    pub fn append(&self, kind: &str, payload: serde_json::Value) -> Result<u64, SessionLogError> {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let mut event = serde_json::Map::new();
         event.insert(
@@ -70,24 +70,27 @@ impl SessionLog {
             .expect("session log file lock is never poisoned while held");
         let _ = file.write_all(line.as_bytes());
         let _ = file.flush();
-        seq
+        Ok(seq)
     }
 }
 
-pub fn read_events(path: &Path) -> Vec<serde_json::Value> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
+pub fn read_events(path: &Path) -> Result<Vec<serde_json::Value>, SessionLogError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(SessionLogError::Io(error)),
     };
-    text.lines()
+    Ok(text
+        .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
-        .collect()
+        .collect())
 }
 
-pub fn events_of_kind(path: &Path, kind: &str) -> Vec<serde_json::Value> {
-    read_events(path)
+pub fn events_of_kind(path: &Path, kind: &str) -> Result<Vec<serde_json::Value>, SessionLogError> {
+    Ok(read_events(path)?
         .into_iter()
         .filter(|event| event.get("kind").and_then(serde_json::Value::as_str) == Some(kind))
-        .collect()
+        .collect())
 }
 
 fn system_millis() -> u64 {
@@ -101,13 +104,17 @@ fn system_millis() -> u64 {
 mod tests {
     use super::*;
 
+    const LOG: &str = "session.ndjson";
+
     #[test]
     fn events_are_appended_with_monotonic_seq_and_kind() {
         let dir = tempfile::tempdir().unwrap();
-        let log = SessionLog::create(dir.path().join("session.ndjson")).unwrap();
-        log.append("plugin_attach", serde_json::json!({ "id": "github-pr" }));
-        log.append("tool_invoke", serde_json::json!({ "name": "pr.read" }));
-        let events = read_events(&dir.path().join("session.ndjson"));
+        let log = SessionLog::open(dir.path().join(LOG)).unwrap();
+        log.append("plugin_attach", serde_json::json!({ "id": "github-pr" }))
+            .unwrap();
+        log.append("tool_invoke", serde_json::json!({ "name": "pr.read" }))
+            .unwrap();
+        let events = read_events(&dir.path().join(LOG)).unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["kind"], "plugin_attach");
         assert_eq!(events[0]["id"], "github-pr");
@@ -120,9 +127,10 @@ mod tests {
     #[test]
     fn payload_fields_never_override_the_envelope() {
         let dir = tempfile::tempdir().unwrap();
-        let log = SessionLog::create(dir.path().join("session.ndjson")).unwrap();
-        log.append("turn", serde_json::json!({ "kind": "spoofed", "extra": 1 }));
-        let events = read_events(&dir.path().join("session.ndjson"));
+        let log = SessionLog::open(dir.path().join(LOG)).unwrap();
+        log.append("turn", serde_json::json!({ "kind": "spoofed", "extra": 1 }))
+            .unwrap();
+        let events = read_events(&dir.path().join(LOG)).unwrap();
         assert_eq!(
             events[0]["kind"], "turn",
             "the envelope owns the kind field"
@@ -133,17 +141,43 @@ mod tests {
     #[test]
     fn events_of_kind_filters_without_touching_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        let log = SessionLog::create(dir.path().join("session.ndjson")).unwrap();
-        log.append("a", serde_json::json!({}));
-        log.append("b", serde_json::json!({}));
-        log.append("a", serde_json::json!({}));
-        let a_events = events_of_kind(&dir.path().join("session.ndjson"), "a");
+        let log = SessionLog::open(dir.path().join(LOG)).unwrap();
+        log.append("a", serde_json::json!({})).unwrap();
+        log.append("b", serde_json::json!({})).unwrap();
+        log.append("a", serde_json::json!({})).unwrap();
+        let a_events = events_of_kind(&dir.path().join(LOG), "a").unwrap();
         assert_eq!(a_events.len(), 2);
     }
 
     #[test]
     fn reading_a_missing_log_yields_no_events() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(read_events(&dir.path().join("missing.ndjson")).is_empty());
+        assert!(
+            read_events(&dir.path().join("missing.ndjson"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn append_returns_the_sequence_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = SessionLog::open(dir.path().join(LOG)).unwrap();
+        assert_eq!(log.append("a", serde_json::json!({})).unwrap(), 1);
+        assert_eq!(log.append("b", serde_json::json!({})).unwrap(), 2);
+        let bytes = std::fs::read(dir.path().join(LOG)).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.ends_with('\n'), "every line ends with LF: {text:?}");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "exactly two lines: {text:?}");
+        let seqs: Vec<u64> = lines
+            .iter()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["seq"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(seqs, vec![1, 2]);
     }
 }
