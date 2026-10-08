@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+#[cfg(test)]
+pub(crate) mod fault;
+
 /// Why a session log operation failed.
 #[derive(Debug)]
 pub enum SessionLogError {
@@ -187,6 +190,7 @@ pub struct SessionLog {
 struct LogState {
     file: Box<dyn LogFile>,
     next_seq: u64,
+    poisoned: bool,
 }
 
 impl SessionLog {
@@ -216,6 +220,7 @@ impl SessionLog {
             state: Mutex::new(LogState {
                 file: opened.file,
                 next_seq: 1,
+                poisoned: false,
             }),
         })
     }
@@ -226,19 +231,44 @@ impl SessionLog {
     }
 
     /// Appends one event of `kind`. Fields of an object `payload` are added after the envelope
-    /// and never replace `ts_ms`, `seq` or `kind`. Returns the event's sequence number.
+    /// and never replace `ts_ms`, `seq` or `kind`.
+    ///
+    /// Returns the event's sequence number only after the whole LF-terminated line was written,
+    /// flushed and synced with `sync_all`. The first write, flush or sync error poisons this log:
+    /// that call returns [`SessionLogError::Io`] and every later append, from any thread, returns
+    /// [`SessionLogError::Poisoned`]. An error does not mean the line is absent: it may be on
+    /// disk whole or in part, so open a new `SessionLog` to validate the file before continuing.
     pub fn append(&self, kind: &str, payload: serde_json::Value) -> Result<u64, SessionLogError> {
         let mut state = self
             .state
             .lock()
             .expect("session log file lock is never poisoned while held");
+        if state.poisoned {
+            return Err(SessionLogError::Poisoned {
+                path: self.path.clone(),
+            });
+        }
         let seq = state.next_seq;
-        state.next_seq += 1;
         let line = event_line(seq, kind, payload);
-        let _ = state.file.write_all(line.as_bytes());
-        let _ = state.file.flush();
+        if let Err((step, source)) = write_durably(state.file.as_mut(), line.as_bytes()) {
+            state.poisoned = true;
+            return Err(SessionLogError::Io {
+                path: self.path.clone(),
+                step,
+                source,
+            });
+        }
+        state.next_seq = seq + 1;
         Ok(seq)
     }
+}
+
+fn write_durably(file: &mut dyn LogFile, bytes: &[u8]) -> Result<(), (LogStep, std::io::Error)> {
+    file.write_all(bytes)
+        .map_err(|source| (LogStep::Write, source))?;
+    file.flush().map_err(|source| (LogStep::Flush, source))?;
+    file.sync_all()
+        .map_err(|source| (LogStep::SyncFile, source))
 }
 
 fn event_line(seq: u64, kind: &str, payload: serde_json::Value) -> String {
@@ -298,9 +328,41 @@ fn system_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::fault::{Call, FaultLogStore, Step};
     use super::*;
+    use serde_json::json;
 
     const LOG: &str = "session.ndjson";
+
+    fn open_in(store: &FaultLogStore) -> SessionLog {
+        SessionLog::open_with(store.root().join(LOG), store).unwrap()
+    }
+
+    fn open_then_fail(step: Step) -> (FaultLogStore, SessionLog) {
+        let store = FaultLogStore::new();
+        let log = open_in(&store);
+        let nth = store.count(step) + 1;
+        (store.fail(step, nth), log)
+    }
+
+    fn assert_io(result: Result<u64, SessionLogError>, expected: LogStep, at: &Path) {
+        match result {
+            Err(SessionLogError::Io { path, step, .. }) => {
+                assert_eq!(step, expected);
+                assert_eq!(path, at);
+            }
+            other => panic!("expected an Io error at {expected:?}, got {other:?}"),
+        }
+    }
+
+    fn assert_poisoned(result: Result<u64, SessionLogError>) {
+        assert!(
+            matches!(result, Err(SessionLogError::Poisoned { .. })),
+            "expected Poisoned, got {result:?}"
+        );
+    }
+
+    fn assert_send_sync<T: Send + Sync>() {}
 
     #[test]
     fn events_are_appended_with_monotonic_seq_and_kind() {
@@ -375,5 +437,76 @@ mod tests {
             })
             .collect();
         assert_eq!(seqs, vec![1, 2]);
+    }
+
+    fn a_failed_step_is_returned_and_poisons_the_log(fault: Step, expected: LogStep) {
+        let (store, log) = open_then_fail(fault);
+        let at = store.root().join(LOG);
+        assert_io(log.append("force", json!({ "n": 1 })), expected, &at);
+        assert_poisoned(log.append("force", json!({ "n": 2 })));
+        assert_eq!(
+            store.count(Step::Write),
+            1,
+            "a poisoned log writes nothing more: {:?}",
+            store.calls()
+        );
+    }
+
+    #[test]
+    fn a_failed_write_is_returned_and_poisons_the_log() {
+        a_failed_step_is_returned_and_poisons_the_log(Step::Write, LogStep::Write);
+    }
+
+    #[test]
+    fn a_failed_flush_is_returned_and_poisons_the_log() {
+        a_failed_step_is_returned_and_poisons_the_log(Step::Flush, LogStep::Flush);
+    }
+
+    #[test]
+    fn a_failed_file_sync_is_returned_and_poisons_the_log() {
+        a_failed_step_is_returned_and_poisons_the_log(Step::SyncFile, LogStep::SyncFile);
+    }
+
+    #[test]
+    fn success_is_returned_only_after_write_flush_and_sync() {
+        let store = FaultLogStore::new();
+        let log = open_in(&store);
+        let before = store.calls().len();
+        assert_eq!(log.append("a", json!({})).unwrap(), 1);
+        let written = std::fs::read(store.root().join(LOG)).unwrap().len();
+        assert_eq!(
+            store.calls()[before..],
+            [Call::Write(written), Call::Flush, Call::SyncFile]
+        );
+    }
+
+    #[test]
+    fn one_failure_refuses_every_other_caller() {
+        assert_send_sync::<SessionLog>();
+        let (store, log) = open_then_fail(Step::Write);
+        let log = &log;
+        let (a_failed, a_has_failed) = std::sync::mpsc::channel();
+        let (b_done, b_is_done) = std::sync::mpsc::channel();
+        let (a_first, a_again, b) = std::thread::scope(|scope| {
+            let a = scope.spawn(move || {
+                let first = log.append("force", json!({ "cell": "a" }));
+                a_failed.send(()).unwrap();
+                b_is_done.recv().unwrap();
+                (first, log.append("force", json!({ "cell": "a" })))
+            });
+            let b = scope.spawn(move || {
+                a_has_failed.recv().unwrap();
+                let result = log.append("force", json!({ "cell": "b" }));
+                b_done.send(()).unwrap();
+                result
+            });
+            let b = b.join().unwrap();
+            let (first, again) = a.join().unwrap();
+            (first, again, b)
+        });
+        assert_io(a_first, LogStep::Write, &store.root().join(LOG));
+        assert_poisoned(b);
+        assert_poisoned(a_again);
+        assert_eq!(store.count(Step::Write), 1, "{:?}", store.calls());
     }
 }
