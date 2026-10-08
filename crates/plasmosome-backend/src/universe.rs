@@ -844,6 +844,7 @@ mod tests {
                 .contains("duplicate field `cell`")
         );
         assert_eq!(owner.cell.as_str(), "cell-1");
+        assert_eq!(owner.cell.to_string(), "cell-1");
     }
 
     #[test]
