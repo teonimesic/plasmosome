@@ -481,8 +481,12 @@ mod tests {
     }
 
     fn assert_io(result: Result<u64, SessionLogError>, expected: LogStep, at: &Path) {
-        match result {
-            Err(SessionLogError::Io { path, step, .. }) => {
+        assert_io_error(result.expect_err("append succeeded"), expected, at);
+    }
+
+    fn assert_io_error(error: SessionLogError, expected: LogStep, at: &Path) {
+        match error {
+            SessionLogError::Io { path, step, .. } => {
                 assert_eq!(step, expected);
                 assert_eq!(path, at);
             }
@@ -529,23 +533,13 @@ mod tests {
         }
     }
 
-    fn assert_open_io(error: SessionLogError, expected: LogStep, at: &Path) {
-        match error {
-            SessionLogError::Io { path, step, .. } => {
-                assert_eq!(step, expected);
-                assert_eq!(path, at);
-            }
-            other => panic!("expected an Io error at {expected:?}, got {other:?}"),
-        }
-    }
-
     #[test]
     fn events_are_appended_with_monotonic_seq_and_kind() {
         let dir = tempfile::tempdir().unwrap();
         let log = SessionLog::open(dir.path().join(LOG)).unwrap();
-        log.append("plugin_attach", serde_json::json!({ "id": "github-pr" }))
+        log.append("plugin_attach", json!({ "id": "github-pr" }))
             .unwrap();
-        log.append("tool_invoke", serde_json::json!({ "name": "pr.read" }))
+        log.append("tool_invoke", json!({ "name": "pr.read" }))
             .unwrap();
         let events = read_events(&dir.path().join(LOG)).unwrap();
         assert_eq!(events.len(), 2);
@@ -561,7 +555,7 @@ mod tests {
     fn payload_fields_never_override_the_envelope() {
         let dir = tempfile::tempdir().unwrap();
         let log = SessionLog::open(dir.path().join(LOG)).unwrap();
-        log.append("turn", serde_json::json!({ "kind": "spoofed", "extra": 1 }))
+        log.append("turn", json!({ "kind": "spoofed", "extra": 1 }))
             .unwrap();
         let events = read_events(&dir.path().join(LOG)).unwrap();
         assert_eq!(
@@ -575,9 +569,9 @@ mod tests {
     fn events_of_kind_filters_without_touching_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let log = SessionLog::open(dir.path().join(LOG)).unwrap();
-        log.append("a", serde_json::json!({})).unwrap();
-        log.append("b", serde_json::json!({})).unwrap();
-        log.append("a", serde_json::json!({})).unwrap();
+        log.append("a", json!({})).unwrap();
+        log.append("b", json!({})).unwrap();
+        log.append("a", json!({})).unwrap();
         let a_events = events_of_kind(&dir.path().join(LOG), "a").unwrap();
         assert_eq!(a_events.len(), 2);
     }
@@ -596,8 +590,8 @@ mod tests {
     fn append_returns_the_sequence_it_wrote() {
         let dir = tempfile::tempdir().unwrap();
         let log = SessionLog::open(dir.path().join(LOG)).unwrap();
-        assert_eq!(log.append("a", serde_json::json!({})).unwrap(), 1);
-        assert_eq!(log.append("b", serde_json::json!({})).unwrap(), 2);
+        assert_eq!(log.append("a", json!({})).unwrap(), 1);
+        assert_eq!(log.append("b", json!({})).unwrap(), 2);
         let bytes = std::fs::read(dir.path().join(LOG)).unwrap();
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.ends_with('\n'), "every line ends with LF: {text:?}");
@@ -735,7 +729,7 @@ mod tests {
             let store = FaultLogStore::new().fail(Step::SyncDir, index + 1);
             let directory = synced(store.root())[index].clone();
             let error = open_error(store.root().join("a").join("b").join(LOG), &store);
-            assert_open_io(error, LogStep::SyncDirectory, &directory);
+            assert_io_error(error, LogStep::SyncDirectory, &directory);
         }
     }
 
@@ -753,7 +747,7 @@ mod tests {
                 Step::CreateDir => store.root().join("a"),
                 _ => path.clone(),
             };
-            assert_open_io(open_error(path, &store), expected, &at);
+            assert_io_error(open_error(path, &store), expected, &at);
         }
     }
 
@@ -781,7 +775,7 @@ mod tests {
         std::fs::write(&target, b"victim\n").unwrap();
         let planted = dir.path().join(LOG);
         std::os::unix::fs::symlink(&target, &planted).unwrap();
-        assert_open_io(
+        assert_io_error(
             open_error(planted.clone(), &OsLogStore),
             LogStep::Open,
             &planted,
@@ -791,7 +785,7 @@ mod tests {
         let missing = dir.path().join("missing");
         let dangling = dir.path().join("dangling.ndjson");
         std::os::unix::fs::symlink(&missing, &dangling).unwrap();
-        assert_open_io(
+        assert_io_error(
             open_error(dangling.clone(), &OsLogStore),
             LogStep::Open,
             &dangling,
