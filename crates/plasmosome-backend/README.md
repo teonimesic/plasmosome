@@ -26,6 +26,15 @@ without replacing state. `FakeBackend::plant_residue`, the trait's `plant`, and
 `CompositeBackend::new` are fallible; the composite rejects initial observations assigned to the
 wrong leaf.
 
+Spec 017 gives every capability a complete, nonsecret recipe: what an adapter needs to create
+the holding. The `recipe` module holds those records — `SessionFileRecipe`, `UdsRecipe`,
+`ProxyRecipe`, `MountRecipe` and `BrokerLaunch`, with `FileAccess` and `ProxyTransport` — and
+their structural rules: NUL-free strings, absolute paths, at most 65,536 bytes of file contents,
+a nonzero port, a destination that is one DNS name or IP literal, and a launch with an absolute
+program path and two distinct endpoints. Decoding refuses a missing or unknown field and any value
+`validate` refuses; it never reads the filesystem or resolves a name. `Capability` does not
+carry these records yet.
+
 ## What's inside
 
 | Piece | Responsibility |
