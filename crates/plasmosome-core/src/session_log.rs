@@ -236,17 +236,16 @@ impl SessionLog {
     /// Returns the event's sequence number only after the whole LF-terminated line was written,
     /// flushed and synced with `sync_all`. The first write, flush or sync error poisons this log:
     /// that call returns [`SessionLogError::Io`] and every later append, from any thread, returns
-    /// [`SessionLogError::Poisoned`]. An error does not mean the line is absent: it may be on
-    /// disk whole or in part, so open a new `SessionLog` to validate the file before continuing.
+    /// [`SessionLogError::Poisoned`]. A panic while appending poisons it the same way. An error
+    /// does not mean the line is absent: it may be on disk whole or in part, so open a new
+    /// `SessionLog` to validate the file before continuing.
     pub fn append(&self, kind: &str, payload: serde_json::Value) -> Result<u64, SessionLogError> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("session log file lock is never poisoned while held");
+        let poisoned = || SessionLogError::Poisoned {
+            path: self.path.clone(),
+        };
+        let mut state = self.state.lock().map_err(|_| poisoned())?;
         if state.poisoned {
-            return Err(SessionLogError::Poisoned {
-                path: self.path.clone(),
-            });
+            return Err(poisoned());
         }
         let seq = state.next_seq;
         let line = event_line(seq, kind, payload);
@@ -507,6 +506,20 @@ mod tests {
         assert_io(a_first, LogStep::Write, &store.root().join(LOG));
         assert_poisoned(b);
         assert_poisoned(a_again);
+        assert_eq!(store.count(Step::Write), 1, "{:?}", store.calls());
+    }
+
+    #[test]
+    fn a_panic_inside_append_poisons_the_log() {
+        let store = FaultLogStore::new();
+        let log = open_in(&store);
+        let nth = store.count(Step::Write) + 1;
+        let store = store.panic_on_write(nth);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            log.append("force", json!({ "n": 1 }))
+        }));
+        assert!(panicked.is_err(), "the injected write panics");
+        assert_poisoned(log.append("force", json!({ "n": 2 })));
         assert_eq!(store.count(Step::Write), 1, "{:?}", store.calls());
     }
 }
