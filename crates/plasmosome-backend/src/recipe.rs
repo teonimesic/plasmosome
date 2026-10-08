@@ -2,7 +2,8 @@ use std::fmt;
 use std::net::IpAddr;
 
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::ser::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// The most bytes `SessionFileRecipe::contents` may hold.
 pub const MAX_SESSION_FILE_BYTES: usize = 65_536;
@@ -54,11 +55,10 @@ impl<'de> Deserialize<'de> for ProxyTransport {
 /// The resolved recipe of a session file: its initial bytes, the guest's access, and the
 /// absolute guest path it appears at.
 ///
-/// Decoding refuses a missing or unknown field and any value `validate` refuses. A value built
-/// in memory is not checked: call `validate` before acting on it. `contents` must not carry
-/// credential material.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "SessionFileWire")]
+/// Decoding refuses a missing, unknown or repeated field. Decoding and encoding both refuse any
+/// value `validate` refuses. A value built in memory is not checked: call `validate` before
+/// acting on it. `contents` must not carry credential material.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SessionFileRecipe {
     pub contents: Vec<u8>,
     pub mode: FileAccess,
@@ -79,34 +79,21 @@ impl SessionFileRecipe {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SessionFileWire {
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "SessionFileRecipe", deny_unknown_fields)]
+struct SessionFileShape {
     contents: Vec<u8>,
     mode: FileAccess,
     guest_path: String,
 }
 
-impl TryFrom<SessionFileWire> for SessionFileRecipe {
-    type Error = RecipeError;
-
-    fn try_from(wire: SessionFileWire) -> Result<Self, RecipeError> {
-        let recipe = SessionFileRecipe {
-            contents: wire.contents,
-            mode: wire.mode,
-            guest_path: wire.guest_path,
-        };
-        recipe.validate().map(|()| recipe)
-    }
-}
-
 /// The resolved recipe of a socket grant: the absolute host socket it relays to and the
 /// absolute guest path it appears at.
 ///
-/// Decoding refuses a missing or unknown field and any value `validate` refuses. A value built
-/// in memory is not checked: call `validate` before acting on it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "UdsWire")]
+/// Decoding refuses a missing, unknown or repeated field. Decoding and encoding both refuse any
+/// value `validate` refuses. A value built in memory is not checked: call `validate` before
+/// acting on it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UdsRecipe {
     pub upstream: String,
     pub guest_path: String,
@@ -121,33 +108,21 @@ impl UdsRecipe {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UdsWire {
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "UdsRecipe", deny_unknown_fields)]
+struct UdsShape {
     upstream: String,
     guest_path: String,
-}
-
-impl TryFrom<UdsWire> for UdsRecipe {
-    type Error = RecipeError;
-
-    fn try_from(wire: UdsWire) -> Result<Self, RecipeError> {
-        let recipe = UdsRecipe {
-            upstream: wire.upstream,
-            guest_path: wire.guest_path,
-        };
-        recipe.validate().map(|()| recipe)
-    }
 }
 
 /// The resolved recipe of a proxy route: its transport, the one host or address it reaches,
 /// the port, and whether private addresses are allowed for this recipe alone.
 ///
-/// Decoding refuses a missing or unknown field and any value `validate` refuses. A value built
-/// in memory is not checked: call `validate` before acting on it. Passing `validate` resolves
-/// no name and says nothing about the addresses a name resolves to.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "ProxyWire")]
+/// Decoding refuses a missing, unknown or repeated field. Decoding and encoding both refuse any
+/// value `validate` refuses. A value built in memory is not checked: call `validate` before
+/// acting on it. Passing `validate` resolves no name and says nothing about the addresses a
+/// name resolves to.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProxyRecipe {
     pub transport: ProxyTransport,
     pub destination: String,
@@ -173,34 +148,19 @@ impl ProxyRecipe {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProxyWire {
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "ProxyRecipe", deny_unknown_fields)]
+struct ProxyShape {
     transport: ProxyTransport,
     destination: String,
     port: u16,
     allow_private: bool,
 }
 
-impl TryFrom<ProxyWire> for ProxyRecipe {
-    type Error = RecipeError;
-
-    fn try_from(wire: ProxyWire) -> Result<Self, RecipeError> {
-        let recipe = ProxyRecipe {
-            transport: wire.transport,
-            destination: wire.destination,
-            port: wire.port,
-            allow_private: wire.allow_private,
-        };
-        recipe.validate().map(|()| recipe)
-    }
-}
-
 /// The resolved recipe of a mount: the access the guest gets.
 ///
-/// Decoding refuses a missing or unknown field.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "MountWire")]
+/// Decoding refuses a missing, unknown or repeated field.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MountRecipe {
     pub access: FileAccess,
 }
@@ -212,32 +172,21 @@ impl MountRecipe {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MountWire {
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "MountRecipe", deny_unknown_fields)]
+struct MountShape {
     access: FileAccess,
-}
-
-impl TryFrom<MountWire> for MountRecipe {
-    type Error = RecipeError;
-
-    fn try_from(wire: MountWire) -> Result<Self, RecipeError> {
-        let recipe = MountRecipe {
-            access: wire.access,
-        };
-        recipe.validate().map(|()| recipe)
-    }
 }
 
 /// How to launch a broker: the exact argument vector, whose first word is an absolute program
 /// path, and two distinct absolute host-private endpoints.
 ///
 /// Every word is data. Nothing here runs a shell, searches `PATH` or expands `$HOME` or `~`.
-/// Decoding refuses a missing or unknown field and any value `validate` refuses. A value built
-/// in memory is not checked: call `validate` before acting on it. Passing `validate` does not
-/// mean the program exists or the endpoints can be bound.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "BrokerLaunchWire")]
+/// Decoding refuses a missing, unknown or repeated field. Decoding and encoding both refuse any
+/// value `validate` refuses. A value built in memory is not checked: call `validate` before
+/// acting on it. Passing `validate` does not mean the program exists or the endpoints can be
+/// bound.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BrokerLaunch {
     pub command: Vec<String>,
     pub control_socket: String,
@@ -272,26 +221,40 @@ impl BrokerLaunch {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BrokerLaunchWire {
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "BrokerLaunch", deny_unknown_fields)]
+struct BrokerLaunchShape {
     command: Vec<String>,
     control_socket: String,
     data_socket: String,
 }
 
-impl TryFrom<BrokerLaunchWire> for BrokerLaunch {
-    type Error = RecipeError;
+macro_rules! validated_serde {
+    ($($recipe:ident through $shape:ident),*) => {$(
+        impl Serialize for $recipe {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.validate().map_err(S::Error::custom)?;
+                $shape::serialize(self, serializer)
+            }
+        }
 
-    fn try_from(wire: BrokerLaunchWire) -> Result<Self, RecipeError> {
-        let launch = BrokerLaunch {
-            command: wire.command,
-            control_socket: wire.control_socket,
-            data_socket: wire.data_socket,
-        };
-        launch.validate().map(|()| launch)
-    }
+        impl<'de> Deserialize<'de> for $recipe {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let recipe = $shape::deserialize(deserializer)?;
+                recipe.validate().map_err(D::Error::custom)?;
+                Ok(recipe)
+            }
+        }
+    )*};
 }
+
+validated_serde!(
+    SessionFileRecipe through SessionFileShape,
+    UdsRecipe through UdsShape,
+    ProxyRecipe through ProxyShape,
+    MountRecipe through MountShape,
+    BrokerLaunch through BrokerLaunchShape
+);
 
 /// The first structural rule a recipe breaks. `field` is the serde field name; every word of
 /// `command` reports as `"command"`.
@@ -429,24 +392,47 @@ mod tests {
 
     trait Recipe: Serialize + DeserializeOwned + Debug + Clone + Ord + Hash {
         fn check(&self) -> Result<(), RecipeError>;
+        fn json(&self) -> Value;
     }
 
     macro_rules! recipes {
-        ($($record:ty),*) => {
+        ($($record:ty { $($field:ident),* }),*) => {
             $(impl Recipe for $record {
                 fn check(&self) -> Result<(), RecipeError> {
                     self.validate()
+                }
+
+                fn json(&self) -> Value {
+                    let mut object = serde_json::Map::new();
+                    $(object.insert(stringify!($field).to_string(), json!(self.$field));)*
+                    Value::Object(object)
                 }
             })*
         };
     }
 
     recipes!(
-        SessionFileRecipe,
-        UdsRecipe,
-        ProxyRecipe,
-        MountRecipe,
-        BrokerLaunch
+        SessionFileRecipe {
+            contents,
+            mode,
+            guest_path
+        },
+        UdsRecipe {
+            upstream,
+            guest_path
+        },
+        ProxyRecipe {
+            transport,
+            destination,
+            port,
+            allow_private
+        },
+        MountRecipe { access },
+        BrokerLaunch {
+            command,
+            control_socket,
+            data_socket
+        }
     );
 
     fn session_file(contents: Vec<u8>, guest_path: &str) -> SessionFileRecipe {
@@ -519,11 +505,15 @@ mod tests {
             Err(expected.clone()),
             "validate() of {recipe:?}"
         );
-        let json = serde_json::to_value(recipe).unwrap();
         assert_eq!(
-            decode::<R>(json),
+            decode::<R>(recipe.json()),
             Err(expected.to_string()),
             "decode of {recipe:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(recipe).map_err(|error| error.to_string()),
+            Err(expected.to_string()),
+            "encode of {recipe:?}"
         );
     }
 
@@ -684,8 +674,33 @@ mod tests {
         assert_map_refused::<ProxyTransport>(r#"{"udp":null}"#);
         assert_map_refused::<MountRecipe>(r#"{"access":{"read_only":null}}"#);
         assert_map_refused::<ProxyRecipe>(
-            r#"{"transport":{"udp":null},"destination":"a.example","port":1,"allow_private":false}"#,
+            r#"{"transport":{"udp":null},"destination":"a.b","port":1,"allow_private":false}"#,
         );
+    }
+
+    #[test]
+    fn an_invalid_recipe_does_not_encode() {
+        fn assert_not_encoded<R: Recipe>(recipe: R) {
+            let error = recipe.check().unwrap_err().to_string();
+            assert_eq!(
+                serde_json::to_string(&recipe).unwrap_err().to_string(),
+                error
+            );
+            assert_eq!(
+                serde_json::to_value(&recipe).unwrap_err().to_string(),
+                error
+            );
+        }
+        assert_not_encoded(session_file(Vec::new(), "relative"));
+        assert_not_encoded(uds(UPSTREAM, "/run//agent.sock"));
+        assert_not_encoded(proxy("api.github.com", 0));
+        assert_not_encoded(launch(&[], CONTROL, DATA));
+        for recipe in [
+            valid_session_file(),
+            session_file(vec![0; MAX_SESSION_FILE_BYTES], SEED),
+        ] {
+            assert!(serde_json::to_string(&recipe).is_ok());
+        }
     }
 
     #[test]
