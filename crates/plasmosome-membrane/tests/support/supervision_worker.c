@@ -48,12 +48,8 @@ static void wait_until_orphaned(pid_t leader) {
     }
 }
 
-static void named_worker(const char *liveness_path, const char *control_path) {
-    pid_t leader = getppid();
-    struct timespec pause = {0, 1000000};
-    while (getppid() == leader) {
-        nanosleep(&pause, NULL);
-    }
+static void named_worker(pid_t leader, const char *liveness_path, const char *control_path) {
+    wait_until_orphaned(leader);
     int liveness = open(liveness_path, O_WRONLY);
     if (liveness < 0) {
         _exit(70);
@@ -97,7 +93,7 @@ int main(int argc, char **argv) {
             wait_until_orphaned(leader);
         }
         if (named) {
-            named_worker(argv[2], argv[3]);
+            named_worker(leader, argv[2], argv[3]);
         }
         descriptor_worker(ready, control, argv[4]);
     }
