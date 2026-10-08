@@ -1,12 +1,5 @@
 pub mod digest;
 pub mod path;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "nothing outside tests reads strict JSON yet; the runtime recipe parser will"
-    )
-)]
 pub(crate) mod strict_json;
 
 /// The result of removing a path the runtime created, after checking that the
