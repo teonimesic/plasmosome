@@ -1,7 +1,8 @@
 use std::fmt;
 use std::net::IpAddr;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// The most bytes `SessionFileRecipe::contents` may hold.
 pub const MAX_SESSION_FILE_BYTES: usize = 65_536;
@@ -9,22 +10,45 @@ pub const MAX_SESSION_FILE_BYTES: usize = 65_536;
 const MAX_DNS_NAME_BYTES: usize = 253;
 const MAX_DNS_LABEL_BYTES: usize = 63;
 
-/// The access a managed file or mount gives the guest. Encodes as `"read_only"` or
-/// `"read_write"`; no other spelling decodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// The access a managed file or mount gives the guest. Encodes as the string `"read_only"` or
+/// `"read_write"`; no other spelling or shape decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileAccess {
     ReadOnly,
     ReadWrite,
 }
 
-/// The transport a proxy route carries. Encodes as `"tcp"` or `"udp"`; no other spelling
-/// decodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for FileAccess {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "read_only" => Ok(FileAccess::ReadOnly),
+            "read_write" => Ok(FileAccess::ReadWrite),
+            other => Err(D::Error::unknown_variant(
+                other,
+                &["read_only", "read_write"],
+            )),
+        }
+    }
+}
+
+/// The transport a proxy route carries. Encodes as the string `"tcp"` or `"udp"`; no other
+/// spelling or shape decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyTransport {
     Tcp,
     Udp,
+}
+
+impl<'de> Deserialize<'de> for ProxyTransport {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "tcp" => Ok(ProxyTransport::Tcp),
+            "udp" => Ok(ProxyTransport::Udp),
+            other => Err(D::Error::unknown_variant(other, &["tcp", "udp"])),
+        }
+    }
 }
 
 /// The resolved recipe of a session file: its initial bytes, the guest's access, and the
@@ -643,6 +667,25 @@ mod tests {
                 "{drifted}"
             );
         }
+    }
+
+    #[test]
+    fn access_and_transport_decode_only_from_a_string() {
+        fn assert_map_refused<T: DeserializeOwned + Debug>(text: &str) {
+            let error = serde_json::from_str::<T>(text).unwrap_err().to_string();
+            assert!(
+                error.starts_with("invalid type: map"),
+                "{text} gave: {error}"
+            );
+        }
+        assert_map_refused::<FileAccess>(r#"{"read_only":null}"#);
+        assert_map_refused::<FileAccess>(r#"{"read_write":null}"#);
+        assert_map_refused::<ProxyTransport>(r#"{"tcp":null}"#);
+        assert_map_refused::<ProxyTransport>(r#"{"udp":null}"#);
+        assert_map_refused::<MountRecipe>(r#"{"access":{"read_only":null}}"#);
+        assert_map_refused::<ProxyRecipe>(
+            r#"{"transport":{"udp":null},"destination":"a.example","port":1,"allow_private":false}"#,
+        );
     }
 
     #[test]
