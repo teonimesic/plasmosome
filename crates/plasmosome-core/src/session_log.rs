@@ -171,16 +171,18 @@ impl LogStore for OsLogStore {
                 created: true,
             }),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let file = options(false).open(path)?;
+                let mut file = options(false).open(path)?;
                 if !file.metadata()?.is_file() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
                         "the session log path is not a regular file",
                     ));
                 }
+                let mut existing = Vec::new();
+                std::io::Read::read_to_end(&mut file, &mut existing)?;
                 Ok(OpenedLog {
                     file: Box::new(file),
-                    existing: Vec::new(),
+                    existing,
                     created: false,
                 })
             }
@@ -226,8 +228,11 @@ impl SessionLog {
     ///
     /// Each directory this creates, and the file if this creates it, has its containing directory
     /// synced. The nearest existing ancestor must be a directory; a symlink at `path` itself is
-    /// refused. The file and its directory are synced before this returns, so reopening a log
-    /// also makes durable whatever an earlier writer left unsynced. Any failed step is returned.
+    /// refused. An existing log must pass the checks [`read_events`] makes, or this returns
+    /// [`SessionLogError::Malformed`] and leaves the file as it was; a log whose last `seq` is
+    /// `u64::MAX` is refused too. The file and its directory are synced before this returns, so
+    /// reopening a log also makes durable whatever an earlier writer left unsynced. Any failed
+    /// step is returned. The next append is numbered one more than the last line's `seq`, or 1.
     pub fn open_with(path: PathBuf, store: &dyn LogStore) -> Result<SessionLog, SessionLogError> {
         let parent = parent_of(&path);
         create_parents(parent, store)?;
@@ -239,6 +244,17 @@ impl SessionLog {
                 .sync_dir(parent)
                 .map_err(io_error(parent, LogStep::SyncDirectory))?;
         }
+        let (events, last_seq) = parse_lines(&path, &opened.existing)?;
+        let next_seq = match last_seq {
+            None => 1,
+            Some(last) => last
+                .checked_add(1)
+                .ok_or_else(|| SessionLogError::Malformed {
+                    path: path.clone(),
+                    line: events.len(),
+                    fault: LogFault::SequenceExhausted,
+                })?,
+        };
         let mut file = opened.file;
         file.sync_all()
             .map_err(io_error(&path, LogStep::SyncFile))?;
@@ -249,7 +265,7 @@ impl SessionLog {
             path,
             state: Mutex::new(LogState {
                 file,
-                next_seq: 1,
+                next_seq,
                 poisoned: false,
             }),
         })
@@ -266,7 +282,8 @@ impl SessionLog {
     /// Returns the event's sequence number only after the whole LF-terminated line was written,
     /// flushed and synced with `sync_all`. The first write, flush or sync error poisons this log:
     /// that call returns [`SessionLogError::Io`] and every later append, from any thread, returns
-    /// [`SessionLogError::Poisoned`]. A panic while appending poisons it the same way. An error
+    /// [`SessionLogError::Poisoned`]. A panic while appending poisons it the same way, and so does
+    /// writing `seq` `u64::MAX`, after which no event can be numbered. An error
     /// does not mean the line is absent: it may be on disk whole or in part, so open a new
     /// `SessionLog` to validate the file before continuing.
     pub fn append(&self, kind: &str, payload: serde_json::Value) -> Result<u64, SessionLogError> {
@@ -287,7 +304,10 @@ impl SessionLog {
                 source,
             });
         }
-        state.next_seq = seq + 1;
+        match seq.checked_add(1) {
+            Some(next) => state.next_seq = next,
+            None => state.poisoned = true,
+        }
         Ok(seq)
     }
 }
@@ -371,26 +391,62 @@ fn event_line(seq: u64, kind: &str, payload: serde_json::Value) -> String {
     line
 }
 
-/// Reads every event in the log at `path`. A missing file has no events.
+/// Reads every event in the log at `path`, in file order. A missing file has no events.
+///
+/// The whole read is refused with [`SessionLogError::Malformed`], naming the first bad physical
+/// line, when the file does not end with LF, or a line is not UTF-8, is not a JSON object, lacks
+/// an unsigned integer `seq` or a string `kind`, or has a `seq` not greater than the line before.
+/// No line is skipped and the file is never changed.
 pub fn read_events(path: &Path) -> Result<Vec<serde_json::Value>, SessionLogError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => {
-            return Err(SessionLogError::Io {
-                path: path.to_path_buf(),
-                step: LogStep::Read,
-                source,
-            });
-        }
+        Err(source) => return Err(io_error(path, LogStep::Read)(source)),
     };
-    Ok(text
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect())
+    Ok(parse_lines(path, &bytes)?.0)
 }
 
-/// [`read_events`] filtered to the events whose `kind` is `kind`.
+fn parse_lines(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(Vec<serde_json::Value>, Option<u64>), SessionLogError> {
+    let malformed = |line, fault| SessionLogError::Malformed {
+        path: path.to_path_buf(),
+        line,
+        fault,
+    };
+    let mut events = Vec::new();
+    let mut last_seq: Option<u64> = None;
+    let mut segments = bytes.split(|byte| *byte == b'\n').enumerate().peekable();
+    while let Some((index, segment)) = segments.next() {
+        let line = index + 1;
+        if segments.peek().is_none() {
+            if segment.is_empty() {
+                break;
+            }
+            return Err(malformed(line, LogFault::MissingNewline));
+        }
+        let text = std::str::from_utf8(segment).map_err(|_| malformed(line, LogFault::NotUtf8))?;
+        let event: serde_json::Value =
+            serde_json::from_str(text).map_err(|_| malformed(line, LogFault::NotJson))?;
+        let object = event
+            .as_object()
+            .ok_or_else(|| malformed(line, LogFault::NotAnObject))?;
+        let seq = object.get("seq").and_then(serde_json::Value::as_u64);
+        let kind = object.get("kind").and_then(serde_json::Value::as_str);
+        let (Some(seq), Some(_)) = (seq, kind) else {
+            return Err(malformed(line, LogFault::MissingEnvelope));
+        };
+        if last_seq.is_some_and(|last| seq <= last) {
+            return Err(malformed(line, LogFault::SequenceNotIncreasing));
+        }
+        last_seq = Some(seq);
+        events.push(event);
+    }
+    Ok((events, last_seq))
+}
+
+/// [`read_events`] filtered to the events whose `kind` is `kind`, with the same refusals.
 pub fn events_of_kind(path: &Path, kind: &str) -> Result<Vec<serde_json::Value>, SessionLogError> {
     Ok(read_events(path)?
         .into_iter()
@@ -442,6 +498,29 @@ mod tests {
     }
 
     fn assert_send_sync<T: Send + Sync>() {}
+
+    fn seqs_on_disk(path: &Path) -> Vec<u64> {
+        read_events(path)
+            .unwrap()
+            .iter()
+            .map(|event| event["seq"].as_u64().unwrap())
+            .collect()
+    }
+
+    fn assert_malformed(
+        error: SessionLogError,
+        at: &Path,
+        expected: (usize, LogFault),
+        case: &str,
+    ) {
+        match error {
+            SessionLogError::Malformed { path, line, fault } => {
+                assert_eq!((line, fault), expected, "{case}");
+                assert_eq!(path, at, "{case}");
+            }
+            other => panic!("{case}: expected Malformed {expected:?}, got {other:?}"),
+        }
+    }
 
     fn open_error(path: PathBuf, store: &dyn LogStore) -> SessionLogError {
         match SessionLog::open_with(path, store) {
@@ -721,5 +800,197 @@ mod tests {
             !missing.exists(),
             "a dangling symlink's target is never created"
         );
+    }
+
+    #[test]
+    fn reopen_continues_after_the_last_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG);
+        let log = SessionLog::open(path.clone()).unwrap();
+        assert_eq!(log.append("a", json!({})).unwrap(), 1);
+        assert_eq!(log.append("b", json!({})).unwrap(), 2);
+        drop(log);
+        let log = SessionLog::open(path.clone()).unwrap();
+        assert_eq!(log.append("c", json!({})).unwrap(), 3);
+        let kinds: Vec<String> = read_events(&path)
+            .unwrap()
+            .iter()
+            .map(|event| event["kind"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, ["a", "b", "c"]);
+        assert_eq!(seqs_on_disk(&path), [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_failed_append_does_not_consume_a_sequence_number() {
+        let store = FaultLogStore::new();
+        let path = store.root().join(LOG);
+        let log = open_in(&store);
+        assert_eq!(log.append("a", json!({})).unwrap(), 1);
+        let nth = store.count(Step::Write) + 1;
+        let store = store.fail(Step::Write, nth);
+        assert_io(log.append("b", json!({})), LogStep::Write, &path);
+        drop(log);
+        let log = SessionLog::open(path.clone()).unwrap();
+        assert_eq!(log.append("b", json!({})).unwrap(), 2);
+        assert_eq!(seqs_on_disk(&path), [1, 2]);
+        drop(store);
+    }
+
+    #[test]
+    fn reopen_refuses_a_malformed_log_without_changing_it() {
+        let valid: &[u8] = b"{\"ts_ms\":1,\"seq\":1,\"kind\":\"a\"}\n";
+        let cases: [(&str, &[u8], LogFault); 14] = [
+            ("torn line", b"{\"seq\":2,\"kind", LogFault::MissingNewline),
+            (
+                "complete JSON without LF",
+                b"{\"seq\":2,\"kind\":\"a\"}",
+                LogFault::MissingNewline,
+            ),
+            ("invalid UTF-8", b"\xff\xfe\n", LogFault::NotUtf8),
+            ("not JSON", b"not json\n", LogFault::NotJson),
+            ("empty line", b"\n", LogFault::NotJson),
+            ("array", b"[1]\n", LogFault::NotAnObject),
+            ("no seq", b"{\"kind\":\"a\"}\n", LogFault::MissingEnvelope),
+            (
+                "seq as a string",
+                b"{\"seq\":\"2\",\"kind\":\"a\"}\n",
+                LogFault::MissingEnvelope,
+            ),
+            (
+                "negative seq",
+                b"{\"seq\":-2,\"kind\":\"a\"}\n",
+                LogFault::MissingEnvelope,
+            ),
+            ("no kind", b"{\"seq\":2}\n", LogFault::MissingEnvelope),
+            (
+                "kind as a number",
+                b"{\"seq\":2,\"kind\":7}\n",
+                LogFault::MissingEnvelope,
+            ),
+            (
+                "repeated seq",
+                b"{\"seq\":1,\"kind\":\"a\"}\n",
+                LogFault::SequenceNotIncreasing,
+            ),
+            (
+                "decreasing seq",
+                b"{\"seq\":0,\"kind\":\"a\"}\n",
+                LogFault::SequenceNotIncreasing,
+            ),
+            (
+                "bad line before a good one",
+                b"not json\n{\"seq\":3,\"kind\":\"a\"}\n",
+                LogFault::NotJson,
+            ),
+        ];
+        for (case, suffix, fault) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(LOG);
+            let bytes = [valid, suffix].concat();
+            std::fs::write(&path, &bytes).unwrap();
+            assert_malformed(
+                open_error(path.clone(), &OsLogStore),
+                &path,
+                (2, fault),
+                case,
+            );
+            match read_events(&path) {
+                Err(error) => assert_malformed(error, &path, (2, fault), case),
+                Ok(events) => panic!("{case}: read accepted {events:?}"),
+            }
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                bytes,
+                "{case}: bytes changed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_torn_write_leaves_a_log_that_reopen_refuses() {
+        let store = FaultLogStore::new().tear(1, 5);
+        let path = store.root().join(LOG);
+        let log = open_in(&store);
+        assert_io(log.append("force", json!({})), LogStep::Write, &path);
+        assert_poisoned(log.append("force", json!({})));
+        drop(log);
+        let torn = std::fs::read(&path).unwrap();
+        assert_eq!(torn.len(), 5);
+        assert_malformed(
+            open_error(path.clone(), &OsLogStore),
+            &path,
+            (1, LogFault::MissingNewline),
+            "torn first line",
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), torn);
+    }
+
+    #[test]
+    fn a_complete_uncertain_append_may_be_asserted_again() {
+        let (store, log) = open_then_fail(Step::SyncFile);
+        let path = store.root().join(LOG);
+        let assertion = json!({ "cell": "c1", "generation": 4, "operator": "op", "reason": "r" });
+        assert_io(
+            log.append("force", assertion.clone()),
+            LogStep::SyncFile,
+            &path,
+        );
+        drop(log);
+        let log = SessionLog::open(path.clone()).unwrap();
+        assert_eq!(log.append("force", assertion.clone()).unwrap(), 2);
+        let forces = events_of_kind(&path, "force").unwrap();
+        assert_eq!(forces.len(), 2, "{forces:?}");
+        for (event, seq) in forces.iter().zip([1, 2]) {
+            assert_eq!(event["seq"], seq);
+            for field in ["cell", "generation", "operator", "reason"] {
+                assert_eq!(event[field], assertion[field], "{field}");
+            }
+        }
+    }
+
+    #[test]
+    fn read_events_refuses_a_torn_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG);
+        std::fs::write(&path, b"{\"seq\":1,\"kind\":\"a\"}\n{\"seq\":2").unwrap();
+        match read_events(&path) {
+            Err(error) => assert_malformed(error, &path, (2, LogFault::MissingNewline), "torn"),
+            Ok(events) => panic!("read accepted {events:?}"),
+        }
+    }
+
+    #[test]
+    fn open_refuses_a_log_whose_sequence_cannot_advance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG);
+        let bytes = format!(
+            "{{\"seq\":1,\"kind\":\"a\"}}\n{{\"seq\":{},\"kind\":\"a\"}}\n",
+            u64::MAX
+        );
+        std::fs::write(&path, &bytes).unwrap();
+        assert_malformed(
+            open_error(path.clone(), &OsLogStore),
+            &path,
+            (2, LogFault::SequenceExhausted),
+            "seq u64::MAX",
+        );
+        assert_eq!(seqs_on_disk(&path), [1, u64::MAX]);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
+    }
+
+    #[test]
+    fn an_append_numbered_u64_max_is_the_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG);
+        std::fs::write(
+            &path,
+            format!("{{\"seq\":{},\"kind\":\"a\"}}\n", u64::MAX - 1),
+        )
+        .unwrap();
+        let log = SessionLog::open(path.clone()).unwrap();
+        assert_eq!(log.append("b", json!({})).unwrap(), u64::MAX);
+        assert_poisoned(log.append("c", json!({})));
+        assert_eq!(seqs_on_disk(&path), [u64::MAX - 1, u64::MAX]);
     }
 }
