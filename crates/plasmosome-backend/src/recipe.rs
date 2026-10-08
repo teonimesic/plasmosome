@@ -2,6 +2,7 @@ use std::fmt;
 use std::net::IpAddr;
 
 use serde::de::Error as _;
+use serde::de::value::StringDeserializer;
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -13,44 +14,55 @@ const MAX_DNS_LABEL_BYTES: usize = 63;
 
 /// The access a managed file or mount gives the guest. Encodes as the string `"read_only"` or
 /// `"read_write"`; no other spelling or shape decodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FileAccess {
     ReadOnly,
     ReadWrite,
 }
 
-impl<'de> Deserialize<'de> for FileAccess {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        match String::deserialize(deserializer)?.as_str() {
-            "read_only" => Ok(FileAccess::ReadOnly),
-            "read_write" => Ok(FileAccess::ReadWrite),
-            other => Err(D::Error::unknown_variant(
-                other,
-                &["read_only", "read_write"],
-            )),
-        }
-    }
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "FileAccess", rename_all = "snake_case")]
+enum FileAccessShape {
+    ReadOnly,
+    ReadWrite,
 }
 
 /// The transport a proxy route carries. Encodes as the string `"tcp"` or `"udp"`; no other
 /// spelling or shape decodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ProxyTransport {
     Tcp,
     Udp,
 }
 
-impl<'de> Deserialize<'de> for ProxyTransport {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        match String::deserialize(deserializer)?.as_str() {
-            "tcp" => Ok(ProxyTransport::Tcp),
-            "udp" => Ok(ProxyTransport::Udp),
-            other => Err(D::Error::unknown_variant(other, &["tcp", "udp"])),
-        }
-    }
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "ProxyTransport", rename_all = "snake_case")]
+enum ProxyTransportShape {
+    Tcp,
+    Udp,
 }
+
+macro_rules! string_serde {
+    ($($name:ident through $shape:ident),*) => {$(
+        impl Serialize for $name {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                $shape::serialize(self, serializer)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let name = String::deserialize(deserializer)?;
+                $shape::deserialize(StringDeserializer::<D::Error>::new(name))
+            }
+        }
+    )*};
+}
+
+string_serde!(
+    FileAccess through FileAccessShape,
+    ProxyTransport through ProxyTransportShape
+);
 
 /// The resolved recipe of a session file: its initial bytes, the guest's access, and the
 /// absolute guest path it appears at.
