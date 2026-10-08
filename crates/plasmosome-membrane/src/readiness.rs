@@ -403,6 +403,14 @@ fn socket_error(fd: RawFd) -> Result<libc::c_int, ()> {
 }
 
 fn open_nonblocking() -> std::io::Result<OwnedFd> {
+    if cfg!(target_os = "linux") {
+        create_nonblocking()
+    } else {
+        crate::spawn_lock::with_descriptors_held(create_nonblocking)
+    }
+}
+
+fn create_nonblocking() -> std::io::Result<OwnedFd> {
     #[cfg(target_os = "linux")]
     let raw = unsafe {
         libc::socket(
@@ -540,6 +548,23 @@ mod tests {
 
     fn a_budget(flag: &AtomicBool) -> ProbeBudget<'_> {
         ProbeBudget::new(DEADLINE, flag)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn a_probe_socket_is_not_created_while_a_fork_is_in_progress() {
+        let (created, observed) = mpsc::channel();
+        crate::spawn_lock::while_forking(|| {
+            thread::spawn(move || {
+                let _ = created.send(open_nonblocking().is_ok());
+            });
+            assert_eq!(
+                observed.recv_timeout(Duration::from_millis(250)),
+                Err(mpsc::RecvTimeoutError::Timeout),
+                "a probe socket was created while a fork was in progress"
+            );
+        });
+        assert_eq!(observed.recv_timeout(Duration::from_secs(2)), Ok(true));
     }
 
     #[test]

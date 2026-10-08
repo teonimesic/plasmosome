@@ -1,3 +1,4 @@
+use crate::spawn_lock::Forked;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -83,12 +84,20 @@ impl std::error::Error for SupervisionError {}
 #[derive(Debug)]
 pub enum SpawnError {
     ForkFailed(std::io::Error),
+    /// The spawn ran on a thread that is creating descriptors under the spawn
+    /// lock. Forking there would wait on that thread forever, so nothing was
+    /// forked.
+    DescriptorLockHeld,
 }
 
 impl std::fmt::Display for SpawnError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SpawnError::ForkFailed(error) => write!(f, "fork failed: {error}"),
+            SpawnError::DescriptorLockHeld => write!(
+                f,
+                "spawn refused: this thread holds the descriptor lock, so nothing was forked"
+            ),
         }
     }
 }
@@ -135,19 +144,22 @@ pub struct VmmChild {
 impl VmmChild {
     /// Forks and runs `launcher` in a new session. Fork success does not prove
     /// session setup or launch success. A `setsid` failure exits with code 71.
+    ///
+    /// The fork waits while another thread in this process is creating
+    /// descriptors that are not yet close-on-exec. Called on the thread doing
+    /// that creation, it forks nothing and returns
+    /// `SpawnError::DescriptorLockHeld`.
     pub fn spawn(launcher: impl Launch) -> Result<VmmChild, SpawnError> {
-        let _fork_guard = crate::spawn_lock::hold_for_fork();
-        let pid = unsafe { libc::fork() };
-        if pid < 0 {
-            return Err(SpawnError::ForkFailed(std::io::Error::last_os_error()));
-        }
-        if pid == 0 {
-            let _guard = ExitOnUnwind;
-            if unsafe { libc::setsid() } == -1 {
-                unsafe { libc::_exit(71) }
+        let pid = match crate::spawn_lock::fork()? {
+            Forked::Parent(pid) => pid,
+            Forked::Child => {
+                let _guard = ExitOnUnwind;
+                if unsafe { libc::setsid() } == -1 {
+                    unsafe { libc::_exit(71) }
+                }
+                launcher.launch()
             }
-            launcher.launch()
-        }
+        };
         Ok(VmmChild {
             pid,
             lifecycle: Lifecycle::Owned,
