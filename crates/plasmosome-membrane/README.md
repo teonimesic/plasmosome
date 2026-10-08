@@ -20,6 +20,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far only a JSON reader that refuses duplicate keys, the SHA-256 `Digest` and the canonical absolute `RecipePath`; nothing here launches a cell yet |
 
 ## Use
 
@@ -112,5 +113,6 @@ not in the root file.
 ## Not here yet
 
 The netstack shim and the vsock bridges belong to this crate by that rule, and none of it is
-built: the modules present are `brokers`, `control`, `daemon`, `exec`, `readiness` and `vmm`.
+built: the modules present are `brokers`, `control`, `daemon`, `exec`, `readiness`, `runtime`
+and `vmm`.
 They arrive in the next P1 step.
