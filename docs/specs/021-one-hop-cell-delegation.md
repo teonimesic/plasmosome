@@ -1,5 +1,5 @@
 ---
-id: 015
+id: 021
 title: One-hop typed delegation between isolated cells
 status: draft
 intents: [016, 011, 012]
