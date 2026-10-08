@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn a_key_spelled_with_an_escape_is_the_same_key() {
-        assert_eq!(duplicate_at(r#"{"a":1,"a":2}"#), "/a");
+        assert_eq!(duplicate_at(r#"{"a":1,"\u0061":2}"#), "/a");
     }
 
     #[test]
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn every_value_kind_reads_as_serde_json_reads_it() {
-        let text = r#"{"t":true,"f":false,"n":null,"u":18446744073709551615,"i":-9223372036854775808,"x":-0.5,"e":1e300,"s":"é\n","a":[[],{},[1,"2",[3]]],"o":{"":{"k":"v"}}}"#;
+        let text = r#"{"t":true,"f":false,"n":null,"u":18446744073709551615,"i":-9223372036854775808,"x":-0.5,"e":1e300,"s":"\u00e9\n","a":[[],{},[1,"2",[3]]],"o":{"":{"k":"v"}}}"#;
         assert_eq!(
             parse_value(text.as_bytes()),
             Ok(serde_json::from_str::<serde_json::Value>(text).expect("serde_json reads it"))
