@@ -321,6 +321,16 @@ mod tests {
     }
 
     #[test]
+    fn a_reason_without_a_position_is_kept_whole() {
+        let unplaced = <serde_json::Error as de::Error>::custom("a reason with no position");
+        assert_eq!(unplaced.line(), 0, "the error carries no position");
+        assert_eq!(
+            reason_without_position(&unplaced),
+            "a reason with no position"
+        );
+    }
+
+    #[test]
     fn a_single_value_refused_for_its_content_keeps_the_reason() {
         assert_refused_as_serde_json_refuses("[1e400]");
         assert_eq!(
