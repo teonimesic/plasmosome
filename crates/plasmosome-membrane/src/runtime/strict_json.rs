@@ -167,6 +167,14 @@ mod tests {
     }
 
     #[test]
+    fn a_key_repeated_after_another_key_refuses() {
+        assert_eq!(
+            duplicate_at(r#"{"kernel":1,"vcpus":2,"kernel":3}"#),
+            "/kernel"
+        );
+    }
+
+    #[test]
     fn a_repeated_key_in_a_nested_object_refuses_with_its_path() {
         assert_eq!(duplicate_at(r#"{"k":{"s":1,"s":1}}"#), "/k/s");
     }
