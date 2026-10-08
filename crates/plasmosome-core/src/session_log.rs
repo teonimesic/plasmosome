@@ -805,6 +805,7 @@ mod tests {
         assert_eq!(log.append("b", json!({})).unwrap(), 2);
         drop(log);
         let log = SessionLog::open(path.clone()).unwrap();
+        assert_eq!(log.path(), path);
         assert_eq!(log.append("c", json!({})).unwrap(), 3);
         let kinds: Vec<String> = read_events(&path)
             .unwrap()
@@ -1069,5 +1070,32 @@ mod tests {
             assert_eq!(distinct.len(), names.len(), "{names:?}");
             assert!(names.iter().all(|name| !name.is_empty()), "{names:?}");
         }
+    }
+
+    #[test]
+    fn os_refusals_are_returned_with_their_step() {
+        let dir = tempfile::tempdir().unwrap();
+        match read_events(dir.path()) {
+            Err(error) => assert_io_error(error, LogStep::Read, dir.path()),
+            Ok(events) => panic!("read a directory as {events:?}"),
+        }
+        let unnamable = dir.path().join("n".repeat(1024));
+        assert_io_error(
+            open_error(unnamable.clone(), &OsLogStore),
+            LogStep::Open,
+            &unnamable,
+        );
+    }
+
+    #[test]
+    fn a_payload_that_is_not_an_object_adds_no_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG);
+        let log = SessionLog::open(path.clone()).unwrap();
+        log.append("a", json!(["not", "an", "object"])).unwrap();
+        let events = read_events(&path).unwrap();
+        let mut keys: Vec<&String> = events[0].as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["kind", "seq", "ts_ms"]);
     }
 }
