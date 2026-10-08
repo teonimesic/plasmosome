@@ -133,6 +133,12 @@ pub struct ProxyRecipe {
 impl ProxyRecipe {
     /// Returns the first rule this recipe breaks, in field order: `destination` is NUL-free
     /// and is either one IP literal or one ASCII DNS name, then `port` is not 0.
+    ///
+    /// A DNS name is 1 to 253 bytes of dot-separated labels, each 1 to 63 bytes of ASCII letters,
+    /// digits and `-`, not starting or ending with `-`, with no trailing dot. Its last label must
+    /// not be a number in the sense of the WHATWG URL Standard's "ends in a number" check: all
+    /// ASCII digits, or `0x` or `0X` followed by hex digits. Resolvers read such names as IPv4
+    /// addresses, so `0x7f000001` and `127.0.0.0x1` are refused.
     pub fn validate(&self) -> Result<(), RecipeError> {
         destination(&self.destination)?;
         if self.port == 0 {
@@ -326,13 +332,18 @@ fn destination(value: &str) -> Result<(), RecipeError> {
 }
 
 fn is_dns_name(value: &str) -> bool {
-    let last_label_is_numeric = value
-        .rsplit('.')
-        .next()
-        .is_some_and(|label| label.bytes().all(|byte| byte.is_ascii_digit()));
-    value.len() <= MAX_DNS_NAME_BYTES
-        && value.split('.').all(is_dns_label)
-        && !last_label_is_numeric
+    let ends_in_a_number = value.rsplit('.').next().is_some_and(is_number);
+    value.len() <= MAX_DNS_NAME_BYTES && value.split('.').all(is_dns_label) && !ends_in_a_number
+}
+
+fn is_number(label: &str) -> bool {
+    match label
+        .strip_prefix("0x")
+        .or_else(|| label.strip_prefix("0X"))
+    {
+        Some(hex) => hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        None => label.bytes().all(|byte| byte.is_ascii_digit()),
+    }
 }
 
 fn is_dns_label(label: &str) -> bool {
@@ -763,6 +774,8 @@ mod tests {
             "0.pool.ntp.org",
             "1.example",
             "123.example.com",
+            "0x7f.example",
+            "example.0xg",
             longest_label.as_str(),
             longest_name.as_str(),
             "10.0.0.1",
@@ -801,6 +814,11 @@ mod tests {
             "a.1.1.1",
             "api.github.443",
             "api.-github.com",
+            "0x7f000001",
+            "127.0.0.0x1",
+            "0x7f.0x0.0x0.0x1",
+            "example.0x",
+            "example.0X1F",
             "10.0.0",
             "010.0.0.1",
             "bücher.example",
