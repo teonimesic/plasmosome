@@ -150,7 +150,10 @@ impl ProxyRecipe {
     /// IPv4-compatible (`::a.b.c.d`) form, because the IPv4 spelling names the same host. `::`
     /// and `::1` are the unspecified and loopback addresses, not IPv4-compatible ones. Other
     /// prefixes that carry an IPv4 address, such as NAT64's `64:ff9b::/96`, are left to the
-    /// connect-time address policy.
+    /// connect-time address policy. An IP literal that passes that rule must then be spelled
+    /// exactly as `IpAddr` displays it, the RFC 5952 text form, so one address has one
+    /// spelling: `2001:db8::1` is accepted, and `2001:DB8::1` and `2001:0db8:0:0:0:0:0:1` are
+    /// refused, never rewritten.
     ///
     /// A DNS name is 1 to 253 bytes of dot-separated labels, each 1 to 63 bytes of ASCII letters,
     /// digits and `-`, not starting or ending with `-`, with no trailing dot. Its last label must
@@ -290,6 +293,7 @@ pub enum RecipeError {
     ContentsTooLarge { len: usize },
     ZeroPort,
     InvalidDestination { value: String },
+    NotCanonicalAddress { value: String, canonical: IpAddr },
     EmbeddedIpv4 { value: String, ipv4: Ipv4Addr },
     EmptyCommand,
     SharedEndpoint { path: String },
@@ -314,6 +318,10 @@ impl fmt::Display for RecipeError {
             RecipeError::InvalidDestination { value } => write!(
                 f,
                 "`destination` must be one DNS name or IP address, not {value:?}"
+            ),
+            RecipeError::NotCanonicalAddress { value, canonical } => write!(
+                f,
+                "`destination` must spell this IP address as {canonical}, not {value:?}"
             ),
             RecipeError::EmbeddedIpv4 { value, ipv4 } => write!(
                 f,
@@ -369,12 +377,18 @@ fn destination(value: &str) -> Result<(), RecipeError> {
 }
 
 fn ip_literal(value: &str, address: IpAddr) -> Result<(), RecipeError> {
-    if let IpAddr::V6(address) = address
-        && let Some(ipv4) = embedded_ipv4(address)
+    if let IpAddr::V6(v6) = address
+        && let Some(ipv4) = embedded_ipv4(v6)
     {
         return Err(RecipeError::EmbeddedIpv4 {
             value: value.to_string(),
             ipv4,
+        });
+    }
+    if address.to_string() != value {
+        return Err(RecipeError::NotCanonicalAddress {
+            value: value.to_string(),
+            canonical: address,
         });
     }
     Ok(())
@@ -633,6 +647,12 @@ mod tests {
     fn invalid_destination(value: &str) -> RecipeError {
         let value = value.to_string();
         RecipeError::InvalidDestination { value }
+    }
+
+    fn uncanonical_address(value: &str, canonical: &str) -> RecipeError {
+        let value = value.to_string();
+        let canonical = canonical.parse().unwrap();
+        RecipeError::NotCanonicalAddress { value, canonical }
     }
 
     fn embedded_ipv4(value: &str, ipv4: &str) -> RecipeError {
@@ -978,6 +998,9 @@ mod tests {
             "::1:0:0",
             "::ffff:1:0:0",
             "2001:db8::1",
+            "2001:db8::1:0:0:1",
+            "2001:db8:0:1:1:1:1:1",
+            "fe80::1",
         ] {
             assert_accepted(&proxy(destination, 443));
         }
@@ -1024,6 +1047,25 @@ mod tests {
             "",
         ] {
             assert_refused(&proxy(destination, 443), invalid_destination(destination));
+        }
+    }
+
+    #[test]
+    fn an_ip_literal_must_be_spelled_canonically() {
+        for (destination, canonical) in [
+            ("2001:DB8::1", "2001:db8::1"),
+            ("2001:0db8:0:0:0:0:0:1", "2001:db8::1"),
+            ("2001:db8:0::0:1", "2001:db8::1"),
+            ("2001:db8::0:1", "2001:db8::1"),
+            ("2001:db8:0:0:1::1", "2001:db8::1:0:0:1"),
+            ("1:0:0:2:0:0:0:3", "1:0:0:2::3"),
+            ("FE80::1", "fe80::1"),
+            ("0::1", "::1"),
+            ("::0.0.0.1", "::1"),
+            ("0:0:0:0:0:0:0:0", "::"),
+        ] {
+            let expected = uncanonical_address(destination, canonical);
+            assert_refused(&proxy(destination, 443), expected);
         }
     }
 
@@ -1132,6 +1174,10 @@ mod tests {
             (too_large(), vec!["contents", "65537", "65536"]),
             (RecipeError::ZeroPort, vec!["port"]),
             (invalid_destination("x:443"), vec!["destination", "x:443"]),
+            (
+                uncanonical_address("2001:DB8::1", "2001:db8::1"),
+                vec!["destination", "2001:DB8::1", "2001:db8::1"],
+            ),
             (
                 embedded_ipv4("::7f00:1", "127.0.0.1"),
                 vec!["destination", "::7f00:1", "127.0.0.1"],

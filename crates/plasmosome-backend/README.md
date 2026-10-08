@@ -31,11 +31,11 @@ the holding. The `recipe` module holds those records — `SessionFileRecipe`, `U
 `ProxyRecipe`, `MountRecipe` and `BrokerLaunch`, with `FileAccess` and `ProxyTransport` — and
 their structural rules: NUL-free strings, absolute paths with no empty, `.` or `..` component
 and no trailing `/`, at most 65,536 bytes of file contents, a nonzero port, a destination that
-is one DNS name or IP literal, and a launch with an absolute program path and two distinct
-endpoints. A path that breaks these rules is refused, never rewritten. Decoding refuses a
-missing, unknown or repeated field, and decoding and encoding both refuse any value `validate`
-refuses; neither reads the filesystem or resolves a name. `Capability` does not carry these
-records yet.
+is one DNS name or one IP literal in its canonical spelling and never an IPv6 spelling of an
+IPv4 address, and a launch with an absolute program path and two distinct endpoints. A path that
+breaks these rules is refused, never rewritten. Decoding refuses a missing, unknown or repeated
+field, and decoding and encoding both refuse any value `validate` refuses; neither reads the
+filesystem or resolves a name. `Capability` does not carry these records yet.
 
 ## What's inside
 
