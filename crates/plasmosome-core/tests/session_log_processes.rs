@@ -1,5 +1,6 @@
 use plasmosome_core::{LogFault, SessionLog, SessionLogError};
 use serde_json::json;
+use std::cell::Cell;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -11,7 +12,7 @@ const LOCK_HOLDER: &str = "PLASMOSOME_SESSION_LOG_LOCK_HOLDER";
 const HOLDING: &str = "session log writer lock held";
 const PATIENCE: Duration = Duration::from_secs(60);
 
-struct PausedChild(libc::pid_t);
+struct PausedChild(libc::pid_t, Cell<bool>);
 
 impl PausedChild {
     fn fork() -> PausedChild {
@@ -22,16 +23,25 @@ impl PausedChild {
             }
         }
         assert!(pid > 0, "fork: {}", std::io::Error::last_os_error());
-        PausedChild(pid)
+        PausedChild(pid, Cell::new(false))
     }
 
     fn is_alive(&self) -> bool {
-        unsafe { libc::kill(self.0, 0) == 0 }
+        if self.1.get() {
+            return false;
+        }
+        let mut status = 0;
+        let running = unsafe { libc::waitpid(self.0, &mut status, libc::WNOHANG) } == 0;
+        self.1.set(!running);
+        running
     }
 }
 
 impl Drop for PausedChild {
     fn drop(&mut self) {
+        if self.1.get() {
+            return;
+        }
         unsafe { libc::kill(self.0, libc::SIGKILL) };
         let deadline = Instant::now() + PATIENCE;
         loop {
