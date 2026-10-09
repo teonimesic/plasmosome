@@ -30,7 +30,7 @@ pub use session_log::{
 };
 pub use state::{
     CellRecord, CellStatus, ControllerState, GenomeName, InstanceName, InstanceNameError,
-    InstanceRecord, MockMode, PlasmidRecord,
+    InstanceRecord, PlasmidRecord,
 };
 pub use version::{
     Candidate, ConflictPolicy, Provision, Requirement, SelectionError, Version, VersionReq,
