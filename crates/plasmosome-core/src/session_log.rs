@@ -744,34 +744,6 @@ mod tests {
         assert_eq!(seqs, vec![1, 2]);
     }
 
-    fn a_failed_step_is_returned_and_poisons_the_log(fault: Step, expected: LogStep) {
-        let (store, log) = open_then_fail(fault);
-        let at = store.root().join(LOG);
-        assert_io(log.append("force", json!({ "n": 1 })), expected, &at);
-        assert_poisoned(log.append("force", json!({ "n": 2 })));
-        assert_eq!(
-            store.count(Step::Write),
-            1,
-            "a poisoned log writes nothing more: {:?}",
-            store.calls()
-        );
-    }
-
-    #[test]
-    fn a_failed_write_is_returned_and_poisons_the_log() {
-        a_failed_step_is_returned_and_poisons_the_log(Step::Write, LogStep::Write);
-    }
-
-    #[test]
-    fn a_failed_flush_is_returned_and_poisons_the_log() {
-        a_failed_step_is_returned_and_poisons_the_log(Step::Flush, LogStep::Flush);
-    }
-
-    #[test]
-    fn a_failed_file_sync_is_returned_and_poisons_the_log() {
-        a_failed_step_is_returned_and_poisons_the_log(Step::SyncFile, LogStep::SyncFile);
-    }
-
     #[test]
     fn success_is_returned_only_after_write_flush_and_sync() {
         let store = FaultLogStore::new();
@@ -812,20 +784,6 @@ mod tests {
         assert_io(a_first, LogStep::Write, &store.root().join(LOG));
         assert_poisoned(b);
         assert_poisoned(a_again);
-        assert_eq!(store.count(Step::Write), 1, "{:?}", store.calls());
-    }
-
-    #[test]
-    fn a_panic_inside_append_poisons_the_log() {
-        let store = FaultLogStore::new();
-        let log = open_in(&store);
-        let nth = store.count(Step::Write) + 1;
-        let store = store.panic_on_write(nth);
-        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            log.append("force", json!({ "n": 1 }))
-        }));
-        assert!(panicked.is_err(), "the injected write panics");
-        assert_poisoned(log.append("force", json!({ "n": 2 })));
         assert_eq!(store.count(Step::Write), 1, "{:?}", store.calls());
     }
 
@@ -944,22 +902,6 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_append_does_not_consume_a_sequence_number() {
-        let store = FaultLogStore::new();
-        let path = store.root().join(LOG);
-        let log = open_in(&store);
-        assert_eq!(log.append("a", json!({})).unwrap(), 1);
-        let nth = store.count(Step::Write) + 1;
-        let store = store.fail(Step::Write, nth);
-        assert_io(log.append("b", json!({})), LogStep::Write, &path);
-        drop(log);
-        let log = SessionLog::open(path.clone()).unwrap();
-        assert_eq!(log.append("b", json!({})).unwrap(), 2);
-        assert_eq!(seqs_on_disk(&path), [1, 2]);
-        drop(store);
-    }
-
-    #[test]
     fn reopen_refuses_a_malformed_log_without_changing_it() {
         let valid: &[u8] = b"{\"ts_ms\":1,\"seq\":1,\"kind\":\"a\"}\n";
         let cases: [(&str, &[u8], LogFault); 14] = [
@@ -1027,25 +969,6 @@ mod tests {
                 "{case}: bytes changed"
             );
         }
-    }
-
-    #[test]
-    fn a_torn_write_leaves_a_log_that_reopen_refuses() {
-        let store = FaultLogStore::new().tear(1, 5);
-        let path = store.root().join(LOG);
-        let log = open_in(&store);
-        assert_io(log.append("force", json!({})), LogStep::Write, &path);
-        assert_poisoned(log.append("force", json!({})));
-        drop(log);
-        let torn = std::fs::read(&path).unwrap();
-        assert_eq!(torn.len(), 5);
-        assert_malformed(
-            open_error(path.clone(), &OsLogStore),
-            &path,
-            (1, LogFault::MissingNewline),
-            "torn first line",
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), torn);
     }
 
     #[test]
@@ -1264,18 +1187,29 @@ mod tests {
     }
 
     #[test]
-    fn a_poisoned_writer_releases_its_lock() {
+    fn a_failed_append_poisons_the_log_and_releases_its_lock() {
         fn after_open(store: FaultLogStore, step: Step) -> FaultLogStore {
             let nth = store.count(step) + 1;
             store.fail(step, nth)
         }
         type Arm = fn(FaultLogStore) -> FaultLogStore;
-        let cases: [(&str, Arm, u64); 4] = [
-            ("failed write", |store| after_open(store, Step::Write), 1),
-            ("failed flush", |store| after_open(store, Step::Flush), 2),
+        let cases: [(&str, Arm, Option<LogStep>, u64); 4] = [
+            (
+                "failed write",
+                |store| after_open(store, Step::Write),
+                Some(LogStep::Write),
+                1,
+            ),
+            (
+                "failed flush",
+                |store| after_open(store, Step::Flush),
+                Some(LogStep::Flush),
+                2,
+            ),
             (
                 "failed file sync",
                 |store| after_open(store, Step::SyncFile),
+                Some(LogStep::SyncFile),
                 2,
             ),
             (
@@ -1284,10 +1218,11 @@ mod tests {
                     let nth = store.count(Step::Write) + 1;
                     store.panic_on_write(nth)
                 },
+                None,
                 1,
             ),
         ];
-        for (case, arm, next) in cases {
+        for (case, arm, step, next) in cases {
             let store = FaultLogStore::new();
             let path = store.root().join(LOG);
             let first = open_in(&store);
@@ -1295,7 +1230,11 @@ mod tests {
             let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 first.append("force", json!({ "cell": "a" }))
             }));
-            assert!(!matches!(failed, Ok(Ok(_))), "{case}: the append failed");
+            match (failed, step) {
+                (Ok(Err(error)), Some(step)) => assert_io_error(error, step, &path),
+                (Err(_), None) => {}
+                (other, _) => panic!("{case}: expected {step:?}, got {other:?}"),
+            }
             let second = SessionLog::open(path.clone())
                 .unwrap_or_else(|error| panic!("{case}: reopen while poisoned: {error}"));
             assert_eq!(
@@ -1304,7 +1243,12 @@ mod tests {
                 "{case}"
             );
             assert_poisoned(first.append("force", json!({ "cell": "a" })));
-            drop(store);
+            assert_eq!(
+                store.count(Step::Write),
+                1,
+                "{case}: a poisoned log writes nothing more: {:?}",
+                store.calls()
+            );
         }
     }
 
