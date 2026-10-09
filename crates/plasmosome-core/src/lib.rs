@@ -35,7 +35,7 @@ pub use registry::{LookupError, RegistryEntry, ToolRegistry};
 pub use session_log::{SessionLog, read_events};
 pub use state::{
     CellRecord, CellStatus, ControllerState, GenomeName, InstanceName, InstanceNameError,
-    InstanceRecord, MockMode, PlasmidRecord,
+    InstanceRecord, PlasmidRecord,
 };
 pub use version::{
     Candidate, ConflictPolicy, Provision, Requirement, SelectionError, Version, VersionReq,

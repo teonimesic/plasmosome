@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use plasmosome_backend::{Capability, CellId, CellOwner, Grant, GrantKind, LedgerEntry};
+use plasmosome_backend::{Capability, CellId, CellOwner, Grant, GrantKind, LedgerEntry, MockMode};
 use plasmosome_core::manifest::{NetworkSpec, PlasmidManifest, ToolDeclaration};
 use plasmosome_core::reconciler::{DesiredCell, DesiredState};
-use plasmosome_core::state::{GenomeName, MockMode, PlasmidRecord};
+use plasmosome_core::state::{GenomeName, PlasmidRecord};
 use plasmosome_ledger::{Effect, InverseVia};
 
 const DEFAULT_HOST: &str = "api.plasmosome.test";

@@ -20,7 +20,7 @@ one.
 | `reconciler` | Desired state vs observed state, converging by generation |
 | `gatekeeper` | Credential custody — the cell receives handles, never secrets |
 | `session_log` | Append-only record of everything that happened in a cell |
-| `state` | Wire types: instances, cells, genomes, mock modes |
+| `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode` |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends |
 
@@ -55,9 +55,16 @@ impl.wasm = "github-pr.wasm"
 Missing or invalid purpose, tool declarations and missing/non-string IDs return
 `ManifestError::Field` with the declaration ID when available, a TOML field path and a suggested
 repair. Credential-reference refusals use that same form, including the indexed reference and,
-for command credentials, the quoted command key. Other manifest errors retain their existing
-forms. `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
-description.
+for command credentials, the quoted command key. So does a `ports` value that is not a list, or an
+entry that is not an integer from 1 to 65535. A refused entry is named by its index, such as
+`network.ports[1]` or `commands.commands.<key>.network.ports[1]`. Its fix is the port the entry
+evidently means, such as `8080` for `"8080"`, unless the list already declares that port, and
+otherwise `remove this entry`. A value that is not a list is named `network.ports`, with fix
+`ports = [P]` or `remove this entry`. Following a fix never drops a valid declared port, repeats
+one, or adds one the author did not evidently write. A port inside a nested array, an inline table
+or a string such as `"443, 8080"` is removed, not unwrapped. The parser itself never drops or
+wraps an entry. Other manifest errors retain their existing forms. `ToolDeclaration` lives in
+`plasmosome_core::manifest`; `RegistryEntry` includes the tool's description.
 
 Credential `delivery` is optional in both `[secrets]` and command-local refs. Omission derives one
 mode: `handle` for `wasm`, `helper` for `git`, and `inject` for `http` or `process` that declare
