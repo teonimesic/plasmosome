@@ -56,14 +56,8 @@ fn close_on_exec_or_closed<T: AsFd>(created: T) -> std::io::Result<T> {
     }
 }
 
-/// Forks while holding the read side of the spawn lock.
-///
-/// The fork waits while another thread is inside `with_descriptors_held`, and
-/// the parent releases the lock once `fork` returns. The child never touches
-/// its copy of the lock, so it stays async-signal-safe. From inside
-/// `with_descriptors_held` on this thread it forks nothing and returns
-/// `SpawnError::DescriptorLockHeld`. A failed fork returns
-/// `SpawnError::ForkFailed` with its errno.
+/// Forks while holding the read side of the spawn lock. In `Forked::Child`, do
+/// only async-signal-safe work, and never return or unwind.
 pub(crate) fn fork() -> Result<Forked, SpawnError> {
     fork_holding(&SPAWN_LOCK, || unsafe { libc::fork() })
 }
