@@ -295,6 +295,65 @@ impl<'de> Deserialize<'de> for ReleaseKey {
     }
 }
 
+/// A release address pinned to its descriptor digest: exactly spec 020's six fields. The
+/// registry ID belongs to the enclosing record, never to the reference.
+///
+/// Ordering compares the key, then the digest bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ReleaseRef {
+    key: ReleaseKey,
+    digest: Digest,
+}
+
+impl ReleaseRef {
+    pub fn new(key: ReleaseKey, digest: Digest) -> ReleaseRef {
+        ReleaseRef { key, digest }
+    }
+
+    pub fn key(&self) -> &ReleaseKey {
+        &self.key
+    }
+
+    pub fn digest(&self) -> &Digest {
+        &self.digest
+    }
+}
+
+impl Serialize for ReleaseRef {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut record = serializer.serialize_struct("ReleaseRef", 6)?;
+        self.key.serialize_fields(&mut record)?;
+        record.serialize_field("digest", &self.digest)?;
+        record.end()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename = "ReleaseRef", deny_unknown_fields)]
+struct ReleaseRefWire {
+    kind: ArtifactKind,
+    population: Population,
+    publisher: String,
+    name: String,
+    version: String,
+    digest: Digest,
+}
+
+impl<'de> Deserialize<'de> for ReleaseRef {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ReleaseRefWire::deserialize(ObjectOnly(deserializer))?;
+        let key = ReleaseKey::checked(
+            wire.kind,
+            wire.population,
+            wire.publisher,
+            wire.name,
+            wire.version,
+        )
+        .map_err(D::Error::custom)?;
+        Ok(ReleaseRef::new(key, wire.digest))
+    }
+}
+
 struct ObjectOnly<D>(D);
 
 impl<'de, D: Deserializer<'de>> Deserializer<'de> for ObjectOnly<D> {
