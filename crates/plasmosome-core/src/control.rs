@@ -250,7 +250,8 @@ impl Handler for Controller {
 mod tests {
     use super::*;
     use crate::protocol::ErrorCode;
-    use crate::state::{CellId, CellStatus, GenomeName, InstanceRecord, MockMode};
+    use crate::state::{CellStatus, GenomeName, InstanceRecord, MockMode};
+    use plasmosome_backend::CellId;
     use std::io::{BufReader, Read};
     use std::net::Shutdown;
     use std::os::unix::net::{UnixListener, UnixStream};
