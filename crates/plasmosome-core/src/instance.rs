@@ -183,10 +183,10 @@ fn sync_directory(dir: BorrowedFd<'_>) -> io::Result<()> {
 mod tests {
     use std::ffi::CString;
     use std::fs;
-    use std::io;
+    use std::io::{self, Read};
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{MetadataExt, symlink};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::thread;
@@ -239,6 +239,59 @@ mod tests {
             path.display(),
             io::Error::last_os_error()
         );
+    }
+
+    fn make_cell(root: &Path, name: &str, journal: Option<&[u8]>) -> PathBuf {
+        let cell = root.join("cells").join(name);
+        fs::create_dir_all(&cell).expect("the cell directory is made");
+        if let Some(bytes) = journal {
+            fs::write(cell.join("ledger.ndjson"), bytes).expect("the journal is written");
+        }
+        cell
+    }
+
+    fn set_mode(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("the mode is set");
+    }
+
+    fn assert_not_root() {
+        assert_ne!(
+            unsafe { libc::geteuid() },
+            0,
+            "this test needs a user the kernel refuses for mode 000; root bypasses it"
+        );
+    }
+
+    fn describe(class: &EntryClass) -> String {
+        match class {
+            EntryClass::Cell { cell, journal } => {
+                format!("cell {cell}: {}", describe_journal(journal))
+            }
+            EntryClass::NotACell(reason) => format!("not a cell: {reason:?}"),
+        }
+    }
+
+    fn describe_journal(journal: &JournalOpen) -> &'static str {
+        match journal {
+            JournalOpen::Missing => "missing",
+            JournalOpen::Regular(_) => "regular",
+            JournalOpen::Refused(JournalRefusal::CellDirectory(_)) => "refused: cell directory",
+            JournalOpen::Refused(JournalRefusal::Symlink) => "refused: symlink",
+            JournalOpen::Refused(JournalRefusal::NotRegular) => "refused: not regular",
+            JournalOpen::Refused(JournalRefusal::Io(_)) => "refused: io",
+        }
+    }
+
+    fn discover(root: &Path) -> Discovery {
+        open_root(root).discover().expect("discovery succeeds")
+    }
+
+    fn described(discovery: &Discovery) -> Vec<String> {
+        discovery
+            .entries
+            .iter()
+            .map(|entry| describe(&entry.class))
+            .collect()
     }
 
     #[test]
@@ -394,5 +447,240 @@ mod tests {
             Err(LockError::NotRegular { path }) => assert_eq!(path, root.join("controller.lock")),
             other => panic!("expected NotRegular, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_missing_cells_directory_is_a_fresh_instance() {
+        let (_dir, root) = temp_root();
+        let discovery = discover(&root);
+        assert!(!discovery.cells_dir_present);
+        assert!(discovery.entries.is_empty(), "{discovery:?}");
+    }
+
+    #[test]
+    fn an_empty_cells_directory_lists_no_dot_entries() {
+        let (_dir, root) = temp_root();
+        fs::create_dir(root.join("cells")).expect("cells is made");
+        let discovery = discover(&root);
+        assert!(discovery.cells_dir_present);
+        assert!(discovery.entries.is_empty(), "{discovery:?}");
+    }
+
+    #[test]
+    fn a_symlinked_cells_directory_aborts_discovery() {
+        let (_dir, root) = temp_root();
+        make_cell(&root.join("elsewhere"), "cell-1", Some(b"{}\n"));
+        symlink(root.join("elsewhere/cells"), root.join("cells")).expect("the link is made");
+        match open_root(&root).discover() {
+            Err(DiscoveryError::CellsSymlink { path }) => assert_eq!(path, root.join("cells")),
+            other => panic!("expected CellsSymlink, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_regular_file_at_cells_aborts_discovery() {
+        let (_dir, root) = temp_root();
+        fs::write(root.join("cells"), b"").expect("the file is made");
+        match open_root(&root).discover() {
+            Err(DiscoveryError::CellsNotADirectory { path }) => {
+                assert_eq!(path, root.join("cells"))
+            }
+            other => panic!("expected CellsNotADirectory, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_cells_directory_aborts_discovery() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        make_cell(&root, "cell-1", None);
+        set_mode(&root.join("cells"), 0o000);
+        let result = open_root(&root).discover();
+        set_mode(&root.join("cells"), 0o700);
+        match result {
+            Err(DiscoveryError::Open { path, source }) => {
+                assert_eq!(path, root.join("cells"));
+                assert_eq!(source.raw_os_error(), Some(libc::EACCES));
+            }
+            other => panic!("expected Open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_listing_error_after_some_entries_aborts() {
+        let names = vec![
+            Ok(b"a".to_vec()),
+            Ok(b"b".to_vec()),
+            Err(io::Error::from_raw_os_error(libc::EIO)),
+        ];
+        let error = collect_names(names.into_iter()).expect_err("a partial listing is refused");
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        assert_eq!(
+            collect_names(vec![Ok(b"b".to_vec()), Ok(b"a".to_vec())].into_iter())
+                .expect("a complete listing"),
+            vec![b"b".to_vec(), b"a".to_vec()]
+        );
+    }
+
+    #[test]
+    fn entries_are_classified_and_good_siblings_survive() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        make_cell(&root, "a-journal", Some(b"{}\n"));
+        make_cell(&root, "b-empty", None);
+        let locked = root.join("locked");
+        fs::create_dir(&locked).expect("the link target is made");
+        set_mode(&locked, 0o000);
+        symlink(&locked, root.join("cells/c-link")).expect("the link is made");
+        fs::write(root.join("cells/d-file"), b"not a cell").expect("the file is made");
+        fs::create_dir(root.join("cells/e\\bad")).expect("the bad name is made");
+
+        let mut discovery = discover(&root);
+        set_mode(&locked, 0o700);
+
+        assert!(discovery.cells_dir_present);
+        assert_eq!(
+            described(&discovery),
+            [
+                "cell a-journal: regular",
+                "cell b-empty: missing",
+                "not a cell: Symlink",
+                "not a cell: NotADirectory",
+                "not a cell: InvalidName",
+            ]
+        );
+        let names = ["a-journal", "b-empty", "c-link", "d-file", "e\\bad"];
+        for (entry, name) in discovery.entries.iter().zip(names) {
+            assert_eq!(entry.raw_name, name.as_bytes());
+            assert_eq!(entry.path, root.join("cells").join(name));
+        }
+        let EntryClass::Cell {
+            journal: JournalOpen::Regular(file),
+            ..
+        } = &mut discovery.entries[0].class
+        else {
+            panic!("the first cell's journal opens");
+        };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).expect("the journal reads");
+        assert_eq!(bytes, b"{}\n");
+    }
+
+    #[test]
+    fn a_symlink_with_an_invalid_name_is_reported_as_a_symlink() {
+        let (_dir, root) = temp_root();
+        make_cell(&root, "good", None);
+        symlink(root.join("cells/good"), root.join("cells/bad\\link")).expect("the link is made");
+        fs::write(root.join("cells/bad\\file"), b"").expect("the file is made");
+        assert_eq!(
+            described(&discover(&root)),
+            [
+                "not a cell: NotADirectory",
+                "not a cell: Symlink",
+                "cell good: missing",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_cell_name_refuses_non_utf8_bytes_without_loss() {
+        assert_eq!(parse_cell_name(&[0xff, b'a']), None);
+        assert_eq!(parse_cell_name(b".."), None);
+        assert_eq!(parse_cell_name(b"a\\b"), None);
+        assert_eq!(parse_cell_name(b"cell-1"), Some(CellId::from("cell-1")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_entry_keeps_its_raw_name_and_path() {
+        use std::ffi::OsStr;
+
+        let (_dir, root) = temp_root();
+        let raw = [0xff, b'a'];
+        let path = root.join("cells").join(OsStr::from_bytes(&raw));
+        fs::create_dir_all(&path).expect("the non-UTF-8 entry is made");
+        let discovery = discover(&root);
+        assert_eq!(described(&discovery), ["not a cell: InvalidName"]);
+        assert_eq!(discovery.entries[0].raw_name, raw);
+        assert_eq!(discovery.entries[0].path, path);
+        assert!(
+            discovery.entries[0]
+                .path
+                .as_os_str()
+                .as_bytes()
+                .ends_with(&raw)
+        );
+    }
+
+    #[test]
+    fn a_symlinked_journal_is_refused_and_its_target_is_not_opened() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        let cell = make_cell(&root, "cell-1", None);
+        let target = root.join("secret");
+        fs::write(&target, b"secret").expect("the target is made");
+        set_mode(&target, 0o000);
+        symlink(&target, cell.join("ledger.ndjson")).expect("the link is made");
+        assert_eq!(
+            described(&discover(&root)),
+            ["cell cell-1: refused: symlink"]
+        );
+    }
+
+    #[test]
+    fn a_fifo_journal_is_refused_without_blocking() {
+        let (_dir, root) = temp_root();
+        let cell = make_cell(&root, "cell-1", None);
+        make_fifo(&cell.join("ledger.ndjson"));
+        let instance = open_root(&root);
+        let discovery = within("discovering a FIFO journal", move || instance.discover())
+            .expect("discovery succeeds");
+        assert_eq!(described(&discovery), ["cell cell-1: refused: not regular"]);
+    }
+
+    #[test]
+    fn a_directory_journal_is_refused_as_not_regular() {
+        let (_dir, root) = temp_root();
+        let cell = make_cell(&root, "cell-1", None);
+        fs::create_dir(cell.join("ledger.ndjson")).expect("the directory is made");
+        assert_eq!(
+            described(&discover(&root)),
+            ["cell cell-1: refused: not regular"]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_cell_directory_refuses_only_that_cell() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        make_cell(&root, "cell-a", Some(b"{}\n"));
+        let locked = make_cell(&root, "cell-b", None);
+        set_mode(&locked, 0o000);
+        let discovery = discover(&root);
+        set_mode(&locked, 0o700);
+        assert_eq!(
+            described(&discovery),
+            [
+                "cell cell-a: regular",
+                "cell cell-b: refused: cell directory"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_discovered_journal_is_left_blocking() {
+        let (_dir, root) = temp_root();
+        make_cell(&root, "cell-1", Some(b"{}\n"));
+        let discovery = discover(&root);
+        let EntryClass::Cell {
+            journal: JournalOpen::Regular(file),
+            ..
+        } = &discovery.entries[0].class
+        else {
+            panic!("the journal opens: {discovery:?}");
+        };
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0, "F_GETFL: {}", io::Error::last_os_error());
+        assert_eq!(flags & libc::O_NONBLOCK, 0, "O_NONBLOCK was left set");
     }
 }
