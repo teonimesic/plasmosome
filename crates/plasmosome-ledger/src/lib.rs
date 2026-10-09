@@ -590,6 +590,8 @@ impl Ledger {
     }
 }
 
+pub mod artifact;
+
 #[cfg(test)]
 mod tests {
     use super::*;
