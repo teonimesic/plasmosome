@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fmt;
 
 use serde::de::{Error as _, Visitor};
@@ -48,8 +49,9 @@ impl<'de> Deserialize<'de> for RegistryId {
     }
 }
 
-/// What a release is. Text forms are exactly `plasmid` and `genome`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// What a release is. Text forms are exactly `plasmid` and `genome`, and ordering compares
+/// them, so `Genome` sorts before `Plasmid`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArtifactKind {
     Plasmid,
     Genome,
@@ -61,6 +63,18 @@ impl ArtifactKind {
             ArtifactKind::Plasmid => "plasmid",
             ArtifactKind::Genome => "genome",
         }
+    }
+}
+
+impl Ord for ArtifactKind {
+    fn cmp(&self, other: &ArtifactKind) -> Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl PartialOrd for ArtifactKind {
+    fn partial_cmp(&self, other: &ArtifactKind) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -83,8 +97,9 @@ impl<'de> Deserialize<'de> for ArtifactKind {
     }
 }
 
-/// Who endorses a release. Text forms are exactly `curated` and `user`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Who endorses a release. Text forms are exactly `curated` and `user`, and ordering compares
+/// them, so `Curated` sorts before `User`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Population {
     Curated,
     User,
@@ -96,6 +111,18 @@ impl Population {
             Population::Curated => "curated",
             Population::User => "user",
         }
+    }
+}
+
+impl Ord for Population {
+    fn cmp(&self, other: &Population) -> Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl PartialOrd for Population {
+    fn partial_cmp(&self, other: &Population) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
