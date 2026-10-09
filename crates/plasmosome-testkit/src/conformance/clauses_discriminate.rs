@@ -60,6 +60,7 @@ enum Defect {
     ApplyRemovalLeavesAStaleHandle,
     StallKeyedByPluginAboveZero,
     ForcedApplyRemovalLeavesAStaleHandle,
+    GracefulApplyRemovalLeavesAStaleHandle,
     ForceRefusedWhileANeighbourStands,
     ForceRefusedWhileThePluginStandsElsewhere,
 }
@@ -1117,6 +1118,24 @@ fn forced_granted_removal_step_rejects_a_stale_handle() {
     assert_rejected(|| {
         conformance::repeated_grants_are_independently_removable(carrying(
             Defect::ForcedApplyRemovalLeavesAStaleHandle,
+        ))
+    });
+}
+
+#[test]
+fn peer_removal_step_rejects_a_graceful_stale_handle() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::GracefulApplyRemovalLeavesAStaleHandle,
+        ))
+    });
+}
+
+#[test]
+fn graceful_granted_removal_step_rejects_a_stale_handle() {
+    assert_rejected(|| {
+        conformance::repeated_grants_are_independently_removable(carrying(
+            Defect::GracefulApplyRemovalLeavesAStaleHandle,
         ))
     });
 }
