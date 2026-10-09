@@ -7,7 +7,7 @@ pub mod composite;
 pub mod fake;
 pub mod recipe;
 pub mod universe;
-pub mod wire;
+mod wire;
 
 pub use backend::{
     BackendError, Capability, DrainSpec, EnforcementBackend, Grant, GrantKind, Handle, LedgerEntry,

@@ -28,9 +28,15 @@ struct InverseShape {
     via: InverseVia,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InverseVia {
+    Backend(Handle),
+    Universe(UniverseRemoval),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "InverseVia", deny_unknown_fields)]
+enum InverseViaShape {
     Backend(Handle),
     Universe(UniverseRemoval),
 }
@@ -72,9 +78,17 @@ struct PolicyShape {
     assertion: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reversibility {
+    Exact(Inverse),
+    Compensating(Compensation),
+    Delayed(Outbox),
+    External(Policy),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Reversibility", deny_unknown_fields)]
+enum ReversibilityShape {
     Exact(Inverse),
     Compensating(Compensation),
     Delayed(Outbox),
@@ -300,9 +314,11 @@ macro_rules! object_serde {
 
 object_serde!(
     Inverse through InverseShape,
+    InverseVia through InverseViaShape,
     Compensation through CompensationShape,
     Outbox through OutboxShape,
     Policy through PolicyShape,
+    Reversibility through ReversibilityShape,
     Effect through EffectShape,
     DetachReport through DetachReportShape,
 );

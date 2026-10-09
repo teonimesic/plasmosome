@@ -3,10 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::backend::{
     BackendError, DrainSpec, EnforcementBackend, Grant, Handle, LedgerEntry, RevokePolicy,
 };
-use crate::recipe::RecipeError;
-use crate::universe::{
-    CellOwner, GrantId, OsObject, OsState, UniverseClass, UniverseOp, UniverseRemoval,
-};
+use crate::universe::{CellOwner, GrantId, OsObject, OsState, UniverseOp, UniverseRemoval};
 
 #[derive(Debug, Default)]
 pub struct FakeBackend {
@@ -111,8 +108,8 @@ impl EnforcementBackend for FakeBackend {
     }
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
-        valid(op.class(), op.id(), op.validate())?;
         let object = op.object();
+        checked(&object)?;
         if let Some((owner, cause)) = &self.apply_fault
             && object.owner == *owner
         {
@@ -153,28 +150,28 @@ impl EnforcementBackend for FakeBackend {
     }
 
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError> {
-        valid(object.class(), object.id, object.capability.validate())?;
+        checked(&object)?;
         self.state.insert(object).map(|_| ())
     }
 }
 
-fn valid(
-    class: UniverseClass,
-    id: GrantId,
-    validity: Result<(), RecipeError>,
-) -> Result<(), BackendError> {
-    validity.map_err(|error| BackendError::InvalidOperation {
-        class: class.as_str(),
-        id,
-        error,
-    })
+fn checked(object: &OsObject) -> Result<(), BackendError> {
+    object
+        .capability
+        .validate()
+        .map_err(|error| BackendError::InvalidOperation {
+            class: object.class().as_str(),
+            id: object.id,
+            error,
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::{Capability, GrantKind};
-    use crate::universe::{CellId, CellOwner, PluginId};
+    use crate::recipe::RecipeError;
+    use crate::universe::{CellId, CellOwner, PluginId, UniverseClass};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::time::Duration;
 
