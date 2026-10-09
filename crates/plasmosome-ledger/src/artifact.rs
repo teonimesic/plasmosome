@@ -808,11 +808,15 @@ mod tests {
 
     #[test]
     fn release_ref_refuses_missing_unknown_null_and_duplicate_fields() {
-        let records: [(&str, Value, &[&str], fn(&str) -> String); 2] = [
-            ("ReleaseRef", release_json(), &SIX, refusal::<ReleaseRef>),
+        for (record, value, fields, refuse) in [
+            (
+                "ReleaseRef",
+                release_json(),
+                &SIX[..],
+                refusal::<ReleaseRef> as fn(&str) -> String,
+            ),
             ("ReleaseKey", key_json(), &SIX[..5], refusal::<ReleaseKey>),
-        ];
-        for (record, value, fields, refuse) in records {
+        ] {
             let mut cases = Vec::new();
             for field in fields {
                 let mut missing = value.clone();
