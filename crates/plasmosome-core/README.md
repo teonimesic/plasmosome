@@ -119,23 +119,45 @@ reads its replies can hold the daemon open past shutdown.
 
 ## Private recovery sockets
 
-`private_socket` gives a recovery socket the boundary spec 001 §4.1 requires, on macOS and Linux:
-only processes running under the instance's own effective UID can reach it. It does not change
-the public control socket described above.
+`private_socket` gives a recovery socket the boundary spec 001 §4.1 requires, on macOS and Linux.
+It refuses every peer whose kernel-reported effective UID is not the trusted one. It also keeps
+other UIDs from reaching the socket path. That second property has not yet been shown with a
+second UID: the distinct-UID test waits on owner decision O-8. It does not change the public
+control socket described above.
 
-- `PrivateDir::open` walks the socket's parent directory from `/` with no-follow opens. Every
-  ancestor must be owned by root or the effective UID and writable by neither group nor other; a
-  sticky `/tmp` refuses too. The directory itself must be owned by the effective UID, have no group
-  or other permission bits and carry no ACL. An ACL on an ancestor is allowed, because the macOS
-  home directory carries one. The directory stays open for the checks that follow.
-- `PrivateListener::bind` refuses any entry already at the name and never unlinks it. It binds,
-  sets the socket to mode 0600 through the held directory before `listen`, and on drop removes
-  only the socket it created, matched by device and inode.
-- `PrivateListener::accept` reads the peer's effective UID from the kernel (`getpeereid` on macOS,
-  `SO_PEERCRED` on Linux) and closes an untrusted peer before reading a byte.
-- A client calls `check_private_path` before its own nonblocking connect, and `check_peer_uid` on
-  the connected stream before it sends anything.
+- `PrivateDir::open` walks the socket's parent directory from `/`, without following symlinks.
+  - Each ancestor must be owned by root or by the effective UID, and writable by neither group
+    nor other. A sticky `/tmp` is refused as well.
+  - On macOS, an ancestor is also refused when its ACL has an allow entry that grants
+    `add_file`, `add_subdirectory`, `delete_child`, `delete`, `writesecurity` or `chown`.
+    Extended ACLs do not show in the mode bits. Deny entries and allow entries for reading
+    still pass, such as the home directory's `everyone deny delete`.
+  - On Linux, an ACL that grants write raises the mask, which shows in the group bits, so the
+    mode rule covers it.
+  - Ancestors only need search permission, so a root-owned 0711 `/home` passes.
+  - The directory itself must be owned by the effective UID, have no group or other permission
+    bits, and carry no ACL. It stays open for the checks that follow.
+- `PrivateListener::bind` refuses any entry already at the name and never unlinks it.
+  - It walks and judges the directory again before it creates the socket, and again after
+    `bind`. If the second check fails, it returns that check's error and removes the socket it
+    finds at the name in the held directory.
+  - It sets the socket to mode 0600 through the held directory before `listen`.
+  - On drop, it removes only the socket it created, matched by device and inode, through the
+    held directory.
+- `PrivateListener::accept` reads the peer's effective UID from the kernel: `getpeereid` on
+  macOS, `SO_PEERCRED` on Linux. It closes an untrusted peer before reading a byte.
+- A client calls `check_private_path` before its own nonblocking connect, then `check_peer_uid`
+  on the connected stream before it sends anything.
 
-Tests that bind a private socket need a root whose every ancestor passes: the canonical temp
-directory on macOS, because `/var` and `/tmp` are symlinks and `/private/tmp` is mode 1777, and
-`CARGO_TARGET_TMPDIR` on Linux.
+The integration tests make each private root where every ancestor passes:
+- on macOS, under the per-user temp directory that `confstr(_CS_DARWIN_USER_TEMP_DIR)` reports,
+  whatever `TMPDIR` says;
+- on Linux, under `XDG_RUNTIME_DIR` when it is set, else under `CARGO_TARGET_TMPDIR`.
+
+If no base passes, the tests fail and name each base with the ancestor that refused it.
+
+The integration tests replace the allocator with one that overwrites `errno` after every
+allocation, so an error read too late shows up as the wrong variant.
+
+The Linux ACL tests fail when the filesystem refuses POSIX ACLs. Set
+`PLASMOSOME_ACL_TESTS_UNSUPPORTED=1` to skip them there instead.
