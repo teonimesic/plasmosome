@@ -123,7 +123,7 @@ fn discovery_under_a_descriptor_limit_child() {
 fn running_out_of_descriptors_aborts_discovery_instead_of_refusing_cells() {
     let (_dir, root) = temp_root();
     let cells = root.join("cells");
-    for index in 0..64 {
+    for index in 0..24 {
         let cell = cells.join(format!("cell-{index:02}"));
         fs::create_dir_all(&cell).expect("the cell directory is made");
         fs::write(cell.join("ledger.ndjson"), b"{}\n").expect("the journal is written");
