@@ -1,13 +1,23 @@
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr};
 use std::fmt;
 use std::fs::{File, OpenOptions, Permissions};
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::mem::MaybeUninit;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
+
+use plasmosome_backend::CellId;
+
+use crate::state::{CELL_JOURNAL_FILE, CELLS_DIR, cell_ledger_path, validate_cell_id};
 
 const LOCK_FILE: &str = "controller.lock";
 const PRIVATE_FILE: libc::mode_t = 0o600;
+const DIRECTORY_FLAGS: libc::c_int =
+    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+const JOURNAL_FLAGS: libc::c_int = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
 
 /// An opened instance root directory. The operator supplies and trusts the root, so `open` may
 /// reach it through a symlink; every name beneath it is opened relative to this descriptor
@@ -85,6 +95,102 @@ impl InstanceRoot {
         }
     }
 
+    /// Lists every entry of `<root>/cells` and classifies it, opening nothing through a symlink.
+    /// A missing `cells` is a fresh instance with no entries. A symlinked or non-directory
+    /// `cells`, or any failure to list or inspect all of its entries, refuses the whole
+    /// discovery: a partial listing is never returned. A bad entry or an unopenable cell is
+    /// reported in its own entry while its siblings are still classified. Entries come in
+    /// raw-byte order of their names.
+    pub fn discover(&self) -> Result<Discovery, DiscoveryError> {
+        let cells_path = self.path.join(CELLS_DIR);
+        let cells = match self.open_cells() {
+            Ok(cells) => cells,
+            Err(DirectoryRefusal::Missing) => {
+                return Ok(Discovery {
+                    cells_dir_present: false,
+                    entries: Vec::new(),
+                });
+            }
+            Err(DirectoryRefusal::Symlink) => {
+                return Err(DiscoveryError::CellsSymlink { path: cells_path });
+            }
+            Err(DirectoryRefusal::NotADirectory) => {
+                return Err(DiscoveryError::CellsNotADirectory { path: cells_path });
+            }
+            Err(DirectoryRefusal::Io(source)) => {
+                return Err(DiscoveryError::Open {
+                    path: cells_path,
+                    source,
+                });
+            }
+        };
+        let mut names = DirectoryStream::open(cells.as_fd())
+            .and_then(collect_names)
+            .map_err(|source| DiscoveryError::Listing {
+                path: cells_path.clone(),
+                source,
+            })?;
+        names.sort();
+        let entries = names
+            .into_iter()
+            .map(|raw_name| self.classify(cells.as_fd(), &cells_path, raw_name))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Discovery {
+            cells_dir_present: true,
+            entries,
+        })
+    }
+
+    fn open_cells(&self) -> Result<OwnedFd, DirectoryRefusal> {
+        let name = c_name(CELLS_DIR.as_bytes()).map_err(DirectoryRefusal::Io)?;
+        open_at(self.dir.as_fd(), &name, DIRECTORY_FLAGS, 0)
+            .map_err(|error| directory_refusal(self.dir.as_fd(), &name, error))
+    }
+
+    fn classify(
+        &self,
+        cells: BorrowedFd<'_>,
+        cells_path: &Path,
+        raw_name: Vec<u8>,
+    ) -> Result<DiscoveredEntry, DiscoveryError> {
+        let path = cells_path.join(OsStr::from_bytes(&raw_name));
+        let classify_error = |source| DiscoveryError::Classify {
+            path: path.clone(),
+            source,
+        };
+        let name = c_name(&raw_name).map_err(classify_error)?;
+        let class = match kind_at(cells, &name).map_err(classify_error)? {
+            Kind::Symlink => EntryClass::NotACell(NotACell::Symlink),
+            Kind::Other => EntryClass::NotACell(NotACell::NotADirectory),
+            Kind::Directory => match self.cell_named(&raw_name) {
+                None => EntryClass::NotACell(NotACell::InvalidName),
+                Some((cell, journal_path)) => {
+                    let journal = match open_at(cells, &name, DIRECTORY_FLAGS, 0) {
+                        Ok(dir) => CellDir {
+                            dir,
+                            cell: cell.clone(),
+                            journal_path,
+                        }
+                        .open_journal(),
+                        Err(error) => JournalOpen::Refused(JournalRefusal::CellDirectory(error)),
+                    };
+                    EntryClass::Cell { cell, journal }
+                }
+            },
+        };
+        Ok(DiscoveredEntry {
+            raw_name,
+            path,
+            class,
+        })
+    }
+
+    fn cell_named(&self, raw_name: &[u8]) -> Option<(CellId, PathBuf)> {
+        let cell = parse_cell_name(raw_name)?;
+        let journal_path = cell_ledger_path(&self.path, &cell).ok()?;
+        Some((cell, journal_path))
+    }
+
     fn open_lock_file(&self) -> io::Result<(OwnedFd, bool)> {
         let name = c_name(LOCK_FILE.as_bytes())?;
         let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
@@ -127,6 +233,101 @@ impl fmt::Debug for WriterLock {
     }
 }
 
+/// One opened cell directory under `<root>/cells`, reached without following a symlink. Its
+/// journal is opened relative to it, never by path.
+#[derive(Debug)]
+pub struct CellDir {
+    dir: OwnedFd,
+    cell: CellId,
+    journal_path: PathBuf,
+}
+
+impl CellDir {
+    /// The cell this directory belongs to.
+    pub fn cell(&self) -> &CellId {
+        &self.cell
+    }
+
+    /// The journal's path, as [`cell_ledger_path`] names it, for messages and reports.
+    pub fn journal_path(&self) -> &Path {
+        &self.journal_path
+    }
+
+    /// Opens the journal for reading without following a symlink and without blocking on a
+    /// FIFO. A missing journal is `Missing`; anything but a regular file is refused and closed
+    /// unread. The returned file is in blocking mode.
+    pub fn open_journal(&self) -> JournalOpen {
+        match open_journal_at(self.dir.as_fd(), libc::O_RDONLY, 0) {
+            Ok(file) => JournalOpen::Regular(file),
+            Err(JournalRefusal::Io(error)) if error.raw_os_error() == Some(libc::ENOENT) => {
+                JournalOpen::Missing
+            }
+            Err(refusal) => JournalOpen::Refused(refusal),
+        }
+    }
+}
+
+/// The result of opening a cell's journal for reading.
+#[derive(Debug)]
+pub enum JournalOpen {
+    Missing,
+    Regular(File),
+    Refused(JournalRefusal),
+}
+
+/// Why a cell's journal was not opened. `CellDirectory` means the cell directory itself could
+/// not be opened.
+#[derive(Debug)]
+pub enum JournalRefusal {
+    CellDirectory(io::Error),
+    Symlink,
+    NotRegular,
+    Io(io::Error),
+}
+
+/// Every entry found under `<root>/cells`, in raw-byte order of the names.
+/// `cells_dir_present` is false for a fresh instance with no `cells` directory.
+#[derive(Debug)]
+pub struct Discovery {
+    pub cells_dir_present: bool,
+    pub entries: Vec<DiscoveredEntry>,
+}
+
+/// One entry of `<root>/cells`. `raw_name` is the name's exact bytes and `path` is built from
+/// them, never from a lossy string.
+#[derive(Debug)]
+pub struct DiscoveredEntry {
+    pub raw_name: Vec<u8>,
+    pub path: PathBuf,
+    pub class: EntryClass,
+}
+
+/// A discovered entry is a valid cell with its journal opened, or not a cell at all.
+#[derive(Debug)]
+pub enum EntryClass {
+    Cell { cell: CellId, journal: JournalOpen },
+    NotACell(NotACell),
+}
+
+/// Why an entry is not a cell. Nothing is opened through such an entry. A symlink is reported
+/// as a symlink even when its name is also invalid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotACell {
+    InvalidName,
+    Symlink,
+    NotADirectory,
+}
+
+/// Why discovery could not account for every entry under `<root>/cells`.
+#[derive(Debug)]
+pub enum DiscoveryError {
+    CellsSymlink { path: PathBuf },
+    CellsNotADirectory { path: PathBuf },
+    Open { path: PathBuf, source: io::Error },
+    Listing { path: PathBuf, source: io::Error },
+    Classify { path: PathBuf, source: io::Error },
+}
+
 /// Why an instance root could not be opened.
 #[derive(Debug)]
 pub enum InstanceRootError {
@@ -165,6 +366,143 @@ fn open_at(
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn parse_cell_name(raw: &[u8]) -> Option<CellId> {
+    let cell = CellId::from(std::str::from_utf8(raw).ok()?);
+    validate_cell_id(&cell).ok()?;
+    Some(cell)
+}
+
+fn collect_names(names: impl Iterator<Item = io::Result<Vec<u8>>>) -> io::Result<Vec<Vec<u8>>> {
+    names.collect()
+}
+
+enum DirectoryRefusal {
+    Missing,
+    Symlink,
+    NotADirectory,
+    Io(io::Error),
+}
+
+fn directory_refusal(parent: BorrowedFd<'_>, name: &CStr, error: io::Error) -> DirectoryRefusal {
+    match error.raw_os_error() {
+        Some(libc::ENOENT) => DirectoryRefusal::Missing,
+        Some(libc::ELOOP) => DirectoryRefusal::Symlink,
+        Some(libc::ENOTDIR) => match kind_at(parent, name) {
+            Ok(Kind::Symlink) => DirectoryRefusal::Symlink,
+            _ => DirectoryRefusal::NotADirectory,
+        },
+        _ => DirectoryRefusal::Io(error),
+    }
+}
+
+fn open_journal_at(
+    cell: BorrowedFd<'_>,
+    access: libc::c_int,
+    mode: libc::mode_t,
+) -> Result<File, JournalRefusal> {
+    let name = c_name(CELL_JOURNAL_FILE.as_bytes()).map_err(JournalRefusal::Io)?;
+    let fd = open_at(cell, &name, access | JOURNAL_FLAGS, mode).map_err(|error| {
+        match error.raw_os_error() {
+            Some(libc::ELOOP) => JournalRefusal::Symlink,
+            Some(libc::EISDIR) => JournalRefusal::NotRegular,
+            _ => JournalRefusal::Io(error),
+        }
+    })?;
+    let file = File::from(fd);
+    if !file.metadata().map_err(JournalRefusal::Io)?.is_file() {
+        return Err(JournalRefusal::NotRegular);
+    }
+    clear_nonblocking(file.as_fd()).map_err(JournalRefusal::Io)?;
+    Ok(file)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Directory,
+    Symlink,
+    Other,
+}
+
+fn kind_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<Kind> {
+    let mut status = MaybeUninit::<libc::stat>::uninit();
+    let found = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            status.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if found != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let format = unsafe { status.assume_init() }.st_mode & libc::S_IFMT;
+    Ok(match format {
+        libc::S_IFDIR => Kind::Directory,
+        libc::S_IFLNK => Kind::Symlink,
+        _ => Kind::Other,
+    })
+}
+
+fn clear_nonblocking(file: BorrowedFd<'_>) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let set = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+    if set < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+struct DirectoryStream(NonNull<libc::DIR>);
+
+impl DirectoryStream {
+    fn open(dir: BorrowedFd<'_>) -> io::Result<DirectoryStream> {
+        let owned = dir.try_clone_to_owned()?;
+        let stream = unsafe { libc::fdopendir(owned.as_raw_fd()) };
+        let stream = NonNull::new(stream).ok_or_else(io::Error::last_os_error)?;
+        let _owned_by_stream = owned.into_raw_fd();
+        Ok(DirectoryStream(stream))
+    }
+}
+
+impl Iterator for DirectoryStream {
+    type Item = io::Result<Vec<u8>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            clear_errno();
+            let entry = unsafe { libc::readdir(self.0.as_ptr()) };
+            if entry.is_null() {
+                let error = io::Error::last_os_error();
+                return (error.raw_os_error() != Some(0)).then_some(Err(error));
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if name != b"." && name != b".." {
+                return Some(Ok(name.to_vec()));
+            }
+        }
+    }
+}
+
+impl Drop for DirectoryStream {
+    fn drop(&mut self) {
+        unsafe { libc::closedir(self.0.as_ptr()) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn clear_errno() {
+    unsafe { *libc::__error() = 0 };
+}
+
+#[cfg(target_os = "linux")]
+fn clear_errno() {
+    unsafe { *libc::__errno_location() = 0 };
 }
 
 fn lock_exclusive_nonblocking(file: BorrowedFd<'_>) -> io::Result<()> {
