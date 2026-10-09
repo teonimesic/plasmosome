@@ -678,10 +678,11 @@ fn sync_directory(dir: BorrowedFd<'_>) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
     use std::ffi::CString;
     use std::fs;
     use std::io::{self, Read, Write};
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsRawFd, BorrowedFd};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::os::unix::net::UnixListener;
@@ -1220,6 +1221,48 @@ mod tests {
         (metadata.dev(), metadata.ino())
     }
 
+    thread_local! {
+        static SYNCED: RefCell<Vec<(u64, u64)>> = const { RefCell::new(Vec::new()) };
+        static FAIL_NEXT_SYNC_OF: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+    }
+
+    fn recording_sync(dir: BorrowedFd<'_>) -> io::Result<()> {
+        let synced = identity(&fs::File::from(dir.try_clone_to_owned()?).metadata()?);
+        SYNCED.with(|all| all.borrow_mut().push(synced));
+        if FAIL_NEXT_SYNC_OF.with(|fail| fail.get()) == Some(synced) {
+            FAIL_NEXT_SYNC_OF.with(|fail| fail.set(None));
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
+        sync_directory(dir)
+    }
+
+    fn recording_root(root: &Path) -> InstanceRoot {
+        SYNCED.with(|all| all.borrow_mut().clear());
+        FAIL_NEXT_SYNC_OF.with(|fail| fail.set(None));
+        let mut instance = open_root(root);
+        instance.sync = recording_sync;
+        instance
+    }
+
+    fn syncs_of(path: &Path) -> usize {
+        let directory = identity(&fs::metadata(path).expect("the synced directory exists"));
+        SYNCED.with(|all| {
+            all.borrow()
+                .iter()
+                .filter(|&&synced| synced == directory)
+                .count()
+        })
+    }
+
+    fn fail_next_sync_of(path: &Path) {
+        let directory = identity(&fs::metadata(path).expect("the directory exists"));
+        FAIL_NEXT_SYNC_OF.with(|fail| fail.set(Some(directory)));
+    }
+
+    fn assert_injected(source: &io::Error) {
+        assert_eq!(source.raw_os_error(), Some(libc::EIO), "{source}");
+    }
+
     fn appended(dir: &CellDir) -> JournalAppend {
         dir.open_journal_for_append()
             .expect("the journal opens for appending")
@@ -1505,5 +1548,115 @@ mod tests {
                 "the {what} descriptor would leak into a spawned process: flags {flags}"
             );
         }
+    }
+
+    #[test]
+    fn lock_syncs_the_root_on_every_call() {
+        let (_dir, root) = temp_root();
+        let instance = recording_root(&root);
+        drop(instance.lock().expect("the first lock is taken"));
+        drop(instance.lock().expect("the second lock is taken"));
+        assert_eq!(syncs_of(&root), 2);
+    }
+
+    #[test]
+    fn a_lock_retried_after_a_failed_root_sync_syncs_the_root() {
+        let (_dir, root) = temp_root();
+        let instance = recording_root(&root);
+        fail_next_sync_of(&root);
+        expect_match!(instance.lock(), Err(LockError::Io { path, source }) => {
+            assert_eq!(path, root);
+            assert_injected(&source);
+        });
+        assert!(
+            a_separate_open_can_lock(&root.join("controller.lock")),
+            "a failed lock() holds nothing"
+        );
+        let _lock = instance.lock().expect("the retry takes the lock");
+        assert_eq!(syncs_of(&root), 2);
+        assert_eq!(mode_of(&root.join("controller.lock")), 0o600);
+    }
+
+    #[test]
+    fn create_cell_dir_syncs_the_root_and_cells_on_every_call() {
+        let (_dir, root) = temp_root();
+        let instance = recording_root(&root);
+        instance
+            .create_cell_dir(&cell("cell-1"))
+            .expect("the first cell is created");
+        assert_eq!((syncs_of(&root), syncs_of(&root.join("cells"))), (1, 1));
+        instance
+            .create_cell_dir(&cell("cell-2"))
+            .expect("the second cell is created");
+        assert_eq!((syncs_of(&root), syncs_of(&root.join("cells"))), (2, 2));
+    }
+
+    #[test]
+    fn a_cell_creation_retried_after_a_failed_root_sync_syncs_the_root() {
+        let (_dir, root) = temp_root();
+        let instance = recording_root(&root);
+        fail_next_sync_of(&root);
+        expect_match!(instance.create_cell_dir(&cell("cell-1")), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, root);
+            assert_injected(&source);
+        });
+        instance
+            .create_cell_dir(&cell("cell-1"))
+            .expect("the retry creates the cell");
+        assert_eq!(syncs_of(&root), 2);
+        assert_eq!(mode_of(&root.join("cells")), 0o700);
+    }
+
+    #[test]
+    fn a_cells_directory_left_without_its_mode_is_made_private() {
+        assert_not_root();
+        for left in [0o500, 0o755] {
+            let (_dir, root) = temp_root();
+            fs::create_dir(root.join("cells")).expect("cells is made");
+            let _restore = restrict(&root.join("cells"), left);
+            open_root(&root)
+                .create_cell_dir(&cell("cell-1"))
+                .unwrap_or_else(|error| panic!("cells left at {left:o}: {error:?}"));
+            assert_eq!(mode_of(&root.join("cells")), 0o700, "left at {left:o}");
+        }
+    }
+
+    #[test]
+    fn a_cell_whose_cells_sync_failed_is_not_adopted_and_its_retry_syncs_cells() {
+        let (_dir, root) = temp_root();
+        fs::create_dir(root.join("cells")).expect("cells is made");
+        let instance = recording_root(&root);
+        fail_next_sync_of(&root.join("cells"));
+        expect_match!(instance.create_cell_dir(&cell("cell-1")), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, root.join("cells"));
+            assert_injected(&source);
+        });
+        expect_match!(
+            instance.create_cell_dir(&cell("cell-1")),
+            Err(CellDirError::AlreadyExists { path }) => assert_eq!(path, root.join("cells/cell-1"))
+        );
+        assert_eq!(syncs_of(&root.join("cells")), 2);
+    }
+
+    #[test]
+    fn an_existing_journal_is_made_private_when_opened_for_append() {
+        let (_dir, root) = temp_root();
+        let cell_path = make_cell(&root, "cell-1", Some(b"one\n"));
+        set_mode(&cell_path.join("ledger.ndjson"), 0o644);
+        let opened = open_root(&root)
+            .cell_dir(&cell("cell-1"))
+            .expect("the cell");
+        assert!(!appended(&opened).created);
+        assert_eq!(mode_of(&cell_path.join("ledger.ndjson")), 0o600);
+    }
+
+    #[test]
+    fn a_cell_directory_syncs_through_the_roots_function() {
+        let (_dir, root) = temp_root();
+        let created = recording_root(&root)
+            .create_cell_dir(&cell("cell-1"))
+            .expect("the cell is created");
+        created.sync().expect("the cell directory syncs");
+        assert_eq!(syncs_of(&root.join("cells/cell-1")), 1);
     }
 }
