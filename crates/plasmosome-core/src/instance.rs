@@ -5,7 +5,7 @@ use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
@@ -23,6 +23,7 @@ const DIRECTORY_FLAGS: libc::c_int =
 const JOURNAL_FLAGS: libc::c_int = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
 
 type SyncDirectory = fn(BorrowedFd<'_>) -> io::Result<()>;
+type Identity = (u64, u64);
 
 /// An opened instance root directory. The operator supplies and trusts the root, so `open` may
 /// reach it through a symlink; every name beneath it is opened relative to this descriptor
@@ -31,6 +32,7 @@ type SyncDirectory = fn(BorrowedFd<'_>) -> io::Result<()>;
 pub struct InstanceRoot {
     dir: OwnedFd,
     path: PathBuf,
+    identity: Identity,
     sync: SyncDirectory,
 }
 
@@ -47,13 +49,16 @@ impl InstanceRoot {
             .read(true)
             .custom_flags(libc::O_DIRECTORY)
             .open(path)
+            .and_then(|dir| Ok((identity_of(&dir.metadata()?), dir)))
             .map_err(|source| InstanceRootError::Open {
                 path: path.to_path_buf(),
                 source,
             })?;
+        let (identity, dir) = dir;
         Ok(InstanceRoot {
             dir: OwnedFd::from(dir),
             path: path.to_path_buf(),
+            identity,
             sync: sync_directory,
         })
     }
@@ -77,15 +82,13 @@ impl InstanceRoot {
             source,
         };
         let name = c_name(LOCK_FILE.as_bytes()).map_err(io_error)?;
-        let fd = self
-            .open_lock_file(&name)
-            .map_err(|source| match source.raw_os_error() {
-                Some(libc::ELOOP) => LockError::Symlink { path: path.clone() },
-                _ if present_and_not_regular(self.dir.as_fd(), &name) => {
-                    LockError::NotRegular { path: path.clone() }
-                }
-                _ => io_error(source),
-            })?;
+        let fd = self.open_lock_file(&name).map_err(|source| {
+            match file_refusal(self.dir.as_fd(), &name, source) {
+                FileRefusal::Symlink => LockError::Symlink { path: path.clone() },
+                FileRefusal::NotRegular => LockError::NotRegular { path: path.clone() },
+                FileRefusal::Io(source) => io_error(source),
+            }
+        })?;
         let file = File::from(fd);
         if !file.metadata().map_err(io_error)?.is_file() {
             return Err(LockError::NotRegular { path });
@@ -101,7 +104,11 @@ impl InstanceRoot {
             path: self.path.clone(),
             source,
         })?;
-        Ok(WriterLock { file, path })
+        Ok(WriterLock {
+            file,
+            path,
+            root: self.identity,
+        })
     }
 
     /// Lists every entry of `<root>/cells` and classifies it, opening nothing through a symlink.
@@ -110,11 +117,16 @@ impl InstanceRoot {
     /// discovery: a partial listing is never returned. A bad entry or an unopenable cell is
     /// reported in its own entry while its siblings are still classified. Entries come in
     /// raw-byte order of their names.
-    pub fn discover(&self) -> Result<Discovery, DiscoveryError> {
+    pub fn discover(&self, lock: &WriterLock) -> Result<Discovery, DiscoveryError> {
+        if lock.root != self.identity {
+            return Err(DiscoveryError::ForeignLock {
+                path: lock.path.clone(),
+            });
+        }
         let cells_path = self.path.join(CELLS_DIR);
         let cells = match self.open_cells() {
             Ok(cells) => cells,
-            Err(DirectoryRefusal::Missing(_)) => {
+            Err(DirectoryRefusal::Missing) => {
                 return Ok(Discovery {
                     cells_dir_present: false,
                     entries: Vec::new(),
@@ -126,6 +138,12 @@ impl InstanceRoot {
             Err(DirectoryRefusal::NotADirectory) => {
                 return Err(DiscoveryError::CellsNotADirectory { path: cells_path });
             }
+            Err(DirectoryRefusal::Io(source)) if out_of_descriptors(&source) => {
+                return Err(DiscoveryError::OutOfDescriptors {
+                    path: cells_path,
+                    source,
+                });
+            }
             Err(DirectoryRefusal::Io(source)) => {
                 return Err(DiscoveryError::Open {
                     path: cells_path,
@@ -135,9 +153,13 @@ impl InstanceRoot {
         };
         let mut names = DirectoryStream::open(cells.as_fd())
             .and_then(collect_names)
-            .map_err(|source| DiscoveryError::Listing {
-                path: cells_path.clone(),
-                source,
+            .map_err(|source| {
+                let path = cells_path.clone();
+                if out_of_descriptors(&source) {
+                    DiscoveryError::OutOfDescriptors { path, source }
+                } else {
+                    DiscoveryError::Listing { path, source }
+                }
             })?;
         names.sort();
         let entries = names
@@ -164,14 +186,28 @@ impl InstanceRoot {
             source,
         })?;
         let dir = open_at(cells.as_fd(), &name, DIRECTORY_FLAGS, 0).map_err(|error| {
-            directory_refusal(cells.as_fd(), &name, error).into_cell_dir_error(cell_path)
+            directory_refusal(cells.as_fd(), &name, error).into_cell_dir_error(cell_path.clone())
         })?;
-        Ok(CellDir {
+        let listed = lists_exactly(cells.as_fd(), cell.as_str().as_bytes()).map_err(|source| {
+            CellDirError::Io {
+                path: cells_path.clone(),
+                source,
+            }
+        })?;
+        if !listed {
+            return Err(CellDirError::Alias { path: cell_path });
+        }
+        Ok(self.cell_dir_from(dir, cell.clone(), journal_path))
+    }
+
+    fn cell_dir_from(&self, dir: OwnedFd, cell: CellId, journal_path: PathBuf) -> CellDir {
+        CellDir {
             dir,
-            cell: cell.clone(),
+            cell,
             journal_path,
+            root: self.identity,
             sync: self.sync,
-        })
+        }
     }
 
     /// Creates `<root>/cells/<cell>` exclusively with mode 0700, whatever the umask, creating
@@ -181,7 +217,16 @@ impl InstanceRoot {
     /// created. A failed sync names the directory that was being synced. An existing cell
     /// directory is `AlreadyExists` and is never adopted. An invalid ID is refused before
     /// anything is created.
-    pub fn create_cell_dir(&self, cell: &CellId) -> Result<CellDir, CellDirError> {
+    pub fn create_cell_dir(
+        &self,
+        lock: &WriterLock,
+        cell: &CellId,
+    ) -> Result<CellDir, CellDirError> {
+        if lock.root != self.identity {
+            return Err(CellDirError::ForeignLock {
+                path: lock.path.clone(),
+            });
+        }
         let journal_path = cell_ledger_path(&self.path, cell).map_err(CellDirError::InvalidCell)?;
         let cells_path = self.path.join(CELLS_DIR);
         let cells = self.create_cells(&cells_path)?;
@@ -209,12 +254,7 @@ impl InstanceRoot {
         })?;
         change_mode(dir.as_fd(), PRIVATE_DIRECTORY).map_err(io_error)?;
         sync_cells()?;
-        Ok(CellDir {
-            dir,
-            cell: cell.clone(),
-            journal_path,
-            sync: self.sync,
-        })
+        Ok(self.cell_dir_from(dir, cell.clone(), journal_path))
     }
 
     fn create_cells(&self, cells_path: &Path) -> Result<OwnedFd, CellDirError> {
@@ -255,25 +295,40 @@ impl InstanceRoot {
             path: path.clone(),
             source,
         };
+        let out_of_descriptors_error = |source| DiscoveryError::OutOfDescriptors {
+            path: path.clone(),
+            source,
+        };
         let name = c_name(&raw_name).map_err(classify_error)?;
-        let class = match kind_at(cells, &name).map_err(classify_error)? {
+        let not_a_cell = |kind| match kind {
             Kind::Symlink => EntryClass::NotACell(NotACell::Symlink),
             Kind::Regular | Kind::Other => EntryClass::NotACell(NotACell::NotADirectory),
-            Kind::Directory => match self.cell_named(&raw_name) {
-                None => EntryClass::NotACell(NotACell::InvalidName),
-                Some((cell, journal_path)) => {
-                    let journal = match open_at(cells, &name, DIRECTORY_FLAGS, 0) {
-                        Ok(dir) => CellDir {
-                            dir,
-                            cell: cell.clone(),
-                            journal_path,
-                            sync: self.sync,
-                        }
-                        .open_journal(),
-                        Err(error) => JournalOpen::Refused(JournalRefusal::CellDirectory(error)),
-                    };
-                    EntryClass::Cell { cell, journal }
+            Kind::Directory => EntryClass::NotACell(NotACell::InvalidName),
+        };
+        let class = match self.cell_named(&raw_name) {
+            None => not_a_cell(kind_at(cells, &name).map_err(classify_error)?),
+            Some((cell, journal_path)) => match open_at(cells, &name, DIRECTORY_FLAGS, 0) {
+                Ok(dir) => match self
+                    .cell_dir_from(dir, cell.clone(), journal_path)
+                    .open_journal()
+                {
+                    JournalOpen::Refused(JournalRefusal::Io(source))
+                        if out_of_descriptors(&source) =>
+                    {
+                        return Err(out_of_descriptors_error(source));
+                    }
+                    journal => EntryClass::Cell { cell, journal },
+                },
+                Err(source) if out_of_descriptors(&source) => {
+                    return Err(out_of_descriptors_error(source));
                 }
+                Err(error) => match kind_at(cells, &name).map_err(classify_error)? {
+                    Kind::Directory => EntryClass::Cell {
+                        cell,
+                        journal: JournalOpen::Refused(JournalRefusal::CellDirectory(error)),
+                    },
+                    kind => not_a_cell(kind),
+                },
             },
         };
         Ok(DiscoveredEntry {
@@ -290,7 +345,7 @@ impl InstanceRoot {
     }
 
     fn open_lock_file(&self, name: &CStr) -> io::Result<OwnedFd> {
-        let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+        let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC;
         match open_at(self.dir.as_fd(), name, flags, 0) {
             Err(missing) if missing.raw_os_error() == Some(libc::ENOENT) => {
                 let exclusive = flags | libc::O_CREAT | libc::O_EXCL;
@@ -308,9 +363,11 @@ impl InstanceRoot {
 
 /// The instance's writer lock. Dropping it releases the lock and leaves `controller.lock` in
 /// place; so does the death of the process holding it.
+#[must_use = "dropping the WriterLock releases the instance lock"]
 pub struct WriterLock {
     file: File,
     path: PathBuf,
+    root: Identity,
 }
 
 impl WriterLock {
@@ -336,6 +393,7 @@ pub struct CellDir {
     dir: OwnedFd,
     cell: CellId,
     journal_path: PathBuf,
+    root: Identity,
     sync: SyncDirectory,
 }
 
@@ -368,7 +426,15 @@ impl CellDir {
     /// is created exclusively and returns `created: true`. Either way the journal is set to mode
     /// 0600. This call does not sync the journal or its directory. An existing inode is never
     /// replaced.
-    pub fn open_journal_for_append(&self) -> Result<JournalAppend, JournalRefusal> {
+    pub fn open_journal_for_append(
+        &self,
+        lock: &WriterLock,
+    ) -> Result<JournalAppend, JournalRefusal> {
+        if lock.root != self.root {
+            return Err(JournalRefusal::ForeignLock {
+                path: lock.path.clone(),
+            });
+        }
         let access = libc::O_RDWR | libc::O_APPEND;
         let (file, created) = match open_journal_at(self.dir.as_fd(), access, 0) {
             Ok(file) => (file, false),
@@ -414,6 +480,7 @@ pub enum JournalRefusal {
     Symlink,
     NotRegular,
     Io(io::Error),
+    ForeignLock { path: PathBuf },
 }
 
 /// Every entry found under `<root>/cells`, in raw-byte order of the names.
@@ -457,16 +524,21 @@ pub enum DiscoveryError {
     Open { path: PathBuf, source: io::Error },
     Listing { path: PathBuf, source: io::Error },
     Classify { path: PathBuf, source: io::Error },
+    OutOfDescriptors { path: PathBuf, source: io::Error },
+    ForeignLock { path: PathBuf },
 }
 
 /// Why a cell directory could not be opened or created.
 #[derive(Debug)]
 pub enum CellDirError {
     InvalidCell(CellPathError),
+    Missing { path: PathBuf },
+    Alias { path: PathBuf },
     Symlink { path: PathBuf },
     NotADirectory { path: PathBuf },
     AlreadyExists { path: PathBuf },
     Io { path: PathBuf, source: io::Error },
+    ForeignLock { path: PathBuf },
 }
 
 /// Why an instance root could not be opened.
@@ -483,6 +555,170 @@ pub enum LockError {
     Symlink { path: PathBuf },
     NotRegular { path: PathBuf },
     Io { path: PathBuf, source: io::Error },
+}
+
+fn symlink_text(path: &Path) -> String {
+    format!("{} is a symlink and was not followed", path.display())
+}
+
+fn foreign_lock_text(path: &Path) -> String {
+    format!(
+        "the writer lock {} belongs to another instance root",
+        path.display()
+    )
+}
+
+impl fmt::Display for JournalRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JournalRefusal::CellDirectory(source) => {
+                write!(f, "the cell directory could not be opened: {source}")
+            }
+            JournalRefusal::Symlink => f.write_str("the journal is a symlink and was not followed"),
+            JournalRefusal::NotRegular => f.write_str("the journal is not a regular file"),
+            JournalRefusal::Io(source) => write!(f, "I/O failed on the journal: {source}"),
+            JournalRefusal::ForeignLock { path } => f.write_str(&foreign_lock_text(path)),
+        }
+    }
+}
+
+impl std::error::Error for JournalRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            JournalRefusal::CellDirectory(source) | JournalRefusal::Io(source) => Some(source),
+            JournalRefusal::Symlink
+            | JournalRefusal::NotRegular
+            | JournalRefusal::ForeignLock { .. } => None,
+        }
+    }
+}
+
+impl fmt::Display for DiscoveryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DiscoveryError::CellsSymlink { path } => f.write_str(&symlink_text(path)),
+            DiscoveryError::CellsNotADirectory { path } => {
+                write!(f, "{} is not a directory", path.display())
+            }
+            DiscoveryError::Open { path, source } => {
+                write!(f, "cannot open {}: {source}", path.display())
+            }
+            DiscoveryError::Listing { path, source } => {
+                write!(f, "cannot list {}: {source}", path.display())
+            }
+            DiscoveryError::Classify { path, source } => {
+                write!(f, "cannot inspect {}: {source}", path.display())
+            }
+            DiscoveryError::OutOfDescriptors { path, source } => {
+                write!(f, "out of file descriptors at {}: {source}", path.display())
+            }
+            DiscoveryError::ForeignLock { path } => f.write_str(&foreign_lock_text(path)),
+        }
+    }
+}
+
+impl std::error::Error for DiscoveryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DiscoveryError::Open { source, .. }
+            | DiscoveryError::Listing { source, .. }
+            | DiscoveryError::Classify { source, .. }
+            | DiscoveryError::OutOfDescriptors { source, .. } => Some(source),
+            DiscoveryError::CellsSymlink { .. }
+            | DiscoveryError::CellsNotADirectory { .. }
+            | DiscoveryError::ForeignLock { .. } => None,
+        }
+    }
+}
+
+impl fmt::Display for CellDirError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CellDirError::InvalidCell(error) => write!(f, "cannot use this cell ID: {error}"),
+            CellDirError::Missing { path } => write!(f, "{} does not exist", path.display()),
+            CellDirError::Alias { path } => write!(
+                f,
+                "{} names a cell whose directory is spelled differently on disk",
+                path.display()
+            ),
+            CellDirError::Symlink { path } => f.write_str(&symlink_text(path)),
+            CellDirError::NotADirectory { path } => {
+                write!(f, "{} is not a directory", path.display())
+            }
+            CellDirError::AlreadyExists { path } => {
+                write!(f, "{} already exists and was not adopted", path.display())
+            }
+            CellDirError::Io { path, source } => {
+                write!(f, "I/O failed at {}: {source}", path.display())
+            }
+            CellDirError::ForeignLock { path } => f.write_str(&foreign_lock_text(path)),
+        }
+    }
+}
+
+impl std::error::Error for CellDirError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CellDirError::InvalidCell(error) => Some(error),
+            CellDirError::Io { source, .. } => Some(source),
+            CellDirError::Missing { .. }
+            | CellDirError::Alias { .. }
+            | CellDirError::Symlink { .. }
+            | CellDirError::NotADirectory { .. }
+            | CellDirError::AlreadyExists { .. }
+            | CellDirError::ForeignLock { .. } => None,
+        }
+    }
+}
+
+impl fmt::Display for InstanceRootError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InstanceRootError::NotAbsolute { path } => {
+                write!(f, "{} is not an absolute path", path.display())
+            }
+            InstanceRootError::Open { path, source } => write!(
+                f,
+                "cannot open the instance root {}: {source}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InstanceRootError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            InstanceRootError::Open { source, .. } => Some(source),
+            InstanceRootError::NotAbsolute { .. } => None,
+        }
+    }
+}
+
+impl fmt::Display for LockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LockError::Busy { path } => write!(f, "{} is held by another writer", path.display()),
+            LockError::Symlink { path } => f.write_str(&symlink_text(path)),
+            LockError::NotRegular { path } => {
+                write!(f, "{} is not a regular file", path.display())
+            }
+            LockError::Io { path, source } => {
+                write!(f, "the writer lock failed at {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LockError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LockError::Io { source, .. } => Some(source),
+            LockError::Busy { .. } | LockError::Symlink { .. } | LockError::NotRegular { .. } => {
+                None
+            }
+        }
+    }
 }
 
 fn c_name(name: &[u8]) -> io::Result<CString> {
@@ -512,8 +748,25 @@ fn collect_names(names: impl Iterator<Item = io::Result<Vec<u8>>>) -> io::Result
     names.collect()
 }
 
+fn lists_exactly(dir: BorrowedFd<'_>, name: &[u8]) -> io::Result<bool> {
+    for listed in DirectoryStream::open(dir)? {
+        if listed? == name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn out_of_descriptors(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
+}
+
+fn identity_of(metadata: &std::fs::Metadata) -> Identity {
+    (metadata.dev(), metadata.ino())
+}
+
 enum DirectoryRefusal {
-    Missing(io::Error),
+    Missing,
     Symlink,
     NotADirectory,
     Io(io::Error),
@@ -524,16 +777,15 @@ impl DirectoryRefusal {
         match self {
             DirectoryRefusal::Symlink => CellDirError::Symlink { path },
             DirectoryRefusal::NotADirectory => CellDirError::NotADirectory { path },
-            DirectoryRefusal::Missing(source) | DirectoryRefusal::Io(source) => {
-                CellDirError::Io { path, source }
-            }
+            DirectoryRefusal::Missing => CellDirError::Missing { path },
+            DirectoryRefusal::Io(source) => CellDirError::Io { path, source },
         }
     }
 }
 
 fn directory_refusal(parent: BorrowedFd<'_>, name: &CStr, error: io::Error) -> DirectoryRefusal {
     match error.raw_os_error() {
-        Some(libc::ENOENT) => DirectoryRefusal::Missing(error),
+        Some(libc::ENOENT) => DirectoryRefusal::Missing,
         Some(libc::ELOOP) => DirectoryRefusal::Symlink,
         Some(libc::ENOTDIR) => match kind_at(parent, name) {
             Ok(Kind::Symlink) => DirectoryRefusal::Symlink,
@@ -549,13 +801,14 @@ fn open_journal_at(
     mode: libc::mode_t,
 ) -> Result<File, JournalRefusal> {
     let name = c_name(CELL_JOURNAL_FILE.as_bytes()).map_err(JournalRefusal::Io)?;
-    let fd = open_at(cell, &name, access | JOURNAL_FLAGS, mode).map_err(|error| {
-        match error.raw_os_error() {
-            Some(libc::ELOOP) => JournalRefusal::Symlink,
-            _ if present_and_not_regular(cell, &name) => JournalRefusal::NotRegular,
-            _ => JournalRefusal::Io(error),
-        }
-    })?;
+    let fd =
+        open_at(cell, &name, access | JOURNAL_FLAGS, mode).map_err(|error| {
+            match file_refusal(cell, &name, error) {
+                FileRefusal::Symlink => JournalRefusal::Symlink,
+                FileRefusal::NotRegular => JournalRefusal::NotRegular,
+                FileRefusal::Io(error) => JournalRefusal::Io(error),
+            }
+        })?;
     let file = File::from(fd);
     if !file.metadata().map_err(JournalRefusal::Io)?.is_file() {
         return Err(JournalRefusal::NotRegular);
@@ -572,11 +825,21 @@ enum Kind {
     Other,
 }
 
-fn present_and_not_regular(parent: BorrowedFd<'_>, name: &CStr) -> bool {
-    matches!(
-        kind_at(parent, name),
-        Ok(Kind::Directory | Kind::Symlink | Kind::Other)
-    )
+enum FileRefusal {
+    Symlink,
+    NotRegular,
+    Io(io::Error),
+}
+
+fn file_refusal(parent: BorrowedFd<'_>, name: &CStr, error: io::Error) -> FileRefusal {
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return FileRefusal::Symlink;
+    }
+    match kind_at(parent, name) {
+        Ok(Kind::Symlink) => FileRefusal::Symlink,
+        Ok(Kind::Directory | Kind::Other) => FileRefusal::NotRegular,
+        Ok(Kind::Regular) | Err(_) => FileRefusal::Io(error),
+    }
 }
 
 fn kind_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<Kind> {
