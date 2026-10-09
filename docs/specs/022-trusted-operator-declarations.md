@@ -181,18 +181,19 @@ Each closure member is resolved on its own, against its own declaration and its 
 requirer never gains its provider's capabilities, nor a provider its requirer's. Members already
 attached are not resolved again.
 
-**Declared values are used exactly.** A value the resolver cannot use exactly is the author's
-fault: 108 under spec 011's author-refusal rule, with the field, a nonempty `fix` and the
-plasmid ID. That covers a port that is not an integer from 1 to 65535, a repeated port, hosts
-with no ports, a host that is not a lower-case DNS name, a repeated host, a CIDR that does not
-parse or has host bits set, a `[workspace]` with no `mount`, and a `dst` that is relative, has a
-trailing slash, contains `.`, `..` or NUL, or is `/`. Port faults follow spec 011 as PR #133
-amends it, naming the entry by its index. A repeated port is field `network.ports[i]`, the
-repeat, with `fix` exactly `remove this entry`. An entry that is not an integer from 1 to 65535
-is field `network.ports[i]`, with `fix` the port the entry evidently means when the list does not
-already declare it, and otherwise `remove this entry`. So following a `fix` never drops a
-declared port, repeats one, or adds one the author did not write. A parser that drops, wraps or
-truncates an entry does not meet this.
+**Declared values are used exactly.** A value the resolver cannot use exactly is the author's fault:
+108 under spec 011's author-refusal rule, with the field, a nonempty `fix` and the plasmid ID. That
+covers a port that is not an integer from 1 to 65535, a repeated port, hosts with no ports, a host
+that is not a lower-case DNS name, a repeated host, a CIDR that does not parse or has host bits set,
+a `[workspace]` with no `mount`, and a `dst` that is relative, has a trailing slash, contains `.`,
+`..` or NUL, or is `/`. Port faults follow spec 011 as PR #133 amends it, naming the entry by its
+index. A repeated port is field `network.ports[i]`, the repeat, with `fix` exactly `remove this
+entry`. An entry that is not an integer from 1 to 65535 is field `network.ports[i]`, with `fix` the
+port the entry evidently means when the list does not already declare it, and otherwise `remove this
+entry`. Hosts with no ports is field `network.hosts[0]` with `fix` `remove this entry`, because no
+port line exists that would not be a guess. So following a `fix` never drops a declared port,
+repeats one, or adds one the author did not write. A parser that drops, wraps or truncates an entry
+does not meet this.
 
 #### Network becomes ProxyMap
 
@@ -527,11 +528,12 @@ ProxyMap (O-11) or Mount (O-7).
    whole instance.
 10. Author refusals, each 108 with the field, a nonempty `fix` and the plasmid ID: ports `70000`,
     `-1`, `0`, `65536`, `"443"` and `443.5`; a repeated port or host; hosts with no ports; an
-    upper-case or IP-literal host; a malformed CIDR; `192.0.2.1/24`; `[workspace]` with no
-    `mount`; `dst = "workspace"`. Each port fault names `network.ports[i]`; `["443"]` gives `fix`
-    `443`, a repeat gives `remove this entry`, and applying each `fix` leaves no port the author
-    did not write and none twice. Catches: a truncating parser, a missing or whole-line `fix`, and
-    a `fix` that invents a port.
+    upper-case or IP-literal host; a malformed CIDR; `192.0.2.1/24`; `[workspace]` with no `mount`;
+    `dst = "workspace"`. Each port fault names `network.ports[i]`; `["443"]` gives `fix` `443`, a
+    repeat gives `remove this entry`, and hosts with `ports = []` give `network.hosts[0]` and
+    `remove this entry`. Following the fixes in turn from `[65536]` with one host ends with no host
+    and no port, never a port the author did not write. Catches: a truncating parser, a missing or
+    whole-line `fix`, and a `fix` that invents a port.
 11. Pins, `pin_cidrs = ["192.0.2.0/25"]`. `192.0.2.10` attaches. `192.0.2.200`,
     `192.0.2.10.example.com` and `2001:db8::1` are 103. `::192.0.2.10`, `::ffff:192.0.2.10` and
     `192.000.002.010` refuse the file with 108, as `ProxyRecipe::validate` does. At `--mock
