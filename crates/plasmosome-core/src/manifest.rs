@@ -462,7 +462,7 @@ fn parse_network(
             id,
             field_path.to_string(),
             format!("[{field_path}]\n{}", hosts_line(n.as_str())),
-            &format!("{n} is not a table"),
+            &format!("{} is not a table", shown(n)),
         ));
     }
     let hosts = declared_string_list(id, field_path, "hosts", EXAMPLE_HOST, n.get("hosts"))?;
@@ -795,7 +795,7 @@ fn declared_string_list(
             id,
             path,
             string_list_line(field, value.as_str(), example),
-            &format!("{value} is not a list of strings"),
+            &format!("{} is not a list of strings", shown(value)),
         ));
     };
     items
@@ -807,7 +807,7 @@ fn declared_string_list(
                     id,
                     format!("{path}[{index}]"),
                     REMOVE_ENTRY.into(),
-                    &format!("{item} is not a string"),
+                    &format!("{} is not a string", shown(item)),
                 )
             })
         })
@@ -833,7 +833,7 @@ fn declared_ports(
             id,
             field.to_string(),
             fix,
-            &format!("{value} is not a list of integers from 1 to 65535"),
+            &format!("{} is not a list of integers from 1 to 65535", shown(value)),
         ));
     };
     let ports: Vec<Option<u16>> = items
@@ -851,8 +851,30 @@ fn declared_ports(
         id,
         format!("{field}[{index}]"),
         fix,
-        &format!("{item} is not an integer from 1 to 65535"),
+        &format!("{} is not an integer from 1 to 65535", shown(item)),
     ))
+}
+
+fn shown(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(text) => format!("{text:?}"),
+        toml::Value::Float(number) if number.is_nan() => "nan".into(),
+        toml::Value::Float(number) => format!("{number:?}"),
+        toml::Value::Datetime(datetime) => datetime.to_string(),
+        toml::Value::Array(items) => {
+            let items: Vec<String> = items.iter().map(shown).collect();
+            format!("[{}]", items.join(", "))
+        }
+        toml::Value::Table(table) if table.is_empty() => "{}".into(),
+        toml::Value::Table(table) => {
+            let entries: Vec<String> = table
+                .iter()
+                .map(|(key, value)| format!("{} = {}", diagnostic_key(key), shown(value)))
+                .collect();
+            format!("{{ {} }}", entries.join(", "))
+        }
+        toml::Value::Integer(_) | toml::Value::Boolean(_) => value.to_string(),
+    }
 }
 
 fn evident_port(value: &toml::Value) -> Option<u16> {
