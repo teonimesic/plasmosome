@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use plasmosome_backend::CellId;
 use serde::{Deserialize, Serialize};
 
-use crate::state::{CellId, GenomeName, PlasmidRecord};
+use crate::state::{GenomeName, PlasmidRecord};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesiredState {
