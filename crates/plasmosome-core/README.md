@@ -55,9 +55,11 @@ Missing or invalid purpose, tool declarations and missing/non-string IDs return
 `ManifestError::Field` with the declaration ID when available, a TOML field path and a suggested
 repair. Credential-reference refusals use that same form, including the indexed reference and,
 for command credentials, the quoted command key. So does a `ports` value that is not a list, or an
-entry that is not an integer from 1 to 65535: the refusal names `network.ports` or
-`commands.commands.<key>.network.ports`, and no entry is dropped or wrapped. Other manifest
-errors retain their existing forms. `ToolDeclaration` lives in `plasmosome_core::manifest`;
+entry that is not an integer from 1 to 65535. A refused entry is named by its index, such as
+`network.ports[1]` or `commands.commands.<key>.network.ports[1]`. Its fix is the port the entry
+evidently means, such as `8080` for `"8080"`, unless that port is already declared; otherwise the
+fix is `remove this entry`. No entry is dropped or wrapped. Other manifest errors retain their
+existing forms. `ToolDeclaration` lives in `plasmosome_core::manifest`;
 `RegistryEntry` includes the tool's description.
 
 Credential `delivery` is optional in both `[secrets]` and command-local refs. Omission derives one

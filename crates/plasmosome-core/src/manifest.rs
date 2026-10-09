@@ -436,18 +436,18 @@ fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>,
 
 fn parse_network(
     id: &str,
-    section: &str,
-    path: &str,
+    message_section: &str,
+    field_path: &str,
     n: &toml::Value,
 ) -> Result<NetworkSpec, ManifestError> {
     if !n.is_table() {
         return Err(ManifestError::Invalid(format!(
-            "plasmid {id}: [{section}] must be a table"
+            "plasmid {id}: [{message_section}] must be a table"
         )));
     }
-    let hosts = declared_string_list(id, section, "hosts", n.get("hosts"))?;
-    let ports = declared_ports(id, &format!("{path}.ports"), n.get("ports"))?;
-    let pin_cidrs = declared_string_list(id, section, "pin_cidrs", n.get("pin_cidrs"))?;
+    let hosts = declared_string_list(id, message_section, "hosts", n.get("hosts"))?;
+    let ports = declared_ports(id, &format!("{field_path}.ports"), n.get("ports"))?;
+    let pin_cidrs = declared_string_list(id, message_section, "pin_cidrs", n.get("pin_cidrs"))?;
     Ok(NetworkSpec {
         hosts,
         ports,
@@ -760,6 +760,8 @@ fn declared_string_list(
         .collect()
 }
 
+const REMOVE_ENTRY: &str = "remove this entry";
+
 fn declared_ports(
     id: &str,
     field: &str,
@@ -768,34 +770,41 @@ fn declared_ports(
     let Some(value) = value else {
         return Ok(Vec::new());
     };
-    let refuse = |offending: &toml::Value, detail: String| {
-        let port = evident_port(offending).unwrap_or(443);
-        field_error(id, field.to_string(), format!("ports = [{port}]"), &detail)
-    };
     let Some(items) = value.as_array() else {
-        return Err(refuse(
-            value,
-            format!("expected a list of integer ports from 1 to 65535, found {value}"),
+        let fix = evident_port(value).map_or_else(
+            || REMOVE_ENTRY.to_string(),
+            |port| format!("ports = [{port}]"),
+        );
+        return Err(field_error(
+            id,
+            field.to_string(),
+            fix,
+            &format!("{value} is not a list of integers from 1 to 65535"),
         ));
     };
-    items
+    let ports: Vec<Option<u16>> = items
         .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            item.as_integer().and_then(nonzero_port).ok_or_else(|| {
-                refuse(
-                    item,
-                    format!("ports[{index}] holds {item}, which is not an integer from 1 to 65535"),
-                )
-            })
-        })
-        .collect()
+        .map(|item| item.as_integer().and_then(nonzero_port))
+        .collect();
+    let Some(index) = ports.iter().position(Option::is_none) else {
+        return Ok(ports.into_iter().flatten().collect());
+    };
+    let item = &items[index];
+    let fix = evident_port(item)
+        .filter(|port| !ports.contains(&Some(*port)))
+        .map_or_else(|| REMOVE_ENTRY.to_string(), |port| port.to_string());
+    Err(field_error(
+        id,
+        format!("{field}[{index}]"),
+        fix,
+        &format!("{item} is not an integer from 1 to 65535"),
+    ))
 }
 
 fn evident_port(value: &toml::Value) -> Option<u16> {
     let number = match value {
         toml::Value::Integer(number) => *number,
-        toml::Value::String(text) => text.parse().ok()?,
+        toml::Value::String(text) => text.trim().parse().ok()?,
         toml::Value::Float(number) if number.fract() == 0.0 => *number as i64,
         _ => return None,
     };
