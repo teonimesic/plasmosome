@@ -1498,6 +1498,121 @@ subject = "git"
         assert!(manifest.network.as_ref().unwrap().pin_cidrs.is_empty());
     }
 
+    const PORT_SECTIONS: [(&str, &str); 2] = [
+        ("[network]\nhosts = [\"api.example.com\"]\n", "network"),
+        (
+            "[network]\nhosts = [\"api.example.com\"]\n\
+             [commands.commands.\"git ops\"]\nexec = [\"git\"]\n\
+             [commands.commands.\"git ops\".network]\nhosts = [\"api.example.com\"]\n",
+            "commands.commands.\"git ops\".network",
+        ),
+    ];
+
+    fn ports_declaration(section: &str, ports: &str) -> String {
+        format!("id = \"github-pr\"\ndescription = \"Reach the declared API.\"\n{section}{ports}\n")
+    }
+
+    fn parsed_ports(section: &str, ports: &str) -> Result<Vec<u16>, ManifestError> {
+        let manifest = PlasmidManifest::parse(&ports_declaration(section, ports))?;
+        let network = match manifest.commands {
+            Some(commands) => commands.commands[0].network.clone(),
+            None => manifest.network,
+        };
+        Ok(network
+            .expect("the declaration has a network section")
+            .ports)
+    }
+
+    #[test]
+    fn ports_from_1_to_65535_parse_to_exactly_the_declared_list() {
+        for (section, _) in PORT_SECTIONS {
+            for (ports, expected) in [
+                ("ports = [443]", vec![443]),
+                ("ports = [1]", vec![1]),
+                ("ports = [65535]", vec![65535]),
+                ("ports = [65535, 1, 443]", vec![65535, 1, 443]),
+                ("ports = []", vec![]),
+                ("", vec![]),
+            ] {
+                assert_eq!(
+                    parsed_ports(section, ports).unwrap(),
+                    expected,
+                    "{section}{ports}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_port_that_is_not_an_integer_from_1_to_65535_is_refused_naming_its_ports_field() {
+        for (section, path) in PORT_SECTIONS {
+            for (ports, entry) in [
+                ("ports = [65536]", "65536"),
+                ("ports = [70000]", "70000"),
+                ("ports = [0]", "0"),
+                ("ports = [-1]", "-1"),
+                ("ports = [\"443\"]", "\"443\""),
+                ("ports = [443.0]", "443.0"),
+                ("ports = [443, \"x\", 8080]", "\"x\""),
+                ("ports = 443", "443"),
+                ("ports = [1, 65536]", "65536"),
+                ("ports = [true]", "true"),
+            ] {
+                let error = PlasmidManifest::parse(&ports_declaration(section, ports)).unwrap_err();
+                let ManifestError::Field {
+                    plasmid,
+                    field,
+                    fix,
+                    detail,
+                } = error
+                else {
+                    panic!("{ports} was not refused with its field: {error:?}");
+                };
+                assert_eq!(plasmid.as_deref(), Some("github-pr"), "{ports}");
+                assert_eq!(field, format!("{path}.ports"), "{ports}");
+                assert!(detail.contains(entry), "{ports}: {detail}");
+                assert_eq!(fix, "ports = [443]", "{ports}");
+                assert_eq!(parsed_ports(section, &fix).unwrap(), vec![443], "{ports}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_port_refusal_fix_carries_the_port_the_author_evidently_meant() {
+        let (section, path) = PORT_SECTIONS[0];
+        for (ports, meant) in [
+            ("ports = 8080", 8080),
+            ("ports = \"8080\"", 8080),
+            ("ports = 8080.0", 8080),
+            ("ports = [\"8080\"]", 8080),
+            ("ports = [8080.0]", 8080),
+            ("ports = [443, \"8080\", 70000]", 8080),
+            ("ports = [\"1\"]", 1),
+            ("ports = [\"65535\"]", 65535),
+            ("ports = [1.0]", 1),
+            ("ports = [65535.0]", 65535),
+            ("ports = 70000", 443),
+            ("ports = 0", 443),
+            ("ports = -8080", 443),
+            ("ports = [\"0\"]", 443),
+            ("ports = [\"65536\"]", 443),
+            ("ports = [\"http\"]", 443),
+            ("ports = [8080.5]", 443),
+            ("ports = [0.0]", 443),
+            ("ports = [65536.0]", 443),
+            ("ports = [-8080.0]", 443),
+            ("ports = [nan]", 443),
+            ("ports = [inf]", 443),
+            ("ports = [[8080]]", 443),
+            ("ports = { port = 8080 }", 443),
+        ] {
+            let source = ports_declaration(section, ports);
+            let fix = field_fix(&source, &format!("{path}.ports"));
+            assert_eq!(fix, format!("ports = [{meant}]"), "{ports}");
+            assert_eq!(parsed_ports(section, &fix).unwrap(), vec![meant], "{ports}");
+        }
+    }
+
     #[test]
     fn the_reserved_commands_section_parses_to_child_domain_decls() {
         let manifest = PlasmidManifest::parse(COMMANDS_E13).unwrap();
