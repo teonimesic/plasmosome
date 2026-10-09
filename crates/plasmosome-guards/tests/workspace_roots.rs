@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -62,7 +61,7 @@ fn copy_build_output(source: &Path, destination: &Path) {
     }
 }
 
-fn rewrite_recorded_roots(build_output: &Path, root: &Path) {
+fn rewrite_recorded_roots(build_output: &Path, built: &Path, root: &Path) {
     let mut recorded = Vec::new();
     let mut directories = vec![build_output.to_path_buf()];
     while let Some(directory) = directories.pop() {
@@ -74,7 +73,7 @@ fn rewrite_recorded_roots(build_output: &Path, root: &Path) {
                 .is_dir()
             {
                 directories.push(entry.path());
-            } else if entry.file_name() == OsStr::new("workspace-root") {
+            } else if entry.file_name() == "workspace-root" {
                 recorded.push(entry.path());
             }
         }
@@ -85,6 +84,12 @@ fn rewrite_recorded_roots(build_output: &Path, root: &Path) {
         build_output.display()
     );
     for file in recorded {
+        assert_eq!(
+            fs::read_to_string(&file).expect("the recorded-root file is readable"),
+            built.to_str().unwrap(),
+            "{} must be the record the copied consumers were built with; rewriting any other file cannot tell an embedded root from one read at run time",
+            file.display()
+        );
         fs::write(&file, root.to_str().unwrap())
             .expect("the recorded-root file in the old build output is rewritten");
     }
@@ -464,7 +469,7 @@ fn prebuilt_real_consumers_inspect_the_invocation_tree_but_cannot_certify_a_copy
             );
         }
 
-        rewrite_recorded_roots(&external_target, &b);
+        rewrite_recorded_roots(&external_target, &a, &b);
         for consumer in &copied {
             observe(
                 &mut failures,
