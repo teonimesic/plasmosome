@@ -113,13 +113,15 @@ mod tests {
     use crate::vmm::{Launch, SpawnError, VmmChild, VmmState};
     use std::cell::Cell;
     use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
-    use std::sync::TryLockError;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, RecvTimeoutError};
-    use std::time::Duration;
+    use std::sync::{Arc, TryLockError};
+    use std::time::{Duration, Instant};
 
     const PATIENCE: Duration = Duration::from_secs(10);
     const ABORT_AFTER: Duration = Duration::from_secs(60);
     const HOLD: Duration = Duration::from_millis(250);
+    const ARRANGE_WITHIN: Duration = Duration::from_secs(30);
 
     struct ExitAtOnce;
 
@@ -243,16 +245,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_forked_child_never_inherits_a_descriptor_before_it_is_close_on_exec() {
-        let lock = fresh_lock();
+    struct ForkDuringCreation {
+        reached_the_lock_while_held: bool,
+        forked_while_held: bool,
+        child_status: libc::c_int,
+    }
+
+    fn fork_during_creation(lock: &'static RwLock<()>) -> ForkDuringCreation {
+        let released = Arc::new(AtomicBool::new(false));
         let (starting, started) = mpsc::channel();
         let (forker, watched) = write_held(lock, || {
             let watched = inheritable_null();
             let fd = watched.as_raw_fd();
+            let seen = Arc::clone(&released);
             let forker = std::thread::spawn(move || {
                 let _ = starting.send(());
-                match fork_holding(lock, || unsafe { libc::fork() }) {
+                let reached_the_lock_while_held = !seen.load(Ordering::SeqCst);
+                let mut forked_while_held = false;
+                let forked = fork_holding(lock, || {
+                    forked_while_held = !seen.load(Ordering::SeqCst);
+                    unsafe { libc::fork() }
+                });
+                match forked {
                     Ok(Forked::Child) => {
                         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
                         let code = if flags == -1 {
@@ -264,7 +278,9 @@ mod tests {
                         };
                         unsafe { libc::_exit(code) }
                     }
-                    Ok(Forked::Parent(pid)) => Ok(pid),
+                    Ok(Forked::Parent(pid)) => {
+                        Ok((reached_the_lock_while_held, forked_while_held, pid))
+                    }
                     Err(error) => Err(error),
                 }
             });
@@ -277,18 +293,44 @@ mod tests {
                 0,
                 "the descriptor is marked close-on-exec"
             );
+            released.store(true, Ordering::SeqCst);
             (forker, watched)
         });
-        let pid = forker
+        let (reached_the_lock_while_held, forked_while_held, pid) = forker
             .join()
             .expect("the forking thread finishes")
             .expect("the fork succeeds");
-        let mut status = 0;
-        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        let mut child_status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut child_status, 0) }, pid);
         drop(watched);
-        assert!(libc::WIFEXITED(status), "the child exits");
+        ForkDuringCreation {
+            reached_the_lock_while_held,
+            forked_while_held,
+            child_status,
+        }
+    }
+
+    #[test]
+    fn a_forked_child_never_inherits_a_descriptor_before_it_is_close_on_exec() {
+        let lock = fresh_lock();
+        let deadline = Instant::now() + ARRANGE_WITHIN;
+        let attempt = loop {
+            let attempt = fork_during_creation(lock);
+            if attempt.reached_the_lock_while_held {
+                break attempt;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the forking thread never reached the lock while creation was in progress"
+            );
+        };
+        assert!(
+            !attempt.forked_while_held,
+            "the fork ran while another thread was creating a descriptor"
+        );
+        assert!(libc::WIFEXITED(attempt.child_status), "the child exits");
         assert_eq!(
-            libc::WEXITSTATUS(status),
+            libc::WEXITSTATUS(attempt.child_status),
             0,
             "exit 3 means the child inherited the descriptor before it was close-on-exec"
         );
