@@ -222,9 +222,12 @@ impl Drop for BoundEntry {
 impl PrivateListener {
     /// Binds `name` inside `dir` for peers whose effective UID is `trusted_uid`. Production
     /// passes `effective_uid()`; a test passes another value to force a real mismatch. `name` is
-    /// one path component. Any existing entry at the name is refused and left untouched. The
-    /// socket is owned by the effective UID and set to mode 0600 before it listens; umask plays
-    /// no part. The listener is nonblocking. A caller that forks from another thread must hold
+    /// one path component. Any existing entry at the name is refused and left untouched. `dir`
+    /// is walked and judged again before the socket is created, and again after it is bound; if
+    /// that second check fails, its error is returned and the socket found at the name in the
+    /// held directory is removed. `BindEscaped` means no socket is at the name in the held
+    /// directory after bind. The socket is owned by the effective UID and set to mode 0600
+    /// before it listens; umask plays no part. The listener is nonblocking. A caller that forks from another thread must hold
     /// its descriptor lock around this call, because on macOS the socket is created before it is
     /// marked close-on-exec.
     pub fn bind(
@@ -667,6 +670,7 @@ fn prepare_with(
     let c_name = entry_name(name)?;
     let path = dir.path.join(name);
     let (address, length) = address_for(&path)?;
+    dir.reconfirm()?;
     match stat_at(&dir.dir, &c_name) {
         Ok(_) => return Err(PrivateSocketError::AddressInUse { path }),
         Err(errno) if errno == libc::ENOENT => {}
@@ -695,8 +699,9 @@ fn prepare_with(
         });
     }
     after_bind();
-    let created = match (dir.reconfirm(), stat_at(&dir.dir, &c_name)) {
-        (Ok(()), Ok(facts)) if facts.kind == Kind::Socket => facts,
+    let recheck = dir.reconfirm();
+    let created = match stat_at(&dir.dir, &c_name) {
+        Ok(facts) if facts.kind == Kind::Socket => facts,
         _ => return Err(PrivateSocketError::BindEscaped { path }),
     };
     let bound = BoundEntry {
@@ -708,6 +713,7 @@ fn prepare_with(
             ino: created.ino,
         },
     };
+    recheck?;
     restrict_to_owner(&bound)?;
     let facts = stat_at(&bound.dir.dir, &bound.name)
         .map_err(|errno| missing_or_io(errno, &bound.entry.path))?;
