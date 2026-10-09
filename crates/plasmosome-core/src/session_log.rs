@@ -172,7 +172,21 @@ impl LogStore for OsLogStore {
             opened => opened?,
         };
         file.try_lock()?;
-        Ok(Box::new(file))
+        Ok(Box::new(OsLogFile(file)))
+    }
+}
+
+struct OsLogFile(std::fs::File);
+
+impl Drop for OsLogFile {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+impl std::io::Read for OsLogFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut self.0, buf)
     }
 }
 
@@ -189,17 +203,17 @@ fn open_regular(options: &mut std::fs::OpenOptions, path: &Path) -> std::io::Res
     Ok(file)
 }
 
-impl LogFile for std::fs::File {
+impl LogFile for OsLogFile {
     fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        std::io::Write::write_all(self, bytes)
+        std::io::Write::write_all(&mut self.0, bytes)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        std::io::Write::flush(self)
+        std::io::Write::flush(&mut self.0)
     }
 
     fn sync_all(&mut self) -> std::io::Result<()> {
-        std::fs::File::sync_all(self)
+        self.0.sync_all()
     }
 }
 
@@ -213,10 +227,11 @@ impl LogFile for std::fs::File {
 /// `seq` `u64::MAX`. The lock is advisory: it stops other `SessionLog`s, not a process that
 /// writes the file without asking for it.
 ///
-/// The lock belongs to the open file, not to this value. A child process forked while the log is
-/// open shares that file until it execs or exits, so an open in that window, including one made
-/// after this value is dropped, returns [`SessionLogError::Locked`]. Retry such an open once
-/// the child has exec'd.
+/// The lock belongs to the open file, which a child process forked while the log is open shares.
+/// Dropping or poisoning this value unlocks the file explicitly, so such a child does not keep
+/// the lock. The unlock works from either side: a forked child that drops a `SessionLog` it
+/// inherited releases the parent's lock, so a forked child must exec or exit without running the
+/// parent's destructors.
 pub struct SessionLog {
     path: PathBuf,
     state: Mutex<LogState>,
