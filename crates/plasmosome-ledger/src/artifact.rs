@@ -209,6 +209,7 @@ impl std::error::Error for ArtifactRefError {}
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use serde_json::{Value, json};
 
     use super::*;
@@ -337,6 +338,155 @@ mod tests {
                     && serde_json::from_str::<Population>(&value.to_string()).is_err(),
                 "{value}"
             );
+        }
+    }
+
+    #[test]
+    fn identifiers_follow_the_publisher_and_name_grammar() {
+        let longest = format!("{}-b", "a".repeat(62));
+        assert_eq!(longest.len(), 64);
+        for text in ["a", "a1", "0", "github-pr", "a-b-c", longest.as_str()] {
+            assert_eq!(check_identifier("publisher", text), Ok(()), "{text:?}");
+        }
+        let too_long = format!("{longest}c");
+        for text in [
+            "",
+            "-a",
+            "a-",
+            "a--b",
+            "A",
+            "a_b",
+            "a.b",
+            "a b",
+            "\u{e9}",
+            too_long.as_str(),
+        ] {
+            assert_eq!(
+                check_identifier("name", text),
+                Err(ArtifactRefError::Identifier {
+                    field: "name",
+                    text: text.to_string(),
+                }),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn versions_follow_the_exact_version_grammar() {
+        let longest = format!("1.a_B-{}", "z".repeat(123));
+        assert_eq!(longest.len(), 128);
+        for text in ["1", "1.2.0", "RC-1", "v1_2", "latest", "Z", longest.as_str()] {
+            assert_eq!(check_version(text), Ok(()), "{text:?}");
+        }
+        let too_long = format!("{longest}z");
+        for text in [
+            "",
+            ".1",
+            "-1",
+            "_1",
+            "1.2.0+build",
+            "1 2",
+            "latest ",
+            " 1",
+            "1\n",
+            "1/2",
+            "\u{e9}",
+            too_long.as_str(),
+        ] {
+            assert_eq!(
+                check_version(text),
+                Err(ArtifactRefError::Version {
+                    text: text.to_string(),
+                }),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_key_new_checks_each_field_and_keeps_its_text() {
+        let key = ReleaseKey::new(
+            ArtifactKind::Genome,
+            Population::User,
+            "acme",
+            "researcher",
+            "latest",
+        )
+        .unwrap();
+        assert_eq!(key.kind(), ArtifactKind::Genome);
+        assert_eq!(key.population(), Population::User);
+        assert_eq!(key.publisher(), "acme");
+        assert_eq!(key.name(), "researcher");
+        assert_eq!(key.version(), "latest");
+        let refused = |publisher, name, version| {
+            ReleaseKey::new(
+                ArtifactKind::Plasmid,
+                Population::Curated,
+                publisher,
+                name,
+                version,
+            )
+            .unwrap_err()
+        };
+        assert_eq!(
+            refused("Acme", "researcher", "1"),
+            ArtifactRefError::Identifier {
+                field: "publisher",
+                text: "Acme".to_string(),
+            }
+        );
+        assert_eq!(
+            refused("acme", "re_searcher", "1"),
+            ArtifactRefError::Identifier {
+                field: "name",
+                text: "re_searcher".to_string(),
+            }
+        );
+        assert_eq!(
+            refused("acme", "researcher", "1+2"),
+            ArtifactRefError::Version {
+                text: "1+2".to_string(),
+            }
+        );
+        assert_eq!(
+            refused("acme", "researcher", "1+2").to_string(),
+            "version \"1+2\" does not match [A-Za-z0-9][A-Za-z0-9._-]* within 128 bytes"
+        );
+        assert_eq!(
+            refused("Acme", "researcher", "1").to_string(),
+            "publisher \"Acme\" does not match [a-z0-9]+(-[a-z0-9]+)* within 64 bytes"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn generated_identifiers_round_trip(
+            identifier in "[a-z0-9]{1,8}(-[a-z0-9]{1,8}){0,3}",
+        ) {
+            prop_assert_eq!(check_identifier("name", &identifier), Ok(()));
+            let key = ReleaseKey::new(
+                ArtifactKind::Plasmid,
+                Population::User,
+                &identifier,
+                &identifier,
+                "1.0.0",
+            )
+            .unwrap();
+            let text = serde_json::to_string(&key).unwrap();
+            prop_assert_eq!(serde_json::from_str::<ReleaseKey>(&text).unwrap(), key);
+        }
+
+        #[test]
+        fn one_upper_case_byte_is_refused(
+            identifier in "[a-z0-9]{1,8}(-[a-z0-9]{1,8}){0,3}",
+            at in any::<prop::sample::Index>(),
+        ) {
+            let mut bytes = identifier.into_bytes();
+            let at = at.index(bytes.len());
+            bytes[at] = b'A';
+            let text = String::from_utf8(bytes).unwrap();
+            prop_assert!(check_identifier("publisher", &text).is_err(), "{:?}", text);
         }
     }
 }
