@@ -1,7 +1,7 @@
 ---
 id: 023
 title: Starting, owning and ending a cell's supervisor
-status: draft
+status: accepted
 intents: [003, 009]
 ---
 
@@ -21,18 +21,20 @@ within a deadline, waits for the lock to free, and moves the directory to `<root
 Two files make a missing supervisor safe to reason about. `supervisor.lock` is held without a
 gap from its creation until `membraned` exits, so a free lock proves no supervisor holds the
 directory. The `launched` marker is created before any runtime resource, records the host's boot
-session, and is removed only by a clean `cell.kill`. A free lock with no marker and nothing held
-is a cell that never ran or was ended: it is retired. A free lock with a marker from an earlier
-boot is a cell whose host restarted, so its guest is gone: it is retired, and its holdings are
-reported as residue. A free lock with a marker from this boot, or a held lock that never answers,
-**sets aside** that one cell: it is reported, readiness is false, and the rest of the instance
-keeps serving. The existence of `membrane.uds` decides nothing.
+session, records a clean stop on SIGTERM, and is removed only by a clean `cell.kill` or a failed
+launch. A free lock with no marker and nothing held is a cell that never ran or was ended: it is
+retired. A free lock with a marker from an earlier boot, or one recording a clean stop, is a cell
+whose guest is gone: it is retired unless it owes an external obligation, and its holdings are
+reported as residue. A free lock with any other marker, or a held lock that never answers, **sets
+aside** that one cell: it is reported, readiness is false, and the rest of the instance keeps
+serving. The existence of `membrane.uds` decides nothing.
 
 This serves intent 003: a cell survives the controller, and a restarted controller tells a live
 cell, an ended one and a lost one apart without a PID file, so an unresponsive or lost supervisor
 no longer takes the instance down. It serves intent 009: `cell.new` returns a cell that is ready
 to use, or a refusal naming any cell it created. The controller never starts a second supervisor
-for a cell directory, and only `cell.kill` deletes a guest disk. Relaunch is an owner question.
+for a cell directory, and only `cell.kill`, or a launch that fails before hello, deletes a guest
+disk. Relaunch is an owner question.
 
 **Platform.** macOS first: Darwin arm64 is the only runtime host, and the cell is a libkrun Linux
 guest. A Linux host is deferred, not dropped; on any other host `cell.new` refuses before
@@ -111,7 +113,8 @@ serializes controllers, not requests, so it does not provide this.
 - `launched` is one line of strict JSON, `{"cell": "<id>", "boot_session": "<uuid>"}`, created
   exclusively and synced with its directory. On Darwin `boot_session` is `kern.bootsessionuuid`,
   assumed to change on every boot; the implementing task measures that. A Linux host would use
-  `/proc/sys/kernel/random/boot_id`.
+  `/proc/sys/kernel/random/boot_id`. After a clean stop (§5, step 9) the record is replaced
+  atomically by one that adds `"stopped": true`.
 - `created` is empty. The controller creates it exclusively and syncs it when `cell.new`
   completes (§4, step 8).
 - Spec 008's discovery reads `cells/` only. A retired directory is never queried or recovered.
@@ -176,14 +179,17 @@ anything, makes it exit nonzero before step 1, having created nothing.
 5. Create `launched` (§3), and sync it and the directory.
 6. Create `runtime/`, copy the root image, bind the two bridge listeners and launch the helper, as
    spec 001 §4.2 says. `boot_deadline_ms` is `membraned`'s own budget, from its exec to the
-   guest's hello. If it passes first, `membraned` handles it as a launch failure (below).
+   guest's hello. If it passes first, or the helper exits before hello, `membraned` handles it
+   as a launch failure (below).
 7. Report the cell `germinating` until the guest's hello, then `ready` (§6). Serve.
 8. On `membrane.cell.kill`, tear down: stop the guest (§7), reap the helper, stop and reap every
    broker, and remove both bridge sockets and `root.img`. Remove `launched` only after a clean
    teardown, meaning all of those finished. If the teardown was not clean, keep serving with the
    lock and marker, so the cell stays visible and a later kill can finish.
 9. On SIGTERM or SIGINT, stop the guest, reap the helper and every broker, and remove the bridge
-   sockets, keeping `root.img` and `launched`. The marker then decides the cell (§8).
+   sockets, keeping `root.img`. If all of that finished, replace `launched` atomically with the
+   record that adds `"stopped": true` and sync the directory; otherwise leave it. The marker then
+   decides the cell (§8).
 10. Remove its own `membrane.uds` by identity, then exit. Exit releases the lock.
 
 A launch failure releases what the attempt created, removes `launched` only if that release was
@@ -194,8 +200,9 @@ cell visible and does not clean it.
 ### 6. Readiness
 
 **From the controller.** A cell whose `cell.new` has not replied is `germinating`, whatever its
-supervisor says. A cell whose `cell.kill` has started is `draining` until it is retired or the
-kill gives up. `cell.list` and `cell.status` show these states. `cell.exec` and every plasmid
+supervisor says. A cell whose `cell.kill` has started is `draining` until it is retired. A kill
+that gives up leaves it `draining` after a 106, and otherwise in the state its supervisor
+reports. `cell.list` and `cell.status` show these states. `cell.exec` and every plasmid
 verb on a `germinating` or `draining` cell refuse at once with 105 `{from: <state>, to:
 "ready"}`, before any wait. Mutations of one cell (`cell.new`, plasmid verbs, `cell.kill` and
 the check of §8) run one at a time, in arrival order. Requests for other cells are not blocked.
@@ -231,11 +238,13 @@ nonblank strings, required when `now` is true: they are spec 008's Force asserti
 §3.7 says the reply carries. The controller marks the cell `draining`, then:
 
 1. **Stop the workload** with spec 024's `membrane.workload.stop`, only when the supervisor
-   reports the cell `ready` or `draining`. A stop that fails, is refused (`workload_remains`) or
-   times out never blocks the kill: the kill continues and the reply reports it.
+   reports the cell `ready` or `draining`, and never with `now`, whose Force guest stop kills the
+   helper's process group anyway. A stop that fails, is refused (`workload_remains`) or times out
+   never blocks the kill: the kill continues and the reply reports it.
 2. **Withdraw** every attachment, if there is any, in one removal transaction under spec 008:
-   safe removal, or Force when `now` is set. A drain that times out replies 106
-   `{handle, deadline_ms}`, and the cell stays `draining` for a later `cell.kill`.
+   safe removal, or Force when `now` is set. A drain that times out, or a withdrawal whose
+   publication does not settle within D, replies 106 `{handle, deadline_ms}`, and the cell stays
+   `draining` for a later `cell.kill`, which publishes first (spec 008).
 3. **Stop the guest** with `membrane.cell.kill` and `DrainSpec {deadline, policy}`, policy `Safe`,
    or `Force` with `now`. `membraned` sends the 4090 `shutdown` with a smaller positive deadline,
    or none with `Force`. When that passes and the helper still runs, it kills the helper's process
@@ -246,23 +255,27 @@ nonblank strings, required when `now` is true: they are spec 008's Force asserti
    attachment and no pending transaction. Rename `cells/<cell>` to `retired/<cell>`, sync both
    parent directories, and release the lock.
 6. **Reply** `{cell, state: "dead", drained, residue}` as spec 001 §3.7 shows, with the residue
-   from step 3, and `incomplete`, the steps that failed, timed out or were skipped, when there
-   are any.
+   from step 3. When a step fell short, the reply adds `incomplete`, a list over a closed set:
+   `workload_stop` (it failed, was refused, timed out or had no budget), `shutdown` (the guest got
+   no `shutdown` for lack of budget, or ignored it, and its helper was killed; never listed with
+   `now`) and `teardown` (the teardown was not clean, so the cell was not retired). A reply is a
+   retirement exactly when `incomplete` lacks `teardown`.
 
 **Budgets.** D counts from the request's arrival, so a kill may queue behind earlier mutations.
 The steps run in order, each with a positive budget, and end within D, the withdrawal's
 publication exchange included. The guest gets a positive shutdown budget before its helper is
 killed, and the lock wait keeps a reserve; the shares are the implementing task's. Every deadline
-sent is at least 1 ms. With `now`, the workload stop and the guest stop get 1 ms. A step left with
-no budget takes its next escalation and is listed in `incomplete`: the workload stop is skipped,
-the guest stop sends no `shutdown`, a withdrawal is a drain timeout (106), the lock wait one try.
+sent is at least 1 ms. With `now`, the guest stop gets 1 ms. A step left with no budget takes
+its next escalation: the workload stop is skipped, the guest stop sends no `shutdown` (each listed
+in `incomplete`), a withdrawal is a drain timeout (106), and the lock wait makes one try.
 
 A `dead` cell can always be killed: step 1 is skipped and step 3 finishes its teardown. Outcomes
 that do not retire the cell:
 
 - The teardown was not clean (for example, a bridge socket that could not be removed):
   `membraned` answers `{state: "dead", clean: false, residue: "items", ...}` and keeps running.
-  `cell.kill` replies with that residue, and the cell stays `dead` for a later kill.
+  `cell.kill` replies with that residue and `teardown` in `incomplete`, and the cell stays `dead`
+  for a later kill.
 - The helper is not reaped by the deadline: 105 `{from: "draining", to: "dead", cell}`.
 - The lock does not free within D: 105 `{from: "dead", to: "retired", cell}`.
 
@@ -283,17 +296,19 @@ The controller runs this check:
 
 It never touches an entry spec 008 does not validate. To test the lock, the controller tries
 `flock(LOCK_EX | LOCK_NB)` on a fresh descriptor; "free" means it got the lock, which it holds
-until the row's action is done. At startup the held-lock cells are queried concurrently, each
-with an answer cap below `recovery_deadline_ms` that leaves the rest of spec 001 §4.1's single
-startup deadline for cleanup and publication. Rows are tried in order:
+until the row's action is done. A missing `supervisor.lock` is created exclusively, locked, and
+counts as free. At startup the held-lock cells are queried concurrently, each with an answer cap
+below `recovery_deadline_ms` that leaves the rest of spec 001 §4.1's single startup deadline for
+cleanup and publication; while serving, the cap is `recovery_deadline_ms`. A malformed answer
+counts as no answer. Rows are tried in order:
 
 | Lock | Marker | Journal | Outcome |
 | --- | --- | --- | --- |
 | held | any | any | Query under spec 008 within the cap, waiting for a `germinating` cell. No answer, or still `germinating`, at the cap: set aside as `unresponsive` or `germinating`. |
 | free | any | corrupt | Quarantine under spec 008, with the lock state and marker in its report. |
-| free | from an earlier boot | no outstanding external obligation | Retire. Every settled holding and pending operation is written to the session log as residue of a host restart. |
-| free | from an earlier boot | an outstanding external obligation | Set aside as `host_restarted`. |
-| free | from this boot, or unreadable | any | Set aside as `supervisor_lost` (O-10). |
+| free | from an earlier boot, or recording a clean stop | no outstanding external obligation | Retire. Every settled holding and pending operation is written to the session log as residue. |
+| free | from an earlier boot, or recording a clean stop | an outstanding external obligation | Set aside as `external_obligations`. |
+| free | from this boot with no clean stop, or unreadable | any | Set aside as `supervisor_lost` (O-10). |
 | free | absent | nothing settled, nothing pending | Retire, with a session log line. |
 | free | absent | a settled attachment or a pending operation | Set aside as `holdings_without_supervisor`. |
 
@@ -302,23 +317,26 @@ A missing journal reads as empty, as spec 008 says. An outstanding external obli
 retiring never does; which verb carries that Force is owner question 3. A retirement whose session
 log line cannot be appended sets the cell aside instead.
 
-**Set-aside cells** are handled as spec 008 handles quarantine. The cell is absent from the
-ordinary registry, so `cell.list` omits it. `plasmosome.recovery` lists it with its reason, its
-lock state and its marker. Readiness is false while any cell is set aside, and it is never a
-reason to refuse startup or to stop serving other cells. It is not permanent: the next request
-naming it, and every startup, runs the check again. `cell.kill` on a set-aside cell whose lock is
-held runs §7's steps. Every other verb naming a set-aside cell is 101, and so is `cell.kill` on
-one whose lock is free; clearing those is owner question 3.
+**Set-aside cells** are handled as spec 008 handles quarantine. The cell is absent from the ordinary
+registry, so `cell.list` omits it. `plasmosome.recovery` lists it with its reason, its lock state,
+its marker and its pending operations. Readiness is false while any cell is set aside, and it is
+never a reason to refuse startup or to stop serving other cells. Nobody can run its pending cleanup,
+reconciliation or publication under spec 008 without its supervisor, so they wait, and block nothing
+else. It is not permanent: the next request naming it, and every startup, runs the check again. A
+check that adopts it first does what startup adoption does: spec 008's pending cleanup, generation
+comparison, reconciliation and publication, then the no-`created` rule below. `cell.kill` on a
+set-aside cell whose lock is held runs §7's steps. Every other verb naming a set-aside cell is 101,
+and so is `cell.kill` on one whose lock is free; clearing those is owner question 3.
 
-**Order.** At startup the controller classifies every validated cell first, holding each free
-lock. It acts only after that, and only if startup is going to serve. A startup that refuses for
-another reason (spec 008's partial discovery, unfinished cleanup or publication) retires nothing
-and releases the locks.
+**Order.** At startup the controller classifies every validated cell first, holding each free lock.
+It acts only after that, and only if startup is going to serve. A startup that refuses for another
+reason (spec 008's partial discovery, or an adopted cell's unfinished cleanup or publication)
+retires nothing and releases the locks.
 
-**After a successful startup**, an adopted cell with no `created` file is one whose `cell.new`
-never replied, so no client knows it exists. The controller ends it as `cell.kill` does, with a
-budget of `stop_deadline_ms`, and writes a session log line naming it. If that kill does not
-finish, the cell stays listed with its state.
+**A cell adopted with no `created` file**, at a startup that serves or by a later check, is one
+whose `cell.new` never replied, so no client knows it exists. The controller ends it as `cell.kill`
+does, with a budget of `stop_deadline_ms`, and writes a session log line naming it. If that kill
+does not finish, the cell stays listed with its state.
 
 ### 9. Isolation of the private socket
 
@@ -333,10 +351,9 @@ item 16 are gated, and the instance root must sit under that writable directory.
 
 ## Changes proposed to accepted specs
 
-These are proposed text, not edits made in this PR. Spec 001 says its text changes in a pull
-request with the reasoning written down, so the PR that accepts this spec must carry these
-edits, or this spec stays draft. Where spec 022 or 024 proposes text for the same lines, the text
-below is the same.
+These are proposed text. The PR that accepts this spec edits no other accepted document. Each
+amendment is applied by a later reviewed change to the document it amends, before any task that
+relies on it. Where spec 022 or 024 proposes text for the same lines, the text below is the same.
 
 **Spec 001 §1, the 105 row.** Replace "`from`, `to`; private recovery methods additionally carry
 the typed `recovery` refusal in §4.1" with:
@@ -365,7 +382,7 @@ too (whichever lands second finds it applied):
 
 ```json
 {"id": 5, "result": {"cell": "cell-3", "state": "ready",
-  "plasmids": ["github-pr [mock:simulate]", "workspace [real]"]}}
+  "plasmids": ["github-pr [mock:simulate]", "workspace [mock:simulate]"]}}
 ```
 
 After the `genome` bullet, add:
@@ -382,12 +399,14 @@ operator assertion.", add:
 
 > `now` requires `operator` and `reason`, nonblank strings: that assertion. Optional
 > `deadline_ms` bounds the whole kill, default `cell_runtime.stop_deadline_ms` or 30,000. The cell
-> is `draining` from the start. The controller stops the workload if the guest runs, withdraws
-> every attachment, sends `membrane.cell.kill`, waits for the supervisor to exit, and moves the
-> directory to `<instance>/retired/<cell>` before replying (spec 023). A failed workload stop never
-> blocks; the reply lists it in `incomplete`. A drain timeout is 106. An unclean teardown replies
-> `"state": "dead"` with its residue, and the cell stays listed for a retry. A guest not stopped,
-> or a supervisor not gone, within the deadline is 105 naming the cell.
+> is `draining` from the start. The controller stops the workload if the guest runs and `now` is
+> not set, withdraws every attachment, sends `membrane.cell.kill`, waits for the supervisor to
+> exit, and moves the directory to `<instance>/retired/<cell>` before replying (spec 023). A step
+> that falls short is listed in `incomplete`, over the closed set `workload_stop`, `shutdown` and
+> `teardown`; a failed workload stop never blocks. A drain or publication timeout is 106. An
+> unclean teardown replies `"state": "dead"` with its residue and `teardown` in `incomplete`, and
+> the cell stays listed for a retry. A guest not stopped, or a supervisor not gone, within the
+> deadline is 105 naming the cell.
 
 **Spec 001 §4, `membrane.status`.** Replace "Every call asks every broker again; no answer is
 kept." with:
@@ -424,8 +443,8 @@ deadline (spec 023)."
 
 > The controller starts each cell's supervisor once, as spec 023 §4 says. The supervisor holds
 > the cell's `supervisor.lock` for its whole life, and creates the `launched` marker, which
-> records the host boot session, before any runtime resource. Only `membrane.cell.kill` removes
-> the marker and the guest's disk.
+> records the host boot session, before any runtime resource. Only `membrane.cell.kill`, or a
+> launch that fails before hello, removes the marker and the guest's disk.
 
 **Spec 008, writer lock (`008:66-67`).** Replace "takes a nonblocking exclusive OS file lock" with
 "takes a nonblocking exclusive `flock(2)` lock on a close-on-exec descriptor".
@@ -433,16 +452,24 @@ deadline (spec 023)."
 **Spec 008, startup query (`008:477-483`).** After "the controller must not derive that state
 from a PID file, socket existence or inability to connect.", add:
 
-> Before that query, startup applies spec 023's supervisor check to each validated cell. It
-> queries only cells whose `supervisor.lock` is held, concurrently, each within a cap below the
-> startup deadline. The lock and the `launched` marker are the supervisor's own lifecycle
-> evidence, not a PID file or socket existence. A failed query, or a free lock with a marker from
-> this boot, sets that one cell aside: it is handled as quarantine is, and never refuses startup.
-> Otherwise a free lock may retire the directory to `<root>/retired/<cell>`, which is not
+> Before that query, startup applies spec 023's supervisor check to each validated cell. It queries
+> only cells whose `supervisor.lock` is held, concurrently, each within a cap below the startup
+> deadline. The lock and the `launched` marker are the supervisor's own lifecycle evidence, not a
+> PID file or socket existence. A failed query, or a free lock with a marker from this boot that
+> records no clean stop, sets that one cell aside: it is handled as quarantine is, and never refuses
+> startup. Otherwise a free lock may retire the directory to `<root>/retired/<cell>`, which is not
 > discovered again. The same check runs while serving, when a query to a supervisor fails.
 
+**Spec 008, answering requests (`008:484-487`).** After "has been reconciled with its membrane.",
+add:
+
+> The pending cleanup here is an adopted cell's. A cell that spec 023's supervisor check sets
+> aside is not adopted: its pending cleanup, reconciliation and publication wait, and the check
+> that later adopts it runs them before the cell serves.
+
 **Spec 008, refusing startup (`008:537-540`).** After "exits nonzero rather than serving a partial
-instance.", add "A cell set aside under spec 023 is not incomplete observation for this rule."
+instance.", add "A cell set aside under spec 023 is not incomplete observation, cleanup or
+publication for this rule."
 
 **Spec 008, unlinking (`008:543-546`).** After "as the existing daemon does.", add:
 
@@ -457,8 +484,9 @@ observation keeps readiness false and sets that cell aside; it does not prevent 
 **Spec 008, R9.** Replace "An unavailable supervisor, partial discovery, unfinished cleanup or
 unresolved publication prevents serving" with:
 
-> An unavailable supervisor sets only its cell aside under spec 023, with readiness false.
-> Partial discovery, unfinished cleanup or unresolved publication prevents serving
+> An unavailable supervisor sets only its cell aside under spec 023, with readiness false, and
+> that cell's cleanup and publication wait until it is adopted. Partial discovery, or an adopted
+> cell's unfinished cleanup or unresolved publication, prevents serving
 
 
 ## Open questions
@@ -474,16 +502,19 @@ These need the owner. Where this spec needs an answer to work, it sets a conserv
    out-of-scope line). Should a cell come back after a host restart, as intent 003's title
    suggests?
 3. **Clearing a set-aside cell.** A cell whose lock is free stays set aside until a check finds
-   it otherwise (the default). Should there be an operator verb, for example a Force retire that
-   records an operator assertion, and what may it assume about a lost guest? A `host_restarted`
-   cell's external obligations wait on this.
+   it otherwise (the default). Until answered, an operator who has confirmed that no `membraned
+   --cell=<id>` and no helper of that cell runs may move its directory into `retired/`, and must
+   never delete it, or its ID can be allocated again. A move would drop an
+   `external_obligations` cell's obligations, so that route is not for one. Should there be an
+   operator verb, for example a Force retire that records an operator assertion, and what may it
+   assume about a lost guest?
 4. **Retired directories and ID reuse.** They are kept, guest disk included, so IDs are never
    reused (the default). Pruning them would let IDs repeat unless a high-water record is kept.
    Who prunes, and when?
 5. **Does `plasmosome.stop` end cells?** Spec 001 §3.4 says a graceful stop drains every cell, then
    stops the controller, which would strip every plasmid from cells that keep running. The default
-   is that cells outlive a stopped controller; this spec does not implement stop and leaves §3.4
-   alone. Should stop end cells, drain them, or leave them untouched?
+   is §3.4 as written: stop drains every cell, and the cells outlive the controller, empty. This
+   spec does not implement stop. Should stop end cells, drain them, or leave them untouched?
 
 O-2 is not a question this spec asks, but §9 and item 16 are gated on it.
 
@@ -493,13 +524,13 @@ Each item names the broken implementation it catches. Unless it says otherwise, 
 Darwin with the fixture test helper, a real, verified test artifact under spec 001 §4.2's checks.
 Items that attach plasmids also need the RealCellBackend task and spec 022.
 
-1. A helper that holds hello until released. While held, `cell.new` has not replied,
-   `cell.status` shows `germinating`, `cell.exec` is 105 `{from: "germinating"}`, and
-   `membrane.status` is `cell_not_ready` with `cell_state: "germinating"`. After release,
-   `cell.new` replies `ready` and `created` exists. With a genome whose attach the test holds at
-   prepare, `membrane.status` is ready, yet `cell.status` shows `germinating` and `cell.exec`
-   refuses until `cell.new` replies `ready`. Catches: replying on a fork or a bound socket, a
-   deadlock between ready and attach, and admitting work before the genome is attached.
+1. A helper that holds hello until released. While held, `cell.new` has not replied, `cell.status`
+   shows `germinating`, `cell.exec` is 105 `{from: "germinating"}`, and `membrane.status` is
+   `cell_not_ready` with `cell_state: "germinating"`. After release, `cell.new` replies `ready` and
+   `created` exists. With a genome whose attach the test holds at prepare, `membrane.status` is not
+   `cell_not_ready`, yet `cell.status` shows `germinating` and `cell.exec` refuses until `cell.new`
+   replies `ready`. Catches: replying on a fork or a bound socket, a deadlock between ready and
+   attach, and admitting work before the genome is attached.
 2. A helper that never sends hello. When `cell.new` replies 105 `{from: "germinating", to:
    "ready", cell}`, after `start_deadline_ms` and within `stop_deadline_ms` more, the directory is
    under `retired/` with no `launched`, and no helper or `membraned` remains. Catches: leaving
@@ -535,25 +566,27 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
    - B: lock free, no `launched`, a stale `membrane.uds`, empty journal;
    - C: lock free, `launched` from another boot, a journal with one settled attachment;
    - D: lock free, no `launched`, a journal with a settled attachment;
-   - E: lock held by a test process that never answers;
+   - E: lock held by a test process that never answers, a journal with a prepared transaction;
    - F: a healthy supervisor whose settled generation still needs publication.
 
-   Startup serves within `recovery_deadline_ms`, with F adopted and published. A, D and E are
-   absent from `cell.list`, listed by `plasmosome.recovery` as `supervisor_lost`,
-   `holdings_without_supervisor` and `unresponsive`, and readiness is false. B and C are under
-   `retired/`, and the session log names C's holding as residue. A retired directory with a
-   corrupt journal is ignored. Catches: deciding from socket existence, one hung supervisor
-   spending the startup deadline, and a cell from before a host restart blocking forever.
+   Startup serves within `recovery_deadline_ms`, with F adopted and published. A, D and E are absent
+   from `cell.list`, listed by `plasmosome.recovery` as `supervisor_lost`,
+   `holdings_without_supervisor` and `unresponsive`, E with its transaction left uncleaned, and
+   readiness is false. B and C are under `retired/`, and the session log names C's holding as
+   residue. A retired directory with a corrupt journal is ignored. Catches: deciding from socket
+   existence, one hung supervisor spending the startup deadline, and a cell from before a host
+   restart blocking forever.
 10. The same set, plus an invalid configuration that makes startup refuse after discovery: nothing
     is retired. Catches: acting before every cell is classified.
-11. While serving, SIGTERM the `membraned` of a cell with an attachment: it stops the guest and
-    exits, keeping `root.img` and `launched`; a query is 101 and `plasmosome.recovery` lists
-    `supervisor_lost`. A startup with a different boot session in its marker retires it, logging
-    its holding; one with the same boot session sets it aside again. SIGKILL another cell's
-    `membraned`: `supervisor_lost`, and a third cell still answers. Stall a fourth past its query,
-    then resume it: the next request naming it adopts it. Catches: a SIGTERM that destroys the
-    guest disk, a clean shutdown handled worse than a crash, one cell taking down the instance,
-    and a set-aside state that never clears.
+11. While serving, SIGTERM the `membraned` of a cell with an attachment: it stops the guest,
+    records a clean stop in `launched` and exits. `cell.status` on it is then 101, the session log
+    names its holding, and `retired/<cell>/runtime/root.img` exists. SIGKILL another cell's
+    `membraned`: `supervisor_lost`, and a third cell still answers; a startup with a different
+    boot session in its marker retires it. Stall a fourth, with a prepared transaction and no
+    `created`, past its query, then resume it: the next request naming it adopts it, cleans up the
+    transaction, ends it and logs it. Catches: a SIGTERM that destroys the guest disk, a clean
+    stop left set aside until reboot, one cell taking down the instance, a set-aside state that
+    never clears, and an adoption that skips cleanup or keeps an unrequested cell.
 12. Stop the controller after it spawned `membraned` and before hello. `membraned` gives up at
     `boot_deadline_ms` and exits; a new controller started after that exit retires the directory.
     Repeat with a helper that sends hello after the controller died, and start the new controller
@@ -565,18 +598,19 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     `membrane.cell.kill` one. While the double holds the withdrawal, `cell.status` shows `draining`
     and `cell.exec` is 105 `{from: "draining"}`. Then `membraned` has exited, the directory is
     `retired/<cell>`, the reply's residue came from `membraned`, and the next `cell.new` gets a new
-    ID. With `now`, with `deadline_ms` 1, and queued behind a held `cell.new` until D is spent,
-    every deadline sent is positive, and the reply lists skipped steps in `incomplete` or is a 105
-    naming the cell. Catches: ending the guest before withdrawing, a zero deadline, residue from
-    controller memory, and ID reuse.
+    ID. With `deadline_ms` 1, and queued behind a held `cell.new` until D is spent, every deadline
+    sent is positive, the reply is 106 and the cell stays `draining`. With `now`, no workload stop
+    is sent, the cell is retired and the reply has no `incomplete`. Catches: ending the guest
+    before withdrawing, a zero deadline, residue from controller memory, and ID reuse.
 14. A guest that ignores `shutdown`: with `deadline_ms` 10,000, `cell.kill` replies within 10
-    seconds and the helper is gone. A crashed guest: no workload stop is sent and the cell is
-    retired. A workload stop refused with `workload_remains`, or never answered: the cell is
-    retired and `incomplete` lists `workload_stop`. An `unresponsive` cell whose lock is held: the
-    kill runs instead of replying 101. An unremovable bridge socket: `state: "dead"` with residue
-    items, `membraned` still runs and the cell is listed `dead`; once removable, a repeat retires
-    it. Catches: an unbounded kill, a cell that cannot be ended, and retiring after a failed
-    teardown.
+    seconds, the helper is gone and `incomplete` lists `shutdown`. A crashed guest: no workload stop
+    is sent and the cell is retired. A workload stop refused with `workload_remains`, or never
+    answered: the cell is retired and `incomplete` lists `workload_stop`. An `unresponsive` cell
+    with no attachments whose lock is held: the kill runs instead of replying 101, and with the
+    supervisor still silent replies 105 `{from: "draining", to: "dead", cell}`. An unremovable
+    bridge socket: `state: "dead"` with residue items and `teardown` in `incomplete`, `membraned`
+    still runs and the cell is listed `dead`; once removable, a repeat retires it. Catches: an
+    unbounded kill, a cell that cannot be ended, and retiring after a failed teardown.
 15. A `membraned` under a group-writable parent, a group-writable `membraned`, and a wrong digest
     for `membraned` or a template Artifact: each `cell.new` is 108 with the path, and no cell
     directory exists. Without `cell_runtime`, `cell.new` is the stated 105 with no directory, and
@@ -597,5 +631,6 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
 - How plasmids become capabilities. That is spec 022.
 - Cleaning an orphaned guest after a SIGKILLed supervisor (O-10).
 - Relaunching a cell after a host or supervisor crash.
+- A client request ID on `cell.new`, which spec 025 asks for; that is task plasmosome-bnkf.
 - Instance roots on NFS, SMB or FUSE filesystems.
 - `cell.clone`, `cell.save`, `cell.load` and `freeze`.
