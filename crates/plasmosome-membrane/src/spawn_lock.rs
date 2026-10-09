@@ -1,6 +1,6 @@
 use crate::vmm::SpawnError;
 use std::cell::Cell;
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::sync::{PoisonError, RwLock};
 
 static SPAWN_LOCK: RwLock<()> = RwLock::new(());
@@ -34,7 +34,7 @@ pub(crate) struct DescriptorsHeld(());
 /// already held. Only descriptors created inside `create` are covered, and
 /// forks that bypass this lock, such as `std::process::Command`, are not held
 /// back.
-pub(crate) fn with_descriptors_held<T: AsFd>(
+pub(crate) fn with_descriptors_held<T: AsFd + Into<OwnedFd>>(
     create: impl FnOnce(&DescriptorsHeld) -> std::io::Result<T>,
 ) -> std::io::Result<T> {
     write_held(&SPAWN_LOCK, || {
