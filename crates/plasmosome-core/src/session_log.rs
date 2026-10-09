@@ -25,6 +25,9 @@ pub enum SessionLogError {
     /// An earlier failure stopped this log from accepting appends. Open a new `SessionLog` on the
     /// same path to validate the file and continue.
     Poisoned { path: PathBuf },
+    /// Another open `SessionLog`, in this process or another, holds the writer lock on the file
+    /// at `path`. Nothing was read or written.
+    Locked { path: PathBuf },
 }
 
 /// The IO call a [`SessionLogError::Io`] came from.
@@ -97,6 +100,11 @@ impl std::fmt::Display for SessionLogError {
                 "session log {} refuses appends after an earlier failure; reopen it",
                 path.display()
             ),
+            SessionLogError::Locked { path } => write!(
+                f,
+                "session log {} is held by another writer",
+                path.display()
+            ),
         }
     }
 }
@@ -105,7 +113,9 @@ impl std::error::Error for SessionLogError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             SessionLogError::Io { source, .. } => Some(source),
-            SessionLogError::Malformed { .. } | SessionLogError::Poisoned { .. } => None,
+            SessionLogError::Malformed { .. }
+            | SessionLogError::Poisoned { .. }
+            | SessionLogError::Locked { .. } => None,
         }
     }
 }
