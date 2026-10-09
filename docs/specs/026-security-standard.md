@@ -294,7 +294,8 @@ run C as a separate program, as the membrane does with `supervision_worker.c`. T
 `extern` block, so it is a reviewer item: only register packages may do it.
 
 The fuzz workspace is the one exception. It is never shipped, and it compiles libFuzzer's C++
-through `libfuzzer-sys`.
+through `libfuzzer-sys`. Its own code still forbids `unsafe`, as any package outside the register
+does.
 
 **Gaining `unsafe` later.** A package joins the register in its own PR. The PR gives the package
 its own `[lints]` table with `unsafe_code = "deny"` and both clippy lints, adds the scoped `allow`s
