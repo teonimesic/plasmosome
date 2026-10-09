@@ -810,10 +810,11 @@ mod tests {
 
     #[test]
     fn release_ref_refuses_missing_unknown_null_and_duplicate_fields() {
-        for (record, value, fields) in [
-            ("ReleaseRef", release_json(), &SIX[..]),
-            ("ReleaseKey", key_json(), &SIX[..5]),
-        ] {
+        let records: [(&str, Value, &[&str], fn(&str) -> String); 2] = [
+            ("ReleaseRef", release_json(), &SIX, refusal::<ReleaseRef>),
+            ("ReleaseKey", key_json(), &SIX[..5], refusal::<ReleaseKey>),
+        ];
+        for (record, value, fields, refuse) in records {
             let mut cases = Vec::new();
             for field in fields {
                 let mut missing = value.clone();
@@ -843,11 +844,7 @@ mod tests {
                 "invalid type: sequence".to_string(),
             ));
             for (text, reason) in cases {
-                let error = if record == "ReleaseRef" {
-                    refusal::<ReleaseRef>(&text)
-                } else {
-                    refusal::<ReleaseKey>(&text)
-                };
+                let error = refuse(&text);
                 assert!(error.contains(&reason), "{record} {text}: {error}");
             }
         }
