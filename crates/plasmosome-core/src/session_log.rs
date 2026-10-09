@@ -1528,5 +1528,17 @@ mod tests {
             }
             assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes(), "{case}");
         }
+        let torn = dir.path().join("torn.ndjson");
+        std::fs::write(
+            &torn,
+            padded_line(1, 40) + &"x".repeat(SessionLog::MAX_LINE_BYTES),
+        )
+        .unwrap();
+        assert_malformed(
+            open_error(torn.clone(), &OsLogStore),
+            &torn,
+            (2, LogFault::MissingNewline),
+            "an unterminated line of exactly the limit is torn, not too long",
+        );
     }
 }
