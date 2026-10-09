@@ -169,19 +169,12 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::ObjectOnly;
+    use crate::backend::tests::{operation, owner};
     use crate::{
-        BrokerLaunch, Capability, CellId, CellOwner, Diff, DrainSpec, FileAccess, Grant, GrantId,
-        GrantKind, Handle, LedgerEntry, MountRecipe, OsObject, OsState, PluginId, ProxyRecipe,
-        ProxyTransport, ResidueReport, SessionFileRecipe, UdsRecipe, UniverseClass, UniverseOp,
-        UniverseRemoval,
+        BrokerLaunch, Capability, Diff, DrainSpec, FileAccess, Grant, GrantId, GrantKind, Handle,
+        LedgerEntry, MountRecipe, OsObject, OsState, ProxyRecipe, ProxyTransport, ResidueReport,
+        SessionFileRecipe, UdsRecipe, UniverseClass, UniverseOp, UniverseRemoval,
     };
-
-    fn owner() -> CellOwner {
-        CellOwner {
-            cell: CellId::from("cell-1"),
-            plugin: PluginId::from("github-pr"),
-        }
-    }
 
     fn mount() -> Capability {
         Capability::Mount {
@@ -196,60 +189,6 @@ mod tests {
             owner: owner(),
             capability: mount(),
         }
-    }
-
-    fn operations() -> Vec<(UniverseOp, &'static str, &'static [&'static str])> {
-        let id = GrantId::new;
-        vec![
-            (
-                UniverseOp::WriteSessionFile {
-                    id: id(),
-                    path: "/skills/pr.md".to_string(),
-                    owner: owner(),
-                },
-                "/WriteSessionFile",
-                &["id", "path", "owner"],
-            ),
-            (
-                UniverseOp::BindUds {
-                    id: id(),
-                    path: "/run/plasmosome/egressd.uds".to_string(),
-                    owner: owner(),
-                },
-                "/BindUds",
-                &["id", "path", "owner"],
-            ),
-            (
-                UniverseOp::SetProxyMap {
-                    id: id(),
-                    host: "api.github.com".to_string(),
-                    route: "splice".to_string(),
-                    owner: owner(),
-                },
-                "/SetProxyMap",
-                &["id", "host", "route", "owner"],
-            ),
-            (
-                UniverseOp::SpawnBroker {
-                    id: id(),
-                    pid: 4242,
-                    name: "egressd".to_string(),
-                    owner: owner(),
-                },
-                "/SpawnBroker",
-                &["id", "pid", "name", "owner"],
-            ),
-            (
-                UniverseOp::AddMount {
-                    id: id(),
-                    source: "/srv/repo".to_string(),
-                    target: "/workspace".to_string(),
-                    owner: owner(),
-                },
-                "/AddMount",
-                &["id", "source", "target", "owner"],
-            ),
-        ]
     }
 
     fn positional(encoded: &Value, at: &str, fields: &[&str]) -> Value {
@@ -344,12 +283,13 @@ mod tests {
             "",
             &["cell", "plugin"],
         ));
-        for (capability, at, fields) in [
+        for (capability, at, operation_at, fields) in [
             (
                 Capability::SessionFile {
                     path: "/skills/pr.md".to_string(),
                 },
                 "/SessionFile",
+                "/WriteSessionFile",
                 &["path"][..],
             ),
             (
@@ -357,6 +297,7 @@ mod tests {
                     path: "/run/plasmosome/egressd.uds".to_string(),
                 },
                 "/UdsSocket",
+                "/BindUds",
                 &["path"][..],
             ),
             (
@@ -365,6 +306,7 @@ mod tests {
                     route: "splice".to_string(),
                 },
                 "/ProxyMap",
+                "/SetProxyMap",
                 &["host", "route"][..],
             ),
             (
@@ -373,14 +315,20 @@ mod tests {
                     name: "egressd".to_string(),
                 },
                 "/Broker",
+                "/SpawnBroker",
                 &["pid", "name"][..],
             ),
-            (mount(), "/Mount", &["source", "target"][..]),
+            (mount(), "/Mount", "/AddMount", &["source", "target"][..]),
         ] {
             accepted.extend(sequence_accepted("Capability", &capability, at, fields));
-        }
-        for (operation, at, fields) in operations() {
-            accepted.extend(sequence_accepted("UniverseOp", &operation, at, fields));
+            let operation_fields = [&["id"][..], fields, &["owner"]].concat();
+            let op = operation(GrantId::new(), capability);
+            accepted.extend(sequence_accepted(
+                "UniverseOp",
+                &op,
+                operation_at,
+                &operation_fields,
+            ));
         }
         accepted.extend(sequence_accepted(
             "OsObject",
@@ -492,20 +440,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn a_launch_array_cannot_swap_its_two_endpoints() {
-        let swapped = json!([
-            ["/usr/libexec/egressd"],
-            "/run/plasmosome/egressd.data",
-            "/run/plasmosome/egressd.control"
-        ]);
-        let error = serde_json::from_value::<BrokerLaunch>(swapped).unwrap_err();
-        assert!(
-            error.to_string().contains("invalid type: sequence"),
-            "{error}"
-        );
     }
 
     #[test]

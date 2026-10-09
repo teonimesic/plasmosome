@@ -857,11 +857,20 @@ mod tests {
                 RecipeError::ContainsNul { field: "name" },
             ),
         ] {
+            let rule = error.to_string();
             let expected = BackendError::InvalidOperation {
                 class: op.class().as_str(),
                 id: op.id(),
                 error,
             };
+            assert_eq!(
+                expected.to_string(),
+                format!(
+                    "invalid {} operation {}: {rule}",
+                    op.class().as_str(),
+                    op.id()
+                )
+            );
             assert_eq!(backend.apply(op.clone()).unwrap_err(), expected);
             assert_eq!(backend.snapshot_os_state(), before);
             assert_eq!(backend.plant(op.object()).unwrap_err(), expected);

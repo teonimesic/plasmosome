@@ -354,14 +354,14 @@ pub trait EnforcementBackend {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use serde_json::{Value, json};
 
     use super::*;
     use crate::recipe::RecipeError;
     use crate::universe::{CellId, PluginId};
 
-    fn owner() -> CellOwner {
+    pub(crate) fn owner() -> CellOwner {
         CellOwner {
             cell: CellId::from("cell-1"),
             plugin: PluginId::from("github-pr"),
@@ -454,7 +454,7 @@ mod tests {
         }
     }
 
-    fn operation(id: GrantId, capability: Capability) -> UniverseOp {
+    pub(crate) fn operation(id: GrantId, capability: Capability) -> UniverseOp {
         let owner = owner();
         match capability {
             Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
@@ -608,24 +608,5 @@ mod tests {
             assert_eq!(encoded, operation_json(id, &capability));
             assert_eq!(serde_json::from_value::<UniverseOp>(encoded).unwrap(), op);
         }
-    }
-
-    #[test]
-    fn an_invalid_operation_error_names_its_address_and_the_rule() {
-        let id = GrantId::new();
-        let error = BackendError::InvalidOperation {
-            class: "session-file",
-            id,
-            error: RecipeError::NotAbsolute {
-                field: "path",
-                value: "skills/pr.md".to_string(),
-            },
-        };
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "invalid session-file operation {id}: `path` must be an absolute path, not \"skills/pr.md\""
-            )
-        );
     }
 }
