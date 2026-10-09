@@ -928,6 +928,12 @@ mod tests {
         }
         for refused in [
             "recorded",
+            "real",
+            "live",
+            "sim",
+            "mock",
+            "none",
+            "replay",
             "Simulate",
             "Capture",
             "Passthrough",
@@ -964,6 +970,12 @@ mod tests {
             r#""Capture""#,
             r#""Passthrough""#,
             r#""recorded""#,
+            r#""real""#,
+            r#""live""#,
+            r#""sim""#,
+            r#""mock""#,
+            r#""none""#,
+            r#""replay""#,
             r#""""#,
             "null",
         ] {
@@ -983,6 +995,20 @@ mod tests {
             error,
             "unknown variant `none`, expected one of `simulate`, `capture`, `passthrough`"
         );
+    }
+
+    #[test]
+    fn serde_lists_every_accepted_name_in_its_unknown_variant_error() {
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        enum Probe {
+            #[serde(alias = "accepted_alias")]
+            Name,
+        }
+        let error = serde_json::from_value::<Probe>(serde_json::json!("none"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`accepted_alias`"), "{error}");
     }
 
     #[test]
