@@ -92,8 +92,7 @@ fn rewrite_recorded_roots(
         let found = fs::read_to_string(&file).expect("the recorded-root file is readable");
         if found != built.to_str().unwrap() {
             failures.push(format!(
-                "A's recorded root: expected {}, found {found} in {}. Either the wrong file was found, or the build recorded the wrong root.",
-                built.display(),
+                "A's recorded root: expected {built:?}, found {found:?} in {}. Either this test searched the wrong build output, and the rewritten-root case that follows then tests nothing, or the build recorded the wrong root.",
                 file.display()
             ));
         }
