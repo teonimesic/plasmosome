@@ -133,16 +133,27 @@ second UID: the distinct-UID test waits on owner decision O-8. It does not chang
 control socket described above.
 
 - `PrivateDir::open` walks the socket's parent directory from `/`, without following symlinks.
+  The path must be absolute and normal: no `.` or `..` component, no empty component and no
+  trailing `/`. `check_private_path` applies the same rule to the socket path.
   - Each ancestor must be owned by root or by the effective UID, and writable by neither group
     nor other. A sticky `/tmp` is refused as well.
   - On macOS, an ancestor is also refused when its ACL has an allow entry that grants
-    `add_file`, `add_subdirectory`, `delete_child`, `delete`, `writesecurity` or `chown`. This
-    holds whoever the entry names, this user included, and for entries that apply only to new
-    children. Extended ACLs do not show in the mode bits. Deny entries and allow entries for
+    `add_file`, `add_subdirectory`, `delete_child`, `delete`, `writesecurity` or `chown`, or
+    the generic write or generic all right that implies them. This holds whoever the entry
+    names, this user included, and for entries that apply only to new children. Extended ACLs do not show in the mode bits. Deny entries and allow entries for
     reading still pass, such as the home directory's `everyone deny delete`.
   - On Linux, an ACL that grants write raises the mask, which shows in the group bits, so the
     mode rule covers it. Linux reads only POSIX ACLs, so neither rule sees an NFSv4 or CIFS
     ACL.
+  - On macOS, a directory on a volume mounted with ownership ignored (`noowners`, the
+    `MNT_IGNORE_OWNERSHIP` flag) is refused, whether it is an ancestor or the directory itself.
+    On such a volume every user is treated as the owner, so owner and mode keep no one out.
+  - Otherwise owner and mode are taken as the filesystem reports them. NFS, SMB and FUSE
+    filesystems, on Linux and on macOS, can map, squash or invent owners, and the walk does not
+    check the filesystem type. Keep the socket's directory on a local filesystem.
+  - A component this user may not open is judged from a no-follow `fstatat` in its parent. A
+    root-owned 0700 directory is therefore refused as `ForeignOwner`; only a component that
+    breaks no rule is reported as `Io`.
   - Ancestors only need search permission, so a root-owned 0711 `/home` passes.
   - The directory itself must be owned by the effective UID, have no group or other permission
     bits, and carry no ACL. It stays open for the checks that follow.
@@ -159,7 +170,8 @@ control socket described above.
 - `PrivateListener::accept` reads the peer's effective UID from the kernel: `getpeereid` on
   macOS, `SO_PEERCRED` on Linux. It closes an untrusted peer before reading a byte.
 - A client calls `check_private_path` before its own nonblocking connect, then `check_peer_uid`
-  on the connected stream before it sends anything.
+  on the connected stream before it sends anything. A missing directory is `NoDirectory`; a
+  missing socket entry in a directory that exists is `NoSocket`.
 
 The integration tests make each private root where every ancestor passes:
 - on macOS, under the per-user temp directory that `confstr(_CS_DARWIN_USER_TEMP_DIR)` reports,
@@ -182,3 +194,13 @@ allocation, so an error read too late shows up as the wrong variant.
 
 The Linux ACL tests fail when the filesystem refuses POSIX ACLs. Set
 `PLASMOSOME_ACL_TESTS_UNSUPPORTED=1` to skip them there instead.
+
+One test connects to a socket served by another UID and expects the kernel to report that UID,
+not this process's own: `/private/var/run/mDNSResponder` on macOS, the system D-Bus socket or
+the journal's stdout socket on Linux. It fails when none of them accepts a connection. Set
+`PLASMOSOME_FOREIGN_PEER_TESTS_UNSUPPORTED=1` to skip it there instead.
+
+On macOS, the generic-rights test writes an ACL entry that holds only a generic right, through
+the raw `chmod_extended` system call. The `noowners` test creates a
+1 MB HFS+ image under the test root, attaches it with `hdiutil attach -owners off`, which
+needs no root, and detaches it when the test ends.
