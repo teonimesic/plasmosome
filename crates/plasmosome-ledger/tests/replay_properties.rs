@@ -51,7 +51,7 @@ impl GeneratedEffect {
             GeneratedEffect::ExactFile { index } => {
                 let op = UniverseOp::WriteSessionFile {
                     id: GrantId::new(),
-                    path: format!("skills/generated-{index}.md"),
+                    path: format!("/skills/generated-{index}.md"),
                     owner: generated_owner(),
                 };
                 let effect = Effect::exact(

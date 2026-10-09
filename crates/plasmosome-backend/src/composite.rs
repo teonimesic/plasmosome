@@ -150,7 +150,7 @@ mod tests {
         let file = backend.grant(Grant {
             owner: cell_owner("github-pr"),
             capability: Capability::SessionFile {
-                path: "skills/pr.md".to_string(),
+                path: "/skills/pr.md".to_string(),
             },
             kind: GrantKind::Hot,
         });
@@ -296,7 +296,7 @@ mod tests {
                 id: GrantId::new(),
                 owner: cell_owner("workspace"),
                 capability: Capability::SessionFile {
-                    path: "skills/pr.md".to_string(),
+                    path: "/skills/pr.md".to_string(),
                 },
             })
             .unwrap();

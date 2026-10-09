@@ -5,7 +5,7 @@ use plasmosome_backend::{
     Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, Grant,
     GrantId, GrantKind, LedgerEntry, PluginId, UniverseClass, UniverseOp, UniverseRemoval,
 };
-use plasmosome_ledger::{Closure, Effect, InverseVia, Ledger, LogRecord};
+use plasmosome_ledger::{Closure, Effect, Inverse, InverseVia, Ledger, LogRecord, Reversibility};
 
 fn cell() -> CellId {
     CellId::from("cell-1")
@@ -30,7 +30,7 @@ fn file_removal(path: &str) -> UniverseRemoval {
 fn wire_capabilities() -> Vec<Capability> {
     vec![
         Capability::SessionFile {
-            path: "skills/pr.md".to_string(),
+            path: "/skills/pr.md".to_string(),
         },
         Capability::UdsSocket {
             path: "/run/plasmosome/egressd.uds".to_string(),
@@ -53,7 +53,7 @@ fn wire_capabilities() -> Vec<Capability> {
 fn populate(backend: &mut FakeBackend) -> (PluginId, Vec<Effect>) {
     let op = UniverseOp::WriteSessionFile {
         id: GrantId::new(),
-        path: "skills/pr.md".to_string(),
+        path: "/skills/pr.md".to_string(),
         owner: cell_owner("github-pr"),
     };
     let removal = op.removal();
@@ -217,7 +217,7 @@ fn ledger_entry_refuses_serializing_a_class_capability_mismatch() {
     let entry = backend.grant(Grant {
         owner: cell_owner("network"),
         capability: Capability::SessionFile {
-            path: "skills/pr.md".to_string(),
+            path: "/skills/pr.md".to_string(),
         },
         kind: GrantKind::Hot,
     });
@@ -237,7 +237,7 @@ fn log_record_refuses_serializing_an_unsupported_format() {
     let record = LogRecord {
         format: 2,
         plugin: PluginId::from("network"),
-        effect: Effect::exact("wire", InverseVia::Universe(file_removal("skills/pr.md"))),
+        effect: Effect::exact("wire", InverseVia::Universe(file_removal("/skills/pr.md"))),
     };
     let encoded = serde_json::to_string(&record).unwrap();
     assert_eq!(serde_json::from_str::<LogRecord>(&encoded).unwrap(), record);
@@ -303,11 +303,11 @@ fn a_crash_truncated_final_line_costs_only_its_own_entry() {
     let mut ledger = Ledger::new("github-pr");
     ledger.push(Effect::exact(
         "entry one",
-        InverseVia::Universe(file_removal("skills/a.md")),
+        InverseVia::Universe(file_removal("/skills/a.md")),
     ));
     ledger.push(Effect::exact(
         "entry two",
-        InverseVia::Universe(file_removal("skills/b.md")),
+        InverseVia::Universe(file_removal("/skills/b.md")),
     ));
     ledger.append_to_file(&log).unwrap();
 
@@ -332,13 +332,13 @@ fn a_torn_utf8_tail_preserves_complete_entries_without_rewriting() {
     let log = dir.path().join("ledger.ndjson");
     let first = Effect::exact(
         "entry one",
-        InverseVia::Universe(file_removal("skills/a.md")),
+        InverseVia::Universe(file_removal("/skills/a.md")),
     );
     let mut ledger = Ledger::new("github-pr");
     ledger.push(first.clone());
     ledger.push(Effect::exact(
         "entry €",
-        InverseVia::Universe(file_removal("skills/b.md")),
+        InverseVia::Universe(file_removal("/skills/b.md")),
     ));
     let mut encoded = Vec::new();
     ledger.write_to(&mut encoded).unwrap();
@@ -362,7 +362,7 @@ fn invalid_utf8_and_complete_final_records_cannot_be_discarded() {
     let mut ledger = Ledger::new("github-pr");
     ledger.push(Effect::exact(
         "entry",
-        InverseVia::Universe(file_removal("skills/a.md")),
+        InverseVia::Universe(file_removal("/skills/a.md")),
     ));
     let mut valid = Vec::new();
     ledger.write_to(&mut valid).unwrap();
@@ -392,13 +392,13 @@ fn a_log_whose_lines_disagree_on_the_plugin_is_a_named_error() {
     let mut ledger = Ledger::new("github-pr");
     ledger.push(Effect::exact(
         "entry one",
-        InverseVia::Universe(file_removal("skills/a.md")),
+        InverseVia::Universe(file_removal("/skills/a.md")),
     ));
     ledger.append_to_file(&log).unwrap();
     let mut other = Ledger::new("model-provider");
     other.push(Effect::exact(
         "entry two",
-        InverseVia::Universe(file_removal("skills/b.md")),
+        InverseVia::Universe(file_removal("/skills/b.md")),
     ));
     let mut file = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
     other.write_to(&mut file).unwrap();
@@ -526,7 +526,7 @@ fn complete_invalid_records_are_refused_without_rewriting_the_source() {
     let mut ledger = Ledger::new("github-pr");
     ledger.push(Effect::exact(
         "entry",
-        InverseVia::Universe(file_removal("skills/a.md")),
+        InverseVia::Universe(file_removal("/skills/a.md")),
     ));
     let mut encoded = Vec::new();
     ledger.write_to(&mut encoded).unwrap();
@@ -552,7 +552,7 @@ fn complete_invalid_records_are_refused_without_rewriting_the_source() {
     cases.push(serde_json::to_string(&invalid_variant).unwrap() + "\n");
     let mut old_lossy_field = value.clone();
     old_lossy_field["effect"]["reversibility"]["Exact"]["via"]["Universe"]["key"] =
-        serde_json::json!("session/skills/a.md");
+        serde_json::json!("session//skills/a.md");
     cases.push(serde_json::to_string(&old_lossy_field).unwrap() + "\n");
     let mut numeric_handle = value;
     numeric_handle["effect"]["reversibility"]["Exact"]["via"] = serde_json::json!({"Backend": 7});
@@ -575,7 +575,7 @@ fn malformed_middle_and_complete_final_records_never_disappear() {
     let mut ledger = Ledger::new("github-pr");
     ledger.push(Effect::exact(
         "entry",
-        InverseVia::Universe(file_removal("skills/a.md")),
+        InverseVia::Universe(file_removal("/skills/a.md")),
     ));
     let mut encoded = Vec::new();
     ledger.write_to(&mut encoded).unwrap();
@@ -595,4 +595,101 @@ fn malformed_middle_and_complete_final_records_never_disappear() {
 
     std::fs::write(&log, valid.trim_end()).unwrap();
     assert_eq!(Ledger::open_file(&log).unwrap().len(), 1);
+}
+
+#[test]
+fn a_record_that_cannot_be_encoded_leaves_every_target_as_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+    let mut ledger = Ledger::new("github-pr");
+    ledger.push(Effect::exact(
+        "entry one",
+        InverseVia::Universe(file_removal("/skills/a.md")),
+    ));
+    ledger.append_to_file(&log).unwrap();
+    let before = std::fs::read(&log).unwrap();
+
+    let mut unencodable = Ledger::new("github-pr");
+    unencodable.push(Effect::exact(
+        "a valid entry written first",
+        InverseVia::Universe(file_removal("/skills/b.md")),
+    ));
+    unencodable.push(Effect::compensating(
+        "a relative path",
+        file_removal("skills/c.md"),
+    ));
+    let error = unencodable.append_to_file(&log).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        error
+            .to_string()
+            .contains("`path` must be an absolute path, not \"skills/c.md\""),
+        "{error}"
+    );
+    let after = std::fs::read(&log).unwrap();
+    assert!(after == before, "{}", String::from_utf8_lossy(&after));
+
+    let missing = dir.path().join("cell").join("ledger.ndjson");
+    assert_eq!(
+        unencodable.append_to_file(&missing).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert!(!dir.path().join("cell").exists());
+
+    let mut buffer = Vec::new();
+    assert!(unencodable.write_to(&mut buffer).is_err());
+    assert!(buffer.is_empty(), "{}", String::from_utf8_lossy(&buffer));
+}
+
+#[test]
+fn a_record_with_a_repeated_key_at_any_depth_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+    let mut ledger = Ledger::new("github-pr");
+    ledger.push(Effect {
+        description: "effect".to_string(),
+        reversibility: Reversibility::Exact(Inverse {
+            description: "inverse".to_string(),
+            via: InverseVia::Universe(file_removal("/skills/a.md")),
+        }),
+    });
+    let mut encoded = Vec::new();
+    ledger.write_to(&mut encoded).unwrap();
+    let valid = String::from_utf8(encoded).unwrap();
+    for (once, twice, field) in [
+        (
+            r#""plugin":"github-pr""#,
+            r#""plugin":"github-pr","plugin":"audit""#,
+            "plugin",
+        ),
+        (
+            r#""description":"effect""#,
+            r#""description":"effect","description":"other""#,
+            "description",
+        ),
+        (
+            r#""description":"inverse""#,
+            r#""description":"inverse","description":"other""#,
+            "description",
+        ),
+        (
+            r#""path":"/skills/a.md""#,
+            r#""path":"/skills/a.md","path":"/skills/b.md""#,
+            "path",
+        ),
+    ] {
+        assert_eq!(valid.matches(once).count(), 1, "{once} in {valid}");
+        let doubled = valid.replacen(once, twice, 1);
+        std::fs::write(&log, &doubled).unwrap();
+        let error = Ledger::open_file(&log).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("line 1")
+                && error
+                    .to_string()
+                    .contains(&format!("duplicate field `{field}`")),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), doubled);
+    }
 }

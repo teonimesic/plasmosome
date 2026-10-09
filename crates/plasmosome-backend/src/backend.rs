@@ -5,15 +5,23 @@ use serde::de::Error as _;
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::recipe::{RecipeError, canonical_path, nul_free};
 use crate::universe::{
     CellOwner, GrantId, OsObject, OsState, UniverseClass, UniverseOp, UniverseRemoval,
 };
+use crate::wire::{ObjectOnly, object_serde, validated_object_serde};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Handle {
     pub class: UniverseClass,
     pub id: GrantId,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Handle", deny_unknown_fields)]
+struct HandleShape {
+    class: UniverseClass,
+    id: GrantId,
 }
 
 impl fmt::Display for Handle {
@@ -37,9 +45,23 @@ impl GrantKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// A capability, identified by its class and its exact fields.
+///
+/// Decoding refuses a missing, unknown or positional field, and decoding and encoding both
+/// refuse any value `validate` refuses. A value built in memory is not checked: call `validate`
+/// before acting on it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
+    SessionFile { path: String },
+    UdsSocket { path: String },
+    ProxyMap { host: String, route: String },
+    Broker { pid: u32, name: String },
+    Mount { source: String, target: String },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Capability", deny_unknown_fields)]
+enum CapabilityShape {
     SessionFile { path: String },
     UdsSocket { path: String },
     ProxyMap { host: String, route: String },
@@ -71,13 +93,42 @@ impl Capability {
             Capability::Mount { target, .. } => target.clone(),
         }
     }
+
+    /// Returns the first rule this capability breaks, in field order. `SessionFile.path`,
+    /// `UdsSocket.path`, `Mount.source` and `Mount.target` are canonical absolute paths as
+    /// `RecipeError` defines them. `host`, `route` and `name` are exact selection names, so they
+    /// only need to be NUL-free.
+    pub fn validate(&self) -> Result<(), RecipeError> {
+        match self {
+            Capability::SessionFile { path } | Capability::UdsSocket { path } => {
+                canonical_path("path", path)
+            }
+            Capability::ProxyMap { host, route } => {
+                nul_free("host", host)?;
+                nul_free("route", route)
+            }
+            Capability::Broker { name, .. } => nul_free("name", name),
+            Capability::Mount { source, target } => {
+                canonical_path("source", source)?;
+                canonical_path("target", target)
+            }
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
     pub owner: CellOwner,
     pub capability: Capability,
     pub kind: GrantKind,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Grant")]
+struct GrantShape {
+    owner: CellOwner,
+    capability: Capability,
+    kind: GrantKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,7 +199,7 @@ impl<'de> Deserialize<'de> for LedgerEntry {
             kind: GrantKind,
         }
 
-        let wire = Wire::deserialize(deserializer)?;
+        let wire = Wire::deserialize(ObjectOnly::new(deserializer))?;
         if wire.handle.class != wire.capability.class() {
             return Err(D::Error::custom(
                 "ledger entry handle class does not match its capability",
@@ -169,11 +220,26 @@ pub enum RevokePolicy {
     Force,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrainSpec {
     pub deadline: Duration,
     pub policy: RevokePolicy,
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "DrainSpec")]
+struct DrainSpecShape {
+    #[serde(deserialize_with = "crate::wire::object")]
+    deadline: Duration,
+    policy: RevokePolicy,
+}
+
+object_serde!(
+    Handle through HandleShape,
+    Grant through GrantShape,
+    DrainSpec through DrainSpecShape
+);
+validated_object_serde!(Capability through CapabilityShape);
 
 impl DrainSpec {
     /// A drain that waits up to `deadline` for the holding's admitted work to finish before it
@@ -219,6 +285,11 @@ pub enum BackendError {
         class: &'static str,
         id: GrantId,
     },
+    InvalidOperation {
+        class: &'static str,
+        id: GrantId,
+        error: RecipeError,
+    },
     Fault(String),
     Unimplemented(&'static str),
 }
@@ -250,6 +321,9 @@ impl fmt::Display for BackendError {
                     "{class} grant identity {id} is already held by another object"
                 )
             }
+            BackendError::InvalidOperation { class, id, error } => {
+                write!(f, "invalid {class} operation {id}: {error}")
+            }
             BackendError::Fault(cause) => write!(f, "injected backend fault: {cause}"),
             BackendError::Unimplemented(what) => write!(f, "unimplemented in this track: {what}"),
         }
@@ -277,4 +351,255 @@ pub trait EnforcementBackend {
         drain: DrainSpec,
     ) -> Result<(), BackendError>;
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::recipe::RecipeError;
+    use crate::universe::{CellId, PluginId};
+
+    fn owner() -> CellOwner {
+        CellOwner {
+            cell: CellId::from("cell-1"),
+            plugin: PluginId::from("github-pr"),
+        }
+    }
+
+    fn path_faults(field: &'static str) -> Vec<(String, RecipeError)> {
+        vec![
+            (
+                "skills/pr.md".to_string(),
+                RecipeError::NotAbsolute {
+                    field,
+                    value: "skills/pr.md".to_string(),
+                },
+            ),
+            (
+                "/skills//pr.md".to_string(),
+                RecipeError::NotCanonical {
+                    field,
+                    value: "/skills//pr.md".to_string(),
+                },
+            ),
+            (
+                "/skills/../pr.md".to_string(),
+                RecipeError::NotCanonical {
+                    field,
+                    value: "/skills/../pr.md".to_string(),
+                },
+            ),
+            (
+                "/skills/pr\0.md".to_string(),
+                RecipeError::ContainsNul { field },
+            ),
+        ]
+    }
+
+    fn invalid_capabilities() -> Vec<(Capability, RecipeError)> {
+        let mut cases = Vec::new();
+        for (path, error) in path_faults("path") {
+            cases.push((
+                Capability::SessionFile { path: path.clone() },
+                error.clone(),
+            ));
+            cases.push((Capability::UdsSocket { path }, error));
+        }
+        for (source, error) in path_faults("source") {
+            let target = "/workspace".to_string();
+            cases.push((Capability::Mount { source, target }, error));
+        }
+        for (target, error) in path_faults("target") {
+            let source = "/srv/repo".to_string();
+            cases.push((Capability::Mount { source, target }, error));
+        }
+        let nul = |field| RecipeError::ContainsNul { field };
+        cases.push((
+            Capability::ProxyMap {
+                host: "api.github\0.com".to_string(),
+                route: "splice".to_string(),
+            },
+            nul("host"),
+        ));
+        cases.push((
+            Capability::ProxyMap {
+                host: "api.github.com".to_string(),
+                route: "spl\0ice".to_string(),
+            },
+            nul("route"),
+        ));
+        cases.push((
+            Capability::Broker {
+                pid: 4242,
+                name: "egress\0d".to_string(),
+            },
+            nul("name"),
+        ));
+        cases
+    }
+
+    fn capability_json(capability: &Capability) -> Value {
+        match capability {
+            Capability::SessionFile { path } => json!({"SessionFile": {"path": path}}),
+            Capability::UdsSocket { path } => json!({"UdsSocket": {"path": path}}),
+            Capability::ProxyMap { host, route } => {
+                json!({"ProxyMap": {"host": host, "route": route}})
+            }
+            Capability::Broker { pid, name } => json!({"Broker": {"pid": pid, "name": name}}),
+            Capability::Mount { source, target } => {
+                json!({"Mount": {"source": source, "target": target}})
+            }
+        }
+    }
+
+    fn operation(id: GrantId, capability: Capability) -> UniverseOp {
+        let owner = owner();
+        match capability {
+            Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
+            Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
+            Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
+                id,
+                host,
+                route,
+                owner,
+            },
+            Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
+                id,
+                pid,
+                name,
+                owner,
+            },
+            Capability::Mount { source, target } => UniverseOp::AddMount {
+                id,
+                source,
+                target,
+                owner,
+            },
+        }
+    }
+
+    fn operation_json(id: GrantId, capability: &Capability) -> Value {
+        let (variant, mut fields) = match capability_json(capability) {
+            Value::Object(outer) => outer.into_iter().next().expect("one variant"),
+            other => panic!("a capability encodes as an object, not {other}"),
+        };
+        let fields = fields.as_object_mut().expect("variant fields");
+        fields.insert("id".to_string(), json!(id));
+        fields.insert("owner".to_string(), json!(owner()));
+        let variant = match variant.as_str() {
+            "SessionFile" => "WriteSessionFile",
+            "UdsSocket" => "BindUds",
+            "ProxyMap" => "SetProxyMap",
+            "Broker" => "SpawnBroker",
+            "Mount" => "AddMount",
+            other => panic!("no operation for {other}"),
+        };
+        json!({ variant: fields })
+    }
+
+    fn assert_refused<T: Serialize + serde::de::DeserializeOwned>(
+        value: &T,
+        encoded: Value,
+        expected: &RecipeError,
+    ) {
+        let decoded = serde_json::from_value::<T>(encoded.clone()).map(drop);
+        let text = serde_json::from_str::<T>(&encoded.to_string()).map(drop);
+        let written = serde_json::to_string(value).map(drop);
+        for (path, outcome) in [("decode", decoded), ("text", text), ("encode", written)] {
+            let error = outcome.expect_err(&format!("{path} must refuse {encoded}"));
+            assert!(
+                error.to_string().contains(&expected.to_string()),
+                "{path} of {encoded} gave `{error}`, not `{expected}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_capability_refuses_nul_and_non_canonical_paths_wherever_it_travels() {
+        for (capability, expected) in invalid_capabilities() {
+            assert_eq!(
+                capability.validate(),
+                Err(expected.clone()),
+                "{capability:?}"
+            );
+            assert_refused(&capability, capability_json(&capability), &expected);
+            let id = GrantId::new();
+            let op = operation(id, capability.clone());
+            assert_eq!(op.validate(), Err(expected.clone()), "{op:?}");
+            assert_refused(&op, operation_json(id, &capability), &expected);
+            let object = OsObject {
+                id,
+                owner: owner(),
+                capability: capability.clone(),
+            };
+            let object_json =
+                json!({"id": id, "owner": owner(), "capability": capability_json(&capability)});
+            assert_refused(&object, object_json, &expected);
+            let removal = UniverseRemoval {
+                id,
+                capability: capability.clone(),
+            };
+            let removal_json = json!({"id": id, "capability": capability_json(&capability)});
+            assert_refused(&removal, removal_json, &expected);
+        }
+    }
+
+    #[test]
+    fn selection_names_need_only_be_nul_free_and_valid_values_round_trip() {
+        for capability in [
+            Capability::SessionFile {
+                path: "/skills/.pr..md".to_string(),
+            },
+            Capability::UdsSocket {
+                path: "/run/plasmosome/egressd.uds".to_string(),
+            },
+            Capability::ProxyMap {
+                host: "not a dns name".to_string(),
+                route: "../relative/route/".to_string(),
+            },
+            Capability::Broker {
+                pid: 4242,
+                name: "./egressd".to_string(),
+            },
+            Capability::Mount {
+                source: "/srv/repo".to_string(),
+                target: "/workspace".to_string(),
+            },
+        ] {
+            assert_eq!(capability.validate(), Ok(()), "{capability:?}");
+            let encoded = serde_json::to_value(&capability).unwrap();
+            assert_eq!(encoded, capability_json(&capability));
+            assert_eq!(
+                serde_json::from_value::<Capability>(encoded).unwrap(),
+                capability
+            );
+            let id = GrantId::new();
+            let op = operation(id, capability.clone());
+            assert_eq!(op.validate(), Ok(()));
+            let encoded = serde_json::to_value(&op).unwrap();
+            assert_eq!(encoded, operation_json(id, &capability));
+            assert_eq!(serde_json::from_value::<UniverseOp>(encoded).unwrap(), op);
+        }
+    }
+
+    #[test]
+    fn an_invalid_operation_error_names_its_address_and_the_rule() {
+        let id = GrantId::new();
+        let error = BackendError::InvalidOperation {
+            class: "session-file",
+            id,
+            error: RecipeError::NotAbsolute {
+                field: "path",
+                value: "skills/pr.md".to_string(),
+            },
+        };
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "invalid session-file operation {id}: `path` must be an absolute path, not \"skills/pr.md\""
+            )
+        );
+    }
 }
