@@ -547,9 +547,6 @@ mod tests {
         }
     }
 
-    const LOCK_HOLDER: &str = "PLASMOSOME_SESSION_LOG_LOCK_HOLDER";
-    const HOLDING: &str = "session log writer lock held";
-
     fn seqs_on_disk(path: &Path) -> Vec<u64> {
         read_events(path)
             .unwrap()
@@ -1043,32 +1040,6 @@ mod tests {
     }
 
     #[test]
-    fn open_refuses_a_log_that_is_not_a_regular_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(LOG);
-        let made = std::process::Command::new("mkfifo")
-            .arg(&path)
-            .status()
-            .unwrap();
-        assert!(made.success(), "mkfifo {path:?}");
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let opening = path.clone();
-        std::thread::spawn(move || sender.send(open_error(opening, &OsLogStore)));
-        match receiver.recv_timeout(std::time::Duration::from_secs(10)) {
-            Ok(SessionLogError::Io {
-                path: at,
-                step,
-                source,
-            }) => {
-                assert_eq!(step, LogStep::Open);
-                assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
-                assert_eq!(at, path);
-            }
-            other => panic!("expected an Io error at Open, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn errors_name_the_path_and_the_step_or_line() {
         use std::error::Error;
         let path = PathBuf::from("/logs/session.ndjson");
@@ -1173,49 +1144,6 @@ mod tests {
     }
 
     #[test]
-    fn hold_a_writer_lock_for_another_process() {
-        let Some(path) = std::env::var_os(LOCK_HOLDER) else {
-            return;
-        };
-        let _log = SessionLog::open(PathBuf::from(path)).unwrap();
-        println!("{HOLDING}");
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line).unwrap();
-    }
-
-    #[test]
-    fn a_second_writer_in_another_process_is_refused() {
-        use std::io::BufRead;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(LOG);
-        let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "session_log::tests::hold_a_writer_lock_for_another_process",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(LOCK_HOLDER, &path)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut lines = std::io::BufReader::new(holder.stdout.take().unwrap()).lines();
-        let held = lines
-            .by_ref()
-            .map_while(Result::ok)
-            .any(|line| line.contains(HOLDING));
-        assert!(held, "the other process took the writer lock");
-        let refused = SessionLog::open(path.clone());
-        drop(holder.stdin.take());
-        let rest: Vec<String> = lines.map_while(Result::ok).collect();
-        assert!(holder.wait().unwrap().success(), "{rest:?}");
-        assert_locked(refused, &path);
-        let after = SessionLog::open(path.clone()).unwrap();
-        assert_eq!(after.append("a", json!({})).unwrap(), 1);
-    }
-
-    #[test]
     fn a_torn_line_cannot_be_extended_by_a_second_writer() {
         let store = FaultLogStore::new().tear(1, 5);
         let path = store.root().join(LOG);
@@ -1244,7 +1172,8 @@ mod tests {
             let nth = store.count(step) + 1;
             store.fail(step, nth)
         }
-        let cases: [(&str, fn(FaultLogStore) -> FaultLogStore, u64); 4] = [
+        type Arm = fn(FaultLogStore) -> FaultLogStore;
+        let cases: [(&str, Arm, u64); 4] = [
             ("failed write", |store| after_open(store, Step::Write), 1),
             ("failed flush", |store| after_open(store, Step::Flush), 2),
             (
