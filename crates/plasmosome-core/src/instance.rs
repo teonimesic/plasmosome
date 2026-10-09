@@ -1331,14 +1331,15 @@ mod tests {
             assert_eq!(path, root.join("cells"));
             assert_eq!(source.raw_os_error(), Some(libc::EACCES));
         });
+    }
 
-        fs::create_dir(root.join("cells")).expect("cells is made");
-        let restore = restrict(&root.join("cells"), 0o500);
-        let without_cell = open_root(&root).create_cell_dir(&cell("cell-1"));
-        drop(restore);
-        expect_match!(without_cell, Err(CellDirError::Io { path, source }) => {
-            assert_eq!(path, root.join("cells/cell-1"));
-            assert_eq!(source.raw_os_error(), Some(libc::EACCES));
+    #[test]
+    fn create_cell_dir_names_the_cell_when_its_directory_cannot_be_made() {
+        let (_dir, root) = temp_root();
+        let long = "c".repeat(256);
+        expect_match!(open_root(&root).create_cell_dir(&cell(&long)), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, root.join("cells").join(&long));
+            assert_eq!(source.raw_os_error(), Some(libc::ENAMETOOLONG));
         });
     }
 
