@@ -1146,6 +1146,44 @@ fn graceful_granted_removal_step_rejects_a_stale_handle() {
     });
 }
 
+fn revoke_after_one_removal(
+    defect: Defect,
+    drain: DrainSpec,
+) -> (Handle, Result<LedgerEntry, BackendError>) {
+    let mut backend = DefectiveBackend::carrying(defect);
+    let entry = backend.grant(Grant {
+        owner: conformance::conformance_owner(),
+        capability: Capability::Broker {
+            pid: 7,
+            name: "egressd".to_string(),
+        },
+        kind: GrantKind::Hot,
+    });
+    backend
+        .apply_removal(entry.removal(), &entry.owner, drain)
+        .unwrap();
+    let revoked = backend.revoke(entry.handle, DrainSpec::forcing());
+    (entry.handle, revoked)
+}
+
+#[test]
+fn graceful_stale_handle_defect_spares_a_forced_removal() {
+    let (handle, revoked) = revoke_after_one_removal(
+        Defect::GracefulApplyRemovalLeavesAStaleHandle,
+        DrainSpec::forcing(),
+    );
+    assert_eq!(revoked, Err(BackendError::UnknownHandle { handle }));
+}
+
+#[test]
+fn forced_stale_handle_defect_spares_a_graceful_removal() {
+    let (handle, revoked) = revoke_after_one_removal(
+        Defect::ForcedApplyRemovalLeavesAStaleHandle,
+        DrainSpec::graceful(conformance::DRAIN),
+    );
+    assert_eq!(revoked, Err(BackendError::UnknownHandle { handle }));
+}
+
 #[test]
 fn neighbour_after_the_force_rejects_force_refused_while_a_neighbour_stands() {
     assert_rejected(|| {
