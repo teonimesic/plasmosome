@@ -168,7 +168,7 @@ impl PrivateDir {
     ) -> Result<SocketEntry, PrivateSocketError> {
         let c_name = entry_name(name)?;
         let path = self.path.join(name);
-        let facts = stat_at(&self.dir, &c_name).map_err(|errno| missing_or_io(errno, &path))?;
+        let facts = stat_at(&self.dir, &c_name).map_err(|errno| no_socket_or_io(errno, &path))?;
         judge_socket(&facts, trusted_uid, &path)?;
         Ok(SocketEntry {
             path,
@@ -743,7 +743,7 @@ fn prepare_as(
     recheck?;
     restrict_to_owner(&bound)?;
     let facts = stat_at(&bound.dir.dir, &bound.name)
-        .map_err(|errno| missing_or_io(errno, &bound.entry.path))?;
+        .map_err(|errno| no_socket_or_io(errno, &bound.entry.path))?;
     if facts.dev != created.dev || facts.ino != created.ino {
         return Err(PrivateSocketError::BindEscaped {
             path: bound.entry.path.clone(),
@@ -1074,9 +1074,9 @@ fn acl_present(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
     Ok(false)
 }
 
-fn missing_or_io(errno: i32, path: &Path) -> PrivateSocketError {
+fn no_socket_or_io(errno: i32, path: &Path) -> PrivateSocketError {
     if errno == libc::ENOENT {
-        PrivateSocketError::NoDirectory {
+        PrivateSocketError::NoSocket {
             path: path.to_path_buf(),
         }
     } else {
