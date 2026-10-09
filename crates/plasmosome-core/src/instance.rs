@@ -668,6 +668,7 @@ mod tests {
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::thread;
@@ -813,6 +814,7 @@ mod tests {
             !a_separate_open_can_lock(&path),
             "the lock is held while the WriterLock lives"
         );
+        assert!(format!("{lock:?}").contains("controller.lock"), "{lock:?}");
     }
 
     #[test]
@@ -927,6 +929,32 @@ mod tests {
         match within("locking a FIFO", move || instance.lock()) {
             Err(LockError::NotRegular { path }) => assert_eq!(path, root.join("controller.lock")),
             other => panic!("expected NotRegular, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_socket_at_the_lock_path_is_refused_as_not_regular() {
+        let (_dir, root) = temp_root();
+        let _socket = UnixListener::bind(root.join("controller.lock")).expect("the socket binds");
+        match open_root(&root).lock() {
+            Err(LockError::NotRegular { path }) => assert_eq!(path, root.join("controller.lock")),
+            other => panic!("expected NotRegular, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_lock_file_that_cannot_be_created_is_an_io_error() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        set_mode(&root, 0o500);
+        let result = open_root(&root).lock();
+        set_mode(&root, 0o700);
+        match result {
+            Err(LockError::Io { path, source }) => {
+                assert_eq!(path, root.join("controller.lock"));
+                assert_eq!(source.raw_os_error(), Some(libc::EACCES));
+            }
+            other => panic!("expected Io, got {other:?}"),
         }
     }
 
@@ -1131,6 +1159,17 @@ mod tests {
     }
 
     #[test]
+    fn a_socket_journal_is_refused_as_not_regular() {
+        let (_dir, root) = temp_root();
+        let cell = make_cell(&root, "cell-1", None);
+        let _socket = UnixListener::bind(cell.join("ledger.ndjson")).expect("the socket binds");
+        assert_eq!(
+            described(&discover(&root)),
+            ["cell cell-1: refused: not regular"]
+        );
+    }
+
+    #[test]
     fn an_unreadable_cell_directory_refuses_only_that_cell() {
         assert_not_root();
         let (_dir, root) = temp_root();
@@ -1240,6 +1279,34 @@ mod tests {
         match open_root(&root).create_cell_dir(&cell("cell-1")) {
             Err(CellDirError::NotADirectory { path }) => assert_eq!(path, root.join("cells")),
             other => panic!("expected NotADirectory, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_cell_dir_reports_a_parent_it_cannot_write() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        set_mode(&root, 0o500);
+        let without_cells = open_root(&root).create_cell_dir(&cell("cell-1"));
+        set_mode(&root, 0o700);
+        match without_cells {
+            Err(CellDirError::Io { path, source }) => {
+                assert_eq!(path, root.join("cells"));
+                assert_eq!(source.raw_os_error(), Some(libc::EACCES));
+            }
+            other => panic!("expected Io for cells, got {other:?}"),
+        }
+
+        fs::create_dir(root.join("cells")).expect("cells is made");
+        set_mode(&root.join("cells"), 0o500);
+        let without_cell = open_root(&root).create_cell_dir(&cell("cell-1"));
+        set_mode(&root.join("cells"), 0o700);
+        match without_cell {
+            Err(CellDirError::Io { path, source }) => {
+                assert_eq!(path, root.join("cells/cell-1"));
+                assert_eq!(source.raw_os_error(), Some(libc::EACCES));
+            }
+            other => panic!("expected Io for the cell, got {other:?}"),
         }
     }
 
@@ -1355,6 +1422,25 @@ mod tests {
     }
 
     #[test]
+    fn an_append_handle_writes_after_the_existing_records() {
+        let (_dir, root) = temp_root();
+        make_cell(&root, "cell-1", Some(b"one\n"));
+        let opened = open_root(&root)
+            .cell_dir(&cell("cell-1"))
+            .expect("the cell");
+        let mut handle = appended(&opened);
+        assert!(!handle.created);
+        handle
+            .file
+            .write_all(b"two\n")
+            .expect("the record is written");
+        assert_eq!(
+            fs::read(root.join("cells/cell-1/ledger.ndjson")).expect("the journal"),
+            b"one\ntwo\n"
+        );
+    }
+
+    #[test]
     fn the_append_handle_and_the_constructor_name_the_same_file() {
         let (_dir, root) = temp_root();
         let created = open_root(&root)
@@ -1390,13 +1476,15 @@ mod tests {
     }
 
     #[test]
-    fn open_journal_for_append_refuses_a_directory_or_fifo_journal() {
+    fn open_journal_for_append_refuses_a_directory_fifo_or_socket_journal() {
         let (_dir, root) = temp_root();
         fs::create_dir_all(root.join("cells/dir/ledger.ndjson")).expect("the directory is made");
         make_cell(&root, "fifo", None);
         make_fifo(&root.join("cells/fifo/ledger.ndjson"));
+        let socket = make_cell(&root, "socket", None);
+        let _socket = UnixListener::bind(socket.join("ledger.ndjson")).expect("the socket binds");
         let instance = open_root(&root);
-        for name in ["dir", "fifo"] {
+        for name in ["dir", "fifo", "socket"] {
             let opened = instance.cell_dir(&cell(name)).expect("the cell");
             let result = within("opening a journal for appending", move || {
                 opened.open_journal_for_append()
