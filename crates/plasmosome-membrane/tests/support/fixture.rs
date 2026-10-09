@@ -72,3 +72,18 @@ pub fn compile_supervision_fixture(cache_root: &Path, source: &Path) -> PathBuf 
     );
     output
 }
+
+#[test]
+fn the_supervision_fixture_is_cached_inside_the_target_directory() {
+    let executable = std::env::current_exe().expect("the running test executable has a path");
+    let profile = executable
+        .parent()
+        .and_then(Path::parent)
+        .expect("the test executable sits two directories below the target directory");
+    let fixture = supervision_fixture();
+    assert_eq!(
+        fixture.parent().and_then(Path::parent),
+        Some(profile.join("plasmosome-supervision-fixture").as_path()),
+        "the compiled fixture is cached beside deps in the target directory, not in a shared temporary directory"
+    );
+}

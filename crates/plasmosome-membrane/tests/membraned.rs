@@ -5,7 +5,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -819,4 +819,172 @@ fn membraned_leaves_a_dangling_symlink_settled_at_its_socket_path_alone() {
             .is_socket(),
         "the original socket stays allocated under the caller's new name"
     );
+}
+
+fn fixture_identity(path: &Path) -> (u64, std::time::SystemTime) {
+    let metadata = std::fs::metadata(path).expect("the published fixture exists");
+    (
+        metadata.ino(),
+        metadata
+            .modified()
+            .expect("the fixture's modification time is readable"),
+    )
+}
+
+#[test]
+fn the_supervision_fixture_is_compiled_once_per_source_and_reused() {
+    let cache = tempfile::tempdir().unwrap();
+    let source = fixture::supervision_worker_source();
+
+    let first = fixture::compile_supervision_fixture(cache.path(), &source);
+    let published = fixture_identity(&first);
+    let second = fixture::compile_supervision_fixture(cache.path(), &source);
+
+    assert_eq!(
+        second, first,
+        "two calls with one cache root return the same path"
+    );
+    assert_eq!(
+        fixture_identity(&second),
+        published,
+        "the second call reuses the published executable without compiling it again"
+    );
+}
+
+#[test]
+fn concurrent_callers_share_one_published_fixture_that_is_never_replaced() {
+    const CALLERS: usize = 8;
+    let cache = tempfile::tempdir().unwrap();
+    let source = fixture::supervision_worker_source();
+    let start = Arc::new(Barrier::new(CALLERS));
+
+    let callers: Vec<_> = (0..CALLERS)
+        .map(|_| {
+            let start = Arc::clone(&start);
+            let root = cache.path().to_path_buf();
+            let source = source.clone();
+            thread::spawn(move || {
+                start.wait();
+                let path = fixture::compile_supervision_fixture(&root, &source);
+                let inode = std::fs::metadata(&path)
+                    .expect("the returned fixture exists")
+                    .ino();
+                (path, inode)
+            })
+        })
+        .collect();
+    let returned: Vec<(PathBuf, u64)> = callers
+        .into_iter()
+        .map(|caller| caller.join().expect("every concurrent caller returns"))
+        .collect();
+
+    let published = &returned[0].0;
+    let inode = std::fs::metadata(published)
+        .expect("the published fixture exists")
+        .ino();
+    for (path, seen) in &returned {
+        assert_eq!(
+            path, published,
+            "every concurrent caller returns the same path"
+        );
+        assert_eq!(
+            *seen, inode,
+            "no caller's executable was replaced after that caller returned"
+        );
+    }
+    let names = |directory: &Path| -> Vec<String> {
+        std::fs::read_dir(directory)
+            .expect("the cache directory is readable")
+            .map(|entry| {
+                entry
+                    .expect("the cache entry is readable")
+                    .file_name()
+                    .into_string()
+                    .expect("the cache entry name is UTF-8")
+            })
+            .collect()
+    };
+    assert_eq!(
+        names(cache.path()).len(),
+        1,
+        "one source is cached under one key"
+    );
+    assert_eq!(
+        names(published.parent().expect("the fixture has a key directory")),
+        ["supervision-worker"],
+        "the key directory holds one executable and no temporary names"
+    );
+}
+
+#[test]
+fn a_changed_fixture_source_compiles_to_a_new_key() {
+    let cache = tempfile::tempdir().unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    let original = fixture::supervision_worker_source();
+    let changed = sources.path().join("supervision_worker.c");
+    let mut text = std::fs::read_to_string(&original).expect("the fixture source is readable");
+    text.push_str("\n/* a changed source */\n");
+    std::fs::write(&changed, text).expect("the changed source is written");
+
+    let first = fixture::compile_supervision_fixture(cache.path(), &original);
+    let second = fixture::compile_supervision_fixture(cache.path(), &changed);
+
+    assert_ne!(second, first, "a changed source is cached under a new key");
+    for executable in [&first, &second] {
+        assert_eq!(
+            Command::new(executable)
+                .status()
+                .expect("each cached fixture runs")
+                .code(),
+            Some(64),
+            "each cached fixture still refuses a call with no arguments"
+        );
+    }
+}
+
+#[test]
+fn a_reused_fixture_is_run_once_before_it_is_returned() {
+    let cache = tempfile::tempdir().unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    let source = fixture::supervision_worker_source();
+    let published = fixture::compile_supervision_fixture(cache.path(), &source);
+
+    let refusing = sources.path().join("refusing.c");
+    std::fs::write(&refusing, "int main(void) { return 63; }\n")
+        .expect("the stand-in source is written");
+    std::fs::remove_file(&published).expect("the published fixture is removed");
+    let built = Command::new("cc")
+        .arg(&refusing)
+        .arg("-o")
+        .arg(&published)
+        .status()
+        .expect("the host C compiler starts for the stand-in");
+    assert!(built.success(), "the stand-in exiting 63 compiles");
+
+    let refused =
+        std::panic::catch_unwind(|| fixture::compile_supervision_fixture(cache.path(), &source))
+            .expect_err("a reused executable that does not exit 64 fails setup");
+    let message = refused
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        message.contains("refuses a call with no arguments") && message.contains("Some(63)"),
+        "setup fails at the warm-up's exit-64 assertion, not elsewhere: {message}"
+    );
+}
+
+#[test]
+fn the_fixture_cache_sits_beside_the_cargo_deps_directory() {
+    assert_eq!(
+        fixture::fixture_cache_root(Path::new("/work/target/debug/deps/membraned-0123abcd")),
+        Path::new("/work/target/debug/plasmosome-supervision-fixture"),
+        "the cache root is inside the profile directory that holds deps"
+    );
+}
+
+#[test]
+#[should_panic(expected = "/work/target/debug/membraned")]
+fn the_fixture_cache_refuses_an_executable_outside_a_cargo_deps_directory() {
+    fixture::fixture_cache_root(Path::new("/work/target/debug/membraned"));
 }
