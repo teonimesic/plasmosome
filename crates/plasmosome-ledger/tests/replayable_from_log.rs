@@ -2,10 +2,21 @@ use std::io::Write;
 use std::time::Duration;
 
 use plasmosome_backend::{
-    Capability, Diff, DrainSpec, EnforcementBackend, FakeBackend, Grant, GrantId, GrantKind,
-    LedgerEntry, PluginId, UniverseClass, UniverseOp, UniverseRemoval,
+    Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, Grant,
+    GrantId, GrantKind, LedgerEntry, PluginId, UniverseClass, UniverseOp, UniverseRemoval,
 };
 use plasmosome_ledger::{Closure, Effect, InverseVia, Ledger, LogRecord};
+
+fn cell() -> CellId {
+    CellId::from("cell-1")
+}
+
+fn cell_owner(plugin: &str) -> CellOwner {
+    CellOwner {
+        cell: cell(),
+        plugin: PluginId::from(plugin),
+    }
+}
 
 fn file_removal(path: &str) -> UniverseRemoval {
     UniverseRemoval {
@@ -43,12 +54,12 @@ fn populate(backend: &mut FakeBackend) -> (PluginId, Vec<Effect>) {
     let op = UniverseOp::WriteSessionFile {
         id: GrantId::new(),
         path: "skills/pr.md".to_string(),
-        owner: PluginId::from("github-pr"),
+        owner: cell_owner("github-pr"),
     };
     let removal = op.removal();
     backend.apply(op).unwrap();
     let entry = backend.grant(Grant {
-        plugin: PluginId::from("network"),
+        owner: cell_owner("network"),
         capability: Capability::UdsSocket {
             path: "/run/plasmosome/egressd.uds".to_string(),
         },
@@ -90,7 +101,11 @@ fn a_ledger_rebuilt_from_its_log_replays_to_an_empty_universe() {
         panic!("a log of exact and unpublished-delayed entries must close external-free");
     };
     let report = sealed
-        .detach(&mut backend, DrainSpec::graceful(Duration::from_millis(1)))
+        .detach(
+            &mut backend,
+            &cell(),
+            DrainSpec::graceful(Duration::from_millis(1)),
+        )
         .unwrap();
     assert_eq!(
         report.replayed,
@@ -141,7 +156,7 @@ fn a_log_rebuilt_in_a_fresh_process_round_trips_through_serde_only() {
 fn exact_state_wire_preserves_identity_and_refuses_ambiguous_rows() {
     let mut backend = FakeBackend::new();
     backend.grant(Grant {
-        plugin: PluginId::from("network"),
+        owner: cell_owner("network"),
         capability: Capability::ProxyMap {
             host: "api.github.com".to_string(),
             route: "splice".to_string(),
@@ -157,7 +172,7 @@ fn exact_state_wire_preserves_identity_and_refuses_ambiguous_rows() {
     let duplicate = serde_json::json!({"objects": [object.clone(), object.clone()]});
     assert!(serde_json::from_value::<plasmosome_backend::OsState>(duplicate).is_err());
     let mut conflict = object.clone();
-    conflict["owner"] = serde_json::json!("audit");
+    conflict["owner"] = serde_json::json!({"cell": "cell-1", "plugin": "audit"});
     assert!(
         serde_json::from_value::<plasmosome_backend::OsState>(
             serde_json::json!({"objects": [object.clone(), conflict]})
@@ -175,7 +190,7 @@ fn exact_state_wire_preserves_identity_and_refuses_ambiguous_rows() {
     assert!(
         serde_json::from_value::<plasmosome_backend::OsState>(serde_json::json!({
             "objects": [{
-                "owner": "deploy",
+                "owner": {"cell": "cell-1", "plugin": "deploy"},
                 "capability": {"ProxyMap": {"host": "api.github.com", "route": "splice"}}
             }]
         }))
@@ -200,7 +215,7 @@ fn exact_state_wire_preserves_identity_and_refuses_ambiguous_rows() {
 fn ledger_entry_refuses_serializing_a_class_capability_mismatch() {
     let mut backend = FakeBackend::new();
     let entry = backend.grant(Grant {
-        plugin: PluginId::from("network"),
+        owner: cell_owner("network"),
         capability: Capability::SessionFile {
             path: "skills/pr.md".to_string(),
         },
@@ -405,12 +420,12 @@ fn exact_neighbours_survive_interrupted_logged_replay_and_resume() {
     };
     let mut backend = FakeBackend::new();
     let first = backend.grant(Grant {
-        plugin: PluginId::from("network"),
+        owner: cell_owner("network"),
         capability: capability.clone(),
         kind: GrantKind::Hot,
     });
     let second = backend.grant(Grant {
-        plugin: PluginId::from("network"),
+        owner: cell_owner("network"),
         capability,
         kind: GrantKind::Hot,
     });
@@ -431,7 +446,11 @@ fn exact_neighbours_survive_interrupted_logged_replay_and_resume() {
     };
     assert!(
         sealed
-            .detach(&mut backend, DrainSpec::graceful(Duration::from_millis(1)))
+            .detach(
+                &mut backend,
+                &cell(),
+                DrainSpec::graceful(Duration::from_millis(1))
+            )
             .is_err()
     );
     assert_eq!(
@@ -439,7 +458,7 @@ fn exact_neighbours_survive_interrupted_logged_replay_and_resume() {
         vec![&first.object()]
     );
     let resumed = sealed
-        .detach(&mut backend, DrainSpec::forcing())
+        .detach(&mut backend, &cell(), DrainSpec::forcing())
         .expect("force resumes at the exact timed-out holding");
     assert_eq!(resumed.replayed, vec!["first equal grant"]);
     assert!(backend.snapshot_os_state().is_empty());
@@ -455,12 +474,12 @@ fn serialized_observations_restore_exact_inverses_but_not_backend_handles() {
     };
     let mut source = FakeBackend::new();
     let first = source.grant(Grant {
-        plugin: PluginId::from("network"),
+        owner: cell_owner("network"),
         capability: capability.clone(),
         kind: GrantKind::Hot,
     });
     let second = source.grant(Grant {
-        plugin: PluginId::from("network"),
+        owner: cell_owner("network"),
         capability,
         kind: GrantKind::Hot,
     });
@@ -495,7 +514,7 @@ fn serialized_observations_restore_exact_inverses_but_not_backend_handles() {
         panic!("exact observed inverses close external-free");
     };
     sealed
-        .detach(&mut fresh, DrainSpec::forcing())
+        .detach(&mut fresh, &cell(), DrainSpec::forcing())
         .expect("serialized exact inverses select both restored observations");
     assert!(fresh.snapshot_os_state().is_empty());
 }
