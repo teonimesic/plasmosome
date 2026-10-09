@@ -20,6 +20,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far only a JSON reader that refuses duplicate keys, the SHA-256 `Digest`, the canonical absolute `RecipePath` and the `RemoveOutcome` of removing a path; nothing here launches a cell yet |
 
 ## Use
 
@@ -86,6 +87,25 @@ atomic snapshot, so complete query visibility and the no-new-members requirement
 trusted-host contract. This does not cover descendants that leave the group, change credentials,
 or keep forking. `mem::forget` leaks an unfinished handle.
 
+## A fork waits while descriptors are created
+
+Darwin cannot create a pipe, a socket or an accepted connection already close-on-exec, so each one
+exists for a moment before `FD_CLOEXEC` is set, and a fork in that moment hands it to the child.
+`VmmChild::spawn` forks holding the read side of one process-wide lock. The readiness probe
+creates its socket holding the write side, so a spawn waits while a probe socket is created; on
+Linux that socket is close-on-exec from the start, so the wait matters only on Darwin. Creation
+under the write side returns the value that owns its descriptor, and only that descriptor is
+checked: if it is not already close-on-exec, it is closed before the lock is released and creation
+fails. A descriptor created under the lock and kept anywhere else is not checked, so the code that
+creates it must mark it close-on-exec before the lock is released. A spawn from the thread that
+holds the write side returns `SpawnError::DescriptorLockHeld` instead of waiting on itself.
+
+The lock covers only those two paths. Forks that do not go through `VmmChild::spawn`, such as
+`std::process::Command`, do not take it, and neither do the standard library's `bind` in
+`daemon.rs` and `accept` in `control.rs`. Those two are safe only because `membraned` binds its
+control socket, spawns its brokers and serves requests on one thread, so none of them can overlap
+a fork. Code that creates descriptors or forks on a second thread must take the lock first.
+
 ## Control-socket ownership
 
 `membraned` refuses an occupied control-socket path — a live socket, a stale file or a symlink —
@@ -112,5 +132,6 @@ not in the root file.
 ## Not here yet
 
 The netstack shim and the vsock bridges belong to this crate by that rule, and none of it is
-built: the modules present are `brokers`, `control`, `daemon`, `exec`, `readiness` and `vmm`.
+built: the modules present are `brokers`, `control`, `daemon`, `exec`, `readiness`, `runtime`
+and `vmm`.
 They arrive in the next P1 step.
