@@ -146,8 +146,10 @@ pub trait LogStore {
     fn sync_dir(&self, path: &Path) -> std::io::Result<()>;
     /// Opens `path` for reading and appending without following a final symlink, creating the
     /// file if it is missing. Refuses anything that is not a regular file, without blocking on
-    /// it. Takes a nonblocking exclusive lock on the file, held for as long as the returned file
-    /// is open; if another open file holds that lock, fails with `ErrorKind::WouldBlock`.
+    /// it. Takes a nonblocking exclusive lock on the file; if another open file holds that lock,
+    /// fails with `ErrorKind::WouldBlock`. Dropping the returned file must release the lock
+    /// explicitly, as [`OsLogStore`] does, even while a forked child still shares the open file:
+    /// closing a descriptor alone leaves the lock held for as long as any copy of it is open.
     fn open_log(&self, path: &Path) -> std::io::Result<Box<dyn LogFile>>;
 }
 
@@ -269,7 +271,11 @@ struct LogState {
 }
 
 impl SessionLog {
-    /// The longest line, in bytes before its LF, that a log writes or accepts.
+    /// The longest line, in bytes before its LF, that a log writes or accepts. A later version
+    /// may raise it but must never lower it, because a lower limit would refuse lines this
+    /// version wrote and acknowledged. It is a memory choice and nothing more: spec 026 leaves
+    /// the controller's own journals out of its parser bounds, since only the controller writes
+    /// them.
     pub const MAX_LINE_BYTES: usize = 1 << 20;
 
     /// Opens the log at `path` with [`OsLogStore`]. See [`SessionLog::open_with`].
@@ -286,14 +292,16 @@ impl SessionLog {
     /// or this returns [`SessionLogError::Malformed`] and leaves the file as it was; a log whose
     /// last `seq` is `u64::MAX` is refused too. The check reads one line at a time, keeps only the
     /// last `seq`, and stops reading a line once it is longer than
-    /// [`SessionLog::MAX_LINE_BYTES`], so its memory stays within a few times that limit however
-    /// long the log or its last, unterminated line is.
+    /// [`SessionLog::MAX_LINE_BYTES`], so holding a line costs about 3 times that limit however
+    /// long the log or its last, unterminated line is. Parsing one line within the limit costs
+    /// more: a line of many small JSON values, such as an array of zeros, peaks at about 25 times
+    /// the limit, some 26 MB.
     ///
     /// Before returning, every open syncs the file, then its directory and each ancestor of that
     /// directory up to the root, whether or not this call created them. A directory an earlier,
     /// interrupted open created is therefore made durable by the next open. An ancestor this
     /// process cannot open for reading fails the open at [`LogStep::SyncDirectory`]. On macOS
-    /// each directory sync is an `F_FULLFSYNC`, measured at 5 ms or more on every call, so an
+    /// each directory sync is an `F_FULLFSYNC`, measured at about 5 ms on every call, so an
     /// open pays that for every component of the log's absolute path. Syncing the
     /// file again does not prove that a line written before a failed sync is on disk: on Linux a
     /// failed `fsync` can drop the unwritten pages, and the next sync then succeeds without them.
