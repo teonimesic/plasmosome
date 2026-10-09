@@ -160,7 +160,6 @@ pub enum ManifestError {
         fix: String,
         detail: String,
     },
-    Invalid(String),
 }
 
 impl std::fmt::Display for ManifestError {
@@ -183,7 +182,6 @@ impl std::fmt::Display for ManifestError {
                     write!(f, "{field}: {detail}; write {fix}")
                 }
             }
-            ManifestError::Invalid(d) => write!(f, "invalid manifest: {d}"),
         }
     }
 }
@@ -201,15 +199,10 @@ impl PlasmidManifest {
         let id = raw
             .get("id")
             .and_then(toml::Value::as_str)
-            .ok_or_else(|| ManifestError::Field {
-                plasmid: None,
-                field: "id".into(),
-                fix: "id = \"choose-a-stable-id\"".into(),
-                detail: "a string id is required".into(),
-            })?
+            .ok_or_else(|| id_error("a string id is required"))?
             .to_string();
         if id.is_empty() {
-            return Err(ManifestError::Invalid("id must not be empty".into()));
+            return Err(id_error("the id must not be empty"));
         }
         let description = raw
             .get("description")
@@ -236,7 +229,7 @@ impl PlasmidManifest {
             .map(PathBuf::from);
         let network = raw
             .get("network")
-            .map(|n| parse_network(&id, "network", "network", n))
+            .map(|n| parse_network(&id, "network", n))
             .transpose()?;
         let requires = raw
             .get("requires")
@@ -291,7 +284,13 @@ impl PlasmidManifest {
                     .unwrap_or("github")
                     .to_string();
                 Ok(MockSpec {
-                    hosts: declared_string_list(&id, "mock", "hosts", m.get("hosts"))?,
+                    hosts: declared_string_list(
+                        &id,
+                        "mock",
+                        "hosts",
+                        EXAMPLE_HOST,
+                        m.get("hosts"),
+                    )?,
                     kind,
                     api,
                     source,
@@ -322,16 +321,22 @@ impl PlasmidManifest {
             && model.is_none()
             && commands.is_none()
         {
-            return Err(ManifestError::Invalid(format!(
-                "plasmid {id} declares no capability and no implementation"
-            )));
+            return Err(field_error(
+                &id,
+                "impl".into(),
+                "[impl]\nwasm = \"component.wasm\"".into(),
+                "the declaration names no capability and no implementation",
+            ));
         }
         if let Some(spec) = &network
             && spec.hosts.is_empty()
         {
-            return Err(ManifestError::Invalid(format!(
-                "plasmid {id} declares [network] without hosts"
-            )));
+            return Err(field_error(
+                &id,
+                "network.hosts".into(),
+                hosts_line(None),
+                "a network section must name at least one host",
+            ));
         }
         if let Some(spec) = &mock {
             validate_mock(&id, spec, network.as_ref())?;
@@ -360,6 +365,15 @@ impl PlasmidManifest {
         self.network
             .as_ref()
             .is_some_and(|n| n.hosts.iter().any(|h| h == host))
+    }
+}
+
+fn id_error(detail: &str) -> ManifestError {
+    ManifestError::Field {
+        plasmid: None,
+        field: "id".into(),
+        fix: "id = \"choose-a-stable-id\"".into(),
+        detail: detail.to_string(),
     }
 }
 
@@ -440,18 +454,21 @@ fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>,
 
 fn parse_network(
     id: &str,
-    message_section: &str,
     field_path: &str,
     n: &toml::Value,
 ) -> Result<NetworkSpec, ManifestError> {
     if !n.is_table() {
-        return Err(ManifestError::Invalid(format!(
-            "plasmid {id}: [{message_section}] must be a table"
-        )));
+        return Err(field_error(
+            id,
+            field_path.to_string(),
+            format!("[{field_path}]\n{}", hosts_line(n.as_str())),
+            &format!("{n} is not a table"),
+        ));
     }
-    let hosts = declared_string_list(id, message_section, "hosts", n.get("hosts"))?;
+    let hosts = declared_string_list(id, field_path, "hosts", EXAMPLE_HOST, n.get("hosts"))?;
     let ports = declared_ports(id, &format!("{field_path}.ports"), n.get("ports"))?;
-    let pin_cidrs = declared_string_list(id, message_section, "pin_cidrs", n.get("pin_cidrs"))?;
+    let pin_cidrs =
+        declared_string_list(id, field_path, "pin_cidrs", EXAMPLE_PIN, n.get("pin_cidrs"))?;
     Ok(NetworkSpec {
         hosts,
         ports,
@@ -563,14 +580,25 @@ fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, M
     let table = raw
         .get("commands")
         .and_then(toml::Value::as_table)
-        .ok_or_else(|| ManifestError::Invalid("[commands] must hold a commands table".into()))?;
+        .ok_or_else(|| {
+            field_error(
+                plasmid_id,
+                "commands.commands".into(),
+                "[commands.commands.git]\nexec = [\"git\"]".into(),
+                "[commands] holds no commands table",
+            )
+        })?;
     let mut commands = Vec::new();
     for (id, decl) in table {
+        let path = format!("commands.commands.{}", diagnostic_key(id));
         let exec = string_list(decl.get("exec"));
         if exec.is_empty() {
-            return Err(ManifestError::Invalid(format!(
-                "[commands.{id}] declares no exec"
-            )));
+            return Err(field_error(
+                plasmid_id,
+                format!("{path}.exec"),
+                format!("exec = [{}]", toml::Value::String(id.clone())),
+                "the command declares no exec",
+            ));
         }
         commands.push(CommandDecl {
             id: id.clone(),
@@ -581,24 +609,11 @@ fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, M
                 .map(String::from),
             network: decl
                 .get("network")
-                .map(|n| {
-                    parse_network(
-                        plasmid_id,
-                        &format!("commands.{id}.network"),
-                        &format!("commands.commands.{}.network", diagnostic_key(id)),
-                        n,
-                    )
-                })
+                .map(|n| parse_network(plasmid_id, &format!("{path}.network"), n))
                 .transpose()?,
             secrets: decl
                 .get("secrets")
-                .map(|secrets| {
-                    parse_secret_refs(
-                        plasmid_id,
-                        &format!("commands.commands.{}.secrets", diagnostic_key(id)),
-                        secrets,
-                    )
-                })
+                .map(|secrets| parse_secret_refs(plasmid_id, &format!("{path}.secrets"), secrets))
                 .transpose()?
                 .unwrap_or_default(),
         });
@@ -692,15 +707,26 @@ fn validate_mock(
     network: Option<&NetworkSpec>,
 ) -> Result<(), ManifestError> {
     let Some(network) = network else {
-        return Err(ManifestError::Invalid(format!(
-            "plasmid {id} declares [mock] without the [network] hosts it stands in for"
-        )));
+        let hosts = if mock.hosts.is_empty() {
+            hosts_line(None)
+        } else {
+            format!("hosts = {}", toml::Value::from(mock.hosts.clone()))
+        };
+        return Err(field_error(
+            id,
+            "network".into(),
+            format!("[network]\n{hosts}"),
+            "a mock stands in for hosts that [network] declares, and there is no [network]",
+        ));
     };
     for host in &mock.hosts {
         if !network.hosts.iter().any(|declared| declared == host) {
-            return Err(ManifestError::Invalid(format!(
-                "plasmid {id}: [mock] names host `{host}`, which its [network] does not declare"
-            )));
+            return Err(field_error(
+                id,
+                "network.hosts".into(),
+                toml::Value::String(host.clone()).to_string(),
+                &format!("[mock] stands in for {host:?}, which [network] does not declare"),
+            ));
         }
     }
     Ok(())
@@ -738,27 +764,51 @@ fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestEr
     Ok(())
 }
 
+const EXAMPLE_HOST: &str = "api.example.com";
+
+const EXAMPLE_PIN: &str = "192.0.2.0/24";
+
+fn hosts_line(evident: Option<&str>) -> String {
+    string_list_line("hosts", evident, EXAMPLE_HOST)
+}
+
+fn string_list_line(field: &str, evident: Option<&str>, example: &str) -> String {
+    let entry = evident
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or(example);
+    format!("{field} = [{}]", toml::Value::String(entry.into()))
+}
+
 fn declared_string_list(
     id: &str,
     section: &str,
     field: &str,
+    example: &str,
     value: Option<&toml::Value>,
 ) -> Result<Vec<String>, ManifestError> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
+    let path = format!("{section}.{field}");
     let Some(items) = value.as_array() else {
-        return Err(ManifestError::Invalid(format!(
-            "plasmid {id}: [{section}] `{field}` must be an array of strings"
-        )));
+        return Err(field_error(
+            id,
+            path,
+            string_list_line(field, value.as_str(), example),
+            &format!("{value} is not a list of strings"),
+        ));
     };
     items
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(index, item)| {
             item.as_str().map(String::from).ok_or_else(|| {
-                ManifestError::Invalid(format!(
-                    "plasmid {id}: [{section}] `{field}` holds `{item}`, which is not a string"
-                ))
+                field_error(
+                    id,
+                    format!("{path}[{index}]"),
+                    REMOVE_ENTRY.into(),
+                    &format!("{item} is not a string"),
+                )
             })
         })
         .collect()
