@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -54,9 +55,7 @@ fn copy_build_output(source: &Path, destination: &Path) {
             .and_then(|metadata| metadata.modified())
             .expect("the build output records when it was written");
         fs::copy(source, destination).expect("the build output is copied");
-        fs::File::options()
-            .write(true)
-            .open(destination)
+        fs::File::open(destination)
             .and_then(|file| file.set_modified(modified))
             .expect("the copied build output keeps its modification time");
     }
@@ -123,6 +122,7 @@ fn compile_consumers(root: &Path, target: &Path) -> Vec<Consumer> {
         .expect("Cargo compiles the actual consumer test executables");
     assert!(output.status.success(), "{}", transcript(&output));
     let mut publication = None;
+    let mut rebuilt = BTreeSet::new();
     for line in output.stdout.split(|byte| *byte == b'\n') {
         let Ok(artifact) = serde_json::from_slice::<serde_json::Value>(line) else {
             continue;
@@ -140,6 +140,12 @@ fn compile_consumers(root: &Path, target: &Path) -> Vec<Consumer> {
             artifact["fresh"], false,
             "the consumer and the checking component were actually rebuilt: {source}"
         );
+        for kind in artifact["target"]["kind"]
+            .as_array()
+            .expect("Cargo reports the kinds of each compiled unit")
+        {
+            rebuilt.insert(kind.as_str().expect("a unit kind is a string").to_string());
+        }
         if artifact["profile"]["test"] != true {
             continue;
         }
@@ -152,6 +158,11 @@ fn compile_consumers(root: &Path, target: &Path) -> Vec<Consumer> {
         };
         assert!(slot.replace(PathBuf::from(executable)).is_none());
     }
+    assert_eq!(
+        rebuilt,
+        BTreeSet::from(["custom-build", "lib", "test"].map(String::from)),
+        "the rebuilt units are the build script, the checking component and its consumer"
+    );
     [Consumer {
         executable: publication.expect("Cargo reports the publication integration executable"),
         filter: PUBLICATION,
