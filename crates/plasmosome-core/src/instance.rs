@@ -66,21 +66,21 @@ impl InstanceRoot {
     /// returned value is dropped or the process dies, and the file is never unlinked.
     pub fn lock(&self) -> Result<WriterLock, LockError> {
         let path = self.path.join(LOCK_FILE);
-        let (fd, created) =
-            self.open_lock_file()
-                .map_err(|source| match source.raw_os_error() {
-                    Some(libc::ELOOP) => LockError::Symlink { path: path.clone() },
-                    Some(libc::EISDIR) => LockError::NotRegular { path: path.clone() },
-                    _ => LockError::Io {
-                        path: path.clone(),
-                        source,
-                    },
-                })?;
-        let file = File::from(fd);
         let io_error = |source| LockError::Io {
             path: path.clone(),
             source,
         };
+        let name = c_name(LOCK_FILE.as_bytes()).map_err(io_error)?;
+        let (fd, created) =
+            self.open_lock_file(&name)
+                .map_err(|source| match source.raw_os_error() {
+                    Some(libc::ELOOP) => LockError::Symlink { path: path.clone() },
+                    _ if present_and_not_regular(self.dir.as_fd(), &name) => {
+                        LockError::NotRegular { path: path.clone() }
+                    }
+                    _ => io_error(source),
+                })?;
+        let file = File::from(fd);
         if !file.metadata().map_err(io_error)?.is_file() {
             return Err(LockError::NotRegular { path });
         }
@@ -235,7 +235,7 @@ impl InstanceRoot {
         let name = c_name(&raw_name).map_err(classify_error)?;
         let class = match kind_at(cells, &name).map_err(classify_error)? {
             Kind::Symlink => EntryClass::NotACell(NotACell::Symlink),
-            Kind::Other => EntryClass::NotACell(NotACell::NotADirectory),
+            Kind::Regular | Kind::Other => EntryClass::NotACell(NotACell::NotADirectory),
             Kind::Directory => match self.cell_named(&raw_name) {
                 None => EntryClass::NotACell(NotACell::InvalidName),
                 Some((cell, journal_path)) => {
@@ -265,16 +265,15 @@ impl InstanceRoot {
         Some((cell, journal_path))
     }
 
-    fn open_lock_file(&self) -> io::Result<(OwnedFd, bool)> {
-        let name = c_name(LOCK_FILE.as_bytes())?;
+    fn open_lock_file(&self, name: &CStr) -> io::Result<(OwnedFd, bool)> {
         let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
-        match open_at(self.dir.as_fd(), &name, flags, 0) {
+        match open_at(self.dir.as_fd(), name, flags, 0) {
             Err(missing) if missing.raw_os_error() == Some(libc::ENOENT) => {
                 let exclusive = flags | libc::O_CREAT | libc::O_EXCL;
-                match open_at(self.dir.as_fd(), &name, exclusive, PRIVATE_FILE) {
+                match open_at(self.dir.as_fd(), name, exclusive, PRIVATE_FILE) {
                     Ok(fd) => Ok((fd, true)),
                     Err(raced) if raced.raw_os_error() == Some(libc::EEXIST) => {
-                        open_at(self.dir.as_fd(), &name, flags, 0).map(|fd| (fd, false))
+                        open_at(self.dir.as_fd(), name, flags, 0).map(|fd| (fd, false))
                     }
                     Err(error) => Err(error),
                 }
@@ -533,7 +532,7 @@ fn open_journal_at(
     let fd = open_at(cell, &name, access | JOURNAL_FLAGS, mode).map_err(|error| {
         match error.raw_os_error() {
             Some(libc::ELOOP) => JournalRefusal::Symlink,
-            Some(libc::EISDIR) => JournalRefusal::NotRegular,
+            _ if present_and_not_regular(cell, &name) => JournalRefusal::NotRegular,
             _ => JournalRefusal::Io(error),
         }
     })?;
@@ -549,7 +548,15 @@ fn open_journal_at(
 enum Kind {
     Directory,
     Symlink,
+    Regular,
     Other,
+}
+
+fn present_and_not_regular(parent: BorrowedFd<'_>, name: &CStr) -> bool {
+    matches!(
+        kind_at(parent, name),
+        Ok(Kind::Directory | Kind::Symlink | Kind::Other)
+    )
 }
 
 fn kind_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<Kind> {
@@ -569,6 +576,7 @@ fn kind_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<Kind> {
     Ok(match format {
         libc::S_IFDIR => Kind::Directory,
         libc::S_IFLNK => Kind::Symlink,
+        libc::S_IFREG => Kind::Regular,
         _ => Kind::Other,
     })
 }
