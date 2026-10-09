@@ -440,6 +440,7 @@ mod tests {
     use std::collections::{BTreeSet, HashSet};
     use std::fmt::Debug;
     use std::hash::Hash;
+    use std::net::IpAddr;
 
     use serde::Serialize;
     use serde::de::DeserializeOwned;
@@ -1009,6 +1010,8 @@ mod tests {
             "2001:db8::1:0:0:1",
             "2001:db8:0:1:1:1:1:1",
             "fe80::1",
+            "64:ff9b::7f00:1",
+            "::ffff:0:7f00:1",
         ] {
             assert_accepted(&proxy(destination, 443));
         }
@@ -1056,6 +1059,31 @@ mod tests {
         ] {
             assert_refused(&proxy(destination, 443), invalid_destination(destination));
         }
+    }
+
+    #[test]
+    fn an_ip_literal_is_stored_exactly_as_this_toolchain_displays_it() {
+        for (written, displayed) in [
+            ("2001:db8:0:0:0:0:0:1", "2001:db8::1"),
+            ("1:0:0:2:0:0:0:3", "1:0:0:2::3"),
+            ("1:0:0:0:0:0:0:0", "1::"),
+            ("2001:db8:0:0:1:0:0:1", "2001:db8::1:0:0:1"),
+            ("2001:db8:0:1:1:1:1:1", "2001:db8:0:1:1:1:1:1"),
+            ("2001:DB8:0:0:0:0:0:A", "2001:db8::a"),
+            ("0:0:0:0:0:0:0:0", "::"),
+            ("0:0:0:0:0:0:0:1", "::1"),
+            ("0:0:0:0:ffff:0:7f00:1", "::ffff:0:7f00:1"),
+            ("::ffff:0:127.0.0.1", "::ffff:0:7f00:1"),
+            ("64:ff9b:0:0:0:0:7f00:1", "64:ff9b::7f00:1"),
+            ("64:ff9b::127.0.0.1", "64:ff9b::7f00:1"),
+            ("10.0.0.1", "10.0.0.1"),
+        ] {
+            let address: IpAddr = written.parse().unwrap();
+            assert_eq!(address.to_string(), displayed, "Display of {written}");
+            assert_accepted(&proxy(displayed, 443));
+        }
+        let mapped: IpAddr = "0:0:0:0:0:ffff:7f00:1".parse().unwrap();
+        assert_eq!(mapped.to_string(), "::ffff:127.0.0.1");
     }
 
     #[test]
