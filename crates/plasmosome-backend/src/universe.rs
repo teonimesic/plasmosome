@@ -916,10 +916,25 @@ mod tests {
     #[test]
     fn mock_mode_vocabulary_is_closed_and_defaults_to_passthrough() {
         assert_eq!(MockMode::default(), MockMode::Passthrough);
-        assert_eq!(MockMode::parse("simulate"), Some(MockMode::Simulate));
-        assert_eq!(MockMode::parse("capture"), Some(MockMode::Capture));
-        assert_eq!(MockMode::parse("passthrough"), Some(MockMode::Passthrough));
-        for refused in ["recorded", "Simulate", "CAPTURE", ""] {
+        for mode in [MockMode::Simulate, MockMode::Capture, MockMode::Passthrough] {
+            let name = match mode {
+                MockMode::Simulate => "simulate",
+                MockMode::Capture => "capture",
+                MockMode::Passthrough => "passthrough",
+            };
+            assert_eq!(MockMode::parse(name), Some(mode));
+            assert_eq!(mode.as_str(), name);
+        }
+        for refused in [
+            "recorded",
+            "Simulate",
+            "Capture",
+            "Passthrough",
+            "CAPTURE",
+            "",
+            " simulate",
+            "simulate\n",
+        ] {
             assert_eq!(
                 MockMode::parse(refused),
                 None,
@@ -959,7 +974,18 @@ mod tests {
     }
 
     #[test]
-    fn mock_mode_list_tags_are_unchanged() {
+    fn mock_mode_decodes_only_its_three_names() {
+        let error = serde_json::from_value::<MockMode>(serde_json::json!("none"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "unknown variant `none`, expected one of `simulate`, `capture`, `passthrough`"
+        );
+    }
+
+    #[test]
+    fn mock_mode_lists_only_passthrough_as_real() {
         assert_eq!(MockMode::Simulate.list_tag(), "[mock:simulate]");
         assert_eq!(MockMode::Capture.list_tag(), "[mock:capture]");
         assert_eq!(MockMode::Passthrough.list_tag(), "[real]");
