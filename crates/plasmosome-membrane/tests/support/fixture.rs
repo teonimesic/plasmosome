@@ -159,14 +159,20 @@ fn publish(source: &Path, executable: &Path) {
 #[test]
 fn the_supervision_fixture_is_cached_inside_the_target_directory() {
     let executable = std::env::current_exe().expect("the running test executable has a path");
-    let profile = executable
+    let fixture = supervision_fixture();
+    let root = fixture
         .parent()
         .and_then(Path::parent)
-        .expect("the test executable sits two directories below the target directory");
-    let fixture = supervision_fixture();
-    assert_eq!(
-        fixture.parent().and_then(Path::parent),
-        Some(profile.join("plasmosome-supervision-fixture").as_path()),
-        "the compiled fixture is cached beside deps in the target directory, not in a shared temporary directory"
+        .expect("the fixture sits two directories below its cache root");
+    let target = root
+        .parent()
+        .expect("the cache root sits in the target directory");
+    assert!(
+        root.ends_with("plasmosome-supervision-fixture")
+            && target.join("CACHEDIR.TAG").is_file()
+            && executable.starts_with(target),
+        "the compiled fixture {} is cached in the Cargo target directory that holds the test executable {}, not in a shared temporary directory",
+        fixture.display(),
+        executable.display()
     );
 }

@@ -308,7 +308,26 @@ fn a_reused_fixture_is_run_once_before_it_is_returned() {
 }
 
 #[test]
+fn the_fixture_cache_sits_in_the_nearest_directory_cargo_tagged_whatever_the_layout_below() {
+    let target = tempfile::tempdir().unwrap();
+    std::fs::write(
+        target.path().join("CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .expect("the cache directory tag is written");
+    let executable = target
+        .path()
+        .join("debug/build/plasmosome-membrane/0123abcd/out/membraned-0123abcd");
+
+    assert_eq!(
+        fixture::fixture_cache_root(&executable),
+        target.path().join("plasmosome-supervision-fixture"),
+        "the cache root sits in the tagged target directory, not beside a deps directory"
+    );
+}
+
+#[test]
 #[should_panic(expected = "/work/target/debug/membraned")]
-fn the_fixture_cache_refuses_an_executable_outside_a_cargo_deps_directory() {
+fn the_fixture_cache_refuses_an_executable_outside_a_cargo_target_directory() {
     fixture::fixture_cache_root(Path::new("/work/target/debug/membraned"));
 }
