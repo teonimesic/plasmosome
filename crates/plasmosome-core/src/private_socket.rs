@@ -53,12 +53,15 @@ impl Walk {
             judge_ancestor(&facts, euid, &at)?;
             refuse_replacing_acl(parent, &at)?;
             at.push(OsStr::from_bytes(component.as_bytes()));
-            let access = if index + 1 == self.components.len() {
-                libc::O_RDONLY
-            } else {
-                SEARCH_ONLY
-            };
-            let next = open_child(parent, component, &at, access)?;
+            let last = index + 1 == self.components.len();
+            let access = if last { libc::O_RDONLY } else { SEARCH_ONLY };
+            let next = open_child(parent, component, &at, access, |facts, at| {
+                if last {
+                    judge_private(facts, euid, at)
+                } else {
+                    judge_ancestor(facts, euid, at)
+                }
+            })?;
             facts = stat_fd(&next, &at)?;
             held = Some(next);
         }
@@ -85,7 +88,8 @@ impl PrivateDir {
     /// Walks `path` from "/" without following symlinks, judges every ancestor and the final
     /// directory, and keeps the final directory open. `path` must be absolute and normal: no
     /// `.` or `..` components and no empty components. Returns the first rule broken, naming
-    /// the component that broke it.
+    /// the component that broke it. A component this user may not open is judged from a
+    /// no-follow `fstatat` in its parent; only when it breaks no rule is the result `Io`.
     pub fn open(path: &Path) -> Result<PrivateDir, PrivateSocketError> {
         let components = absolute_components(path)?;
         let root = Path::new("/");
@@ -858,6 +862,7 @@ fn open_child(
     name: &CStr,
     at: &Path,
     access: libc::c_int,
+    judge: impl FnOnce(&Facts, &Path) -> Result<(), PrivateSocketError>,
 ) -> Result<OwnedFd, PrivateSocketError> {
     let raw = unsafe {
         libc::openat(
@@ -879,6 +884,14 @@ fn open_child(
                 PrivateSocketError::SymlinkInPath { path: at }
             }
             _ => PrivateSocketError::NotDirectory { path: at },
+        },
+        libc::EACCES => match stat_at(parent, name).map(|facts| judge(&facts, &at)) {
+            Ok(Err(refusal)) => refusal,
+            _ => PrivateSocketError::Io {
+                op: "openat",
+                path: at,
+                errno,
+            },
         },
         errno => PrivateSocketError::Io {
             op: "openat",
