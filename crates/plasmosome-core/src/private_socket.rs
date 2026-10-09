@@ -16,9 +16,10 @@ pub struct DirIdentity {
 
 /// A socket's parent directory, opened without following symlinks and judged private: every
 /// ancestor is owned by root or the effective UID and writable by neither group nor other, and
-/// the directory itself is owned by the effective UID, has no group or other bits and carries
-/// no ACL. The directory stays open, so a later rename of its path cannot redirect operations
-/// made through it.
+/// on macOS carries no ACL allow entry granting add_file, add_subdirectory, delete_child,
+/// delete, writesecurity or chown, whoever it names. The directory itself is owned by the
+/// effective UID, has no group or other bits and carries no ACL. The directory stays open, so
+/// a later rename of its path cannot redirect operations made through it.
 #[derive(Debug)]
 pub struct PrivateDir {
     path: PathBuf,
@@ -477,7 +478,9 @@ impl fmt::Display for PrivateSocketError {
             ),
             PrivateSocketError::ReplaceableByAcl { at } => write!(
                 f,
-                "{} has an ACL entry that lets another principal replace entries in it",
+                "{} has an ACL allow entry granting add_file, add_subdirectory, delete_child, \
+                 delete, writesecurity or chown; such an entry is refused on an ancestor whoever \
+                 it names, even if it applies only to new children",
                 at.display()
             ),
             PrivateSocketError::NotPrivate { path, mode } => write!(
