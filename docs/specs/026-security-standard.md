@@ -1,7 +1,7 @@
 ---
 id: 026
 title: The security standard, and what refuses work in its name
-status: draft
+status: accepted
 intents: [006, 002]
 ---
 
@@ -17,21 +17,22 @@ that breaks it: a CI check, the compiler, or the independent reviewer.
 
 The rule with the most reach is dependency admission. Every third-party package in a git-tracked
 `Cargo.lock` is named by a short review record in `docs/dependencies/`. The first step of `gates`
-reads the tracked manifests and Cargo configuration with a TOML parser and never runs cargo. It
-refuses the ways of swapping or wrapping the code cargo builds: `[patch]`, `[replace]`, source
-replacement, `include`, build settings in committed Cargo configuration, and path dependencies
-outside the repository. Only then does a guard read `cargo metadata` and refuse a package no record
-names. A new dependency is admitted only when what the workspace uses of it could not be written
-here in roughly a thousand lines. That rule is the owner's, from intent 006's first draft.
+reads the commit from git's object store and never runs cargo. It allows only listed keys, so it
+refuses the ways of swapping or wrapping the code cargo builds: any committed Cargo configuration,
+a toolchain file beyond its four plain keys, `[patch]`, `[replace]`, path dependencies outside the
+repository, and lockfile sources other than crates.io. Only then does a guard read
+`cargo metadata` and refuse a package no record names. A new dependency is admitted only when what
+the workspace uses of it could not be written here in roughly a thousand lines. That rule is the
+owner's, from intent 006's first draft.
 
 The other rules are shorter. Every cargo command in CI that resolves dependencies runs with
 `--locked`, so the lockfile is what CI builds. Packages with no `unsafe` code forbid it. In those
 that need it, each block carries a safety argument that clippy checks. An exact
-`rust-toolchain.toml` pins the compiler. `cargo-deny` refuses non-crates.io sources on every PR,
-and known vulnerabilities on every PR that changes a manifest or lockfile. Advisories against code
-already on main open one `security` issue. Every parser fed by a less-trusted side checks a size
-bound while reading, and the three that face hostile writers get fuzz targets. `SECURITY.md` routes
-reports through GitHub's private vulnerability reporting.
+`rust-toolchain.toml` pins the compiler. `cargo-deny` refuses known vulnerabilities on every PR
+that changes a manifest or lockfile. Advisories against code already on main open one `security`
+issue. Every parser fed by a less-trusted side checks a size bound while reading, and the three
+that face hostile writers get fuzz targets. `SECURITY.md` routes reports through GitHub's private
+vulnerability reporting.
 
 [Spec 013](013-what-earns-a-guard.md) still decides which refusals may fail the build: only those
 whose harm the next commit cannot undo. [Section 7](#7-how-each-rule-refuses) argues each one. A
@@ -76,13 +77,10 @@ four parties now.
    an action, a compiler or a CI tool. It is defended by records, `--locked`, crates.io as the only
    source, a seven-day wait for new releases, and pinned actions and tools.
 
-**Guest-side syscall filtering is in scope.** Whatever denies the workload a kernel object inside
-the guest, such as AF_VSOCK sockets, user namespaces or io_uring, is part of the boundary. Reviews
-of draft spec 024 found two routes a single-syscall filter misses on the 6.12 guest kernel.
-io_uring's `IORING_OP_SOCKET` opens a socket without calling `socket(2)`. A network namespace does
-not confine AF_VSOCK, which reaches the host bridges on ports 4090 and 4091. Spec 017 already
-requires that "all alternate syscall/loader paths" meet the same denial. Spec 024 owns the
-mechanism, shaped by owner item O-7. This spec names the surface and does not choose.
+**Guest-side syscall filtering is in scope**, including AF_VSOCK, user namespaces and io_uring.
+Draft spec 024's reviews found that io_uring's `IORING_OP_SOCKET` skips a `socket(2)` filter, and
+that a network namespace does not confine AF_VSOCK, which reaches the host bridges on ports 4090
+and 4091. Spec 024 owns the mechanism, shaped by O-7; this spec names the surface only.
 
 **Not covered yet.** These are stated so nobody reads silence as a claim.
 
@@ -178,22 +176,29 @@ derive the same list. Features and users are read from `cargo tree`, not kept in
 An advisory pass is not a review. It shows that nobody has reported a problem, not that anybody
 read the code.
 
-**The git-only step.** It is the first step of `gates`. It lists tracked files with `git ls-files`
-and parses every `.cargo/config*` and every `Cargo.toml` with a TOML parser, such as Python's
-standard `tomllib`. It never invokes cargo or rustc, because any cargo command, `cargo metadata`
-included, runs a configured `rustc` or wrapper. It refuses:
+**The git-only step.** It is the first step of `gates`, immediately after checkout and before the
+toolchain install and the cache action, which run `rustc -vV` and `cargo metadata`. It takes a
+commit and reads it from git's object store, with `git ls-tree -r` and `git show <sha>:<path>`, and
+parses TOML with a parser such as Python's standard `tomllib`. It never needs a checkout and never
+invokes cargo, rustc or rustup, because any of them can run a program the commit names. It allows
+only what this spec lists:
 
-- `[patch]` or `[replace]` in a manifest;
-- in a tracked `.cargo/config` or `.cargo/config.toml`: `include`, source replacement, `paths`,
-  `patch`, `env`, or any `rustflags`, `rustc`, wrapper, `linker` or `runner` key in any table;
-- a path dependency whose canonical path is outside the repository, so a tracked symlink that leads
-  outside counts as outside.
+- **Cargo configuration.** A tracked `.cargo/config` or `.cargo/config.toml`, at any depth, may
+  hold only keys this spec names. Today it names none, so any tracked Cargo configuration is
+  refused. A key that is ever needed is added here first.
+- **Toolchain files.** A `rust-toolchain.toml` may hold only a `[toolchain]` table with `channel`,
+  `components`, `targets` and `profile`, so an absolute toolchain `path` is refused. An
+  extensionless `rust-toolchain` file is refused.
+- **Manifests.** No `[patch]` or `[replace]`. A path dependency must resolve, through any tracked
+  symlinks, to a directory inside the repository.
+- **Lockfiles.** Every package in every tracked `Cargo.lock` has no `source`, or the crates.io
+  source: `registry+https://github.com/rust-lang/crates.io-index` or
+  `sparse+https://index.crates.io/`. A PR can loosen its own `deny.toml`, so `cargo-deny`'s sources
+  check is a second opinion.
 
-None of these has an exception today. If one is ever needed, this spec gains the record field that
-names it. Its message names the file and key, and the harm: a program nobody reviewed runs at the
-first cargo command on every machine that builds main, including ones that hold publish
-credentials. The script lives in `.githooks/` beside `provenance-guard`, and the guards crate
-mutation-tests it.
+Its message names the file and key, and the harm: a program nobody reviewed runs at the first cargo
+command on every machine that builds main, including ones that hold publish credentials. The script
+lives in `.githooks/` beside `provenance-guard`, and the guards crate mutation-tests it.
 
 **The record guard.** `every_dependency_has_a_review_record`, in `crates/plasmosome-guards`, runs
 second, before clippy or the tests compile anything. It reads `cargo metadata --locked`, which runs
@@ -203,13 +208,16 @@ build scripts and proc macros. It checks that records exist and name what is loc
 contents are right is the reviewer's to judge. Compiling it builds `plasmosome-guards`' own
 dependencies first, so a PR that changes those relies on the rule below.
 
-**Read before running.** A reviewer, person or agent, runs no cargo command on a contributor's PR on
-their own machine until the git-only step has passed for that head. The reviewer reads that result
-from a CI run only if the PR leaves the workflows and the step's script unchanged; otherwise the
-reviewer runs main's copy of the script, which needs no cargo. Before running anything, the reviewer
-also reads any change to `build.rs` or `rust-toolchain*`, and the build-time code of every package
-the lockfile adds or changes. A contributor's own tests and proc macros run too, so the reviewer
-reads the diff before running it.
+**Read before running.** A reviewer, person or agent, runs nothing from a contributor's PR on their
+own machine, its git hooks included, until the git-only step has passed for that head. The reviewer
+fetches the PR's ref and inspects it through the object store, and runs main's copy of the step
+against the fetched commit. A CI result counts only if the PR leaves the workflows and the step's
+script unchanged. Only then is the PR checked out, with hooks disabled:
+`git -c core.hooksPath=/dev/null checkout …`. This repository sets a relative `core.hooksPath`, so
+checking out a PR otherwise runs that PR's own `.githooks/`, at checkout and at every later git
+command there. Before running anything, the reviewer reads any change to `.githooks/`, `.github/`,
+`build.rs` or `rust-toolchain*`, the build-time code of every package the lockfile adds or changes,
+and the contributor's own tests and proc macros.
 
 **Dependencies on main.** The record guard's task writes a re-derived record for every direct
 dependency on main: today `serde`, `serde_json`, `uuid`, `toml`, `toml_edit`, `libc`, `cc`,
@@ -267,10 +275,9 @@ carries. That needs the `AGENTS.md` amendment below.
   the range as reviewed; a compatible bump can add such a macro unseen. A PR whose code in a forbid
   package first calls a macro some record lists there says why.
 - **Build settings that weaken lints.** `--cap-lints` or `-A` in rustflags silences both the forbid
-  and clippy. The git-only step refuses that in committed Cargo configuration. A workflow can reach
-  the same settings through `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, any `CARGO_BUILD_*` or
-  `CARGO_TARGET_*` variable, `RUSTC_WRAPPER`, `CARGO_HOME` or `--config`. That is a reviewer item,
-  because the step does not parse YAML.
+  and clippy. The git-only step refuses all committed Cargo configuration. A workflow can set the
+  same things, and run anything, through its environment: `RUSTUP_TOOLCHAIN` set to a path was
+  measured to run a committed toolchain. So any change to `.github/` is read as code.
 
 **Native code is `unsafe` code.** Only register packages compile or link it. In a forbid package
 the compiler refuses the `unsafe extern` block that calling it needs. A test can also compile and
@@ -311,7 +318,8 @@ fuzz manifest declares `unsafe_code = "forbid"` for its own code.
 
 `deny.toml` configures `cargo-deny` over every git-tracked lockfile. `cargo-deny` replaces
 `cargo-audit`. It is pinned to a version that loads today's advisory database and installed with
-`--locked`. On 2026-10-08, 0.20.2 loaded it and 0.18.5 did not.
+`--locked`. On 2026-10-08, 0.20.2 loaded it and 0.18.5 did not. CI calls the `cargo-deny` binary
+directly, never `cargo deny`, which a Cargo alias could replace.
 
 | Check | Setting | Refuses a merge? |
 | --- | --- | --- |
@@ -321,9 +329,11 @@ fuzz manifest declares `unsafe_code = "forbid"` for its own code.
 | Unmaintained, notice and yanked advisories | Warned | No; reported |
 
 **Advisories.** A PR that changes a manifest or lockfile cannot merge while a vulnerability or
-unsound advisory affects any locked package, unless that advisory is ignored. Advisories against
-code already on main surface through the same check run on each push to main and weekly, not by
-refusing unrelated PRs. Whether the owner wants every PR refused instead is Q9.
+unsound advisory affects any locked package, unless that advisory is ignored. A manifest change
+alone counts, because enabling a feature brings code without changing the lockfile. So the `forbid`
+task, which edits every manifest, meets whatever advisory is open that day. Advisories against code
+already on main surface through the same check run on each push to main and weekly, not by refusing
+unrelated PRs. Whether the owner wants every PR refused instead is Q9.
 
 - **Ignores.** `cargo-deny` accepts only `id` and `reason` in an ignore entry. The reason carries
   the expiry and the link in a fixed form: `reason = "until 2026-12-01; <link>; <why>"`. A
@@ -335,9 +345,6 @@ refusing unrelated PRs. Whether the owner wants every PR refused instead is Q9.
 **Licences** are reported, not refused, until something ships (Q8). The release step in spec 007,
 once accepted, refuses them with the advisories. On a PR that changes a lockfile, the reviewer reads
 the licence report.
-
-**Bans are not used.** With `--locked`, a loose version requirement changes nothing until a reviewed
-lockfile change.
 
 **The `security` issue.** The check on each push to main, and a weekly scheduled run, cover every
 lockfile with warnings included. The weekly run also flags ignores whose date has passed or whose
@@ -365,7 +372,7 @@ maximum size and, where it applies, a maximum nesting depth and a time budget.
   symlink to `/dev/zero`, must be refused at the bound, not read forever.
 - Past the bound it refuses with an error. It never truncates to a success.
 - A parser whose writer is hostile also has a fuzz target. Hostile writers are a cell's workload,
-  a plasmid author, a broker, and a control-socket client.
+  a plasmid author, a faulty broker, and a control-socket client.
 - A new parser lands in the same PR as its row below and its bound. That includes the host side of
   the guest bridges, guest observations under spec 024, and registry packages under spec 020.
 
@@ -403,18 +410,19 @@ records.
 ### 6. Reporting a vulnerability
 
 `SECURITY.md` at the root says how to report: through GitHub's private vulnerability reporting,
-plus any contact Q1 adds. Its scope is the crates and binaries here, the cell boundary they build,
-and their supply chain. It links this spec's [threat model](#threat-model) for what is not covered
-yet, rather than copying it. It promises an acknowledgement within the time Q1 settles, and a fix or
-a stated decision before public disclosure. It never names a route nobody receives.
+which is enabled. Its scope is the crates and binaries here, the cell boundary they build, and
+their supply chain. It links this spec's [threat model](#threat-model) for what is not covered yet,
+rather than copying it. It promises a fix or a stated decision before public disclosure, and no
+acknowledgement time. A contact or a time is the owner's public commitment, so it is added only
+when Q1 is answered. It never names a route nobody receives.
 
 ### 7. How each rule refuses
 
 | Rule broken | Refused by | Why that is allowed under spec 013 |
 | --- | --- | --- |
-| `include`, source replacement, `[patch]`, `[replace]`, configured rustflags, `rustc`, wrapper, linker, runner or `env`, or a path dependency outside the repository | The git-only step, first in `gates`, before any cargo command | Each runs or swaps a program nobody reviewed at the first cargo command, on every machine that builds main, including the owner's, which holds a crates.io publish token. Code that ran cannot be un-run. |
+| Any tracked Cargo configuration (`include`, `paths`, source replacement, rustflags, `rustc`, `rustdoc`, wrappers, aliases and the rest); a toolchain file beyond its four keys, or an extensionless one; `[patch]`, `[replace]`; a path dependency outside the repository; a lockfile source other than crates.io | The git-only step, first in `gates`, before any cargo, rustc or rustup command | Each runs or swaps a program nobody reviewed at the first cargo command, on every machine that builds main, including the owner's, which holds a crates.io publish token. Code that ran cannot be un-run. |
 | A locked dependency, or a new range of one, that no record names | The record guard, second in `gates` | The same harm, from build scripts and proc macros |
-| A non-crates.io source | `cargo-deny` in `gates` | The same harm |
+| A non-crates.io source | The git-only step; `cargo-deny` in `gates` as a second opinion | The same harm |
 | A stale lockfile | `--locked` on every cargo command that resolves dependencies | Not a guard. It is cargo refusing to re-resolve. Without it, every check above reads a lockfile that is not what CI built. |
 | A vulnerability or unsound advisory, on a PR that changes a manifest or lockfile | `cargo-deny` in `gates` | The merge brings that code onto main, which the owner builds and runs against hostile input, with no release step between. An exploit cannot be undone. |
 | An advisory database or tool failure | The advisory step, as a tool failure | Fails closed: the step cannot vouch for the change |
@@ -424,11 +432,11 @@ a stated decision before public disclosure. It never names a route nobody receiv
 | An `allow(unsafe_code)` wider than an item or a named FFI module; an undocumented `unsafe extern` declaration; joining the register without both lints or a reason | Reviewer | Judgement |
 | Native code in a forbid package | The compiler, for linked code; the reviewer, for test-built programs | Judgement for the second |
 | A dependency rule that is a judgement: the thousand-line rule, the narrowest crate, features, record contents, release age, a stale record, an approval link, a copied crate | Reviewer | Judgement |
-| Running a contributor's PR before reading it | Reviewer | A rule about who does what |
+| Running anything from a contributor's PR, its git hooks included, before reading it | Reviewer | A rule about who does what |
 | A dependency above `rust-version`, or a newer language feature | The `msrv` job, through pr-review's green-CI merge condition | Not a guard |
 | An ignore without a date or link, or past its date | Reviewer; the weekly run flags it | Judgement |
 | An advisory against code already on main; unmaintained crates; fuzz crashes; a newer stable Rust | Nothing refuses. The `security` issue, then Main | A rule about who does what. Refusing every PR for advisories is Q9. |
-| The toolchain rules; Dependabot configuration and tasks; CI pins and permissions; Cargo settings in workflows | Reviewer | Revertible by the next commit |
+| The toolchain rules; Dependabot configuration and tasks; CI pins and permissions; any workflow change, read as code | Reviewer | Revertible by the next commit |
 | A parser without its bound, row or fuzz target | Reviewer | A design, revertible |
 | A fixed crash that returns | The corpus replay test | An ordinary regression test |
 | A guest syscall route left open | Spec 024's acceptance | Owned there |
@@ -458,9 +466,9 @@ This lands with the `forbid` task, the first under this spec. Add after the para
 > it takes a visible change: the line itself, or a build setting that weakens lints, which
 > [spec 026](026-security-standard.md#2-unsafe-code) refuses in committed Cargo configuration and
 > puts before the reviewer in workflows. It does not reach `unsafe` that a dependency's macro
-> expands; spec 026's dependency records cover that. Spec 026's git-only check of Cargo
-> configuration runs before cargo, because any cargo command runs a configured `rustc` or wrapper.
-> It is a script in `.githooks/`, mutation-tested from this crate. A supply-chain check by a pinned
+> expands; spec 026's dependency records cover that. Spec 026's git-only step runs before cargo,
+> because cargo, rustc and rustup can each run a program a commit names. It is a script in
+> `.githooks/`, mutation-tested from this crate. A supply-chain check by a pinned
 > third-party tool, such as `cargo-deny`, runs as its own CI step. The last two are held to this
 > spec's bar like any guard, and [spec 026](026-security-standard.md#7-how-each-rule-refuses)
 > argues each one.
@@ -515,16 +523,20 @@ every governing spec.", add:
 
 > A PR that changes any path or kind of code listed in
 > [spec 026 section 8](../../../docs/specs/026-security-standard.md#8-which-prs-this-spec-governs)
-> is also governed by spec 026, whatever its task maps to. Run no cargo command on a contributor's
-> PR on your own machine until spec 026's git-only step has passed for that head, and read any
-> change to `build.rs` or `rust-toolchain*` first. A Dependabot PR gets a Beads task under spec 026
-> before it merges, filed by whoever reviews it, who adds the `task:` footer to the PR body and
-> adds it again if Dependabot rewrites the body.
+> is also governed by spec 026, whatever its task maps to. Run nothing from a contributor's PR on
+> your own machine, its git hooks included, until spec 026's git-only step has passed for that
+> head. Fetch the PR's ref and inspect it through the object store, and check it out only after
+> that, with hooks disabled: `git -c core.hooksPath=/dev/null checkout …`. Read any change to
+> `.githooks/`, `.github/`, `build.rs` or `rust-toolchain*` first. A Dependabot PR gets a Beads
+> task under spec 026 before it merges, filed by whoever reviews it straight into spec 016's
+> `review` status, with that reviewer as assignee and the PR as `external_ref`, because the
+> candidate already exists. The reviewer adds the `task:` footer to the PR body, and adds it again
+> if Dependabot rewrites the body.
 
 This is a rule about who does what, so it lands on its reasoning. It prevents three failures. A PR
 adding a dependency under a task mapped to spec 017 is reviewed against spec 017 only, and nobody
-opens the record. The reviewer's own machine runs a contributor's wrapper or build script. A
-Dependabot PR merges with no task, outside spec 012's two shapes.
+opens the record. The reviewer's own machine runs a contributor's git hook, wrapper or build
+script. A Dependabot PR merges with no task, outside spec 012's two shapes.
 
 ### The check-pipeline-health skill: the `security` issue
 
@@ -538,7 +550,8 @@ paragraph that begins "Read the actual JSON and exit status.", add:
 ## Open questions for the owner
 
 1. **Q1, the security contact.** Should `SECURITY.md` add a contact beside private vulnerability
-   reporting, such as an email address? What acknowledgement time should it promise?
+   reporting, such as an email address? What acknowledgement time should it promise? Until
+   answered, it offers private vulnerability reporting only and promises no time.
 2. **Q2, whether the thousand-line rule is hard or advisory.** If hard, only the owner approves an
    exception. If advisory, the independent reviewer may accept a stated argument. Until it is
    answered, the owner approves.
@@ -551,12 +564,13 @@ paragraph that begins "Read the actual JSON and exit status.", add:
    Plausible candidates are `uuid`, `tempfile` and `cc`. Until you answer, each keeps verdict
    `kept-pending-owner`.
 5. **Q5, secret scanning push protection.** It is off. A secret pushed to a public repository
-   cannot be withdrawn. Should it be turned on?
+   cannot be withdrawn. Should it be turned on? Until answered, today's setting stands.
 6. **Q6, the native artifacts' advisories.** Who tracks the guest kernel's CVEs, and libkrun's
    advisories, including those of libkrun's own Rust dependencies? How? Today they are pinned and
-   not tracked.
+   not tracked. Until answered, that stands, and the records state the intended cadence.
 7. **Q7, the Actions settings.** Should `sha_pinning_required` be turned on, making the action pin a
-   platform refusal? Should `allowed_actions` be narrowed from `all`?
+   platform refusal? Should `allowed_actions` be narrowed from `all`? Until answered, today's
+   settings stand.
 8. **Q8, spec 013's bar before anything ships.** Licences are reported, not refused, because nothing
    that ships carries a third-party crate yet. Should spec 013 admit cheap third-party checks before
    a release exists? If so, the licence check refuses in `gates`.
@@ -573,17 +587,20 @@ Each line names the broken implementation it catches.
 
 1. A manifest change pushed without its lockfile update fails `gates`. Catches CI that re-resolves
    on the runner, because some cargo command lacks `--locked`.
-2. Each of these fails the git-only step, and a `rustc-wrapper` set to a script that logs its calls
-   leaves the log empty:
+2. Each of these fails the git-only step, and a `rustc-wrapper` or toolchain set to a script that
+   logs its calls leaves the log empty:
    - `[patch]` or `[replace]` in a manifest;
    - a `.cargo/config.toml` with source replacement, `paths`, `rustflags` holding
-     `--cap-lints allow`, or `rustc-wrapper`;
-   - an extensionless `.cargo/config` with `rustflags`;
-   - a `.cargo/config.toml` holding only `include`;
+     `--cap-lints allow`, `rustc-wrapper`, `[build] rustdoc`, or an `[alias] deny` pointing at a
+     stub;
+   - an extensionless `.cargo/config`, and a `.cargo/config.toml` holding only `include`;
+   - a `rust-toolchain.toml` with an absolute `path`, and an extensionless `rust-toolchain` file;
    - a path dependency outside the repository, and one reached through a tracked symlink.
 
-   An in-tree path package passes. Catches a step that runs cargo first, and checks keyed on package
-   names, which a vendored source with an edited `build.rs` passes.
+   An in-tree path package passes. Run from main's checkout against a fetched PR commit, the step
+   judges that commit with nothing checked out. In `gates`, checkout is the only step before it.
+   Catches a deny-list that misses a key, a step that reads the working tree, and a step placed
+   after the toolchain or cache action.
 3. A PR adding a package no record names fails the record guard, before clippy or the tests compile
    anything. This holds whether the package is direct or transitive. Catches a guard that reads only
    direct dependencies, and a guard ordered after compilation.
@@ -624,15 +641,15 @@ Each line names the broken implementation it catches.
     the `msrv` and fuzz jobs. Every other job's log prints a `rustc` version equal to the pin. The
     `msrv` and fuzz jobs print their own explicit toolchain. Catches an action that installs its
     default `stable`, and a nested toolchain file that rustup overrides.
-15. Each of these makes the `msrv` job fail while `gates` passes: locking a dependency version whose
-    `rust-version` is above 1.96, and a language feature newer than 1.96 in an integration test.
-    Catches an `msrv` job without `+1.96.0`, and one without `--all-targets`.
+15. The spec 004 amendment's two `msrv` mutations hold. Catches an `msrv` job without `+1.96.0`, and
+    one without `--all-targets`.
 
 **Advisories, sources, licences and updates**
 
-16. Each of these fails `gates`: a git dependency, or a crate from another registry, in any
-    git-tracked lockfile, the fuzz lockfile included. Catches `cargo-deny` run over the root
-    manifest only.
+16. A git dependency, or a crate from another registry, in any git-tracked lockfile, the fuzz
+    lockfile included, fails the git-only step, and still fails it with an `allow-git` line added to
+    `deny.toml`. Catches a sources check the PR can switch off, and one run over the root lockfile
+    only.
 17. With an unignored vulnerability advisory against a locked package, a PR that changes a
     `Cargo.toml` fails `gates`, and a Markdown-only PR passes. An ignore whose reason has the stated
     form lets the first pass. Pointing the check at a database it cannot load fails with a
@@ -667,8 +684,9 @@ Each line names the broken implementation it catches.
 
 **Disclosure and the whole**
 
-25. `SECURITY.md` names private vulnerability reporting and Q1's contact, links the threat model,
-    and states Q1's acknowledgement time. Catches a file that names a route nobody receives.
+25. `SECURITY.md` names private vulnerability reporting, links the threat model, and promises no
+    acknowledgement time until Q1 is answered. Catches a file that names a route nobody receives,
+    or a commitment the owner did not make.
 26. Every rule in sections 1 to 6 has a row in section 7. Catches a rule that nothing checks.
 27. The root gate in `AGENTS.md` is green.
 
