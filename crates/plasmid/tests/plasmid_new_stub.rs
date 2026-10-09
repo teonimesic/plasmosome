@@ -39,7 +39,7 @@ fn an_unknown_verb_is_a_named_refusal() {
         .arg("attach")
         .output()
         .expect("the plasmid stub runs");
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("unknown verb `attach`"), "{stderr}");
 }
