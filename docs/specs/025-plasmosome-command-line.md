@@ -1,7 +1,7 @@
 ---
 id: 025
 title: The plasmosome command line
-status: draft
+status: accepted
 intents: [009, 011]
 ---
 
@@ -132,8 +132,8 @@ accepted.
 daemon resolves it or answers code 100 with candidates. `exec status` and `exec output` require
 `--cell`, because exec IDs repeat from cell to cell (draft 024). The exec and plasmid commands,
 whose verbs may pick the cell themselves, are served only once their results name the cell they
-acted on. Draft 024's results do not yet, and neither do spec 001's plasmid results; changing
-the plasmid results is a change to spec 001 §3 that a later spec makes. The client never adds a
+acted on. Draft 024's results do not yet, and neither do spec 001's plasmid results, which a
+later spec changes, such as draft 022 (see "Requests to draft specs"). The client never adds a
 field to a result (section 3).
 
 `plasmid new` (spec 011) reaches no daemon or registry. It keeps spec 011's output, and its
@@ -227,7 +227,8 @@ The JSON form writes each one, wherever it appears in a key or a value, as JSON'
 escape (a backslash, `u`, four hex digits). Standard JSON writers, `serde_json` among them,
 escape only U+0000 to U+001F, so the client uses its own formatter. The output stays valid JSON
 and parses to the same values, so a person reading it at a terminal never receives a raw
-control, whichever process wrote the string.
+control, whichever process wrote the string. Registry commands' JSON goes through the same
+formatter: spec 020 escapes only its human form, and this escaping keeps the data it preserves.
 
 **The human form.** `--human` selects output for a person. A success prints the envelope
 indented, one key per line. A failure prints the message, then a `fix:` line when the error has
@@ -245,7 +246,7 @@ Three commands print something other than an envelope on stdout: `--help`, `--ve
 | --- | --- | --- | --- |
 | 0 | Done. stdout holds the result. | Answered. | Not applicable. |
 | 1 | Unavailable. The instance is not up or could not be reached, or a request that changes no state got no complete answer. Nothing can have changed. | Not sent, read-only, or refused with 107. | Yes. |
-| 2 | Refused. The kernel, the registry or the client's own checks refused it. | Refused, or never sent. | No. Read `error`. |
+| 2 | Refused. The kernel, the registry or the client's own checks refused it. | Refused or never sent; `error` may name a partial effect, such as a cell a failed start left behind (draft 023). | No. Read `error`. |
 | 3 | Outcome unknown. A request that changes state was at least partly written and its answer did not reach the caller, or the kernel answered that its outcome is unknown. | It may take effect, even after this command has exited. | Observe first. |
 | 64 | Usage. The command line is wrong. | Not sent. | No. |
 | 70 | Internal. The client or the daemon broke the protocol or failed. | Unknown for a command that changes state. | Observe first, and report it. |
@@ -348,8 +349,9 @@ A name is valid UTF-8, follows `plasmosome-core`'s `InstanceName` rules (not emp
 backslash or NUL; not `.` or `..`), and contains no terminal control (section 3). It is checked
 before any path is built; a bad name from the flag or the variable is a usage error naming its
 source. Rules 2 to 4 need `$HOME` to be an absolute, normal UTF-8 path; otherwise the command
-exits 2 with `invalid_home`. The client never falls back to another home directory, the password
-database included.
+exits 2 with `invalid_home`. A trailing `/` on `$HOME` counts as normal and is dropped before the
+path is built; any other empty component does not. The client never falls back to another home
+directory, the password database included.
 
 When the client knows a name, it sends it in the verb's instance parameter (`name` for
 `plasmosome.*`, `kernel` otherwise), so a daemon configured under another name refuses with
@@ -390,7 +392,8 @@ cannot change its target.
 is spec 001 §4.1's path boundary for private sockets. It refuses a symbolic link in any
 component, an ancestor that another user could replace, a socket directory that is not the
 caller's own `0700` directory without an ACL, and a socket entry that is not the caller's socket
-with mode `0600`. The client maps #124's errors, as of `33f2eb6`, and adds nothing of its own:
+with mode `0600`. The client maps #124's errors, as of `33f2eb6`, as below. Its only checks of
+its own run first: that a path is normal, and that it fits `sun_path`.
 
 | #124 error | Client code | `rule` | Exit |
 | --- | --- | --- | --- |
@@ -462,7 +465,7 @@ start when its configured control socket path:
 
 - passes through a symbolic link, such as `/var` or `/tmp` on macOS;
 - has an ancestor that group, other or an ACL entry lets another user replace;
-- sits in a directory that is not owned by the daemon's user, with mode `0700` and no ACL.
+- sits in a directory that is not its own `0700` directory without an ACL.
 
 It names the failing component and exits 1, as a failure to bind does today. Today it binds all
 of these. Tests and scripts that bind under macOS's `TMPDIR` (`/var/folders/...`) must pass its
@@ -579,15 +582,14 @@ on Linux they are deferred with the platform.
 17. On macOS, a library test connects the client's verify step to
     `/private/var/run/mDNSResponder` with the trusted UID set to the caller's own effective UID,
     and gets `peer_mismatch` with a `peer_uid` other than the caller's (measured: 65 against 501).
-    Nothing is written. Through the binary, a hard link to that socket inside a caller-owned
-    `0700` directory exits 2 with `unsafe_socket`, rule `owner`, at the link. Catches: a peer
-    check that compares the trusted UID with `geteuid()` and never reads the peer, and a binary
-    that passes a trusted UID other than its own.
+    Nothing is written. Catches: a peer check that compares the trusted UID with `geteuid()` and
+    never reads the peer. Item 6 catches a binary that passes any other trusted UID.
 18. `--help` lists no option that reaches the trusted UID, `--trusted-uid 0` is a usage error,
     and review confirms that the binary passes only its effective UID to `plasmosome-cli`.
     Catches: a hidden override of the peer check.
-19. A `--socket` path one byte shorter than the platform's limit connects; one at the limit exits
-    2 with `socket_path_too_long` and makes no connection. Catches: truncation and an off-by-one.
+19. On macOS, a 103-byte `--socket` path connects, and a 104-byte path exits 2 with
+    `socket_path_too_long` and makes no connection; on Linux the lengths are 107 and 108.
+    Catches: truncation and an off-by-one.
 20. With live fakes `a` and `b` under a test `HOME`:
     - `--kernel a` reaches `a`, with `instance.name` `a`; `PLASMOSOME_KERNEL=b` reaches `b`;
       `--kernel a` with `PLASMOSOME_KERNEL=b` reaches `a`;
@@ -631,9 +633,12 @@ on Linux they are deferred with the platform.
     as `<U+XXXX>`. A `--kernel` value holding ESC is refused, and its echo in `argument` is
     escaped in both forms. Catches: relying on `serde_json`'s escaping, escaping only daemon
     text, and escaping only under `--human`.
-26. Two runs of `plasmosome status`, with `HOME`, `TMPDIR`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` and
-    the working directory each an empty test directory, leave all of them as they were. Catches:
-    a cache or state file.
+26. `HOME` holds only the instance directory of a live fake `a`, and `TMPDIR`, `XDG_CACHE_HOME`,
+    `XDG_STATE_HOME` and the working directory are empty test directories. A first
+    `plasmosome status` with no selection input exits 0 and reaches `a`. The test then removes
+    `a`'s directory and starts a live fake `b`, and a second run reaches `b`. Afterwards `HOME`
+    holds only `b`'s instance directory, and the other four are still empty. Catches: a cache or
+    state file, including one written only after a successful selection.
 27. An in-process test of the top-level handler, with the panic hook installed, makes the command
     code panic: exit 70 with one `internal` envelope on stderr and no panic text. The trigger
     exists only in the test build. Catches: a panic reaching stderr with Rust's exit 101.
@@ -668,7 +673,8 @@ on Linux they are deferred with the platform.
 
 ## Amendments this spec proposes
 
-Each is applied in the change that accepts this spec. This PR edits no accepted document.
+The PR that accepts this spec edits no other accepted document. Each amendment is applied by a
+later reviewed change to the document it amends, before any task that relies on it.
 
 **A. Spec 001 §2, two bullets.** In the first bullet, replace
 
@@ -743,12 +749,17 @@ logic goes when its trigger fires. Spec 011: `plasmid new` keeps its exit 2. Spe
    registry commands, in the same binary. Should one default hold for both, and which?
 5. **Is `status` alone a usable tool?** Spec 010 lets `crates/plasmosome` gain a binary once there
    is a usable tool to install. Task B serves one command. Is that enough, or should the binary
-   wait for a command that changes state?
+   wait for a command that changes state? Until the owner answers, this spec proceeds on yes:
+   Task B adds the binary with `status`.
 
 ## Requests to draft specs
 
+- Draft 022 (#125): name `cell` in the plasmid verbs' results, which serving the plasmid
+  commands needs (section 2).
 - Draft 023 (#126): a client request ID on `cell.new`, so that a repeat after exit 3 does not
   create a second cell.
+- Draft 024 (#127): name `cell` in the `cell.exec`, `exec.status` and `exec.output` results,
+  which serving the exec commands needs (section 2).
 - Draft 024 (#127): a wait parameter on `exec.status`, so that one request returns when the
   process ends or a deadline passes, instead of a polling loop costing a tool call per poll.
 
