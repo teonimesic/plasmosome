@@ -6,15 +6,72 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::SystemTime;
 
-fn fixture_identity(path: &Path) -> (u64, std::time::SystemTime) {
-    let metadata = std::fs::metadata(path).expect("the published fixture exists");
+fn entries(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .expect("the directory is readable")
+        .map(|entry| {
+            entry
+                .expect("the directory entry is readable")
+                .file_name()
+                .into_string()
+                .expect("the entry name is UTF-8")
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+fn fixture_identity(path: &Path) -> (u64, SystemTime, SystemTime) {
+    let file = std::fs::metadata(path).expect("the published fixture exists");
+    let key = std::fs::metadata(path.parent().expect("the fixture has a key directory"))
+        .expect("the key directory exists");
     (
-        metadata.ino(),
-        metadata
-            .modified()
+        file.ino(),
+        file.modified()
             .expect("the fixture's modification time is readable"),
+        key.modified()
+            .expect("the key directory's modification time is readable"),
     )
+}
+
+#[test]
+fn a_second_test_process_publishes_no_new_key_and_leaves_no_temporary_files() {
+    let published = fixture::supervision_fixture();
+    let root = published
+        .parent()
+        .and_then(Path::parent)
+        .expect("the fixture sits two directories below its cache root");
+    let keys = entries(root);
+    let temporary = tempfile::tempdir().unwrap();
+
+    let child = Command::new(std::env::current_exe().expect("the test executable has a path"))
+        .args([
+            "--exact",
+            "fixture::the_supervision_fixture_is_cached_inside_the_target_directory",
+            "fixture_cache::a_freshly_compiled_fixture_is_run_once_before_it_is_returned",
+        ])
+        .env("TMPDIR", temporary.path())
+        .output()
+        .expect("a second test process starts");
+
+    let report = String::from_utf8_lossy(&child.stdout);
+    assert!(
+        child.status.success() && report.contains("test result: ok. 2 passed"),
+        "the second test process reuses the published fixture and compiles a fresh one:\n{report}\n{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert_eq!(
+        entries(root),
+        keys,
+        "a second test process publishes no new key"
+    );
+    assert_eq!(
+        entries(temporary.path()),
+        Vec::<String>::new(),
+        "a second test process leaves nothing in its temporary directory"
+    );
 }
 
 #[test]
