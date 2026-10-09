@@ -91,10 +91,12 @@ or keep forking. `mem::forget` leaks an unfinished handle.
 
 Darwin cannot create a pipe, a socket or an accepted connection already close-on-exec, so each one
 exists for a moment before `FD_CLOEXEC` is set, and a fork in that moment hands it to the child.
-`VmmChild::spawn` forks holding the read side of one process-wide lock. The Darwin readiness probe
-creates its socket holding the write side, so a spawn waits while a probe socket is created. A
-spawn from the thread that holds the write side returns `SpawnError::DescriptorLockHeld` instead of
-waiting on itself.
+`VmmChild::spawn` forks holding the read side of one process-wide lock. The readiness probe
+creates its socket holding the write side, so a spawn waits while a probe socket is created; on
+Linux that socket is close-on-exec from the start, so the wait matters only on Darwin. Creation
+under the write side must hand back a descriptor that is already close-on-exec: one that is not is
+closed before the lock is released, and creation fails. A spawn from the thread that holds the
+write side returns `SpawnError::DescriptorLockHeld` instead of waiting on itself.
 
 The lock covers only those two paths. Forks that do not go through `VmmChild::spawn`, such as
 `std::process::Command`, do not take it, and neither do the standard library's `bind` in
