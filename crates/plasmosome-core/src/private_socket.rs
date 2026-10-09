@@ -979,12 +979,16 @@ mod darwin_acl {
     const ACL_DELETE_CHILD: u64 = 1 << 6;
     const ACL_WRITE_SECURITY: u64 = 1 << 12;
     const ACL_CHANGE_OWNER: u64 = 1 << 13;
+    const KAUTH_ACE_GENERIC_ALL: u64 = 1 << 21;
+    const KAUTH_ACE_GENERIC_WRITE: u64 = 1 << 23;
     const REPLACES_ENTRIES: u64 = ACL_ADD_FILE
         | ACL_DELETE
         | ACL_ADD_SUBDIRECTORY
         | ACL_DELETE_CHILD
         | ACL_WRITE_SECURITY
-        | ACL_CHANGE_OWNER;
+        | ACL_CHANGE_OWNER
+        | KAUTH_ACE_GENERIC_ALL
+        | KAUTH_ACE_GENERIC_WRITE;
 
     unsafe extern "C" {
         fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
