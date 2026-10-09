@@ -516,6 +516,12 @@ mod tests {
         assert_eq!(id.as_uuid().hyphenated().to_string(), UUID);
         assert_eq!(serde_json::to_value(id).unwrap(), json!(UUID));
         assert_eq!(decoded::<RegistryId>(json!(UUID)), id);
+        for value in [Value::Null, json!(7), json!([UUID]), json!({ "id": UUID })] {
+            assert!(
+                serde_json::from_value::<RegistryId>(value.clone()).is_err(),
+                "{value}"
+            );
+        }
         let refused = [
             UUID.to_uppercase(),
             format!("{{{UUID}}}"),
@@ -558,6 +564,7 @@ mod tests {
             format!("sha256:{HEX}0"),
             format!("sha256:{}A", &HEX[..63]),
             format!("sha256:{}g", &HEX[..63]),
+            format!("sha256:g{}", &HEX[1..]),
             format!(" sha256:{HEX}"),
             format!("sha256:{HEX}\n"),
         ];
