@@ -8,6 +8,7 @@
 pub mod control;
 pub mod daemon;
 pub mod gatekeeper;
+pub mod instance;
 pub mod lifecycle;
 pub mod manifest;
 pub mod protocol;
