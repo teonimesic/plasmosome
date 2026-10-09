@@ -315,6 +315,47 @@ fn a_test_root_is_removed_even_when_its_test_panics() {
 }
 
 #[test]
+fn a_root_owned_directory_this_user_cannot_open_is_judged_by_its_owner() {
+    let euid = effective_uid();
+    if euid == 0 {
+        println!("skipped: root opens every directory");
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    let locked = Path::new("/private/var/audit");
+    #[cfg(target_os = "linux")]
+    let locked = Path::new("/root");
+    let metadata = fs::symlink_metadata(locked).expect("the locked directory exists");
+    assert!(
+        metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o7777 == 0o700,
+        "{} must be a root-owned 0700 directory for this test",
+        locked.display()
+    );
+    let foreign = PrivateSocketError::ForeignOwner {
+        path: locked.to_path_buf(),
+        uid: 0,
+    };
+    assert_eq!(
+        PrivateDir::open(locked).map(|dir| dir.path().to_path_buf()),
+        Err(foreign.clone())
+    );
+    assert_eq!(check_private_path(&locked.join("sock"), euid), Err(foreign));
+    #[cfg(target_os = "macos")]
+    let unreachable = locked.to_path_buf();
+    #[cfg(target_os = "linux")]
+    let unreachable = locked.join("cell");
+    assert_eq!(
+        PrivateDir::open(&locked.join("cell")).map(|dir| dir.path().to_path_buf()),
+        Err(PrivateSocketError::Io {
+            op: "openat",
+            path: unreachable,
+            errno: libc::EACCES
+        }),
+        "a root-owned 0700 ancestor is safe, only unreachable"
+    );
+}
+
+#[test]
 fn open_names_the_component_even_when_allocation_overwrites_errno() {
     let root = private_root();
     let at = |name: &str| root.path().join(name);
@@ -462,6 +503,155 @@ fn an_ancestor_acl_that_allows_replacing_entries_is_refused() {
         opened.map(|dir| dir.path().to_path_buf()),
         Err(PrivateSocketError::ReplaceableByAcl { path: ancestor }),
         "an allow entry on a grandparent"
+    );
+}
+
+#[cfg(target_os = "macos")]
+const KAUTH_ACE_GENERIC_ALL: u32 = 1 << 21;
+#[cfg(target_os = "macos")]
+const KAUTH_ACE_GENERIC_WRITE: u32 = 1 << 23;
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn mbr_gid_to_uuid(gid: libc::gid_t, uuid: *mut u8) -> libc::c_int;
+}
+
+#[cfg(target_os = "macos")]
+fn add_raw_allow_for_everyone(path: &Path, rights: u32) {
+    const SYS_CHMOD_EXTENDED: libc::c_int = 282;
+    const KAUTH_FILESEC_MAGIC: u32 = 0x012c_c16d;
+    const KAUTH_ACE_PERMIT: u32 = 1;
+    const KAUTH_ID_NONE: u32 = u32::MAX - 100;
+    const EVERYONE_GID: libc::gid_t = 12;
+    let mut everyone = [0u8; 16];
+    assert_eq!(
+        unsafe { mbr_gid_to_uuid(EVERYONE_GID, everyone.as_mut_ptr()) },
+        0,
+        "the everyone group has a UUID"
+    );
+    let mut filesec = Vec::new();
+    filesec.extend(KAUTH_FILESEC_MAGIC.to_ne_bytes());
+    filesec.extend([0u8; 32]);
+    filesec.extend(1u32.to_ne_bytes());
+    filesec.extend(0u32.to_ne_bytes());
+    filesec.extend(everyone);
+    filesec.extend(KAUTH_ACE_PERMIT.to_ne_bytes());
+    filesec.extend(rights.to_ne_bytes());
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("no NUL");
+    #[allow(deprecated)]
+    let outcome = unsafe {
+        libc::syscall(
+            SYS_CHMOD_EXTENDED,
+            c_path.as_ptr(),
+            KAUTH_ID_NONE,
+            KAUTH_ID_NONE,
+            -1 as libc::c_int,
+            filesec.as_ptr(),
+        )
+    };
+    assert_eq!(
+        outcome,
+        0,
+        "chmod_extended stores an allow entry with rights {rights:#x}: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ancestor_acl_granting_generic_rights_is_refused() {
+    let root = private_root();
+    let ancestor = root.path().join("ancestor");
+    make_dir(&ancestor, 0o755);
+    let cell = ancestor.join("cell");
+    make_dir(&cell, 0o700);
+    for (name, rights) in [
+        ("generic_write", KAUTH_ACE_GENERIC_WRITE),
+        ("generic_all", KAUTH_ACE_GENERIC_ALL),
+    ] {
+        add_raw_allow_for_everyone(&ancestor, rights);
+        let opened = PrivateDir::open(&cell);
+        clear_acl(&ancestor);
+        assert_eq!(
+            opened.map(|dir| dir.path().to_path_buf()),
+            Err(PrivateSocketError::ReplaceableByAcl {
+                path: ancestor.clone()
+            }),
+            "{name}"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct Attached(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Attached {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-force", "-quiet"])
+            .arg(&self.0)
+            .status();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn hdiutil(arguments: &[&OsStr]) {
+    let output = std::process::Command::new("/usr/bin/hdiutil")
+        .args(arguments)
+        .output()
+        .expect("hdiutil runs");
+    assert!(
+        output.status.success(),
+        "hdiutil {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_volume_mounted_with_ownership_ignored_is_refused() {
+    let root = private_root();
+    let image = root.path().join("noowners.dmg");
+    hdiutil(&[
+        OsStr::new("create"),
+        OsStr::new("-quiet"),
+        OsStr::new("-size"),
+        OsStr::new("1m"),
+        OsStr::new("-fs"),
+        OsStr::new("HFS+"),
+        OsStr::new("-layout"),
+        OsStr::new("NONE"),
+        OsStr::new("-volname"),
+        OsStr::new("psnoowners"),
+        image.as_os_str(),
+    ]);
+    let mount = root.path().join("mnt");
+    make_dir(&mount, 0o755);
+    hdiutil(&[
+        OsStr::new("attach"),
+        OsStr::new("-quiet"),
+        OsStr::new("-owners"),
+        OsStr::new("off"),
+        OsStr::new("-nobrowse"),
+        OsStr::new("-noverify"),
+        OsStr::new("-noautoopen"),
+        OsStr::new("-mountpoint"),
+        mount.as_os_str(),
+        image.as_os_str(),
+    ]);
+    let _attached = Attached(mount.clone());
+    let cell = mount.join("cell");
+    make_dir(&cell, 0o700);
+    assert_eq!(
+        PrivateDir::open(&cell).map(|dir| dir.path().to_path_buf()),
+        Err(PrivateSocketError::OwnershipIgnored {
+            path: mount.clone()
+        })
+    );
+    assert_eq!(
+        check_private_path(&cell.join("sock"), effective_uid()),
+        Err(PrivateSocketError::OwnershipIgnored { path: mount })
     );
 }
 
@@ -860,19 +1050,41 @@ fn the_listening_descriptor_polls_readable_while_a_client_waits() {
     assert!(!poll_readable(&listener), "the client was taken");
 }
 
+#[cfg(target_os = "macos")]
+const FOREIGN_PEERS: &[&str] = &["/private/var/run/mDNSResponder"];
+#[cfg(target_os = "linux")]
+const FOREIGN_PEERS: &[&str] = &["/run/dbus/system_bus_socket", "/run/systemd/journal/stdout"];
+
+const FOREIGN_PEER_OPT_OUT: &str = "PLASMOSOME_FOREIGN_PEER_TESTS_UNSUPPORTED";
+
 #[test]
-fn check_peer_uid_on_a_client_stream_compares_the_server_uid() {
-    let root = private_root();
-    let listener = bind(&root, "sock");
-    let client = UnixStream::connect(&listener.entry().path).expect("connect");
+fn check_peer_uid_reads_a_foreign_peer_uid_from_the_kernel() {
+    let Some(stream) = FOREIGN_PEERS
+        .iter()
+        .find_map(|path| UnixStream::connect(path).ok())
+    else {
+        assert!(
+            std::env::var_os(FOREIGN_PEER_OPT_OUT).is_some_and(|value| value == "1"),
+            "none of {FOREIGN_PEERS:?} accepts a connection, so no peer running as another UID \
+             can be read; run the tests where one of those daemons runs or set \
+             {FOREIGN_PEER_OPT_OUT}=1 to skip this test"
+        );
+        println!(
+            "skipped: none of {FOREIGN_PEERS:?} accepts a connection and {FOREIGN_PEER_OPT_OUT}=1 is set"
+        );
+        return;
+    };
     let euid = effective_uid();
-    assert_eq!(peer_uid(&client).expect("peer uid"), euid);
-    assert_eq!(check_peer_uid(&client, euid), Ok(()));
+    let found = peer_uid(&stream).expect("the kernel reports the peer's credentials");
+    assert_ne!(
+        found, euid,
+        "the peer UID read for a daemon of another user is this process's own UID"
+    );
     assert_eq!(
-        check_peer_uid(&client, euid.wrapping_add(1)),
+        check_peer_uid(&stream, euid),
         Err(PrivateSocketError::PeerMismatch {
-            trusted: euid.wrapping_add(1),
-            found: euid
+            trusted: euid,
+            found
         })
     );
 }
@@ -909,7 +1121,7 @@ fn socket_entry_validates_type_owner_and_mode_without_following() {
     );
     assert_eq!(
         dir.socket_entry("absent", euid),
-        Err(PrivateSocketError::NoDirectory {
+        Err(PrivateSocketError::NoSocket {
             path: root.path().join("absent")
         })
     );
@@ -953,6 +1165,35 @@ fn check_private_path_checks_the_parent_and_the_entry() {
         check_private_path(Path::new("/"), euid),
         Err(PrivateSocketError::BadPath {
             path: PathBuf::from("/")
+        })
+    );
+    let spelled = path.to_str().expect("a UTF-8 test root");
+    let parent = root.path().to_str().expect("a UTF-8 test root");
+    for unnormal in [
+        format!("{parent}/./sock"),
+        format!("{parent}//sock"),
+        format!("{spelled}/"),
+        format!("{spelled}/."),
+        format!("{parent}/x/../sock"),
+    ] {
+        assert_eq!(
+            check_private_path(Path::new(&unnormal), euid),
+            Err(PrivateSocketError::BadPath {
+                path: PathBuf::from(&unnormal)
+            }),
+            "{unnormal}"
+        );
+    }
+    assert_eq!(
+        check_private_path(&root.path().join("absent"), euid),
+        Err(PrivateSocketError::NoSocket {
+            path: root.path().join("absent")
+        })
+    );
+    assert_eq!(
+        check_private_path(&root.path().join("nodir/sock"), euid),
+        Err(PrivateSocketError::NoDirectory {
+            path: root.path().join("nodir")
         })
     );
     assert_eq!(

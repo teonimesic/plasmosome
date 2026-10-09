@@ -1414,6 +1414,42 @@ mod tests {
     }
 
     #[test]
+    fn open_from_judges_a_directory_it_cannot_open() {
+        let root = test_root();
+        let group = root.path().join("group");
+        make_dir(&group, 0o700);
+        make_dir(&group.join("cell"), 0o700);
+        set_mode(&group, 0o020);
+        let shared = root.path().join("shared");
+        make_dir(&shared, 0o070);
+        let locked = root.path().join("locked");
+        make_dir(&locked, 0o000);
+        assert_eq!(
+            open_in(&root, "group/cell").map(|dir| dir.path().to_path_buf()),
+            Err(PrivateSocketError::Replaceable {
+                path: group.clone(),
+                mode: 0o020
+            })
+        );
+        assert_eq!(
+            open_in(&root, "shared").map(|dir| dir.path().to_path_buf()),
+            Err(PrivateSocketError::NotPrivate {
+                path: shared,
+                mode: 0o070
+            })
+        );
+        assert_eq!(
+            open_in(&root, "locked").map(|dir| dir.path().to_path_buf()),
+            Err(PrivateSocketError::Io {
+                op: "openat",
+                path: locked,
+                errno: libc::EACCES
+            }),
+            "a directory this user owns and keeps private is only unreachable"
+        );
+    }
+
+    #[test]
     fn reconfirm_fails_after_the_directory_is_replaced() {
         let root = test_root();
         make_dir(&root.path().join("cell"), 0o700);
@@ -1665,6 +1701,10 @@ mod tests {
                 "/r/cell does not exist",
             ),
             (
+                PrivateSocketError::NoSocket { path: at() },
+                "/r/cell does not exist: no socket is bound at that name",
+            ),
+            (
                 PrivateSocketError::NotDirectory { path: at() },
                 "/r/cell is not a directory",
             ),
@@ -1687,6 +1727,11 @@ mod tests {
                 "/r/cell has an ACL allow entry granting add_file, add_subdirectory, delete_child, \
                  delete, writesecurity or chown; such an entry is refused on an ancestor whoever it \
                  names, even if it applies only to new children",
+            ),
+            (
+                PrivateSocketError::OwnershipIgnored { path: at() },
+                "/r/cell is on a volume mounted with ownership ignored (noowners): its owner and \
+                 mode do not keep other users out",
             ),
             (
                 PrivateSocketError::NotPrivate {
