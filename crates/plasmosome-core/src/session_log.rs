@@ -267,11 +267,6 @@ impl SessionLog {
                 io_error(&path, LogStep::Open)(source)
             }
         })?;
-        if opened.created {
-            store
-                .sync_dir(parent)
-                .map_err(io_error(parent, LogStep::SyncDirectory))?;
-        }
         let (events, last_seq) = parse_lines(&path, &opened.existing)?;
         let next_seq = match last_seq {
             None => 1,
@@ -286,9 +281,7 @@ impl SessionLog {
         let mut file = opened.file;
         file.sync_all()
             .map_err(io_error(&path, LogStep::SyncFile))?;
-        store
-            .sync_dir(parent)
-            .map_err(io_error(parent, LogStep::SyncDirectory))?;
+        sync_up_from(parent, store)?;
         Ok(SessionLog {
             path,
             state: Mutex::new(LogState {
@@ -390,10 +383,17 @@ fn create_parents(parent: &Path, store: &dyn LogStore) -> Result<(), SessionLogE
         store
             .create_dir(directory)
             .map_err(io_error(directory, LogStep::CreateDirectory))?;
-        let above = parent_of(directory);
+    }
+    Ok(())
+}
+
+fn sync_up_from(directory: &Path, store: &dyn LogStore) -> Result<(), SessionLogError> {
+    let absolute =
+        std::path::absolute(directory).map_err(io_error(directory, LogStep::SyncDirectory))?;
+    for each in absolute.ancestors() {
         store
-            .sync_dir(above)
-            .map_err(io_error(above, LogStep::SyncDirectory))?;
+            .sync_dir(each)
+            .map_err(io_error(each, LogStep::SyncDirectory))?;
     }
     Ok(())
 }
@@ -538,6 +538,13 @@ mod tests {
     }
 
     fn assert_send_sync<T: Send + Sync>() {}
+
+    fn synced_up_from(directory: &Path) -> Vec<Call> {
+        directory
+            .ancestors()
+            .map(|each| Call::SyncDir(each.to_path_buf()))
+            .collect()
+    }
 
     fn assert_locked(result: Result<SessionLog, SessionLogError>, at: &Path) {
         match result {
@@ -743,37 +750,28 @@ mod tests {
         let root = store.root().to_path_buf();
         let path = root.join("a").join("b").join(LOG);
         SessionLog::open_with(path.clone(), &store).unwrap();
-        assert_eq!(
-            store.calls(),
-            [
-                Call::CreateDir(root.join("a")),
-                Call::SyncDir(root.clone()),
-                Call::CreateDir(root.join("a").join("b")),
-                Call::SyncDir(root.join("a")),
-                Call::Open(path.clone()),
-                Call::SyncDir(root.join("a").join("b")),
-                Call::SyncFile,
-                Call::SyncDir(root.join("a").join("b")),
-            ]
-        );
+        let mut expected = vec![
+            Call::CreateDir(root.join("a")),
+            Call::CreateDir(root.join("a").join("b")),
+            Call::Open(path.clone()),
+            Call::SyncFile,
+        ];
+        expected.extend(synced_up_from(&root.join("a").join("b")));
+        assert_eq!(store.calls(), expected);
         assert!(path.is_file());
     }
 
     #[test]
     fn a_failed_parent_sync_refuses_open() {
-        let synced = |root: &Path| {
-            [
-                root.to_path_buf(),
-                root.join("a"),
-                root.join("a").join("b"),
-                root.join("a").join("b"),
-            ]
-        };
-        for (index, _) in synced(Path::new("")).iter().enumerate() {
-            let store = FaultLogStore::new().fail(Step::SyncDir, index + 1);
-            let directory = synced(store.root())[index].clone();
+        let positions = FaultLogStore::new().root().ancestors().count() + 2;
+        for nth in 1..=positions {
+            let store = FaultLogStore::new().fail(Step::SyncDir, nth);
+            let synced = synced_up_from(&store.root().join("a").join("b"));
+            let Call::SyncDir(directory) = &synced[nth - 1] else {
+                unreachable!()
+            };
             let error = open_error(store.root().join("a").join("b").join(LOG), &store);
-            assert_io_error(error, LogStep::SyncDirectory, &directory);
+            assert_io_error(error, LogStep::SyncDirectory, directory);
         }
     }
 
@@ -1209,5 +1207,37 @@ mod tests {
             assert_poisoned(first.append("force", json!({ "cell": "a" })));
             drop(store);
         }
+    }
+
+    #[test]
+    fn a_reopen_syncs_the_file_and_every_ancestor() {
+        let store = FaultLogStore::new();
+        let path = store.root().join(LOG);
+        drop(open_in(&store));
+        let before = store.calls().len();
+        drop(open_in(&store));
+        let mut expected = vec![Call::Open(path), Call::SyncFile];
+        expected.extend(synced_up_from(store.root()));
+        assert_eq!(store.calls()[before..], expected);
+    }
+
+    #[test]
+    fn a_reopen_after_an_interrupted_open_syncs_the_directories_it_created() {
+        let store = FaultLogStore::new().fail(Step::SyncDir, 1);
+        let directory = store.root().join("a").join("b");
+        let path = directory.join(LOG);
+        match open_error(path.clone(), &store) {
+            SessionLogError::Io { step, .. } => assert_eq!(step, LogStep::SyncDirectory),
+            other => panic!("expected the first open to fail a directory sync, got {other:?}"),
+        }
+        let before = store.calls().len();
+        let log = SessionLog::open_with(path, &store).unwrap();
+        let synced: Vec<Call> = store.calls()[before..]
+            .iter()
+            .filter(|call| matches!(call, Call::SyncDir(_)))
+            .cloned()
+            .collect();
+        assert_eq!(synced, synced_up_from(&directory));
+        assert_eq!(log.append("a", json!({})).unwrap(), 1);
     }
 }
