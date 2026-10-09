@@ -136,6 +136,7 @@ fn addressable(socket: &Path) -> BufReader<UnixStream> {
     }
 }
 
+#[track_caller]
 fn send(client: &BufReader<UnixStream>, bytes: &[u8]) {
     let mut stream = client.get_ref().try_clone().expect("clone for writing");
     stream
@@ -145,6 +146,7 @@ fn send(client: &BufReader<UnixStream>, bytes: &[u8]) {
     stream.flush().expect("the request is flushed");
 }
 
+#[track_caller]
 fn send_unterminated(client: &BufReader<UnixStream>, bytes: &[u8]) {
     let mut stream = client.get_ref().try_clone().expect("clone for writing");
     stream
@@ -161,8 +163,10 @@ fn read_reply(client: &mut BufReader<UnixStream>) -> Value {
         read, 0,
         "plasmosomed answered rather than closing the socket"
     );
-    serde_json::from_str(&reply)
-        .unwrap_or_else(|error| panic!("plasmosomed answers JSON, got {reply:?}: {error}"))
+    match serde_json::from_str(&reply) {
+        Ok(value) => value,
+        Err(error) => panic!("plasmosomed answers JSON, got {reply:?}: {error}"),
+    }
 }
 
 #[track_caller]
