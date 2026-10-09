@@ -90,6 +90,20 @@ impl std::fmt::Debug for Digest {
     }
 }
 
+impl serde::Serialize for Digest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let _ = serializer;
+        todo!()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Digest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Digest, D::Error> {
+        let _ = deserializer;
+        todo!()
+    }
+}
+
 impl std::fmt::Display for DigestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

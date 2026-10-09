@@ -6,6 +6,7 @@ pub mod backend;
 pub mod composite;
 pub mod digest;
 pub mod fake;
+pub mod paging;
 pub mod recipe;
 pub mod universe;
 
@@ -16,6 +17,7 @@ pub use backend::{
 pub use composite::{CompositeBackend, Leaf};
 pub use digest::{Digest, DigestError};
 pub use fake::FakeBackend;
+pub use paging::{ObservationPage, PageAssembler, PageCursor};
 pub use recipe::{
     BrokerLaunch, FileAccess, MAX_SESSION_FILE_BYTES, MountRecipe, ProxyRecipe, ProxyTransport,
     RecipeError, SessionFileRecipe, UdsRecipe,
