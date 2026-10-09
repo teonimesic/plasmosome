@@ -139,6 +139,21 @@ fn a_second_writer_in_another_process_is_refused() {
 }
 
 #[test]
+fn a_killed_child_does_not_read_as_alive_before_anyone_reaps_it() {
+    let child = PausedChild::fork();
+    assert!(child.is_alive(), "a paused child reads as alive");
+    unsafe { libc::kill(child.0, libc::SIGKILL) };
+    let deadline = Instant::now() + PATIENCE;
+    while child.is_alive() {
+        assert!(
+            Instant::now() < deadline,
+            "a killed child still read as alive after {PATIENCE:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn a_forked_child_does_not_keep_a_dropped_log_locked() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(LOG);
