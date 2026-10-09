@@ -16,7 +16,7 @@ struct Holder(Child);
 impl Drop for Holder {
     fn drop(&mut self) {
         let _ = self.0.kill();
-        let _ = self.0.try_wait();
+        let _ = self.0.wait();
     }
 }
 

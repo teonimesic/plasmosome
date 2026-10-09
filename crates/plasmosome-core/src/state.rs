@@ -227,6 +227,16 @@ mod tests {
     }
 
     #[test]
+    fn a_cell_id_is_used_exactly_as_given() {
+        for name in [" Cell-1 ", "CELL-1", "cell 1"] {
+            assert_eq!(
+                cell_ledger_path(Path::new("/inst"), &CellId::from(name)),
+                Ok(PathBuf::from(format!("/inst/cells/{name}/ledger.ndjson")))
+            );
+        }
+    }
+
+    #[test]
     fn the_supervisor_socket_sits_beside_the_journal() {
         let root = Path::new("/inst");
         assert_eq!(

@@ -686,6 +686,15 @@ mod tests {
 
     use super::*;
 
+    macro_rules! expect_match {
+        ($value:expr, $pattern:pat => $then:expr) => {
+            match $value {
+                $pattern => $then,
+                other => panic!("expected {}, got {other:?}", stringify!($pattern)),
+            }
+        };
+    }
+
     const DEADLINE: Duration = Duration::from_secs(5);
 
     fn temp_root() -> (TempDir, PathBuf) {
@@ -744,6 +753,19 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("the mode is set");
     }
 
+    struct RestoreMode(PathBuf);
+
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    fn restrict(path: &Path, mode: u32) -> RestoreMode {
+        set_mode(path, mode);
+        RestoreMode(path.to_path_buf())
+    }
+
     fn assert_not_root() {
         assert_ne!(
             unsafe { libc::geteuid() },
@@ -786,25 +808,22 @@ mod tests {
 
     #[test]
     fn a_relative_root_is_refused() {
-        match InstanceRoot::open(Path::new("relative/root")) {
+        expect_match!(
+            InstanceRoot::open(Path::new("relative/root")),
             Err(InstanceRootError::NotAbsolute { path }) => {
                 assert_eq!(path, PathBuf::from("relative/root"))
             }
-            other => panic!("expected NotAbsolute, got {other:?}"),
-        }
+        );
     }
 
     #[test]
     fn a_missing_root_is_an_open_error_naming_it() {
         let (_dir, root) = temp_root();
         let missing = root.join("missing");
-        match InstanceRoot::open(&missing) {
-            Err(InstanceRootError::Open { path, source }) => {
-                assert_eq!(path, missing);
-                assert_eq!(source.kind(), io::ErrorKind::NotFound);
-            }
-            other => panic!("expected Open, got {other:?}"),
-        }
+        expect_match!(InstanceRoot::open(&missing), Err(InstanceRootError::Open { path, source }) => {
+            assert_eq!(path, missing);
+            assert_eq!(source.kind(), io::ErrorKind::NotFound);
+        });
     }
 
     #[test]
@@ -847,10 +866,7 @@ mod tests {
         let (_dir, root) = temp_root();
         let _held = open_root(&root).lock().expect("the first lock is taken");
         let second = open_root(&root);
-        match within("a contended lock", move || second.lock()) {
-            Err(LockError::Busy { path }) => assert_eq!(path, root.join("controller.lock")),
-            other => panic!("expected Busy, got {other:?}"),
-        }
+        expect_match!(within("a contended lock", move || second.lock()), Err(LockError::Busy { path }) => assert_eq!(path, root.join("controller.lock")));
     }
 
     #[test]
@@ -887,10 +903,7 @@ mod tests {
             .and_then(|file| file.set_modified(old))
             .expect("the target's mtime is set");
         symlink(&target, root.join("controller.lock")).expect("the link is made");
-        match open_root(&root).lock() {
-            Err(LockError::Symlink { path }) => assert_eq!(path, root.join("controller.lock")),
-            other => panic!("expected Symlink, got {other:?}"),
-        }
+        expect_match!(open_root(&root).lock(), Err(LockError::Symlink { path }) => assert_eq!(path, root.join("controller.lock")));
         assert_eq!(fs::read(&target).expect("the target reads"), b"keep");
         assert_eq!(
             fs::metadata(&target)
@@ -909,10 +922,7 @@ mod tests {
         let (_dir, root) = temp_root();
         let target = root.join("never-created");
         symlink(&target, root.join("controller.lock")).expect("the link is made");
-        match open_root(&root).lock() {
-            Err(LockError::Symlink { path }) => assert_eq!(path, root.join("controller.lock")),
-            other => panic!("expected Symlink, got {other:?}"),
-        }
+        expect_match!(open_root(&root).lock(), Err(LockError::Symlink { path }) => assert_eq!(path, root.join("controller.lock")));
         assert!(
             fs::symlink_metadata(&target).is_err(),
             "the link target was created"
@@ -923,10 +933,7 @@ mod tests {
     fn a_directory_at_the_lock_path_is_refused() {
         let (_dir, root) = temp_root();
         fs::create_dir(root.join("controller.lock")).expect("the directory is made");
-        match open_root(&root).lock() {
-            Err(LockError::NotRegular { path }) => assert_eq!(path, root.join("controller.lock")),
-            other => panic!("expected NotRegular, got {other:?}"),
-        }
+        expect_match!(open_root(&root).lock(), Err(LockError::NotRegular { path }) => assert_eq!(path, root.join("controller.lock")));
     }
 
     #[test]
@@ -934,36 +941,27 @@ mod tests {
         let (_dir, root) = temp_root();
         make_fifo(&root.join("controller.lock"));
         let instance = open_root(&root);
-        match within("locking a FIFO", move || instance.lock()) {
-            Err(LockError::NotRegular { path }) => assert_eq!(path, root.join("controller.lock")),
-            other => panic!("expected NotRegular, got {other:?}"),
-        }
+        expect_match!(within("locking a FIFO", move || instance.lock()), Err(LockError::NotRegular { path }) => assert_eq!(path, root.join("controller.lock")));
     }
 
     #[test]
     fn a_socket_at_the_lock_path_is_refused_as_not_regular() {
         let (_dir, root) = temp_root();
         let _socket = UnixListener::bind(root.join("controller.lock")).expect("the socket binds");
-        match open_root(&root).lock() {
-            Err(LockError::NotRegular { path }) => assert_eq!(path, root.join("controller.lock")),
-            other => panic!("expected NotRegular, got {other:?}"),
-        }
+        expect_match!(open_root(&root).lock(), Err(LockError::NotRegular { path }) => assert_eq!(path, root.join("controller.lock")));
     }
 
     #[test]
     fn a_lock_file_that_cannot_be_created_is_an_io_error() {
         assert_not_root();
         let (_dir, root) = temp_root();
-        set_mode(&root, 0o500);
+        let restore = restrict(&root, 0o500);
         let result = open_root(&root).lock();
-        set_mode(&root, 0o700);
-        match result {
-            Err(LockError::Io { path, source }) => {
-                assert_eq!(path, root.join("controller.lock"));
-                assert_eq!(source.raw_os_error(), Some(libc::EACCES));
-            }
-            other => panic!("expected Io, got {other:?}"),
-        }
+        drop(restore);
+        expect_match!(result, Err(LockError::Io { path, source }) => {
+            assert_eq!(path, root.join("controller.lock"));
+            assert_eq!(source.raw_os_error(), Some(libc::EACCES));
+        });
     }
 
     #[test]
@@ -988,22 +986,16 @@ mod tests {
         let (_dir, root) = temp_root();
         make_cell(&root.join("elsewhere"), "cell-1", Some(b"{}\n"));
         symlink(root.join("elsewhere/cells"), root.join("cells")).expect("the link is made");
-        match open_root(&root).discover() {
-            Err(DiscoveryError::CellsSymlink { path }) => assert_eq!(path, root.join("cells")),
-            other => panic!("expected CellsSymlink, got {other:?}"),
-        }
+        expect_match!(open_root(&root).discover(), Err(DiscoveryError::CellsSymlink { path }) => assert_eq!(path, root.join("cells")));
     }
 
     #[test]
     fn a_regular_file_at_cells_aborts_discovery() {
         let (_dir, root) = temp_root();
         fs::write(root.join("cells"), b"").expect("the file is made");
-        match open_root(&root).discover() {
-            Err(DiscoveryError::CellsNotADirectory { path }) => {
-                assert_eq!(path, root.join("cells"))
-            }
-            other => panic!("expected CellsNotADirectory, got {other:?}"),
-        }
+        expect_match!(open_root(&root).discover(), Err(DiscoveryError::CellsNotADirectory { path }) => {
+            assert_eq!(path, root.join("cells"))
+        });
     }
 
     #[test]
@@ -1011,16 +1003,13 @@ mod tests {
         assert_not_root();
         let (_dir, root) = temp_root();
         make_cell(&root, "cell-1", None);
-        set_mode(&root.join("cells"), 0o000);
+        let restore = restrict(&root.join("cells"), 0o000);
         let result = open_root(&root).discover();
-        set_mode(&root.join("cells"), 0o700);
-        match result {
-            Err(DiscoveryError::Open { path, source }) => {
-                assert_eq!(path, root.join("cells"));
-                assert_eq!(source.raw_os_error(), Some(libc::EACCES));
-            }
-            other => panic!("expected Open, got {other:?}"),
-        }
+        drop(restore);
+        expect_match!(result, Err(DiscoveryError::Open { path, source }) => {
+            assert_eq!(path, root.join("cells"));
+            assert_eq!(source.raw_os_error(), Some(libc::EACCES));
+        });
     }
 
     #[test]
@@ -1047,13 +1036,12 @@ mod tests {
         make_cell(&root, "b-empty", None);
         let locked = root.join("locked");
         fs::create_dir(&locked).expect("the link target is made");
-        set_mode(&locked, 0o000);
+        let _restore = restrict(&locked, 0o000);
         symlink(&locked, root.join("cells/c-link")).expect("the link is made");
         fs::write(root.join("cells/d-file"), b"not a cell").expect("the file is made");
         fs::create_dir(root.join("cells/e\\bad")).expect("the bad name is made");
 
         let mut discovery = discover(&root);
-        set_mode(&locked, 0o700);
 
         assert!(discovery.cells_dir_present);
         assert_eq!(
@@ -1183,9 +1171,9 @@ mod tests {
         let (_dir, root) = temp_root();
         make_cell(&root, "cell-a", Some(b"{}\n"));
         let locked = make_cell(&root, "cell-b", None);
-        set_mode(&locked, 0o000);
+        let restore = restrict(&locked, 0o000);
         let discovery = discover(&root);
-        set_mode(&locked, 0o700);
+        drop(restore);
         assert_eq!(
             described(&discovery),
             [
@@ -1256,10 +1244,7 @@ mod tests {
         let (_dir, root) = temp_root();
         let existing = make_cell(&root, "cell-1", None);
         set_mode(&existing, 0o755);
-        match open_root(&root).create_cell_dir(&cell("cell-1")) {
-            Err(CellDirError::AlreadyExists { path }) => assert_eq!(path, existing),
-            other => panic!("expected AlreadyExists, got {other:?}"),
-        }
+        expect_match!(open_root(&root).create_cell_dir(&cell("cell-1")), Err(CellDirError::AlreadyExists { path }) => assert_eq!(path, existing));
         assert_eq!(mode_of(&existing), 0o755, "an existing cell is not adopted");
     }
 
@@ -1269,10 +1254,7 @@ mod tests {
         let elsewhere = root.join("elsewhere");
         fs::create_dir(&elsewhere).expect("the link target is made");
         symlink(&elsewhere, root.join("cells")).expect("the link is made");
-        match open_root(&root).create_cell_dir(&cell("cell-1")) {
-            Err(CellDirError::Symlink { path }) => assert_eq!(path, root.join("cells")),
-            other => panic!("expected Symlink, got {other:?}"),
-        }
+        expect_match!(open_root(&root).create_cell_dir(&cell("cell-1")), Err(CellDirError::Symlink { path }) => assert_eq!(path, root.join("cells")));
         assert_eq!(
             fs::read_dir(&elsewhere).expect("the target lists").count(),
             0,
@@ -1284,49 +1266,37 @@ mod tests {
     fn create_cell_dir_refuses_a_regular_file_at_cells() {
         let (_dir, root) = temp_root();
         fs::write(root.join("cells"), b"").expect("the file is made");
-        match open_root(&root).create_cell_dir(&cell("cell-1")) {
-            Err(CellDirError::NotADirectory { path }) => assert_eq!(path, root.join("cells")),
-            other => panic!("expected NotADirectory, got {other:?}"),
-        }
+        expect_match!(open_root(&root).create_cell_dir(&cell("cell-1")), Err(CellDirError::NotADirectory { path }) => assert_eq!(path, root.join("cells")));
     }
 
     #[test]
     fn create_cell_dir_reports_a_parent_it_cannot_write() {
         assert_not_root();
         let (_dir, root) = temp_root();
-        set_mode(&root, 0o500);
+        let restore = restrict(&root, 0o500);
         let without_cells = open_root(&root).create_cell_dir(&cell("cell-1"));
-        set_mode(&root, 0o700);
-        match without_cells {
-            Err(CellDirError::Io { path, source }) => {
-                assert_eq!(path, root.join("cells"));
-                assert_eq!(source.raw_os_error(), Some(libc::EACCES));
-            }
-            other => panic!("expected Io for cells, got {other:?}"),
-        }
+        drop(restore);
+        expect_match!(without_cells, Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, root.join("cells"));
+            assert_eq!(source.raw_os_error(), Some(libc::EACCES));
+        });
 
         fs::create_dir(root.join("cells")).expect("cells is made");
-        set_mode(&root.join("cells"), 0o500);
+        let restore = restrict(&root.join("cells"), 0o500);
         let without_cell = open_root(&root).create_cell_dir(&cell("cell-1"));
-        set_mode(&root.join("cells"), 0o700);
-        match without_cell {
-            Err(CellDirError::Io { path, source }) => {
-                assert_eq!(path, root.join("cells/cell-1"));
-                assert_eq!(source.raw_os_error(), Some(libc::EACCES));
-            }
-            other => panic!("expected Io for the cell, got {other:?}"),
-        }
+        drop(restore);
+        expect_match!(without_cell, Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, root.join("cells/cell-1"));
+            assert_eq!(source.raw_os_error(), Some(libc::EACCES));
+        });
     }
 
     #[test]
     fn create_cell_dir_refuses_invalid_ids_before_creating_anything() {
         let (_dir, root) = temp_root();
-        match open_root(&root).create_cell_dir(&cell("..")) {
-            Err(CellDirError::InvalidCell(CellPathError::NotACellName(text))) => {
-                assert_eq!(text, "..")
-            }
-            other => panic!("expected InvalidCell, got {other:?}"),
-        }
+        expect_match!(open_root(&root).create_cell_dir(&cell("..")), Err(CellDirError::InvalidCell(CellPathError::NotACellName(text))) => {
+            assert_eq!(text, "..")
+        });
         assert!(
             fs::symlink_metadata(root.join("cells")).is_err(),
             "cells was created for an invalid ID"
@@ -1352,12 +1322,9 @@ mod tests {
     fn cell_dir_refuses_invalid_ids_before_any_open() {
         let (_dir, root) = temp_root();
         fs::create_dir(root.join("cells")).expect("cells is made");
-        match open_root(&root).cell_dir(&cell("..")) {
-            Err(CellDirError::InvalidCell(CellPathError::NotACellName(text))) => {
-                assert_eq!(text, "..")
-            }
-            other => panic!("expected InvalidCell, got {other:?}"),
-        }
+        expect_match!(open_root(&root).cell_dir(&cell("..")), Err(CellDirError::InvalidCell(CellPathError::NotACellName(text))) => {
+            assert_eq!(text, "..")
+        });
     }
 
     #[test]
@@ -1367,23 +1334,14 @@ mod tests {
         symlink(root.join("cells/real"), root.join("cells/linked")).expect("the link is made");
         fs::write(root.join("cells/file"), b"").expect("the file is made");
         let instance = open_root(&root);
-        match instance.cell_dir(&cell("linked")) {
-            Err(CellDirError::Symlink { path }) => assert_eq!(path, root.join("cells/linked")),
-            other => panic!("expected Symlink, got {other:?}"),
-        }
-        match instance.cell_dir(&cell("file")) {
-            Err(CellDirError::NotADirectory { path }) => {
-                assert_eq!(path, root.join("cells/file"))
-            }
-            other => panic!("expected NotADirectory, got {other:?}"),
-        }
-        match instance.cell_dir(&cell("missing")) {
-            Err(CellDirError::Io { path, source }) => {
-                assert_eq!(path, root.join("cells/missing"));
-                assert_eq!(source.kind(), io::ErrorKind::NotFound);
-            }
-            other => panic!("expected Io, got {other:?}"),
-        }
+        expect_match!(instance.cell_dir(&cell("linked")), Err(CellDirError::Symlink { path }) => assert_eq!(path, root.join("cells/linked")));
+        expect_match!(instance.cell_dir(&cell("file")), Err(CellDirError::NotADirectory { path }) => {
+            assert_eq!(path, root.join("cells/file"))
+        });
+        expect_match!(instance.cell_dir(&cell("missing")), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, root.join("cells/missing"));
+            assert_eq!(source.kind(), io::ErrorKind::NotFound);
+        });
     }
 
     #[test]
@@ -1391,10 +1349,7 @@ mod tests {
         let (_dir, root) = temp_root();
         make_cell(&root.join("elsewhere"), "cell-1", None);
         symlink(root.join("elsewhere/cells"), root.join("cells")).expect("the link is made");
-        match open_root(&root).cell_dir(&cell("cell-1")) {
-            Err(CellDirError::Symlink { path }) => assert_eq!(path, root.join("cells")),
-            other => panic!("expected Symlink, got {other:?}"),
-        }
+        expect_match!(open_root(&root).cell_dir(&cell("cell-1")), Err(CellDirError::Symlink { path }) => assert_eq!(path, root.join("cells")));
     }
 
     #[test]
@@ -1446,6 +1401,27 @@ mod tests {
             fs::read(root.join("cells/cell-1/ledger.ndjson")).expect("the journal"),
             b"one\ntwo\n"
         );
+    }
+
+    #[test]
+    fn a_created_journal_handle_appends_after_other_writers() {
+        let (_dir, root) = temp_root();
+        let created = open_root(&root)
+            .create_cell_dir(&cell("cell-1"))
+            .expect("the cell directory is created");
+        let mut handle = appended(&created);
+        assert!(handle.created);
+        let journal = root.join("cells/cell-1/ledger.ndjson");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&journal)
+            .and_then(|mut other| other.write_all(b"one\n"))
+            .expect("another writer extends the journal");
+        handle
+            .file
+            .write_all(b"two\n")
+            .expect("the record is written");
+        assert_eq!(fs::read(&journal).expect("the journal"), b"one\ntwo\n");
     }
 
     #[test]
