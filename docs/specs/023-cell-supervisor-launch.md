@@ -355,13 +355,14 @@ writable directory for the qualified bundle to run at all.
 These are proposed text, not edits made in this PR. `docs/specs/README.md` does not say that the
 accepting PR applies them, and spec 001 says its text changes in a pull request with the
 reasoning written down. So the PR that accepts this spec must carry these edits, or this spec
-stays draft. Spec 024 proposes a change to the same 105 row of spec 001 §1; the accepting PRs
-merge the two.
+stays draft. Spec 024 changes the same 105 row of spec 001 §1, so the row below is the merged
+text both specs propose.
 
 **Spec 001 §1, the 105 row.** Replace the structured fields with:
 
-> `from`, `to`; `cell` when a `cell.new` or `cell.kill` refusal leaves a cell in place (spec 023);
-> private recovery methods additionally carry the typed `recovery` refusal in §4.1
+> `from`, `to`; `detail` on a guest refusal, exactly one of spec 024's detail records; `cell`
+> when a `cell.new` or `cell.kill` refusal leaves a cell in place (spec 023); private recovery
+> methods additionally carry the typed `recovery` refusal in §4.1
 
 **Spec 001 §3.3 (`001:243-247`).** After "Quarantine alone can coexist with a serving controller
 when all live observations are complete; readiness remains false.", add:
@@ -541,8 +542,10 @@ artifact, never a production fake.
    second line. Each `membraned` exits without binding a socket or creating `launched`, and the
    controller then retires the directory. Catches: acting on a partial record.
 8. Two `cell.new` requests at once get two distinct IDs and two directories. While one waits on a
-   held hello, `cell.status` of another cell answers at once. Catches: unserialized allocation, and
-   a controller blocked by one boot.
+   held hello, `cell.status` of another cell answers at once. A `cell.kill` and a serving-time
+   check of one cell, started together, run one after the other: the kill replies with its own
+   result and the directory is retired once. Catches: unserialized allocation, a controller
+   blocked by one boot, and two threads that both believe they hold one cell's lock.
 9. Startup over these validated cells, each built by hand:
    - A: lock free, `launched` from this boot, empty journal, no `membrane.uds`;
    - B: lock free, no `launched`, a stale `membrane.uds` file, empty journal;
