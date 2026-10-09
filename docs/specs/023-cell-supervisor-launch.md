@@ -219,8 +219,9 @@ is owner decision O-10. This spec makes such a cell visible and does not clean i
 **From the controller.** A cell whose `cell.new` has not replied is `germinating`, whatever its
 supervisor says. `cell.list` and `cell.status` show it with that state. `cell.exec` and every
 plasmid verb on it refuse with 105 `{from: "germinating", to: "ready"}`. Requests for other cells
-are not blocked by a `cell.new` in progress. Operations on one cell run one at a time, in arrival
-order.
+are not blocked by a `cell.new` in progress. Mutations of one cell (`cell.new`, plasmid verbs,
+`cell.kill` and the check of section 8) run one at a time, in arrival order. Reads never wait for
+them; `cell.exec` waits for them only as spec 024 says.
 
 **From the supervisor.** `membrane.status` covers the cell. A cell-configured membrane answers
 `{ready: true, state: "serving"}` exactly when its cell is `ready` and every broker it supervises
