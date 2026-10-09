@@ -122,6 +122,9 @@ fn addressable(socket: &Path) -> BufReader<UnixStream> {
             stream
                 .set_read_timeout(Some(PATIENCE))
                 .expect("the test client bounds its own reads");
+            stream
+                .set_write_timeout(Some(PATIENCE))
+                .expect("the test client bounds its own writes");
             return BufReader::new(stream);
         }
         assert!(
@@ -133,6 +136,7 @@ fn addressable(socket: &Path) -> BufReader<UnixStream> {
     }
 }
 
+#[track_caller]
 fn send(client: &BufReader<UnixStream>, bytes: &[u8]) {
     let mut stream = client.get_ref().try_clone().expect("clone for writing");
     stream
@@ -142,6 +146,16 @@ fn send(client: &BufReader<UnixStream>, bytes: &[u8]) {
     stream.flush().expect("the request is flushed");
 }
 
+#[track_caller]
+fn send_unterminated(client: &BufReader<UnixStream>, bytes: &[u8]) {
+    let mut stream = client.get_ref().try_clone().expect("clone for writing");
+    stream
+        .write_all(bytes)
+        .expect("the request reaches plasmosomed");
+    stream.flush().expect("the request is flushed");
+}
+
+#[track_caller]
 fn read_reply(client: &mut BufReader<UnixStream>) -> Value {
     let mut reply = String::new();
     let read = client.read_line(&mut reply).expect("plasmosomed answers");
@@ -149,10 +163,13 @@ fn read_reply(client: &mut BufReader<UnixStream>) -> Value {
         read, 0,
         "plasmosomed answered rather than closing the socket"
     );
-    serde_json::from_str(&reply)
-        .unwrap_or_else(|error| panic!("plasmosomed answers JSON, got {reply:?}: {error}"))
+    match serde_json::from_str(&reply) {
+        Ok(value) => value,
+        Err(error) => panic!("plasmosomed answers JSON, got {reply:?}: {error}"),
+    }
 }
 
+#[track_caller]
 fn ask(client: &mut BufReader<UnixStream>, line: &str) -> Value {
     send(client, line.as_bytes());
     read_reply(client)
@@ -245,7 +262,7 @@ fn the_envelope_edges_hold_on_the_wire() {
 
     let mut over_cap = addressable(&control);
     let (too_long, _) = padded_status(MAX_LINE_BYTES + 1);
-    send(&over_cap, too_long.as_bytes());
+    send_unterminated(&over_cap, too_long.as_bytes());
     let refusal = read_reply(&mut over_cap);
     assert_eq!(
         refusal.pointer("/error/code").and_then(Value::as_i64),
@@ -255,8 +272,8 @@ fn the_envelope_edges_hold_on_the_wire() {
     assert_eq!(refusal.get("id"), Some(&Value::Null), "{refusal}");
     let mut after = String::new();
     assert_eq!(
-        over_cap.read_line(&mut after).ok(),
-        Some(0),
+        over_cap.read_line(&mut after).map_err(|error| error.kind()),
+        Ok(0),
         "the connection closes after an over-long line, got {after:?}"
     );
 }
