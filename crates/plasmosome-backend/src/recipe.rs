@@ -1,10 +1,10 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use serde::de::Error as _;
 use serde::de::value::StringDeserializer;
-use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::wire::validated_object_serde;
 
 /// The most bytes `SessionFileRecipe::contents` may hold.
 pub const MAX_SESSION_FILE_BYTES: usize = 65_536;
@@ -266,26 +266,7 @@ struct BrokerLaunchShape {
     data_socket: String,
 }
 
-macro_rules! validated_serde {
-    ($($recipe:ident through $shape:ident),*) => {$(
-        impl Serialize for $recipe {
-            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                self.validate().map_err(S::Error::custom)?;
-                $shape::serialize(self, serializer)
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $recipe {
-            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let recipe = $shape::deserialize(deserializer)?;
-                recipe.validate().map_err(D::Error::custom)?;
-                Ok(recipe)
-            }
-        }
-    )*};
-}
-
-validated_serde!(
+validated_object_serde!(
     SessionFileRecipe through SessionFileShape,
     UdsRecipe through UdsShape,
     ProxyRecipe through ProxyShape,
@@ -293,12 +274,13 @@ validated_serde!(
     BrokerLaunch through BrokerLaunchShape
 );
 
-/// The first structural rule a recipe breaks. `field` is the serde field name; every word of
-/// `command` reports as `"command"`.
+/// The first structural rule a recipe or a capability breaks. `field` is the serde field name;
+/// every word of `command` reports as `"command"`.
 ///
 /// A path field must be a canonical absolute path: NUL-free, starting with `/`, with no empty,
-/// `.` or `..` component and no trailing `/`. `/` alone is refused, because every path field
-/// names a file, a socket or a program. A path that breaks this is refused, never rewritten, so
+/// `.` or `..` component and no trailing `/`. `/` alone is refused: a path field names a file, a
+/// socket, a program or a mount's directory, never the root, so a mount can neither expose the
+/// whole host nor cover the guest's root. A path that breaks this is refused, never rewritten, so
 /// an accepted path has one textual spelling and round-trips unchanged. One textual spelling is
 /// not one file: see `BrokerLaunch::validate`. Later `command` words are arguments, not paths,
 /// and only need to be NUL-free.
@@ -355,14 +337,14 @@ impl fmt::Display for RecipeError {
 
 impl std::error::Error for RecipeError {}
 
-fn nul_free(field: &'static str, value: &str) -> Result<(), RecipeError> {
+pub(crate) fn nul_free(field: &'static str, value: &str) -> Result<(), RecipeError> {
     if value.contains('\0') {
         return Err(RecipeError::ContainsNul { field });
     }
     Ok(())
 }
 
-fn canonical_path(field: &'static str, value: &str) -> Result<(), RecipeError> {
+pub(crate) fn canonical_path(field: &'static str, value: &str) -> Result<(), RecipeError> {
     nul_free(field, value)?;
     let Some(rest) = value.strip_prefix('/') else {
         return Err(RecipeError::NotAbsolute {

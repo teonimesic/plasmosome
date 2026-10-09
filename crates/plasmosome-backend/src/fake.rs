@@ -109,6 +109,7 @@ impl EnforcementBackend for FakeBackend {
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
         let object = op.object();
+        checked(&object)?;
         if let Some((owner, cause)) = &self.apply_fault
             && object.owner == *owner
         {
@@ -149,14 +150,27 @@ impl EnforcementBackend for FakeBackend {
     }
 
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError> {
+        checked(&object)?;
         self.state.insert(object).map(|_| ())
     }
+}
+
+fn checked(object: &OsObject) -> Result<(), BackendError> {
+    object
+        .capability
+        .validate()
+        .map_err(|error| BackendError::InvalidOperation {
+            class: object.class().as_str(),
+            id: object.id,
+            error,
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::{Capability, GrantKind};
+    use crate::recipe::RecipeError;
     use crate::universe::{CellId, CellOwner, PluginId, UniverseClass};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::time::Duration;
@@ -172,7 +186,7 @@ mod tests {
     fn capabilities() -> Vec<Capability> {
         vec![
             Capability::SessionFile {
-                path: "skills/pr.md".to_string(),
+                path: "/skills/pr.md".to_string(),
             },
             Capability::UdsSocket {
                 path: "/run/ak/egressd.uds".to_string(),
@@ -371,7 +385,7 @@ mod tests {
         let id = GrantId::new();
         let op = UniverseOp::WriteSessionFile {
             id,
-            path: "skills/pr.md".to_string(),
+            path: "/skills/pr.md".to_string(),
             owner: cell_owner("cell-1", "github-pr"),
         };
         let mut backend = FakeBackend::new();
@@ -380,14 +394,14 @@ mod tests {
         assert_eq!(backend.snapshot_os_state().len(), 1);
         let peer = UniverseOp::WriteSessionFile {
             id: GrantId::new(),
-            path: "skills/pr.md".to_string(),
+            path: "/skills/pr.md".to_string(),
             owner: cell_owner("cell-1", "github-pr"),
         };
         backend.apply(peer).unwrap();
         assert_eq!(backend.snapshot_os_state().len(), 2);
         let conflict = UniverseOp::WriteSessionFile {
             id,
-            path: "skills/pr.md".to_string(),
+            path: "/skills/pr.md".to_string(),
             owner: cell_owner("cell-1", "audit"),
         };
         let before = backend.snapshot_os_state();
@@ -404,7 +418,7 @@ mod tests {
         let entry = backend.grant(grant(
             "github-pr",
             Capability::SessionFile {
-                path: "skills/pr.md".to_string(),
+                path: "/skills/pr.md".to_string(),
             },
         ));
         backend
@@ -413,7 +427,7 @@ mod tests {
         backend
             .apply(UniverseOp::WriteSessionFile {
                 id: entry.handle.id,
-                path: "skills/pr.md".to_string(),
+                path: "/skills/pr.md".to_string(),
                 owner: entry.owner.clone(),
             })
             .unwrap();
@@ -650,7 +664,7 @@ mod tests {
         let stuck = backend.grant(grant_to(
             &workspace,
             Capability::SessionFile {
-                path: "skills/pr.md".to_string(),
+                path: "/skills/pr.md".to_string(),
             },
         ));
         backend.apply(op.clone()).unwrap();
@@ -679,7 +693,7 @@ mod tests {
         let drained = backend.grant(grant_to(
             &workspace,
             Capability::SessionFile {
-                path: "skills/drained.md".to_string(),
+                path: "/skills/drained.md".to_string(),
             },
         ));
         assert_eq!(backend.revoke(drained.handle, zero).unwrap(), drained);
@@ -762,7 +776,7 @@ mod tests {
         backend.fail_apply_for_owner(doomed.clone(), "injected refusal");
         let elsewhere = UniverseOp::WriteSessionFile {
             id: GrantId::new(),
-            path: "skills/pr.md".to_string(),
+            path: "/skills/pr.md".to_string(),
             owner: cell_owner("cell-2", "doomed"),
         };
         backend.apply(elsewhere.clone()).unwrap();
@@ -771,7 +785,7 @@ mod tests {
             backend
                 .apply(UniverseOp::WriteSessionFile {
                     id: GrantId::new(),
-                    path: "skills/pr.md".to_string(),
+                    path: "/skills/pr.md".to_string(),
                     owner: doomed,
                 })
                 .unwrap_err(),
@@ -797,5 +811,72 @@ mod tests {
                 .unwrap_err(),
             BackendError::UnknownHandle { handle }
         );
+    }
+
+    #[test]
+    fn apply_and_plant_refuse_an_invalid_value_before_any_fault_or_change() {
+        let owner = cell_owner("cell-1", "github-pr");
+        let mut backend = FakeBackend::new();
+        backend.apply(mount_by(&owner)).unwrap();
+        backend.fail_apply_for_owner(owner.clone(), "injected refusal");
+        let before = backend.snapshot_os_state();
+        for (op, error) in [
+            (
+                UniverseOp::WriteSessionFile {
+                    id: GrantId::new(),
+                    path: "skills/pr.md".to_string(),
+                    owner: owner.clone(),
+                },
+                RecipeError::NotAbsolute {
+                    field: "path",
+                    value: "skills/pr.md".to_string(),
+                },
+            ),
+            (
+                UniverseOp::AddMount {
+                    id: GrantId::new(),
+                    source: "/code".to_string(),
+                    target: "/workspace/".to_string(),
+                    owner: owner.clone(),
+                },
+                RecipeError::NotCanonical {
+                    field: "target",
+                    value: "/workspace/".to_string(),
+                },
+            ),
+            (
+                UniverseOp::SpawnBroker {
+                    id: GrantId::new(),
+                    pid: 4242,
+                    name: "egress\0d".to_string(),
+                    owner: owner.clone(),
+                },
+                RecipeError::ContainsNul { field: "name" },
+            ),
+        ] {
+            let rule = error.to_string();
+            let expected = BackendError::InvalidOperation {
+                class: op.class().as_str(),
+                id: op.id(),
+                error,
+            };
+            assert_eq!(
+                expected.to_string(),
+                format!(
+                    "invalid {} operation {}: {rule}",
+                    op.class().as_str(),
+                    op.id()
+                )
+            );
+            assert_eq!(backend.apply(op.clone()).unwrap_err(), expected);
+            assert_eq!(backend.snapshot_os_state(), before);
+            assert_eq!(backend.plant(op.object()).unwrap_err(), expected);
+            assert_eq!(backend.snapshot_os_state(), before);
+        }
+        assert_eq!(
+            backend.apply(mount_by(&owner)).unwrap_err(),
+            BackendError::Fault("injected refusal".to_string())
+        );
+        assert_eq!(backend.snapshot_os_state(), before);
     }
 }

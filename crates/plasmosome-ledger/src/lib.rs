@@ -1,14 +1,9 @@
 //! Typed reversibility: a plugin's effects, their inverses, and the two-phase
 //! closure that decides whether detach is safe or needs an operator `Force`.
-//!
-//! A ledger's contents are serde data framed one `LogRecord` per ndjson line,
-//! so the ledger is recoverable by replaying its log alone — `Ledger::open_file`
-//! rebuilds it from disk and replay proceeds unchanged, so durable state never
-//! lives only in the crashiest process. `append_to_file` appends
-//! the whole current ledger; rebuild-then-extend is `open_file` → `push` →
-//! `append_to_file` on the reopened ledger.
+//! A caller pushes effects onto a `Ledger`, closes it, and detaches the result.
 
 use std::fmt;
+use std::io::Write;
 use std::path::Path;
 
 use serde::de::Error as _;
@@ -16,44 +11,74 @@ use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use plasmosome_backend::{
-    BackendError, CellId, CellOwner, DrainSpec, EnforcementBackend, Handle, PluginId,
+    BackendError, CellId, CellOwner, DrainSpec, EnforcementBackend, Handle, ObjectOnly, PluginId,
     UniverseRemoval,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Inverse {
     pub description: String,
     pub via: InverseVia,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Inverse", deny_unknown_fields)]
+struct InverseShape {
+    description: String,
+    via: InverseVia,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InverseVia {
     Backend(Handle),
     Universe(UniverseRemoval),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "InverseVia", deny_unknown_fields)]
+enum InverseViaShape {
+    Backend(Handle),
+    Universe(UniverseRemoval),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Compensation {
     pub witness: UniverseRemoval,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Compensation", deny_unknown_fields)]
+struct CompensationShape {
+    witness: UniverseRemoval,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outbox {
     pub channel: String,
     pub payload: String,
     pub published: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Outbox")]
+struct OutboxShape {
+    channel: String,
+    payload: String,
+    published: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
     pub assertion: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Policy")]
+struct PolicyShape {
+    assertion: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reversibility {
     Exact(Inverse),
     Compensating(Compensation),
@@ -61,11 +86,26 @@ pub enum Reversibility {
     External(Policy),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Reversibility", deny_unknown_fields)]
+enum ReversibilityShape {
+    Exact(Inverse),
+    Compensating(Compensation),
+    Delayed(Outbox),
+    External(Policy),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effect {
     pub description: String,
     pub reversibility: Reversibility,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Effect", deny_unknown_fields)]
+struct EffectShape {
+    description: String,
+    reversibility: Reversibility,
 }
 
 impl Effect {
@@ -237,7 +277,7 @@ impl fmt::Debug for Force {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetachReport {
     pub plugin: PluginId,
     pub replayed: Vec<String>,
@@ -245,6 +285,43 @@ pub struct DetachReport {
     pub asserted: Vec<String>,
     pub forced: Option<String>,
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "DetachReport")]
+struct DetachReportShape {
+    plugin: PluginId,
+    replayed: Vec<String>,
+    delayed_discarded: usize,
+    asserted: Vec<String>,
+    forced: Option<String>,
+}
+
+macro_rules! object_serde {
+    ($($record:ident through $shape:ident),* $(,)?) => {$(
+        impl Serialize for $record {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                $shape::serialize(self, serializer)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $record {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                $shape::deserialize(ObjectOnly::new(deserializer))
+            }
+        }
+    )*};
+}
+
+object_serde!(
+    Inverse through InverseShape,
+    InverseVia through InverseViaShape,
+    Compensation through CompensationShape,
+    Outbox through OutboxShape,
+    Policy through PolicyShape,
+    Reversibility through ReversibilityShape,
+    Effect through EffectShape,
+    DetachReport through DetachReportShape,
+);
 
 impl DetachReport {
     pub fn new(plugin: impl Into<PluginId>) -> DetachReport {
@@ -475,14 +552,14 @@ impl<'de> Deserialize<'de> for LogRecord {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
+        #[serde(expecting = "struct LogRecord", deny_unknown_fields)]
         struct Wire {
             format: u8,
             plugin: PluginId,
             effect: Effect,
         }
 
-        let wire = Wire::deserialize(deserializer)?;
+        let wire = Wire::deserialize(ObjectOnly::new(deserializer))?;
         if wire.format != 2 {
             return Err(D::Error::custom(format!(
                 "unsupported ledger format {}; expected 2",
@@ -502,7 +579,13 @@ impl Ledger {
         &self.effects
     }
 
+    /// Appends one record for every effect this ledger holds to `path`, creating it and its
+    /// parent directories when missing. That includes the effects `open_file` read, so appending
+    /// a ledger opened from the same file writes those records a second time. Every record is
+    /// encoded before the file is touched, so an effect that cannot be encoded returns
+    /// `InvalidData` naming it and leaves the file, or its absence, as it was.
     pub fn append_to_file(&self, path: &Path) -> std::io::Result<usize> {
+        let records = self.encode()?;
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -512,22 +595,40 @@ impl Ledger {
             .create(true)
             .append(true)
             .open(path)?;
-        self.write_to(&mut file)
+        file.write_all(&records)?;
+        file.flush()?;
+        Ok(self.effects.len())
     }
 
-    pub fn write_to<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<usize> {
-        for effect in &self.effects {
+    /// Writes one record per effect. Every record is encoded first, so an effect that cannot
+    /// be encoded returns `InvalidData` naming it and writes nothing.
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<usize> {
+        writer.write_all(&self.encode()?)?;
+        writer.flush()?;
+        Ok(self.effects.len())
+    }
+
+    fn encode(&self) -> std::io::Result<Vec<u8>> {
+        let mut records = Vec::new();
+        for (index, effect) in self.effects.iter().enumerate() {
             let record = LogRecord {
                 format: 2,
                 plugin: self.plugin.clone(),
                 effect: effect.clone(),
             };
-            let mut line = serde_json::to_string(&record)?;
-            line.push('\n');
-            writer.write_all(line.as_bytes())?;
+            serde_json::to_writer(&mut records, &record).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "effect {} of {} cannot be encoded: {error}",
+                        index + 1,
+                        self.effects.len()
+                    ),
+                )
+            })?;
+            records.push(b'\n');
         }
-        writer.flush()?;
-        Ok(self.effects.len())
+        Ok(records)
     }
 
     pub fn open_file(path: &Path) -> std::io::Result<Ledger> {
@@ -659,7 +760,7 @@ mod tests {
         vec![
             grant_uds(backend, "/run/ak/egressd.uds"),
             grant_uds(backend, "/run/ak/github.uds"),
-            grant_file(backend, "skills/pr.md"),
+            grant_file(backend, "/skills/pr.md"),
         ]
     }
 
@@ -668,7 +769,7 @@ mod tests {
         let mut backend = FakeBackend::new();
         let op = UniverseOp::WriteSessionFile {
             id: GrantId::new(),
-            path: "skills/pr.md".to_string(),
+            path: "/skills/pr.md".to_string(),
             owner: cell_owner("workspace-bind"),
         };
         let removal = op.removal();
@@ -745,7 +846,7 @@ mod tests {
             .unwrap();
         let before = backend.snapshot_os_state();
         let (handle_a, _) = grant_uds(&mut backend, "/run/ak/egressd.uds");
-        let (handle_b, _) = grant_file(&mut backend, "skills/pr.md");
+        let (handle_b, _) = grant_file(&mut backend, "/skills/pr.md");
         let mut ledger = Ledger::new("github-pr");
         ledger.push(Effect::exact(
             "egress socket",
@@ -958,12 +1059,12 @@ mod tests {
                 let owner = cell_owner("github-pr");
                 let stuck = UniverseOp::WriteSessionFile {
                     id: GrantId::new(),
-                    path: "skills/pr.md".to_string(),
+                    path: "/skills/pr.md".to_string(),
                     owner: owner.clone(),
                 };
                 let healthy = UniverseOp::WriteSessionFile {
                     id: GrantId::new(),
-                    path: "skills/pr.md".to_string(),
+                    path: "/skills/pr.md".to_string(),
                     owner,
                 };
                 let address = Handle {
@@ -1018,7 +1119,7 @@ mod tests {
                 let elsewhere = CellId::from("cell-2");
                 let op = UniverseOp::WriteSessionFile {
                     id: GrantId::new(),
-                    path: "skills/pr.md".to_string(),
+                    path: "/skills/pr.md".to_string(),
                     owner: CellOwner {
                         cell: elsewhere.clone(),
                         plugin: PluginId::from("github-pr"),
@@ -1040,7 +1141,7 @@ mod tests {
                         detach_either(&mut closure, &mut backend, &cell(), drain).unwrap_err(),
                         DetachError::Backend(BackendError::UnknownObject {
                             class: "session-file",
-                            key: "session/skills/pr.md".to_string(),
+                            key: "session//skills/pr.md".to_string(),
                             owner: cell_owner("github-pr"),
                             id: op.id(),
                         })
@@ -1057,5 +1158,137 @@ mod tests {
                 assert!(backend.snapshot_os_state().is_empty());
             }
         }
+    }
+
+    fn sequence_accepted<T>(record: &str, value: &T, at: &str, fields: &[&str]) -> Vec<String>
+    where
+        T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let encoded = serde_json::to_value(value).expect("a valid record encodes");
+        assert_eq!(
+            &serde_json::from_value::<T>(encoded.clone()).expect("its object decodes"),
+            value
+        );
+        let mut array = encoded;
+        let fields_at = array
+            .pointer_mut(at)
+            .expect("the record sits at its pointer");
+        assert_eq!(
+            fields_at.as_object().map(serde_json::Map::len),
+            Some(fields.len()),
+            "{fields_at} must hold exactly the fields {fields:?}"
+        );
+        *fields_at = serde_json::Value::Array(
+            fields
+                .iter()
+                .map(|field| fields_at[*field].clone())
+                .collect(),
+        );
+        let mut accepted = Vec::new();
+        let through_value = serde_json::from_value::<T>(array.clone()).map(drop);
+        let through_text = serde_json::from_str::<T>(&array.to_string()).map(drop);
+        for (path, outcome) in [("value", through_value), ("text", through_text)] {
+            match outcome {
+                Err(error)
+                    if error.is_data() && error.to_string().contains("invalid type: sequence") => {}
+                other => accepted.push(format!("{record} at {at:?} through {path}: {other:?}")),
+            }
+        }
+        accepted
+    }
+
+    #[test]
+    fn a_positional_log_record_is_refused_by_its_public_name() {
+        for error in [
+            serde_json::from_str::<LogRecord>("[]").unwrap_err(),
+            serde_json::from_value::<LogRecord>(serde_json::json!([])).unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid type: sequence, expected struct LogRecord"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_ledger_record_decodes_from_an_object_and_refuses_a_positional_array() {
+        let removal = UniverseRemoval {
+            id: GrantId::new(),
+            capability: Capability::SessionFile {
+                path: "/skills/pr.md".to_string(),
+            },
+        };
+        let exact = Effect::exact("skill file", InverseVia::Universe(removal.clone()));
+        let Reversibility::Exact(inverse) = exact.reversibility.clone() else {
+            panic!("an exact effect carries an inverse");
+        };
+        let delayed = Effect::delayed_published("outbox/github", "payload");
+        let Reversibility::Delayed(outbox) = delayed.reversibility.clone() else {
+            panic!("a delayed effect carries an outbox");
+        };
+        let mut report = DetachReport::new("github-pr");
+        report.replayed.push("skill file".to_string());
+        let mut accepted = Vec::new();
+        accepted.extend(sequence_accepted(
+            "Inverse",
+            &inverse,
+            "",
+            &["description", "via"],
+        ));
+        accepted.extend(sequence_accepted(
+            "Compensation",
+            &Compensation { witness: removal },
+            "",
+            &["witness"],
+        ));
+        accepted.extend(sequence_accepted(
+            "Outbox",
+            &outbox,
+            "",
+            &["channel", "payload", "published"],
+        ));
+        accepted.extend(sequence_accepted(
+            "Policy",
+            &Policy {
+                assertion: "the comment left the host".to_string(),
+            },
+            "",
+            &["assertion"],
+        ));
+        accepted.extend(sequence_accepted(
+            "Effect",
+            &exact,
+            "",
+            &["description", "reversibility"],
+        ));
+        accepted.extend(sequence_accepted(
+            "DetachReport",
+            &report,
+            "",
+            &[
+                "plugin",
+                "replayed",
+                "delayed_discarded",
+                "asserted",
+                "forced",
+            ],
+        ));
+        accepted.extend(sequence_accepted(
+            "LogRecord",
+            &LogRecord {
+                format: 2,
+                plugin: PluginId::from("github-pr"),
+                effect: exact,
+            },
+            "",
+            &["format", "plugin", "effect"],
+        ));
+        assert!(
+            accepted.is_empty(),
+            "these positional arrays decoded:\n{}",
+            accepted.join("\n")
+        );
     }
 }

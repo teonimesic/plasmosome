@@ -15,7 +15,7 @@ fn fixture(size: usize) -> (plasmosome_ledger::SealedLedger, FakeBackend) {
                 plugin: PluginId::from("bench"),
             },
             capability: Capability::SessionFile {
-                path: format!("file-{index}"),
+                path: format!("/file-{index}"),
             },
             kind: GrantKind::Hot,
         });

@@ -7,6 +7,7 @@ pub mod composite;
 pub mod fake;
 pub mod recipe;
 pub mod universe;
+mod wire;
 
 pub use backend::{
     BackendError, Capability, DrainSpec, EnforcementBackend, Grant, GrantKind, Handle, LedgerEntry,
@@ -22,3 +23,4 @@ pub use universe::{
     CellId, CellOwner, Diff, GrantId, MockMode, OsObject, OsState, PluginId, ResidueReport,
     UniverseClass, UniverseOp, UniverseRemoval,
 };
+pub use wire::ObjectOnly;

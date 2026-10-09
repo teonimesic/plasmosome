@@ -649,7 +649,7 @@ fn remove_planted(
 fn substituted_capability(capability: &Capability) -> Capability {
     match capability {
         Capability::SessionFile { .. } => Capability::SessionFile {
-            path: "substituted-session".to_string(),
+            path: "/substituted-session".to_string(),
         },
         Capability::UdsSocket { .. } => Capability::UdsSocket {
             path: "/substituted.uds".to_string(),
@@ -674,7 +674,7 @@ fn shadow_of(entry: &LedgerEntry) -> OsObject {
         id: GrantId::new(),
         owner: entry.owner.clone(),
         capability: Capability::SessionFile {
-            path: format!("shadow/{}", entry.handle.id),
+            path: format!("/shadow/{}", entry.handle.id),
         },
     }
 }
@@ -682,7 +682,7 @@ fn shadow_of(entry: &LedgerEntry) -> OsObject {
 fn a_stranger(handle: Handle) -> LedgerEntry {
     let capability = match handle.class {
         UniverseClass::SessionFile => Capability::SessionFile {
-            path: "stranger.md".to_string(),
+            path: "/stranger.md".to_string(),
         },
         UniverseClass::UdsPath => Capability::UdsSocket {
             path: "/stranger.uds".to_string(),

@@ -17,6 +17,13 @@ records instead of guessing which holding an old lossy inverse meant. Only an in
 JSON fragment without a newline is treated as a torn write.
 A split UTF-8 character may be discarded with that incomplete final record; other invalid UTF-8
 is rejected with its record's line number. Opening a log never rewrites the source file.
+Every record decodes only from a JSON object, and a line that repeats a key at any depth is
+refused. That holds only while no record has a map-typed field: serde keeps the last copy of a
+key repeated inside one.
+`write_to` and `append_to_file` encode every record before they touch their target, so
+an effect that cannot be encoded, such as one whose inverse names a relative path, returns
+`InvalidData` naming that effect and leaves the file, or its absence, as it was. Both write every
+effect the ledger holds, including those `open_file` read, so neither extends a reopened log.
 
 A log names its plugin but not the cell that plugin is attached to. `detach` and `detach_forced`
 take that cell from the caller, so every universe and compensation removal names the owner
