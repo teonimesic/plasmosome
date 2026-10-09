@@ -33,6 +33,7 @@ Every place the kernel touches the world outside the process, and the seam that 
 | OS enforcement (grants, revocation, residue) | `EnforcementBackend` (`plasmosome-backend`) | `FakeBackend`, `CompositeBackend` over fake leaves |
 | Process spawning (the VMM child) | `Launch` (`plasmosome-membrane::vmm`) | test launchers already in the crate's tests |
 | Filesystem (session log, state) | paths injected as arguments | `tempfile::TempDir` |
+| Durable appends that can fail (session log) | `LogStore` and `LogFile` (`plasmosome-core::session_log`) | `FaultLogStore` in core's unit tests |
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
 
 **The seam rule.** Both forms in that table are seams. Which one a contact gets is decided by
