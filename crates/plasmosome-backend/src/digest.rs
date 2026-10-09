@@ -5,7 +5,8 @@ const READ_CHUNK: usize = 64 * 1024;
 
 /// A SHA-256 digest: 32 bytes, written as 64 lowercase hexadecimal digits.
 ///
-/// `Debug` and `Display` both print those 64 digits.
+/// `Debug` and `Display` both print those 64 digits, and in JSON it is that string. Decoding
+/// accepts exactly what [`Digest::parse_hex`] accepts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Digest([u8; 32]);
 
@@ -87,6 +88,32 @@ impl std::fmt::Display for Digest {
 impl std::fmt::Debug for Digest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.hex())
+    }
+}
+
+impl serde::Serialize for Digest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.hex())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Digest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Digest, D::Error> {
+        deserializer.deserialize_str(HexDigits)
+    }
+}
+
+struct HexDigits;
+
+impl serde::de::Visitor<'_> for HexDigits {
+    type Value = Digest;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("64 lowercase hexadecimal digits")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Digest, E> {
+        Digest::parse_hex(text).map_err(E::custom)
     }
 }
 
@@ -242,6 +269,48 @@ mod tests {
         let error = Digest::of_reader(FailsAfter { served: false })
             .expect_err("a failing read produces no digest");
         assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn digest_serde_round_trips_as_lowercase_hex() {
+        let digest = Digest::parse_hex(ABC).expect("64 lowercase digits parse");
+        let encoded = serde_json::to_string(&digest).expect("a digest encodes");
+        assert_eq!(encoded, format!("\"{ABC}\""));
+        assert_eq!(
+            serde_json::from_str::<Digest>(&encoded).expect("its encoding decodes"),
+            digest
+        );
+        assert_eq!(
+            serde_json::from_value::<Digest>(serde_json::Value::String(ABC.to_string()))
+                .expect("a JSON string value decodes"),
+            digest
+        );
+    }
+
+    #[test]
+    fn digest_serde_refuses_uppercase_and_short() {
+        let cases = [
+            (
+                format!("\"{}\"", ABC.to_uppercase()),
+                "byte 0 of a SHA-256 digest is not a lowercase hexadecimal digit",
+            ),
+            (
+                format!("\"{}\"", &ABC[..63]),
+                "a SHA-256 digest is 64 lowercase hexadecimal digits, not 63 bytes",
+            ),
+            (
+                "12".to_string(),
+                "invalid type: integer `12`, expected 64 lowercase hexadecimal digits",
+            ),
+            (
+                format!("[\"{ABC}\"]"),
+                "invalid type: sequence, expected 64 lowercase hexadecimal digits",
+            ),
+        ];
+        for (text, reason) in cases {
+            let error = serde_json::from_str::<Digest>(&text).expect_err(&text);
+            assert!(error.to_string().starts_with(reason), "{text}: {error}");
+        }
     }
 
     #[test]
