@@ -19,7 +19,7 @@ one.
 | `registry` | Tool names, their registered owners and author-written descriptions |
 | `reconciler` | Desired state vs observed state, converging by generation |
 | `gatekeeper` | Credential custody — the cell receives handles, never secrets |
-| `session_log` | Append-only record of everything that happened in a cell |
+| `session_log` | Append-only, synced audit record shared by an instance's cells through one locked writer; an IO error stops all later appends |
 | `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode`; the one constructor for a cell's journal and socket paths |
 | `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |

@@ -30,7 +30,9 @@ pub use manifest::{ManifestError, PlasmidManifest};
 pub use protocol::{ErrorCode, Request, Response, StatusResult, WireError};
 pub use reconciler::{DesiredState, ObservedState, ReconcilePlan, Reconciler};
 pub use registry::{LookupError, RegistryEntry, ToolRegistry};
-pub use session_log::{SessionLog, read_events};
+pub use session_log::{
+    LogFault, LogFile, LogStep, LogStore, OsLogStore, SessionLog, SessionLogError, read_events,
+};
 pub use state::{
     CellPathError, CellRecord, CellStatus, ControllerState, GenomeName, InstanceName,
     InstanceNameError, InstanceRecord, PlasmidRecord, cell_ledger_path,
