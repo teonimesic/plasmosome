@@ -77,24 +77,38 @@ pub fn compile_supervision_fixture(cache_root: &Path, source: &Path) -> PathBuf 
         .recursive(true)
         .mode(0o700)
         .create(&key)
-        .expect("the fixture cache directory is created, readable only by its owner");
+        .unwrap_or_else(|error| {
+            panic!(
+                "the fixture cache directory {} is created, readable only by its owner: {error}",
+                key.display()
+            )
+        });
     let executable = key.join("supervision-worker");
     if !executable.exists() {
         publish(source, &executable);
     }
-    let usage = Command::new(&executable)
-        .status()
-        .expect("the compiled supervision worker fixture runs");
+    let usage = Command::new(&executable).status().unwrap_or_else(|error| {
+        panic!(
+            "the compiled supervision worker fixture {} runs: {error}; if it is stale, remove it or run `cargo clean`",
+            executable.display()
+        )
+    });
     assert_eq!(
         usage.code(),
         Some(64),
-        "the compiled supervision worker fixture refuses a call with no arguments"
+        "the compiled supervision worker fixture {} refuses a call with no arguments; if it is stale, remove it or run `cargo clean`",
+        executable.display()
     );
     executable
 }
 
 fn source_key(source: &Path) -> String {
-    let bytes = fs::read(source).expect("the supervision worker source is readable");
+    let bytes = fs::read(source).unwrap_or_else(|error| {
+        panic!(
+            "the supervision worker source {} is readable: {error}",
+            source.display()
+        )
+    });
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
     COMPILER_ARGUMENTS.hash(&mut hasher);
@@ -127,7 +141,11 @@ fn publish(source: &Path, executable: &Path) {
         );
     }
     let status = compiled.expect("the host C compiler starts for the supervision fixture");
-    assert!(status.success(), "the supervision worker fixture compiles");
+    assert!(
+        status.success(),
+        "the supervision worker fixture compiles from {}: {status}",
+        source.display()
+    );
     if let Err(error) = published
         && error.kind() != ErrorKind::AlreadyExists
     {
