@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use plasmosome_backend::{
-    Capability, Diff, DrainSpec, EnforcementBackend, FakeBackend, PluginId, ResidueReport,
+    Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, PluginId,
+    ResidueReport,
 };
+use plasmosome_core::ToolRegistry;
 use plasmosome_core::manifest::PlasmidManifest;
 use plasmosome_core::state::MockMode;
-use plasmosome_core::{CellId, ToolRegistry};
 use plasmosome_ledger::{Closure, Ledger};
 use plasmosome_testkit::builders::{
     DesiredStateBuilder, GrantSequence, ManifestBuilder, exact_backend_effect,
@@ -30,9 +31,10 @@ fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
         .cell("cell-1", "researcher")
         .plasmid_in("cell-1", &manifest.id, MockMode::Simulate)
         .build();
+    let cell_id = CellId::from("cell-1");
     let cell = desired
         .cells
-        .get(&CellId::from("cell-1"))
+        .get(&cell_id)
         .expect("the builder declared cell-1");
     assert_eq!(cell.plasmids[0].plasmid, manifest.id);
 
@@ -42,19 +44,22 @@ fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
 
     let mut ledger = Ledger::new(plugin.clone());
     let mut attached = Vec::new();
-    for grant in GrantSequence::for_plugin(&manifest.id)
-        .hot(Capability::Mount {
-            source: "/src/repo".to_string(),
-            target: "/workspace".to_string(),
-        })
-        .hot(Capability::UdsSocket {
-            path: "/workspace/run/egressd.uds".to_string(),
-        })
-        .hot(Capability::ProxyMap {
-            host: manifest.network.as_ref().expect("a host").hosts[0].clone(),
-            route: "splice".to_string(),
-        })
-        .into_grants()
+    for grant in GrantSequence::for_owner(CellOwner {
+        cell: cell_id.clone(),
+        plugin: plugin.clone(),
+    })
+    .hot(Capability::Mount {
+        source: "/src/repo".to_string(),
+        target: "/workspace".to_string(),
+    })
+    .hot(Capability::UdsSocket {
+        path: "/workspace/run/egressd.uds".to_string(),
+    })
+    .hot(Capability::ProxyMap {
+        host: manifest.network.as_ref().expect("a host").hosts[0].clone(),
+        route: "splice".to_string(),
+    })
+    .into_grants()
     {
         let effect = exact_backend_effect(&backend.grant(grant));
         attached.push(effect.description.clone());
@@ -70,7 +75,7 @@ fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
         manifest.drain_ms.expect("the builder set a drain deadline"),
     ));
     let report = sealed
-        .detach(&mut backend, drain)
+        .detach(&mut backend, &cell_id, drain)
         .expect("replaying exact inverses cannot fail");
 
     let mut lifo = attached;

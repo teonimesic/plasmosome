@@ -9,7 +9,7 @@ the trait. Every backend is held to the same functions, unchanged; a backend tha
 the thing that is wrong. That is what makes the fake a model of enforcement rather than a hope
 about it.
 
-`FakeBackend` and `CompositeBackend` over three fake leaves both pass all ten clauses. The
+`FakeBackend` and `CompositeBackend` over three fake leaves both pass all eleven clauses. The
 composite failed three of the original clauses when it was first wired in, because it lost the
 handle its leaf issued; task 008 fixed the backend rather than the clauses, which is the point of
 holding every backend to the same functions.
@@ -27,6 +27,30 @@ remembered: the private unit-test module `src/conformance/clauses_discriminate.r
 defective backend per defect and accepts only failures recorded by the clause's semantic checks.
 A clause that stops discriminating fails there. Run those witnesses directly with
 `cargo test -p plasmosome-testkit --lib conformance::clauses_discriminate`.
+
+Owners are a plugin in one cell. `revoke_takes_its_owners_object` pairs two plugins in one cell
+and one plugin in two cells, and `apply_and_removal_reach_the_universe` tries the same plugin in
+another cell and another plugin in the same cell before every exact removal.
+
+`graceful_timeouts_preserve_the_selected_holding` needs a backend that cannot drain. Its factory
+must stall every graceful withdrawal of a holding owned by `conformance::stalled_owner()`, before
+any release, while Force still succeeds; the fake factories arm this with
+`FakeBackend::stall_graceful_drains_for_owner`. A future real factory must arrange the same stall
+with real resources. The clause times the stalled holding out with a 50 ms and a zero deadline,
+checks that a removal naming the wrong owner is refused before any drain in both directions, and
+drains another plugin in the stalled cell and the same plugin in another cell normally. It
+withdraws the stalled holding and its equal peers in both orders, and runs each order twice,
+draining every other holding under a 50 ms deadline and then under a zero deadline. The
+stalled-first pass forces the stalled holding while every other holding stands; the peer-first
+pass drains the others while it stands and forces it last. The clause runs once with granted
+holdings through `revoke`, where a graceful `apply_removal` of the stalled grant must also time out
+and keep its handle, and once with applied holdings through `apply_removal`, where the granted
+peer is removed through `apply_removal` too and its handle must be retired. Each order, each
+deadline, each entry point and each of those steps has its own defective backend, so deleting any
+one of them turns its witness red, and so does moving the neighbour or the other-cell holding
+across the forced withdrawal in either order. `repeated_grants_are_independently_removable`
+removes a granted holding through `apply_removal` under both policies and checks that its handle
+is retired.
 
 The order a clause revokes in is part of what it proves. A detach replays a ledger in reverse push
 order, so a backend that accepts revokes only in grant order was conformant right up until task 012
@@ -50,7 +74,7 @@ and verifies the backend snapshot shows no residue.
 | Module | Holds |
 | --- | --- |
 | `builders` | `PlasmidManifest`, `Grant` sequences, `Effect`s and `DesiredState` — a test states only what it is about |
-| `conformance` | Ten clauses of the backend contract, each generic over `EnforcementBackend` |
+| `conformance` | Eleven clauses of the backend contract, each generic over `EnforcementBackend` |
 | `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |
 
