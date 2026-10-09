@@ -945,21 +945,32 @@ fn concurrent_callers_share_one_published_fixture_that_is_never_replaced() {
     );
 }
 
+fn key_of(fixture: &Path) -> &std::ffi::OsStr {
+    fixture
+        .parent()
+        .and_then(Path::file_name)
+        .expect("a cached fixture sits in its key directory")
+}
+
 #[test]
 fn a_changed_fixture_source_compiles_to_a_new_key() {
     let cache = tempfile::tempdir().unwrap();
     let sources = tempfile::tempdir().unwrap();
-    let original = fixture::supervision_worker_source();
     let changed = sources.path().join("supervision_worker.c");
-    let mut text = std::fs::read_to_string(&original).expect("the fixture source is readable");
+    let mut text = std::fs::read_to_string(fixture::supervision_worker_source())
+        .expect("the fixture source is readable");
     text.push_str("\n/* a changed source */\n");
     std::fs::write(&changed, text).expect("the changed source is written");
 
-    let first = fixture::compile_supervision_fixture(cache.path(), &original);
-    let second = fixture::compile_supervision_fixture(cache.path(), &changed);
+    let original = fixture::supervision_fixture();
+    let rebuilt = fixture::compile_supervision_fixture(cache.path(), &changed);
 
-    assert_ne!(second, first, "a changed source is cached under a new key");
-    for executable in [&first, &second] {
+    assert_ne!(
+        key_of(&rebuilt),
+        key_of(&original),
+        "a changed source is cached under a new key"
+    );
+    for executable in [&original, &rebuilt] {
         assert_eq!(
             Command::new(executable)
                 .status()
@@ -975,24 +986,26 @@ fn a_changed_fixture_source_compiles_to_a_new_key() {
 fn a_reused_fixture_is_run_once_before_it_is_returned() {
     let cache = tempfile::tempdir().unwrap();
     let sources = tempfile::tempdir().unwrap();
-    let source = fixture::supervision_worker_source();
-    let published = fixture::compile_supervision_fixture(cache.path(), &source);
-
+    let key = cache.path().join(key_of(&fixture::supervision_fixture()));
+    std::fs::create_dir(&key).expect("the key directory is created");
     let refusing = sources.path().join("refusing.c");
     std::fs::write(&refusing, "int main(void) { return 63; }\n")
         .expect("the stand-in source is written");
-    std::fs::remove_file(&published).expect("the published fixture is removed");
     let built = Command::new("cc")
         .arg(&refusing)
         .arg("-o")
-        .arg(&published)
+        .arg(key.join("supervision-worker"))
         .status()
         .expect("the host C compiler starts for the stand-in");
-    assert!(built.success(), "the stand-in exiting 63 compiles");
+    assert!(
+        built.success(),
+        "a stand-in exiting 63 is published at the real source's key"
+    );
 
-    let refused =
-        std::panic::catch_unwind(|| fixture::compile_supervision_fixture(cache.path(), &source))
-            .expect_err("a reused executable that does not exit 64 fails setup");
+    let refused = std::panic::catch_unwind(|| {
+        fixture::compile_supervision_fixture(cache.path(), &fixture::supervision_worker_source())
+    })
+    .expect_err("a reused executable that does not exit 64 fails setup");
     let message = refused
         .downcast_ref::<String>()
         .cloned()
