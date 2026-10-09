@@ -89,7 +89,7 @@ impl PrivateDir {
     pub fn open(path: &Path) -> Result<PrivateDir, PrivateSocketError> {
         let bytes = path.as_os_str().as_bytes();
         let Some(relative) = bytes.strip_prefix(b"/") else {
-            return Err(PrivateSocketError::NotAbsolute {
+            return Err(PrivateSocketError::BadPath {
                 path: path.to_path_buf(),
             });
         };
@@ -350,7 +350,7 @@ pub fn check_private_path(
     socket_path: &Path,
     trusted_uid: u32,
 ) -> Result<SocketEntry, PrivateSocketError> {
-    let not_absolute = || PrivateSocketError::NotAbsolute {
+    let not_absolute = || PrivateSocketError::BadPath {
         path: socket_path.to_path_buf(),
     };
     if !socket_path.is_absolute() {
@@ -374,28 +374,28 @@ pub fn effective_uid() -> u32 {
 /// rule broken; callers branch on the variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrivateSocketError {
-    NotAbsolute {
+    BadPath {
         path: PathBuf,
     },
     SymlinkInPath {
-        at: PathBuf,
+        path: PathBuf,
     },
-    Missing {
-        at: PathBuf,
+    NoDirectory {
+        path: PathBuf,
     },
     NotDirectory {
-        at: PathBuf,
+        path: PathBuf,
     },
     ForeignOwner {
-        at: PathBuf,
+        path: PathBuf,
         uid: u32,
     },
     Replaceable {
-        at: PathBuf,
+        path: PathBuf,
         mode: u32,
     },
     ReplaceableByAcl {
-        at: PathBuf,
+        path: PathBuf,
     },
     NotPrivate {
         path: PathBuf,
@@ -440,7 +440,7 @@ pub enum PrivateSocketError {
     },
     Io {
         op: &'static str,
-        at: PathBuf,
+        path: PathBuf,
         errno: i32,
     },
 }
@@ -448,36 +448,38 @@ pub enum PrivateSocketError {
 impl fmt::Display for PrivateSocketError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PrivateSocketError::NotAbsolute { path } => write!(
+            PrivateSocketError::BadPath { path } => write!(
                 f,
                 "{} is not an absolute path of normal components (no empty, . or .. components)",
                 path.display()
             ),
-            PrivateSocketError::SymlinkInPath { at } => write!(
+            PrivateSocketError::SymlinkInPath { path } => write!(
                 f,
                 "{} is a symlink; a private socket path must not pass through one",
-                at.display()
+                path.display()
             ),
-            PrivateSocketError::Missing { at } => write!(f, "{} does not exist", at.display()),
-            PrivateSocketError::NotDirectory { at } => {
-                write!(f, "{} is not a directory", at.display())
+            PrivateSocketError::NoDirectory { path } => {
+                write!(f, "{} does not exist", path.display())
             }
-            PrivateSocketError::ForeignOwner { at, uid } => write!(
+            PrivateSocketError::NotDirectory { path } => {
+                write!(f, "{} is not a directory", path.display())
+            }
+            PrivateSocketError::ForeignOwner { path, uid } => write!(
                 f,
                 "{} is owned by uid {uid}, which is not trusted here",
-                at.display()
+                path.display()
             ),
-            PrivateSocketError::Replaceable { at, mode } => write!(
+            PrivateSocketError::Replaceable { path, mode } => write!(
                 f,
                 "{} has mode {mode:04o}: group or other can replace entries in it",
-                at.display()
+                path.display()
             ),
-            PrivateSocketError::ReplaceableByAcl { at } => write!(
+            PrivateSocketError::ReplaceableByAcl { path } => write!(
                 f,
                 "{} has an ACL allow entry granting add_file, add_subdirectory, delete_child, \
                  delete, writesecurity or chown; such an entry is refused on an ancestor whoever \
                  it names, even if it applies only to new children",
-                at.display()
+                path.display()
             ),
             PrivateSocketError::NotPrivate { path, mode } => write!(
                 f,
@@ -531,8 +533,8 @@ impl fmt::Display for PrivateSocketError {
                 f,
                 "the peer runs as uid {found}, not the trusted uid {trusted}"
             ),
-            PrivateSocketError::Io { op, at, errno } => {
-                write!(f, "{op} failed at {} (errno {errno})", at.display())
+            PrivateSocketError::Io { op, path, errno } => {
+                write!(f, "{op} failed at {} (errno {errno})", path.display())
             }
         }
     }
@@ -589,18 +591,18 @@ fn mode_and_device(stat: &libc::stat) -> (u32, u64) {
 fn judge_ancestor(facts: &Facts, euid: u32, at: &Path) -> Result<(), PrivateSocketError> {
     if facts.kind != Kind::Directory {
         return Err(PrivateSocketError::NotDirectory {
-            at: at.to_path_buf(),
+            path: at.to_path_buf(),
         });
     }
     if facts.uid != 0 && facts.uid != euid {
         return Err(PrivateSocketError::ForeignOwner {
-            at: at.to_path_buf(),
+            path: at.to_path_buf(),
             uid: facts.uid,
         });
     }
     if facts.mode & 0o022 != 0 {
         return Err(PrivateSocketError::Replaceable {
-            at: at.to_path_buf(),
+            path: at.to_path_buf(),
             mode: facts.mode,
         });
     }
@@ -610,12 +612,12 @@ fn judge_ancestor(facts: &Facts, euid: u32, at: &Path) -> Result<(), PrivateSock
 fn judge_private(facts: &Facts, euid: u32, path: &Path) -> Result<(), PrivateSocketError> {
     if facts.kind != Kind::Directory {
         return Err(PrivateSocketError::NotDirectory {
-            at: path.to_path_buf(),
+            path: path.to_path_buf(),
         });
     }
     if facts.uid != euid {
         return Err(PrivateSocketError::ForeignOwner {
-            at: path.to_path_buf(),
+            path: path.to_path_buf(),
             uid: facts.uid,
         });
     }
@@ -685,7 +687,7 @@ fn prepare_as(
         Err(errno) => {
             return Err(PrivateSocketError::Io {
                 op: "fstatat",
-                at: path,
+                path,
                 errno,
             });
         }
@@ -744,7 +746,7 @@ fn restrict_to_owner(bound: &BoundEntry) -> Result<(), PrivateSocketError> {
     if errno != libc::EOPNOTSUPP && errno != libc::ENOTSUP {
         return Err(PrivateSocketError::Io {
             op: "fchmodat",
-            at: bound.entry.path.clone(),
+            path: bound.entry.path.clone(),
             errno,
         });
     }
@@ -765,7 +767,7 @@ fn restrict_to_owner(bound: &BoundEntry) -> Result<(), PrivateSocketError> {
     let errno = last_errno();
     Err(PrivateSocketError::Io {
         op: "fchmodat",
-        at: bound.entry.path.clone(),
+        path: bound.entry.path.clone(),
         errno,
     })
 }
@@ -778,7 +780,7 @@ fn components_of(relative: &[u8], whole: &Path) -> Result<Vec<CString>, PrivateS
             component => CString::new(component).ok(),
         })
         .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| PrivateSocketError::NotAbsolute {
+        .ok_or_else(|| PrivateSocketError::BadPath {
             path: whole.to_path_buf(),
         })
 }
@@ -850,15 +852,17 @@ fn open_child(
     let errno = last_errno();
     let at = at.to_path_buf();
     Err(match errno {
-        libc::ELOOP => PrivateSocketError::SymlinkInPath { at },
-        libc::ENOENT => PrivateSocketError::Missing { at },
+        libc::ELOOP => PrivateSocketError::SymlinkInPath { path: at },
+        libc::ENOENT => PrivateSocketError::NoDirectory { path: at },
         libc::ENOTDIR => match stat_at(parent, name) {
-            Ok(facts) if facts.kind == Kind::Symlink => PrivateSocketError::SymlinkInPath { at },
-            _ => PrivateSocketError::NotDirectory { at },
+            Ok(facts) if facts.kind == Kind::Symlink => {
+                PrivateSocketError::SymlinkInPath { path: at }
+            }
+            _ => PrivateSocketError::NotDirectory { path: at },
         },
         errno => PrivateSocketError::Io {
             op: "openat",
-            at,
+            path: at,
             errno,
         },
     })
@@ -916,7 +920,7 @@ fn refuse_if(
         Ok(true) => Err(refusal(at.to_path_buf())),
         Err((op, errno)) => Err(PrivateSocketError::Io {
             op,
-            at: at.to_path_buf(),
+            path: at.to_path_buf(),
             errno,
         }),
     }
@@ -931,7 +935,7 @@ fn refuse_acl(dir: &OwnedFd, path: &Path) -> Result<(), PrivateSocketError> {
 #[cfg(target_os = "macos")]
 fn refuse_replacing_acl(dir: &OwnedFd, at: &Path) -> Result<(), PrivateSocketError> {
     refuse_if(darwin_acl::allows_replacing_entries(dir), at, |at| {
-        PrivateSocketError::ReplaceableByAcl { at }
+        PrivateSocketError::ReplaceableByAcl { path: at }
     })
 }
 
@@ -1055,13 +1059,13 @@ fn acl_present(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
 
 fn missing_or_io(errno: i32, path: &Path) -> PrivateSocketError {
     if errno == libc::ENOENT {
-        PrivateSocketError::Missing {
-            at: path.to_path_buf(),
+        PrivateSocketError::NoDirectory {
+            path: path.to_path_buf(),
         }
     } else {
         PrivateSocketError::Io {
             op: "fstatat",
-            at: path.to_path_buf(),
+            path: path.to_path_buf(),
             errno,
         }
     }
@@ -1070,7 +1074,7 @@ fn missing_or_io(errno: i32, path: &Path) -> PrivateSocketError {
 fn io_failure(op: &'static str, at: &Path, error: &io::Error) -> PrivateSocketError {
     PrivateSocketError::Io {
         op,
-        at: at.to_path_buf(),
+        path: at.to_path_buf(),
         errno: errno_of(error),
     }
 }
@@ -1171,7 +1175,7 @@ mod tests {
             assert_eq!(
                 judge_ancestor(&facts(Kind::Directory, 0, mode), EUID, at),
                 Err(PrivateSocketError::Replaceable {
-                    at: at.to_path_buf(),
+                    path: at.to_path_buf(),
                     mode
                 })
             );
@@ -1179,14 +1183,14 @@ mod tests {
         assert_eq!(
             judge_ancestor(&facts(Kind::Directory, 4242, 0o755), EUID, at),
             Err(PrivateSocketError::ForeignOwner {
-                at: at.to_path_buf(),
+                path: at.to_path_buf(),
                 uid: 4242
             })
         );
         assert_eq!(
             judge_ancestor(&facts(Kind::Other, 0, 0o755), EUID, at),
             Err(PrivateSocketError::NotDirectory {
-                at: at.to_path_buf()
+                path: at.to_path_buf()
             })
         );
     }
@@ -1212,14 +1216,14 @@ mod tests {
         assert_eq!(
             judge_private(&facts(Kind::Directory, 0, 0o700), EUID, path),
             Err(PrivateSocketError::ForeignOwner {
-                at: path.to_path_buf(),
+                path: path.to_path_buf(),
                 uid: 0
             })
         );
         assert_eq!(
             judge_private(&facts(Kind::Symlink, EUID, 0o700), EUID, path),
             Err(PrivateSocketError::NotDirectory {
-                at: path.to_path_buf()
+                path: path.to_path_buf()
             })
         );
     }
@@ -1280,13 +1284,13 @@ mod tests {
         assert_eq!(
             open_in(&root, "a/link/cell").unwrap_err(),
             PrivateSocketError::SymlinkInPath {
-                at: root.path().join("a/link")
+                path: root.path().join("a/link")
             }
         );
         assert_eq!(
             open_in(&root, "a/last").unwrap_err(),
             PrivateSocketError::SymlinkInPath {
-                at: root.path().join("a/last")
+                path: root.path().join("a/last")
             }
         );
     }
@@ -1299,7 +1303,7 @@ mod tests {
         assert_eq!(
             open_in(&root, "a/cell").unwrap_err(),
             PrivateSocketError::Replaceable {
-                at: root.path().join("a"),
+                path: root.path().join("a"),
                 mode: 0o775
             }
         );
@@ -1314,7 +1318,7 @@ mod tests {
         assert_eq!(
             open_in(&root, "a/b/cell").map(|dir| dir.path().to_path_buf()),
             Err(PrivateSocketError::Replaceable {
-                at: root.path().join("a"),
+                path: root.path().join("a"),
                 mode: 0o775
             })
         );
@@ -1339,20 +1343,20 @@ mod tests {
         fs::write(root.path().join("file"), b"").expect("write");
         assert_eq!(
             open_in(&root, "absent/cell").unwrap_err(),
-            PrivateSocketError::Missing {
-                at: root.path().join("absent")
+            PrivateSocketError::NoDirectory {
+                path: root.path().join("absent")
             }
         );
         assert_eq!(
             open_in(&root, "file/cell").unwrap_err(),
             PrivateSocketError::NotDirectory {
-                at: root.path().join("file")
+                path: root.path().join("file")
             }
         );
         assert_eq!(
             open_in(&root, "file").unwrap_err(),
             PrivateSocketError::NotDirectory {
-                at: root.path().join("file")
+                path: root.path().join("file")
             }
         );
     }
@@ -1434,7 +1438,7 @@ mod tests {
         ] {
             assert_eq!(
                 PrivateDir::open(Path::new(path)).unwrap_err(),
-                PrivateSocketError::NotAbsolute {
+                PrivateSocketError::BadPath {
                     path: PathBuf::from(path)
                 }
             );
@@ -1632,34 +1636,37 @@ mod tests {
         let at = || PathBuf::from("/r/cell");
         let cases = [
             (
-                PrivateSocketError::NotAbsolute { path: at() },
+                PrivateSocketError::BadPath { path: at() },
                 "/r/cell is not an absolute path of normal components (no empty, . or .. components)",
             ),
             (
-                PrivateSocketError::SymlinkInPath { at: at() },
+                PrivateSocketError::SymlinkInPath { path: at() },
                 "/r/cell is a symlink; a private socket path must not pass through one",
             ),
             (
-                PrivateSocketError::Missing { at: at() },
+                PrivateSocketError::NoDirectory { path: at() },
                 "/r/cell does not exist",
             ),
             (
-                PrivateSocketError::NotDirectory { at: at() },
+                PrivateSocketError::NotDirectory { path: at() },
                 "/r/cell is not a directory",
             ),
             (
-                PrivateSocketError::ForeignOwner { at: at(), uid: 42 },
+                PrivateSocketError::ForeignOwner {
+                    path: at(),
+                    uid: 42,
+                },
                 "/r/cell is owned by uid 42, which is not trusted here",
             ),
             (
                 PrivateSocketError::Replaceable {
-                    at: at(),
+                    path: at(),
                     mode: 0o1777,
                 },
                 "/r/cell has mode 1777: group or other can replace entries in it",
             ),
             (
-                PrivateSocketError::ReplaceableByAcl { at: at() },
+                PrivateSocketError::ReplaceableByAcl { path: at() },
                 "/r/cell has an ACL allow entry granting add_file, add_subdirectory, delete_child, \
                  delete, writesecurity or chown; such an entry is refused on an ancestor whoever it \
                  names, even if it applies only to new children",
@@ -1732,7 +1739,7 @@ mod tests {
             (
                 PrivateSocketError::Io {
                     op: "fstatat",
-                    at: at(),
+                    path: at(),
                     errno: 13,
                 },
                 "fstatat failed at /r/cell (errno 13)",

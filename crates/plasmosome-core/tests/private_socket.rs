@@ -232,13 +232,13 @@ fn open_refuses_the_system_temp_directories_and_the_root_directory() {
         assert_eq!(
             PrivateDir::open(Path::new("/tmp/cell")).unwrap_err(),
             PrivateSocketError::SymlinkInPath {
-                at: PathBuf::from("/tmp")
+                path: PathBuf::from("/tmp")
             }
         );
         assert_eq!(
             PrivateDir::open(Path::new("/private/tmp/cell")).unwrap_err(),
             PrivateSocketError::Replaceable {
-                at: PathBuf::from("/private/tmp"),
+                path: PathBuf::from("/private/tmp"),
                 mode: 0o1777
             }
         );
@@ -247,7 +247,7 @@ fn open_refuses_the_system_temp_directories_and_the_root_directory() {
     assert_eq!(
         PrivateDir::open(Path::new("/tmp/cell")).unwrap_err(),
         PrivateSocketError::Replaceable {
-            at: PathBuf::from("/tmp"),
+            path: PathBuf::from("/tmp"),
             mode: 0o1777
         }
     );
@@ -266,7 +266,7 @@ fn open_refuses_the_system_temp_directories_and_the_root_directory() {
     assert_eq!(
         PrivateDir::open(&held.path().join("cell")).map(|dir| dir.path().to_path_buf()),
         Err(PrivateSocketError::Replaceable {
-            at: sticky.to_path_buf(),
+            path: sticky.to_path_buf(),
             mode: 0o1777
         }),
         "a private directory two levels under the sticky directory"
@@ -278,7 +278,7 @@ fn open_refuses_the_system_temp_directories_and_the_root_directory() {
         }
     } else {
         PrivateSocketError::ForeignOwner {
-            at: PathBuf::from("/"),
+            path: PathBuf::from("/"),
             uid: 0,
         }
     };
@@ -325,15 +325,15 @@ fn open_names_the_component_even_when_allocation_overwrites_errno() {
     for (path, expected) in [
         (
             at("absent/cell"),
-            PrivateSocketError::Missing { at: at("absent") },
+            PrivateSocketError::NoDirectory { path: at("absent") },
         ),
         (
             at("link/cell"),
-            PrivateSocketError::SymlinkInPath { at: at("link") },
+            PrivateSocketError::SymlinkInPath { path: at("link") },
         ),
         (
             at("file/cell"),
-            PrivateSocketError::NotDirectory { at: at("file") },
+            PrivateSocketError::NotDirectory { path: at("file") },
         ),
     ] {
         assert_eq!(
@@ -436,7 +436,7 @@ fn an_ancestor_acl_that_allows_replacing_entries_is_refused() {
         assert_eq!(
             opened.map(|dir| dir.path().to_path_buf()),
             Err(PrivateSocketError::ReplaceableByAcl {
-                at: ancestor.clone()
+                path: ancestor.clone()
             }),
             "{rule:?}"
         );
@@ -448,7 +448,7 @@ fn an_ancestor_acl_that_allows_replacing_entries_is_refused() {
     assert_eq!(
         opened.map(|dir| dir.path().to_path_buf()),
         Err(PrivateSocketError::ReplaceableByAcl {
-            at: ancestor.clone()
+            path: ancestor.clone()
         }),
         "an allow entry after a deny entry"
     );
@@ -460,7 +460,7 @@ fn an_ancestor_acl_that_allows_replacing_entries_is_refused() {
     clear_acl(&ancestor);
     assert_eq!(
         opened.map(|dir| dir.path().to_path_buf()),
-        Err(PrivateSocketError::ReplaceableByAcl { at: ancestor }),
+        Err(PrivateSocketError::ReplaceableByAcl { path: ancestor }),
         "an allow entry on a grandparent"
     );
 }
@@ -909,8 +909,8 @@ fn socket_entry_validates_type_owner_and_mode_without_following() {
     );
     assert_eq!(
         dir.socket_entry("absent", euid),
-        Err(PrivateSocketError::Missing {
-            at: root.path().join("absent")
+        Err(PrivateSocketError::NoDirectory {
+            path: root.path().join("absent")
         })
     );
     assert_eq!(
@@ -945,13 +945,13 @@ fn check_private_path_checks_the_parent_and_the_entry() {
     );
     assert_eq!(
         check_private_path(Path::new("relative/sock"), euid),
-        Err(PrivateSocketError::NotAbsolute {
+        Err(PrivateSocketError::BadPath {
             path: PathBuf::from("relative/sock")
         })
     );
     assert_eq!(
         check_private_path(Path::new("/"), euid),
-        Err(PrivateSocketError::NotAbsolute {
+        Err(PrivateSocketError::BadPath {
             path: PathBuf::from("/")
         })
     );
