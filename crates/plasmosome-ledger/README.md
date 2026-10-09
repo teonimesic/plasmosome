@@ -36,4 +36,9 @@ a later detach resumes there without replaying what already succeeded.
 A detach over the first three is a safe operation. Over `External`, it is an assertion the
 operator makes and the record keeps.
 
+`plasmosome_ledger::artifact` holds spec 020's registry identity values: registry IDs, release
+keys and pinned release references. They only parse, print and compare; this crate never hashes,
+fetches or verifies an import. A release key or reference decodes only from an object with
+exactly its fields, and kinds and populations sort by their text, as the registry catalog does.
+
 Tests: `cargo test -p plasmosome-ledger`
