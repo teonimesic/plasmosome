@@ -61,6 +61,46 @@ fn copy_build_output(source: &Path, destination: &Path) {
     }
 }
 
+fn rewrite_recorded_roots(
+    failures: &mut Vec<String>,
+    build_output: &Path,
+    built: &Path,
+    root: &Path,
+) {
+    let mut recorded = Vec::new();
+    let mut directories = vec![build_output.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory).expect("the build output directory is readable") {
+            let entry = entry.expect("the build output entry is readable");
+            if entry
+                .file_type()
+                .expect("the build output entry has a type")
+                .is_dir()
+            {
+                directories.push(entry.path());
+            } else if entry.file_name() == "workspace-root" {
+                recorded.push(entry.path());
+            }
+        }
+    }
+    assert!(
+        !recorded.is_empty(),
+        "the build script records its root in a workspace-root file under {}; without one to rewrite, the rewritten-root case cannot tell an embedded root from one read at run time",
+        build_output.display()
+    );
+    for file in recorded {
+        let found = fs::read_to_string(&file).expect("the recorded-root file is readable");
+        if found != built.to_str().unwrap() {
+            failures.push(format!(
+                "A's recorded root: expected {built:?}, found {found:?} in {}. Either this test searched the wrong build output, and the rewritten-root case that follows then tests nothing, or the build recorded the wrong root.",
+                file.display()
+            ));
+        }
+        fs::write(&file, root.to_str().unwrap())
+            .expect("the recorded-root file in the old build output is rewritten");
+    }
+}
+
 fn copy_source(source: &Path, destination: &Path) {
     fs::create_dir_all(destination.join("docs/specs")).expect("the fixture spec directory exists");
     for name in ["Cargo.toml", "Cargo.lock", "crates"] {
@@ -432,6 +472,35 @@ fn prebuilt_real_consumers_inspect_the_invocation_tree_but_cannot_certify_a_copy
                 consumer,
                 output,
                 Verdict::Pass,
+            );
+        }
+
+        rewrite_recorded_roots(&mut failures, &external_target, &a, &b);
+        for consumer in &copied {
+            observe(
+                &mut failures,
+                "A's recorded-root file rewritten after the build",
+                consumer,
+                run(consumer, &b, &rebuilt_target, None),
+                Verdict::Stale {
+                    built: &a,
+                    runtime: &b,
+                    violated: false,
+                },
+            );
+        }
+        fs::remove_dir_all(&external_target).expect("A's disposable build output is removed");
+        for consumer in &copied {
+            observe(
+                &mut failures,
+                "A's build output removed",
+                consumer,
+                run(consumer, &b, &rebuilt_target, None),
+                Verdict::Stale {
+                    built: &a,
+                    runtime: &b,
+                    violated: false,
+                },
             );
         }
         assert!(failures.is_empty(), "{}", failures.join("\n\n"));
