@@ -580,8 +580,14 @@ impl EnforcementBackend for DefectiveBackend {
         let removed = self.drained(owner, &removal.capability, address, drain, |backend| {
             backend.remove_exact(&removal, owner)
         });
-        if self.defect == Defect::ForcedApplyRemovalLeavesAStaleHandle
-            && drain.policy == RevokePolicy::Force
+        let keeps_the_record = match self.defect {
+            Defect::ForcedApplyRemovalLeavesAStaleHandle => drain.policy == RevokePolicy::Force,
+            Defect::GracefulApplyRemovalLeavesAStaleHandle => {
+                drain.policy == RevokePolicy::Graceful
+            }
+            _ => false,
+        };
+        if keeps_the_record
             && removed.is_ok()
             && let Some(record) = record
         {
