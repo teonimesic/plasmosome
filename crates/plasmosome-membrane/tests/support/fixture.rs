@@ -29,12 +29,23 @@ static FIXTURE: LazyLock<PathBuf> = LazyLock::new(|| {
         .status()
         .expect("the host C compiler starts for the supervision fixture");
     assert!(status.success(), "the supervision worker fixture compiles");
+    let usage = Command::new(&output)
+        .status()
+        .expect("the compiled supervision worker fixture runs");
+    assert_eq!(
+        usage.code(),
+        Some(64),
+        "the compiled supervision worker fixture refuses a call with no arguments"
+    );
     output
 });
 
 /// Takes no arguments and returns the path of the supervision worker fixture.
 ///
-/// The fixture is compiled once per test process with the host C compiler.
+/// The fixture is compiled once per test process with the host C compiler,
+/// then run once with no arguments before its path is returned. macOS charges
+/// the first exec of a freshly linked binary up to seconds under load, so the
+/// warm-up spends that cost here, where no test deadline is running.
 /// Callers must not remove or replace the returned executable. Production
 /// builds of the crate never compile the fixture; the build script compiles
 /// only the product Darwin helper.
