@@ -1,14 +1,57 @@
-use plasmosome_core::{LogStep, SessionLog, SessionLogError, read_events};
+use plasmosome_core::{LogFault, LogStep, SessionLog, SessionLogError, read_events};
 use serde_json::json;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const LOG: &str = "session.ndjson";
 const LOCK_HOLDER: &str = "PLASMOSOME_SESSION_LOG_LOCK_HOLDER";
 const HOLDING: &str = "session log writer lock held";
+const PATIENCE: Duration = Duration::from_secs(60);
+
+struct PausedChild(libc::pid_t);
+
+impl PausedChild {
+    fn fork() -> PausedChild {
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        assert!(pid > 0, "fork: {}", std::io::Error::last_os_error());
+        PausedChild(pid)
+    }
+
+    fn is_alive(&self) -> bool {
+        unsafe { libc::kill(self.0, 0) == 0 }
+    }
+}
+
+impl Drop for PausedChild {
+    fn drop(&mut self) {
+        unsafe { libc::kill(self.0, libc::SIGKILL) };
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let mut status = 0;
+            let reaped = unsafe { libc::waitpid(self.0, &mut status, libc::WNOHANG) };
+            if reaped == self.0 || reaped == -1 {
+                return;
+            }
+            if Instant::now() >= deadline {
+                assert!(
+                    std::thread::panicking(),
+                    "the forked child {} was not reaped within {PATIENCE:?}",
+                    self.0
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
 
 fn assert_locked(result: Result<SessionLog, SessionLogError>, at: &Path) {
     match result {
@@ -108,5 +151,45 @@ fn read_events_refuses_a_fifo_without_hanging() {
         }
         Ok(other) => panic!("expected an Io error at Read, got {other:?}"),
         Err(timeout) => panic!("read_events did not return: {timeout:?}"),
+    }
+}
+
+#[test]
+fn a_forked_child_does_not_keep_a_dropped_log_locked() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(LOG);
+    let log = SessionLog::open(path.clone()).unwrap();
+    assert_eq!(log.append("a", json!({})).unwrap(), 1);
+    let child = PausedChild::fork();
+    drop(log);
+    let reopened = SessionLog::open(path.clone());
+    assert!(child.is_alive(), "the forked child still shares the file");
+    let log = match reopened {
+        Ok(log) => log,
+        Err(error) => panic!("reopen after drop while a forked child lives: {error:?}"),
+    };
+    assert_eq!(log.append("b", json!({})).unwrap(), 2);
+}
+
+#[test]
+fn a_forked_child_does_not_keep_a_poisoned_log_locked() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(LOG);
+    std::fs::write(
+        &path,
+        format!("{{\"seq\":{},\"kind\":\"a\"}}\n", u64::MAX - 1),
+    )
+    .unwrap();
+    let log = SessionLog::open(path.clone()).unwrap();
+    let child = PausedChild::fork();
+    assert_eq!(log.append("b", json!({})).unwrap(), u64::MAX);
+    let reopened = SessionLog::open(path.clone());
+    assert!(child.is_alive(), "the forked child still shares the file");
+    match reopened {
+        Err(SessionLogError::Malformed { line, fault, .. }) => {
+            assert_eq!((line, fault), (2, LogFault::SequenceExhausted));
+        }
+        Err(other) => panic!("reopen after poison while a forked child lives: {other:?}"),
+        Ok(_) => panic!("a log whose last seq is u64::MAX opened"),
     }
 }
