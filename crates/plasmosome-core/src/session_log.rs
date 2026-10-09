@@ -235,13 +235,13 @@ impl SessionLog {
 
     /// Opens the log at `path` through `store`, creating it and any missing parent directories.
     ///
-    /// The nearest existing ancestor must be a directory. A symlink at `path`, or anything there
-    /// that is not a regular file, is refused. The open takes the writer lock described on
-    /// [`SessionLog`], or returns [`SessionLogError::Locked`]. An existing log must pass the
-    /// checks [`read_events`] makes, or this returns [`SessionLogError::Malformed`] and leaves
-    /// the file as it was; a log whose last `seq` is `u64::MAX` is refused too. The check reads
-    /// one line at a time and keeps only the last `seq`, so its memory grows with the longest
-    /// line, not with the log.
+    /// The nearest existing ancestor must be a directory, and symlinks among the ancestors are
+    /// followed. A symlink at `path`, or anything there that is not a regular file, is refused.
+    /// The open takes the writer lock described on [`SessionLog`], or returns
+    /// [`SessionLogError::Locked`]. An existing log must pass the checks [`read_events`] makes,
+    /// or this returns [`SessionLogError::Malformed`] and leaves the file as it was; a log whose
+    /// last `seq` is `u64::MAX` is refused too. The check reads one line at a time and keeps only
+    /// the last `seq`, so its memory grows with the longest line, not with the log.
     ///
     /// Before returning, every open syncs the file, then its directory and each ancestor of that
     /// directory up to the root, whether or not this call created them. A directory an earlier,
