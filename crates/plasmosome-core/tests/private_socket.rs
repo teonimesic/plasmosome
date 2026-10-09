@@ -94,8 +94,8 @@ fn root_bases() -> Vec<PathBuf> {
 #[cfg(target_os = "macos")]
 const ROOT_HINT: &str = "the integration tests make their roots under the per-user temp \
 directory that confstr(_CS_DARWIN_USER_TEMP_DIR) reports; its ancestors must be owned by root \
-or by this user, writable by neither group nor other, and carry no ACL entry that lets another \
-principal replace entries";
+or by this user, writable by neither group nor other, and carry no ACL allow entry granting \
+add_file, add_subdirectory, delete_child, delete, writesecurity or chown";
 
 #[cfg(target_os = "linux")]
 fn root_bases() -> Vec<PathBuf> {
@@ -113,7 +113,49 @@ const ROOT_HINT: &str = "the integration tests make their roots under XDG_RUNTIM
 is set, else under the target directory's tmp; set XDG_RUNTIME_DIR to a short path whose \
 ancestors are owned by root or by this user and writable by neither group nor other";
 
-fn private_root() -> TempDir {
+struct TestRoot(TempDir);
+
+impl TestRoot {
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl From<TempDir> for TestRoot {
+    fn from(dir: TempDir) -> Self {
+        TestRoot(dir)
+    }
+}
+
+impl Drop for TestRoot {
+    fn drop(&mut self) {
+        open_up(self.path());
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("/bin/chmod")
+            .args(["-R", "-N"])
+            .arg(self.path())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+fn open_up(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if !metadata.is_dir() {
+        return;
+    }
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        open_up(&entry.path());
+    }
+}
+
+fn private_root() -> TestRoot {
     let mut refusals = Vec::new();
     for base in root_bases() {
         let root = match tempfile::Builder::new().prefix("ps").tempdir_in(&base) {
@@ -131,7 +173,7 @@ fn private_root() -> TempDir {
                 "{}: a {length}-byte root leaves fewer than {NAME_ROOM} bytes for a socket name",
                 base.display()
             )),
-            Ok(_) => return root,
+            Ok(_) => return TestRoot::from(root),
         }
     }
     panic!(
@@ -149,11 +191,11 @@ fn make_dir(path: &Path, mode: u32) {
     set_mode(path, mode);
 }
 
-fn private_dir(root: &TempDir) -> PrivateDir {
+fn private_dir(root: &TestRoot) -> PrivateDir {
     PrivateDir::open(root.path()).expect("the test root is private")
 }
 
-fn bind(root: &TempDir, name: &str) -> PrivateListener {
+fn bind(root: &TestRoot, name: &str) -> PrivateListener {
     PrivateListener::bind(private_dir(root), name, effective_uid()).expect("bind")
 }
 
@@ -213,10 +255,12 @@ fn open_refuses_the_system_temp_directories_and_the_root_directory() {
     let sticky = Path::new("/private/tmp");
     #[cfg(target_os = "linux")]
     let sticky = Path::new("/tmp");
-    let held = tempfile::Builder::new()
-        .prefix("ps")
-        .tempdir_in(sticky)
-        .expect("a directory in the sticky temp directory");
+    let held = TestRoot::from(
+        tempfile::Builder::new()
+            .prefix("ps")
+            .tempdir_in(sticky)
+            .expect("a directory in the sticky temp directory"),
+    );
     set_mode(held.path(), 0o700);
     make_dir(&held.path().join("cell"), 0o700);
     assert_eq!(
@@ -998,10 +1042,12 @@ fn a_different_uid_client_cannot_reach_the_socket() {
     let base = temp
         .parent()
         .expect("the per-user temp directory has a parent");
-    let root = tempfile::Builder::new()
-        .prefix("ps")
-        .tempdir_in(base)
-        .expect("a root other UIDs can search");
+    let root = TestRoot::from(
+        tempfile::Builder::new()
+            .prefix("ps")
+            .tempdir_in(base)
+            .expect("a root other UIDs can search"),
+    );
     set_mode(root.path(), 0o755);
     let open = root.path().join("open");
     make_dir(&open, 0o755);

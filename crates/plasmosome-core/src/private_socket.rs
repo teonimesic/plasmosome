@@ -1107,17 +1107,47 @@ mod tests {
         }
     }
 
-    fn test_root() -> TempDir {
+    struct TestRoot(TempDir);
+
+    impl TestRoot {
+        fn path(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            open_up(self.path());
+        }
+    }
+
+    fn open_up(path: &Path) {
+        let Ok(metadata) = fs::symlink_metadata(path) else {
+            return;
+        };
+        if !metadata.is_dir() {
+            return;
+        }
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            open_up(&entry.path());
+        }
+    }
+
+    fn test_root() -> TestRoot {
         let root = tempfile::tempdir().expect("tempdir");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("chmod");
-        root
+        TestRoot(root)
     }
 
     fn set_mode(path: &Path, mode: u32) {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("chmod");
     }
 
-    fn start(root: &TempDir) -> OwnedFd {
+    fn start(root: &TestRoot) -> OwnedFd {
         OwnedFd::from(fs::File::open(root.path()).expect("the test root opens"))
     }
 
@@ -1126,7 +1156,7 @@ mod tests {
         set_mode(path, mode);
     }
 
-    fn open_in(root: &TempDir, relative: &str) -> Result<PrivateDir, PrivateSocketError> {
+    fn open_in(root: &TestRoot, relative: &str) -> Result<PrivateDir, PrivateSocketError> {
         PrivateDir::open_from(start(root), root.path(), Path::new(relative))
     }
 
