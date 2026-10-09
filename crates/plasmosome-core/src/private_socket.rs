@@ -18,8 +18,10 @@ pub struct DirIdentity {
 /// ancestor is owned by root or the effective UID and writable by neither group nor other, and
 /// on macOS carries no ACL allow entry granting add_file, add_subdirectory, delete_child,
 /// delete, writesecurity or chown, whoever it names. The directory itself is owned by the
-/// effective UID, has no group or other bits and carries no ACL. The directory stays open, so
-/// a later rename of its path cannot redirect operations made through it.
+/// effective UID, has no group or other bits and carries no ACL. On macOS, no directory on the
+/// path may sit on a volume mounted with ownership ignored, where every user sees itself as
+/// the owner. The directory stays open, so a later rename of its path cannot redirect
+/// operations made through it.
 #[derive(Debug)]
 pub struct PrivateDir {
     path: PathBuf,
@@ -50,6 +52,7 @@ impl Walk {
         let mut held: Option<OwnedFd> = None;
         for (index, component) in self.components.iter().enumerate() {
             let parent = held.as_ref().unwrap_or(&self.start);
+            refuse_ignored_ownership(parent, &at)?;
             judge_ancestor(&facts, euid, &at)?;
             refuse_replacing_acl(parent, &at)?;
             at.push(OsStr::from_bytes(component.as_bytes()));
@@ -78,6 +81,7 @@ impl Walk {
     fn judged(&self, path: &Path) -> Result<(OwnedFd, Facts), PrivateSocketError> {
         let euid = effective_uid();
         let (dir, facts) = self.run(euid)?;
+        refuse_ignored_ownership(&dir, path)?;
         judge_private(&facts, euid, path)?;
         refuse_acl(&dir, path)?;
         Ok((dir, facts))
@@ -974,6 +978,24 @@ fn refuse_replacing_acl(dir: &OwnedFd, at: &Path) -> Result<(), PrivateSocketErr
 
 #[cfg(target_os = "linux")]
 fn refuse_replacing_acl(_dir: &OwnedFd, _at: &Path) -> Result<(), PrivateSocketError> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn refuse_ignored_ownership(dir: &OwnedFd, at: &Path) -> Result<(), PrivateSocketError> {
+    let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+    let ignored = if unsafe { libc::fstatfs(dir.as_raw_fd(), &mut stats) } == 0 {
+        Ok(stats.f_flags & libc::MNT_IGNORE_OWNERSHIP as u32 != 0)
+    } else {
+        Err(("fstatfs", last_errno()))
+    };
+    refuse_if(ignored, at, |path| PrivateSocketError::OwnershipIgnored {
+        path,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn refuse_ignored_ownership(_dir: &OwnedFd, _at: &Path) -> Result<(), PrivateSocketError> {
     Ok(())
 }
 
