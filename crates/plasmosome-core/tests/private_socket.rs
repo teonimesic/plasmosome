@@ -640,6 +640,14 @@ fn a_volume_mounted_with_ownership_ignored_is_refused() {
         image.as_os_str(),
     ]);
     let _attached = Attached(mount.clone());
+    set_mode(&mount, 0o700);
+    assert_eq!(
+        PrivateDir::open(&mount).map(|dir| dir.path().to_path_buf()),
+        Err(PrivateSocketError::OwnershipIgnored {
+            path: mount.clone()
+        }),
+        "the volume's own root as the private directory"
+    );
     let cell = mount.join("cell");
     make_dir(&cell, 0o700);
     assert_eq!(
