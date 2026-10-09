@@ -72,7 +72,10 @@ pub(crate) const CELL_SUPERVISOR_SOCKET: &str = "membrane.uds";
 
 /// Checks that `cell` can name one directory under `<root>/cells`: nonempty, not exactly `.` or
 /// `..`, and free of `/`, `\` and NUL. A dot inside a name such as `a.b` is allowed. An invalid ID
-/// is refused with its text unchanged; nothing is trimmed or replaced.
+/// is refused with its text unchanged; nothing is trimmed, lower-cased or replaced. On a
+/// filesystem that folds case or Unicode normalization, two valid IDs can reach one directory;
+/// [`InstanceRoot::cell_dir`](crate::InstanceRoot::cell_dir) refuses the spelling that is not
+/// the name on disk.
 pub fn validate_cell_id(cell: &CellId) -> Result<(), CellPathError> {
     let text = cell.as_str();
     if text.is_empty() {
@@ -84,8 +87,12 @@ pub fn validate_cell_id(cell: &CellId) -> Result<(), CellPathError> {
     Ok(())
 }
 
-/// Returns `<root>/cells/<cell>/ledger.ndjson`, the cell's journal. This is the only function that
-/// names the journal: every reader and writer resolves it here. An invalid ID is refused as
+/// Returns `<root>/cells/<cell>/ledger.ndjson`, the cell's journal path, for messages and
+/// reports. It is built from the same names the instance root opens, but no reader or writer
+/// opens this path: opening it would follow a symlink at `cells` or at the cell. Open the journal
+/// relative to the cell directory instead, through
+/// [`InstanceRoot::cell_dir`](crate::InstanceRoot::cell_dir) and
+/// [`CellDir::open_journal`](crate::CellDir::open_journal). An invalid ID is refused as
 /// [`validate_cell_id`] refuses it. `root` is used as given.
 pub fn cell_ledger_path(root: &Path, cell: &CellId) -> Result<PathBuf, CellPathError> {
     Ok(cell_path(root, cell)?.join(CELL_JOURNAL_FILE))
@@ -93,6 +100,10 @@ pub fn cell_ledger_path(root: &Path, cell: &CellId) -> Result<PathBuf, CellPathE
 
 /// Returns `<root>/cells/<cell>/membrane.uds`, the cell supervisor's socket, refusing an invalid
 /// ID as [`validate_cell_id`] does. It builds the path only; it does not check what is there.
+/// Connecting by this path follows a symlink in any of its components, so a caller must not
+/// connect through it until `cells` and the cell directory have been validated without following
+/// a symlink (spec 008: only socket paths under validated no-follow directories are used). This
+/// crate does not perform that validation for sockets.
 pub fn cell_supervisor_socket_path(root: &Path, cell: &CellId) -> Result<PathBuf, CellPathError> {
     Ok(cell_path(root, cell)?.join(CELL_SUPERVISOR_SOCKET))
 }

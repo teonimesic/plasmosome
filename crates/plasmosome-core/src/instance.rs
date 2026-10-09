@@ -28,6 +28,11 @@ type Identity = (u64, u64);
 /// An opened instance root directory. The operator supplies and trusts the root, so `open` may
 /// reach it through a symlink; every name beneath it is opened relative to this descriptor
 /// without following a symlink.
+///
+/// Private modes (0700 for directories, 0600 for files) are set with `fchmod`, whatever the
+/// umask. On macOS they do not restrict access when the root or `cells` carries an inheritable
+/// ACL: the new entry inherits it and the mode does not show it. Nothing here removes or checks
+/// ACLs.
 #[derive(Debug)]
 pub struct InstanceRoot {
     dir: OwnedFd,
@@ -72,9 +77,17 @@ impl InstanceRoot {
     /// `<root>/controller.lock`, opened without following a symlink and close-on-exec. The file
     /// is created if missing. Once the lock is held, every call sets the file to mode 0600 and
     /// syncs the root, so a retry after a failed call finishes what the failed call began.
-    /// Another holder, in this process or another, makes this `Busy`; it never waits. The lock
-    /// lasts until the returned value is dropped or the process dies, and the file is never
-    /// unlinked.
+    /// Another holder, in this process or another, makes this `Busy`; it never waits. The file is
+    /// never unlinked.
+    ///
+    /// The lock lasts until the returned value is dropped or the process dies, provided no
+    /// process forked from this one still has the lock file open without having called `exec`.
+    /// Such a child keeps the lock alive after this process dies, and an unlock from it releases
+    /// this process's lock. Close-on-exec covers a child only once it has called `exec`.
+    ///
+    /// The lock assumes a local filesystem and does not check for one. On NFS and similar
+    /// filesystems `flock` may be emulated, lost silently or held past a crash; spec 008 makes
+    /// it a local writer exclusion, not a cross-host lock.
     pub fn lock(&self) -> Result<WriterLock, LockError> {
         let path = self.path.join(LOCK_FILE);
         let io_error = |source| LockError::Io {
@@ -112,11 +125,13 @@ impl InstanceRoot {
     }
 
     /// Lists every entry of `<root>/cells` and classifies it, opening nothing through a symlink.
-    /// A missing `cells` is a fresh instance with no entries. A symlinked or non-directory
+    /// It needs this root's writer lock; a lock taken on another root is `ForeignLock`. A
+    /// missing `cells` is a fresh instance with no entries. A symlinked or non-directory
     /// `cells`, or any failure to list or inspect all of its entries, refuses the whole
-    /// discovery: a partial listing is never returned. A bad entry or an unopenable cell is
-    /// reported in its own entry while its siblings are still classified. Entries come in
-    /// raw-byte order of their names.
+    /// discovery: a partial listing is never returned. Running out of file descriptors
+    /// (`EMFILE`, `ENFILE`) is a fault of the process, not of a cell, and also refuses the whole
+    /// discovery. A bad entry or an unopenable cell is reported in its own entry while its
+    /// siblings are still classified. Entries come in raw-byte order of their names.
     pub fn discover(&self, lock: &WriterLock) -> Result<Discovery, DiscoveryError> {
         if lock.root != self.identity {
             return Err(DiscoveryError::ForeignLock {
@@ -173,7 +188,10 @@ impl InstanceRoot {
     }
 
     /// Opens an existing cell's directory, following no symlink at `cells` or at the cell. An
-    /// invalid ID is refused before anything is opened.
+    /// invalid ID is refused before anything is opened, and a missing `cells` or cell is
+    /// `Missing`. The name on disk must equal the ID byte for byte: on a filesystem that folds
+    /// case or Unicode normalization, another spelling of an existing cell is refused as `Alias`.
+    /// Opening needs no lock; appending to the journal does.
     pub fn cell_dir(&self, cell: &CellId) -> Result<CellDir, CellDirError> {
         let journal_path = cell_ledger_path(&self.path, cell).map_err(CellDirError::InvalidCell)?;
         let cells_path = self.path.join(CELLS_DIR);
@@ -211,7 +229,8 @@ impl InstanceRoot {
     }
 
     /// Creates `<root>/cells/<cell>` exclusively with mode 0700, whatever the umask, creating
-    /// `cells` when it is missing. Each directory is made from its opened parent. Every call
+    /// `cells` when it is missing. It needs this root's writer lock; a lock taken on another root
+    /// is `ForeignLock` and nothing is created. Each directory is made from its opened parent. Every call
     /// sets `cells` to mode 0700 and syncs the root and then `cells`, including a call that finds
     /// the cell already there, so a retry after a failed call makes durable what the failed call
     /// created. A failed sync names the directory that was being synced. An existing cell
@@ -362,7 +381,9 @@ impl InstanceRoot {
 }
 
 /// The instance's writer lock. Dropping it releases the lock and leaves `controller.lock` in
-/// place; so does the death of the process holding it.
+/// place; so does the death of the process holding it, unless a forked child that has not
+/// called `exec` still holds the file (see [`InstanceRoot::lock`]). Discovery, cell creation and
+/// journal appends take it as proof that the caller holds the lock of the same root.
 #[must_use = "dropping the WriterLock releases the instance lock"]
 pub struct WriterLock {
     file: File,
@@ -422,7 +443,8 @@ impl CellDir {
     }
 
     /// Opens the journal for reading and appending, without following a symlink, blocking on a
-    /// FIFO or truncating. An existing regular journal returns `created: false`. A missing one
+    /// FIFO or truncating. It needs the writer lock of the root this directory was opened from;
+    /// another root's lock is `ForeignLock`. An existing regular journal returns `created: false`. A missing one
     /// is created exclusively and returns `created: true`. Either way the journal is set to mode
     /// 0600. This call does not sync the journal or its directory. An existing inode is never
     /// replaced.
@@ -457,7 +479,10 @@ impl CellDir {
 
 /// A journal opened for reading and appending through one descriptor. `created` is true when
 /// this open created the file: its directory entry is not yet durable until the caller syncs
-/// the file and then the cell directory with [`CellDir::sync`].
+/// the file and then the cell directory with [`CellDir::sync`]. `created: false` does not prove
+/// the entry is durable: an earlier open may have created the file and failed before that sync,
+/// so a caller resuming an existing journal also syncs the cell directory once before it acts
+/// on the journal.
 #[derive(Debug)]
 pub struct JournalAppend {
     pub file: File,
@@ -473,7 +498,8 @@ pub enum JournalOpen {
 }
 
 /// Why a cell's journal was not opened. `CellDirectory` means the cell directory itself could
-/// not be opened.
+/// not be opened. It was then never validated, so no path under it may be used, including its
+/// supervisor socket.
 #[derive(Debug)]
 pub enum JournalRefusal {
     CellDirectory(io::Error),
