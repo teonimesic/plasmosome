@@ -991,13 +991,23 @@ mod tests {
         }
     }
 
+    fn test_root() -> TempDir {
+        let root = tempfile::tempdir().expect("tempdir");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("chmod");
+        root
+    }
+
+    fn set_mode(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+
     fn start(root: &TempDir) -> OwnedFd {
         OwnedFd::from(fs::File::open(root.path()).expect("the test root opens"))
     }
 
     fn make_dir(path: &Path, mode: u32) {
         fs::create_dir(path).expect("mkdir");
-        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("chmod");
+        set_mode(path, mode);
     }
 
     fn open_in(root: &TempDir, relative: &str) -> Result<PrivateDir, PrivateSocketError> {
@@ -1119,7 +1129,7 @@ mod tests {
 
     #[test]
     fn open_from_refuses_a_symlinked_component_without_following_it() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = test_root();
         make_dir(&root.path().join("a"), 0o700);
         make_dir(&root.path().join("b"), 0o700);
         make_dir(&root.path().join("b/cell"), 0o700);
@@ -1141,7 +1151,7 @@ mod tests {
 
     #[test]
     fn open_from_refuses_a_group_writable_intermediate() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = test_root();
         make_dir(&root.path().join("a"), 0o775);
         make_dir(&root.path().join("a/cell"), 0o700);
         assert_eq!(
@@ -1155,7 +1165,7 @@ mod tests {
 
     #[test]
     fn open_from_refuses_a_0750_final_directory() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = test_root();
         make_dir(&root.path().join("cell"), 0o750);
         assert_eq!(
             open_in(&root, "cell").unwrap_err(),
@@ -1168,7 +1178,7 @@ mod tests {
 
     #[test]
     fn open_from_refuses_a_missing_component_and_a_file_in_the_path() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = test_root();
         fs::write(root.path().join("file"), b"").expect("write");
         assert_eq!(
             open_in(&root, "absent/cell").unwrap_err(),
@@ -1192,7 +1202,7 @@ mod tests {
 
     #[test]
     fn open_from_accepts_a_0700_final_directory_and_reconfirm_passes() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = test_root();
         make_dir(&root.path().join("a"), 0o755);
         make_dir(&root.path().join("a/cell"), 0o700);
         let dir = open_in(&root, "a/cell").expect("a private directory opens");
@@ -1209,8 +1219,25 @@ mod tests {
     }
 
     #[test]
+    fn open_from_passes_an_intermediate_it_can_search_but_not_read() {
+        let root = test_root();
+        let a = root.path().join("a");
+        make_dir(&a, 0o755);
+        make_dir(&a.join("cell"), 0o700);
+        set_mode(&a, 0o311);
+        let opened = open_in(&root, "a/cell");
+        let reconfirmed = opened.as_ref().ok().map(PrivateDir::reconfirm);
+        set_mode(&a, 0o755);
+        assert_eq!(
+            opened.expect("a search-only intermediate passes").path(),
+            a.join("cell")
+        );
+        assert_eq!(reconfirmed, Some(Ok(())));
+    }
+
+    #[test]
     fn reconfirm_fails_after_the_directory_is_replaced() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = test_root();
         make_dir(&root.path().join("cell"), 0o700);
         let dir = open_in(&root, "cell").expect("a private directory opens");
         fs::rename(root.path().join("cell"), root.path().join("moved")).expect("rename");
@@ -1225,7 +1252,7 @@ mod tests {
 
     #[test]
     fn reconfirm_fails_when_the_directory_is_no_longer_private() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = test_root();
         make_dir(&root.path().join("cell"), 0o700);
         let dir = open_in(&root, "cell").expect("a private directory opens");
         fs::set_permissions(root.path().join("cell"), fs::Permissions::from_mode(0o750))
@@ -1259,7 +1286,7 @@ mod tests {
 
     #[test]
     fn prepare_leaves_a_0600_socket_that_refuses_connections() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = test_root();
         make_dir(&root.path().join("cell"), 0o700);
         let dir = open_in(&root, "cell").expect("a private directory opens");
         let (socket, bound) = prepare(dir, "sock").expect("prepare binds");
@@ -1281,6 +1308,106 @@ mod tests {
         drop(socket);
         drop(bound);
         assert!(fs::symlink_metadata(&path).is_err());
+    }
+
+    fn refusal_of(
+        outcome: Result<(OwnedFd, BoundEntry), PrivateSocketError>,
+    ) -> PrivateSocketError {
+        match outcome {
+            Ok((_, bound)) => panic!("prepare bound {:?}", bound.entry),
+            Err(refusal) => refusal,
+        }
+    }
+
+    fn entries(path: &Path) -> Vec<PathBuf> {
+        fs::read_dir(path)
+            .expect("readdir")
+            .map(|entry| entry.expect("an entry").path())
+            .collect()
+    }
+
+    #[test]
+    fn prepare_refuses_a_directory_that_stopped_being_private_without_binding() {
+        let root = test_root();
+        let cell = root.path().join("cell");
+        make_dir(&cell, 0o700);
+        let dir = open_in(&root, "cell").expect("a private directory opens");
+        set_mode(&cell, 0o750);
+        let mut bound = false;
+        let refusal = refusal_of(prepare_with(dir, "sock", || bound = true));
+        assert_eq!(
+            refusal,
+            PrivateSocketError::NotPrivate {
+                path: cell.clone(),
+                mode: 0o750
+            }
+        );
+        assert!(
+            !bound,
+            "the socket was bound in a directory no longer private"
+        );
+        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn prepare_reports_the_recheck_and_removes_a_socket_bound_before_the_directory_changed() {
+        let root = test_root();
+        let cell = root.path().join("cell");
+        make_dir(&cell, 0o700);
+        let dir = open_in(&root, "cell").expect("a private directory opens");
+        let refusal = refusal_of(prepare_with(dir, "sock", || set_mode(&cell, 0o750)));
+        assert_eq!(
+            refusal,
+            PrivateSocketError::NotPrivate {
+                path: cell.clone(),
+                mode: 0o750
+            }
+        );
+        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn prepare_reports_a_directory_replaced_after_bind_and_removes_the_socket() {
+        let root = test_root();
+        let cell = root.path().join("cell");
+        let moved = root.path().join("moved");
+        make_dir(&cell, 0o700);
+        let dir = open_in(&root, "cell").expect("a private directory opens");
+        let refusal = refusal_of(prepare_with(dir, "sock", || {
+            fs::rename(&cell, &moved).expect("rename");
+            make_dir(&cell, 0o700);
+        }));
+        assert_eq!(refusal, PrivateSocketError::Replaced { path: cell.clone() });
+        assert_eq!(entries(&moved), Vec::<PathBuf>::new());
+        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn prepare_reports_bind_escaped_and_leaves_the_name_when_no_socket_is_there() {
+        let root = test_root();
+        let cell = root.path().join("cell");
+        make_dir(&cell, 0o700);
+        let sock = cell.join("sock");
+        let dir = open_in(&root, "cell").expect("a private directory opens");
+        let refusal = refusal_of(prepare_with(dir, "sock", || {
+            fs::remove_file(&sock).expect("unlink");
+        }));
+        assert_eq!(
+            refusal,
+            PrivateSocketError::BindEscaped { path: sock.clone() }
+        );
+        assert_eq!(entries(&cell), Vec::<PathBuf>::new());
+
+        let dir = open_in(&root, "cell").expect("a private directory opens");
+        let refusal = refusal_of(prepare_with(dir, "sock", || {
+            fs::remove_file(&sock).expect("unlink");
+            fs::write(&sock, b"planted").expect("write");
+        }));
+        assert_eq!(
+            refusal,
+            PrivateSocketError::BindEscaped { path: sock.clone() }
+        );
+        assert_eq!(fs::read(&sock).expect("the planted file stays"), b"planted");
     }
 
     #[test]
@@ -1330,6 +1457,10 @@ mod tests {
                     mode: 0o1777,
                 },
                 "/r/cell has mode 1777: group or other can replace entries in it",
+            ),
+            (
+                PrivateSocketError::ReplaceableByAcl { at: at() },
+                "/r/cell has an ACL entry that lets another principal replace entries in it",
             ),
             (
                 PrivateSocketError::NotPrivate {
