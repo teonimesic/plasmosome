@@ -387,6 +387,9 @@ pub enum PrivateSocketError {
         at: PathBuf,
         mode: u32,
     },
+    ReplaceableByAcl {
+        at: PathBuf,
+    },
     NotPrivate {
         path: PathBuf,
         mode: u32,
@@ -460,6 +463,11 @@ impl fmt::Display for PrivateSocketError {
             PrivateSocketError::Replaceable { at, mode } => write!(
                 f,
                 "{} has mode {mode:04o}: group or other can replace entries in it",
+                at.display()
+            ),
+            PrivateSocketError::ReplaceableByAcl { at } => write!(
+                f,
+                "{} has an ACL entry that lets another principal replace entries in it",
                 at.display()
             ),
             PrivateSocketError::NotPrivate { path, mode } => write!(
@@ -641,6 +649,14 @@ fn judge_peer(trusted: u32, found: u32) -> Result<(), PrivateSocketError> {
 }
 
 fn prepare(dir: PrivateDir, name: &str) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
+    prepare_with(dir, name, || {})
+}
+
+fn prepare_with(
+    dir: PrivateDir,
+    name: &str,
+    after_bind: impl FnOnce(),
+) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
     let c_name = entry_name(name)?;
     let path = dir.path.join(name);
     let (address, length) = address_for(&path)?;
@@ -671,6 +687,7 @@ fn prepare(dir: PrivateDir, name: &str) -> Result<(OwnedFd, BoundEntry), Private
             io_failure("bind", &path, &error)
         });
     }
+    after_bind();
     let created = match (dir.reconfirm(), stat_at(&dir.dir, &c_name)) {
         (Ok(()), Ok(facts)) if facts.kind == Kind::Socket => facts,
         _ => return Err(PrivateSocketError::BindEscaped { path }),
