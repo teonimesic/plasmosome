@@ -268,8 +268,8 @@ fn the_envelope_edges_hold_on_the_wire() {
     assert_eq!(refusal.get("id"), Some(&Value::Null), "{refusal}");
     let mut after = String::new();
     assert_eq!(
-        over_cap.read_line(&mut after).ok(),
-        Some(0),
+        over_cap.read_line(&mut after).map_err(|error| error.kind()),
+        Ok(0),
         "the connection closes after an over-long line, got {after:?}"
     );
 }
