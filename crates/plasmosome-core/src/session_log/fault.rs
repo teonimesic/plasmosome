@@ -10,6 +10,7 @@ pub(crate) enum Step {
     Write,
     Flush,
     SyncFile,
+    Read,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,17 +46,30 @@ enum Fault {
 #[derive(Default)]
 struct Record {
     calls: Vec<Call>,
+    reads: usize,
     planned: Vec<(Step, usize, Fault)>,
 }
 
 impl Record {
     fn count(&self, step: Step) -> usize {
-        self.calls.iter().filter(|call| call.step() == step).count()
+        match step {
+            Step::Read => self.reads,
+            _ => self.calls.iter().filter(|call| call.step() == step).count(),
+        }
     }
 
     fn enter(&mut self, call: Call) -> Option<Fault> {
         let step = call.step();
         self.calls.push(call);
+        self.planned_at(step)
+    }
+
+    fn enter_read(&mut self) -> Option<Fault> {
+        self.reads += 1;
+        self.planned_at(Step::Read)
+    }
+
+    fn planned_at(&self, step: Step) -> Option<Fault> {
         let nth = self.count(step);
         self.planned
             .iter()
@@ -66,6 +80,10 @@ impl Record {
 
 fn enter(record: &Mutex<Record>, call: Call) -> Option<Fault> {
     record.lock().expect("fault record lock").enter(call)
+}
+
+fn enter_read(record: &Mutex<Record>) -> Option<Fault> {
+    record.lock().expect("fault record lock").enter_read()
 }
 
 fn injected() -> std::io::Error {
@@ -154,6 +172,7 @@ struct FaultLogFile {
 
 impl std::io::Read for FaultLogFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        strike(enter_read(&self.record))?;
         self.inner.read(buf)
     }
 }

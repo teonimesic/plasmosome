@@ -247,19 +247,16 @@ impl SessionLog {
                 io_error(&path, LogStep::Open)(source)
             }
         })?;
-        let mut existing = Vec::new();
-        std::io::Read::read_to_end(&mut file, &mut existing)
-            .map_err(io_error(&path, LogStep::Open))?;
-        let (events, last_seq) = parse_lines(&path, &existing)?;
-        let next_seq = match last_seq {
+        let next_seq = match scan_lines(&path, &mut file, |_| {})? {
             None => 1,
-            Some(last) => last
-                .checked_add(1)
-                .ok_or_else(|| SessionLogError::Malformed {
-                    path: path.clone(),
-                    line: events.len(),
-                    fault: LogFault::SequenceExhausted,
-                })?,
+            Some((line, last)) => {
+                last.checked_add(1)
+                    .ok_or_else(|| SessionLogError::Malformed {
+                        path: path.clone(),
+                        line,
+                        fault: LogFault::SequenceExhausted,
+                    })?
+            }
         };
         file.sync_all()
             .map_err(io_error(&path, LogStep::SyncFile))?;
@@ -422,36 +419,39 @@ fn event_line(seq: u64, kind: &str, payload: serde_json::Value) -> String {
 /// No line is skipped and the file is never changed. The read takes no lock, so reading while a
 /// writer appends can see its line half written and refuse it as a missing newline.
 pub fn read_events(path: &Path) -> Result<Vec<serde_json::Value>, SessionLogError> {
-    let file = match open_regular(std::fs::OpenOptions::new().read(true), path) {
+    let mut file = match open_regular(std::fs::OpenOptions::new().read(true), path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => return Err(io_error(path, LogStep::Read)(source)),
     };
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut &file, &mut bytes).map_err(io_error(path, LogStep::Read))?;
-    Ok(parse_lines(path, &bytes)?.0)
+    let mut events = Vec::new();
+    scan_lines(path, &mut file, |event| events.push(event))?;
+    Ok(events)
 }
 
-fn parse_lines(
+fn scan_lines(
     path: &Path,
-    bytes: &[u8],
-) -> Result<(Vec<serde_json::Value>, Option<u64>), SessionLogError> {
+    file: &mut dyn std::io::Read,
+    mut keep: impl FnMut(serde_json::Value),
+) -> Result<Option<(usize, u64)>, SessionLogError> {
     let malformed = |line, fault| SessionLogError::Malformed {
         path: path.to_path_buf(),
         line,
         fault,
     };
-    let mut events = Vec::new();
-    let mut last_seq: Option<u64> = None;
-    let mut segments = bytes.split(|byte| *byte == b'\n').enumerate().peekable();
-    while let Some((index, segment)) = segments.next() {
-        let line = index + 1;
-        if segments.peek().is_none() {
-            if segment.is_empty() {
-                break;
-            }
-            return Err(malformed(line, LogFault::MissingNewline));
+    let mut reader = std::io::BufReader::new(file);
+    let mut bytes = Vec::new();
+    let mut last: Option<(usize, u64)> = None;
+    for line in 1.. {
+        bytes.clear();
+        let read = std::io::BufRead::read_until(&mut reader, b'\n', &mut bytes)
+            .map_err(io_error(path, LogStep::Read))?;
+        if read == 0 {
+            break;
         }
+        let Some(segment) = bytes.strip_suffix(b"\n") else {
+            return Err(malformed(line, LogFault::MissingNewline));
+        };
         let text = std::str::from_utf8(segment).map_err(|_| malformed(line, LogFault::NotUtf8))?;
         let event: serde_json::Value =
             serde_json::from_str(text).map_err(|_| malformed(line, LogFault::NotJson))?;
@@ -463,13 +463,13 @@ fn parse_lines(
         let (Some(seq), Some(_)) = (seq, kind) else {
             return Err(malformed(line, LogFault::MissingEnvelope));
         };
-        if last_seq.is_some_and(|last| seq <= last) {
+        if last.is_some_and(|(_, last_seq)| seq <= last_seq) {
             return Err(malformed(line, LogFault::SequenceNotIncreasing));
         }
-        last_seq = Some(seq);
-        events.push(event);
+        last = Some((line, seq));
+        keep(event);
     }
-    Ok((events, last_seq))
+    Ok(last)
 }
 
 /// [`read_events`] filtered to the events whose `kind` is `kind`, with the same refusals.
@@ -1256,5 +1256,16 @@ mod tests {
             Err(error) => assert_io_error(error, LogStep::Read, &dangling),
             Ok(events) => panic!("a dangling symlink read as {events:?}"),
         }
+    }
+
+    #[test]
+    fn a_failed_read_of_an_existing_log_refuses_open_and_releases_the_lock() {
+        let store = FaultLogStore::new().fail(Step::Read, 1);
+        let path = store.root().join(LOG);
+        std::fs::write(&path, b"{\"seq\":4,\"kind\":\"k\"}\n").unwrap();
+        assert_io_error(open_error(path.clone(), &store), LogStep::Read, &path);
+        assert_eq!(store.count(Step::Read), 1);
+        let log = SessionLog::open_with(path, &store).unwrap();
+        assert_eq!(log.append("k", json!({})).unwrap(), 5);
     }
 }
