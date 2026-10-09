@@ -103,9 +103,9 @@ as an amendment below rather than slipped past as an addition.
 
 An author who does not understand the kernel cannot act on a refusal phrased in the kernel's
 terms. So every refusal an author can cause names the declaration it read, the field in it that
-is wrong or missing, and the line the author would write. This is what makes the write-attach-fix
-loop converge for someone who never learns the rules: they do not have to know what is allowed,
-because the refusal tells them what they did not say.
+is wrong or missing, and the line the author would write, or the entry to remove. This is what
+makes the write-attach-fix loop converge for someone who never learns the rules: they do not have
+to know what is allowed, because the refusal tells them what they did not say.
 
 There are three shapes, and the third is the one that matters most.
 
@@ -227,7 +227,9 @@ a change nobody reviewed.
   refusals an author can reach gain one structured field, `fix`, holding the line the author would
   write. Where the field is list-valued, `fix` holds the entry to add, not the whole line: a
   replacement line would either drop the entries already there or name them, and naming what is
-  already granted is what the report above forbids.
+  already granted is what the report above forbids. Where the repair is to delete what `field`
+  names, `fix` is exactly `remove this entry`, and an entry in a list is named by its index, such
+  as `network.ports[1]`.
 - **§3.9 and §3.6, and only those two.** The `plasmid.add` reply of §3.10 and the
   `plasmid.reload` reply of §3.12 also carry a plasmid as an object and are deliberately left
   alone: both report a transition, and the plasmid on the far side of it has been denied nothing
@@ -325,12 +327,12 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 - **Deriving rescues nothing else.** A reference with no `delivery` whose scope is malformed — a
   relative path-scope entry — is refused with the same named error an explicit `inject` gets.
 - **Every refusal an author can cause carries the field path in the declaration and a `fix`
-  sentence** holding the line the author would write, and carries the plasmid id wherever the
-  declaration supplies one. A declaration with no `id` is the single case that cannot name a
-  plasmid; it names the missing `id` instead. Where a refusal must name more than one plasmid —
-  the requirers a detach would strand — it names them in the message and the `fix`, not in a new
-  structured field: §1's assertion carries a single plasmid, and adding a field to it would be a
-  fourth amendment this spec does not make.
+  sentence** holding the line the author would write, or exactly `remove this entry` where the
+  repair is a deletion, and carries the plasmid id wherever the declaration supplies one. A
+  declaration with no `id` is the single case that cannot name a plasmid; it names the missing `id`
+  instead. Where a refusal must name more than one plasmid — the requirers a detach would strand —
+  it names them in the message and the `fix`, not in a new structured field: §1's assertion carries
+  a single plasmid, and adding a field to it would be a fourth amendment this spec does not make.
 - **A capability denied at the boundary is reported as a missing declaration.** The report names
   what was denied and the declaration field it belongs in, and names nothing that was granted or
   would have been. It is written to the cell's session log, one line per denial, and to the
