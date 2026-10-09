@@ -1,4 +1,8 @@
 use super::digest::{Digest, DigestError};
+use super::strict_json::{StrictJsonError, parse_value};
+use serde_json::{Map, Value};
+
+const GUEST_TEXT_LIMIT: usize = 1024;
 
 /// One of the two connections the guest shim opens to the host's 4090
 /// control port. The shim opens the normal lane first and the withdrawal lane
@@ -16,13 +20,23 @@ pub enum ControlLane {
 /// It carries exactly `id`, `method` and `params: {lane}`. The guest shim
 /// exits on any other field, so send these bytes unchanged.
 pub fn hello_request(lane: ControlLane) -> &'static [u8] {
-    todo!("{lane:?}")
+    match lane {
+        ControlLane::Normal => {
+            b"{\"id\":1,\"method\":\"hello\",\"params\":{\"lane\":\"normal\"}}\n"
+        }
+        ControlLane::Withdrawal => {
+            b"{\"id\":2,\"method\":\"hello\",\"params\":{\"lane\":\"withdrawal\"}}\n"
+        }
+    }
 }
 
 /// The request id that `hello_request(lane)` carries and its reply must
 /// echo: 1 on the normal lane, 2 on the withdrawal lane.
 pub fn request_id(lane: ControlLane) -> u64 {
-    todo!("{lane:?}")
+    match lane {
+        ControlLane::Normal => 1,
+        ControlLane::Withdrawal => 2,
+    }
 }
 
 /// The guest's boot token: 32 random bytes the shim draws once per boot and
@@ -36,18 +50,18 @@ impl BootToken {
     /// Reads exactly 64 lowercase hexadecimal digits. Uppercase digits, any
     /// other byte and any other length are refused with the first fault.
     pub fn parse_hex(text: &str) -> Result<BootToken, DigestError> {
-        todo!("{text}")
+        Digest::parse_hex(text).map(BootToken)
     }
 
     /// The 64 lowercase hexadecimal digits.
     pub fn hex(&self) -> String {
-        todo!()
+        self.0.hex()
     }
 }
 
 impl std::fmt::Debug for BootToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!("{f:p}")
+        f.write_str(&self.hex())
     }
 }
 
@@ -103,7 +117,65 @@ pub enum HelloRefusal {
 
 impl std::fmt::Display for HelloRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!("{f:p}")
+        match self {
+            HelloRefusal::NotUtf8 => f.write_str("the hello reply is not UTF-8"),
+            HelloRefusal::NotJson { detail } => {
+                write!(f, "the hello reply is not one JSON value: {detail}")
+            }
+            HelloRefusal::DuplicateKey { path } => {
+                write!(f, "the hello reply repeats the key at {path:?}")
+            }
+            HelloRefusal::NotAnObject { field } => {
+                write!(f, "the hello reply value at {field:?} is not a JSON object")
+            }
+            HelloRefusal::UnknownField { field } => write!(
+                f,
+                "the hello reply has a field hello does not define at {field:?}"
+            ),
+            HelloRefusal::MissingField { field } => {
+                write!(f, "the hello reply has no {field:?}")
+            }
+            HelloRefusal::WrongType { field } => {
+                write!(f, "the hello reply value at {field:?} is not a string")
+            }
+            HelloRefusal::WrongId { expected, found } => {
+                write!(f, "the hello reply answers id {found}, not {expected}")
+            }
+            HelloRefusal::GuestError {
+                code: Some(code),
+                message,
+            } => write!(f, "the guest refused hello with code {code}: {message:?}"),
+            HelloRefusal::GuestError {
+                code: None,
+                message,
+            } => write!(
+                f,
+                "the guest refused hello without an integer code: {message:?}"
+            ),
+            HelloRefusal::BadBoot {
+                fault: DigestError::WrongLength { bytes },
+            } => write!(
+                f,
+                "the hello boot token is {bytes} bytes long, not 64 lowercase hexadecimal digits"
+            ),
+            HelloRefusal::BadBoot {
+                fault: DigestError::NotLowercaseHex { at },
+            } => write!(
+                f,
+                "byte {at} of the hello boot token is not a lowercase hexadecimal digit"
+            ),
+            HelloRefusal::BadPolicy { fault } => write!(f, "the hello policy is refused: {fault}"),
+            HelloRefusal::PolicyMismatch { expected, reported } => write!(
+                f,
+                "the guest verified policy {reported}, not the expected {expected}"
+            ),
+            HelloRefusal::BootChanged { first, second } => write!(
+                f,
+                "the guest boot token changed from {} to {}",
+                first.hex(),
+                second.hex()
+            ),
+        }
     }
 }
 
@@ -125,7 +197,89 @@ pub fn judge_reply(
     expected_policy: &Digest,
     earlier: Option<&BootToken>,
 ) -> Result<HelloAnswer, HelloRefusal> {
-    todo!("{lane:?} {frame:?} {expected_policy:?} {earlier:?}")
+    if std::str::from_utf8(frame).is_err() {
+        return Err(HelloRefusal::NotUtf8);
+    }
+    let reply = parse_value(frame).map_err(|fault| match fault {
+        StrictJsonError::DuplicateKey { path } => HelloRefusal::DuplicateKey { path: cut(&path) },
+        StrictJsonError::NotJson { .. } => HelloRefusal::NotJson {
+            detail: fault.to_string(),
+        },
+    })?;
+    let reply = object(&reply, "")?;
+    if let Some(error) = reply.get("error") {
+        return Err(HelloRefusal::GuestError {
+            code: error.get("code").and_then(Value::as_i64),
+            message: error
+                .get("message")
+                .and_then(Value::as_str)
+                .map(cut)
+                .unwrap_or_default(),
+        });
+    }
+    closed(reply, "", &["id", "result"])?;
+    let expected = request_id(lane);
+    if reply["id"].as_u64() != Some(expected) {
+        return Err(HelloRefusal::WrongId {
+            expected,
+            found: cut(&reply["id"].to_string()),
+        });
+    }
+    let result = object(&reply["result"], "/result")?;
+    closed(result, "/result", &["boot", "policy"])?;
+    let boot = BootToken::parse_hex(text(result, "/result", "boot")?)
+        .map_err(|fault| HelloRefusal::BadBoot { fault })?;
+    let policy = Digest::parse_hex(text(result, "/result", "policy")?)
+        .map_err(|fault| HelloRefusal::BadPolicy { fault })?;
+    if policy != *expected_policy {
+        return Err(HelloRefusal::PolicyMismatch {
+            expected: *expected_policy,
+            reported: policy,
+        });
+    }
+    if let Some(&first) = earlier
+        && first != boot
+    {
+        return Err(HelloRefusal::BootChanged {
+            first,
+            second: boot,
+        });
+    }
+    Ok(HelloAnswer { lane, boot, policy })
+}
+
+fn object<'a>(value: &'a Value, at: &str) -> Result<&'a Map<String, Value>, HelloRefusal> {
+    value.as_object().ok_or_else(|| HelloRefusal::NotAnObject {
+        field: at.to_owned(),
+    })
+}
+
+fn closed(record: &Map<String, Value>, at: &str, fields: &[&str]) -> Result<(), HelloRefusal> {
+    if let Some(unknown) = record.keys().find(|key| !fields.contains(&key.as_str())) {
+        return Err(HelloRefusal::UnknownField {
+            field: cut(&pointer(at, unknown)),
+        });
+    }
+    match fields.iter().find(|field| !record.contains_key(**field)) {
+        Some(missing) => Err(HelloRefusal::MissingField {
+            field: pointer(at, missing),
+        }),
+        None => Ok(()),
+    }
+}
+
+fn text<'a>(record: &'a Map<String, Value>, at: &str, key: &str) -> Result<&'a str, HelloRefusal> {
+    record[key].as_str().ok_or_else(|| HelloRefusal::WrongType {
+        field: pointer(at, key),
+    })
+}
+
+fn pointer(at: &str, key: &str) -> String {
+    format!("{at}/{}", key.replace('~', "~0").replace('/', "~1"))
+}
+
+fn cut(text: &str) -> String {
+    text[..text.floor_char_boundary(GUEST_TEXT_LIMIT)].to_owned()
 }
 
 #[cfg(test)]
