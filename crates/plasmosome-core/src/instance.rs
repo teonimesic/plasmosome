@@ -65,9 +65,11 @@ impl InstanceRoot {
 
     /// Takes the instance's one writer lock: a nonblocking exclusive `flock` on
     /// `<root>/controller.lock`, opened without following a symlink and close-on-exec. The file
-    /// is created mode 0600 if missing, and the root is synced after creating it. Another holder,
-    /// in this process or another, makes this `Busy`; it never waits. The lock lasts until the
-    /// returned value is dropped or the process dies, and the file is never unlinked.
+    /// is created if missing. Once the lock is held, every call sets the file to mode 0600 and
+    /// syncs the root, so a retry after a failed call finishes what the failed call began.
+    /// Another holder, in this process or another, makes this `Busy`; it never waits. The lock
+    /// lasts until the returned value is dropped or the process dies, and the file is never
+    /// unlinked.
     pub fn lock(&self) -> Result<WriterLock, LockError> {
         let path = self.path.join(LOCK_FILE);
         let io_error = |source| LockError::Io {
@@ -75,30 +77,31 @@ impl InstanceRoot {
             source,
         };
         let name = c_name(LOCK_FILE.as_bytes()).map_err(io_error)?;
-        let (fd, created) =
-            self.open_lock_file(&name)
-                .map_err(|source| match source.raw_os_error() {
-                    Some(libc::ELOOP) => LockError::Symlink { path: path.clone() },
-                    _ if present_and_not_regular(self.dir.as_fd(), &name) => {
-                        LockError::NotRegular { path: path.clone() }
-                    }
-                    _ => io_error(source),
-                })?;
+        let fd = self
+            .open_lock_file(&name)
+            .map_err(|source| match source.raw_os_error() {
+                Some(libc::ELOOP) => LockError::Symlink { path: path.clone() },
+                _ if present_and_not_regular(self.dir.as_fd(), &name) => {
+                    LockError::NotRegular { path: path.clone() }
+                }
+                _ => io_error(source),
+            })?;
         let file = File::from(fd);
         if !file.metadata().map_err(io_error)?.is_file() {
             return Err(LockError::NotRegular { path });
         }
-        if created {
-            change_mode(file.as_fd(), PRIVATE_FILE).map_err(io_error)?;
-            (self.sync)(self.dir.as_fd()).map_err(io_error)?;
-        }
         match lock_exclusive_nonblocking(file.as_fd()) {
-            Ok(()) => Ok(WriterLock { file, path }),
             Err(source) if source.raw_os_error() == Some(libc::EWOULDBLOCK) => {
-                Err(LockError::Busy { path })
+                return Err(LockError::Busy { path });
             }
-            Err(source) => Err(LockError::Io { path, source }),
+            locked => locked.map_err(io_error)?,
         }
+        change_mode(file.as_fd(), PRIVATE_FILE).map_err(io_error)?;
+        (self.sync)(self.dir.as_fd()).map_err(|source| LockError::Io {
+            path: self.path.clone(),
+            source,
+        })?;
+        Ok(WriterLock { file, path })
     }
 
     /// Lists every entry of `<root>/cells` and classifies it, opening nothing through a symlink.
@@ -172,23 +175,31 @@ impl InstanceRoot {
     }
 
     /// Creates `<root>/cells/<cell>` exclusively with mode 0700, whatever the umask, creating
-    /// `cells` the same way when it is missing. Each directory is made from its opened parent,
-    /// which is synced afterwards. An existing cell directory is `AlreadyExists` and is never
-    /// adopted. An invalid ID is refused before anything is created.
+    /// `cells` when it is missing. Each directory is made from its opened parent. Every call
+    /// sets `cells` to mode 0700 and syncs the root and then `cells`, including a call that finds
+    /// the cell already there, so a retry after a failed call makes durable what the failed call
+    /// created. A failed sync names the directory that was being synced. An existing cell
+    /// directory is `AlreadyExists` and is never adopted. An invalid ID is refused before
+    /// anything is created.
     pub fn create_cell_dir(&self, cell: &CellId) -> Result<CellDir, CellDirError> {
         let journal_path = cell_ledger_path(&self.path, cell).map_err(CellDirError::InvalidCell)?;
         let cells_path = self.path.join(CELLS_DIR);
-        let cells = self
-            .create_cells()
-            .map_err(|refusal| refusal.into_cell_dir_error(cells_path.clone()))?;
+        let cells = self.create_cells(&cells_path)?;
         let cell_path = cells_path.join(cell.as_str());
         let io_error = |source| CellDirError::Io {
             path: cell_path.clone(),
             source,
         };
+        let sync_cells = || {
+            (self.sync)(cells.as_fd()).map_err(|source| CellDirError::Io {
+                path: cells_path.clone(),
+                source,
+            })
+        };
         let name = c_name(cell.as_str().as_bytes()).map_err(io_error)?;
         match make_directory_at(cells.as_fd(), &name) {
             Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+                sync_cells()?;
                 return Err(CellDirError::AlreadyExists { path: cell_path });
             }
             made => made.map_err(io_error)?,
@@ -197,7 +208,7 @@ impl InstanceRoot {
             directory_refusal(cells.as_fd(), &name, error).into_cell_dir_error(cell_path.clone())
         })?;
         change_mode(dir.as_fd(), PRIVATE_DIRECTORY).map_err(io_error)?;
-        (self.sync)(cells.as_fd()).map_err(io_error)?;
+        sync_cells()?;
         Ok(CellDir {
             dir,
             cell: cell.clone(),
@@ -206,18 +217,24 @@ impl InstanceRoot {
         })
     }
 
-    fn create_cells(&self) -> Result<OwnedFd, DirectoryRefusal> {
-        let name = c_name(CELLS_DIR.as_bytes()).map_err(DirectoryRefusal::Io)?;
-        let created = match make_directory_at(self.dir.as_fd(), &name) {
-            Ok(()) => true,
-            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => false,
-            Err(error) => return Err(DirectoryRefusal::Io(error)),
+    fn create_cells(&self, cells_path: &Path) -> Result<OwnedFd, CellDirError> {
+        let io_error = |source| CellDirError::Io {
+            path: cells_path.to_path_buf(),
+            source,
         };
-        let cells = self.open_cells()?;
-        if created {
-            change_mode(cells.as_fd(), PRIVATE_DIRECTORY).map_err(DirectoryRefusal::Io)?;
-            (self.sync)(self.dir.as_fd()).map_err(DirectoryRefusal::Io)?;
+        let name = c_name(CELLS_DIR.as_bytes()).map_err(io_error)?;
+        match make_directory_at(self.dir.as_fd(), &name) {
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {}
+            made => made.map_err(io_error)?,
         }
+        let cells = self
+            .open_cells()
+            .map_err(|refusal| refusal.into_cell_dir_error(cells_path.to_path_buf()))?;
+        change_mode(cells.as_fd(), PRIVATE_DIRECTORY).map_err(io_error)?;
+        (self.sync)(self.dir.as_fd()).map_err(|source| CellDirError::Io {
+            path: self.path.clone(),
+            source,
+        })?;
         Ok(cells)
     }
 
@@ -272,20 +289,19 @@ impl InstanceRoot {
         Some((cell, journal_path))
     }
 
-    fn open_lock_file(&self, name: &CStr) -> io::Result<(OwnedFd, bool)> {
+    fn open_lock_file(&self, name: &CStr) -> io::Result<OwnedFd> {
         let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
         match open_at(self.dir.as_fd(), name, flags, 0) {
             Err(missing) if missing.raw_os_error() == Some(libc::ENOENT) => {
                 let exclusive = flags | libc::O_CREAT | libc::O_EXCL;
                 match open_at(self.dir.as_fd(), name, exclusive, PRIVATE_FILE) {
-                    Ok(fd) => Ok((fd, true)),
                     Err(raced) if raced.raw_os_error() == Some(libc::EEXIST) => {
-                        open_at(self.dir.as_fd(), name, flags, 0).map(|fd| (fd, false))
+                        open_at(self.dir.as_fd(), name, flags, 0)
                     }
-                    Err(error) => Err(error),
+                    created => created,
                 }
             }
-            opened => opened.map(|fd| (fd, false)),
+            opened => opened,
         }
     }
 }
@@ -349,26 +365,22 @@ impl CellDir {
 
     /// Opens the journal for reading and appending, without following a symlink, blocking on a
     /// FIFO or truncating. An existing regular journal returns `created: false`. A missing one
-    /// is created exclusively with mode 0600 and returns `created: true`; this call does not
-    /// sync it or its directory. An existing inode is never replaced.
+    /// is created exclusively and returns `created: true`. Either way the journal is set to mode
+    /// 0600. This call does not sync the journal or its directory. An existing inode is never
+    /// replaced.
     pub fn open_journal_for_append(&self) -> Result<JournalAppend, JournalRefusal> {
         let access = libc::O_RDWR | libc::O_APPEND;
-        match open_journal_at(self.dir.as_fd(), access, 0) {
-            Ok(file) => Ok(JournalAppend {
-                file,
-                created: false,
-            }),
+        let (file, created) = match open_journal_at(self.dir.as_fd(), access, 0) {
+            Ok(file) => (file, false),
             Err(JournalRefusal::Io(error)) if error.raw_os_error() == Some(libc::ENOENT) => {
                 let exclusive = access | libc::O_CREAT | libc::O_EXCL;
                 let file = open_journal_at(self.dir.as_fd(), exclusive, PRIVATE_FILE)?;
-                change_mode(file.as_fd(), PRIVATE_FILE).map_err(JournalRefusal::Io)?;
-                Ok(JournalAppend {
-                    file,
-                    created: true,
-                })
+                (file, true)
             }
-            Err(refusal) => Err(refusal),
-        }
+            Err(refusal) => return Err(refusal),
+        };
+        change_mode(file.as_fd(), PRIVATE_FILE).map_err(JournalRefusal::Io)?;
+        Ok(JournalAppend { file, created })
     }
 
     /// Syncs this cell directory, making entries created in it durable.
