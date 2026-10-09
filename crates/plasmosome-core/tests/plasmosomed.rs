@@ -9,6 +9,9 @@ use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "support/warm_up.rs"]
+mod warm_up;
+
 const STATUS_REQUEST: &str = r#"{"id":1,"method":"plasmosome.status","params":{}}"#;
 const PATIENCE: Duration = Duration::from_secs(10);
 
@@ -67,7 +70,7 @@ impl Drop for Daemon {
 }
 
 fn plasmosomed(arguments: &[&Path]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_plasmosomed"));
+    let mut command = warm_up::plasmosomed();
     command.args(arguments).stderr(Stdio::piped());
     command
 }

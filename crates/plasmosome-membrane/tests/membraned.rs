@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 #[path = "support/fixture.rs"]
 mod fixture;
+#[path = "support/warm_up.rs"]
+mod warm_up;
 
 const STATUS_REQUEST: &str = r#"{"id":1,"method":"membrane.status","params":{}}"#;
 const READY: &str = r#"{"id":0,"result":{"ready":true,"state":"serving"}}"#;
@@ -87,7 +89,7 @@ impl Drop for Daemon {
 }
 
 fn membraned(arguments: &[&Path]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_membraned"));
+    let mut command = warm_up::membraned();
     command.args(arguments).stderr(Stdio::piped());
     command
 }

@@ -6,10 +6,13 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "support/warm_up.rs"]
+mod warm_up;
+
 const PATIENCE: Duration = Duration::from_secs(5);
 
 fn plasmosomed(directory: &Path, arguments: &[&OsStr]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_plasmosomed"));
+    let mut command = warm_up::plasmosomed();
     command
         .current_dir(directory)
         .args(arguments)
