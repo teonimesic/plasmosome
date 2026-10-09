@@ -227,7 +227,10 @@ mod tests {
         assert_eq!(id.to_string(), UUID);
         assert_eq!(id.as_uuid().hyphenated().to_string(), UUID);
         assert_eq!(serde_json::to_value(id).unwrap(), json!(UUID));
-        assert_eq!(serde_json::from_value::<RegistryId>(json!(UUID)).unwrap(), id);
+        assert_eq!(
+            serde_json::from_value::<RegistryId>(json!(UUID)).unwrap(),
+            id
+        );
         let refused = [
             UUID.to_uppercase(),
             format!("{{{UUID}}}"),
@@ -246,7 +249,9 @@ mod tests {
             );
             let error = serde_json::from_value::<RegistryId>(json!(text)).unwrap_err();
             assert!(
-                error.to_string().starts_with(&format!("registry_id {text:?} ")),
+                error
+                    .to_string()
+                    .starts_with(&format!("registry_id {text:?} ")),
                 "{error}"
             );
         }
@@ -300,13 +305,13 @@ mod tests {
             ("plasmid", ArtifactKind::Plasmid),
             ("genome", ArtifactKind::Genome),
         ] {
-            assert_eq!(serde_json::from_value::<ArtifactKind>(json!(text)).unwrap(), kind);
+            assert_eq!(
+                serde_json::from_value::<ArtifactKind>(json!(text)).unwrap(),
+                kind
+            );
             assert_eq!(serde_json::to_value(kind).unwrap(), json!(text));
         }
-        for (text, population) in [
-            ("curated", Population::Curated),
-            ("user", Population::User),
-        ] {
+        for (text, population) in [("curated", Population::Curated), ("user", Population::User)] {
             assert_eq!(
                 serde_json::from_value::<Population>(json!(text)).unwrap(),
                 population
@@ -323,7 +328,9 @@ mod tests {
         for text in ["Curated", "curated ", "users", "plasmid", "genome", ""] {
             let error = serde_json::from_value::<Population>(json!(text)).unwrap_err();
             assert!(
-                error.to_string().starts_with(&format!("population {text:?} ")),
+                error
+                    .to_string()
+                    .starts_with(&format!("population {text:?} ")),
                 "{error}"
             );
         }
@@ -376,7 +383,15 @@ mod tests {
     fn versions_follow_the_exact_version_grammar() {
         let longest = format!("1.a_B-{}", "z".repeat(122));
         assert_eq!(longest.len(), 128);
-        for text in ["1", "1.2.0", "RC-1", "v1_2", "latest", "Z", longest.as_str()] {
+        for text in [
+            "1",
+            "1.2.0",
+            "RC-1",
+            "v1_2",
+            "latest",
+            "Z",
+            longest.as_str(),
+        ] {
             assert_eq!(check_version(text), Ok(()), "{text:?}");
         }
         let too_long = format!("{longest}z");
