@@ -212,6 +212,11 @@ impl LogFile for std::fs::File {
 /// [`SessionLogError::Io`], before a panic inside it continues to unwind, and once it has written
 /// `seq` `u64::MAX`. The lock is advisory: it stops other `SessionLog`s, not a process that
 /// writes the file without asking for it.
+///
+/// The lock belongs to the open file, not to this value. A child process forked while the log is
+/// open shares that file until it execs or exits, so an open in that window, including one made
+/// after this value is dropped, returns [`SessionLogError::Locked`]. Retry such an open once
+/// the child has exec'd.
 pub struct SessionLog {
     path: PathBuf,
     state: Mutex<LogState>,
@@ -230,13 +235,23 @@ impl SessionLog {
 
     /// Opens the log at `path` through `store`, creating it and any missing parent directories.
     ///
-    /// Each directory this creates, and the file if this creates it, has its containing directory
-    /// synced. The nearest existing ancestor must be a directory; a symlink at `path` itself is
-    /// refused. An existing log must pass the checks [`read_events`] makes, or this returns
-    /// [`SessionLogError::Malformed`] and leaves the file as it was; a log whose last `seq` is
-    /// `u64::MAX` is refused too. The file and its directory are synced before this returns, so
-    /// reopening a log also makes durable whatever an earlier writer left unsynced. Any failed
-    /// step is returned. The next append is numbered one more than the last line's `seq`, or 1.
+    /// The nearest existing ancestor must be a directory. A symlink at `path`, or anything there
+    /// that is not a regular file, is refused. The open takes the writer lock described on
+    /// [`SessionLog`], or returns [`SessionLogError::Locked`]. An existing log must pass the
+    /// checks [`read_events`] makes, or this returns [`SessionLogError::Malformed`] and leaves
+    /// the file as it was; a log whose last `seq` is `u64::MAX` is refused too. The check reads
+    /// one line at a time and keeps only the last `seq`, so its memory grows with the longest
+    /// line, not with the log.
+    ///
+    /// Before returning, every open syncs the file, then its directory and each ancestor of that
+    /// directory up to the root, whether or not this call created them. A directory an earlier,
+    /// interrupted open created is therefore made durable by the next open. An ancestor this
+    /// process cannot open for reading fails the open at [`LogStep::SyncDirectory`]. Syncing the
+    /// file again does not prove that a line written before a failed sync is on disk: on Linux a
+    /// failed `fsync` can drop the unwritten pages, and the next sync then succeeds without them.
+    /// After an append that returned an error, assert that event again rather than relying on
+    /// the reopen. Any failed step is returned. The next append is numbered one more than the
+    /// last line's `seq`, or 1.
     pub fn open_with(path: PathBuf, store: &dyn LogStore) -> Result<SessionLog, SessionLogError> {
         let parent = parent_of(&path);
         create_parents(parent, store)?;
@@ -285,6 +300,12 @@ impl SessionLog {
     /// writing `seq` `u64::MAX`, after which no event can be numbered. Poisoning releases the
     /// writer lock. An error does not mean the line is absent: it may be on disk whole or in part,
     /// so one recovering owner opens a new `SessionLog` to validate the file before continuing.
+    ///
+    /// The log's mutex is held across the write and the `sync_all`, so appends from every thread
+    /// wait behind one full sync each. On macOS `sync_all` is `F_FULLFSYNC`, and the
+    /// `session_log_append` bench measures about 7 to 10 ms per append on an idle machine, more
+    /// under load: at most about 100 to 140 appends a second for a whole instance. A producer
+    /// that needs a higher rate needs group commit or a path that does not sync.
     pub fn append(&self, kind: &str, payload: serde_json::Value) -> Result<u64, SessionLogError> {
         let poisoned = || SessionLogError::Poisoned {
             path: self.path.clone(),

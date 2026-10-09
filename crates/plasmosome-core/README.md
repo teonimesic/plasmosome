@@ -19,7 +19,7 @@ one.
 | `registry` | Tool names, their registered owners and author-written descriptions |
 | `reconciler` | Desired state vs observed state, converging by generation |
 | `gatekeeper` | Credential custody — the cell receives handles, never secrets |
-| `session_log` | Append-only, synced audit record shared by an instance's cells; an IO error stops all later appends |
+| `session_log` | Append-only, synced audit record shared by an instance's cells through one locked writer; an IO error stops all later appends |
 | `state` | Wire types: instances, cells, genomes, mock modes |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
 
