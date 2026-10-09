@@ -1,12 +1,11 @@
 use std::time::Duration;
 
 use plasmosome_backend::{
-    Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, PluginId,
-    ResidueReport,
+    Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, MockMode,
+    PluginId, ResidueReport,
 };
 use plasmosome_core::ToolRegistry;
 use plasmosome_core::manifest::PlasmidManifest;
-use plasmosome_core::state::MockMode;
 use plasmosome_ledger::{Closure, Ledger};
 use plasmosome_testkit::builders::{
     DesiredStateBuilder, GrantSequence, ManifestBuilder, exact_backend_effect,

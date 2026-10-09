@@ -33,7 +33,7 @@ pub use registry::{LookupError, RegistryEntry, ToolRegistry};
 pub use session_log::{SessionLog, read_events};
 pub use state::{
     CellPathError, CellRecord, CellStatus, ControllerState, GenomeName, InstanceName,
-    InstanceNameError, InstanceRecord, MockMode, PlasmidRecord, cell_ledger_path,
+    InstanceNameError, InstanceRecord, PlasmidRecord, cell_ledger_path,
     cell_supervisor_socket_path, validate_cell_id,
 };
 pub use version::{

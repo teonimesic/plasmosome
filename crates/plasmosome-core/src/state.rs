@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use plasmosome_backend::CellId;
+use plasmosome_backend::{CellId, MockMode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -123,41 +123,6 @@ impl fmt::Display for CellPathError {
 }
 
 impl std::error::Error for CellPathError {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MockMode {
-    Simulate,
-    Capture,
-    #[default]
-    Passthrough,
-}
-
-impl MockMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            MockMode::Simulate => "simulate",
-            MockMode::Capture => "capture",
-            MockMode::Passthrough => "passthrough",
-        }
-    }
-
-    pub fn parse(text: &str) -> Option<MockMode> {
-        match text {
-            "simulate" => Some(MockMode::Simulate),
-            "capture" => Some(MockMode::Capture),
-            "passthrough" => Some(MockMode::Passthrough),
-            _ => None,
-        }
-    }
-
-    pub fn list_tag(&self) -> String {
-        match self {
-            MockMode::Simulate | MockMode::Capture => format!("[mock:{}]", self.as_str()),
-            MockMode::Passthrough => "[real]".to_string(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlasmidRecord {
@@ -318,19 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn bare_mock_means_simulate_and_absent_means_passthrough() {
-        assert_eq!(MockMode::default(), MockMode::Passthrough);
-        assert_eq!(MockMode::parse("simulate"), Some(MockMode::Simulate));
-        assert_eq!(MockMode::parse("capture"), Some(MockMode::Capture));
-        assert_eq!(MockMode::parse("passthrough"), Some(MockMode::Passthrough));
-        assert_eq!(
-            MockMode::parse("recorded"),
-            None,
-            "the D2 vocabulary is closed"
-        );
-    }
-
-    #[test]
     fn plasmid_list_labels_show_the_mock_mode() {
         let mocked = PlasmidRecord {
             plasmid: "github-pr".to_string(),
@@ -379,6 +331,5 @@ mod tests {
         wire_serde::<CellStatus>();
         wire_serde::<GenomeName>();
         wire_serde::<PlasmidRecord>();
-        wire_serde::<MockMode>();
     }
 }

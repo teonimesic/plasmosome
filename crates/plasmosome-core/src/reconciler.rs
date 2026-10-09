@@ -100,7 +100,7 @@ mod tests {
                             genome: Some(GenomeName::from("researcher")),
                             plasmids: vec![PlasmidRecord {
                                 plasmid: "github-pr".to_string(),
-                                mock: crate::state::MockMode::Simulate,
+                                mock: plasmosome_backend::MockMode::Simulate,
                             }],
                         },
                     )

@@ -64,6 +64,49 @@ impl fmt::Display for CellId {
     }
 }
 
+/// How a plasmid's calls are served in a cell: `Simulate`, `Capture` or `Passthrough`.
+/// `Passthrough`, the default, sends them to the real service. The vocabulary is closed. It
+/// serializes as the lower-case name, and decoding refuses any other name, including a
+/// capitalized one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MockMode {
+    Simulate,
+    Capture,
+    #[default]
+    Passthrough,
+}
+
+impl MockMode {
+    /// The lower-case wire name: `simulate`, `capture` or `passthrough`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MockMode::Simulate => "simulate",
+            MockMode::Capture => "capture",
+            MockMode::Passthrough => "passthrough",
+        }
+    }
+
+    /// Reads exactly `simulate`, `capture` or `passthrough`; any other text, including a
+    /// capitalized name, is `None`.
+    pub fn parse(text: &str) -> Option<MockMode> {
+        match text {
+            "simulate" => Some(MockMode::Simulate),
+            "capture" => Some(MockMode::Capture),
+            "passthrough" => Some(MockMode::Passthrough),
+            _ => None,
+        }
+    }
+
+    /// The status-list tag: `[mock:simulate]`, `[mock:capture]` or `[real]`.
+    pub fn list_tag(&self) -> String {
+        match self {
+            MockMode::Simulate | MockMode::Capture => format!("[mock:{}]", self.as_str()),
+            MockMode::Passthrough => "[real]".to_string(),
+        }
+    }
+}
+
 /// The owner of a holding: a plugin as attached to one cell. The same plugin in two cells is two
 /// owners, so every ownership comparison must compare both fields. Its JSON is exactly the object
 /// `{"cell": ..., "plugin": ...}`; an array, a missing, repeated or unknown field is refused. It
@@ -869,6 +912,110 @@ mod tests {
             cell_owner("a", "b/c").to_string()
         );
         assert_eq!(cell_owner("a\"/\"b", "c").to_string(), r#""a\"/\"b"/"c""#);
+    }
+
+    #[test]
+    fn mock_mode_vocabulary_is_closed_and_defaults_to_passthrough() {
+        assert_eq!(MockMode::default(), MockMode::Passthrough);
+        for mode in [MockMode::Simulate, MockMode::Capture, MockMode::Passthrough] {
+            let name = match mode {
+                MockMode::Simulate => "simulate",
+                MockMode::Capture => "capture",
+                MockMode::Passthrough => "passthrough",
+            };
+            assert_eq!(MockMode::parse(name), Some(mode));
+            assert_eq!(mode.as_str(), name);
+        }
+        for refused in [
+            "recorded",
+            "real",
+            "live",
+            "sim",
+            "mock",
+            "none",
+            "replay",
+            "Simulate",
+            "Capture",
+            "Passthrough",
+            "CAPTURE",
+            "",
+            " simulate",
+            "simulate\n",
+        ] {
+            assert_eq!(
+                MockMode::parse(refused),
+                None,
+                "{refused:?} is not a mock mode"
+            );
+        }
+    }
+
+    #[test]
+    fn mock_mode_serializes_as_lower_case_text() {
+        for (mode, wire) in [
+            (MockMode::Simulate, r#""simulate""#),
+            (MockMode::Capture, r#""capture""#),
+            (MockMode::Passthrough, r#""passthrough""#),
+        ] {
+            assert_eq!(serde_json::to_string(&mode).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<MockMode>(wire).unwrap(), mode);
+            assert_eq!(mode.as_str(), wire.trim_matches('"'));
+        }
+    }
+
+    #[test]
+    fn mock_mode_refuses_unknown_and_capitalized_text() {
+        for refused in [
+            r#""Simulate""#,
+            r#""Capture""#,
+            r#""Passthrough""#,
+            r#""recorded""#,
+            r#""real""#,
+            r#""live""#,
+            r#""sim""#,
+            r#""mock""#,
+            r#""none""#,
+            r#""replay""#,
+            r#""""#,
+            "null",
+        ] {
+            assert!(
+                serde_json::from_str::<MockMode>(refused).is_err(),
+                "{refused} must not decode as a mock mode"
+            );
+        }
+    }
+
+    #[test]
+    fn mock_mode_decodes_only_its_three_names() {
+        let error = serde_json::from_value::<MockMode>(serde_json::json!("none"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "unknown variant `none`, expected one of `simulate`, `capture`, `passthrough`"
+        );
+    }
+
+    #[test]
+    fn serde_lists_every_accepted_name_in_its_unknown_variant_error() {
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        enum Probe {
+            #[serde(alias = "accepted_alias")]
+            Name,
+        }
+        let error = serde_json::from_value::<Probe>(serde_json::json!("none"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`accepted_alias`"), "{error}");
+    }
+
+    #[test]
+    fn mock_mode_lists_only_passthrough_as_real() {
+        assert_eq!(MockMode::Simulate.list_tag(), "[mock:simulate]");
+        assert_eq!(MockMode::Capture.list_tag(), "[mock:capture]");
+        assert_eq!(MockMode::Passthrough.list_tag(), "[real]");
     }
 
     #[test]
