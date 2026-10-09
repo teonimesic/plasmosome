@@ -22,8 +22,10 @@ and review of revisions whose author has not checked them.
 
 After edits settle, run the root gate in [AGENTS.md](../../../AGENTS.md) and the additional
 locally runnable checks in [CI](../../../.github/workflows/ci.yml), including quick workspace
-benchmarks. Tests and benchmarks already compile their targets; add an explicit build for a
-changed target they do not cover rather than repeat identical compilation. Behavior changes
+benchmarks. Run `tools/work-state-regression.py` only when the change touches `tools/work-state*`
+(the launcher, its suite or its Beads pin): it needs the pinned release and takes minutes, and CI
+runs it on every push. Tests and benchmarks already compile their targets; add an explicit build
+for a changed target they do not cover rather than repeat identical compilation. Behavior changes
 also need their applicable focused regressions, mutation witnesses and runtime smoke scenarios;
 a documentation change does not need an unrelated runtime experiment.
 
