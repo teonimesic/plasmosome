@@ -64,9 +64,10 @@ impl fmt::Display for CellId {
     }
 }
 
-/// How a plasmid's calls are served in a cell: `Simulate`, `Capture`, or `Passthrough` to the
-/// real backend, which is the default. The vocabulary is closed. It serializes as the lower-case
-/// name, and decoding refuses any other name, including a capitalized one.
+/// How a plasmid's calls are served in a cell: `Simulate`, `Capture` or `Passthrough`.
+/// `Passthrough`, the default, sends them to the real service. The vocabulary is closed. It
+/// serializes as the lower-case name, and decoding refuses any other name, including a
+/// capitalized one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MockMode {
