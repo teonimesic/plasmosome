@@ -1,4 +1,5 @@
 pub mod digest;
+pub mod hello;
 pub mod path;
 pub(crate) mod strict_json;
 
