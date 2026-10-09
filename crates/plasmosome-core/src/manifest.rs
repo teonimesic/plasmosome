@@ -1595,9 +1595,13 @@ subject = "git"
     }
 
     fn port_refusal(section: &str, ports: &str) -> (String, String, String) {
-        let row = format!("{section}{ports}");
-        let error = PlasmidManifest::parse(&ports_declaration(section, ports))
-            .expect_err(&format!("{row} must be refused"));
+        refusal_of(&ports_declaration(section, ports))
+    }
+
+    fn refusal_of(declaration: &str) -> (String, String, String) {
+        let row = declaration;
+        let error =
+            PlasmidManifest::parse(declaration).expect_err(&format!("{row} must be refused"));
         let ManifestError::Field {
             plasmid,
             field,
@@ -1612,8 +1616,14 @@ subject = "git"
     }
 
     fn repaired_ports(section: &str, ports: &str, entry: Option<usize>, fix: &str) -> Vec<u16> {
-        let mut declaration: toml::Value =
-            toml::from_str(&ports_declaration(section, ports)).unwrap();
+        let repaired = with_port_fix(&ports_declaration(section, ports), entry, fix);
+        PlasmidManifest::parse(&repaired)
+            .map(ports_of)
+            .unwrap_or_else(|error| panic!("{ports} with {fix:?} applied is refused: {error}"))
+    }
+
+    fn with_port_fix(declaration: &str, entry: Option<usize>, fix: &str) -> String {
+        let mut declaration: toml::Value = toml::from_str(declaration).unwrap();
         let network = match declaration.get_mut("commands") {
             Some(commands) => {
                 let (_, command) = commands["commands"]
@@ -1643,10 +1653,7 @@ subject = "git"
                 network.insert("ports".into(), line["ports"].clone());
             }
         }
-        let repaired = toml::to_string(&declaration).unwrap();
-        PlasmidManifest::parse(&repaired)
-            .map(ports_of)
-            .unwrap_or_else(|error| panic!("{ports} with {fix:?} applied is refused: {error}"))
+        toml::to_string(&declaration).unwrap()
     }
 
     #[test]
@@ -1731,6 +1738,25 @@ subject = "git"
                     "{row}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn following_each_port_fix_from_the_first_refused_entry_keeps_every_declared_port() {
+        for (section, path) in PORT_SECTIONS {
+            let mut declaration =
+                ports_declaration(section, "ports = [70000, \"8080\", 443, \"x\", \"443\"]");
+            for (index, fix) in [(0, REMOVAL), (0, "8080"), (2, REMOVAL), (2, REMOVAL)] {
+                let (field, actual_fix, _) = refusal_of(&declaration);
+                assert_eq!(field, format!("{path}.ports[{index}]"), "{declaration}");
+                assert_eq!(actual_fix, fix, "{declaration}");
+                declaration = with_port_fix(&declaration, Some(index), &actual_fix);
+            }
+            assert_eq!(
+                PlasmidManifest::parse(&declaration).map(ports_of).unwrap(),
+                vec![8080, 443],
+                "{declaration}"
+            );
         }
     }
 
