@@ -755,10 +755,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let control = dir.path().join("c.uds");
         let shared = dir.path().join("shared.uds");
-        let pidfile = dir.path().join("b0.pid");
         let shutdown = AtomicBool::new(false);
+        let mut forked = Vec::new();
 
-        let refusal = run(
+        let refusal = run_with(
             DaemonConfig {
                 control_socket: control.clone(),
                 status_deadline: Duration::from_millis(500),
@@ -766,7 +766,7 @@ mod tests {
                     BrokerConfig {
                         name: "egressd".to_string(),
                         control_socket: shared.clone(),
-                        command: sleeping_broker(&pidfile),
+                        command: vec!["sleep".to_string(), "300".to_string()],
                     },
                     BrokerConfig {
                         name: "dnsd".to_string(),
@@ -776,6 +776,11 @@ mod tests {
                 ],
             },
             &shutdown,
+            |command| {
+                let child = VmmChild::spawn(command)?;
+                forked.push(child.pid());
+                Ok(child)
+            },
         )
         .expect_err("two brokers may not share one control socket");
 
@@ -783,14 +788,16 @@ mod tests {
             DaemonError::Spawn(failure) => assert_eq!(failure.broker, "dnsd"),
             other => panic!("a shared socket is a spawn failure, got {other:?}"),
         }
-        thread::sleep(Duration::from_secs(1));
+        assert_eq!(
+            forked.len(),
+            1,
+            "only egressd is forked; dnsd is refused before its fork"
+        );
         assert!(
-            !pidfile.exists(),
-            "the broker that was spawned was killed before it could run. A broker left running \
-             records its pid within 50ms, measured; this waits twenty times that, so under load \
-             the assertion fails rather than passing early. The reap itself is observed by \
-             ECHILD at the brokers layer, which is the only place the pid is knowable — here \
-             the kill lands before the child finishes exec'ing, so no pid is ever recorded"
+            is_reaped(forked[0]),
+            "egressd at pid {} was still a child of this process after run returned, so the \
+             refusal left it running or unreaped",
+            forked[0]
         );
         assert!(!control.exists(), "the socket path is removed on a refusal");
     }
