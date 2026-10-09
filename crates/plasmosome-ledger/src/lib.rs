@@ -536,7 +536,7 @@ impl<'de> Deserialize<'de> for LogRecord {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
+        #[serde(expecting = "struct LogRecord", deny_unknown_fields)]
         struct Wire {
             format: u8,
             plugin: PluginId,
@@ -592,13 +592,22 @@ impl Ledger {
 
     fn encode(&self) -> std::io::Result<Vec<u8>> {
         let mut records = Vec::new();
-        for effect in &self.effects {
+        for (index, effect) in self.effects.iter().enumerate() {
             let record = LogRecord {
                 format: 2,
                 plugin: self.plugin.clone(),
                 effect: effect.clone(),
             };
-            serde_json::to_writer(&mut records, &record)?;
+            serde_json::to_writer(&mut records, &record).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "effect {} of {} cannot be encoded: {error}",
+                        index + 1,
+                        self.effects.len()
+                    ),
+                )
+            })?;
             records.push(b'\n');
         }
         Ok(records)

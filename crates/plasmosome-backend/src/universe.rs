@@ -394,7 +394,7 @@ impl<'de> Deserialize<'de> for OsState {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
+        #[serde(expecting = "struct OsState", deny_unknown_fields)]
         struct State {
             objects: Vec<OsObject>,
         }

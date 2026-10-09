@@ -191,7 +191,7 @@ impl<'de> Deserialize<'de> for LedgerEntry {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
+        #[serde(expecting = "struct LedgerEntry", deny_unknown_fields)]
         struct Wire {
             handle: Handle,
             owner: CellOwner,

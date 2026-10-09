@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::de::{DeserializeSeed, EnumAccess, VariantAccess, Visitor};
+use serde::de::{DeserializeSeed, EnumAccess, MapAccess, VariantAccess, Visitor};
 use serde::{Deserialize, Deserializer, forward_to_deserialize_any};
 
 /// A deserializer that reads a struct, and each struct variant of an enum, only from a map.
@@ -94,20 +94,24 @@ impl<'de, A: VariantAccess<'de>> VariantAccess<'de> for Content<A> {
 
     fn struct_variant<V: Visitor<'de>>(
         self,
-        _fields: &'static [&'static str],
+        fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, A::Error> {
-        self.0.newtype_variant_seed(Fields(visitor))
+        self.0.struct_variant(fields, Fields(visitor))
     }
 }
 
 struct Fields<V>(V);
 
-impl<'de, V: Visitor<'de>> DeserializeSeed<'de> for Fields<V> {
+impl<'de, V: Visitor<'de>> Visitor<'de> for Fields<V> {
     type Value = V::Value;
 
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<V::Value, D::Error> {
-        deserializer.deserialize_map(self.0)
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.expecting(formatter)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<V::Value, A::Error> {
+        self.0.visit_map(map)
     }
 }
 
