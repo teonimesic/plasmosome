@@ -21,6 +21,7 @@ pub mod version;
 pub use control::{Controller, Handler, MAX_LINE_BYTES, serve_connection};
 pub use daemon::{ConfigError, DaemonConfig, DaemonError, parse_config, run};
 pub use gatekeeper::Gatekeeper;
+pub use instance::{InstanceRoot, InstanceRootError, LockError, WriterLock};
 pub use lifecycle::{PluginState, StateError};
 pub use manifest::{ManifestError, PlasmidManifest};
 pub use protocol::{ErrorCode, Request, Response, StatusResult, WireError};
