@@ -838,6 +838,7 @@ impl std::error::Error for RecipeRefusal {}
 
 #[cfg(test)]
 mod tests {
+    use super::RecipeRefusal::*;
     use super::*;
     use proptest::prelude::*;
     use serde_json::{Value, json};
@@ -956,8 +957,12 @@ mod tests {
         format!("{recipe}\n").into_bytes()
     }
 
+    fn set(pointer: &str, value: Value) -> (&str, Option<Value>) {
+        (pointer, Some(value))
+    }
+
     fn with(pointer: &str, value: Value) -> Vec<u8> {
-        record(&[(pointer, Some(value))])
+        record(&[set(pointer, value)])
     }
 
     fn without(pointer: &str) -> Vec<u8> {
@@ -982,10 +987,28 @@ mod tests {
     }
 
     fn wrong_type(field: &str, expected: &'static str) -> RecipeRefusal {
-        RecipeRefusal::WrongType {
-            field: field.to_owned(),
-            expected,
-        }
+        let field = field.to_owned();
+        WrongType { field, expected }
+    }
+
+    fn missing(field: &str) -> RecipeRefusal {
+        let field = field.to_owned();
+        MissingField { field }
+    }
+
+    fn unknown(field: &str) -> RecipeRefusal {
+        let field = field.to_owned();
+        UnknownField { field }
+    }
+
+    fn not_an_object(field: &str) -> RecipeRefusal {
+        let field = field.to_owned();
+        NotAnObject { field }
+    }
+
+    fn duplicate(path: &str) -> RecipeRefusal {
+        let path = path.to_owned();
+        DuplicateField { path }
     }
 
     fn path_of_length(bytes: usize) -> Value {
@@ -1001,22 +1024,14 @@ mod tests {
         assert_eq!((recipe.vcpus(), recipe.memory_mib()), (2, 2048));
         assert_eq!(recipe.kernel_format(), KernelFormat::Raw);
         assert_eq!(recipe.architecture(), Architecture::Aarch64);
-        assert_eq!(
-            [
-                recipe.writable_root().as_str(),
-                recipe.control_path().as_str(),
-                recipe.data_path().as_str(),
-            ],
-            [
-                "/var/cell/c1/root.raw",
-                "/var/cell/c1/control.sock",
-                "/var/cell/c1/data.sock",
-            ]
-        );
+        assert_eq!(recipe.writable_root().as_str(), "/var/cell/c1/root.raw");
+        assert_eq!(recipe.control_path().as_str(), "/var/cell/c1/control.sock");
+        assert_eq!(recipe.data_path().as_str(), "/var/cell/c1/data.sock");
         let listed: Vec<(ArtifactRole, &str, String)> = recipe
             .artifacts()
             .map(|(role, artifact)| (role, artifact.path().as_str(), artifact.sha256().hex()))
             .collect();
+        let library = "/opt/cell/lib/libkrun.1.dylib";
         assert_eq!(
             listed,
             [
@@ -1024,11 +1039,7 @@ mod tests {
                 (ArtifactRole::Initramfs, "/opt/cell/initramfs", digest('2')),
                 (ArtifactRole::RootImage, "/opt/cell/root.raw", digest('3')),
                 (ArtifactRole::Helper, "/opt/cell/krun-helper", digest('4')),
-                (
-                    ArtifactRole::Library(0),
-                    "/opt/cell/lib/libkrun.1.dylib",
-                    digest('5')
-                ),
+                (ArtifactRole::Library(0), library, digest('5')),
                 (ArtifactRole::HostPolicy, "/opt/cell/host.sb", digest('6')),
                 (
                     ArtifactRole::GuestPolicy,
@@ -1053,11 +1064,8 @@ mod tests {
 
     #[test]
     fn the_encoding_is_one_compact_line_with_keys_in_spec_order() {
-        let golden = GOLDEN.to_owned();
-        assert_eq!(
-            String::from_utf8(parsed(&record(&[])).to_ndjson()).expect("the encoding is UTF-8"),
-            golden
-        );
+        let encoded = parsed(&record(&[])).to_ndjson();
+        assert_eq!(String::from_utf8(encoded).expect("UTF-8"), GOLDEN);
     }
 
     #[test]
@@ -1068,18 +1076,12 @@ mod tests {
             artifact("/opt/cell/lib/c.dylib", 'c'),
         ]);
         let escaped = [
-            (
+            set(
                 "/writable_root",
-                Some(json!("/var/cell/a \"quoted\" name/back\\slash")),
+                json!("/var/cell/a \"quoted\" name/back\\slash"),
             ),
-            (
-                "/control_path",
-                Some(json!("/var/cell/caf\u{e9}/\t\x07.sock")),
-            ),
-            (
-                "/libraries/0/path",
-                Some(json!("/opt/cell/\u{2603} lib/\r\n")),
-            ),
+            set("/control_path", json!("/var/cell/caf\u{e9}/\t\x07.sock")),
+            set("/libraries/0/path", json!("/opt/cell/\u{2603} lib/\r\n")),
         ];
         for record in [
             record(&[]),
@@ -1099,16 +1101,10 @@ mod tests {
     }
 
     fn component() -> impl Strategy<Value = String> {
-        proptest::collection::vec(
-            any::<char>().prop_filter("a component holds no / or NUL", |c| {
-                !matches!(c, '/' | '\0')
-            }),
-            1..6,
-        )
-        .prop_map(String::from_iter)
-        .prop_filter("a component is not . or ..", |name| {
-            name != "." && name != ".."
-        })
+        let character = any::<char>().prop_filter("no / or NUL", |c| !matches!(c, '/' | '\0'));
+        proptest::collection::vec(character, 1..6)
+            .prop_map(String::from_iter)
+            .prop_filter("not . or ..", |name| name != "." && name != "..")
     }
 
     proptest! {
@@ -1125,30 +1121,31 @@ mod tests {
                 .map(|(index, name)| artifact(&format!("/lib/{index}/{name}"), 'e'))
                 .collect();
             let record = record(&[
-                ("/vcpus", Some(json!(vcpus))),
-                ("/memory_mib", Some(json!(memory_mib))),
-                ("/libraries", Some(Value::Array(libraries))),
-                ("/writable_root", Some(json!(format!("/w/{name}")))),
-                ("/data_path", Some(json!(format!("/d/{name}")))),
+                set("/vcpus", json!(vcpus)),
+                set("/memory_mib", json!(memory_mib)),
+                set("/libraries", Value::Array(libraries)),
+                set("/writable_root", json!(format!("/w/{name}"))),
+                set("/data_path", json!(format!("/d/{name}"))),
             ]);
             let recipe = parsed(&record);
             prop_assert_eq!(parsed(&recipe.to_ndjson()), recipe);
         }
     }
 
+    fn with_byte_in_writable_root(byte: u8) -> Vec<u8> {
+        let mut text = with("/writable_root", json!("/var/cell/X"));
+        let at = text
+            .iter()
+            .position(|held| *held == b'X')
+            .expect("X is in the record");
+        text[at] = byte;
+        text
+    }
+
     #[test]
     fn a_record_that_is_not_exactly_one_line_refuses() {
         let line = record(&[]);
         let body = &line[..line.len() - 1];
-        let carriage_return_in_a_string = {
-            let mut text = with("/writable_root", json!("/var/cell/X"));
-            let at = text
-                .iter()
-                .position(|byte| *byte == b'X')
-                .expect("X is in the record");
-            text[at] = b'\r';
-            text
-        };
         for case in [
             body.to_vec(),
             [line.as_slice(), &line].concat(),
@@ -1157,27 +1154,17 @@ mod tests {
             [body, b"\r\n"].concat(),
             [b"\r".as_slice(), &line].concat(),
             [b"{\r".as_slice(), &line[1..]].concat(),
-            carriage_return_in_a_string,
+            with_byte_in_writable_root(b'\r'),
             Vec::new(),
         ] {
-            assert_eq!(
-                refused(&case),
-                RecipeRefusal::NotOneLine,
-                "{:?}",
-                String::from_utf8_lossy(&case)
-            );
+            let shown = String::from_utf8_lossy(&case).into_owned();
+            assert_eq!(refused(&case), NotOneLine, "{shown:?}");
         }
     }
 
     #[test]
     fn a_record_that_is_not_utf8_refuses() {
-        let mut text = with("/writable_root", json!("/var/cell/X"));
-        let at = text
-            .iter()
-            .position(|byte| *byte == b'X')
-            .expect("X is in the record");
-        text[at] = 0xff;
-        assert_eq!(refused(&text), RecipeRefusal::NotUtf8);
+        assert_eq!(refused(&with_byte_in_writable_root(0xff)), NotUtf8);
     }
 
     #[test]
@@ -1190,99 +1177,56 @@ mod tests {
             text
         };
         assert_eq!(parsed(&padded(1_048_576)), parsed(&record(&[])));
-        assert_eq!(
-            refused(&padded(1_048_577)),
-            RecipeRefusal::TooLarge { bytes: 1_048_577 }
-        );
+        assert_eq!(refused(&padded(1_048_577)), TooLarge { bytes: 1_048_577 });
     }
 
     #[test]
     fn framing_is_checked_line_then_size_then_encoding() {
         let mut oversized = vec![b' '; 1_048_577];
         oversized[0] = 0xff;
-        assert_eq!(refused(&oversized), RecipeRefusal::NotOneLine);
+        assert_eq!(refused(&oversized), NotOneLine);
         oversized.push(b'\n');
-        assert_eq!(
-            refused(&oversized),
-            RecipeRefusal::TooLarge { bytes: 1_048_577 }
-        );
+        assert_eq!(refused(&oversized), TooLarge { bytes: 1_048_577 });
     }
 
     #[test]
     fn a_record_that_is_not_one_json_value_refuses() {
         for text in [&b"\n"[..], b"{\"version\":1,\n", b"{} {}\n", b"[1e400]\n"] {
-            assert!(
-                matches!(refused(text), RecipeRefusal::NotJson { .. }),
-                "{:?}",
-                String::from_utf8_lossy(text)
-            );
+            let shown = String::from_utf8_lossy(text).into_owned();
+            assert!(matches!(refused(text), NotJson { .. }), "{shown:?}");
         }
-        assert_eq!(
-            refused(b"{} {}\n"),
-            RecipeRefusal::NotJson {
-                detail: "trailing characters at line 1, column 4".to_owned()
-            }
-        );
+        let detail = "trailing characters at line 1, column 4".to_owned();
+        assert_eq!(refused(b"{} {}\n"), NotJson { detail });
     }
 
     #[test]
     fn each_missing_field_refuses_by_name() {
         for field in FIELDS {
-            assert_eq!(
-                refused(&without(&format!("/{field}"))),
-                RecipeRefusal::MissingField {
-                    field: field.to_owned()
-                }
-            );
+            assert_eq!(refused(&without(&format!("/{field}"))), missing(field));
         }
         for (pointer, name) in ARTIFACTS {
             for key in ["path", "sha256"] {
-                assert_eq!(
-                    refused(&without(&format!("{pointer}/{key}"))),
-                    RecipeRefusal::MissingField {
-                        field: format!("{name}.{key}")
-                    }
-                );
+                let refusal = refused(&without(&format!("{pointer}/{key}")));
+                assert_eq!(refusal, missing(&format!("{name}.{key}")));
             }
         }
     }
 
     #[test]
     fn unknown_keys_refuse_before_missing_ones_and_missing_ones_in_spec_order() {
-        assert_eq!(
-            refused(&record(&[("/architecture", None), ("/vcpus", None)])),
-            RecipeRefusal::MissingField {
-                field: "vcpus".to_owned()
-            }
-        );
-        assert_eq!(
-            refused(&record(&[("/vcpus", None), ("/extra", Some(json!(1)))])),
-            RecipeRefusal::UnknownField {
-                field: "extra".to_owned()
-            }
-        );
-        assert_eq!(
-            refused(&record(&[
-                ("/zeta", Some(json!(1))),
-                ("/alpha", Some(json!(1)))
-            ])),
-            RecipeRefusal::UnknownField {
-                field: "alpha".to_owned()
-            }
-        );
-        assert_eq!(
-            refused(&with(
-                "/libraries",
-                json!([
-                    artifact("/opt/cell/lib/a.dylib", 'a'),
-                    artifact("/opt/cell/lib/b.dylib", 'b'),
-                    {"path": "/opt/cell/lib/c.dylib"},
-                ])
-            )),
-            RecipeRefusal::MissingField {
-                field: "libraries[2].sha256".to_owned()
-            }
-        );
+        let both_missing = record(&[("/architecture", None), ("/vcpus", None)]);
+        assert_eq!(refused(&both_missing), missing("vcpus"));
+        let missing_and_unknown = record(&[("/vcpus", None), set("/extra", json!(1))]);
+        assert_eq!(refused(&missing_and_unknown), unknown("extra"));
+        let two_unknown = record(&[set("/zeta", json!(1)), set("/alpha", json!(1))]);
+        assert_eq!(refused(&two_unknown), unknown("alpha"));
+        let third_without_digest = json!([
+            artifact("/opt/cell/lib/a.dylib", 'a'),
+            artifact("/opt/cell/lib/b.dylib", 'b'),
+            {"path": "/opt/cell/lib/c.dylib"},
+        ]);
+        let refusal = refused(&with("/libraries", third_without_digest));
+        assert_eq!(refusal, missing("libraries[2].sha256"));
     }
 
     #[test]
@@ -1292,37 +1236,20 @@ mod tests {
             ("/kernel/size", "kernel.size"),
             ("/libraries/0/size", "libraries[0].size"),
         ] {
-            assert_eq!(
-                refused(&with(pointer, json!(1))),
-                RecipeRefusal::UnknownField {
-                    field: field.to_owned()
-                }
-            );
+            assert_eq!(refused(&with(pointer, json!(1))), unknown(field));
         }
     }
 
     #[test]
     fn a_value_of_the_wrong_shape_refuses_naming_its_field() {
+        assert_eq!(refused(b"[]\n"), not_an_object(""));
+        let kernel_as_text = with("/kernel", json!("/opt/cell/kernel"));
+        assert_eq!(refused(&kernel_as_text), not_an_object("kernel"));
+        let library_as_text = with("/libraries", json!(["/opt/cell/lib/a.dylib"]));
+        assert_eq!(refused(&library_as_text), not_an_object("libraries[0]"));
+        let libraries_as_object = with("/libraries", json!({}));
         assert_eq!(
-            refused(b"[]\n"),
-            RecipeRefusal::NotAnObject {
-                field: String::new()
-            }
-        );
-        assert_eq!(
-            refused(&with("/kernel", json!("/opt/cell/kernel"))),
-            RecipeRefusal::NotAnObject {
-                field: "kernel".to_owned()
-            }
-        );
-        assert_eq!(
-            refused(&with("/libraries", json!(["/opt/cell/lib/a.dylib"]))),
-            RecipeRefusal::NotAnObject {
-                field: "libraries[0]".to_owned()
-            }
-        );
-        assert_eq!(
-            refused(&with("/libraries", json!({}))),
+            refused(&libraries_as_object),
             wrong_type("libraries", "an array")
         );
         for (pointer, field) in [
@@ -1343,46 +1270,31 @@ mod tests {
     fn a_repeated_key_refuses_wherever_it_appears() {
         let text = String::from_utf8(record(&[])).expect("the record is UTF-8");
         let kernel_twice = text.replacen('{', r#"{"kernel":0,"#, 1);
-        assert_eq!(
-            refused(kernel_twice.as_bytes()),
-            RecipeRefusal::DuplicateField {
-                path: "/kernel".to_owned()
-            }
-        );
+        assert_eq!(refused(kernel_twice.as_bytes()), duplicate("/kernel"));
         let helper = r#""helper":{"#;
         assert!(text.contains(helper));
-        let sha256_twice = text.replacen(
-            helper,
-            &format!(r#"{helper}"sha256":"{}","#, digest('4')),
-            1,
-        );
+        let repeated = format!(r#"{helper}"sha256":"{}","#, digest('4'));
+        let sha256_twice = text.replacen(helper, &repeated, 1);
         assert_eq!(
             refused(sha256_twice.as_bytes()),
-            RecipeRefusal::DuplicateField {
-                path: "/helper/sha256".to_owned()
-            }
+            duplicate("/helper/sha256")
         );
     }
 
     #[test]
     fn version_is_the_integer_one() {
-        for (found, refusal) in [(2, 2), (0, 0), (-1, -1)] {
-            assert_eq!(
-                refused(&with("/version", json!(found))),
-                RecipeRefusal::UnsupportedVersion { found: refusal }
-            );
+        for found in [2, 0, -1] {
+            let refusal = UnsupportedVersion {
+                found: i128::from(found),
+            };
+            assert_eq!(refused(&with("/version", json!(found))), refusal);
         }
-        assert_eq!(
-            refused(&with("/version", json!(u64::MAX))),
-            RecipeRefusal::UnsupportedVersion {
-                found: i128::from(u64::MAX)
-            }
-        );
+        let found = i128::from(u64::MAX);
+        let refusal = refused(&with("/version", json!(u64::MAX)));
+        assert_eq!(refusal, UnsupportedVersion { found });
         for wrong in [json!(1.0), json!("1"), json!(null), json!(true)] {
-            assert_eq!(
-                refused(&with("/version", wrong)),
-                wrong_type("version", "the integer 1")
-            );
+            let refusal = refused(&with("/version", wrong));
+            assert_eq!(refusal, wrong_type("version", "the integer 1"));
         }
     }
 
@@ -1390,35 +1302,29 @@ mod tests {
     fn vcpus_and_memory_are_positive_and_within_the_host_limits() {
         let vcpus_type = wrong_type("vcpus", "an integer from 0 to 255");
         let memory_type = wrong_type("memory_mib", "an integer from 0 to 4294967295");
-        assert_eq!(refused(&with("/vcpus", json!(0))), RecipeRefusal::ZeroVcpus);
+        assert_eq!(refused(&with("/vcpus", json!(0))), ZeroVcpus);
         for wrong in [json!(256), json!(-1), json!(2.0), json!("2")] {
             assert_eq!(refused(&with("/vcpus", wrong)), vcpus_type);
         }
+        let refusal = refused(&with("/vcpus", json!(9)));
         assert_eq!(
-            refused(&with("/vcpus", json!(9))),
-            RecipeRefusal::VcpusAboveLimit {
+            refusal,
+            VcpusAboveLimit {
                 requested: 9,
                 limit: 8
             }
         );
         assert_eq!(parsed(&with("/vcpus", json!(8))).vcpus(), 8);
-        assert_eq!(
-            refused(&with("/memory_mib", json!(0))),
-            RecipeRefusal::ZeroMemory
-        );
+        assert_eq!(refused(&with("/memory_mib", json!(0))), ZeroMemory);
         for wrong in [json!(4_294_967_296_u64), json!(-1), json!(2048.0)] {
             assert_eq!(refused(&with("/memory_mib", wrong)), memory_type);
         }
+        let (requested, limit) = (16_385, 16_384);
+        let refusal = refused(&with("/memory_mib", json!(requested)));
+        assert_eq!(refusal, MemoryAboveLimit { requested, limit });
         assert_eq!(
-            refused(&with("/memory_mib", json!(16_385))),
-            RecipeRefusal::MemoryAboveLimit {
-                requested: 16_385,
-                limit: 16_384
-            }
-        );
-        assert_eq!(
-            parsed(&with("/memory_mib", json!(16_384))).memory_mib(),
-            16_384
+            parsed(&with("/memory_mib", json!(limit))).memory_mib(),
+            limit
         );
         let roomy = PlatformLimits {
             max_vcpus: u8::MAX,
@@ -1426,8 +1332,8 @@ mod tests {
             ..LIMITS
         };
         let largest = record(&[
-            ("/vcpus", Some(json!(255))),
-            ("/memory_mib", Some(json!(u32::MAX))),
+            set("/vcpus", json!(255)),
+            set("/memory_mib", json!(u32::MAX)),
         ]);
         let recipe = RuntimeRecipe::parse(&largest, &roomy).expect("the largest values parse");
         assert_eq!((recipe.vcpus(), recipe.memory_mib()), (255, u32::MAX));
@@ -1446,13 +1352,10 @@ mod tests {
             let format = parsed(&with("/kernel_format", json!(spelling))).kernel_format();
             assert_eq!((format.krun_value(), format.as_str()), (krun, spelling));
         }
-        for unknown in ["RAW", "bzImage", ""] {
-            assert_eq!(
-                refused(&with("/kernel_format", json!(unknown))),
-                RecipeRefusal::UnknownKernelFormat {
-                    found: unknown.to_owned()
-                }
-            );
+        for found in ["RAW", "bzImage", ""] {
+            let refusal = refused(&with("/kernel_format", json!(found)));
+            let found = found.to_owned();
+            assert_eq!(refusal, UnknownKernelFormat { found });
         }
     }
 
@@ -1460,40 +1363,36 @@ mod tests {
     fn x86_64_with_raw_refuses_on_either_host_before_the_architecture_compare() {
         let x86_64 = |format: &str| {
             record(&[
-                ("/architecture", Some(json!("x86_64"))),
-                ("/kernel_format", Some(json!(format))),
+                set("/architecture", json!("x86_64")),
+                set("/kernel_format", json!(format)),
             ])
         };
         for limits in [LIMITS, X86_64_LIMITS] {
-            assert_eq!(
-                refused_under(&x86_64("raw"), &limits),
-                RecipeRefusal::UnadmittedBootPair
-            );
+            assert_eq!(refused_under(&x86_64("raw"), &limits), UnadmittedBootPair);
         }
+        let (aarch64, x86) = (Architecture::Aarch64, Architecture::X86_64);
+        let refusal = refused(&x86_64("elf"));
         assert_eq!(
-            refused(&x86_64("elf")),
-            RecipeRefusal::ArchitectureMismatch {
-                recipe: Architecture::X86_64,
-                host: Architecture::Aarch64
+            refusal,
+            ArchitectureMismatch {
+                recipe: x86,
+                host: aarch64
             }
         );
+        let refusal = refused_under(&record(&[]), &X86_64_LIMITS);
         assert_eq!(
-            refused_under(&record(&[]), &X86_64_LIMITS),
-            RecipeRefusal::ArchitectureMismatch {
-                recipe: Architecture::Aarch64,
-                host: Architecture::X86_64
+            refusal,
+            ArchitectureMismatch {
+                recipe: aarch64,
+                host: x86
             }
         );
-        let recipe =
-            RuntimeRecipe::parse(&x86_64("elf"), &X86_64_LIMITS).expect("x86_64 elf parses");
+        let recipe = RuntimeRecipe::parse(&x86_64("elf"), &X86_64_LIMITS).expect("x86_64 elf");
         assert_eq!(recipe.architecture().as_str(), "x86_64");
-        for unknown in ["arm64", "AARCH64", ""] {
-            assert_eq!(
-                refused(&with("/architecture", json!(unknown))),
-                RecipeRefusal::UnknownArchitecture {
-                    found: unknown.to_owned()
-                }
-            );
+        for found in ["arm64", "AARCH64", ""] {
+            let refusal = refused(&with("/architecture", json!(found)));
+            let found = found.to_owned();
+            assert_eq!(refusal, UnknownArchitecture { found });
         }
     }
 
@@ -1502,20 +1401,16 @@ mod tests {
         for (pointer, name) in ARTIFACTS {
             let sha256 = format!("{pointer}/sha256");
             let field = format!("{name}.sha256");
-            assert_eq!(
-                refused(&with(&sha256, json!("A".repeat(64)))),
-                RecipeRefusal::BadDigest {
-                    field: field.clone(),
-                    fault: DigestError::NotLowercaseHex { at: 0 }
-                }
-            );
-            assert_eq!(
-                refused(&with(&sha256, json!("a".repeat(63)))),
-                RecipeRefusal::BadDigest {
-                    field,
-                    fault: DigestError::WrongLength { bytes: 63 }
-                }
-            );
+            for (text, fault) in [
+                ("A".repeat(64), DigestError::NotLowercaseHex { at: 0 }),
+                ("a".repeat(63), DigestError::WrongLength { bytes: 63 }),
+            ] {
+                let field = field.clone();
+                assert_eq!(
+                    refused(&with(&sha256, json!(text))),
+                    BadDigest { field, fault }
+                );
+            }
         }
     }
 
@@ -1527,12 +1422,10 @@ mod tests {
                 ("/var//cell", PathError::EmptyComponent),
                 ("/var/ce\0ll", PathError::Nul),
             ] {
+                let field = name.to_owned();
                 assert_eq!(
                     refused(&with(pointer, json!(text))),
-                    RecipeRefusal::BadPath {
-                        field: name.to_owned(),
-                        fault
-                    }
+                    BadPath { field, fault }
                 );
             }
         }
@@ -1540,18 +1433,17 @@ mod tests {
 
     #[test]
     fn socket_paths_are_distinct_and_fit_the_host_sun_path() {
-        assert_eq!(
-            refused(&with("/data_path", json!("/var/cell/c1/control.sock"))),
-            RecipeRefusal::SocketPathsEqual
-        );
+        let same = with("/data_path", json!("/var/cell/c1/control.sock"));
+        assert_eq!(refused(&same), SocketPathsEqual);
         for (pointer, field) in [
             ("/control_path", "control_path"),
             ("/data_path", "data_path"),
         ] {
             parsed(&with(pointer, path_of_length(103)));
+            let refusal = refused(&with(pointer, path_of_length(104)));
             assert_eq!(
-                refused(&with(pointer, path_of_length(104))),
-                RecipeRefusal::SocketPathTooLong {
+                refusal,
+                SocketPathTooLong {
                     field,
                     bytes: 104,
                     max: 103
@@ -1559,13 +1451,14 @@ mod tests {
             );
         }
         let both_long = record(&[
-            ("/control_path", Some(path_of_length(105))),
-            ("/data_path", Some(path_of_length(104))),
+            set("/control_path", path_of_length(105)),
+            set("/data_path", path_of_length(104)),
         ]);
+        let field = "control_path";
         assert_eq!(
             refused(&both_long),
-            RecipeRefusal::SocketPathTooLong {
-                field: "control_path",
+            SocketPathTooLong {
+                field,
                 bytes: 105,
                 max: 103
             }
@@ -1575,142 +1468,135 @@ mod tests {
     #[test]
     fn one_path_in_two_roles_refuses_naming_both() {
         use ArtifactRole::*;
+        use PathRole::{Artifact as Of, ControlPath, DataPath, WritableRoot};
         for (pointer, path, first, second) in [
             (
                 "/writable_root",
                 "/opt/cell/root.raw",
-                PathRole::Artifact(RootImage),
-                PathRole::WritableRoot,
+                Of(RootImage),
+                WritableRoot,
             ),
             (
                 "/libraries/0/path",
                 "/opt/cell/krun-helper",
-                PathRole::Artifact(Helper),
-                PathRole::Artifact(Library(0)),
+                Of(Helper),
+                Of(Library(0)),
             ),
-            (
-                "/data_path",
-                "/opt/cell/host.sb",
-                PathRole::DataPath,
-                PathRole::Artifact(HostPolicy),
-            ),
+            ("/data_path", "/opt/cell/host.sb", DataPath, Of(HostPolicy)),
             (
                 "/guest_policy/path",
                 "/opt/cell/kernel",
-                PathRole::Artifact(Kernel),
-                PathRole::Artifact(GuestPolicy),
+                Of(Kernel),
+                Of(GuestPolicy),
             ),
             (
                 "/initramfs/path",
                 "/var/cell/c1/control.sock",
-                PathRole::Artifact(Initramfs),
-                PathRole::ControlPath,
+                Of(Initramfs),
+                ControlPath,
             ),
         ] {
             assert_eq!(
                 refused(&with(pointer, json!(path))),
-                RecipeRefusal::PathReused { first, second }
+                PathReused { first, second }
             );
         }
-        let twin_libraries = json!([
+        let twins = json!([
             artifact("/opt/cell/lib/a.dylib", 'a'),
             artifact("/opt/cell/lib/a.dylib", 'b'),
         ]);
+        let (first, second) = (Of(Library(0)), Of(Library(1)));
         assert_eq!(
-            refused(&with("/libraries", twin_libraries)),
-            RecipeRefusal::PathReused {
-                first: PathRole::Artifact(Library(0)),
-                second: PathRole::Artifact(Library(1))
-            }
+            refused(&with("/libraries", twins)),
+            PathReused { first, second }
         );
     }
 
     #[test]
     fn of_several_reused_paths_the_first_pair_in_field_order_is_reported() {
         let two_reuses = record(&[
-            ("/root_image/path", Some(json!("/opt/cell/initramfs"))),
-            ("/guest_policy/path", Some(json!("/opt/cell/kernel"))),
+            set("/root_image/path", json!("/opt/cell/initramfs")),
+            set("/guest_policy/path", json!("/opt/cell/kernel")),
         ]);
-        assert_eq!(
-            refused(&two_reuses),
-            RecipeRefusal::PathReused {
-                first: PathRole::Artifact(ArtifactRole::Kernel),
-                second: PathRole::Artifact(ArtifactRole::GuestPolicy)
-            }
-        );
+        let first = PathRole::Artifact(ArtifactRole::Kernel);
+        let second = PathRole::Artifact(ArtifactRole::GuestPolicy);
+        assert_eq!(refused(&two_reuses), PathReused { first, second });
     }
 
     #[test]
     fn value_rules_come_before_the_cross_field_rules_in_a_fixed_order() {
+        let (zero, over) = (json!(0), json!(9));
+        let found = "bzImage".to_owned();
+        let control = json!("/var/cell/c1/control.sock");
+        let long = path_of_length(104);
         let cases = [
             (
-                record(&[
-                    ("/vcpus", Some(json!(0))),
-                    ("/kernel_format", Some(json!("bzImage"))),
-                ]),
-                RecipeRefusal::UnknownKernelFormat {
-                    found: "bzImage".to_owned(),
-                },
+                vec![
+                    set("/vcpus", zero.clone()),
+                    set("/kernel_format", json!(found)),
+                ],
+                UnknownKernelFormat { found },
             ),
             (
-                record(&[("/vcpus", Some(json!(0))), ("/memory_mib", Some(json!(0)))]),
-                RecipeRefusal::ZeroVcpus,
+                vec![
+                    set("/vcpus", zero.clone()),
+                    set("/memory_mib", zero.clone()),
+                ],
+                ZeroVcpus,
             ),
             (
-                record(&[("/memory_mib", Some(json!(0))), ("/vcpus", Some(json!(9)))]),
-                RecipeRefusal::ZeroMemory,
+                vec![set("/memory_mib", zero), set("/vcpus", over.clone())],
+                ZeroMemory,
             ),
             (
-                record(&[
-                    ("/vcpus", Some(json!(9))),
-                    ("/memory_mib", Some(json!(16_385))),
-                ]),
-                RecipeRefusal::VcpusAboveLimit {
+                vec![set("/vcpus", over), set("/memory_mib", json!(16_385))],
+                VcpusAboveLimit {
                     requested: 9,
                     limit: 8,
                 },
             ),
             (
-                record(&[
-                    ("/memory_mib", Some(json!(16_385))),
-                    ("/architecture", Some(json!("x86_64"))),
-                ]),
-                RecipeRefusal::MemoryAboveLimit {
+                vec![
+                    set("/memory_mib", json!(16_385)),
+                    set("/architecture", json!("x86_64")),
+                ],
+                MemoryAboveLimit {
                     requested: 16_385,
                     limit: 16_384,
                 },
             ),
             (
-                record(&[
-                    ("/architecture", Some(json!("x86_64"))),
-                    ("/kernel_format", Some(json!("elf"))),
-                    ("/data_path", Some(json!("/var/cell/c1/control.sock"))),
-                ]),
-                RecipeRefusal::ArchitectureMismatch {
+                vec![
+                    set("/architecture", json!("x86_64")),
+                    set("/kernel_format", json!("elf")),
+                    set("/data_path", control),
+                ],
+                ArchitectureMismatch {
                     recipe: Architecture::X86_64,
                     host: Architecture::Aarch64,
                 },
             ),
             (
-                record(&[
-                    ("/control_path", Some(path_of_length(104))),
-                    ("/data_path", Some(path_of_length(104))),
-                ]),
-                RecipeRefusal::SocketPathsEqual,
+                vec![
+                    set("/control_path", long.clone()),
+                    set("/data_path", long.clone()),
+                ],
+                SocketPathsEqual,
             ),
             (
-                record(&[
-                    ("/control_path", Some(path_of_length(104))),
-                    ("/writable_root", Some(json!("/opt/cell/root.raw"))),
-                ]),
-                RecipeRefusal::SocketPathTooLong {
+                vec![
+                    set("/control_path", long),
+                    set("/writable_root", json!("/opt/cell/root.raw")),
+                ],
+                SocketPathTooLong {
                     field: "control_path",
                     bytes: 104,
                     max: 103,
                 },
             ),
         ];
-        for (record, refusal) in cases {
+        for (edits, refusal) in cases {
+            let record = record(&edits);
             assert_eq!(
                 refused(&record),
                 refusal,
@@ -1735,21 +1621,20 @@ mod tests {
     #[test]
     fn roles_are_shown_as_recipe_field_names() {
         use ArtifactRole::*;
-        let shown: Vec<String> = [
-            PathRole::Artifact(Kernel),
-            PathRole::Artifact(Initramfs),
-            PathRole::Artifact(RootImage),
-            PathRole::WritableRoot,
-            PathRole::ControlPath,
-            PathRole::DataPath,
-            PathRole::Artifact(Helper),
-            PathRole::Artifact(Library(3)),
-            PathRole::Artifact(HostPolicy),
-            PathRole::Artifact(GuestPolicy),
-        ]
-        .iter()
-        .map(PathRole::to_string)
-        .collect();
+        use PathRole::{Artifact as Of, ControlPath, DataPath, WritableRoot};
+        let roles = [
+            Of(Kernel),
+            Of(Initramfs),
+            Of(RootImage),
+            WritableRoot,
+            ControlPath,
+            DataPath,
+            Of(Helper),
+            Of(Library(3)),
+            Of(HostPolicy),
+            Of(GuestPolicy),
+        ];
+        let shown: Vec<String> = roles.iter().map(PathRole::to_string).collect();
         assert_eq!(
             shown,
             [
@@ -1769,49 +1654,38 @@ mod tests {
 
     #[test]
     fn refusals_describe_themselves() {
-        let field = |name: &str| name.to_owned();
+        let (helper, library) = (ArtifactRole::Helper, ArtifactRole::Library(0));
+        let detail = "trailing characters at line 1, column 4".to_owned();
+        let (found, field) = ("bzImage".to_owned(), "kernel.sha256".to_owned());
         for (refusal, text) in [
             (
-                RecipeRefusal::TooLarge { bytes: 1_048_577 },
+                TooLarge { bytes: 1_048_577 },
                 "the recipe is 1048577 bytes before its newline; at most 1048576 are allowed",
             ),
             (
-                RecipeRefusal::NotOneLine,
+                NotOneLine,
                 "the recipe is not one line ending in a single newline with no carriage return",
             ),
-            (RecipeRefusal::NotUtf8, "the recipe is not UTF-8"),
+            (NotUtf8, "the recipe is not UTF-8"),
             (
-                RecipeRefusal::NotJson {
-                    detail: field("trailing characters at line 1, column 4"),
-                },
+                NotJson { detail },
                 "the recipe is not JSON: trailing characters at line 1, column 4",
             ),
+            (not_an_object(""), "the recipe is not a JSON object"),
             (
-                RecipeRefusal::NotAnObject { field: field("") },
-                "the recipe is not a JSON object",
-            ),
-            (
-                RecipeRefusal::NotAnObject {
-                    field: field("libraries[2]"),
-                },
+                not_an_object("libraries[2]"),
                 "`libraries[2]` must be a JSON object",
             ),
             (
-                RecipeRefusal::DuplicateField {
-                    path: field("/helper/sha256"),
-                },
+                duplicate("/helper/sha256"),
                 r#"the recipe repeats the key at "/helper/sha256""#,
             ),
             (
-                RecipeRefusal::UnknownField {
-                    field: field("kernel.si\nze"),
-                },
+                unknown("kernel.si\nze"),
                 r#"the recipe carries an unknown field "kernel.si\nze""#,
             ),
             (
-                RecipeRefusal::MissingField {
-                    field: field("libraries[2].sha256"),
-                },
+                missing("libraries[2].sha256"),
                 "the recipe is missing `libraries[2].sha256`",
             ),
             (
@@ -1819,68 +1693,66 @@ mod tests {
                 "`vcpus` must be an integer from 0 to 255",
             ),
             (
-                RecipeRefusal::UnsupportedVersion { found: 2 },
+                UnsupportedVersion { found: 2 },
                 "recipe version 2 is not supported; only version 1 is",
             ),
             (
-                RecipeRefusal::BadDigest {
-                    field: field("kernel.sha256"),
+                BadDigest {
+                    field,
                     fault: DigestError::WrongLength { bytes: 63 },
                 },
                 "`kernel.sha256` is refused: a SHA-256 digest is 64 lowercase hexadecimal digits, not 63 bytes",
             ),
             (
-                RecipeRefusal::BadPath {
-                    field: field("data_path"),
+                BadPath {
+                    field: "data_path".to_owned(),
                     fault: PathError::NotAbsolute,
                 },
                 "`data_path` is refused: the path does not start with /",
             ),
             (
-                RecipeRefusal::UnknownKernelFormat {
-                    found: field("bzImage"),
-                },
+                UnknownKernelFormat { found },
                 r#"`kernel_format` "bzImage" is not one of raw, elf, pe_gz, image_bz2, image_gz or image_zstd"#,
             ),
             (
-                RecipeRefusal::UnknownArchitecture {
-                    found: field("riscv64"),
+                UnknownArchitecture {
+                    found: "riscv64".to_owned(),
                 },
                 r#"architecture "riscv64" is neither aarch64 nor x86_64"#,
             ),
-            (RecipeRefusal::ZeroVcpus, "`vcpus` must be at least 1"),
-            (RecipeRefusal::ZeroMemory, "`memory_mib` must be at least 1"),
+            (ZeroVcpus, "`vcpus` must be at least 1"),
+            (ZeroMemory, "`memory_mib` must be at least 1"),
             (
-                RecipeRefusal::VcpusAboveLimit {
+                VcpusAboveLimit {
                     requested: 9,
                     limit: 8,
                 },
                 "`vcpus` is 9; this host admits at most 8",
             ),
             (
-                RecipeRefusal::MemoryAboveLimit {
+                MemoryAboveLimit {
                     requested: 16_385,
                     limit: 16_384,
                 },
                 "`memory_mib` is 16385; this host admits at most 16384",
             ),
             (
-                RecipeRefusal::UnadmittedBootPair,
+                UnadmittedBootPair,
                 "kernel format raw is not admitted for x86_64: the pinned libkrun boots it without the initramfs and command line",
             ),
             (
-                RecipeRefusal::ArchitectureMismatch {
+                ArchitectureMismatch {
                     recipe: Architecture::X86_64,
                     host: Architecture::Aarch64,
                 },
                 "the recipe is built for x86_64 but this host is aarch64",
             ),
             (
-                RecipeRefusal::SocketPathsEqual,
+                SocketPathsEqual,
                 "`control_path` and `data_path` are the same path",
             ),
             (
-                RecipeRefusal::SocketPathTooLong {
+                SocketPathTooLong {
                     field: "control_path",
                     bytes: 104,
                     max: 103,
@@ -1888,14 +1760,14 @@ mod tests {
                 "`control_path` is 104 bytes; a socket path on this host holds at most 103",
             ),
             (
-                RecipeRefusal::PathReused {
-                    first: PathRole::Artifact(ArtifactRole::Helper),
-                    second: PathRole::Artifact(ArtifactRole::Library(0)),
+                PathReused {
+                    first: PathRole::Artifact(helper),
+                    second: PathRole::Artifact(library),
                 },
                 "`helper.path` and `libraries[0].path` are the same path",
             ),
             (
-                RecipeRefusal::HostLimitUnavailable {
+                HostLimitUnavailable {
                     limit: "physical memory",
                 },
                 "this host did not report its physical memory",
