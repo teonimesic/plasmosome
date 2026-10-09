@@ -65,5 +65,6 @@ address or one owner time out.
 | `FakeBackend` | In-memory recorder — the test workhorse |
 | `CompositeBackend` | Routes capability classes to the backend that owns them |
 | Universe classes | What "system state" means for residue verification: sockets, mounts, processes, proxy entries, session files |
+| `MockMode` | How a plasmid's calls are served: `simulate`, `capture` or `passthrough`, the default. It lives here, beside `CellId`, so the ledger can record a mode without depending on core |
 
 Tests: `cargo test -p plasmosome-backend`
