@@ -739,14 +739,14 @@ fn restrict_to_owner(bound: &BoundEntry) -> Result<(), PrivateSocketError> {
         }
     }
     if unsafe { libc::fchmodat(dir, name, 0o600, 0) } == 0 {
-        Ok(())
-    } else {
-        Err(PrivateSocketError::Io {
-            op: "fchmodat",
-            at: bound.entry.path.clone(),
-            errno: last_errno(),
-        })
+        return Ok(());
     }
+    let errno = last_errno();
+    Err(PrivateSocketError::Io {
+        op: "fchmodat",
+        at: bound.entry.path.clone(),
+        errno,
+    })
 }
 
 fn components_of(relative: &[u8], whole: &Path) -> Result<Vec<CString>, PrivateSocketError> {
@@ -815,8 +815,9 @@ fn open_child(parent: &OwnedFd, name: &CStr, at: &Path) -> Result<OwnedFd, Priva
     if raw >= 0 {
         return Ok(unsafe { OwnedFd::from_raw_fd(raw) });
     }
+    let errno = last_errno();
     let at = at.to_path_buf();
-    Err(match last_errno() {
+    Err(match errno {
         libc::ELOOP => PrivateSocketError::SymlinkInPath { at },
         libc::ENOENT => PrivateSocketError::Missing { at },
         libc::ENOTDIR => match stat_at(parent, name) {
