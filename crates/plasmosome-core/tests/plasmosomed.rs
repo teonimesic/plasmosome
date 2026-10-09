@@ -162,6 +162,7 @@ fn read_reply(client: &mut BufReader<UnixStream>) -> Value {
         .unwrap_or_else(|error| panic!("plasmosomed answers JSON, got {reply:?}: {error}"))
 }
 
+#[track_caller]
 fn ask(client: &mut BufReader<UnixStream>, line: &str) -> Value {
     send(client, line.as_bytes());
     read_reply(client)
