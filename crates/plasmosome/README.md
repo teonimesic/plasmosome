@@ -22,6 +22,6 @@ The first release with something in it picks its own version number.
 
 To follow the work, read the repository. Nothing for building a capability module is ready yet:
 [`plasmid-sdk`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid-sdk), the
-contract a module will build against, is reserved and unimplemented, and the authoring tool
-[`plasmid`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid) does not yet write
-one.
+contract a module will build against, is reserved in this repository and unimplemented, and the
+authoring tool [`plasmid`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid)
+does not yet write one.
