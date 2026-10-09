@@ -26,8 +26,7 @@ pub use protocol::{ErrorCode, Request, Response, StatusResult, WireError};
 pub use reconciler::{DesiredState, ObservedState, ReconcilePlan, Reconciler};
 pub use registry::{LookupError, RegistryEntry, ToolRegistry};
 pub use session_log::{
-    LogFault, LogFile, LogStep, LogStore, OpenedLog, OsLogStore, SessionLog, SessionLogError,
-    read_events,
+    LogFault, LogFile, LogStep, LogStore, OsLogStore, SessionLog, SessionLogError, read_events,
 };
 pub use state::{
     CellId, CellRecord, CellStatus, ControllerState, GenomeName, InstanceName, InstanceNameError,

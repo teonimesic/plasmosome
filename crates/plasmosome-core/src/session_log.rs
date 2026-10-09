@@ -129,30 +129,21 @@ pub trait LogStore {
     /// Makes the entries of the existing directory at `path` durable.
     fn sync_dir(&self, path: &Path) -> std::io::Result<()>;
     /// Opens `path` for reading and appending without following a final symlink, creating the
-    /// file if it is missing. Refuses anything that is not a regular file. Takes a nonblocking
-    /// exclusive lock on the file before reading it, held for as long as the returned file is
-    /// open; if another open file holds that lock, fails with `ErrorKind::WouldBlock`.
-    fn open_log(&self, path: &Path) -> std::io::Result<OpenedLog>;
+    /// file if it is missing. Refuses anything that is not a regular file, without blocking on
+    /// it. Takes a nonblocking exclusive lock on the file, held for as long as the returned file
+    /// is open; if another open file holds that lock, fails with `ErrorKind::WouldBlock`.
+    fn open_log(&self, path: &Path) -> std::io::Result<Box<dyn LogFile>>;
 }
 
-/// An open log file. Each method has the meaning of the `std` call of the same name.
-pub trait LogFile: Send {
+/// An open log file, read from its start through [`std::io::Read`] and appended to at its end.
+/// Each method has the meaning of the `std` call of the same name.
+pub trait LogFile: std::io::Read + Send {
     /// Writes all of `bytes` at the end of the file, or fails having written any prefix.
     fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()>;
     /// Pushes buffered bytes to the operating system. This is not durability.
     fn flush(&mut self) -> std::io::Result<()>;
     /// Returns only once the file's data and metadata are durable.
     fn sync_all(&mut self) -> std::io::Result<()>;
-}
-
-/// What [`LogStore::open_log`] found.
-pub struct OpenedLog {
-    /// The open file, positioned to append.
-    pub file: Box<dyn LogFile>,
-    /// Every byte the file held when it was opened.
-    pub existing: Vec<u8>,
-    /// Whether this call created the file.
-    pub created: bool,
 }
 
 /// The production [`LogStore`] over `std::fs`.
@@ -168,34 +159,20 @@ impl LogStore for OsLogStore {
         std::fs::File::open(path)?.sync_all()
     }
 
-    fn open_log(&self, path: &Path) -> std::io::Result<OpenedLog> {
+    fn open_log(&self, path: &Path) -> std::io::Result<Box<dyn LogFile>> {
         let options = |create: bool| {
             let mut options = std::fs::OpenOptions::new();
             options.read(true).append(true).create_new(create);
             options
         };
-        match open_regular(&mut options(true), path) {
-            Ok(file) => {
-                file.try_lock()?;
-                Ok(OpenedLog {
-                    file: Box::new(file),
-                    existing: Vec::new(),
-                    created: true,
-                })
-            }
+        let file = match open_regular(&mut options(true), path) {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let mut file = open_regular(&mut options(false), path)?;
-                file.try_lock()?;
-                let mut existing = Vec::new();
-                std::io::Read::read_to_end(&mut file, &mut existing)?;
-                Ok(OpenedLog {
-                    file: Box::new(file),
-                    existing,
-                    created: false,
-                })
+                open_regular(&mut options(false), path)?
             }
-            Err(error) => Err(error),
-        }
+            opened => opened?,
+        };
+        file.try_lock()?;
+        Ok(Box::new(file))
     }
 }
 
@@ -263,14 +240,17 @@ impl SessionLog {
     pub fn open_with(path: PathBuf, store: &dyn LogStore) -> Result<SessionLog, SessionLogError> {
         let parent = parent_of(&path);
         create_parents(parent, store)?;
-        let opened = store.open_log(&path).map_err(|source| {
+        let mut file = store.open_log(&path).map_err(|source| {
             if source.kind() == std::io::ErrorKind::WouldBlock {
                 SessionLogError::Locked { path: path.clone() }
             } else {
                 io_error(&path, LogStep::Open)(source)
             }
         })?;
-        let (events, last_seq) = parse_lines(&path, &opened.existing)?;
+        let mut existing = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut existing)
+            .map_err(io_error(&path, LogStep::Open))?;
+        let (events, last_seq) = parse_lines(&path, &existing)?;
         let next_seq = match last_seq {
             None => 1,
             Some(last) => last
@@ -281,7 +261,6 @@ impl SessionLog {
                     fault: LogFault::SequenceExhausted,
                 })?,
         };
-        let mut file = opened.file;
         file.sync_all()
             .map_err(io_error(&path, LogStep::SyncFile))?;
         sync_up_from(parent, store)?;

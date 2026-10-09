@@ -1,4 +1,4 @@
-use super::{LogFile, LogStore, OpenedLog, OsLogStore};
+use super::{LogFile, LogStore, OsLogStore};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -138,23 +138,24 @@ impl LogStore for FaultLogStore {
         OsLogStore.sync_dir(path)
     }
 
-    fn open_log(&self, path: &Path) -> std::io::Result<OpenedLog> {
+    fn open_log(&self, path: &Path) -> std::io::Result<Box<dyn LogFile>> {
         strike(enter(&self.record, Call::Open(path.to_path_buf())))?;
-        let opened = OsLogStore.open_log(path)?;
-        Ok(OpenedLog {
-            file: Box::new(FaultLogFile {
-                inner: opened.file,
-                record: Arc::clone(&self.record),
-            }),
-            existing: opened.existing,
-            created: opened.created,
-        })
+        Ok(Box::new(FaultLogFile {
+            inner: OsLogStore.open_log(path)?,
+            record: Arc::clone(&self.record),
+        }))
     }
 }
 
 struct FaultLogFile {
     inner: Box<dyn LogFile>,
     record: Arc<Mutex<Record>>,
+}
+
+impl std::io::Read for FaultLogFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
 }
 
 impl LogFile for FaultLogFile {
