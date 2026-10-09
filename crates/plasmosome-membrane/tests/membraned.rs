@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 #[path = "support/fixture.rs"]
 mod fixture;
+#[path = "support/fixture_cache.rs"]
+mod fixture_cache;
 
 const STATUS_REQUEST: &str = r#"{"id":1,"method":"membrane.status","params":{}}"#;
 const READY: &str = r#"{"id":0,"result":{"ready":true,"state":"serving"}}"#;
