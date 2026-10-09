@@ -667,6 +667,15 @@ fn prepare_with(
     name: &str,
     after_bind: impl FnOnce(),
 ) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
+    prepare_as(dir, name, effective_uid(), after_bind)
+}
+
+fn prepare_as(
+    dir: PrivateDir,
+    name: &str,
+    owner: u32,
+    after_bind: impl FnOnce(),
+) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
     let c_name = entry_name(name)?;
     let path = dir.path.join(name);
     let (address, length) = address_for(&path)?;
@@ -722,7 +731,7 @@ fn prepare_with(
             path: bound.entry.path.clone(),
         });
     }
-    judge_socket(&facts, effective_uid(), &bound.entry.path)?;
+    judge_socket(&facts, owner, &bound.entry.path)?;
     Ok((socket, bound))
 }
 
