@@ -1,7 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use plasmosome_backend::CellId;
+use plasmosome_backend::{CellId, MockMode};
 use plasmosome_core::reconciler::DesiredCell;
-use plasmosome_core::{DesiredState, GenomeName, MockMode, PlasmidRecord, Reconciler};
+use plasmosome_core::{DesiredState, GenomeName, PlasmidRecord, Reconciler};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use plasmosome_backend::CellId;
+use plasmosome_backend::{CellId, MockMode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -64,41 +64,6 @@ impl fmt::Display for InstanceNameError {
 }
 
 impl std::error::Error for InstanceNameError {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MockMode {
-    Simulate,
-    Capture,
-    #[default]
-    Passthrough,
-}
-
-impl MockMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            MockMode::Simulate => "simulate",
-            MockMode::Capture => "capture",
-            MockMode::Passthrough => "passthrough",
-        }
-    }
-
-    pub fn parse(text: &str) -> Option<MockMode> {
-        match text {
-            "simulate" => Some(MockMode::Simulate),
-            "capture" => Some(MockMode::Capture),
-            "passthrough" => Some(MockMode::Passthrough),
-            _ => None,
-        }
-    }
-
-    pub fn list_tag(&self) -> String {
-        match self {
-            MockMode::Simulate | MockMode::Capture => format!("[mock:{}]", self.as_str()),
-            MockMode::Passthrough => "[real]".to_string(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlasmidRecord {
