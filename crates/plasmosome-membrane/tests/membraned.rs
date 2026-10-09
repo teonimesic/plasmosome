@@ -298,7 +298,7 @@ fn membraned_shutdown_cleans_a_worker_whose_broker_leader_exited_first() {
 }
 
 #[test]
-fn membraned_shutdown_cleans_a_worker_that_ran_only_after_its_broker_leader_exited() {
+fn membraned_shutdown_cleans_a_worker_that_first_looked_after_its_broker_leader_exited() {
     shutdown_cleans_a_leader_first_worker("named-exit-late");
 }
 
