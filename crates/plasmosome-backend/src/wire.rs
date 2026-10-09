@@ -164,10 +164,11 @@ mod tests {
     use std::fmt::Debug;
     use std::time::Duration;
 
-    use serde::Serialize;
     use serde::de::DeserializeOwned;
+    use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
 
+    use super::ObjectOnly;
     use crate::{
         BrokerLaunch, Capability, CellId, CellOwner, Diff, DrainSpec, FileAccess, Grant, GrantId,
         GrantKind, Handle, LedgerEntry, MountRecipe, OsObject, OsState, PluginId, ProxyRecipe,
@@ -472,5 +473,36 @@ mod tests {
             error.to_string().contains("invalid type: sequence"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn unit_newtype_and_tuple_variants_decode_through_object_only_unchanged() {
+        #[derive(Clone, Debug, PartialEq, Deserialize)]
+        enum Shape {
+            Unit,
+            Newtype(u8),
+            Tuple(u8, u8),
+        }
+        let cases = [
+            (json!("Unit"), Shape::Unit),
+            (json!({ "Newtype": 1 }), Shape::Newtype(1)),
+            (json!({ "Tuple": [1, 2] }), Shape::Tuple(1, 2)),
+        ];
+        for (value, expected) in cases {
+            let text = value.to_string();
+            let mut reader = serde_json::Deserializer::from_str(&text);
+            let through_text = Shape::deserialize(ObjectOnly::new(&mut reader));
+            let through_value = Shape::deserialize(ObjectOnly::new(value));
+            assert_eq!(
+                through_text.map_err(|error| error.to_string()),
+                Ok(expected.clone()),
+                "{text}"
+            );
+            assert_eq!(
+                through_value.map_err(|error| error.to_string()),
+                Ok(expected),
+                "{text}"
+            );
+        }
     }
 }
