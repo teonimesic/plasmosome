@@ -129,19 +129,24 @@ control socket described above.
   - Each ancestor must be owned by root or by the effective UID, and writable by neither group
     nor other. A sticky `/tmp` is refused as well.
   - On macOS, an ancestor is also refused when its ACL has an allow entry that grants
-    `add_file`, `add_subdirectory`, `delete_child`, `delete`, `writesecurity` or `chown`.
-    Extended ACLs do not show in the mode bits. Deny entries and allow entries for reading
-    still pass, such as the home directory's `everyone deny delete`.
+    `add_file`, `add_subdirectory`, `delete_child`, `delete`, `writesecurity` or `chown`. This
+    holds whoever the entry names, this user included, and for entries that apply only to new
+    children. Extended ACLs do not show in the mode bits. Deny entries and allow entries for
+    reading still pass, such as the home directory's `everyone deny delete`.
   - On Linux, an ACL that grants write raises the mask, which shows in the group bits, so the
-    mode rule covers it.
+    mode rule covers it. Linux reads only POSIX ACLs, so neither rule sees an NFSv4 or CIFS
+    ACL.
   - Ancestors only need search permission, so a root-owned 0711 `/home` passes.
   - The directory itself must be owned by the effective UID, have no group or other permission
     bits, and carry no ACL. It stays open for the checks that follow.
 - `PrivateListener::bind` refuses any entry already at the name and never unlinks it.
   - It walks and judges the directory again before it creates the socket, and again after
     `bind`. If the second check fails, it returns that check's error and removes the socket it
-    finds at the name in the held directory.
-  - It sets the socket to mode 0600 through the held directory before `listen`.
+    finds at the name in the held directory, but only if the effective UID owns it.
+  - It sets the socket to mode 0600 through the held directory before `listen`. On Linux,
+    glibc implements `fchmodat` with `AT_SYMLINK_NOFOLLOW` through `/proc` and reports
+    `EOPNOTSUPP` without it. The socket is then matched by device and inode and set with
+    `fchmodat` without that flag.
   - On drop, it removes only the socket it created, matched by device and inode, through the
     held directory.
 - `PrivateListener::accept` reads the peer's effective UID from the kernel: `getpeereid` on
@@ -154,7 +159,16 @@ The integration tests make each private root where every ancestor passes:
   whatever `TMPDIR` says;
 - on Linux, under `XDG_RUNTIME_DIR` when it is set, else under `CARGO_TARGET_TMPDIR`.
 
-If no base passes, the tests fail and name each base with the ancestor that refused it.
+If no base passes, the tests fail and name each base with the ancestor that refused it. Each
+test root is removed when its test ends, even after a panic: modes are opened up and, on macOS,
+ACLs stripped before removal.
+
+The distinct-UID test is ignored by default. It runs with `--ignored` and
+`PLASMOSOME_OTHER_UID_PREFIX` set to a command prefix that runs its arguments as another UID
+(owner decision O-8). On macOS it makes its root under the parent of the per-user temp
+directory, which is 0755 and owned by this user. The other UID must first reach a 0777 control
+socket in a 0755 directory there; otherwise the test fails as unproved. Only then does it try
+the socket in the 0700 private directory beside it.
 
 The integration tests replace the allocator with one that overwrites `errno` after every
 allocation, so an error read too late shows up as the wrong variant.
