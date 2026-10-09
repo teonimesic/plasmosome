@@ -35,6 +35,8 @@ falling back to a build path or runtime `CARGO_MANIFEST_DIR`.
 A relocated checking component reports `StaleTarget` and still runs the consumer against the
 selected tree, exposing copy-only violations. Even a clean consumer cannot pass until the
 component and its consuming test binaries are rebuilt for that tree. This compares canonical
-build and runtime locations, not source freshness. The `workspace_roots` regression builds real
-publication and membrane consumers in disposable trees and exercises this copy/move contract;
-it therefore includes two isolated compilations.
+build and runtime locations, not source freshness. The `workspace_roots` regression builds the
+real publication consumer in a disposable tree with an unused target and exercises this copy/move
+contract. To rebuild for the copy, it starts from a copy of that build output and removes the
+checking component with `cargo clean -p plasmosome-guards`, so only the component and its
+consumer compile twice; the third-party dependencies compile once per run.
