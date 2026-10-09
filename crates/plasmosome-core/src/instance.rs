@@ -521,7 +521,7 @@ fn sync_directory(dir: BorrowedFd<'_>) -> io::Result<()> {
 mod tests {
     use std::ffi::CString;
     use std::fs;
-    use std::io::{self, Read};
+    use std::io::{self, Read, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -1020,5 +1020,267 @@ mod tests {
         let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
         assert!(flags >= 0, "F_GETFL: {}", io::Error::last_os_error());
         assert_eq!(flags & libc::O_NONBLOCK, 0, "O_NONBLOCK was left set");
+    }
+
+    fn cell(name: &str) -> CellId {
+        CellId::from(name)
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        fs::symlink_metadata(path).expect("the entry exists").mode() & 0o7777
+    }
+
+    fn identity(metadata: &fs::Metadata) -> (u64, u64) {
+        (metadata.dev(), metadata.ino())
+    }
+
+    fn appended(dir: &CellDir) -> JournalAppend {
+        dir.open_journal_for_append()
+            .expect("the journal opens for appending")
+    }
+
+    #[test]
+    fn create_cell_dir_creates_private_directories() {
+        let (_dir, root) = temp_root();
+        let created = open_root(&root)
+            .create_cell_dir(&cell("cell-1"))
+            .expect("the cell directory is created");
+        assert_eq!(created.cell(), &cell("cell-1"));
+        assert_eq!(
+            created.journal_path(),
+            root.join("cells/cell-1/ledger.ndjson")
+        );
+        for path in [root.join("cells"), root.join("cells/cell-1")] {
+            assert!(
+                fs::symlink_metadata(&path)
+                    .expect("the directory exists")
+                    .is_dir()
+            );
+            assert_eq!(mode_of(&path), 0o700, "{}", path.display());
+        }
+        created.sync().expect("the cell directory syncs");
+    }
+
+    #[test]
+    fn create_cell_dir_refuses_an_existing_cell() {
+        let (_dir, root) = temp_root();
+        let existing = make_cell(&root, "cell-1", None);
+        set_mode(&existing, 0o755);
+        match open_root(&root).create_cell_dir(&cell("cell-1")) {
+            Err(CellDirError::AlreadyExists { path }) => assert_eq!(path, existing),
+            other => panic!("expected AlreadyExists, got {other:?}"),
+        }
+        assert_eq!(mode_of(&existing), 0o755, "an existing cell is not adopted");
+    }
+
+    #[test]
+    fn create_cell_dir_refuses_a_symlinked_cells_directory() {
+        let (_dir, root) = temp_root();
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir(&elsewhere).expect("the link target is made");
+        symlink(&elsewhere, root.join("cells")).expect("the link is made");
+        match open_root(&root).create_cell_dir(&cell("cell-1")) {
+            Err(CellDirError::Symlink { path }) => assert_eq!(path, root.join("cells")),
+            other => panic!("expected Symlink, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_dir(&elsewhere).expect("the target lists").count(),
+            0,
+            "nothing was created through the link"
+        );
+    }
+
+    #[test]
+    fn create_cell_dir_refuses_a_regular_file_at_cells() {
+        let (_dir, root) = temp_root();
+        fs::write(root.join("cells"), b"").expect("the file is made");
+        match open_root(&root).create_cell_dir(&cell("cell-1")) {
+            Err(CellDirError::NotADirectory { path }) => assert_eq!(path, root.join("cells")),
+            other => panic!("expected NotADirectory, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_cell_dir_refuses_invalid_ids_before_creating_anything() {
+        let (_dir, root) = temp_root();
+        match open_root(&root).create_cell_dir(&cell("..")) {
+            Err(CellDirError::InvalidCell(CellPathError::NotACellName(text))) => {
+                assert_eq!(text, "..")
+            }
+            other => panic!("expected InvalidCell, got {other:?}"),
+        }
+        assert!(
+            fs::symlink_metadata(root.join("cells")).is_err(),
+            "cells was created for an invalid ID"
+        );
+    }
+
+    #[test]
+    fn cell_dir_opens_an_existing_cell_and_its_journal() {
+        let (_dir, root) = temp_root();
+        make_cell(&root, "cell-1", Some(b"{}\n"));
+        let opened = open_root(&root)
+            .cell_dir(&cell("cell-1"))
+            .expect("the cell opens");
+        assert_eq!(opened.cell(), &cell("cell-1"));
+        assert_eq!(
+            opened.journal_path(),
+            cell_ledger_path(&root, &cell("cell-1")).expect("a valid cell")
+        );
+        assert_eq!(describe_journal(&opened.open_journal()), "regular");
+    }
+
+    #[test]
+    fn cell_dir_refuses_invalid_ids_before_any_open() {
+        let (_dir, root) = temp_root();
+        fs::create_dir(root.join("cells")).expect("cells is made");
+        match open_root(&root).cell_dir(&cell("..")) {
+            Err(CellDirError::InvalidCell(CellPathError::NotACellName(text))) => {
+                assert_eq!(text, "..")
+            }
+            other => panic!("expected InvalidCell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cell_dir_refuses_symlinks_and_non_directories() {
+        let (_dir, root) = temp_root();
+        make_cell(&root, "real", None);
+        symlink(root.join("cells/real"), root.join("cells/linked")).expect("the link is made");
+        fs::write(root.join("cells/file"), b"").expect("the file is made");
+        let instance = open_root(&root);
+        match instance.cell_dir(&cell("linked")) {
+            Err(CellDirError::Symlink { path }) => assert_eq!(path, root.join("cells/linked")),
+            other => panic!("expected Symlink, got {other:?}"),
+        }
+        match instance.cell_dir(&cell("file")) {
+            Err(CellDirError::NotADirectory { path }) => {
+                assert_eq!(path, root.join("cells/file"))
+            }
+            other => panic!("expected NotADirectory, got {other:?}"),
+        }
+        match instance.cell_dir(&cell("missing")) {
+            Err(CellDirError::Io { path, source }) => {
+                assert_eq!(path, root.join("cells/missing"));
+                assert_eq!(source.kind(), io::ErrorKind::NotFound);
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cell_dir_refuses_a_symlinked_cells_directory() {
+        let (_dir, root) = temp_root();
+        make_cell(&root.join("elsewhere"), "cell-1", None);
+        symlink(root.join("elsewhere/cells"), root.join("cells")).expect("the link is made");
+        match open_root(&root).cell_dir(&cell("cell-1")) {
+            Err(CellDirError::Symlink { path }) => assert_eq!(path, root.join("cells")),
+            other => panic!("expected Symlink, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_journal_for_append_creates_once_and_never_truncates() {
+        let (_dir, root) = temp_root();
+        let instance = open_root(&root);
+        let created = instance
+            .create_cell_dir(&cell("cell-1"))
+            .expect("the cell directory is created");
+        let journal = root.join("cells/cell-1/ledger.ndjson");
+
+        let mut first = appended(&created);
+        assert!(first.created);
+        assert_eq!(mode_of(&journal), 0o600);
+        first.file.write_all(b"one\n").expect("the first record");
+        let before = identity(&fs::symlink_metadata(&journal).expect("the journal"));
+
+        let mut second = appended(&instance.cell_dir(&cell("cell-1")).expect("the cell"));
+        assert!(!second.created);
+        let mut existing = Vec::new();
+        second
+            .file
+            .read_to_end(&mut existing)
+            .expect("the existing records read through the append handle");
+        assert_eq!(existing, b"one\n");
+        second.file.write_all(b"two\n").expect("the second record");
+        assert_eq!(fs::read(&journal).expect("the journal"), b"one\ntwo\n");
+        assert_eq!(
+            identity(&fs::symlink_metadata(&journal).expect("the journal")),
+            before,
+            "the journal inode was replaced"
+        );
+    }
+
+    #[test]
+    fn the_append_handle_and_the_constructor_name_the_same_file() {
+        let (_dir, root) = temp_root();
+        let created = open_root(&root)
+            .create_cell_dir(&cell("cell-1"))
+            .expect("the cell directory is created");
+        let handle = appended(&created);
+        let constructed = cell_ledger_path(&root, &cell("cell-1")).expect("a valid cell");
+        assert_eq!(
+            identity(&handle.file.metadata().expect("the handle's fstat")),
+            identity(&fs::metadata(&constructed).expect("the constructed path")),
+        );
+        assert_eq!(created.journal_path(), constructed);
+    }
+
+    #[test]
+    fn open_journal_for_append_refuses_a_symlinked_journal() {
+        let (_dir, root) = temp_root();
+        let cell_path = make_cell(&root, "cell-1", None);
+        let target = root.join("elsewhere");
+        fs::write(&target, b"keep").expect("the target is made");
+        symlink(&target, cell_path.join("ledger.ndjson")).expect("the link is made");
+        let opened = open_root(&root)
+            .cell_dir(&cell("cell-1"))
+            .expect("the cell");
+        assert!(
+            matches!(
+                opened.open_journal_for_append(),
+                Err(JournalRefusal::Symlink)
+            ),
+            "a symlinked journal is refused"
+        );
+        assert_eq!(fs::read(&target).expect("the target"), b"keep");
+    }
+
+    #[test]
+    fn open_journal_for_append_refuses_a_directory_or_fifo_journal() {
+        let (_dir, root) = temp_root();
+        fs::create_dir_all(root.join("cells/dir/ledger.ndjson")).expect("the directory is made");
+        make_cell(&root, "fifo", None);
+        make_fifo(&root.join("cells/fifo/ledger.ndjson"));
+        let instance = open_root(&root);
+        for name in ["dir", "fifo"] {
+            let opened = instance.cell_dir(&cell(name)).expect("the cell");
+            let result = within("opening a journal for appending", move || {
+                opened.open_journal_for_append()
+            });
+            assert!(
+                matches!(result, Err(JournalRefusal::NotRegular)),
+                "{name}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cell_and_journal_descriptors_are_close_on_exec() {
+        let (_dir, root) = temp_root();
+        let created = open_root(&root)
+            .create_cell_dir(&cell("cell-1"))
+            .expect("the cell directory is created");
+        let handle = appended(&created);
+        for (what, fd) in [
+            ("cell", created.dir.as_raw_fd()),
+            ("journal", handle.file.as_raw_fd()),
+        ] {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(
+                flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+                "the {what} descriptor would leak into a spawned process: flags {flags}"
+            );
+        }
     }
 }
