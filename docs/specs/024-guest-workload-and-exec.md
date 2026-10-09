@@ -33,7 +33,8 @@ how it ended and read what it printed. It serves intent 003: running work surviv
 controller. Intent 011, isolation the model never has to know about, decides the shape: no
 plasmosome variables, no special errors, no restart when reach changes. This spec meets intent
 011 for non-interactive harnesses only; a terminal is an owner question. It serves intent 004 by
-saying when a removed Mount grant counts as gone while a process still holds a reference into it.
+saying when a removed Mount grant counts as gone while a process still holds a reference into it,
+and what a workload's call returns when any grant stops serving it.
 Subject spawns stay refused with code 110 until host-side attestation exists, and output
 streaming stays reserved, as spec 001 says.
 
@@ -62,17 +63,20 @@ Owner gates O-1 and O-6 also block a real boot.
 - A cell that is not `ready` is 105 `{from: <cell state>, to: "ready"}` at once, before any
   wait; spec 023 says when a cell is `germinating`, `draining` or `dead`. A cell that is unknown,
   retired or set aside (spec 023) is 101 `cell <id>`.
-- Success is `{exec_id, state}`, where `state` is `running` for a new process. The reply means
-  the process exists, not that the program was found (§4).
+- Success is `{cell, exec_id, state}`, where `state` is `running` for a new process. The reply
+  means the process exists, not that the program was found (§4).
 
 `exec.status` and `exec.output` take `kernel`, `cell`, `exec_id` and optional `deadline_ms`
-(as above). They are answered while the cell is `ready` or `draining`. `exec.status` returns one
-of:
+(as above). They are answered while the cell is `ready` or `draining`. `exec.status` also takes
+optional `wait`, default false. With `wait: true` it replies once the process is no longer
+`running`, or when its deadline leaves only a reply reserve of the smaller of 1,000 ms and half
+the deadline, with the state at that moment; reaching the deadline is not an error. Every result
+names `cell`. `exec.status` returns one of:
 
 ```json
-{"exec_id": "e-11", "state": "running"}
-{"exec_id": "e-11", "state": "exited", "exit_code": 0, "duration_ms": 1823}
-{"exec_id": "e-11", "state": "signaled", "signal": 9, "duration_ms": 40}
+{"cell": "cell-1", "exec_id": "e-11", "state": "running"}
+{"cell": "cell-1", "exec_id": "e-11", "state": "exited", "exit_code": 0, "duration_ms": 1823}
+{"cell": "cell-1", "exec_id": "e-11", "state": "signaled", "signal": 9, "duration_ms": 40}
 ```
 
 `exit_code` is 0 to 255. `signal` is the Linux signal number. `duration_ms` runs from the start of
@@ -81,7 +85,7 @@ the process to its reap, on the guest's monotonic clock.
 `exec.output` returns the retained output of both streams:
 
 ```json
-{"exec_id": "e-11",
+{"cell": "cell-1", "exec_id": "e-11",
  "stdout": {"bytes": [111, 107, 10], "total": 3, "truncated": false, "closed": true},
  "stderr": {"bytes": [], "total": 0, "truncated": false, "closed": true}}
 ```
@@ -114,7 +118,8 @@ None of the three verbs writes a journal record or takes part in spec 008's tran
 ### 2. Waiting
 
 - `exec.status` and `exec.output` never wait for a grant transaction or a drain, at the
-  controller, at the membrane or on the 4090 lane.
+  controller, at the membrane or on the 4090 lane. A waiting `exec.status` waits only for its
+  process.
 - `exec` waits for a grant transaction in progress on the same cell, at the controller and on the
   4090 normal lane, within its deadline. At the deadline it is refused with `busy`, and nothing
   was sent to the guest.
@@ -130,7 +135,7 @@ The controller sends four new membrane methods on `membrane.uds`:
 | Method | Params | Result |
 | --- | --- | --- |
 | `membrane.cell.exec` | `{cell, argv, request_key: String\|null, deadline_ms}` | `{cell, exec_id, state}` |
-| `membrane.exec.status` | `{cell, exec_id, deadline_ms}` | `cell` plus one `exec.status` result |
+| `membrane.exec.status` | `{cell, exec_id, wait, deadline_ms}` | `cell` plus one `exec.status` result |
 | `membrane.exec.output` | `{cell, exec_id, deadline_ms}` | `cell` plus one `exec.output` result |
 | `membrane.workload.stop` | `{cell, deadline_ms}` | `{cell, stopped: true}` |
 
@@ -145,7 +150,7 @@ Four verbs are added to the 4090 table, all on the normal lane only:
 | Method | Params | Result |
 | --- | --- | --- |
 | `exec` | `{argv: [String], request_key: String\|null, deadline_ms}` | `{boot, exec_id: String, state: ExecState}` |
-| `exec_status` | `{exec_id: String, deadline_ms}` | `ExecStatus` |
+| `exec_status` | `{exec_id: String, wait: bool, deadline_ms}` | `ExecStatus` |
 | `exec_output` | `{exec_id: String, deadline_ms}` | `{boot, exec_id, stdout: Stream, stderr: Stream}` |
 | `workload_stop` | `{deadline_ms}` | `{boot, stopped: true}` |
 
@@ -182,9 +187,10 @@ In the new process, before `execve`, PID1's child:
   sets no-new-privs, then loads the seccomp filter of §8;
 - after those, puts descriptor 0 on `/dev/null` and 1 and 2 on the write ends of two pipes PID1
   reads, with no other descriptor open;
-- searches `PATH` for `argv[0]` with `stat` inside the workload root (an `argv[0]` containing `/`
-  is used as a path), then calls `execve` with the environment exactly
-  `PATH=/usr/local/bin:/usr/bin:/bin`, `HOME=/home/workload` and `LANG=C.UTF-8`.
+- searches `PATH` for `argv[0]` inside the workload root (an `argv[0]` containing `/` is used as
+  a path), taking the first regular file uid 1000 may execute, or else the first file that
+  exists, then calls `execve` with the environment exactly `PATH=/usr/local/bin:/usr/bin:/bin`,
+  `HOME=/home/workload` and `LANG=C.UTF-8`.
 
 The order that matters: the namespaces, group and root change come before capabilities are
 dropped; no-new-privs comes before seccomp; descriptors are set after both. If the search finds
@@ -235,9 +241,9 @@ without them refuses the boot as a launch failure, and the cell never reaches re
 
 ### 6. The workload control group
 
-Before hello, PID1 creates one cgroup v2 group for the workload. Every started process is created
-in it (§4); PID1 and its own helpers stay outside it. The guest kernel must provide the pids and
-memory controllers; PID1 checks them before hello and refuses the boot without them. The pinned
+Before hello, PID1 creates one cgroup v2 group for the workload. Every started process is created in
+it (§4); PID1 stays outside it and runs no helper process. The guest kernel must provide the pids
+and memory controllers; PID1 checks them before hello and refuses the boot without them. The pinned
 kernel's configuration has both.
 
 - `pids.max` is 4,096 and `memory.max` is the guest's memory less a reserve for PID1, the larger
@@ -287,10 +293,11 @@ checked; only aarch64 is built today.
 
 None of these needs owner decision O-7: seccomp, sysctls and credentials are enough. Spec 017's
 managed-file policy, which forbids mapping or directly executing a managed file, does need a
-mechanism that sees files, and that is O-7. Because hello requires the guest policy to be loaded,
-`exec` stays gated on O-7 as a whole.
+mechanism that sees files, and that is O-7. A mechanism built on LSM hooks needs
+`CONFIG_SECURITY`, which the pinned kernel leaves unset. Because hello requires the guest policy
+to be loaded, `exec` stays gated on O-7 as a whole.
 
-### 9. When a Mount grant is removed under a running process
+### 9. When a grant stops serving a running process
 
 A removal never waits for the workload and never stops a started process. Destructive withdrawal
 of a Mount grant, safe or Force, revokes the grant's backing, in one of two ways:
@@ -299,20 +306,49 @@ of a Mount grant, safe or Force, revokes the grant's backing, in one of two ways
   of a reference into it, and the mount is detached.
 - **A peer shares the connection at the same target** (spec 017's equal peers). The guest file
   server refuses every request on the withdrawn grant's inodes and handles. The mount stays,
-  because the peer still serves it, and a fresh lookup reaches the peer. The mount is detached
-  only when the last holding at the target goes.
+  because the peer still serves it. The target's root belongs to neither grant, so a working
+  directory at the target itself keeps working, and a fresh lookup reaches the peer. The mount
+  is detached only when the last holding at the target goes.
 
-Either way, the host closes the grant's source root and every host handle opened for it. From
-then on, every operation through a reference a process still holds into the withdrawn grant,
-such as a read, write, `stat`, directory listing or lookup through its working directory or an
-open descriptor, fails with one named error in both branches. The expected value is `ENOTCONN`;
-the implementing task measures it on the pinned runtime and records it here before item 10 runs.
-`close()` succeeds. The process keeps running. Observation reports the binding as `revoked`,
-which counts as absent, so `plasmid.remove` completes while a process sits with `cd /ws`. After
-the last holding at a target goes, a lookup by path there fails with `ENOENT`.
+Either way, the host closes the grant's source root and every host handle opened for it. Every
+operation started after the removal replies, through a reference a process still holds into the
+withdrawn grant, fails with one named error in both branches: a read, write, `stat`, directory
+listing or lookup, through a working directory or an open descriptor. The expected value is
+`ENOTCONN`; the implementing task measures it on the pinned runtime and records it here before
+item 10 runs. An operation in flight at the revocation ends with an error too, expected
+`ECONNABORTED`, within the removal's deadline. `close()` succeeds. The process keeps running.
+After the last holding at a target goes, a lookup by path there fails with `ENOENT`. All of this
+rests on spec 017's direct IO, zero cache timeouts and refusal of file-backed mappings
+(`017:416-424`), which need O-7 (§8); without them, cached pages and mappings outlive the grant.
 
-The same question for SessionFile handles belongs to the spec that realizes SessionFile in the
-guest.
+**A revoked binding.** Observation reports the binding as `revoked` while references to it
+remain. It counts as absent, so `plasmid.remove` completes while a process sits in the target.
+Once the removal has completed, no host authority remains to match it, so it is left out of
+association checks, residue, drift and recovery matching, and it never blocks readiness or a
+later attach at the same target (the amendments to spec 001 and spec 008 below).
+
+**A binding that stands while the host refuses it.** A grant can stop serving while its guest
+binding stands: a fence (draft spec 028), a graceful removal's reversible pause, or a Force
+removal before guest cleanup. The host gate refuses (spec 001 §4.2's `grant_inactive`), and the
+guest turns that into an ordinary error:
+
+| Grant | Refused while standing: a fence, or Force before guest cleanup | During a graceful removal's reversible pause |
+| --- | --- | --- |
+| Mount | An operation through a reference bound to the grant: expected `ENOTCONN`, as above. A fresh lookup when the only grant at the target is refused: expected `ENOENT`. | Each operation fails at once with the same errors. A failed operation destroys nothing, so after a restore new operations succeed. |
+| UdsSocket or Broker stream | The stream is closed: a read returns end-of-file, and a write fails with `EPIPE`. A new connection is closed the same way as soon as it is accepted. | Nothing is closed, since the pause may be undone. Data waits, and a blocked read or write returns when the pause is restored, or fails as on the left when the removal goes ahead. |
+| ProxyMap flow | An established TCP flow is reset, so its next call fails with `ECONNRESET`. A new TCP connect fails with `ECONNREFUSED`. A UDP datagram on a refused flow gets an ICMP port unreachable, so a connected socket's next call fails with `ECONNREFUSED`. DNS answers NXDOMAIN. No flow is dropped silently. | As for a stream. |
+
+A write to a closed stream also raises `SIGPIPE`, as for any stream whose peer has gone, and a
+process that has not ignored it ends. The guest could prevent that only by changing the process's
+signal dispositions, which §4 resets to the defaults, or by dropping writes silently, so it does
+neither; a reader sees end-of-file and no signal. SessionFile handles belong to the spec that
+realizes SessionFile in the guest.
+
+**No call waits forever.** A workload call on a refused, paused or removed grant fails at once
+when it starts after the gate closed. One already in progress, or waiting on a paused stream or
+flow, returns no later than that removal's or pause's deadline. Host IO that cannot be
+interrupted by then keeps the removal incomplete, as spec 001 §4.2 says, and the workload's call
+does not wait for it.
 
 ### 10. What a started process is not
 
@@ -325,10 +361,9 @@ verb, so its processes cannot be queried until it is adopted.
 
 ## Changes proposed to accepted specs
 
-These are proposed text, not edits made in this PR. Spec 001 says its text changes in a pull
-request with the reasoning written down, so the PR that accepts this spec must carry these
-edits, or this spec stays draft. Where spec 023 proposes text for the same lines, the text below
-is the same.
+These are proposed text. The PR that accepts this spec edits no other accepted document. Each
+amendment is applied by a later reviewed change to the document it amends, before any task that
+relies on it. Where spec 023 proposes text for the same lines, the text below is the same.
 
 **Spec 001 §1, the 105 row.** Replace "`from`, `to`; private recovery methods additionally carry
 the typed `recovery` refusal in §4.1" with:
@@ -341,21 +376,23 @@ the typed `recovery` refusal in §4.1" with:
 when a `subject` is named." with "Run a command inside the cell as its unprivileged workload user
 (spec 024). A named `subject` requests an E13-style subject spawn, refused with 110 until
 host-side attestation exists." In the example request, replace `"subject": "git"` with
-`"request_key": "push-1"`. After the `exec.status` example, add:
+`"request_key": "push-1"`. In both example results, replace `{"exec_id": "e-11",` with
+`{"cell": "cell-1", "exec_id": "e-11",`. After the `exec.status` example, add:
 
 > ```json
 > {"id": 11, "method": "exec.output",
 >  "params": {"kernel": "work", "cell": "cell-1", "exec_id": "e-11"}}
-> {"id": 11, "result": {"exec_id": "e-11",
+> {"id": 11, "result": {"cell": "cell-1", "exec_id": "e-11",
 >   "stdout": {"bytes": [111, 107, 10], "total": 3, "truncated": false, "closed": true},
 >   "stderr": {"bytes": [], "total": 0, "truncated": false, "closed": true}}}
 > ```
 
 After the bullet about subject attestation and code `110`, add:
 
-> - The parameters, the workload's identity and environment, exit codes, retained output and the
->   refusals are spec 024's. A started process is not a capability: it is not journaled,
->   observed as a grant or stopped by plasmid removal.
+> - The parameters, including `exec.status`'s `wait`, the workload's identity and environment,
+>   exit codes, retained output and the refusals are spec 024's. Every result names `cell`. A
+>   started process is not a capability: it is not journaled, observed as a grant or stopped by
+>   plasmid removal.
 
 **Spec 001 §4.** After the `membrane.cell.kill` bullet, add:
 
@@ -387,7 +424,7 @@ within its deadline and then refuses as busy (spec 024)."
 **Spec 001 §4.2, the 4090 table.** Add:
 
 > | `exec` | `{argv:[String], request_key:String\|null, deadline_ms}` | `{boot, exec_id:String, state:ExecState}` |
-> | `exec_status` | `{exec_id:String, deadline_ms}` | `ExecStatus` (spec 024) |
+> | `exec_status` | `{exec_id:String, wait:bool, deadline_ms}` | `ExecStatus` (spec 024) |
 > | `exec_output` | `{exec_id:String, deadline_ms}` | `{boot, exec_id, stdout:Stream, stderr:Stream}` (spec 024) |
 > | `workload_stop` | `{deadline_ms}` | `{boot, stopped:true}` |
 
@@ -404,6 +441,10 @@ active | draining | closed`." with:
 > GuestAdmission is exactly `staged | active | draining | closed | revoked`. `revoked` is a Mount
 > binding whose backing is revoked under spec 024: the guest serves nothing for its grant and the
 > host side is closed, while workload references to it may remain, and every use of them fails.
+> Once its removal has completed, a `revoked` binding needs no retained host authority or cell
+> association: the association, attribution and inventory rules below leave it out, residue,
+> drift and recovery matching ignore it, and it never blocks readiness or a later attach at the
+> same target. The host still verifies that it holds no access for that grant.
 
 and after "Closed/staged attachments remain visible until physically removed;", add "a `revoked`
 binding also remains visible until its last reference goes, and counts as absent for removal;".
@@ -411,6 +452,13 @@ binding also remains visible until its last reference goes, and counts as absent
 **Spec 001 §5.** Replace "beyond §4.2's selected launch, observation, data and shutdown contract"
 with "beyond §4.2's selected launch, observation, data and shutdown contract and spec 024's exec
 and workload verbs".
+
+**Spec 008, observation (`008:400-402`).** After "not empty projections or guessed grant IDs.",
+add "A guest binding that spec 024 reports as `revoked`, after its removal completed, is neither
+drift nor an unknown resource, and recovery matches nothing to it (spec 001 §4.2)."
+
+**Spec 008, readiness (`008:552-553`).** After "an empty instance is ready only after the same
+startup requirements.", add "A `revoked` guest binding (spec 024) is none of these."
 
 **Spec 017, mounts (`017:411-412`).** After "For mounts, lazy detach alone does not establish
 absent connections/handles or closed host access.", add:
@@ -453,8 +501,10 @@ O-7). Items marked **mount** also need the Mount adapter and its guest filesyste
 2. **Guest.** `["no-such-program"]` replies `running`, then ends `exited` 127. A file in the image
    without execute permission, a script whose interpreter is missing, a text file with no `#!`,
    and a single argument of 200 KiB each end `exited` 126. A program reached through an absolute
-   symlink inside the image runs. Catches: refusing at `cell.exec`, searching `PATH` from PID1's
-   root, a missing interpreter reported as a missing program, and a shell fallback.
+   symlink inside the image runs, and so does an executable `/usr/bin/x` behind a non-executable
+   `/usr/local/bin/x`. Catches: refusing at `cell.exec`, searching `PATH` from PID1's root, a
+   missing interpreter reported as a missing program, a shell fallback, and a search that stops
+   at the first file.
 3. **Guest.** A probe exits 0 only when all of these hold: uid and gid 1000, no supplementary
    groups, and `getpwuid(1000)` gives `/home/workload`; all five capability sets empty and
    no-new-privs set; the environment exactly the three variables; its directory
@@ -497,12 +547,16 @@ O-7). Items marked **mount** also need the Mount adapter and its guest filesyste
 10. **Guest, mount.** With the error measured and recorded in §9 first:
     `["sh", "-c", "cd /workspace && exec probe"]`, where the probe holds an open file there and
     loops on reading it and on `stat(".")`. `plasmid.remove workspace` completes without waiting
-    for the probe. Then each call fails with the recorded error, `close()` succeeds, the probe
-    still runs, and observation reports the binding `revoked`. Repeat with two equal Mount grants
-    at one target, removing one while the probe holds references through it: those references
-    fail with the same error, while a fresh lookup and an open handle through the peer still
+    for the probe. Then each call started after the reply fails with the recorded error, `close()`
+    succeeds, the probe still runs, and observation reports the binding `revoked`. SIGKILL the
+    controller and restart it while the probe still holds them: recovery adopts the cell ready,
+    and adding `workspace` again succeeds at the same target. Repeat with two equal Mount grants
+    at one target: the probe opens a file and enters a directory below the target through the
+    grant with the smaller GrantId, and that grant is removed. Those references fail with the
+    same error, while the target's root, a fresh lookup and an open handle through the peer still
     work. Catches: a removal that waits on the workload, a lazy detach that leaves the backing
-    reachable, two errors for one state, and a detach that takes a peer's mount.
+    reachable, two errors for one state, a revoked binding that fails recovery or blocks a
+    re-attach, and a detach that takes a peer's mount.
 11. **Model.** A 4090 test double holds a `drain` reply. `exec.status`, `exec.output` and
     `workload_stop` answer at once. `exec` waits, then is 105 `busy` at its deadline, and the
     double saw no `exec`. Then the double holds an `exec` reply: a Force removal and a new attach
@@ -530,8 +584,10 @@ O-7). Items marked **mount** also need the Mount adapter and its guest filesyste
     unknown one, also fails. Catches: a membrane that never compares the boot, and lax records.
 17. **Guest.** `["sh", "-c", "sleep 600 & exit 3"]` ends `exited` 3 within a second, with
     `closed` false while the `sleep` holds the streams. `membrane.workload.stop` then ends it, the
-    streams report `closed`, and a following `exec` is 105 `stopped`. Catches: an entry that waits
-    for descendants, an end of output a client cannot see, and an exec admitted after the stop.
+    streams report `closed`, a following `cell.exec` is 105 `{from: "draining"}` from the
+    membrane, and a 4090 `exec` sent to PID1 directly is 105 `stopped`. Catches: an entry that
+    waits for descendants, an end of output a client cannot see, and an exec admitted after the
+    stop at either layer.
 18. **Model.** PID1's startup sends hello only after the workload namespaces, the control group and
     the image checks succeeded. A fake that fails any of them gets no hello. Catches: readiness
     before the workload can run.
@@ -553,6 +609,19 @@ O-7). Items marked **mount** also need the Mount adapter and its guest filesyste
     answering. 600 runs of item 17's pattern leave PID1 answering. Catches: a workload with no
     group limits, a spawn charged outside the group, no reserve for PID1, and PID1 running out of
     descriptors.
+22. **Guest.** `exec.status` with `wait: true` on `["sleep", "1"]` replies `exited` 0 after about
+    a second; on `["sleep", "600"]` with `deadline_ms` 2,000 it replies `running` before 2
+    seconds. Every result of `cell.exec`, `exec.status` and `exec.output` names `cell`. Catches: a
+    wait that ignores its deadline, a deadline reported as an error, and a result a client cannot
+    attribute.
+23. **Guest, with the host side of 4091 replaced by a test double.** The double refuses a
+    standing binding's gate. A read through a bound Mount handle fails at once with the recorded
+    error, and a fresh lookup at a target whose only grant is refused fails with `ENOENT`. An
+    established stream gives end-of-file to a read and `EPIPE` to a write; a TCP flow is reset.
+    Then the double pauses a stream's gate: a blocked read does not fail, and returns data once
+    the double restores the gate. Paused again and then removed, the read fails by the pause
+    deadline. Catches: a silent drop, a call that waits forever, and a stream closed for a pause
+    that is then undone.
 
 ## Out of scope
 
@@ -562,7 +631,7 @@ O-7). Items marked **mount** also need the Mount adapter and its guest filesyste
 - Signalling one started process, and environment variables or image entries beyond §4 and §5;
   a later spec may add them.
 - Subject spawns and attestation.
-- How attached software becomes visible inside a cell (`011:487-491`). It is bound by two rules
+- How attached software becomes visible inside a cell (`011:489-493`). It is bound by two rules
   here: `PATH` is fixed to three directories, and spec 017 forbids executing a managed file. So a
   plasmid's software can be found by name only if it lands, as files that are not managed files,
   in one of those directories.
