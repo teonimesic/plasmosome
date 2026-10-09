@@ -4,6 +4,7 @@
 
 pub mod backend;
 pub mod composite;
+pub mod digest;
 pub mod fake;
 pub mod recipe;
 pub mod universe;
@@ -13,6 +14,7 @@ pub use backend::{
     RevokePolicy,
 };
 pub use composite::{CompositeBackend, Leaf};
+pub use digest::{Digest, DigestError};
 pub use fake::FakeBackend;
 pub use recipe::{
     BrokerLaunch, FileAccess, MAX_SESSION_FILE_BYTES, MountRecipe, ProxyRecipe, ProxyTransport,

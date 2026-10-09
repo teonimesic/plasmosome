@@ -1,4 +1,4 @@
-pub mod digest;
+pub use plasmosome_backend::digest;
 pub mod path;
 pub(crate) mod strict_json;
 
