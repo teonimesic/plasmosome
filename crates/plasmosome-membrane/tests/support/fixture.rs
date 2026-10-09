@@ -35,27 +35,27 @@ pub fn supervision_fixture() -> PathBuf {
 /// Takes the path of a running test executable and returns the directory the
 /// compiled fixture is cached in.
 ///
-/// Cargo places unit and integration test executables in
-/// `<target>/<profile>/deps`, so the cache is the sibling directory
-/// `<target>/<profile>/plasmosome-supervision-fixture`: it stays inside the
-/// user's own target directory, and `cargo clean` removes it. Panics, naming
-/// the path, when the executable is not in a `deps` directory; it never falls
-/// back to a shared temporary directory.
+/// The cache is `plasmosome-supervision-fixture` inside the nearest ancestor
+/// holding the `CACHEDIR.TAG` file Cargo writes at the root of its target
+/// directory. It therefore stays inside the user's own target directory
+/// whether test executables sit in `deps` or in Cargo's newer
+/// `build/<package>/<hash>/out` layout, and `cargo clean` removes it. Panics,
+/// naming the path, when no ancestor is tagged; it never falls back to a
+/// shared temporary directory.
 pub fn fixture_cache_root(executable: &Path) -> PathBuf {
     executable
-        .parent()
-        .filter(|directory| directory.ends_with("deps"))
-        .and_then(Path::parent)
+        .ancestors()
+        .skip(1)
+        .find(|directory| directory.join("CACHEDIR.TAG").is_file())
         .unwrap_or_else(|| {
             panic!(
-                "the test executable {} is not in a Cargo deps directory, so the supervision fixture has no cache inside the target directory",
+                "the test executable {} is not inside a Cargo target directory tagged with CACHEDIR.TAG, so the supervision fixture has no cache there",
                 executable.display()
             )
         })
         .join("plasmosome-supervision-fixture")
 }
 
-/// Returns the path of the C source the supervision worker is compiled from.
 pub fn supervision_worker_source() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/support/supervision_worker.c")
 }
@@ -70,7 +70,9 @@ pub fn supervision_worker_source() -> PathBuf {
 /// call and published with a hard link, which fails instead of replacing a
 /// file when another caller, in this process or another, published first; a
 /// published executable is therefore never replaced. Every call then runs the
-/// executable once with no arguments and panics unless it exits 64.
+/// executable once with no arguments and panics unless it exits 64. The key
+/// does not include the compiler, so after a compiler or SDK upgrade run
+/// `cargo clean` to rebuild the fixture with it.
 pub fn compile_supervision_fixture(cache_root: &Path, source: &Path) -> PathBuf {
     let key = cache_root.join(source_key(source));
     fs::DirBuilder::new()
