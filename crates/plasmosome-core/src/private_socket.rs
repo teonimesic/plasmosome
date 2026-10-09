@@ -53,7 +53,12 @@ impl Walk {
                 judge_ancestor(&facts, euid, &at)?;
             }
             at.push(OsStr::from_bytes(component.as_bytes()));
-            let next = open_child(held.as_ref().unwrap_or(&self.start), component, &at)?;
+            let access = if index + 1 == self.components.len() {
+                libc::O_RDONLY
+            } else {
+                SEARCH_ONLY
+            };
+            let next = open_child(held.as_ref().unwrap_or(&self.start), component, &at, access)?;
             facts = stat_fd(&next, &at)?;
             held = Some(next);
         }
@@ -804,12 +809,23 @@ fn open_root() -> io::Result<OwnedFd> {
     }
 }
 
-fn open_child(parent: &OwnedFd, name: &CStr, at: &Path) -> Result<OwnedFd, PrivateSocketError> {
+#[cfg(target_os = "macos")]
+const SEARCH_ONLY: libc::c_int = libc::O_SEARCH;
+
+#[cfg(target_os = "linux")]
+const SEARCH_ONLY: libc::c_int = libc::O_PATH;
+
+fn open_child(
+    parent: &OwnedFd,
+    name: &CStr,
+    at: &Path,
+    access: libc::c_int,
+) -> Result<OwnedFd, PrivateSocketError> {
     let raw = unsafe {
         libc::openat(
             parent.as_raw_fd(),
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
     if raw >= 0 {
