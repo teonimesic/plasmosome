@@ -34,7 +34,7 @@ below and stays empty until one exists.
 | --- | --- | --- | --- |
 | Unit | each crate: `#[cfg(test)]` modules and its `tests/` | `cargo test -p <crate>` | yes (already does) |
 | Integration | `crates/plasmosome-testkit/tests/` | `cargo test -p plasmosome-testkit` | yes |
-| End-to-end | `crates/plasmosome-testkit/tests/e2e_*.rs`, `#[ignore]` until a cell boots | `cargo test -p plasmosome-testkit -- --ignored` | defined only |
+| End-to-end | `crates/plasmosome-testkit/tests/e2e_*.rs`, `#[ignore = "needs a booted cell"]` until a cell boots | `cargo test -p plasmosome-testkit -- --ignored` | defined only |
 | Performance | `benches/` per crate and in testkit | `cargo bench` | no — specs 005 and 006 |
 
 A unit test exercises one crate through its own API. An integration test exercises two or more
