@@ -1,5 +1,6 @@
 use crate::vmm::SpawnError;
 use std::cell::Cell;
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::{PoisonError, RwLock};
 
 static SPAWN_LOCK: RwLock<()> = RwLock::new(());
@@ -13,18 +14,43 @@ pub(crate) enum Forked {
     Parent(libc::pid_t),
 }
 
+/// Proof that the write side of the spawn lock is held. Only
+/// `with_descriptors_held` makes one, so a function that takes it can run only
+/// inside descriptor creation.
+pub(crate) struct DescriptorsHeld(());
+
 /// Runs `create` while no `VmmChild::spawn` in this process can fork.
 ///
-/// Use it only to create descriptors and mark them close-on-exec, where the
-/// platform needs two calls for that. Never hold it across a blocking call
-/// such as `accept`: every `VmmChild::spawn` in the process waits until
-/// `create` returns. A spawn on this thread from inside `create` forks nothing
-/// and returns `SpawnError::DescriptorLockHeld`, and a nested call runs under
-/// the lock already held. Only descriptors created inside `create` are
-/// covered, and forks that bypass this lock, such as `std::process::Command`,
-/// are not held back.
-pub(crate) fn with_descriptors_held<T>(create: impl FnOnce() -> T) -> T {
-    write_held(&SPAWN_LOCK, create)
+/// Use it only to create a descriptor and mark it close-on-exec, where the
+/// platform needs two calls for that. `create` receives the `DescriptorsHeld`
+/// proof, so a function that takes one cannot be called outside. A descriptor
+/// that is not close-on-exec when `create` returns is closed before the lock
+/// is released, and an error is returned instead.
+///
+/// Never hold it across a blocking call such as `accept`: every
+/// `VmmChild::spawn` in the process waits until `create` returns. A spawn on
+/// this thread from inside `create` forks nothing and returns
+/// `SpawnError::DescriptorLockHeld`, and a nested call runs under the lock
+/// already held. Only descriptors created inside `create` are covered, and
+/// forks that bypass this lock, such as `std::process::Command`, are not held
+/// back.
+pub(crate) fn with_descriptors_held<T: AsFd>(
+    create: impl FnOnce(&DescriptorsHeld) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    write_held(&SPAWN_LOCK, || {
+        create(&DescriptorsHeld(())).and_then(close_on_exec_or_closed)
+    })
+}
+
+fn close_on_exec_or_closed<T: AsFd>(created: T) -> std::io::Result<T> {
+    let flags = unsafe { libc::fcntl(created.as_fd().as_raw_fd(), libc::F_GETFD) };
+    if flags != -1 && flags & libc::FD_CLOEXEC != 0 {
+        Ok(created)
+    } else {
+        Err(std::io::Error::other(
+            "a descriptor created under the spawn lock was not close-on-exec, so it was closed",
+        ))
+    }
 }
 
 /// Forks while holding the read side of the spawn lock.
@@ -81,22 +107,19 @@ fn fork_holding(
     }
 }
 
-#[cfg(all(test, not(target_os = "linux")))]
-pub(crate) fn while_forking<T>(during: impl FnOnce() -> T) -> T {
-    let _forking = SPAWN_LOCK.read().unwrap_or_else(PoisonError::into_inner);
-    during()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::vmm::{Launch, SpawnError, VmmChild, VmmState};
+    use std::cell::Cell;
+    use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
     use std::sync::TryLockError;
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::time::Duration;
 
-    const PATIENCE: Duration = Duration::from_secs(2);
-    const HELD: Duration = Duration::from_millis(250);
+    const PATIENCE: Duration = Duration::from_secs(10);
+    const ABORT_AFTER: Duration = Duration::from_secs(60);
+    const HOLD: Duration = Duration::from_millis(250);
 
     struct ExitAtOnce;
 
@@ -106,19 +129,42 @@ mod tests {
         }
     }
 
-    struct ReportsCloseOnExec(libc::c_int);
+    struct ReportsInheritedReadSide;
 
-    impl Launch for ReportsCloseOnExec {
+    impl Launch for ReportsInheritedReadSide {
         fn launch(self) -> ! {
-            let flags = unsafe { libc::fcntl(self.0, libc::F_GETFD) };
-            let code = if flags == -1 {
-                4
-            } else if flags & libc::FD_CLOEXEC != 0 {
-                0
-            } else {
-                3
+            let code = match SPAWN_LOCK.try_write() {
+                Err(TryLockError::WouldBlock) => 0,
+                Err(TryLockError::Poisoned(acquired)) => {
+                    std::mem::forget(acquired.into_inner());
+                    3
+                }
+                Ok(acquired) => {
+                    std::mem::forget(acquired);
+                    3
+                }
             };
             unsafe { libc::_exit(code) }
+        }
+    }
+
+    struct RecordsWhereItCloses<'a> {
+        fd: OwnedFd,
+        closed_under_lock: &'a Cell<Option<bool>>,
+    }
+
+    impl AsFd for RecordsWhereItCloses<'_> {
+        fn as_fd(&self) -> BorrowedFd<'_> {
+            self.fd.as_fd()
+        }
+    }
+
+    impl Drop for RecordsWhereItCloses<'_> {
+        fn drop(&mut self) {
+            self.closed_under_lock.set(Some(matches!(
+                SPAWN_LOCK.try_read(),
+                Err(TryLockError::WouldBlock)
+            )));
         }
     }
 
@@ -128,6 +174,16 @@ mod tests {
 
     fn read_side_held(lock: &RwLock<()>) -> bool {
         matches!(lock.try_write(), Err(TryLockError::WouldBlock))
+    }
+
+    fn inheritable_null() -> OwnedFd {
+        let raw = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+        assert!(raw >= 0, "/dev/null opens");
+        unsafe { OwnedFd::from_raw_fd(raw) }
+    }
+
+    fn close_on_exec_null() -> std::io::Result<OwnedFd> {
+        std::fs::File::open("/dev/null").map(OwnedFd::from)
     }
 
     fn on_a_thread<T: Send + 'static>(
@@ -141,34 +197,100 @@ mod tests {
     }
 
     #[test]
-    fn a_child_never_inherits_a_descriptor_before_it_is_close_on_exec() {
-        let (spawner, ends) = with_descriptors_held(|| {
-            let mut ends = [0; 2];
-            assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0, "a pipe opens");
-            let watched = ends[1];
-            let spawner = std::thread::spawn(move || VmmChild::spawn(ReportsCloseOnExec(watched)));
-            std::thread::sleep(HELD);
-            for end in ends {
-                assert_eq!(
-                    unsafe { libc::fcntl(end, libc::F_SETFD, libc::FD_CLOEXEC) },
-                    0,
-                    "the pipe end is marked close-on-exec"
-                );
-            }
-            (spawner, ends)
-        });
-        let mut child = spawner
-            .join()
-            .expect("the spawning thread finishes")
-            .expect("the fork succeeds");
-        let state = child.wait_terminal(PATIENCE);
-        for end in ends {
-            unsafe { libc::close(end) };
-        }
+    fn a_spawned_child_was_forked_holding_the_read_side_of_the_spawn_lock() {
+        let mut child = VmmChild::spawn(ReportsInheritedReadSide).expect("the fork succeeds");
         assert_eq!(
-            state,
+            child.wait_terminal(PATIENCE),
             Ok(VmmState::Exited { code: 0 }),
-            "exit 3 means the child inherited the pipe end before it was close-on-exec"
+            "exit 3 means the child's copy of the spawn lock had no read side held"
+        );
+    }
+
+    #[test]
+    fn descriptor_creation_runs_holding_the_write_side_of_the_spawn_lock() {
+        let mut write_side_held = false;
+        let created = with_descriptors_held(|_held| {
+            write_side_held = matches!(SPAWN_LOCK.try_read(), Err(TryLockError::WouldBlock));
+            close_on_exec_null()
+        });
+        assert!(created.is_ok(), "a close-on-exec descriptor is returned");
+        assert!(
+            write_side_held,
+            "creation ran holding the write side of the spawn lock"
+        );
+    }
+
+    #[test]
+    fn a_descriptor_still_inheritable_when_creation_returns_is_closed_under_the_lock() {
+        let closed_under_lock = Cell::new(None);
+        let created = with_descriptors_held(|_held| {
+            Ok(RecordsWhereItCloses {
+                fd: inheritable_null(),
+                closed_under_lock: &closed_under_lock,
+            })
+        });
+        let refusal = created.err().map(|error| error.to_string());
+        assert_eq!(
+            refusal.as_deref(),
+            Some(
+                "a descriptor created under the spawn lock was not close-on-exec, so it was closed"
+            )
+        );
+        assert_eq!(
+            closed_under_lock.get(),
+            Some(true),
+            "the descriptor was closed before the write side was released"
+        );
+    }
+
+    #[test]
+    fn a_forked_child_never_inherits_a_descriptor_before_it_is_close_on_exec() {
+        let lock = fresh_lock();
+        let (starting, started) = mpsc::channel();
+        let (forker, watched) = write_held(lock, || {
+            let watched = inheritable_null();
+            let fd = watched.as_raw_fd();
+            let forker = std::thread::spawn(move || {
+                let _ = starting.send(());
+                match fork_holding(lock, || unsafe { libc::fork() }) {
+                    Ok(Forked::Child) => {
+                        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+                        let code = if flags == -1 {
+                            4
+                        } else if flags & libc::FD_CLOEXEC != 0 {
+                            0
+                        } else {
+                            3
+                        };
+                        unsafe { libc::_exit(code) }
+                    }
+                    Ok(Forked::Parent(pid)) => Ok(pid),
+                    Err(error) => Err(error),
+                }
+            });
+            started
+                .recv_timeout(PATIENCE)
+                .expect("the forking thread starts");
+            std::thread::sleep(HOLD);
+            assert_eq!(
+                unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                0,
+                "the descriptor is marked close-on-exec"
+            );
+            (forker, watched)
+        });
+        let pid = forker
+            .join()
+            .expect("the forking thread finishes")
+            .expect("the fork succeeds");
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        drop(watched);
+        assert!(libc::WIFEXITED(status), "the child exits");
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "exit 3 means the child inherited the descriptor before it was close-on-exec"
         );
     }
 
@@ -269,11 +391,17 @@ mod tests {
     fn spawn_from_inside_descriptor_creation_refuses_instead_of_deadlocking() {
         let (sent, received) = mpsc::channel();
         std::thread::spawn(move || {
-            let spawned = with_descriptors_held(|| VmmChild::spawn(ExitAtOnce));
-            let _ = sent.send(spawned.map(|mut child| child.wait_terminal(PATIENCE)));
+            let mut spawned = None;
+            let created = with_descriptors_held(|_held| {
+                spawned = Some(VmmChild::spawn(ExitAtOnce));
+                close_on_exec_null()
+            });
+            let spawned =
+                spawned.map(|spawned| spawned.map(|mut child| child.wait_terminal(PATIENCE)));
+            let _ = sent.send((spawned, created.is_ok()));
         });
-        match received.recv_timeout(PATIENCE) {
-            Ok(Err(SpawnError::DescriptorLockHeld)) => {}
+        match received.recv_timeout(ABORT_AFTER) {
+            Ok((Some(Err(SpawnError::DescriptorLockHeld)), true)) => {}
             Ok(other) => panic!("spawn inside descriptor creation must refuse, got {other:?}"),
             Err(_) => {
                 let _ = std::io::Write::write_all(

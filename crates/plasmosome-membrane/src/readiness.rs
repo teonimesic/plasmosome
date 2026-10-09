@@ -1,3 +1,4 @@
+use crate::spawn_lock::DescriptorsHeld;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -403,14 +404,10 @@ fn socket_error(fd: RawFd) -> Result<libc::c_int, ()> {
 }
 
 fn open_nonblocking() -> std::io::Result<OwnedFd> {
-    if cfg!(target_os = "linux") {
-        create_nonblocking()
-    } else {
-        crate::spawn_lock::with_descriptors_held(create_nonblocking)
-    }
+    crate::spawn_lock::with_descriptors_held(create_nonblocking)
 }
 
-fn create_nonblocking() -> std::io::Result<OwnedFd> {
+fn create_nonblocking(_held: &DescriptorsHeld) -> std::io::Result<OwnedFd> {
     #[cfg(target_os = "linux")]
     let raw = unsafe {
         libc::socket(
@@ -550,21 +547,13 @@ mod tests {
         ProbeBudget::new(DEADLINE, flag)
     }
 
-    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn a_probe_socket_is_not_created_while_a_fork_is_in_progress() {
-        let (created, observed) = mpsc::channel();
-        crate::spawn_lock::while_forking(|| {
-            thread::spawn(move || {
-                let _ = created.send(open_nonblocking().is_ok());
-            });
-            assert_eq!(
-                observed.recv_timeout(Duration::from_millis(250)),
-                Err(mpsc::RecvTimeoutError::Timeout),
-                "a probe socket was created while a fork was in progress"
-            );
-        });
-        assert_eq!(observed.recv_timeout(Duration::from_secs(2)), Ok(true));
+    fn the_probe_socket_is_close_on_exec_and_nonblocking() {
+        let socket = open_nonblocking().expect("a probe socket opens");
+        let descriptor_flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFD) };
+        let status_flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0, "close-on-exec");
+        assert_ne!(status_flags & libc::O_NONBLOCK, 0, "nonblocking");
     }
 
     #[test]
