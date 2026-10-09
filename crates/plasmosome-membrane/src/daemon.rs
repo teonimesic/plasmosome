@@ -345,6 +345,14 @@ impl Drop for BoundSocket {
 /// can keep running and the socket path stays. No residue observation or recovery verb is
 /// implemented.
 pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonError> {
+    run_with(config, shutdown, VmmChild::spawn)
+}
+
+fn run_with(
+    config: DaemonConfig,
+    shutdown: &AtomicBool,
+    mut spawn: impl FnMut(ExecCommand) -> Result<VmmChild, SpawnError>,
+) -> Result<(), DaemonError> {
     let listener =
         UnixListener::bind(&config.control_socket).map_err(|source| DaemonError::Bind {
             path: config.control_socket.clone(),
@@ -375,7 +383,7 @@ pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonErro
     let set = BrokerSet::spawn(
         specs,
         |spec: &BrokerSpec| match commands.remove(&spec.name) {
-            Some(command) => VmmChild::spawn(command),
+            Some(command) => spawn(command),
             None => Err(SpawnError::ForkFailed(std::io::Error::other(format!(
                 "no command was built for broker `{}`",
                 spec.name
