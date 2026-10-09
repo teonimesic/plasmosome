@@ -151,7 +151,88 @@ pub struct ControllerState {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
+
+    const REFUSED_NAMES: [&str; 6] = [".", "..", "a/b", "a\\b", "a\0b", "/abs"];
+
+    #[test]
+    fn cell_ledger_path_puts_the_journal_under_cells_and_the_cell() {
+        assert_eq!(
+            cell_ledger_path(Path::new("/inst"), &CellId::from("cell-1")),
+            Ok(PathBuf::from("/inst/cells/cell-1/ledger.ndjson"))
+        );
+    }
+
+    #[test]
+    fn invalid_cell_ids_are_refused_not_sanitized() {
+        let root = Path::new("/inst");
+        assert_eq!(
+            cell_ledger_path(root, &CellId::from("")),
+            Err(CellPathError::Empty)
+        );
+        assert_eq!(
+            validate_cell_id(&CellId::from("")),
+            Err(CellPathError::Empty)
+        );
+        for name in REFUSED_NAMES {
+            let refusal = CellPathError::NotACellName(name.to_string());
+            assert_eq!(
+                cell_ledger_path(root, &CellId::from(name)),
+                Err(refusal.clone()),
+                "{name:?}"
+            );
+            assert_eq!(
+                validate_cell_id(&CellId::from(name)),
+                Err(refusal),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cell_id_with_an_inner_dot_is_valid() {
+        for name in ["a.b", "..a", "a.."] {
+            assert_eq!(
+                cell_ledger_path(Path::new("/inst"), &CellId::from(name)),
+                Ok(PathBuf::from(format!("/inst/cells/{name}/ledger.ndjson")))
+            );
+            assert_eq!(validate_cell_id(&CellId::from(name)), Ok(()));
+        }
+    }
+
+    #[test]
+    fn the_supervisor_socket_sits_beside_the_journal() {
+        let root = Path::new("/inst");
+        assert_eq!(
+            cell_supervisor_socket_path(root, &CellId::from("cell-1")),
+            Ok(PathBuf::from("/inst/cells/cell-1/membrane.uds"))
+        );
+        assert_eq!(
+            cell_supervisor_socket_path(root, &CellId::from("")),
+            Err(CellPathError::Empty)
+        );
+        for name in REFUSED_NAMES {
+            assert_eq!(
+                cell_supervisor_socket_path(root, &CellId::from(name)),
+                Err(CellPathError::NotACellName(name.to_string())),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cell_path_error_names_the_refused_text_escaped() {
+        assert_eq!(
+            CellPathError::Empty.to_string(),
+            "a cell ID must not be empty"
+        );
+        assert_eq!(
+            CellPathError::NotACellName("a\0b".to_string()).to_string(),
+            "\"a\\0b\" is not a valid cell ID (no path separators, NUL, `.`, or `..`)"
+        );
+    }
 
     #[test]
     fn instance_names_reject_path_shaped_text() {
