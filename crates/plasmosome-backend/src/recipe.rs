@@ -153,9 +153,10 @@ impl ProxyRecipe {
     /// An IPv6 literal must not carry an IPv4 address in IPv4-mapped (`::ffff:a.b.c.d`) or
     /// IPv4-compatible (`::a.b.c.d`) form, because the IPv4 spelling names the same host. `::`
     /// and `::1` are the unspecified and loopback addresses, not IPv4-compatible ones. Other
-    /// prefixes that carry an IPv4 address, such as NAT64's `64:ff9b::/96`, are left to the
-    /// connect-time address policy. An IP literal that passes that rule must then be spelled
-    /// exactly as `IpAddr` displays it, the RFC 5952 text form, so one address has one
+    /// prefixes that carry an IPv4 address, such as NAT64's `64:ff9b::/96` and SIIT's
+    /// `::ffff:0:0:0/96`, are accepted here and left to the connect-time address policy. An IP
+    /// literal that passes that rule must then be spelled exactly as Rust's `IpAddr` displays
+    /// it (RFC 5952 §4; only IPv4-mapped addresses are dotted), so one address has one
     /// spelling: `2001:db8::1` is accepted, and `2001:DB8::1` and `2001:0db8:0:0:0:0:0:1` are
     /// refused, never rewritten.
     ///
@@ -230,8 +231,14 @@ impl BrokerLaunch {
     /// Equal strings name the same path. Unequal strings can still name one file: through a
     /// symlink, a hard link or a mount, or on a filesystem that ignores case or Unicode
     /// normalization, such as the macOS host's default APFS. Passing this check therefore does
-    /// not mean the endpoints are different files. Preflight must establish that by comparing
-    /// their `(st_dev, st_ino)` after opening or binding them, never by comparing strings.
+    /// not mean the endpoints are different files, and spec 017's preflight cannot show it
+    /// either: preflight checks only what already exists and creates nothing, and new endpoints
+    /// do not exist yet. After binding both endpoints, the adapter compares the
+    /// `(st_dev, st_ino)` that `lstat` reports for the two bound paths, never `fstat` on the
+    /// two socket descriptors, which describes each socket rather than its name: on APFS,
+    /// listeners bound at `E.sock` and `e.sock` have different `fstat` identities while both
+    /// paths `lstat` to one inode. Equal identities are a failed grant, handled by spec 017's
+    /// incomplete-effect transition.
     pub fn validate(&self) -> Result<(), RecipeError> {
         let Some(program) = self.command.first() else {
             return Err(RecipeError::EmptyCommand);
