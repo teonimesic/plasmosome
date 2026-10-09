@@ -2,7 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde::de::DeserializeOwned;
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{DeserializeOwned, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::digest::Digest;
@@ -35,10 +36,42 @@ pub struct ObservationPage {
     pub complete: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PageFields {
+    snapshot: u64,
+    offset: u64,
+    total: u64,
+    sha256: Digest,
+    bytes: Vec<u8>,
+    complete: bool,
+}
+
+struct PageObject;
+
+impl<'de> Visitor<'de> for PageObject {
+    type Value = ObservationPage;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an observation page object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<ObservationPage, A::Error> {
+        let fields = PageFields::deserialize(MapAccessDeserializer::new(map))?;
+        Ok(ObservationPage {
+            snapshot: fields.snapshot,
+            offset: fields.offset,
+            total: fields.total,
+            sha256: fields.sha256,
+            bytes: fields.bytes,
+            complete: fields.complete,
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for ObservationPage {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<ObservationPage, D::Error> {
-        let _ = deserializer;
-        todo!()
+        deserializer.deserialize_map(PageObject)
     }
 }
 
@@ -48,36 +81,69 @@ impl ObservationPage {
     /// `u64::MAX`, an end past `total`, and a `complete` flag that differs from whether the end
     /// equals `total`. It cannot check the hash; only the assembled account can.
     pub fn check(&self) -> Result<(), PageFault> {
-        todo!()
+        let len = self.bytes.len();
+        if self.snapshot == 0 {
+            return Err(PageFault::ZeroSnapshot);
+        }
+        if self.total == 0 {
+            return Err(PageFault::ZeroTotal);
+        }
+        if len == 0 {
+            return Err(PageFault::EmptyBytes);
+        }
+        if len > MAX_PAGE_BYTES {
+            return Err(PageFault::TooManyBytes { len });
+        }
+        let offset = self.offset;
+        let end = offset
+            .checked_add(len as u64)
+            .ok_or(PageFault::OffsetOverflow { offset, len })?;
+        if end > self.total {
+            return Err(PageFault::BeyondTotal {
+                end,
+                total: self.total,
+            });
+        }
+        let actual = end == self.total;
+        if self.complete != actual {
+            return Err(PageFault::CompleteFlag {
+                stated: self.complete,
+                actual,
+            });
+        }
+        Ok(())
     }
 }
 
 /// The first page rule an [`ObservationPage`] breaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageFault {
-    /// The snapshot is zero, which only a request that starts a capture carries.
     ZeroSnapshot,
-    /// The total is zero; an account is never empty.
     ZeroTotal,
-    /// The page carries no bytes.
     EmptyBytes,
-    /// The page carries `len` bytes, more than [`MAX_PAGE_BYTES`].
-    TooManyBytes { len: usize },
-    /// `offset` plus `len` does not fit in a u64.
-    OffsetOverflow { offset: u64, len: usize },
-    /// The page ends at byte `end`, past the account's `total`.
-    BeyondTotal { end: u64, total: u64 },
-    /// The page says `complete` is `stated`, but where it ends makes it `actual`.
-    CompleteFlag { stated: bool, actual: bool },
+    TooManyBytes {
+        len: usize,
+    },
+    OffsetOverflow {
+        offset: u64,
+        len: usize,
+    },
+    BeyondTotal {
+        end: u64,
+        total: u64,
+    },
+    /// `stated` is the page's flag; `actual` is whether the page ends at `total`.
+    CompleteFlag {
+        stated: bool,
+        actual: bool,
+    },
 }
 
 /// Which page to ask for. Zero/zero starts a capture; any other cursor names a byte offset in
 /// the capture the responder holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageCursor {
-    /// The capture's ID, or zero to start one.
     pub snapshot: u64,
-    /// The first account byte wanted.
     pub offset: u64,
 }
 
@@ -90,7 +156,7 @@ impl PageCursor {
 
     /// True for zero/zero, which a responder answers with [`CaptureSlot::capture`].
     pub fn is_start(&self) -> bool {
-        todo!()
+        *self == PageCursor::START
     }
 }
 
@@ -107,23 +173,29 @@ impl FrozenAccount {
     /// the bytes. Freeze a value only after collecting and validating it. A value JSON cannot
     /// hold, such as a map with non-string keys, is refused with `PagingError::Encode`.
     pub fn freeze<T: Serialize>(value: &T) -> Result<FrozenAccount, PagingError> {
-        let _ = value;
-        todo!()
+        let bytes = serde_json::to_vec(value).map_err(|error| PagingError::Encode {
+            detail: error.to_string(),
+        })?;
+        let sha256 = Digest::of(&bytes);
+        Ok(FrozenAccount {
+            bytes: bytes.into(),
+            sha256,
+        })
     }
 
     /// The account's length in bytes, the `total` of each of its pages; at least 1.
     pub fn total(&self) -> u64 {
-        todo!()
+        self.bytes.len() as u64
     }
 
     /// The SHA-256 of [`FrozenAccount::bytes`].
     pub fn sha256(&self) -> &Digest {
-        todo!()
+        &self.sha256
     }
 
     /// The compact JSON bytes.
     pub fn bytes(&self) -> &[u8] {
-        todo!()
+        &self.bytes
     }
 }
 
@@ -146,17 +218,42 @@ struct Capture<S> {
     expires: Instant,
 }
 
+impl<S> Capture<S> {
+    fn page_at(&self, offset: u64, page_bytes: usize) -> ObservationPage {
+        let account = self.account.bytes();
+        let start = offset as usize;
+        let end = account.len().min(start + page_bytes);
+        ObservationPage {
+            snapshot: self.snapshot,
+            offset,
+            total: self.account.total(),
+            sha256: self.account.sha256,
+            bytes: account[start..end].to_vec(),
+            complete: end == account.len(),
+        }
+    }
+}
+
 impl<S: PartialEq> CaptureSlot<S> {
     /// A slot that serves pages of [`MAX_PAGE_BYTES`].
     pub fn new() -> CaptureSlot<S> {
-        todo!()
+        CaptureSlot {
+            page_bytes: MAX_PAGE_BYTES,
+            last_snapshot: 0,
+            current: None,
+        }
     }
 
     /// A slot that serves pages of `page_bytes`, which must be 1 to [`MAX_PAGE_BYTES`];
     /// anything else is `PagingError::BadPageSize`.
     pub fn with_page_bytes(page_bytes: usize) -> Result<CaptureSlot<S>, PagingError> {
-        let _ = page_bytes;
-        todo!()
+        if !(1..=MAX_PAGE_BYTES).contains(&page_bytes) {
+            return Err(PagingError::BadPageSize { page_bytes });
+        }
+        Ok(CaptureSlot {
+            page_bytes,
+            ..CaptureSlot::new()
+        })
     }
 
     /// Answers a zero/zero request: drops any capture this slot holds, calls `collect` once,
@@ -174,8 +271,28 @@ impl<S: PartialEq> CaptureSlot<S> {
         now: &dyn Fn() -> Instant,
         collect: impl FnOnce() -> Result<FrozenAccount, E>,
     ) -> Result<ObservationPage, CaptureError<E>> {
-        let _ = (scope, expires, now, collect);
-        todo!()
+        self.current = None;
+        if now() >= expires {
+            return Err(CaptureError::Paging(PagingError::Expired));
+        }
+        let account = collect().map_err(CaptureError::Collect)?;
+        if now() >= expires {
+            return Err(CaptureError::Paging(PagingError::Expired));
+        }
+        let snapshot = self
+            .last_snapshot
+            .checked_add(1)
+            .ok_or(CaptureError::Paging(PagingError::SnapshotsExhausted))?;
+        self.last_snapshot = snapshot;
+        let capture = Capture {
+            snapshot,
+            scope,
+            account,
+            expires,
+        };
+        let first = capture.page_at(0, self.page_bytes);
+        self.current = Some(capture);
+        Ok(first)
     }
 
     /// Answers a request for a page of the capture this slot holds.
@@ -193,25 +310,52 @@ impl<S: PartialEq> CaptureSlot<S> {
         request_expires: Instant,
         now: Instant,
     ) -> Result<ObservationPage, PagingError> {
-        let _ = (scope, cursor, request_expires, now);
-        todo!()
+        let PageCursor { snapshot, offset } = cursor;
+        if snapshot == 0 {
+            return Err(PagingError::InvalidCursor { snapshot, offset });
+        }
+        let Some(capture) = self
+            .current
+            .as_mut()
+            .filter(|held| held.snapshot == snapshot)
+        else {
+            return Err(PagingError::UnknownSnapshot { snapshot });
+        };
+        if capture.scope != *scope {
+            return Err(PagingError::ScopeChanged { snapshot });
+        }
+        if now >= capture.expires {
+            self.current = None;
+            return Err(PagingError::Expired);
+        }
+        let total = capture.account.total();
+        if offset >= total {
+            return Err(PagingError::OffsetOutOfRange { offset, total });
+        }
+        capture.expires = capture.expires.min(request_expires);
+        Ok(capture.page_at(offset, self.page_bytes))
     }
 
     /// Drops the capture if `now` is at or past its deadline. Call it while no request arrives,
     /// so retained bytes do not outlive the deadline.
     pub fn expire(&mut self, now: Instant) {
-        let _ = now;
-        todo!()
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|held| now >= held.expires)
+        {
+            self.current = None;
+        }
     }
 
     /// Drops the capture, if any. Snapshot IDs keep counting from where they were.
     pub fn discard(&mut self) {
-        todo!()
+        self.current = None;
     }
 
     /// True while a capture is held.
     pub fn is_holding(&self) -> bool {
-        todo!()
+        self.current.is_some()
     }
 }
 
@@ -225,37 +369,53 @@ impl<S: PartialEq> Default for CaptureSlot<S> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PagingError {
     /// A page request named snapshot zero; only zero/zero, which starts a capture, may.
-    InvalidCursor { snapshot: u64, offset: u64 },
-    /// The slot holds no capture with this ID.
-    UnknownSnapshot { snapshot: u64 },
-    /// The request's scope differs from the one the capture was taken for.
-    ScopeChanged { snapshot: u64 },
-    /// The offset is at or past the end of the `total`-byte account.
-    OffsetOutOfRange { offset: u64, total: u64 },
+    InvalidCursor {
+        snapshot: u64,
+        offset: u64,
+    },
+    UnknownSnapshot {
+        snapshot: u64,
+    },
+    ScopeChanged {
+        snapshot: u64,
+    },
+    OffsetOutOfRange {
+        offset: u64,
+        total: u64,
+    },
     /// The capture's deadline passed; its bytes are gone.
     Expired,
-    /// The slot has issued every snapshot ID a u64 holds.
     SnapshotsExhausted,
-    /// A page size outside 1 to [`MAX_PAGE_BYTES`].
-    BadPageSize { page_bytes: usize },
+    BadPageSize {
+        page_bytes: usize,
+    },
     /// The account could not be encoded as JSON.
-    Encode { detail: String },
+    Encode {
+        detail: String,
+    },
 }
 
 impl PagingError {
     /// The JSON-RPC error code spec 001 §4.1 assigns: `-32602` when the request named a page that
     /// does not exist, and `-32603` when the responder failed or the capture expired.
     pub fn code(&self) -> i64 {
-        todo!()
+        match self {
+            PagingError::InvalidCursor { .. }
+            | PagingError::UnknownSnapshot { .. }
+            | PagingError::ScopeChanged { .. }
+            | PagingError::OffsetOutOfRange { .. } => -32602,
+            PagingError::Expired
+            | PagingError::SnapshotsExhausted
+            | PagingError::BadPageSize { .. }
+            | PagingError::Encode { .. } => -32603,
+        }
     }
 }
 
 /// Why [`CaptureSlot::capture`] returned no page: a paging rule, or the caller's collection.
 #[derive(Debug)]
 pub enum CaptureError<E> {
-    /// A paging rule refused the capture.
     Paging(PagingError),
-    /// `collect` failed with this error.
     Collect(E),
 }
 
@@ -280,13 +440,27 @@ struct Started {
 impl PageAssembler {
     /// An assembler that has received nothing.
     pub fn new() -> PageAssembler {
-        todo!()
+        PageAssembler {
+            started: None,
+            buffer: Vec::new(),
+        }
+    }
+
+    fn received(&self) -> u64 {
+        self.buffer.len() as u64
     }
 
     /// The cursor to request next: zero/zero before any page, then the capture's snapshot at the
     /// first missing byte, and `None` once the completing page was accepted.
     pub fn next(&self) -> Option<PageCursor> {
-        todo!()
+        match &self.started {
+            None => Some(PageCursor::START),
+            Some(started) if started.complete => None,
+            Some(started) => Some(PageCursor {
+                snapshot: started.snapshot,
+                offset: self.received(),
+            }),
+        }
     }
 
     /// Checks `page` with [`ObservationPage::check`] and against the pages before it, then keeps
@@ -294,8 +468,52 @@ impl PageAssembler {
     /// page's snapshot, total and hash, start at the first missing byte, and not follow the
     /// completing page. Memory grows only with the bytes received, never with a stated total.
     pub fn accept(&mut self, page: ObservationPage) -> Result<(), AssemblyFault> {
-        let _ = page;
-        todo!()
+        page.check().map_err(AssemblyFault::Page)?;
+        match &self.started {
+            None if page.offset != 0 => {
+                return Err(AssemblyFault::FirstPageNotAtZero {
+                    offset: page.offset,
+                });
+            }
+            None => {}
+            Some(started) => self.follows(started, &page)?,
+        }
+        self.buffer.extend_from_slice(&page.bytes);
+        self.started = Some(Started {
+            snapshot: page.snapshot,
+            total: page.total,
+            sha256: page.sha256,
+            complete: page.complete,
+        });
+        Ok(())
+    }
+
+    fn follows(&self, started: &Started, page: &ObservationPage) -> Result<(), AssemblyFault> {
+        if started.complete {
+            return Err(AssemblyFault::AfterComplete);
+        }
+        if page.snapshot != started.snapshot {
+            return Err(AssemblyFault::SnapshotChanged {
+                expected: started.snapshot,
+                found: page.snapshot,
+            });
+        }
+        if page.total != started.total {
+            return Err(AssemblyFault::TotalChanged {
+                expected: started.total,
+                found: page.total,
+            });
+        }
+        if page.sha256 != started.sha256 {
+            return Err(AssemblyFault::HashChanged);
+        }
+        if page.offset != self.received() {
+            return Err(AssemblyFault::OutOfOrder {
+                expected: self.received(),
+                found: page.offset,
+            });
+        }
+        Ok(())
     }
 
     /// Yields the account decoded as `T` once every byte arrived. Refuses missing bytes
@@ -303,7 +521,31 @@ impl PageAssembler {
     /// trailing whitespace (`Whitespace`) and content serde cannot decode as `T` (`Decode`).
     /// Serde checks shape only: validate the record's own rules before using it.
     pub fn finish<T: DeserializeOwned>(self) -> Result<T, AssemblyFault> {
-        todo!()
+        let received = self.received();
+        let stated = match &self.started {
+            Some(started) if received == started.total => started.sha256,
+            started => {
+                return Err(AssemblyFault::Incomplete {
+                    received,
+                    total: started.as_ref().map(|started| started.total),
+                });
+            }
+        };
+        let computed = Digest::of(&self.buffer);
+        if computed != stated {
+            return Err(AssemblyFault::HashMismatch { stated, computed });
+        }
+        let surrounded = [self.buffer.first(), self.buffer.last()];
+        if surrounded
+            .into_iter()
+            .flatten()
+            .any(u8::is_ascii_whitespace)
+        {
+            return Err(AssemblyFault::Whitespace);
+        }
+        serde_json::from_slice(&self.buffer).map_err(|error| AssemblyFault::Decode {
+            detail: error.to_string(),
+        })
     }
 }
 
@@ -316,55 +558,149 @@ impl Default for PageAssembler {
 /// Why a [`PageAssembler`] refused a page or a finished account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssemblyFault {
-    /// The page broke a rule of its own.
     Page(PageFault),
-    /// The first page started at `offset`, not 0.
-    FirstPageNotAtZero { offset: u64 },
-    /// A page came from snapshot `found` while assembling snapshot `expected`.
-    SnapshotChanged { expected: u64, found: u64 },
-    /// A page stated a total of `found` bytes, not `expected`.
-    TotalChanged { expected: u64, found: u64 },
-    /// A page stated a different account hash than the first page.
+    FirstPageNotAtZero {
+        offset: u64,
+    },
+    SnapshotChanged {
+        expected: u64,
+        found: u64,
+    },
+    TotalChanged {
+        expected: u64,
+        found: u64,
+    },
     HashChanged,
     /// A page started at `found`, not at the first missing byte `expected`.
-    OutOfOrder { expected: u64, found: u64 },
-    /// A page arrived after the completing page.
+    OutOfOrder {
+        expected: u64,
+        found: u64,
+    },
     AfterComplete,
     /// Only `received` bytes arrived, of `total` if any page stated one.
-    Incomplete { received: u64, total: Option<u64> },
-    /// The assembled bytes hash to `computed`, not the `stated` hash.
-    HashMismatch { stated: Digest, computed: Digest },
+    Incomplete {
+        received: u64,
+        total: Option<u64>,
+    },
+    HashMismatch {
+        stated: Digest,
+        computed: Digest,
+    },
     /// The account starts or ends with whitespace, so it is not compact JSON.
     Whitespace,
     /// The account is not a `T`.
-    Decode { detail: String },
+    Decode {
+        detail: String,
+    },
 }
 
 impl fmt::Display for PageFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            PageFault::ZeroSnapshot => {
+                f.write_str("the page names snapshot 0, which only starts a capture")
+            }
+            PageFault::ZeroTotal => f.write_str("the page states an empty account"),
+            PageFault::EmptyBytes => f.write_str("the page carries no bytes"),
+            PageFault::TooManyBytes { len } => write!(
+                f,
+                "the page carries {len} bytes, more than {MAX_PAGE_BYTES}"
+            ),
+            PageFault::OffsetOverflow { offset, len } => {
+                write!(f, "offset {offset} plus {len} bytes overflows a u64")
+            }
+            PageFault::BeyondTotal { end, total } => write!(
+                f,
+                "the page ends at byte {end}, past the account's {total} bytes"
+            ),
+            PageFault::CompleteFlag { stated, actual } => write!(
+                f,
+                "the page says complete is {stated}, but where it ends makes it {actual}"
+            ),
+        }
     }
 }
 
 impl fmt::Display for PagingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            PagingError::InvalidCursor { snapshot, offset } => write!(
+                f,
+                "snapshot {snapshot} with offset {offset} names no page; zero/zero starts a capture"
+            ),
+            PagingError::UnknownSnapshot { snapshot } => write!(
+                f,
+                "snapshot {snapshot} is not the capture this connection holds"
+            ),
+            PagingError::ScopeChanged { snapshot } => {
+                write!(f, "snapshot {snapshot} was captured for another scope")
+            }
+            PagingError::OffsetOutOfRange { offset, total } => {
+                write!(f, "offset {offset} is outside the {total}-byte account")
+            }
+            PagingError::Expired => f.write_str("the capture's deadline has passed"),
+            PagingError::SnapshotsExhausted => {
+                f.write_str("this connection has issued every snapshot ID")
+            }
+            PagingError::BadPageSize { page_bytes } => write!(
+                f,
+                "a page of {page_bytes} bytes is outside 1 to {MAX_PAGE_BYTES}"
+            ),
+            PagingError::Encode { detail } => {
+                write!(f, "the account cannot be encoded as JSON: {detail}")
+            }
+        }
     }
 }
 
 impl<E: fmt::Display> fmt::Display for CaptureError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            CaptureError::Paging(error) => error.fmt(f),
+            CaptureError::Collect(error) => write!(f, "collecting the account failed: {error}"),
+        }
     }
 }
 
 impl fmt::Display for AssemblyFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            AssemblyFault::Page(fault) => fault.fmt(f),
+            AssemblyFault::FirstPageNotAtZero { offset } => {
+                write!(f, "the first page starts at offset {offset}, not 0")
+            }
+            AssemblyFault::SnapshotChanged { expected, found } => write!(
+                f,
+                "a page from snapshot {found} arrived while assembling snapshot {expected}"
+            ),
+            AssemblyFault::TotalChanged { expected, found } => write!(
+                f,
+                "a page states a {found}-byte account, not {expected} bytes"
+            ),
+            AssemblyFault::HashChanged => {
+                f.write_str("a page states a different account hash than the first page")
+            }
+            AssemblyFault::OutOfOrder { expected, found } => write!(
+                f,
+                "a page starts at offset {found}, not at the first missing byte {expected}"
+            ),
+            AssemblyFault::AfterComplete => f.write_str("a page arrived after the completing page"),
+            AssemblyFault::Incomplete {
+                received,
+                total: Some(total),
+            } => write!(f, "only {received} of {total} bytes arrived"),
+            AssemblyFault::Incomplete { total: None, .. } => f.write_str("no page arrived"),
+            AssemblyFault::HashMismatch { stated, computed } => write!(
+                f,
+                "the account hashes to {computed}, not the stated {stated}"
+            ),
+            AssemblyFault::Whitespace => {
+                f.write_str("the account starts or ends with whitespace, so it is not compact JSON")
+            }
+            AssemblyFault::Decode { detail } => {
+                write!(f, "the account is not the expected record: {detail}")
+            }
+        }
     }
 }
 

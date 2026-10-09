@@ -66,5 +66,7 @@ address or one owner time out.
 | `CompositeBackend` | Routes capability classes to the backend that owns them |
 | Universe classes | What "system state" means for residue verification: sockets, mounts, processes, proxy entries, session files |
 | `MockMode` | How a plasmid's calls are served: `simulate`, `capture` or `passthrough`, the default. It lives here, beside `CellId`, so the ledger can record a mode without depending on core |
+| `digest` | The SHA-256 `Digest`: exactly 64 lowercase hexadecimal digits, as text and in JSON. The membrane re-exports it |
+| `paging` | Spec 001's observation pages, shared by guest, membrane and controller. A responder's `CaptureSlot` freezes one compact JSON account per connection and serves it in pages of 1 to 65,536 bytes until its deadline. A caller's `PageAssembler` yields the account only when every page arrived in order from one capture and the bytes match the stated length and hash. `ObservationPage` decodes only from an object. Callers pass the clock and own the IO |
 
 Tests: `cargo test -p plasmosome-backend`

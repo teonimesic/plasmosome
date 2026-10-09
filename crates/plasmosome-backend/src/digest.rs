@@ -5,7 +5,8 @@ const READ_CHUNK: usize = 64 * 1024;
 
 /// A SHA-256 digest: 32 bytes, written as 64 lowercase hexadecimal digits.
 ///
-/// `Debug` and `Display` both print those 64 digits.
+/// `Debug` and `Display` both print those 64 digits, and in JSON it is that string. Decoding
+/// accepts exactly what [`Digest::parse_hex`] accepts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Digest([u8; 32]);
 
@@ -92,15 +93,27 @@ impl std::fmt::Debug for Digest {
 
 impl serde::Serialize for Digest {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let _ = serializer;
-        todo!()
+        serializer.serialize_str(&self.hex())
     }
 }
 
 impl<'de> serde::Deserialize<'de> for Digest {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Digest, D::Error> {
-        let _ = deserializer;
-        todo!()
+        deserializer.deserialize_str(HexDigits)
+    }
+}
+
+struct HexDigits;
+
+impl serde::de::Visitor<'_> for HexDigits {
+    type Value = Digest;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("64 lowercase hexadecimal digits")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Digest, E> {
+        Digest::parse_hex(text).map_err(E::custom)
     }
 }
 
