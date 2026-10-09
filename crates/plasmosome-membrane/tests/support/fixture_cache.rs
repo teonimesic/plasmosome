@@ -207,6 +207,24 @@ fn a_fixture_source_that_does_not_compile_publishes_nothing() {
 }
 
 #[test]
+fn a_freshly_compiled_fixture_is_run_once_before_it_is_returned() {
+    let cache = tempfile::tempdir().unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    let refusing = sources.path().join("refusing.c");
+    std::fs::write(&refusing, "int main(void) { return 63; }\n")
+        .expect("the refusing source is written");
+
+    let refused =
+        std::panic::catch_unwind(|| fixture::compile_supervision_fixture(cache.path(), &refusing))
+            .expect_err("a freshly compiled executable that does not exit 64 fails setup");
+    let message = panic_message(refused);
+    assert!(
+        message.contains("refuses a call with no arguments") && message.contains("Some(63)"),
+        "setup fails at the warm-up's exit-64 assertion, not elsewhere: {message}"
+    );
+}
+
+#[test]
 fn a_reused_fixture_is_run_once_before_it_is_returned() {
     let cache = tempfile::tempdir().unwrap();
     let sources = tempfile::tempdir().unwrap();
