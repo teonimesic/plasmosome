@@ -872,6 +872,58 @@ mod tests {
     }
 
     #[test]
+    fn mock_mode_vocabulary_is_closed_and_defaults_to_passthrough() {
+        assert_eq!(MockMode::default(), MockMode::Passthrough);
+        assert_eq!(MockMode::parse("simulate"), Some(MockMode::Simulate));
+        assert_eq!(MockMode::parse("capture"), Some(MockMode::Capture));
+        assert_eq!(MockMode::parse("passthrough"), Some(MockMode::Passthrough));
+        for refused in ["recorded", "Simulate", "CAPTURE", ""] {
+            assert_eq!(
+                MockMode::parse(refused),
+                None,
+                "{refused:?} is not a mock mode"
+            );
+        }
+    }
+
+    #[test]
+    fn mock_mode_serializes_as_lower_case_text() {
+        for (mode, wire) in [
+            (MockMode::Simulate, r#""simulate""#),
+            (MockMode::Capture, r#""capture""#),
+            (MockMode::Passthrough, r#""passthrough""#),
+        ] {
+            assert_eq!(serde_json::to_string(&mode).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<MockMode>(wire).unwrap(), mode);
+            assert_eq!(mode.as_str(), wire.trim_matches('"'));
+        }
+    }
+
+    #[test]
+    fn mock_mode_refuses_unknown_and_capitalized_text() {
+        for refused in [
+            r#""Simulate""#,
+            r#""Capture""#,
+            r#""Passthrough""#,
+            r#""recorded""#,
+            r#""""#,
+            "null",
+        ] {
+            assert!(
+                serde_json::from_str::<MockMode>(refused).is_err(),
+                "{refused} must not decode as a mock mode"
+            );
+        }
+    }
+
+    #[test]
+    fn mock_mode_list_tags_are_unchanged() {
+        assert_eq!(MockMode::Simulate.list_tag(), "[mock:simulate]");
+        assert_eq!(MockMode::Capture.list_tag(), "[mock:capture]");
+        assert_eq!(MockMode::Passthrough.list_tag(), "[real]");
+    }
+
+    #[test]
     fn removal_and_selection_refuse_the_same_plugins_object_in_another_cell() {
         let mut state = OsState::new();
         let held = OsObject {
