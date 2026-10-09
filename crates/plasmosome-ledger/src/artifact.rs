@@ -481,6 +481,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use ArtifactKind::{Genome, Plasmid};
+    use Population::{Curated, User};
 
     const UUID: &str = "0b0c5d3e-6c5f-4b1a-9d7e-2f4a8b1c3d5e";
     const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -489,16 +491,31 @@ mod tests {
         format!("sha256:{HEX}")
     }
 
+    fn decoded<T: serde::de::DeserializeOwned>(value: Value) -> T {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn refused_naming<T: serde::de::DeserializeOwned + fmt::Debug>(
+        value: &Value,
+        field: &str,
+        text: &str,
+    ) {
+        let error = serde_json::from_str::<T>(&value.to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with(&format!("{field} {text:?} ")),
+            "{field}: {error}"
+        );
+    }
+
     #[test]
     fn registry_id_accepts_only_canonical_lowercase_non_nil() {
         let id = RegistryId::parse(UUID).unwrap();
         assert_eq!(id.to_string(), UUID);
         assert_eq!(id.as_uuid().hyphenated().to_string(), UUID);
         assert_eq!(serde_json::to_value(id).unwrap(), json!(UUID));
-        assert_eq!(
-            serde_json::from_value::<RegistryId>(json!(UUID)).unwrap(),
-            id
-        );
+        assert_eq!(decoded::<RegistryId>(json!(UUID)), id);
         let refused = [
             UUID.to_uppercase(),
             format!("{{{UUID}}}"),
@@ -515,13 +532,7 @@ mod tests {
                 Err(ArtifactRefError::RegistryId { text: text.clone() }),
                 "{text:?}"
             );
-            let error = serde_json::from_value::<RegistryId>(json!(text)).unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .starts_with(&format!("registry_id {text:?} ")),
-                "{error}"
-            );
+            refused_naming::<RegistryId>(&json!(text), "registry_id", &text);
         }
     }
 
@@ -535,10 +546,7 @@ mod tests {
         assert_eq!(digest.to_string(), digest_text());
         assert_eq!(Digest::from_sha256(*digest.sha256()), digest);
         assert_eq!(serde_json::to_value(digest).unwrap(), json!(digest_text()));
-        assert_eq!(
-            serde_json::from_value::<Digest>(json!(digest_text())).unwrap(),
-            digest
-        );
+        assert_eq!(decoded::<Digest>(json!(digest_text())), digest);
         let refused = [
             format!("SHA256:{HEX}"),
             format!("sha-256:{HEX}"),
@@ -559,48 +567,25 @@ mod tests {
                 Err(ArtifactRefError::Digest { text: text.clone() }),
                 "{text:?}"
             );
-            let error = serde_json::from_value::<Digest>(json!(text)).unwrap_err();
-            assert!(
-                error.to_string().starts_with(&format!("digest {text:?} ")),
-                "{error}"
-            );
+            refused_naming::<Digest>(&json!(text), "digest", &text);
         }
     }
 
     #[test]
     fn kind_and_population_vocabularies_are_closed() {
-        for (text, kind) in [
-            ("plasmid", ArtifactKind::Plasmid),
-            ("genome", ArtifactKind::Genome),
-        ] {
-            assert_eq!(
-                serde_json::from_value::<ArtifactKind>(json!(text)).unwrap(),
-                kind
-            );
+        for (text, kind) in [("plasmid", Plasmid), ("genome", Genome)] {
+            assert_eq!(decoded::<ArtifactKind>(json!(text)), kind);
             assert_eq!(serde_json::to_value(kind).unwrap(), json!(text));
         }
-        for (text, population) in [("curated", Population::Curated), ("user", Population::User)] {
-            assert_eq!(
-                serde_json::from_value::<Population>(json!(text)).unwrap(),
-                population
-            );
+        for (text, population) in [("curated", Curated), ("user", User)] {
+            assert_eq!(decoded::<Population>(json!(text)), population);
             assert_eq!(serde_json::to_value(population).unwrap(), json!(text));
         }
         for text in ["Plasmid", "plugin", "genomes", "curated", "user", ""] {
-            let error = serde_json::from_value::<ArtifactKind>(json!(text)).unwrap_err();
-            assert!(
-                error.to_string().starts_with(&format!("kind {text:?} ")),
-                "{error}"
-            );
+            refused_naming::<ArtifactKind>(&json!(text), "kind", text);
         }
         for text in ["Curated", "curated ", "users", "plasmid", "genome", ""] {
-            let error = serde_json::from_value::<Population>(json!(text)).unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .starts_with(&format!("population {text:?} ")),
-                "{error}"
-            );
+            refused_naming::<Population>(&json!(text), "population", text);
         }
         for value in [
             json!({ "plasmid": null }),
@@ -689,57 +674,31 @@ mod tests {
 
     #[test]
     fn release_key_new_checks_each_field_and_keeps_its_text() {
-        let key = ReleaseKey::new(
-            ArtifactKind::Genome,
-            Population::User,
-            "acme",
-            "researcher",
-            "latest",
-        )
-        .unwrap();
-        assert_eq!(key.kind(), ArtifactKind::Genome);
-        assert_eq!(key.population(), Population::User);
-        assert_eq!(key.publisher(), "acme");
-        assert_eq!(key.name(), "researcher");
-        assert_eq!(key.version(), "latest");
-        let refused = |publisher, name, version| {
-            ReleaseKey::new(
-                ArtifactKind::Plasmid,
-                Population::Curated,
-                publisher,
-                name,
-                version,
-            )
-            .unwrap_err()
-        };
+        let key = ReleaseKey::new(Genome, User, "acme", "lab", "latest");
+        let key = key.unwrap();
         assert_eq!(
-            refused("Acme", "researcher", "1"),
-            ArtifactRefError::Identifier {
-                field: "publisher",
-                text: "Acme".to_string(),
-            }
+            (
+                key.kind(),
+                key.population(),
+                key.publisher(),
+                key.name(),
+                key.version()
+            ),
+            (Genome, User, "acme", "lab", "latest")
         );
-        assert_eq!(
-            refused("acme", "re_searcher", "1"),
-            ArtifactRefError::Identifier {
-                field: "name",
-                text: "re_searcher".to_string(),
-            }
-        );
-        assert_eq!(
-            refused("acme", "researcher", "1+2"),
-            ArtifactRefError::Version {
-                text: "1+2".to_string(),
-            }
-        );
-        assert_eq!(
-            refused("acme", "researcher", "1+2").to_string(),
-            "version \"1+2\" does not match [A-Za-z0-9][A-Za-z0-9._-]* within 128 bytes"
-        );
-        assert_eq!(
-            refused("Acme", "researcher", "1").to_string(),
-            "publisher \"Acme\" does not match [a-z0-9]+(-[a-z0-9]+)* within 64 bytes"
-        );
+        let identifier = "does not match [a-z0-9]+(-[a-z0-9]+)* within 64 bytes";
+        let version = "does not match [A-Za-z0-9][A-Za-z0-9._-]* within 128 bytes";
+        for ((publisher, name, release), message) in [
+            (
+                ("Acme", "lab", "1"),
+                format!("publisher \"Acme\" {identifier}"),
+            ),
+            (("acme", "la_b", "1"), format!("name \"la_b\" {identifier}")),
+            (("acme", "lab", "1+2"), format!("version \"1+2\" {version}")),
+        ] {
+            let refused = ReleaseKey::new(Plasmid, Curated, publisher, name, release);
+            assert_eq!(refused.unwrap_err().to_string(), message);
+        }
     }
 
     const SIX: [&str; 6] = [
@@ -777,8 +736,8 @@ mod tests {
         let text = release_json().to_string();
         let release: ReleaseRef = serde_json::from_str(&text).unwrap();
         let key = release.key();
-        assert_eq!(key.kind(), ArtifactKind::Plasmid);
-        assert_eq!(key.population(), Population::Curated);
+        assert_eq!(key.kind(), Plasmid);
+        assert_eq!(key.population(), Curated);
         assert_eq!(key.publisher(), "plasmosome");
         assert_eq!(key.name(), "github-pr");
         assert_eq!(key.version(), "1.2.0");
@@ -863,19 +822,11 @@ mod tests {
         ] {
             let mut value = release_json();
             value[field] = json!(bad);
-            let error = refusal::<ReleaseRef>(&value.to_string());
-            assert!(
-                error.starts_with(&format!("{field} {bad:?} ")),
-                "{field}: {error}"
-            );
+            refused_naming::<ReleaseRef>(&value, field, bad);
             if field != "digest" {
                 let mut key = key_json();
                 key[field] = json!(bad);
-                let error = refusal::<ReleaseKey>(&key.to_string());
-                assert!(
-                    error.starts_with(&format!("{field} {bad:?} ")),
-                    "{field}: {error}"
-                );
+                refused_naming::<ReleaseKey>(&key, field, bad);
             }
         }
     }
@@ -891,7 +842,7 @@ mod tests {
 
         #[derive(Debug, Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Genome {
+        struct GenomeFile {
             id: String,
             version: String,
             description: String,
@@ -914,7 +865,7 @@ mod tests {
             six.replace(", ", "\n")
         );
         for text in [inline, nested] {
-            let genome: Genome = toml::from_str(&text).unwrap();
+            let genome: GenomeFile = toml::from_str(&text).unwrap();
             assert_eq!(
                 (genome.id.as_str(), genome.version.as_str()),
                 ("researcher", "1.0.0")
@@ -929,7 +880,7 @@ mod tests {
                 "{header}\n[plasmids.github-pr]\nrelease = {{ {release} }}\nmock = \"simulate\"\n"
             )
         };
-        assert!(toml::from_str::<Genome>(&member(&six)).is_ok());
+        assert!(toml::from_str::<GenomeFile>(&member(&six)).is_ok());
         for (release, reason) in [
             (
                 six.split(", digest").next().unwrap().to_string(),
@@ -940,15 +891,13 @@ mod tests {
                 "invalid type: map",
             ),
         ] {
-            let error = toml::from_str::<Genome>(&member(&release)).unwrap_err();
+            let error = toml::from_str::<GenomeFile>(&member(&release)).unwrap_err();
             assert!(error.to_string().contains(reason), "{error}");
         }
     }
 
     #[test]
     fn release_keys_sort_like_the_catalog() {
-        use ArtifactKind::{Genome, Plasmid};
-        use Population::{Curated, User};
         let key = |kind, population, publisher, name, version| {
             ReleaseKey::new(kind, population, publisher, name, version).unwrap()
         };
@@ -998,8 +947,8 @@ mod tests {
         ) {
             prop_assert_eq!(check_identifier("name", &identifier), Ok(()));
             let key = ReleaseKey::new(
-                ArtifactKind::Plasmid,
-                Population::User,
+                Plasmid,
+                User,
                 &identifier,
                 &identifier,
                 "1.0.0",
