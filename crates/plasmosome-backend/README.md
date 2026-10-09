@@ -26,6 +26,25 @@ without replacing state. `FakeBackend::plant_residue`, the trait's `plant`, and
 `CompositeBackend::new` are fallible; the composite rejects initial observations assigned to the
 wrong leaf.
 
+Spec 017 gives every capability a complete, nonsecret recipe: what an adapter needs to create
+the holding. The `recipe` module holds those records — `SessionFileRecipe`, `UdsRecipe`,
+`ProxyRecipe`, `MountRecipe` and `BrokerLaunch`, with `FileAccess` and `ProxyTransport` — and
+their structural rules: NUL-free strings, absolute paths with no empty, `.` or `..` component
+and no trailing `/`, at most 65,536 bytes of file contents, a nonzero port, a destination that
+is one DNS name or one IP literal spelled as Rust's `IpAddr` displays it and never in
+IPv4-mapped or IPv4-compatible form (NAT64, SIIT and other prefixes that carry an IPv4 address
+are left to the connect-time address policy), and a launch with an absolute program path and two
+endpoints with different canonical spellings. A path that breaks these rules is refused, never
+rewritten. Different spellings are not different files: a symlink, a hard link, a mount, or a
+filesystem that ignores case or Unicode normalization, such as default APFS, can give one file
+two names. Spec 017's preflight creates nothing, so it cannot compare endpoints that do not
+exist yet; after binding both, the adapter compares the `(st_dev, st_ino)` that `lstat` reports
+for the two paths, never `fstat` on the socket descriptors, and treats a match as a failed grant
+under spec 017's incomplete-effect rules. Decoding refuses a missing or unknown field, and
+decoding JSON text also refuses a repeated field; a `serde_json::Value` or `Map` keeps only the
+last copy of a repeated key. Decoding and encoding both refuse any value `validate` refuses;
+neither reads the filesystem or resolves a name. `Capability` does not carry these records yet.
+
 ## What's inside
 
 | Piece | Responsibility |

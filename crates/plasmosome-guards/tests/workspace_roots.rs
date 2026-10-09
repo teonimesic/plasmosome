@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,24 @@ fn copy_tree(source: &Path, destination: &Path) {
     }
 }
 
+fn copy_build_output(source: &Path, destination: &Path) {
+    if source.is_dir() {
+        fs::create_dir_all(destination).expect("the build output directory is created");
+        for entry in fs::read_dir(source).expect("the build output directory is readable") {
+            let entry = entry.expect("the build output entry is readable");
+            copy_build_output(&entry.path(), &destination.join(entry.file_name()));
+        }
+    } else {
+        let modified = fs::metadata(source)
+            .and_then(|metadata| metadata.modified())
+            .expect("the build output records when it was written");
+        fs::copy(source, destination).expect("the build output is copied");
+        fs::File::open(destination)
+            .and_then(|file| file.set_modified(modified))
+            .expect("the copied build output keeps its modification time");
+    }
+}
+
 fn copy_source(source: &Path, destination: &Path) {
     fs::create_dir_all(destination.join("docs/specs")).expect("the fixture spec directory exists");
     for name in ["Cargo.toml", "Cargo.lock", "crates"] {
@@ -73,6 +92,21 @@ fn build_consumers(root: &Path, target: &Path) -> Vec<Consumer> {
         !target.exists(),
         "each compilation uses an unused owned target"
     );
+    compile_consumers(root, target)
+}
+
+fn rebuild_consumers(root: &Path, built: &Path, target: &Path) -> Vec<Consumer> {
+    assert!(!target.exists(), "each rebuild uses an unused owned target");
+    copy_build_output(built, target);
+    let output = cargo(root, target)
+        .args(["clean", "--locked", "-p", "plasmosome-guards"])
+        .output()
+        .expect("Cargo removes the checking component built for another tree");
+    assert!(output.status.success(), "{}", transcript(&output));
+    compile_consumers(root, target)
+}
+
+fn compile_consumers(root: &Path, target: &Path) -> Vec<Consumer> {
     let output = cargo(root, target)
         .args([
             "test",
@@ -88,11 +122,31 @@ fn build_consumers(root: &Path, target: &Path) -> Vec<Consumer> {
         .expect("Cargo compiles the actual consumer test executables");
     assert!(output.status.success(), "{}", transcript(&output));
     let mut publication = None;
+    let mut rebuilt = BTreeSet::new();
     for line in output.stdout.split(|byte| *byte == b'\n') {
         let Ok(artifact) = serde_json::from_slice::<serde_json::Value>(line) else {
             continue;
         };
-        if artifact["reason"] != "compiler-artifact" || artifact["profile"]["test"] != true {
+        if artifact["reason"] != "compiler-artifact" {
+            continue;
+        }
+        let source = artifact["target"]["src_path"]
+            .as_str()
+            .expect("Cargo reports the source of each compiled unit");
+        if !Path::new(source).starts_with(root) {
+            continue;
+        }
+        assert_eq!(
+            artifact["fresh"], false,
+            "the consumer and the checking component were actually rebuilt: {source}"
+        );
+        for kind in artifact["target"]["kind"]
+            .as_array()
+            .expect("Cargo reports the kinds of each compiled unit")
+        {
+            rebuilt.insert(kind.as_str().expect("a unit kind is a string").to_string());
+        }
+        if artifact["profile"]["test"] != true {
             continue;
         }
         let Some(executable) = artifact["executable"].as_str() else {
@@ -102,12 +156,13 @@ fn build_consumers(root: &Path, target: &Path) -> Vec<Consumer> {
             Some("workspace_guards") => &mut publication,
             _ => continue,
         };
-        assert_eq!(
-            artifact["fresh"], false,
-            "the consumer was actually rebuilt"
-        );
         assert!(slot.replace(PathBuf::from(executable)).is_none());
     }
+    assert_eq!(
+        rebuilt,
+        BTreeSet::from(["custom-build", "lib", "test"].map(String::from)),
+        "the rebuilt units are the build script, the checking component and its consumer"
+    );
     [Consumer {
         executable: publication.expect("Cargo reports the publication integration executable"),
         filter: PUBLICATION,
@@ -347,7 +402,7 @@ fn prebuilt_real_consumers_inspect_the_invocation_tree_but_cannot_certify_a_copy
         }
 
         let rebuilt_target = b.join("target/rebuilt");
-        let rebuilt = build_consumers(&b, &rebuilt_target);
+        let rebuilt = rebuild_consumers(&b, &external_target, &rebuilt_target);
         for consumer in &rebuilt {
             observe(
                 &mut failures,

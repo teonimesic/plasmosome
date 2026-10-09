@@ -41,12 +41,15 @@ static void descriptor_worker(int ready, int control, const char *liveness_path)
     _exit(read_result >= 0 ? 0 : 69);
 }
 
-static void named_worker(const char *liveness_path, const char *control_path) {
-    pid_t leader = getppid();
+static void wait_until_orphaned(pid_t leader) {
     struct timespec pause = {0, 1000000};
     while (getppid() == leader) {
         nanosleep(&pause, NULL);
     }
+}
+
+static void named_worker(pid_t leader, const char *liveness_path, const char *control_path) {
+    wait_until_orphaned(leader);
     int liveness = open(liveness_path, O_WRONLY);
     if (liveness < 0) {
         _exit(70);
@@ -72,20 +75,25 @@ int main(int argc, char **argv) {
     if (argc != 5) {
         return 64;
     }
-    bool named = strcmp(argv[1], "named-exit") == 0;
+    bool late = strcmp(argv[1], "named-exit-late") == 0;
+    bool named = late || strcmp(argv[1], "named-exit") == 0;
     int ready = named ? -1 : descriptor(argv[2]);
     int control = named ? -1 : descriptor(argv[3]);
     if (!named && (ready < 0 || control < 0)) {
         return 65;
     }
 
+    pid_t leader = getpid();
     pid_t worker = fork();
     if (worker < 0) {
         return 66;
     }
     if (worker == 0) {
+        if (late) {
+            wait_until_orphaned(leader);
+        }
         if (named) {
-            named_worker(argv[2], argv[3]);
+            named_worker(leader, argv[2], argv[3]);
         }
         descriptor_worker(ready, control, argv[4]);
     }
