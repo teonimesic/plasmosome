@@ -87,17 +87,7 @@ impl PrivateDir {
     /// `.` or `..` components and no empty components. Returns the first rule broken, naming
     /// the component that broke it.
     pub fn open(path: &Path) -> Result<PrivateDir, PrivateSocketError> {
-        let bytes = path.as_os_str().as_bytes();
-        let Some(relative) = bytes.strip_prefix(b"/") else {
-            return Err(PrivateSocketError::BadPath {
-                path: path.to_path_buf(),
-            });
-        };
-        let components = if relative.is_empty() {
-            Vec::new()
-        } else {
-            components_of(relative, path)?
-        };
+        let components = absolute_components(path)?;
         let root = Path::new("/");
         let start = open_root().map_err(|error| io_failure("open", root, &error))?;
         Self::from_walk(Walk {
@@ -344,25 +334,25 @@ pub fn check_peer_uid(stream: &UnixStream, expected: u32) -> Result<(), PrivateS
 
 /// The client half of the path boundary, for a caller-owned nonblocking connect: opens the
 /// parent of `socket_path` as a [`PrivateDir`], then checks its file name with
-/// [`PrivateDir::socket_entry`]. Returns the checked entry. The caller connects afterwards and
-/// must still call [`check_peer_uid`] on the connected stream.
+/// [`PrivateDir::socket_entry`]. `socket_path` must be absolute and normal, as for
+/// [`PrivateDir::open`], and name an entry below `/`. Returns the checked entry. The caller
+/// connects afterwards and must still call [`check_peer_uid`] on the connected stream.
 pub fn check_private_path(
     socket_path: &Path,
     trusted_uid: u32,
 ) -> Result<SocketEntry, PrivateSocketError> {
-    let not_absolute = || PrivateSocketError::BadPath {
-        path: socket_path.to_path_buf(),
+    let mut components = absolute_components(socket_path)?;
+    let (Some(name), Some(parent)) = (components.pop(), socket_path.parent()) else {
+        return Err(PrivateSocketError::BadPath {
+            path: socket_path.to_path_buf(),
+        });
     };
-    if !socket_path.is_absolute() {
-        return Err(not_absolute());
-    }
-    let (Some(parent), Some(name)) = (socket_path.parent(), socket_path.file_name()) else {
-        return Err(not_absolute());
-    };
-    let name = name.to_str().ok_or_else(|| PrivateSocketError::BadName {
-        name: name.to_string_lossy().into_owned(),
-    })?;
-    PrivateDir::open(parent)?.socket_entry(name, trusted_uid)
+    let name = name
+        .into_string()
+        .map_err(|error| PrivateSocketError::BadName {
+            name: error.into_cstring().to_string_lossy().into_owned(),
+        })?;
+    PrivateDir::open(parent)?.socket_entry(&name, trusted_uid)
 }
 
 /// The effective UID of this process.
@@ -787,6 +777,19 @@ fn restrict_to_owner(bound: &BoundEntry) -> Result<(), PrivateSocketError> {
         path: bound.entry.path.clone(),
         errno,
     })
+}
+
+fn absolute_components(path: &Path) -> Result<Vec<CString>, PrivateSocketError> {
+    let Some(relative) = path.as_os_str().as_bytes().strip_prefix(b"/") else {
+        return Err(PrivateSocketError::BadPath {
+            path: path.to_path_buf(),
+        });
+    };
+    if relative.is_empty() {
+        Ok(Vec::new())
+    } else {
+        components_of(relative, path)
+    }
 }
 
 fn components_of(relative: &[u8], whole: &Path) -> Result<Vec<CString>, PrivateSocketError> {
