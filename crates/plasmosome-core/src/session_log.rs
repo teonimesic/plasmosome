@@ -127,7 +127,9 @@ pub trait LogStore {
     /// Makes the entries of the existing directory at `path` durable.
     fn sync_dir(&self, path: &Path) -> std::io::Result<()>;
     /// Opens `path` for reading and appending without following a final symlink, creating the
-    /// file if it is missing. Refuses anything that is not a regular file.
+    /// file if it is missing. Refuses anything that is not a regular file. Takes a nonblocking
+    /// exclusive lock on the file before reading it, held for as long as the returned file is
+    /// open; if another open file holds that lock, fails with `ErrorKind::WouldBlock`.
     fn open_log(&self, path: &Path) -> std::io::Result<OpenedLog>;
 }
 
@@ -175,11 +177,14 @@ impl LogStore for OsLogStore {
             options
         };
         match options(true).open(path) {
-            Ok(file) => Ok(OpenedLog {
-                file: Box::new(file),
-                existing: Vec::new(),
-                created: true,
-            }),
+            Ok(file) => {
+                file.try_lock()?;
+                Ok(OpenedLog {
+                    file: Box::new(file),
+                    existing: Vec::new(),
+                    created: true,
+                })
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let mut file = options(false).open(path)?;
                 if !file.metadata()?.is_file() {
@@ -188,6 +193,7 @@ impl LogStore for OsLogStore {
                         "the session log path is not a regular file",
                     ));
                 }
+                file.try_lock()?;
                 let mut existing = Vec::new();
                 std::io::Read::read_to_end(&mut file, &mut existing)?;
                 Ok(OpenedLog {
@@ -246,9 +252,13 @@ impl SessionLog {
     pub fn open_with(path: PathBuf, store: &dyn LogStore) -> Result<SessionLog, SessionLogError> {
         let parent = parent_of(&path);
         create_parents(parent, store)?;
-        let opened = store
-            .open_log(&path)
-            .map_err(io_error(&path, LogStep::Open))?;
+        let opened = store.open_log(&path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::WouldBlock {
+                SessionLogError::Locked { path: path.clone() }
+            } else {
+                io_error(&path, LogStep::Open)(source)
+            }
+        })?;
         if opened.created {
             store
                 .sync_dir(parent)
@@ -512,6 +522,17 @@ mod tests {
     }
 
     fn assert_send_sync<T: Send + Sync>() {}
+
+    fn assert_locked(result: Result<SessionLog, SessionLogError>, at: &Path) {
+        match result {
+            Err(SessionLogError::Locked { path }) => assert_eq!(path, at),
+            Err(other) => panic!("expected Locked, got {other:?}"),
+            Ok(_) => panic!("a second writer opened {at:?}"),
+        }
+    }
+
+    const LOCK_HOLDER: &str = "PLASMOSOME_SESSION_LOG_LOCK_HOLDER";
+    const HOLDING: &str = "session log writer lock held";
 
     fn seqs_on_disk(path: &Path) -> Vec<u64> {
         read_events(path)
@@ -1049,12 +1070,18 @@ mod tests {
             "session log /logs/session.ndjson line 7: no final newline"
         );
         assert!(malformed.source().is_none());
-        let poisoned = SessionLogError::Poisoned { path };
+        let poisoned = SessionLogError::Poisoned { path: path.clone() };
         assert_eq!(
             poisoned.to_string(),
             "session log /logs/session.ndjson refuses appends after an earlier failure; reopen it"
         );
         assert!(poisoned.source().is_none());
+        let locked = SessionLogError::Locked { path };
+        assert_eq!(
+            locked.to_string(),
+            "session log /logs/session.ndjson is held by another writer"
+        );
+        assert!(locked.source().is_none());
         let steps = [
             LogStep::CreateDirectory,
             LogStep::SyncDirectory,
@@ -1107,5 +1134,62 @@ mod tests {
         let mut keys: Vec<&String> = events[0].as_object().unwrap().keys().collect();
         keys.sort();
         assert_eq!(keys, ["kind", "seq", "ts_ms"]);
+    }
+
+    #[test]
+    fn a_second_writer_is_refused_while_the_first_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG);
+        let first = SessionLog::open(path.clone()).unwrap();
+        assert_locked(SessionLog::open(path.clone()), &path);
+        assert_eq!(first.append("a", json!({})).unwrap(), 1);
+        assert_locked(SessionLog::open(path.clone()), &path);
+        drop(first);
+        let second = SessionLog::open(path.clone()).unwrap();
+        assert_eq!(second.append("b", json!({})).unwrap(), 2);
+        assert_eq!(seqs_on_disk(&path), [1, 2]);
+    }
+
+    #[test]
+    fn hold_a_writer_lock_for_another_process() {
+        let Some(path) = std::env::var_os(LOCK_HOLDER) else {
+            return;
+        };
+        let _log = SessionLog::open(PathBuf::from(path)).unwrap();
+        println!("{HOLDING}");
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).unwrap();
+    }
+
+    #[test]
+    fn a_second_writer_in_another_process_is_refused() {
+        use std::io::BufRead;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG);
+        let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "session_log::tests::hold_a_writer_lock_for_another_process",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(LOCK_HOLDER, &path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut lines = std::io::BufReader::new(holder.stdout.take().unwrap()).lines();
+        let held = lines
+            .by_ref()
+            .map_while(Result::ok)
+            .any(|line| line.contains(HOLDING));
+        assert!(held, "the other process took the writer lock");
+        let refused = SessionLog::open(path.clone());
+        drop(holder.stdin.take());
+        let rest: Vec<String> = lines.map_while(Result::ok).collect();
+        assert!(holder.wait().unwrap().success(), "{rest:?}");
+        assert_locked(refused, &path);
+        let after = SessionLog::open(path.clone()).unwrap();
+        assert_eq!(after.append("a", json!({})).unwrap(), 1);
     }
 }
