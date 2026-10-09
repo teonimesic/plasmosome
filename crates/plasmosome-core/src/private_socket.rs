@@ -383,6 +383,9 @@ pub enum PrivateSocketError {
     NoDirectory {
         path: PathBuf,
     },
+    NoSocket {
+        path: PathBuf,
+    },
     NotDirectory {
         path: PathBuf,
     },
@@ -395,6 +398,9 @@ pub enum PrivateSocketError {
         mode: u32,
     },
     ReplaceableByAcl {
+        path: PathBuf,
+    },
+    OwnershipIgnored {
         path: PathBuf,
     },
     NotPrivate {
@@ -461,6 +467,11 @@ impl fmt::Display for PrivateSocketError {
             PrivateSocketError::NoDirectory { path } => {
                 write!(f, "{} does not exist", path.display())
             }
+            PrivateSocketError::NoSocket { path } => write!(
+                f,
+                "{} does not exist: no socket is bound at that name",
+                path.display()
+            ),
             PrivateSocketError::NotDirectory { path } => {
                 write!(f, "{} is not a directory", path.display())
             }
@@ -479,6 +490,12 @@ impl fmt::Display for PrivateSocketError {
                 "{} has an ACL allow entry granting add_file, add_subdirectory, delete_child, \
                  delete, writesecurity or chown; such an entry is refused on an ancestor whoever \
                  it names, even if it applies only to new children",
+                path.display()
+            ),
+            PrivateSocketError::OwnershipIgnored { path } => write!(
+                f,
+                "{} is on a volume mounted with ownership ignored (noowners): its owner and mode \
+                 do not keep other users out",
                 path.display()
             ),
             PrivateSocketError::NotPrivate { path, mode } => write!(
