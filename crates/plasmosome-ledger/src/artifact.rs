@@ -1,7 +1,8 @@
 use std::fmt;
 
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::de::{Error as _, Visitor};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer, forward_to_deserialize_any};
 
 /// A registry's identity: a non-nil UUID written in canonical lower-case hyphenated form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -48,7 +49,7 @@ impl<'de> Deserialize<'de> for RegistryId {
 }
 
 /// What a release is. Text forms are exactly `plasmid` and `genome`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ArtifactKind {
     Plasmid,
     Genome,
@@ -83,7 +84,7 @@ impl<'de> Deserialize<'de> for ArtifactKind {
 }
 
 /// Who endorses a release. Text forms are exactly `curated` and `user`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Population {
     Curated,
     User,
@@ -182,12 +183,184 @@ impl<'de> Deserialize<'de> for Digest {
     }
 }
 
+/// A release address without its digest: kind, population, publisher, name and version.
+///
+/// Ordering compares those fields in that order, matching spec 020's catalog order.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ReleaseKey {
+    kind: ArtifactKind,
+    population: Population,
+    publisher: String,
+    name: String,
+    version: String,
+}
+
+impl ReleaseKey {
+    /// Checks publisher and name against the identifier grammar and version against the
+    /// version grammar, refusing the first field that fails. Never trims, folds case or
+    /// substitutes.
+    pub fn new(
+        kind: ArtifactKind,
+        population: Population,
+        publisher: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<ReleaseKey, ArtifactRefError> {
+        ReleaseKey::checked(
+            kind,
+            population,
+            publisher.to_owned(),
+            name.to_owned(),
+            version.to_owned(),
+        )
+    }
+
+    fn checked(
+        kind: ArtifactKind,
+        population: Population,
+        publisher: String,
+        name: String,
+        version: String,
+    ) -> Result<ReleaseKey, ArtifactRefError> {
+        check_identifier("publisher", &publisher)?;
+        check_identifier("name", &name)?;
+        check_version(&version)?;
+        Ok(ReleaseKey {
+            kind,
+            population,
+            publisher,
+            name,
+            version,
+        })
+    }
+
+    pub fn kind(&self) -> ArtifactKind {
+        self.kind
+    }
+
+    pub fn population(&self) -> Population {
+        self.population
+    }
+
+    pub fn publisher(&self) -> &str {
+        &self.publisher
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    fn serialize_fields<S: SerializeStruct>(&self, record: &mut S) -> Result<(), S::Error> {
+        record.serialize_field("kind", &self.kind)?;
+        record.serialize_field("population", &self.population)?;
+        record.serialize_field("publisher", &self.publisher)?;
+        record.serialize_field("name", &self.name)?;
+        record.serialize_field("version", &self.version)
+    }
+}
+
+impl Serialize for ReleaseKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut record = serializer.serialize_struct("ReleaseKey", 5)?;
+        self.serialize_fields(&mut record)?;
+        record.end()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename = "ReleaseKey", deny_unknown_fields)]
+struct ReleaseKeyWire {
+    kind: ArtifactKind,
+    population: Population,
+    publisher: String,
+    name: String,
+    version: String,
+}
+
+impl<'de> Deserialize<'de> for ReleaseKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ReleaseKeyWire::deserialize(ObjectOnly(deserializer))?;
+        ReleaseKey::checked(
+            wire.kind,
+            wire.population,
+            wire.publisher,
+            wire.name,
+            wire.version,
+        )
+        .map_err(D::Error::custom)
+    }
+}
+
+struct ObjectOnly<D>(D);
+
+impl<'de, D: Deserializer<'de>> Deserializer<'de> for ObjectOnly<D> {
+    type Error = D::Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, D::Error> {
+        self.0.deserialize_map(visitor)
+    }
+
+    fn is_human_readable(&self) -> bool {
+        self.0.is_human_readable()
+    }
+
+    forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+        option unit unit_struct newtype_struct seq tuple tuple_struct map struct enum identifier
+        ignored_any
+    }
+}
+
+/// Checks one publisher or name, and is also usable for a client alias: `[a-z0-9]+(-[a-z0-9]+)*`
+/// within 64 bytes. `field` names the record field in the error.
+pub fn check_identifier(field: &'static str, text: &str) -> Result<(), ArtifactRefError> {
+    let segments_valid = text.split('-').all(|segment| {
+        !segment.is_empty()
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    });
+    if text.len() <= 64 && segments_valid {
+        Ok(())
+    } else {
+        Err(ArtifactRefError::Identifier {
+            field,
+            text: text.to_owned(),
+        })
+    }
+}
+
+/// Checks one exact version: `[A-Za-z0-9][A-Za-z0-9._-]*` within 128 bytes. The text is never
+/// interpreted, so `latest` is accepted as an ordinary version string.
+pub fn check_version(text: &str) -> Result<(), ArtifactRefError> {
+    let starts_alphanumeric = text
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric());
+    let rest_valid = text
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if text.len() <= 128 && starts_alphanumeric && rest_valid {
+        Ok(())
+    } else {
+        Err(ArtifactRefError::Version {
+            text: text.to_owned(),
+        })
+    }
+}
+
 /// Why a text is not a spec 020 reference value. `field` names the record field, and every
 /// variant keeps the refused text unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactRefError {
     RegistryId { text: String },
     Digest { text: String },
+    Identifier { field: &'static str, text: String },
+    Version { text: String },
 }
 
 impl fmt::Display for ArtifactRefError {
@@ -200,6 +373,14 @@ impl fmt::Display for ArtifactRefError {
             ArtifactRefError::Digest { text } => write!(
                 formatter,
                 "digest {text:?} is not sha256: followed by 64 lower-case hex digits"
+            ),
+            ArtifactRefError::Identifier { field, text } => write!(
+                formatter,
+                "{field} {text:?} does not match [a-z0-9]+(-[a-z0-9]+)* within 64 bytes"
+            ),
+            ArtifactRefError::Version { text } => write!(
+                formatter,
+                "version {text:?} does not match [A-Za-z0-9][A-Za-z0-9._-]* within 128 bytes"
             ),
         }
     }
