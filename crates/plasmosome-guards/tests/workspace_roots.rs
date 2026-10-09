@@ -61,7 +61,12 @@ fn copy_build_output(source: &Path, destination: &Path) {
     }
 }
 
-fn rewrite_recorded_roots(build_output: &Path, built: &Path, root: &Path) {
+fn rewrite_recorded_roots(
+    failures: &mut Vec<String>,
+    build_output: &Path,
+    built: &Path,
+    root: &Path,
+) {
     let mut recorded = Vec::new();
     let mut directories = vec![build_output.to_path_buf()];
     while let Some(directory) = directories.pop() {
@@ -84,12 +89,13 @@ fn rewrite_recorded_roots(build_output: &Path, built: &Path, root: &Path) {
         build_output.display()
     );
     for file in recorded {
-        assert_eq!(
-            fs::read_to_string(&file).expect("the recorded-root file is readable"),
-            built.to_str().unwrap(),
-            "{} must be the record the copied consumers were built with; rewriting any other file cannot tell an embedded root from one read at run time",
-            file.display()
-        );
+        let found = fs::read_to_string(&file).expect("the recorded-root file is readable");
+        if found != built.to_str().unwrap() {
+            failures.push(format!(
+                "A's recorded root: expected {built:?}, found {found:?} in {}. Either this test searched the wrong build output, and the rewritten-root case that follows then tests nothing, or the build recorded the wrong root.",
+                file.display()
+            ));
+        }
         fs::write(&file, root.to_str().unwrap())
             .expect("the recorded-root file in the old build output is rewritten");
     }
@@ -469,7 +475,7 @@ fn prebuilt_real_consumers_inspect_the_invocation_tree_but_cannot_certify_a_copy
             );
         }
 
-        rewrite_recorded_roots(&external_target, &a, &b);
+        rewrite_recorded_roots(&mut failures, &external_target, &a, &b);
         for consumer in &copied {
             observe(
                 &mut failures,
