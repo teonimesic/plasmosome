@@ -1,5 +1,6 @@
 use std::fmt;
 
+use plasmosome_backend::CellId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -108,21 +109,6 @@ pub struct PlasmidRecord {
 impl PlasmidRecord {
     pub fn list_label(&self) -> String {
         format!("{} {}", self.plasmid, self.mock.list_tag())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct CellId(String);
-
-impl From<&str> for CellId {
-    fn from(value: &str) -> Self {
-        CellId(value.to_string())
-    }
-}
-
-impl fmt::Display for CellId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
     }
 }
 

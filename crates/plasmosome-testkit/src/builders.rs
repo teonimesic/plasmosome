@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use plasmosome_backend::{Capability, Grant, GrantKind, LedgerEntry, PluginId};
+use plasmosome_backend::{Capability, CellId, CellOwner, Grant, GrantKind, LedgerEntry};
 use plasmosome_core::manifest::{NetworkSpec, PlasmidManifest, ToolDeclaration};
 use plasmosome_core::reconciler::{DesiredCell, DesiredState};
-use plasmosome_core::state::{CellId, GenomeName, MockMode, PlasmidRecord};
+use plasmosome_core::state::{GenomeName, MockMode, PlasmidRecord};
 use plasmosome_ledger::{Effect, InverseVia};
 
 const DEFAULT_HOST: &str = "api.plasmosome.test";
@@ -87,17 +87,19 @@ impl ManifestBuilder {
     }
 }
 
-/// Collects the grants one plugin asks for, in attach order. Replaying the
+/// Collects the grants one owner asks for, in attach order. Replaying the
 /// matching ledger runs their inverses in the opposite order.
 pub struct GrantSequence {
-    plugin: PluginId,
+    owner: CellOwner,
     grants: Vec<Grant>,
 }
 
 impl GrantSequence {
-    pub fn for_plugin(plugin: &str) -> GrantSequence {
+    /// Starts an empty sequence whose every grant is owned by `owner`, the plugin as attached to
+    /// one cell.
+    pub fn for_owner(owner: CellOwner) -> GrantSequence {
         GrantSequence {
-            plugin: PluginId::from(plugin),
+            owner,
             grants: Vec::new(),
         }
     }
@@ -118,7 +120,7 @@ impl GrantSequence {
 
     fn push(mut self, capability: Capability, kind: GrantKind) -> GrantSequence {
         self.grants.push(Grant {
-            plugin: self.plugin.clone(),
+            owner: self.owner.clone(),
             capability,
             kind,
         });
@@ -133,7 +135,7 @@ pub fn exact_backend_effect(entry: &LedgerEntry) -> Effect {
     Effect::exact(
         format!(
             "{} granted {} as {}",
-            entry.plugin,
+            entry.owner,
             entry.capability.class_str(),
             entry.handle
         ),
