@@ -281,8 +281,10 @@ impl SessionLog {
     /// The open takes the writer lock described on [`SessionLog`], or returns
     /// [`SessionLogError::Locked`]. An existing log must pass the checks [`read_events`] makes,
     /// or this returns [`SessionLogError::Malformed`] and leaves the file as it was; a log whose
-    /// last `seq` is `u64::MAX` is refused too. The check reads one line at a time and keeps only
-    /// the last `seq`, so its memory grows with the longest line, not with the log.
+    /// last `seq` is `u64::MAX` is refused too. The check reads one line at a time, keeps only the
+    /// last `seq`, and stops reading a line once it is longer than
+    /// [`SessionLog::MAX_LINE_BYTES`], so its memory stays within a few times that limit however
+    /// long the log or its last, unterminated line is.
     ///
     /// Before returning, every open syncs the file, then its directory and each ancestor of that
     /// directory up to the root, whether or not this call created them. A directory an earlier,
@@ -341,6 +343,8 @@ impl SessionLog {
     /// writing `seq` `u64::MAX`, after which no event can be numbered. Poisoning releases the
     /// writer lock. An error does not mean the line is absent: it may be on disk whole or in part,
     /// so one recovering owner opens a new `SessionLog` to validate the file before continuing.
+    /// An event whose line would be longer than [`SessionLog::MAX_LINE_BYTES`] is refused with
+    /// [`SessionLogError::EventTooLong`] before anything is written, and does not poison the log.
     ///
     /// The log's mutex is held across the write and the `sync_all`, so appends from every thread
     /// wait behind one full sync each. On macOS `sync_all` is `F_FULLFSYNC`, and the
@@ -356,8 +360,15 @@ impl SessionLog {
         let Some(file) = state.file.as_mut() else {
             return Err(poisoned());
         };
+        let line = event_line(seq, kind, payload);
+        if line.len() - 1 > SessionLog::MAX_LINE_BYTES {
+            return Err(SessionLogError::EventTooLong {
+                path: self.path.clone(),
+                bytes: line.len() - 1,
+            });
+        }
         let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            write_durably(file.as_mut(), event_line(seq, kind, payload).as_bytes())
+            write_durably(file.as_mut(), line.as_bytes())
         }));
         match written {
             Ok(Ok(())) => {}
@@ -476,8 +487,9 @@ fn event_line(seq: u64, kind: &str, payload: serde_json::Value) -> String {
 /// such as a FIFO, is refused with [`SessionLogError::Io`] at [`LogStep::Read`].
 ///
 /// The whole read is refused with [`SessionLogError::Malformed`], naming the first bad physical
-/// line, when the file does not end with LF, or a line is not UTF-8, is not a JSON object, lacks
-/// an unsigned integer `seq` or a string `kind`, or has a `seq` not greater than the line before.
+/// line, when the file does not end with LF, or a line is longer than
+/// [`SessionLog::MAX_LINE_BYTES`], is not UTF-8, is not a JSON object, lacks an unsigned integer
+/// `seq` or a string `kind`, or has a `seq` not greater than the line before.
 /// No line is skipped and the file is never changed. The read takes no lock, so reading while a
 /// writer appends can see its line half written and refuse it as a missing newline.
 pub fn read_events(path: &Path) -> Result<Vec<serde_json::Value>, SessionLogError> {
@@ -506,13 +518,21 @@ fn scan_lines(
     let mut last: Option<(usize, u64)> = None;
     for line in 1.. {
         bytes.clear();
-        let read = std::io::BufRead::read_until(&mut reader, b'\n', &mut bytes)
+        let mut bounded = std::io::Read::take(&mut reader, SessionLog::MAX_LINE_BYTES as u64 + 1);
+        let read = std::io::BufRead::read_until(&mut bounded, b'\n', &mut bytes)
             .map_err(io_error(path, LogStep::Read))?;
         if read == 0 {
             break;
         }
         let Some(segment) = bytes.strip_suffix(b"\n") else {
-            return Err(malformed(line, LogFault::MissingNewline));
+            return Err(malformed(
+                line,
+                if bytes.len() > SessionLog::MAX_LINE_BYTES {
+                    LogFault::LineTooLong
+                } else {
+                    LogFault::MissingNewline
+                },
+            ));
         };
         let text = std::str::from_utf8(segment).map_err(|_| malformed(line, LogFault::NotUtf8))?;
         let event: serde_json::Value =
