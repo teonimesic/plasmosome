@@ -30,6 +30,9 @@ pub enum SessionLogError {
     /// Another open `SessionLog`, in this process or another, holds the writer lock on the file
     /// at `path`. Nothing was read or written.
     Locked { path: PathBuf },
+    /// An append's event line is `bytes` long without its LF, more than
+    /// [`SessionLog::MAX_LINE_BYTES`]. Nothing was written and the log still accepts appends.
+    EventTooLong { path: PathBuf, bytes: usize },
 }
 
 /// The IO call a [`SessionLogError::Io`] came from.
@@ -58,6 +61,9 @@ pub enum LogFault {
     SequenceNotIncreasing,
     /// The last `seq` is `u64::MAX`, so no later event can be numbered.
     SequenceExhausted,
+    /// The line is longer than [`SessionLog::MAX_LINE_BYTES`] before its LF, or has no LF and
+    /// is already longer than that.
+    LineTooLong,
 }
 
 impl std::fmt::Display for LogStep {
@@ -76,15 +82,18 @@ impl std::fmt::Display for LogStep {
 
 impl std::fmt::Display for LogFault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            LogFault::MissingNewline => "no final newline",
-            LogFault::NotUtf8 => "not UTF-8",
-            LogFault::NotJson => "not JSON",
-            LogFault::NotAnObject => "not a JSON object",
-            LogFault::MissingEnvelope => "no unsigned seq or string kind",
-            LogFault::SequenceNotIncreasing => "seq does not increase",
-            LogFault::SequenceExhausted => "seq cannot advance past u64::MAX",
-        })
+        match self {
+            LogFault::MissingNewline => f.write_str("no final newline"),
+            LogFault::NotUtf8 => f.write_str("not UTF-8"),
+            LogFault::NotJson => f.write_str("not JSON"),
+            LogFault::NotAnObject => f.write_str("not a JSON object"),
+            LogFault::MissingEnvelope => f.write_str("no unsigned seq or string kind"),
+            LogFault::SequenceNotIncreasing => f.write_str("seq does not increase"),
+            LogFault::SequenceExhausted => f.write_str("seq cannot advance past u64::MAX"),
+            LogFault::LineTooLong => {
+                write!(f, "longer than {} bytes", SessionLog::MAX_LINE_BYTES)
+            }
+        }
     }
 }
 
@@ -107,6 +116,12 @@ impl std::fmt::Display for SessionLogError {
                 "session log {} is held by another writer",
                 path.display()
             ),
+            SessionLogError::EventTooLong { path, bytes } => write!(
+                f,
+                "session log {}: an event line of {bytes} bytes is longer than {}",
+                path.display(),
+                SessionLog::MAX_LINE_BYTES
+            ),
         }
     }
 }
@@ -117,7 +132,8 @@ impl std::error::Error for SessionLogError {
             SessionLogError::Io { source, .. } => Some(source),
             SessionLogError::Malformed { .. }
             | SessionLogError::Poisoned { .. }
-            | SessionLogError::Locked { .. } => None,
+            | SessionLogError::Locked { .. }
+            | SessionLogError::EventTooLong { .. } => None,
         }
     }
 }
@@ -250,6 +266,9 @@ struct LogState {
 }
 
 impl SessionLog {
+    /// The longest line, in bytes before its LF, that a log writes or accepts.
+    pub const MAX_LINE_BYTES: usize = 1 << 20;
+
     /// Opens the log at `path` with [`OsLogStore`]. See [`SessionLog::open_with`].
     pub fn open(path: PathBuf) -> Result<SessionLog, SessionLogError> {
         SessionLog::open_with(path, &OsLogStore)
