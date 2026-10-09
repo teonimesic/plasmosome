@@ -2528,4 +2528,76 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             vec!["140.82.112.0/20".to_string(), "192.30.252.0/22".to_string()]
         );
     }
+
+    fn refusal_detail(declaration: &str) -> String {
+        let error = PlasmidManifest::parse(declaration)
+            .expect_err(&format!("{declaration} must be refused"));
+        let ManifestError::Field { detail, .. } = error else {
+            panic!("{declaration} was not refused with its field: {error:?}");
+        };
+        detail
+    }
+
+    #[test]
+    fn a_refused_value_reads_on_one_line_as_the_author_wrote_it() {
+        let network = "[network]\nhosts = [\"api.github.com\"]\n";
+        let rows = [
+            (
+                format!("{network}ports = [1979-05-27]"),
+                "1979-05-27 is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [1e300]"),
+                "1e300 is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = 1e300"),
+                "1e300 is not a list of integers from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [nan]"),
+                "nan is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [-inf]"),
+                "-inf is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [\"\\t8080\\n\"]"),
+                "\"\\t8080\\n\" is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [[443, 8080]]"),
+                "[443, 8080] is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [{{ port = 443, scheme = \"https\" }}]"),
+                "{ port = 443, scheme = \"https\" } is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [{{}}]"),
+                "{} is not an integer from 1 to 65535",
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\", 1979-05-27T07:32:00Z]".to_string(),
+                "1979-05-27T07:32:00Z is not a string",
+            ),
+            (
+                "[network]\nhosts = \"\\tapi.github.com\\n\"".to_string(),
+                "\"\\tapi.github.com\\n\" is not a list of strings",
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [{ \"two words\" = 1.5 }]"
+                    .to_string(),
+                "{ \"two words\" = 1.5 } is not a string",
+            ),
+            ("network = 07:32:00".to_string(), "07:32:00 is not a table"),
+        ];
+        let details: Vec<String> = rows
+            .iter()
+            .map(|(tail, _)| refusal_detail(&declared(tail)))
+            .collect();
+        let expected: Vec<&str> = rows.iter().map(|(_, detail)| *detail).collect();
+        assert_eq!(details, expected);
+    }
 }
