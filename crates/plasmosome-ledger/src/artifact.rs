@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn versions_follow_the_exact_version_grammar() {
-        let longest = format!("1.a_B-{}", "z".repeat(123));
+        let longest = format!("1.a_B-{}", "z".repeat(122));
         assert_eq!(longest.len(), 128);
         for text in ["1", "1.2.0", "RC-1", "v1_2", "latest", "Z", longest.as_str()] {
             assert_eq!(check_version(text), Ok(()), "{text:?}");
