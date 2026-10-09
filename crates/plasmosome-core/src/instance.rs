@@ -691,6 +691,7 @@ fn sync_directory(dir: BorrowedFd<'_>) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::error::Error;
     use std::ffi::CString;
     use std::fs;
     use std::io::{self, Read, Write};
@@ -812,11 +813,23 @@ mod tests {
             JournalOpen::Refused(JournalRefusal::Symlink) => "refused: symlink",
             JournalOpen::Refused(JournalRefusal::NotRegular) => "refused: not regular",
             JournalOpen::Refused(JournalRefusal::Io(_)) => "refused: io",
+            JournalOpen::Refused(JournalRefusal::ForeignLock { .. }) => "refused: foreign lock",
         }
     }
 
+    fn locked(root: &Path) -> (InstanceRoot, WriterLock) {
+        let instance = open_root(root);
+        let lock = instance.lock().expect("the writer lock is taken");
+        (instance, lock)
+    }
+
+    fn try_discover(root: &Path) -> Result<Discovery, DiscoveryError> {
+        let (instance, lock) = locked(root);
+        instance.discover(&lock)
+    }
+
     fn discover(root: &Path) -> Discovery {
-        open_root(root).discover().expect("discovery succeeds")
+        try_discover(root).expect("discovery succeeds")
     }
 
     fn described(discovery: &Discovery) -> Vec<String> {
@@ -961,8 +974,7 @@ mod tests {
     fn a_fifo_at_the_lock_path_is_refused_as_not_regular() {
         let (_dir, root) = temp_root();
         make_fifo(&root.join("controller.lock"));
-        let instance = open_root(&root);
-        expect_match!(within("locking a FIFO", move || instance.lock()), Err(LockError::NotRegular { path }) => assert_eq!(path, root.join("controller.lock")));
+        expect_match!(open_root(&root).lock(), Err(LockError::NotRegular { path }) => assert_eq!(path, root.join("controller.lock")));
     }
 
     #[test]
@@ -1007,14 +1019,14 @@ mod tests {
         let (_dir, root) = temp_root();
         make_cell(&root.join("elsewhere"), "cell-1", Some(b"{}\n"));
         symlink(root.join("elsewhere/cells"), root.join("cells")).expect("the link is made");
-        expect_match!(open_root(&root).discover(), Err(DiscoveryError::CellsSymlink { path }) => assert_eq!(path, root.join("cells")));
+        expect_match!(try_discover(&root), Err(DiscoveryError::CellsSymlink { path }) => assert_eq!(path, root.join("cells")));
     }
 
     #[test]
     fn a_regular_file_at_cells_aborts_discovery() {
         let (_dir, root) = temp_root();
         fs::write(root.join("cells"), b"").expect("the file is made");
-        expect_match!(open_root(&root).discover(), Err(DiscoveryError::CellsNotADirectory { path }) => {
+        expect_match!(try_discover(&root), Err(DiscoveryError::CellsNotADirectory { path }) => {
             assert_eq!(path, root.join("cells"))
         });
     }
@@ -1025,7 +1037,7 @@ mod tests {
         let (_dir, root) = temp_root();
         make_cell(&root, "cell-1", None);
         let restore = restrict(&root.join("cells"), 0o000);
-        let result = open_root(&root).discover();
+        let result = try_discover(&root);
         drop(restore);
         expect_match!(result, Err(DiscoveryError::Open { path, source }) => {
             assert_eq!(path, root.join("cells"));
@@ -1109,6 +1121,19 @@ mod tests {
     }
 
     #[test]
+    fn a_validly_named_symlink_to_a_cell_is_not_a_cell() {
+        let (_dir, root) = temp_root();
+        make_cell(&root.join("elsewhere"), "cell-1", Some(b"{}\n"));
+        fs::create_dir(root.join("cells")).expect("cells is made");
+        symlink(
+            root.join("elsewhere/cells/cell-1"),
+            root.join("cells/cell-1"),
+        )
+        .expect("the link is made");
+        assert_eq!(described(&discover(&root)), ["not a cell: Symlink"]);
+    }
+
+    #[test]
     fn parse_cell_name_refuses_non_utf8_bytes_without_loss() {
         assert_eq!(parse_cell_name(&[0xff, b'a']), None);
         assert_eq!(parse_cell_name(b".."), None);
@@ -1158,9 +1183,11 @@ mod tests {
         let (_dir, root) = temp_root();
         let cell = make_cell(&root, "cell-1", None);
         make_fifo(&cell.join("ledger.ndjson"));
-        let instance = open_root(&root);
-        let discovery = within("discovering a FIFO journal", move || instance.discover())
-            .expect("discovery succeeds");
+        let (instance, lock) = locked(&root);
+        let discovery = within("discovering a FIFO journal", move || {
+            instance.discover(&lock)
+        })
+        .expect("discovery succeeds");
         assert_eq!(described(&discovery), ["cell cell-1: refused: not regular"]);
     }
 
@@ -1248,12 +1275,23 @@ mod tests {
         sync_directory(dir)
     }
 
-    fn recording_root(root: &Path) -> InstanceRoot {
+    fn reset_syncs() {
         SYNCED.with(|all| all.borrow_mut().clear());
         FAIL_NEXT_SYNC_OF.with(|fail| fail.set(None));
+    }
+
+    fn recording_root(root: &Path) -> InstanceRoot {
+        reset_syncs();
         let mut instance = open_root(root);
         instance.sync = recording_sync;
         instance
+    }
+
+    fn recording_locked(root: &Path) -> (InstanceRoot, WriterLock) {
+        let instance = recording_root(root);
+        let lock = instance.lock().expect("the writer lock is taken");
+        reset_syncs();
+        (instance, lock)
     }
 
     fn syncs_of(path: &Path) -> usize {
@@ -1275,16 +1313,17 @@ mod tests {
         assert_eq!(source.raw_os_error(), Some(libc::EIO), "{source}");
     }
 
-    fn appended(dir: &CellDir) -> JournalAppend {
-        dir.open_journal_for_append()
+    fn appended(dir: &CellDir, lock: &WriterLock) -> JournalAppend {
+        dir.open_journal_for_append(lock)
             .expect("the journal opens for appending")
     }
 
     #[test]
     fn create_cell_dir_creates_private_directories() {
         let (_dir, root) = temp_root();
-        let created = open_root(&root)
-            .create_cell_dir(&cell("cell-1"))
+        let (instance, lock) = locked(&root);
+        let created = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
             .expect("the cell directory is created");
         assert_eq!(created.cell(), &cell("cell-1"));
         assert_eq!(
@@ -1305,19 +1344,21 @@ mod tests {
     #[test]
     fn create_cell_dir_refuses_an_existing_cell() {
         let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
         let existing = make_cell(&root, "cell-1", None);
         set_mode(&existing, 0o755);
-        expect_match!(open_root(&root).create_cell_dir(&cell("cell-1")), Err(CellDirError::AlreadyExists { path }) => assert_eq!(path, existing));
+        expect_match!(instance.create_cell_dir(&lock, &cell("cell-1")), Err(CellDirError::AlreadyExists { path }) => assert_eq!(path, existing));
         assert_eq!(mode_of(&existing), 0o755, "an existing cell is not adopted");
     }
 
     #[test]
     fn create_cell_dir_refuses_a_symlinked_cells_directory() {
         let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
         let elsewhere = root.join("elsewhere");
         fs::create_dir(&elsewhere).expect("the link target is made");
         symlink(&elsewhere, root.join("cells")).expect("the link is made");
-        expect_match!(open_root(&root).create_cell_dir(&cell("cell-1")), Err(CellDirError::Symlink { path }) => assert_eq!(path, root.join("cells")));
+        expect_match!(instance.create_cell_dir(&lock, &cell("cell-1")), Err(CellDirError::Symlink { path }) => assert_eq!(path, root.join("cells")));
         assert_eq!(
             fs::read_dir(&elsewhere).expect("the target lists").count(),
             0,
@@ -1328,16 +1369,18 @@ mod tests {
     #[test]
     fn create_cell_dir_refuses_a_regular_file_at_cells() {
         let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
         fs::write(root.join("cells"), b"").expect("the file is made");
-        expect_match!(open_root(&root).create_cell_dir(&cell("cell-1")), Err(CellDirError::NotADirectory { path }) => assert_eq!(path, root.join("cells")));
+        expect_match!(instance.create_cell_dir(&lock, &cell("cell-1")), Err(CellDirError::NotADirectory { path }) => assert_eq!(path, root.join("cells")));
     }
 
     #[test]
     fn create_cell_dir_reports_a_parent_it_cannot_write() {
         assert_not_root();
         let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
         let restore = restrict(&root, 0o500);
-        let without_cells = open_root(&root).create_cell_dir(&cell("cell-1"));
+        let without_cells = instance.create_cell_dir(&lock, &cell("cell-1"));
         drop(restore);
         expect_match!(without_cells, Err(CellDirError::Io { path, source }) => {
             assert_eq!(path, root.join("cells"));
@@ -1348,8 +1391,9 @@ mod tests {
     #[test]
     fn create_cell_dir_names_the_cell_when_its_directory_cannot_be_made() {
         let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
         let long = "c".repeat(256);
-        expect_match!(open_root(&root).create_cell_dir(&cell(&long)), Err(CellDirError::Io { path, source }) => {
+        expect_match!(instance.create_cell_dir(&lock, &cell(&long)), Err(CellDirError::Io { path, source }) => {
             assert_eq!(path, root.join("cells").join(&long));
             assert_eq!(source.raw_os_error(), Some(libc::ENAMETOOLONG));
         });
@@ -1358,7 +1402,8 @@ mod tests {
     #[test]
     fn create_cell_dir_refuses_invalid_ids_before_creating_anything() {
         let (_dir, root) = temp_root();
-        expect_match!(open_root(&root).create_cell_dir(&cell("..")), Err(CellDirError::InvalidCell(CellPathError::NotACellName(text))) => {
+        let (instance, lock) = locked(&root);
+        expect_match!(instance.create_cell_dir(&lock, &cell("..")), Err(CellDirError::InvalidCell(CellPathError::NotACellName(text))) => {
             assert_eq!(text, "..")
         });
         assert!(
@@ -1402,10 +1447,47 @@ mod tests {
         expect_match!(instance.cell_dir(&cell("file")), Err(CellDirError::NotADirectory { path }) => {
             assert_eq!(path, root.join("cells/file"))
         });
-        expect_match!(instance.cell_dir(&cell("missing")), Err(CellDirError::Io { path, source }) => {
-            assert_eq!(path, root.join("cells/missing"));
-            assert_eq!(source.kind(), io::ErrorKind::NotFound);
+        expect_match!(instance.cell_dir(&cell("missing")), Err(CellDirError::Missing { path }) => {
+            assert_eq!(path, root.join("cells/missing"))
         });
+    }
+
+    #[test]
+    fn cell_dir_reports_a_missing_cells_directory_as_missing() {
+        let (_dir, root) = temp_root();
+        expect_match!(open_root(&root).cell_dir(&cell("cell-1")), Err(CellDirError::Missing { path }) => {
+            assert_eq!(path, root.join("cells"))
+        });
+    }
+
+    #[test]
+    fn cell_dir_refuses_a_case_or_normalization_alias() {
+        let (_dir, root) = temp_root();
+        let composed: String = ['c', 'a', 'f', char::from_u32(0xe9).expect("U+00E9")]
+            .into_iter()
+            .collect();
+        let decomposed: String = ['c', 'a', 'f', 'e', char::from_u32(0x301).expect("U+0301")]
+            .into_iter()
+            .collect();
+        assert_ne!(composed.as_bytes(), decomposed.as_bytes());
+        make_cell(&root, "cell-1", Some(b"{}\n"));
+        make_cell(&root, &composed, Some(b"{}\n"));
+        let instance = open_root(&root);
+        for (created, alias) in [
+            ("cell-1", "CELL-1"),
+            (composed.as_str(), decomposed.as_str()),
+        ] {
+            instance
+                .cell_dir(&cell(created))
+                .unwrap_or_else(|error| panic!("{created:?} opens: {error:?}"));
+            let path = root.join("cells").join(alias);
+            let folded = fs::symlink_metadata(&path).is_ok();
+            match (folded, instance.cell_dir(&cell(alias))) {
+                (true, Err(CellDirError::Alias { path: refused })) => assert_eq!(refused, path),
+                (false, Err(CellDirError::Missing { path: refused })) => assert_eq!(refused, path),
+                (_, other) => panic!("{alias:?}, folded to {created:?}: {folded}: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1419,19 +1501,22 @@ mod tests {
     #[test]
     fn open_journal_for_append_creates_once_and_never_truncates() {
         let (_dir, root) = temp_root();
-        let instance = open_root(&root);
+        let (instance, lock) = locked(&root);
         let created = instance
-            .create_cell_dir(&cell("cell-1"))
+            .create_cell_dir(&lock, &cell("cell-1"))
             .expect("the cell directory is created");
         let journal = root.join("cells/cell-1/ledger.ndjson");
 
-        let mut first = appended(&created);
+        let mut first = appended(&created, &lock);
         assert!(first.created);
         assert_eq!(mode_of(&journal), 0o600);
         first.file.write_all(b"one\n").expect("the first record");
         let before = identity(&fs::symlink_metadata(&journal).expect("the journal"));
 
-        let mut second = appended(&instance.cell_dir(&cell("cell-1")).expect("the cell"));
+        let mut second = appended(
+            &instance.cell_dir(&cell("cell-1")).expect("the cell"),
+            &lock,
+        );
         assert!(!second.created);
         let mut existing = Vec::new();
         second
@@ -1451,11 +1536,10 @@ mod tests {
     #[test]
     fn an_append_handle_writes_after_the_existing_records() {
         let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
         make_cell(&root, "cell-1", Some(b"one\n"));
-        let opened = open_root(&root)
-            .cell_dir(&cell("cell-1"))
-            .expect("the cell");
-        let mut handle = appended(&opened);
+        let opened = instance.cell_dir(&cell("cell-1")).expect("the cell");
+        let mut handle = appended(&opened, &lock);
         assert!(!handle.created);
         handle
             .file
@@ -1470,10 +1554,11 @@ mod tests {
     #[test]
     fn a_created_journal_handle_appends_after_other_writers() {
         let (_dir, root) = temp_root();
-        let created = open_root(&root)
-            .create_cell_dir(&cell("cell-1"))
+        let (instance, lock) = locked(&root);
+        let created = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
             .expect("the cell directory is created");
-        let mut handle = appended(&created);
+        let mut handle = appended(&created, &lock);
         assert!(handle.created);
         let journal = root.join("cells/cell-1/ledger.ndjson");
         fs::OpenOptions::new()
@@ -1491,10 +1576,11 @@ mod tests {
     #[test]
     fn the_append_handle_and_the_constructor_name_the_same_file() {
         let (_dir, root) = temp_root();
-        let created = open_root(&root)
-            .create_cell_dir(&cell("cell-1"))
+        let (instance, lock) = locked(&root);
+        let created = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
             .expect("the cell directory is created");
-        let handle = appended(&created);
+        let handle = appended(&created, &lock);
         let constructed = cell_ledger_path(&root, &cell("cell-1")).expect("a valid cell");
         assert_eq!(
             identity(&handle.file.metadata().expect("the handle's fstat")),
@@ -1506,16 +1592,15 @@ mod tests {
     #[test]
     fn open_journal_for_append_refuses_a_symlinked_journal() {
         let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
         let cell_path = make_cell(&root, "cell-1", None);
         let target = root.join("elsewhere");
         fs::write(&target, b"keep").expect("the target is made");
         symlink(&target, cell_path.join("ledger.ndjson")).expect("the link is made");
-        let opened = open_root(&root)
-            .cell_dir(&cell("cell-1"))
-            .expect("the cell");
+        let opened = instance.cell_dir(&cell("cell-1")).expect("the cell");
         assert!(
             matches!(
-                opened.open_journal_for_append(),
+                opened.open_journal_for_append(&lock),
                 Err(JournalRefusal::Symlink)
             ),
             "a symlinked journal is refused"
@@ -1531,12 +1616,10 @@ mod tests {
         make_fifo(&root.join("cells/fifo/ledger.ndjson"));
         let socket = make_cell(&root, "socket", None);
         let _socket = UnixListener::bind(socket.join("ledger.ndjson")).expect("the socket binds");
-        let instance = open_root(&root);
+        let (instance, lock) = locked(&root);
         for name in ["dir", "fifo", "socket"] {
             let opened = instance.cell_dir(&cell(name)).expect("the cell");
-            let result = within("opening a journal for appending", move || {
-                opened.open_journal_for_append()
-            });
+            let result = opened.open_journal_for_append(&lock);
             assert!(
                 matches!(result, Err(JournalRefusal::NotRegular)),
                 "{name}: {result:?}"
@@ -1547,10 +1630,11 @@ mod tests {
     #[test]
     fn the_cell_and_journal_descriptors_are_close_on_exec() {
         let (_dir, root) = temp_root();
-        let created = open_root(&root)
-            .create_cell_dir(&cell("cell-1"))
+        let (instance, lock) = locked(&root);
+        let created = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
             .expect("the cell directory is created");
-        let handle = appended(&created);
+        let handle = appended(&created, &lock);
         for (what, fd) in [
             ("cell", created.dir.as_raw_fd()),
             ("journal", handle.file.as_raw_fd()),
@@ -1593,13 +1677,13 @@ mod tests {
     #[test]
     fn create_cell_dir_syncs_the_root_and_cells_on_every_call() {
         let (_dir, root) = temp_root();
-        let instance = recording_root(&root);
+        let (instance, lock) = recording_locked(&root);
         instance
-            .create_cell_dir(&cell("cell-1"))
+            .create_cell_dir(&lock, &cell("cell-1"))
             .expect("the first cell is created");
         assert_eq!((syncs_of(&root), syncs_of(&root.join("cells"))), (1, 1));
         instance
-            .create_cell_dir(&cell("cell-2"))
+            .create_cell_dir(&lock, &cell("cell-2"))
             .expect("the second cell is created");
         assert_eq!((syncs_of(&root), syncs_of(&root.join("cells"))), (2, 2));
     }
@@ -1607,14 +1691,14 @@ mod tests {
     #[test]
     fn a_cell_creation_retried_after_a_failed_root_sync_syncs_the_root() {
         let (_dir, root) = temp_root();
-        let instance = recording_root(&root);
+        let (instance, lock) = recording_locked(&root);
         fail_next_sync_of(&root);
-        expect_match!(instance.create_cell_dir(&cell("cell-1")), Err(CellDirError::Io { path, source }) => {
+        expect_match!(instance.create_cell_dir(&lock, &cell("cell-1")), Err(CellDirError::Io { path, source }) => {
             assert_eq!(path, root);
             assert_injected(&source);
         });
         instance
-            .create_cell_dir(&cell("cell-1"))
+            .create_cell_dir(&lock, &cell("cell-1"))
             .expect("the retry creates the cell");
         assert_eq!(syncs_of(&root), 2);
         assert_eq!(mode_of(&root.join("cells")), 0o700);
@@ -1625,10 +1709,11 @@ mod tests {
         assert_not_root();
         for left in [0o500, 0o755] {
             let (_dir, root) = temp_root();
+            let (instance, lock) = locked(&root);
             fs::create_dir(root.join("cells")).expect("cells is made");
             let _restore = restrict(&root.join("cells"), left);
-            open_root(&root)
-                .create_cell_dir(&cell("cell-1"))
+            instance
+                .create_cell_dir(&lock, &cell("cell-1"))
                 .unwrap_or_else(|error| panic!("cells left at {left:o}: {error:?}"));
             assert_eq!(mode_of(&root.join("cells")), 0o700, "left at {left:o}");
         }
@@ -1638,14 +1723,14 @@ mod tests {
     fn a_cell_whose_cells_sync_failed_is_not_adopted_and_its_retry_syncs_cells() {
         let (_dir, root) = temp_root();
         fs::create_dir(root.join("cells")).expect("cells is made");
-        let instance = recording_root(&root);
+        let (instance, lock) = recording_locked(&root);
         fail_next_sync_of(&root.join("cells"));
-        expect_match!(instance.create_cell_dir(&cell("cell-1")), Err(CellDirError::Io { path, source }) => {
+        expect_match!(instance.create_cell_dir(&lock, &cell("cell-1")), Err(CellDirError::Io { path, source }) => {
             assert_eq!(path, root.join("cells"));
             assert_injected(&source);
         });
         expect_match!(
-            instance.create_cell_dir(&cell("cell-1")),
+            instance.create_cell_dir(&lock, &cell("cell-1")),
             Err(CellDirError::AlreadyExists { path }) => assert_eq!(path, root.join("cells/cell-1"))
         );
         assert_eq!(syncs_of(&root.join("cells")), 2);
@@ -1654,22 +1739,264 @@ mod tests {
     #[test]
     fn an_existing_journal_is_made_private_when_opened_for_append() {
         let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
         let cell_path = make_cell(&root, "cell-1", Some(b"one\n"));
         set_mode(&cell_path.join("ledger.ndjson"), 0o644);
-        let opened = open_root(&root)
-            .cell_dir(&cell("cell-1"))
-            .expect("the cell");
-        assert!(!appended(&opened).created);
+        let opened = instance.cell_dir(&cell("cell-1")).expect("the cell");
+        assert!(!appended(&opened, &lock).created);
         assert_eq!(mode_of(&cell_path.join("ledger.ndjson")), 0o600);
     }
 
     #[test]
     fn a_cell_directory_syncs_through_the_roots_function() {
         let (_dir, root) = temp_root();
-        let created = recording_root(&root)
-            .create_cell_dir(&cell("cell-1"))
+        let (instance, lock) = recording_locked(&root);
+        let created = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
             .expect("the cell is created");
         created.sync().expect("the cell directory syncs");
         assert_eq!(syncs_of(&root.join("cells/cell-1")), 1);
+    }
+
+    #[test]
+    fn a_lock_on_another_root_is_refused_as_foreign() {
+        let (_first_dir, first) = temp_root();
+        let (_second_dir, second) = temp_root();
+        let (_first, foreign) = locked(&first);
+        let (instance, lock) = locked(&second);
+        let created = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
+            .expect("the cell is created");
+        let lock_path = first.join("controller.lock");
+        expect_match!(instance.discover(&foreign), Err(DiscoveryError::ForeignLock { path }) => {
+            assert_eq!(path, lock_path)
+        });
+        expect_match!(instance.create_cell_dir(&foreign, &cell("cell-2")), Err(CellDirError::ForeignLock { path }) => {
+            assert_eq!(path, lock_path)
+        });
+        expect_match!(created.open_journal_for_append(&foreign), Err(JournalRefusal::ForeignLock { path }) => {
+            assert_eq!(path, lock_path)
+        });
+        for path in ["cells/cell-2", "cells/cell-1/ledger.ndjson"] {
+            assert!(
+                fs::symlink_metadata(second.join(path)).is_err(),
+                "{path} was created under a foreign lock"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lock_taken_through_another_open_of_the_same_root_is_accepted() {
+        let (_dir, root) = temp_root();
+        let (_locking, lock) = locked(&root);
+        let instance = open_root(&root);
+        let created = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
+            .expect("the same root's lock is accepted");
+        assert!(appended(&created, &lock).created);
+        assert_eq!(
+            described(&instance.discover(&lock).expect("discovery succeeds")),
+            ["cell cell-1: regular"]
+        );
+    }
+
+    fn assert_shown(error: &dyn Error, display: &str, source: Option<&str>) {
+        assert_eq!(error.to_string(), display);
+        assert_eq!(
+            error.source().map(ToString::to_string).as_deref(),
+            source,
+            "{display}"
+        );
+    }
+
+    fn eio() -> io::Error {
+        io::Error::from_raw_os_error(libc::EIO)
+    }
+
+    #[test]
+    fn lock_errors_name_their_path_and_keep_their_cause() {
+        let path = || PathBuf::from("/inst/controller.lock");
+        let cause = eio().to_string();
+        assert_shown(
+            &LockError::Busy { path: path() },
+            "/inst/controller.lock is held by another writer",
+            None,
+        );
+        assert_shown(
+            &LockError::Symlink { path: path() },
+            "/inst/controller.lock is a symlink and was not followed",
+            None,
+        );
+        assert_shown(
+            &LockError::NotRegular { path: path() },
+            "/inst/controller.lock is not a regular file",
+            None,
+        );
+        assert_shown(
+            &LockError::Io {
+                path: PathBuf::from("/inst"),
+                source: eio(),
+            },
+            &format!("the writer lock failed at /inst: {cause}"),
+            Some(&cause),
+        );
+    }
+
+    #[test]
+    fn instance_root_errors_name_their_path_and_keep_their_cause() {
+        let cause = eio().to_string();
+        assert_shown(
+            &InstanceRootError::NotAbsolute {
+                path: PathBuf::from("inst"),
+            },
+            "inst is not an absolute path",
+            None,
+        );
+        assert_shown(
+            &InstanceRootError::Open {
+                path: PathBuf::from("/inst"),
+                source: eio(),
+            },
+            &format!("cannot open the instance root /inst: {cause}"),
+            Some(&cause),
+        );
+    }
+
+    #[test]
+    fn discovery_errors_name_their_path_and_keep_their_cause() {
+        let path = || PathBuf::from("/inst/cells");
+        let cause = eio().to_string();
+        assert_shown(
+            &DiscoveryError::CellsSymlink { path: path() },
+            "/inst/cells is a symlink and was not followed",
+            None,
+        );
+        assert_shown(
+            &DiscoveryError::CellsNotADirectory { path: path() },
+            "/inst/cells is not a directory",
+            None,
+        );
+        assert_shown(
+            &DiscoveryError::ForeignLock {
+                path: PathBuf::from("/other/controller.lock"),
+            },
+            "the writer lock /other/controller.lock belongs to another instance root",
+            None,
+        );
+        for (error, display) in [
+            (
+                DiscoveryError::Open {
+                    path: path(),
+                    source: eio(),
+                },
+                "cannot open /inst/cells",
+            ),
+            (
+                DiscoveryError::Listing {
+                    path: path(),
+                    source: eio(),
+                },
+                "cannot list /inst/cells",
+            ),
+            (
+                DiscoveryError::Classify {
+                    path: path(),
+                    source: eio(),
+                },
+                "cannot inspect /inst/cells",
+            ),
+            (
+                DiscoveryError::OutOfDescriptors {
+                    path: path(),
+                    source: eio(),
+                },
+                "out of file descriptors at /inst/cells",
+            ),
+        ] {
+            assert_shown(&error, &format!("{display}: {cause}"), Some(&cause));
+        }
+    }
+
+    #[test]
+    fn cell_dir_errors_name_their_path_and_keep_their_cause() {
+        let path = || PathBuf::from("/inst/cells/cell-1");
+        let cause = eio().to_string();
+        let invalid = CellPathError::NotACellName("..".to_string());
+        let invalid_text = invalid.to_string();
+        assert_shown(
+            &CellDirError::InvalidCell(invalid),
+            &format!("cannot use this cell ID: {invalid_text}"),
+            Some(&invalid_text),
+        );
+        for (error, display) in [
+            (
+                CellDirError::Missing { path: path() },
+                "/inst/cells/cell-1 does not exist",
+            ),
+            (
+                CellDirError::Alias { path: path() },
+                "/inst/cells/cell-1 names a cell whose directory is spelled differently on disk",
+            ),
+            (
+                CellDirError::Symlink { path: path() },
+                "/inst/cells/cell-1 is a symlink and was not followed",
+            ),
+            (
+                CellDirError::NotADirectory { path: path() },
+                "/inst/cells/cell-1 is not a directory",
+            ),
+            (
+                CellDirError::AlreadyExists { path: path() },
+                "/inst/cells/cell-1 already exists and was not adopted",
+            ),
+            (
+                CellDirError::ForeignLock {
+                    path: PathBuf::from("/other/controller.lock"),
+                },
+                "the writer lock /other/controller.lock belongs to another instance root",
+            ),
+        ] {
+            assert_shown(&error, display, None);
+        }
+        assert_shown(
+            &CellDirError::Io {
+                path: path(),
+                source: eio(),
+            },
+            &format!("I/O failed at /inst/cells/cell-1: {cause}"),
+            Some(&cause),
+        );
+    }
+
+    #[test]
+    fn journal_refusals_keep_their_cause() {
+        let cause = eio().to_string();
+        assert_shown(
+            &JournalRefusal::CellDirectory(eio()),
+            &format!("the cell directory could not be opened: {cause}"),
+            Some(&cause),
+        );
+        assert_shown(
+            &JournalRefusal::Symlink,
+            "the journal is a symlink and was not followed",
+            None,
+        );
+        assert_shown(
+            &JournalRefusal::NotRegular,
+            "the journal is not a regular file",
+            None,
+        );
+        assert_shown(
+            &JournalRefusal::Io(eio()),
+            &format!("I/O failed on the journal: {cause}"),
+            Some(&cause),
+        );
+        assert_shown(
+            &JournalRefusal::ForeignLock {
+                path: PathBuf::from("/other/controller.lock"),
+            },
+            "the writer lock /other/controller.lock belongs to another instance root",
+            None,
+        );
     }
 }

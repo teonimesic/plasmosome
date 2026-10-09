@@ -119,5 +119,5 @@ fn process_death_releases_the_writer_lock() {
     holder.0.kill().expect("the holder is killed");
     holder.reap_within(DEADLINE);
     let (_instance, released) = lock_within(instance);
-    released.expect("the holder's death released the lock");
+    let _lock = released.expect("the holder's death released the lock");
 }
