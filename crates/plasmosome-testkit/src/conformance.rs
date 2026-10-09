@@ -470,7 +470,8 @@ pub fn revoke_takes_its_owners_object<B: EnforcementBackend>(make: impl Fn() -> 
     }
 }
 
-/// Checks repeated equal grants, complete resource collisions, and broker residue.
+/// Checks repeated equal grants, complete resource collisions, broker residue, and that a granted
+/// holding removed through `apply_removal`, gracefully or by force, retires its handle.
 pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: impl Fn() -> B) {
     let mut pairs: Vec<(Capability, Capability)> = sample_capabilities()
         .into_iter()
@@ -592,6 +593,17 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
             drain,
         ));
         contract_assert!(backend.snapshot_os_state().is_empty());
+        let removed = backend.grant(live_request);
+        contract_unwrap!(backend.apply_removal(removed.removal(), &removed.owner, drain));
+        contract_assert!(backend.snapshot_os_state().is_empty());
+        contract_assert_eq!(
+            backend.revoke(removed.handle, DrainSpec::forcing()),
+            Err(BackendError::UnknownHandle {
+                handle: removed.handle
+            }),
+            "a successful {} apply_removal of a granted holding must retire its handle",
+            policy_of(drain)
+        );
     }
 }
 
@@ -599,8 +611,8 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
 /// `graceful_timeouts_preserve_the_selected_holding` must return a backend in which every
 /// graceful withdrawal of a holding owned by exactly this owner, through `revoke` or
 /// `apply_removal` and with any deadline including zero, times out before any release, while a
-/// forced withdrawal succeeds. Every other owner must drain normally, including another plugin in
-/// this cell and this plugin in another cell. `FakeBackend` is armed with
+/// forced withdrawal succeeds. Every other owner must drain normally under any deadline, including
+/// another plugin in this cell and this plugin in another cell. `FakeBackend` is armed with
 /// `stall_graceful_drains_for_owner(stalled_owner())`.
 pub fn stalled_owner() -> CellOwner {
     CellOwner {
@@ -611,17 +623,18 @@ pub fn stalled_owner() -> CellOwner {
 
 /// Checks that a graceful timeout, with a 50 ms or a zero deadline, keeps the selected holding,
 /// its issued record and every peer; that a removal naming the wrong owner is refused before any
-/// drain, whichever side is stalled; that another plugin in the stalled cell and the same plugin
-/// in another cell drain normally, one of them under a zero deadline; that `apply_removal` of a
-/// granted holding keeps its handle on a timeout and retires it on success; and that Force then
-/// withdraws only the stalled holding. The factory's backend must stall every graceful withdrawal
-/// owned by `stalled_owner()`.
+/// drain, whichever side is stalled; that the peer, another plugin in the stalled cell and the
+/// same plugin in another cell each drain normally under a 50 ms and under a zero deadline; that
+/// `apply_removal` of a granted holding keeps its handle on a timeout and retires it on success;
+/// and that Force withdraws only the stalled holding, both while every other holding stands and
+/// after all of them are gone. The factory's backend must stall every graceful withdrawal owned
+/// by `stalled_owner()`.
 pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
     make: impl Fn() -> B,
 ) {
     for capability in sample_capabilities() {
         for granted in [true, false] {
-            for order in [WithdrawalOrder::StalledFirst, WithdrawalOrder::PeerFirst] {
+            for (order, normal) in withdrawal_passes() {
                 let mut backend = make();
                 let peer_request = hot_grant(conformance_owner(), &capability);
                 let peer = backend.grant(peer_request.clone());
@@ -641,7 +654,7 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                     granted,
                 );
                 let pass = format!(
-                    "{} {} pass",
+                    "{} {} pass draining the others within {normal:?}",
                     if granted { "revoke" } else { "apply_removal" },
                     order.name()
                 );
@@ -724,27 +737,27 @@ pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
                     );
                 }
                 let forced_stalled = (&stalled, stalled_entry.as_ref(), DrainSpec::forcing());
-                let graceful_peer = (&peer_object, Some(&peer), DrainSpec::graceful(DRAIN));
-                let zero_elsewhere = (
+                let graceful_peer = (&peer_object, Some(&peer), DrainSpec::graceful(normal));
+                let graceful_elsewhere = (
                     &elsewhere,
                     elsewhere_entry.as_ref(),
-                    DrainSpec::graceful(Duration::ZERO),
+                    DrainSpec::graceful(normal),
                 );
                 let graceful_neighbour = (
                     &neighbour,
                     neighbour_entry.as_ref(),
-                    DrainSpec::graceful(DRAIN),
+                    DrainSpec::graceful(normal),
                 );
                 let steps = match order {
                     WithdrawalOrder::StalledFirst => [
                         forced_stalled,
                         graceful_peer,
-                        zero_elsewhere,
+                        graceful_elsewhere,
                         graceful_neighbour,
                     ],
                     WithdrawalOrder::PeerFirst => [
                         graceful_peer,
-                        zero_elsewhere,
+                        graceful_elsewhere,
                         graceful_neighbour,
                         forced_stalled,
                     ],
@@ -800,6 +813,12 @@ impl WithdrawalOrder {
             WithdrawalOrder::PeerFirst => "peer-first",
         }
     }
+}
+
+fn withdrawal_passes() -> impl Iterator<Item = (WithdrawalOrder, Duration)> {
+    [WithdrawalOrder::StalledFirst, WithdrawalOrder::PeerFirst]
+        .into_iter()
+        .flat_map(|order| [DRAIN, Duration::ZERO].map(|normal| (order, normal)))
 }
 
 fn withdraw<B: EnforcementBackend>(

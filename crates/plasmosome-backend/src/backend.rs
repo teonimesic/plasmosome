@@ -267,7 +267,9 @@ pub trait EnforcementBackend {
     /// cell-qualified owner match. It resolves that holding before draining: a mismatch returns
     /// `UnknownObject` and changes nothing. A graceful drain that cannot finish within its
     /// deadline returns `DrainTimedOut` naming the exact address and keeps the holding, its
-    /// issued record and every peer; `RevokePolicy::Force` then withdraws only that holding.
+    /// issued record and every peer; `RevokePolicy::Force` then withdraws only that holding. A
+    /// successful removal of a granted holding, under either policy, also retires its issued
+    /// record, so a later `revoke` of its handle returns `UnknownHandle`.
     fn apply_removal(
         &mut self,
         removal: UniverseRemoval,

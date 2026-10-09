@@ -51,8 +51,9 @@ exactly those two fields. `CellId` lives here, and core uses this one type. An e
 the owner and a `DrainSpec`. It first resolves the holding at the removal's exact address with
 that owner and full capability, and refuses anything else with `UnknownObject`. A graceful drain
 that times out returns `DrainTimedOut` and keeps the holding, its issued record and every peer;
-`Force` then withdraws only that holding. A zero graceful deadline checks once: a drained holding
-is released, an undrained one times out, and zero never forces. `revoke` follows the same rule.
+`Force` then withdraws only that holding. A successful removal of a granted holding, under either
+policy, also retires its handle. A zero graceful deadline checks once: a drained holding is
+released, an undrained one times out, and zero never forces. `revoke` follows the same rule.
 `FakeBackend::mark_stuck` and `stall_graceful_drains_for_owner` make graceful withdrawals of one
 address or one owner time out.
 

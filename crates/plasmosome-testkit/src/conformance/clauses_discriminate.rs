@@ -58,6 +58,10 @@ enum Defect {
     ZeroDeadlineNeverReleases,
     ApplyRemovalDropsTheRecordOnTimeout,
     ApplyRemovalLeavesAStaleHandle,
+    StallKeyedByPluginAboveZero,
+    ForcedApplyRemovalLeavesAStaleHandle,
+    ForceRefusedWhileANeighbourStands,
+    ForceRefusedWhileThePluginStandsElsewhere,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,30 +206,37 @@ impl DefectiveBackend {
     ) -> Option<BackendError> {
         let stalled = conformance::stalled_owner();
         if drain.policy == RevokePolicy::Force {
-            let peer_stands = self
-                .state
-                .objects()
-                .any(|held| held.capability == *capability && held.owner != *owner);
-            return (self.defect == Defect::ForceRefusedWhilePeerStands
-                && *owner == stalled
-                && peer_stands)
-                .then(|| {
-                    BackendError::Fault("another holder still uses the resource".to_string())
+            let blocks = |held: &OsObject| match self.defect {
+                Defect::ForceRefusedWhilePeerStands => true,
+                Defect::ForceRefusedWhileANeighbourStands => held.owner.cell == owner.cell,
+                Defect::ForceRefusedWhileThePluginStandsElsewhere => {
+                    held.owner.plugin == owner.plugin
+                }
+                _ => false,
+            };
+            let refused = *owner == stalled
+                && self.state.objects().any(|held| {
+                    held.capability == *capability && held.owner != *owner && blocks(held)
                 });
+            return refused.then(|| {
+                BackendError::Fault("another holder still uses the resource".to_string())
+            });
         }
+        let stalled_stands = || {
+            self.state
+                .objects()
+                .any(|held| held.owner == stalled && held.capability == *capability)
+        };
         let times_out = match self.defect {
             Defect::IgnoresDrainTimeouts => false,
             Defect::ZeroDeadlineForces if drain.deadline.is_zero() => false,
-            Defect::StallKeyedByPlugin => owner.plugin == stalled.plugin,
-            Defect::StallKeyedByCell => owner.cell == stalled.cell,
-            Defect::ZeroDeadlineNeverReleases if drain.deadline.is_zero() => true,
-            Defect::StallBlocksEqualPeers => {
-                *owner == stalled
-                    || self
-                        .state
-                        .objects()
-                        .any(|held| held.owner == stalled && held.capability == *capability)
+            Defect::StallKeyedByPlugin => owner.plugin == stalled.plugin && stalled_stands(),
+            Defect::StallKeyedByCell => owner.cell == stalled.cell && stalled_stands(),
+            Defect::StallKeyedByPluginAboveZero if !drain.deadline.is_zero() => {
+                owner.plugin == stalled.plugin
             }
+            Defect::ZeroDeadlineNeverReleases if drain.deadline.is_zero() => true,
+            Defect::StallBlocksEqualPeers => *owner == stalled || stalled_stands(),
             _ => *owner == stalled,
         };
         times_out.then_some(BackendError::DrainTimedOut {
@@ -564,9 +575,18 @@ impl EnforcementBackend for DefectiveBackend {
         } else {
             drain
         };
-        self.drained(owner, &removal.capability, address, drain, |backend| {
+        let record = self.ledger.get(&address).cloned();
+        let removed = self.drained(owner, &removal.capability, address, drain, |backend| {
             backend.remove_exact(&removal, owner)
-        })
+        });
+        if self.defect == Defect::ForcedApplyRemovalLeavesAStaleHandle
+            && drain.policy == RevokePolicy::Force
+            && removed.is_ok()
+            && let Some(record) = record
+        {
+            self.ledger.insert(address, record);
+        }
+        removed
     }
 
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError> {
@@ -1079,6 +1099,42 @@ fn granted_removal_step_rejects_a_stale_handle() {
     assert_rejected(|| {
         conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
             Defect::ApplyRemovalLeavesAStaleHandle,
+        ))
+    });
+}
+
+#[test]
+fn above_zero_other_cell_step_rejects_a_plugin_keyed_stall_above_zero() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::StallKeyedByPluginAboveZero,
+        ))
+    });
+}
+
+#[test]
+fn forced_granted_removal_step_rejects_a_stale_handle() {
+    assert_rejected(|| {
+        conformance::repeated_grants_are_independently_removable(carrying(
+            Defect::ForcedApplyRemovalLeavesAStaleHandle,
+        ))
+    });
+}
+
+#[test]
+fn neighbour_after_the_force_rejects_force_refused_while_a_neighbour_stands() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::ForceRefusedWhileANeighbourStands,
+        ))
+    });
+}
+
+#[test]
+fn other_cell_after_the_force_rejects_force_refused_while_the_plugin_stands_elsewhere() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::ForceRefusedWhileThePluginStandsElsewhere,
         ))
     });
 }

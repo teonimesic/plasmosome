@@ -38,13 +38,19 @@ any release, while Force still succeeds; the fake factories arm this with
 `FakeBackend::stall_graceful_drains_for_owner`. A future real factory must arrange the same stall
 with real resources. The clause times the stalled holding out with a 50 ms and a zero deadline,
 checks that a removal naming the wrong owner is refused before any drain in both directions, and
-drains another plugin in the stalled cell and the same plugin in another cell normally, the second
-under a zero deadline. It withdraws the stalled holding and its equal peers in both orders. It
-runs once with granted holdings through `revoke`, where a graceful `apply_removal` of the stalled
-grant must also time out and keep its handle, and once with applied holdings through
-`apply_removal`, where the granted peer is removed through `apply_removal` too and its handle must
-be retired. Each order, each entry point and each of those steps has its own defective backend, so
-deleting any one of them turns its witness red.
+drains another plugin in the stalled cell and the same plugin in another cell normally. It
+withdraws the stalled holding and its equal peers in both orders, and runs each order twice,
+draining every other holding under a 50 ms deadline and then under a zero deadline. The
+stalled-first pass forces the stalled holding while every other holding stands; the peer-first
+pass drains the others while it stands and forces it last. The clause runs once with granted
+holdings through `revoke`, where a graceful `apply_removal` of the stalled grant must also time out
+and keep its handle, and once with applied holdings through `apply_removal`, where the granted
+peer is removed through `apply_removal` too and its handle must be retired. Each order, each
+deadline, each entry point and each of those steps has its own defective backend, so deleting any
+one of them turns its witness red, and so does moving the neighbour or the other-cell holding
+across the forced withdrawal in either order. `repeated_grants_are_independently_removable`
+removes a granted holding through `apply_removal` under both policies and checks that its handle
+is retired.
 
 The order a clause revokes in is part of what it proves. A detach replays a ledger in reverse push
 order, so a backend that accepts revokes only in grant order was conformant right up until task 012
