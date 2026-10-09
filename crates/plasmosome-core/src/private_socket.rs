@@ -49,8 +49,10 @@ impl Walk {
         let mut facts = stat_fd(&self.start, &at)?;
         let mut held: Option<OwnedFd> = None;
         for (index, component) in self.components.iter().enumerate() {
+            let parent = held.as_ref().unwrap_or(&self.start);
             if index > 0 || self.judge_start {
                 judge_ancestor(&facts, euid, &at)?;
+                refuse_replacing_acl(parent, &at)?;
             }
             at.push(OsStr::from_bytes(component.as_bytes()));
             let access = if index + 1 == self.components.len() {
@@ -58,7 +60,7 @@ impl Walk {
             } else {
                 SEARCH_ONLY
             };
-            let next = open_child(held.as_ref().unwrap_or(&self.start), component, &at, access)?;
+            let next = open_child(parent, component, &at, access)?;
             facts = stat_fd(&next, &at)?;
             held = Some(next);
         }
@@ -905,40 +907,119 @@ fn refuse_acl(dir: &OwnedFd, path: &Path) -> Result<(), PrivateSocketError> {
 }
 
 #[cfg(target_os = "macos")]
+fn refuse_replacing_acl(dir: &OwnedFd, at: &Path) -> Result<(), PrivateSocketError> {
+    match darwin_acl::lets_others_replace_entries(dir) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(PrivateSocketError::ReplaceableByAcl {
+            at: at.to_path_buf(),
+        }),
+        Err((op, errno)) => Err(PrivateSocketError::Io {
+            op,
+            at: at.to_path_buf(),
+            errno,
+        }),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn refuse_replacing_acl(_dir: &OwnedFd, _at: &Path) -> Result<(), PrivateSocketError> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 mod darwin_acl {
+    use std::os::fd::{AsRawFd, OwnedFd};
     use std::os::raw::{c_int, c_void};
 
-    pub(super) const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
-    pub(super) const ACL_FIRST_ENTRY: c_int = 0;
+    const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
+    const ACL_FIRST_ENTRY: c_int = 0;
+    const ACL_NEXT_ENTRY: c_int = -1;
+    const ACL_EXTENDED_ALLOW: c_int = 1;
+    const ACL_ADD_FILE: u64 = 1 << 2;
+    const ACL_DELETE: u64 = 1 << 4;
+    const ACL_ADD_SUBDIRECTORY: u64 = 1 << 5;
+    const ACL_DELETE_CHILD: u64 = 1 << 6;
+    const ACL_WRITE_SECURITY: u64 = 1 << 12;
+    const ACL_CHANGE_OWNER: u64 = 1 << 13;
+    const REPLACES_ENTRIES: u64 = ACL_ADD_FILE
+        | ACL_DELETE
+        | ACL_ADD_SUBDIRECTORY
+        | ACL_DELETE_CHILD
+        | ACL_WRITE_SECURITY
+        | ACL_CHANGE_OWNER;
 
     unsafe extern "C" {
-        pub(super) fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
-        pub(super) fn acl_get_entry(
-            acl: *mut c_void,
-            entry_id: c_int,
-            entry: *mut *mut c_void,
-        ) -> c_int;
-        pub(super) fn acl_free(object: *mut c_void) -> c_int;
+        fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
+        fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
+        fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
+        fn acl_get_permset_mask_np(entry: *mut c_void, mask: *mut u64) -> c_int;
+        fn acl_free(object: *mut c_void) -> c_int;
+    }
+
+    struct Acl(*mut c_void);
+
+    impl Acl {
+        fn of(dir: &OwnedFd) -> Result<Option<Acl>, (&'static str, i32)> {
+            let acl = unsafe { acl_get_fd_np(dir.as_raw_fd(), ACL_TYPE_EXTENDED) };
+            if !acl.is_null() {
+                return Ok(Some(Acl(acl)));
+            }
+            let errno = super::last_errno();
+            if errno == libc::ENOENT {
+                Ok(None)
+            } else {
+                Err(("acl_get_fd_np", errno))
+            }
+        }
+
+        fn entries(&self) -> impl Iterator<Item = *mut c_void> + '_ {
+            let mut which = ACL_FIRST_ENTRY;
+            std::iter::from_fn(move || {
+                let mut entry = std::ptr::null_mut();
+                let found = unsafe { acl_get_entry(self.0, which, &mut entry) } == 0;
+                which = ACL_NEXT_ENTRY;
+                found.then_some(entry)
+            })
+        }
+    }
+
+    impl Drop for Acl {
+        fn drop(&mut self) {
+            unsafe { acl_free(self.0) };
+        }
+    }
+
+    pub(super) fn has_entries(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
+        Ok(Acl::of(dir)?.is_some_and(|acl| acl.entries().next().is_some()))
+    }
+
+    pub(super) fn lets_others_replace_entries(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
+        let Some(acl) = Acl::of(dir)? else {
+            return Ok(false);
+        };
+        for entry in acl.entries() {
+            let mut tag = 0;
+            if unsafe { acl_get_tag_type(entry, &mut tag) } != 0 {
+                return Err(("acl_get_tag_type", super::last_errno()));
+            }
+            if tag != ACL_EXTENDED_ALLOW {
+                continue;
+            }
+            let mut mask = 0;
+            if unsafe { acl_get_permset_mask_np(entry, &mut mask) } != 0 {
+                return Err(("acl_get_permset_mask_np", super::last_errno()));
+            }
+            if mask & REPLACES_ENTRIES != 0 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
 #[cfg(target_os = "macos")]
 fn acl_present(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
-    use darwin_acl::{ACL_FIRST_ENTRY, ACL_TYPE_EXTENDED, acl_free, acl_get_entry, acl_get_fd_np};
-
-    let acl = unsafe { acl_get_fd_np(dir.as_raw_fd(), ACL_TYPE_EXTENDED) };
-    if acl.is_null() {
-        let errno = last_errno();
-        return if errno == libc::ENOENT {
-            Ok(false)
-        } else {
-            Err(("acl_get_fd_np", errno))
-        };
-    }
-    let mut entry = std::ptr::null_mut();
-    let first = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) };
-    unsafe { acl_free(acl) };
-    Ok(first == 0)
+    darwin_acl::has_entries(dir)
 }
 
 #[cfg(target_os = "linux")]
