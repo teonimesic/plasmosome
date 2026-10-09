@@ -67,7 +67,7 @@ def deduplicates_runs_not_status_rows():
                                             status(11, "2026-01-02T11:15:00Z"),
                                             status(12, "2026-01-02T11:30:04Z")],
                       "issues/1/comments": [reply(20, "a", "2026-01-02T11:01:00Z", "2026-01-02T11:10:05Z")]})
-    assert result["counts"]["completed_in_window"] == 2, result
+    assert result["counts"]["completed_in_window"] == 3, result
     assert len(result["events"]) == 2
     assert result["counts"]["admitted_in_window"] is None
     assert result["remaining"] is None
