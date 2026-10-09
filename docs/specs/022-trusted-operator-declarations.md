@@ -1,7 +1,7 @@
 ---
 id: 022
 title: Trusted operator declarations, and how a manifest becomes exact grants
-status: draft
+status: accepted
 intents: [004, 012, 003]
 ---
 
@@ -85,18 +85,21 @@ prepared or journaled.
    (`mode`), and at most 1,048,576 bytes (`size`).
 5. **Outside every Mount source.** Neither the file nor any directory above it may be, or lie
    inside, a Mount source that a cell of this instance holds or has a pending operation for (from
-   the journals), or one the operator file declares (`inside_mount_source`). Sources are compared
-   by directory identity (device and inode), found by opening each recorded source path with the
-   walk of rule 1. A held source that can no longer be opened refuses only the requests that
-   resolve for the cell holding it (`inside_mount_source`); other cells are not blocked.
+   the journals, and from the `found` set of each quarantine report, spec 008), or one the
+   operator file declares (`inside_mount_source`). Sources are compared by directory identity
+   (device and inode), found by opening each source path with the walk of rule 1. A held or
+   pending source that can no longer be opened refuses only the requests that resolve for its
+   cell (`inside_mount_source`). A declared source that cannot be opened is skipped here: it
+   cannot be mounted either, and only a request that resolves it refuses (§6's source guard). No
+   source that cannot be opened blocks resolution for the whole instance.
 6. **Content.** The operator file is UTF-8 JSON with no duplicate keys and no unknown fields, and
    `version` is exactly 1 (`content`). A declaration is parsed with spec 011's grammar and keeps
    spec 011's refusals.
 
 Rule 5 has two limits. It opens the source path recorded at attach, not the directory actually
 mounted, so an operator who renames a held Mount root, or a directory above it, escapes rule 5
-for that holding. And it cannot read the holdings of a quarantined cell, whose journal does not
-parse.
+for that holding. And a quarantine report whose observation was unavailable (spec 008) gives no
+sources for its cell.
 
 ### 4. The file's shape
 
@@ -160,7 +163,8 @@ records spec 008's `{"kind": "local"}` source.
 key, in order:
 
 1. If one or more plasmids already attached to the cell provide the key, it is satisfied. None of
-   them is read or resolved again, and nothing joins the closure.
+   them is read or resolved again, and nothing joins the closure; D2b propagation still reaches
+   them (§6).
 2. Otherwise the candidates are the listed plasmids whose declaration's `[provides]` binds the
    key. The search opens every listed declaration under §3. One that fails §3 or does not parse
    refuses the request with 108 naming it: the search fails closed. Exactly one candidate joins
@@ -169,7 +173,9 @@ key, in order:
    their IDs.
 
 A registry member (spec 020) keeps its imported declaration and its graph's provider bindings.
-The operator file supplies only its ProxyMap and Mount entries, keyed by its plasmid ID.
+The operator file supplies only its ProxyMap and Mount entries, keyed by its plasmid ID alone.
+So an entry written for the operator's own `workspace` also serves any imported registry plasmid
+with that ID, from any publisher, including its `read_write` Mount (question 5).
 
 **Genomes.** `cell.new` with a `genome` and no `artifact` has no local grammar to select from:
 spec 020 defines genomes only as registry releases, and spec 001 §2's project-local path names no
@@ -186,14 +192,14 @@ attached are not resolved again.
 covers a port that is not an integer from 1 to 65535, a repeated port, hosts with no ports, a host
 that is not a lower-case DNS name, a repeated host, a CIDR that does not parse or has host bits set,
 a `[workspace]` with no `mount`, and a `dst` that is relative, has a trailing slash, contains `.`,
-`..` or NUL, or is `/`. Port faults follow spec 011 as PR #133 amends it, naming the entry by its
-index. A repeated port is field `network.ports[i]`, the repeat, with `fix` exactly `remove this
-entry`. An entry that is not an integer from 1 to 65535 is field `network.ports[i]`, with `fix` the
-port the entry evidently means when the list does not already declare it, and otherwise `remove this
-entry`. Hosts with no ports is field `network.hosts[0]` with `fix` `remove this entry`, because no
-port line exists that would not be a guess. So following a `fix` never drops a declared port,
-repeats one, or adds one the author did not write. A parser that drops, wraps or truncates an entry
-does not meet this.
+`..` or NUL, or is `/`. Port faults follow spec 011 (`011:230-232`) and name the entry by its index
+in its own section, such as `network.ports[i]`. A repeated port is the repeat, with `fix` exactly
+`remove this entry`. An entry that is not an integer from 1 to 65535 has `fix` the port the entry
+evidently means when the list does not already declare it, and otherwise `remove this entry`. Hosts
+with no ports is field `network.hosts[0]` with `fix` `remove this entry`, because no port line
+exists that would not be a guess. So following a `fix` never drops a declared port, repeats one, or
+adds one the author did not write. A parser that drops, wraps or truncates an entry does not meet
+this.
 
 #### Network becomes ProxyMap
 
@@ -253,10 +259,11 @@ leaves every remaining plasmid at the mode it attached at. To change a mode, det
   default of `"virtiofs"` does not override that.
 
 **The Mount source guard.** A Mount source must not expose the kernel's own state, nor let a cell
-rewrite what decides what cells get. The resolver opens the source with the walk of §3 rule 1, so
-a symlink anywhere in its path refuses. Every directory above it must meet §3 rule 2, and it must
-be a directory. It refuses with 108 (`path` the operator file) when, compared by directory
-identity, it is the same directory as, an ancestor of, or a descendant of any of these:
+rewrite what decides what cells get. The resolver opens the source with the walk of §3 rule 1; a
+symlink anywhere in its path, or a source that cannot be opened, refuses with 108 (`path` the
+operator file). Every directory above it must meet §3 rule 2, and it must be a directory. It also
+refuses with 108 when, compared by directory identity, it is the same directory as, an ancestor
+of, or a descendant of any of these:
 
 - the instance root, and the registry root if configured;
 - the directories of the control socket, of the controller's configuration file, and of the
@@ -301,9 +308,7 @@ before prepare, when the re-resolved set has any of these against what the plasm
 - a host, port and transport it did not hold;
 - `allow_private` true where the held capability had false;
 - a Mount target it did not hold, or a different Mount `source` at a held target;
-- `read_write` where the held Mount was `read_only`;
-- an entry at `passthrough` where the held one was at `simulate` or `capture`, should the owner
-  let a reload change mode (question 6).
+- `read_write` where the held Mount was `read_only`.
 
 A changed route or destination, or a narrower set, proceeds with fresh replacement holdings.
 Spec 008's reload preflight still applies. To widen, the operator removes the plasmid and adds it
@@ -311,14 +316,13 @@ again.
 
 ## Changes proposed to accepted specs
 
-These are proposed text, not edits made in this PR. Spec 001 says its text changes in a pull
-request with the reasoning written down, so the PR that accepts this spec must carry them, or
-this spec stays draft. The mock-mode amendments to 011 and 001 assume the default of owner
-question 6.
+These are proposed text. The PR that accepts this spec edits no other accepted document. Each
+amendment is applied by a later reviewed change to the document it amends, before any task that
+relies on it. The mock-mode amendments to 011 and 001 assume the default of owner question 6.
 
 **Spec 011.**
 
-- `011:165-169`. Replace "It does change one thing about them: a mock mode propagates across the
+- `011:167-169`. Replace "It does change one thing about them: a mock mode propagates across the
   dependency closure exactly as spec 001 §3.10 froze it. A mode decides whether a granted call
   reaches a live service or a recording; it is not itself a grant, and that propagation is
   untouched here." with "Nor does it change their mock modes: under spec 022 a mode selects
@@ -328,10 +332,10 @@ question 6.
   what the remaining declarations propagate is governed by spec 001 §3.10, unchanged." with "A
   detach changes no remaining plasmid's mock mode: each keeps the mode it attached at (spec
   022)."
-- `011:267-272`. After "attach brings the whole closure with it.", add "Since spec 022, the
+- `011:273-274`. After "attach brings the whole closure with it.", add "Since spec 022, the
   closure bounds which needs a plasmid has; the trusted operator declarations file bounds where
   each one leads on the host, so a reviewer reads both."
-- `011:297-298`. Replace "The declaration is the only thing the kernel reads to decide what the
+- `011:299-300`. Replace "The declaration is the only thing the kernel reads to decide what the
   plasmid may reach." with:
 
   > The declaration is the only thing the kernel reads to decide what the plasmid may reach:
@@ -339,19 +343,19 @@ question 6.
   > declarations decide only where each declared need leads on this host (the real destination,
   > the host directory and its access), and can leave a need unmet, never add one.
 
-- `011:345-347`. Replace "It changes no already-attached plasmid's grants; mock-mode propagation
+- `011:347-349`. Replace "It changes no already-attached plasmid's grants; mock-mode propagation
   across the dependency closure is unchanged from spec 001 §3.10." with "It changes no
   already-attached plasmid's grants or mock mode; propagation that would change an attached
   plasmid's mode refuses with 104 (spec 022)."
-- `011:374-376`. Replace "the declarations of a plasmid and its required closure are sufficient
+- `011:377-378`. Replace "the declarations of a plasmid and its required closure are sufficient
   for a reviewer to bound its reach." with "the declarations of a plasmid and its required
   closure, read with spec 022's operator declarations file, are sufficient for a reviewer to
   bound its reach."
-- `011:418-420`. Replace "a mock mode propagating across the closure in the same attach is
+- `011:421-422`. Replace "a mock mode propagating across the closure in the same attach is
   asserted separately and is not counted as a change of grant." with "an attach whose mock-mode
   propagation would change an attached plasmid's mode is refused with 104 and changes nothing
   (spec 022)."
-- `011:476-478`. Replace "are frozen in spec 001 §3.10 and untouched. The only thing said about
+- `011:479-480`. Replace "are frozen in spec 001 §3.10 and untouched. The only thing said about
   them here is that propagation is not a change of grant." with "are in spec 001 §3.10, as spec
   022 amends it: propagation never changes an attached plasmid's mode."
 
@@ -364,6 +368,10 @@ question 6.
 - §2 (`001:139-141`). After "`.plasmosome/genomes/<name>.toml`; the share/export form is
   `*.genome.toml`.", add "That file is not yet a selection source: until a local genome grammar
   exists, `cell.new` selects a genome only by `artifact` (spec 022)."
+- §2 (`001:144`). After "The server resolves; the client never guesses.", add "The results of
+  `plasmid.list`, `plasmid.add`, `plasmid.remove` and `plasmid.reload` each carry `cell`, the cell
+  the verb acted on, whether the request named it or the server resolved it." Spec 025 serves the
+  plasmid commands only once they do.
 - §3.5. Replace the example request and result with this text, which spec 023 proposes too
   (whichever lands second finds it applied):
 
@@ -378,7 +386,7 @@ question 6.
 
   ```json
   {"id": 5, "result": {"cell": "cell-3", "state": "ready",
-    "plasmids": ["github-pr [mock:simulate]", "workspace [real]"]}}
+    "plasmids": ["github-pr [mock:simulate]", "workspace [mock:simulate]"]}}
   ```
 
   Replace "An absent artifact preserves local selection." with "An absent artifact with a named
@@ -387,13 +395,15 @@ question 6.
   a reload keeps the held mode, spec 022)". After "is the documented alias of `cell.new --genome
   <name>` (D1c).", add "Until a local genome grammar exists, it also needs the genome's
   `artifact` (spec 022)."
-- §3.9. In the example, replace `"plasmid": "model-provider"` with `"plasmid": "workspace"` and
-  `"label": "model-provider [real]"` with `"label": "workspace [real]"`. Under spec 022 a
+- §3.3 and §3.9. In both examples, replace `model-provider [real]` with `workspace [real]`, and
+  in §3.9 replace `"plasmid": "model-provider"` with `"plasmid": "workspace"`. Under spec 022 a
   `[model]` plasmid cannot attach until credential custody exists.
 - §3.10, propagation. After "Inherited levels yield to the new explicit declaration (D2b rule
-  2).", add "They never yield on a plasmid already attached: an attach that would change an
-  attached plasmid's mode refuses with 104 naming it, with `resolutions: ["remove_plasmid"]`
-  (spec 022)."
+  2).", add "No level, inherited or explicit, changes a plasmid already attached: an attach that
+  would change an attached plasmid's mode refuses with 104 naming it, with `resolutions:
+  ["remove_plasmid"]` (spec 022)." Replace "An explicit-vs-explicit conflict on the same node at
+  different modes" with "An explicit-vs-explicit conflict at different modes on a node not yet
+  attached".
 - §3.10, credentials (`001:423-428`). After "never a silent downgrade.", add "Until credential
   custody exists, a reference that passes this validation still refuses the attach with 103
   `unsupported:credential:<ref>` (spec 022)."
@@ -455,9 +465,11 @@ These need the owner. Where this spec needs an answer to work, it sets a conserv
    directory is writable by the agent, so a genome found there cannot be trusted as declared.
 5. **The operator file as a gate.** Every new network or workspace need waits for an operator
    entry, so the file gates reach in practice. It also decides a Mount's access, which a
-   declaration cannot express: a plasmid that needs only reads cannot say so. Intent 010 leaves
-   the gate's shape to the owner. Is this acceptable as part of the gate, or must the gate and
-   the access choice sit elsewhere?
+   declaration cannot express: a plasmid that needs only reads cannot say so. And entries are
+   keyed by plasmid ID alone (the default), so an imported registry plasmid named `workspace`,
+   from any publisher, gets the operator's `workspace` entries, including a `read_write` Mount
+   (§5). Intent 010 leaves the gate's shape to the owner. Is this acceptable as part of the gate,
+   or must the gate, the access choice and the keying sit elsewhere?
 6. **Mode changes after attach.** By default an attached plasmid's mode is fixed: an attach or
    reload that would change it refuses with 104, and a detach leaves it alone (§6). That reverses
    D2b rule 2 for attached plasmids and removes D2's third layer, `plasmid reload --mock`, both
@@ -524,22 +536,24 @@ ProxyMap (O-11) or Mount (O-7).
 9. Cell A holds a `read_write` Mount of S. The operator file inside S, a listed declaration inside
    S, and S declared but not yet held each give 108 `inside_mount_source`; outside S, requests
    succeed. Rename S away: a request for cell A is 108 `inside_mount_source`, and one for cell B
-   succeeds. Catches: trusting a file the workload can write, and one stale holding blocking the
+   succeeds. Quarantine A with its Mount observed: the operator file inside S is still 108. An
+   entry whose source does not exist: other requests succeed, and adding its plasmid is 108.
+   Catches: trusting a file the workload can write, and one stale holding or entry blocking the
    whole instance.
 10. Author refusals, each 108 with the field, a nonempty `fix` and the plasmid ID: ports `70000`,
     `-1`, `0`, `65536`, `"443"` and `443.5`; a repeated port or host; hosts with no ports; an
     upper-case or IP-literal host; a malformed CIDR; `192.0.2.1/24`; `[workspace]` with no `mount`;
-    `dst = "workspace"`. Each port fault names `network.ports[i]`; `["443"]` gives `fix` `443`, a
-    repeat gives `remove this entry`, and hosts with `ports = []` give `network.hosts[0]` and
-    `remove this entry`. Following the fixes in turn from `[65536]` with one host ends with no host
-    and no port, never a port the author did not write. Catches: a truncating parser, a missing or
-    whole-line `fix`, and a `fix` that invents a port.
-11. Pins, `pin_cidrs = ["192.0.2.0/25"]`. `192.0.2.10` attaches. `192.0.2.200`,
+    `dst = "workspace"`. Each bad or repeated port names `network.ports[i]`. `["443"]` gives `443`;
+    `70000`, `-1`, `0`, `65536`, `443.5` and a repeat give `remove this entry`; hosts with
+    `ports = []` give `network.hosts[0]` and `remove this entry`. Following the fixes in turn from
+    `[65536]` with one host ends with no host and no port. Catches: a truncating parser, a missing
+    or whole-line `fix`, and a `fix` that invents a port.
+11. Pins, on a fixture the task adds with `pin_cidrs = ["192.0.2.0/25"]` and `[mock].hosts`
+    naming its host; no in-tree fixture has both. `192.0.2.10` attaches. `192.0.2.200`,
     `192.0.2.10.example.com` and `2001:db8::1` are 103. `::192.0.2.10`, `::ffff:192.0.2.10` and
     `192.000.002.010` refuse the file with 108, as `ProxyRecipe::validate` does. At `--mock
-    simulate` with a `127.0.0.1` entry it attaches. The in-tree `github-pr` fixture attaches in
-    both modes against §4's example. Catches: a prefix check, crossing address families, skipping
-    `validate`, and pins that make a plasmid unmockable.
+    simulate` with a `127.0.0.1` entry it attaches. Catches: a prefix check, crossing address
+    families, skipping `validate`, and pins that make a plasmid unmockable.
 12. X and Y both declare `api.github.com:443`. X at `simulate`, then Y at `passthrough`: 104,
     `node` X, `resolutions` `["remove_plasmid"]`. Both at `passthrough` with different
     destinations: 108; with equal recipes, both attach. Catches: letting ID order choose between a
@@ -562,11 +576,11 @@ ProxyMap (O-11) or Mount (O-7).
     default file.
 17. Mount sources equal to, inside and above each guarded directory (instance root, registry root,
     control-socket, configuration, controller executable, operator file and declaration
-    directories, and once spec 023 is accepted the `membraned` artifact's) each refuse with 108
-    before prepare. A sibling `<instance-root-name>-x` attaches. On a case-insensitive volume, a
-    source spelled in a different case from the instance root refuses, and so does a source with a
-    symlink component. Catches: a string-prefix check, a case-sensitive comparison, and a
-    following walk.
+    directories, and once spec 023 is accepted a `membraned` and a template Artifact's) each
+    refuse with 108 before prepare. A sibling `<instance-root-name>-x` attaches. On a
+    case-insensitive volume, a source spelled in a different case from the instance root refuses,
+    and so does a source with a symlink component. Catches: a string-prefix check, a
+    case-sensitive comparison, and a following walk.
 
 ## Out of scope
 
