@@ -1,5 +1,33 @@
 use super::digest::{Digest, DigestError};
 use super::path::{PathError, RecipePath};
+use super::strict_json::{self, StrictJsonError};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
+const MAX_RECORD_BYTES: usize = 1_048_576;
+
+const RECIPE_FIELDS: [&str; 15] = [
+    "version",
+    "vcpus",
+    "memory_mib",
+    "kernel",
+    "kernel_format",
+    "initramfs",
+    "root_image",
+    "writable_root",
+    "control_path",
+    "data_path",
+    "helper",
+    "libraries",
+    "host_policy",
+    "guest_policy",
+    "architecture",
+];
+
+const ARTIFACT_FIELDS: [&str; 2] = ["path", "sha256"];
+
+static ABSENT: Value = Value::Null;
 
 /// One pinned file of a recipe: its canonical absolute path and the SHA-256
 /// its bytes must hash to. Nothing has opened or hashed the file yet.
@@ -34,16 +62,39 @@ pub enum KernelFormat {
 }
 
 impl KernelFormat {
+    const ALL: [KernelFormat; 6] = [
+        KernelFormat::Raw,
+        KernelFormat::Elf,
+        KernelFormat::PeGz,
+        KernelFormat::ImageBz2,
+        KernelFormat::ImageGz,
+        KernelFormat::ImageZstd,
+    ];
+
     /// The value the helper passes to `krun_set_kernel`: 0 for `Raw` through 5
     /// for `ImageZstd`.
     pub fn krun_value(self) -> u32 {
-        todo!()
+        match self {
+            KernelFormat::Raw => 0,
+            KernelFormat::Elf => 1,
+            KernelFormat::PeGz => 2,
+            KernelFormat::ImageBz2 => 3,
+            KernelFormat::ImageGz => 4,
+            KernelFormat::ImageZstd => 5,
+        }
     }
 
     /// The recipe spelling: `raw`, `elf`, `pe_gz`, `image_bz2`, `image_gz` or
     /// `image_zstd`.
     pub fn as_str(self) -> &'static str {
-        todo!()
+        match self {
+            KernelFormat::Raw => "raw",
+            KernelFormat::Elf => "elf",
+            KernelFormat::PeGz => "pe_gz",
+            KernelFormat::ImageBz2 => "image_bz2",
+            KernelFormat::ImageGz => "image_gz",
+            KernelFormat::ImageZstd => "image_zstd",
+        }
     }
 }
 
@@ -55,14 +106,25 @@ pub enum Architecture {
 }
 
 impl Architecture {
+    const ALL: [Architecture; 2] = [Architecture::Aarch64, Architecture::X86_64];
+
     /// The recipe spelling: `aarch64` or `x86_64`.
     pub fn as_str(self) -> &'static str {
-        todo!()
+        match self {
+            Architecture::Aarch64 => "aarch64",
+            Architecture::X86_64 => "x86_64",
+        }
     }
 
     /// The architecture this binary was built for, or `None` for any other.
     pub fn host() -> Option<Architecture> {
-        todo!()
+        if cfg!(target_arch = "aarch64") {
+            Some(Architecture::Aarch64)
+        } else if cfg!(target_arch = "x86_64") {
+            Some(Architecture::X86_64)
+        } else {
+            None
+        }
     }
 }
 
@@ -92,8 +154,40 @@ impl PlatformLimits {
     /// name, and with `HostLimitUnavailable` when the system will not report
     /// its parallelism or memory.
     pub fn host() -> Result<PlatformLimits, RecipeRefusal> {
-        todo!()
+        let architecture =
+            Architecture::host().ok_or_else(|| RecipeRefusal::UnknownArchitecture {
+                found: std::env::consts::ARCH.to_owned(),
+            })?;
+        let parallelism = std::thread::available_parallelism().map_err(|_| {
+            RecipeRefusal::HostLimitUnavailable {
+                limit: "available parallelism",
+            }
+        })?;
+        Ok(PlatformLimits {
+            architecture,
+            max_vcpus: u8::try_from(parallelism.get()).unwrap_or(u8::MAX),
+            max_memory_mib: physical_memory_mib()?,
+            max_socket_path_bytes: array_length(|address: &libc::sockaddr_un| &address.sun_path)
+                - 1,
+        })
     }
+}
+
+fn physical_memory_mib() -> Result<u32, RecipeRefusal> {
+    let positive = |value: libc::c_long| u64::try_from(value).ok().filter(|value| *value > 0);
+    let pages = positive(unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) });
+    let page_bytes = positive(unsafe { libc::sysconf(libc::_SC_PAGESIZE) });
+    let (Some(pages), Some(page_bytes)) = (pages, page_bytes) else {
+        return Err(RecipeRefusal::HostLimitUnavailable {
+            limit: "physical memory",
+        });
+    };
+    let mib = u128::from(pages) * u128::from(page_bytes) / (1 << 20);
+    Ok(u32::try_from(mib).unwrap_or(u32::MAX))
+}
+
+fn array_length<S, T, const N: usize>(_field: fn(&S) -> &[T; N]) -> usize {
+    N
 }
 
 /// Which artifact of a recipe a value belongs to.
@@ -223,8 +317,55 @@ impl RuntimeRecipe {
     /// spec order, then the rules that compare fields with each other and
     /// with `limits`.
     pub fn parse(record: &[u8], limits: &PlatformLimits) -> Result<RuntimeRecipe, RecipeRefusal> {
-        let _ = (record, limits);
-        todo!()
+        let value = strict_json::parse_value(one_line(record)?).map_err(refused_json)?;
+        let [
+            version,
+            vcpus,
+            memory_mib,
+            kernel,
+            kernel_format,
+            initramfs,
+            root_image,
+            writable_root,
+            control_path,
+            data_path,
+            helper,
+            libraries,
+            host_policy,
+            guest_policy,
+            architecture,
+        ] = fields(&value, RECIPE_FIELDS, "")?;
+        check_version(version)?;
+        let recipe = RuntimeRecipe {
+            vcpus: whole(vcpus, "vcpus", "an integer from 0 to 255")?,
+            memory_mib: whole(memory_mib, "memory_mib", "an integer from 0 to 4294967295")?,
+            kernel: artifact(kernel, "kernel")?,
+            kernel_format: spelled(
+                kernel_format,
+                "kernel_format",
+                KernelFormat::ALL,
+                KernelFormat::as_str,
+                |found| RecipeRefusal::UnknownKernelFormat { found },
+            )?,
+            initramfs: artifact(initramfs, "initramfs")?,
+            root_image: artifact(root_image, "root_image")?,
+            writable_root: path(writable_root, "writable_root".to_owned())?,
+            control_path: path(control_path, "control_path".to_owned())?,
+            data_path: path(data_path, "data_path".to_owned())?,
+            helper: artifact(helper, "helper")?,
+            libraries: library_list(libraries)?,
+            host_policy: artifact(host_policy, "host_policy")?,
+            guest_policy: artifact(guest_policy, "guest_policy")?,
+            architecture: spelled(
+                architecture,
+                "architecture",
+                Architecture::ALL,
+                Architecture::as_str,
+                |found| RecipeRefusal::UnknownArchitecture { found },
+            )?,
+        };
+        recipe.admit(limits)?;
+        Ok(recipe)
     }
 
     /// The recipe as one compact JSON line ending in one newline: keys in
@@ -234,7 +375,31 @@ impl RuntimeRecipe {
     /// The layout is fixed. The VMM helper and test runtimes read exactly
     /// this form, so a change to it is a protocol change.
     pub fn to_ndjson(&self) -> Vec<u8> {
-        todo!()
+        let libraries: Vec<String> = self.libraries.iter().map(artifact_json).collect();
+        format!(
+            concat!(
+                r#"{{"version":1,"vcpus":{},"memory_mib":{},"kernel":{},"kernel_format":{},"#,
+                r#""initramfs":{},"root_image":{},"writable_root":{},"control_path":{},"#,
+                r#""data_path":{},"helper":{},"libraries":[{}],"host_policy":{},"#,
+                r#""guest_policy":{},"architecture":{}}}"#,
+                "\n",
+            ),
+            self.vcpus,
+            self.memory_mib,
+            artifact_json(&self.kernel),
+            quoted(self.kernel_format.as_str()),
+            artifact_json(&self.initramfs),
+            artifact_json(&self.root_image),
+            quoted(self.writable_root.as_str()),
+            quoted(self.control_path.as_str()),
+            quoted(self.data_path.as_str()),
+            artifact_json(&self.helper),
+            libraries.join(","),
+            artifact_json(&self.host_policy),
+            artifact_json(&self.guest_policy),
+            quoted(self.architecture.as_str()),
+        )
+        .into_bytes()
     }
 
     /// Guest vCPUs, at least 1.
@@ -310,28 +475,362 @@ impl RuntimeRecipe {
     /// Every artifact with its role, in field order: kernel, initramfs,
     /// root image, helper, each library, host policy, guest policy.
     pub fn artifacts(&self) -> impl Iterator<Item = (ArtifactRole, &Artifact)> {
-        std::iter::empty()
+        self.leading_artifacts().chain(self.trailing_artifacts())
     }
+
+    fn leading_artifacts(&self) -> impl Iterator<Item = (ArtifactRole, &Artifact)> {
+        [
+            (ArtifactRole::Kernel, &self.kernel),
+            (ArtifactRole::Initramfs, &self.initramfs),
+            (ArtifactRole::RootImage, &self.root_image),
+        ]
+        .into_iter()
+    }
+
+    fn trailing_artifacts(&self) -> impl Iterator<Item = (ArtifactRole, &Artifact)> {
+        std::iter::once((ArtifactRole::Helper, &self.helper))
+            .chain(
+                self.libraries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, library)| (ArtifactRole::Library(index), library)),
+            )
+            .chain([
+                (ArtifactRole::HostPolicy, &self.host_policy),
+                (ArtifactRole::GuestPolicy, &self.guest_policy),
+            ])
+    }
+
+    fn paths(&self) -> impl Iterator<Item = (PathRole, &RecipePath)> {
+        self.leading_artifacts()
+            .map(artifact_path)
+            .chain([
+                (PathRole::WritableRoot, &self.writable_root),
+                (PathRole::ControlPath, &self.control_path),
+                (PathRole::DataPath, &self.data_path),
+            ])
+            .chain(self.trailing_artifacts().map(artifact_path))
+    }
+
+    fn admit(&self, limits: &PlatformLimits) -> Result<(), RecipeRefusal> {
+        if self.vcpus == 0 {
+            return Err(RecipeRefusal::ZeroVcpus);
+        }
+        if self.memory_mib == 0 {
+            return Err(RecipeRefusal::ZeroMemory);
+        }
+        if self.vcpus > limits.max_vcpus {
+            return Err(RecipeRefusal::VcpusAboveLimit {
+                requested: self.vcpus,
+                limit: limits.max_vcpus,
+            });
+        }
+        if self.memory_mib > limits.max_memory_mib {
+            return Err(RecipeRefusal::MemoryAboveLimit {
+                requested: self.memory_mib,
+                limit: limits.max_memory_mib,
+            });
+        }
+        if self.architecture == Architecture::X86_64 && self.kernel_format == KernelFormat::Raw {
+            return Err(RecipeRefusal::UnadmittedBootPair);
+        }
+        if self.architecture != limits.architecture {
+            return Err(RecipeRefusal::ArchitectureMismatch {
+                recipe: self.architecture,
+                host: limits.architecture,
+            });
+        }
+        if self.control_path == self.data_path {
+            return Err(RecipeRefusal::SocketPathsEqual);
+        }
+        for (field, path) in [
+            ("control_path", &self.control_path),
+            ("data_path", &self.data_path),
+        ] {
+            let bytes = path.as_str().len();
+            if bytes > limits.max_socket_path_bytes {
+                return Err(RecipeRefusal::SocketPathTooLong {
+                    field,
+                    bytes,
+                    max: limits.max_socket_path_bytes,
+                });
+            }
+        }
+        match first_reuse(self.paths()) {
+            Some((first, second)) => Err(RecipeRefusal::PathReused { first, second }),
+            None => Ok(()),
+        }
+    }
+}
+
+fn artifact_path((role, artifact): (ArtifactRole, &Artifact)) -> (PathRole, &RecipePath) {
+    (PathRole::Artifact(role), &artifact.path)
+}
+
+fn one_line(record: &[u8]) -> Result<&[u8], RecipeRefusal> {
+    let Some(body) = record.strip_suffix(b"\n") else {
+        return Err(RecipeRefusal::NotOneLine);
+    };
+    if body.iter().any(|byte| matches!(byte, b'\n' | b'\r')) {
+        return Err(RecipeRefusal::NotOneLine);
+    }
+    if body.len() > MAX_RECORD_BYTES {
+        return Err(RecipeRefusal::TooLarge { bytes: body.len() });
+    }
+    std::str::from_utf8(body).map_err(|_| RecipeRefusal::NotUtf8)?;
+    Ok(body)
+}
+
+fn refused_json(error: StrictJsonError) -> RecipeRefusal {
+    match error {
+        StrictJsonError::DuplicateKey { path } => RecipeRefusal::DuplicateField { path },
+        StrictJsonError::NotJson {
+            line,
+            column,
+            reason,
+        } => RecipeRefusal::NotJson {
+            detail: format!("{reason} at line {line}, column {column}"),
+        },
+    }
+}
+
+fn fields<'a, const N: usize>(
+    value: &'a Value,
+    names: [&str; N],
+    at: &str,
+) -> Result<[&'a Value; N], RecipeRefusal> {
+    let Value::Object(entries) = value else {
+        return Err(RecipeRefusal::NotAnObject {
+            field: at.to_owned(),
+        });
+    };
+    if let Some(unknown) = entries
+        .keys()
+        .filter(|key| !names.contains(&key.as_str()))
+        .min()
+    {
+        return Err(RecipeRefusal::UnknownField {
+            field: dotted(at, unknown),
+        });
+    }
+    let mut found = [&ABSENT; N];
+    for (slot, name) in found.iter_mut().zip(names) {
+        *slot = entries
+            .get(name)
+            .ok_or_else(|| RecipeRefusal::MissingField {
+                field: dotted(at, name),
+            })?;
+    }
+    Ok(found)
+}
+
+fn dotted(at: &str, key: &str) -> String {
+    if at.is_empty() {
+        key.to_owned()
+    } else {
+        format!("{at}.{key}")
+    }
+}
+
+fn wrong_type(field: &str, expected: &'static str) -> RecipeRefusal {
+    RecipeRefusal::WrongType {
+        field: field.to_owned(),
+        expected,
+    }
+}
+
+fn check_version(value: &Value) -> Result<(), RecipeRefusal> {
+    let found = value
+        .as_u64()
+        .map(i128::from)
+        .or_else(|| value.as_i64().map(i128::from));
+    match found {
+        Some(1) => Ok(()),
+        Some(found) => Err(RecipeRefusal::UnsupportedVersion { found }),
+        None => Err(wrong_type("version", "the integer 1")),
+    }
+}
+
+fn whole<T: TryFrom<u64>>(
+    value: &Value,
+    field: &str,
+    expected: &'static str,
+) -> Result<T, RecipeRefusal> {
+    value
+        .as_u64()
+        .and_then(|number| T::try_from(number).ok())
+        .ok_or_else(|| wrong_type(field, expected))
+}
+
+fn text<'a>(value: &'a Value, field: &str) -> Result<&'a str, RecipeRefusal> {
+    value.as_str().ok_or_else(|| wrong_type(field, "a string"))
+}
+
+fn spelled<T: Copy, const N: usize>(
+    value: &Value,
+    field: &str,
+    all: [T; N],
+    spelling: fn(T) -> &'static str,
+    refuse: fn(String) -> RecipeRefusal,
+) -> Result<T, RecipeRefusal> {
+    let found = text(value, field)?;
+    all.into_iter()
+        .find(|candidate| spelling(*candidate) == found)
+        .ok_or_else(|| refuse(found.to_owned()))
+}
+
+fn path(value: &Value, field: String) -> Result<RecipePath, RecipeRefusal> {
+    RecipePath::parse(text(value, &field)?).map_err(|fault| RecipeRefusal::BadPath { field, fault })
+}
+
+fn artifact(value: &Value, at: &str) -> Result<Artifact, RecipeRefusal> {
+    let [path_value, sha256_value] = fields(value, ARTIFACT_FIELDS, at)?;
+    let path = path(path_value, format!("{at}.path"))?;
+    let field = format!("{at}.sha256");
+    let sha256 = Digest::parse_hex(text(sha256_value, &field)?)
+        .map_err(|fault| RecipeRefusal::BadDigest { field, fault })?;
+    Ok(Artifact { path, sha256 })
+}
+
+fn library_list(value: &Value) -> Result<Vec<Artifact>, RecipeRefusal> {
+    let Value::Array(entries) = value else {
+        return Err(wrong_type("libraries", "an array"));
+    };
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| artifact(entry, &format!("libraries[{index}]")))
+        .collect()
+}
+
+fn first_reuse<'a>(
+    paths: impl Iterator<Item = (PathRole, &'a RecipePath)>,
+) -> Option<(PathRole, PathRole)> {
+    let mut seen: HashMap<&str, (usize, PathRole)> = HashMap::new();
+    let mut first: Option<((usize, usize), (PathRole, PathRole))> = None;
+    for (index, (role, path)) in paths.enumerate() {
+        match seen.entry(path.as_str()) {
+            Entry::Vacant(slot) => {
+                slot.insert((index, role));
+            }
+            Entry::Occupied(held) => {
+                let (earlier, earlier_role) = *held.get();
+                if first.is_none_or(|(at, _)| (earlier, index) < at) {
+                    first = Some(((earlier, index), (earlier_role, role)));
+                }
+            }
+        }
+    }
+    first.map(|(_, pair)| pair)
+}
+
+fn quoted(text: &str) -> String {
+    Value::from(text).to_string()
+}
+
+fn artifact_json(artifact: &Artifact) -> String {
+    format!(
+        r#"{{"path":{},"sha256":{}}}"#,
+        quoted(artifact.path.as_str()),
+        quoted(&artifact.sha256.hex())
+    )
 }
 
 impl std::fmt::Display for ArtifactRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            ArtifactRole::Kernel => f.write_str("kernel"),
+            ArtifactRole::Initramfs => f.write_str("initramfs"),
+            ArtifactRole::RootImage => f.write_str("root_image"),
+            ArtifactRole::Helper => f.write_str("helper"),
+            ArtifactRole::Library(index) => write!(f, "libraries[{index}]"),
+            ArtifactRole::HostPolicy => f.write_str("host_policy"),
+            ArtifactRole::GuestPolicy => f.write_str("guest_policy"),
+        }
     }
 }
 
 impl std::fmt::Display for PathRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            PathRole::Artifact(role) => write!(f, "{role}.path"),
+            PathRole::WritableRoot => f.write_str("writable_root"),
+            PathRole::ControlPath => f.write_str("control_path"),
+            PathRole::DataPath => f.write_str("data_path"),
+        }
     }
 }
 
 impl std::fmt::Display for RecipeRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            RecipeRefusal::TooLarge { bytes } => write!(
+                f,
+                "the recipe is {bytes} bytes before its newline; at most {MAX_RECORD_BYTES} are allowed"
+            ),
+            RecipeRefusal::NotOneLine => f.write_str(
+                "the recipe is not one line ending in a single newline with no carriage return",
+            ),
+            RecipeRefusal::NotUtf8 => f.write_str("the recipe is not UTF-8"),
+            RecipeRefusal::NotJson { detail } => write!(f, "the recipe is not JSON: {detail}"),
+            RecipeRefusal::NotAnObject { field } if field.is_empty() => {
+                f.write_str("the recipe is not a JSON object")
+            }
+            RecipeRefusal::NotAnObject { field } => write!(f, "`{field}` must be a JSON object"),
+            RecipeRefusal::DuplicateField { path } => {
+                write!(f, "the recipe repeats the key at {path:?}")
+            }
+            RecipeRefusal::UnknownField { field } => {
+                write!(f, "the recipe carries an unknown field {field:?}")
+            }
+            RecipeRefusal::MissingField { field } => write!(f, "the recipe is missing `{field}`"),
+            RecipeRefusal::WrongType { field, expected } => write!(f, "`{field}` must be {expected}"),
+            RecipeRefusal::UnsupportedVersion { found } => write!(
+                f,
+                "recipe version {found} is not supported; only version 1 is"
+            ),
+            RecipeRefusal::BadDigest { field, fault } => write!(f, "`{field}` is refused: {fault}"),
+            RecipeRefusal::BadPath { field, fault } => write!(f, "`{field}` is refused: {fault}"),
+            RecipeRefusal::UnknownKernelFormat { found } => write!(
+                f,
+                "`kernel_format` {found:?} is not one of raw, elf, pe_gz, image_bz2, image_gz or image_zstd"
+            ),
+            RecipeRefusal::UnknownArchitecture { found } => {
+                write!(f, "architecture {found:?} is neither aarch64 nor x86_64")
+            }
+            RecipeRefusal::ZeroVcpus => f.write_str("`vcpus` must be at least 1"),
+            RecipeRefusal::ZeroMemory => f.write_str("`memory_mib` must be at least 1"),
+            RecipeRefusal::VcpusAboveLimit { requested, limit } => write!(
+                f,
+                "`vcpus` is {requested}; this host admits at most {limit}"
+            ),
+            RecipeRefusal::MemoryAboveLimit { requested, limit } => write!(
+                f,
+                "`memory_mib` is {requested}; this host admits at most {limit}"
+            ),
+            RecipeRefusal::UnadmittedBootPair => f.write_str(
+                "kernel format raw is not admitted for x86_64: the pinned libkrun boots it without the initramfs and command line",
+            ),
+            RecipeRefusal::ArchitectureMismatch { recipe, host } => write!(
+                f,
+                "the recipe is built for {} but this host is {}",
+                recipe.as_str(),
+                host.as_str()
+            ),
+            RecipeRefusal::SocketPathsEqual => {
+                f.write_str("`control_path` and `data_path` are the same path")
+            }
+            RecipeRefusal::SocketPathTooLong { field, bytes, max } => write!(
+                f,
+                "`{field}` is {bytes} bytes; a socket path on this host holds at most {max}"
+            ),
+            RecipeRefusal::PathReused { first, second } => {
+                write!(f, "`{first}` and `{second}` are the same path")
+            }
+            RecipeRefusal::HostLimitUnavailable { limit } => {
+                write!(f, "this host did not report its {limit}")
+            }
+        }
     }
 }
 

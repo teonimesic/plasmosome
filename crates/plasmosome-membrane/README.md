@@ -20,7 +20,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far only a JSON reader that refuses duplicate keys, the SHA-256 `Digest`, the canonical absolute `RecipePath` and the `RemoveOutcome` of removing a path; nothing here launches a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far a JSON reader that refuses duplicate keys, the SHA-256 `Digest`, the canonical absolute `RecipePath`, the `RemoveOutcome` of removing a path, and the `RuntimeRecipe`: the strictly parsed launch input with its typed refusals, the host's admitted limits and its one canonical ndjson line. Nothing here touches an artifact or launches a cell yet |
 
 ## Use
 
