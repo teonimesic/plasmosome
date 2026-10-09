@@ -34,7 +34,7 @@ pub use reconciler::{DesiredState, ObservedState, ReconcilePlan, Reconciler};
 pub use registry::{LookupError, RegistryEntry, ToolRegistry};
 pub use session_log::{SessionLog, read_events};
 pub use state::{
-    CellId, CellRecord, CellStatus, ControllerState, GenomeName, InstanceName, InstanceNameError,
+    CellRecord, CellStatus, ControllerState, GenomeName, InstanceName, InstanceNameError,
     InstanceRecord, MockMode, PlasmidRecord,
 };
 pub use version::{
