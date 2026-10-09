@@ -713,7 +713,7 @@ fn prepare_as(
     after_bind();
     let recheck = dir.reconfirm();
     let created = match stat_at(&dir.dir, &c_name) {
-        Ok(facts) if facts.kind == Kind::Socket => facts,
+        Ok(facts) if facts.kind == Kind::Socket && facts.uid == owner => facts,
         _ => return Err(PrivateSocketError::BindEscaped { path }),
     };
     let bound = BoundEntry {
