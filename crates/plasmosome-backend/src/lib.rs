@@ -19,6 +19,6 @@ pub use recipe::{
     RecipeError, SessionFileRecipe, UdsRecipe,
 };
 pub use universe::{
-    CellId, CellOwner, Diff, GrantId, OsObject, OsState, PluginId, ResidueReport, UniverseClass,
-    UniverseOp, UniverseRemoval,
+    CellId, CellOwner, Diff, GrantId, MockMode, OsObject, OsState, PluginId, ResidueReport,
+    UniverseClass, UniverseOp, UniverseRemoval,
 };
