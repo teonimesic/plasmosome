@@ -296,7 +296,8 @@ session says whether it was written since this host booted. The controller runs 
 
 - at startup, for every validated cell directory, through spec 008's no-follow opens;
 - while serving, whenever a query to a cell's membrane fails, except for a cell whose `cell.new`
-  is still in progress.
+  is still in progress;
+- when a `cell.new` finds the lock free while it waits (section 6), for that cell only.
 
 It never touches an entry spec 008 does not validate. To test the lock, the controller tries
 `flock(LOCK_EX | LOCK_NB)` on a fresh descriptor. "Free" means it got the lock; it then holds it
