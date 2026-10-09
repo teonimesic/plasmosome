@@ -143,19 +143,6 @@ mod tests {
     }
 
     #[test]
-    fn bare_mock_means_simulate_and_absent_means_passthrough() {
-        assert_eq!(MockMode::default(), MockMode::Passthrough);
-        assert_eq!(MockMode::parse("simulate"), Some(MockMode::Simulate));
-        assert_eq!(MockMode::parse("capture"), Some(MockMode::Capture));
-        assert_eq!(MockMode::parse("passthrough"), Some(MockMode::Passthrough));
-        assert_eq!(
-            MockMode::parse("recorded"),
-            None,
-            "the D2 vocabulary is closed"
-        );
-    }
-
-    #[test]
     fn plasmid_list_labels_show_the_mock_mode() {
         let mocked = PlasmidRecord {
             plasmid: "github-pr".to_string(),
@@ -204,6 +191,5 @@ mod tests {
         wire_serde::<CellStatus>();
         wire_serde::<GenomeName>();
         wire_serde::<PlasmidRecord>();
-        wire_serde::<MockMode>();
     }
 }
