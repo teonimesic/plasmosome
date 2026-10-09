@@ -970,6 +970,7 @@ mod tests {
             key(Plasmid, Curated, "b", "a", "0"),
             key(Plasmid, User, "a", "a", "0"),
         ];
+        assert!(Genome < Plasmid && Curated < User);
         let mut sorted = catalog.clone();
         sorted.reverse();
         sorted.sort();
