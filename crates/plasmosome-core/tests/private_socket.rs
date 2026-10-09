@@ -343,6 +343,15 @@ fn an_ancestor_acl_that_allows_replacing_entries_is_refused() {
             "{rule:?}"
         );
     }
+    add_acl(&ancestor, "everyone allow add_file");
+    add_acl(&ancestor, "everyone deny delete");
+    let opened = PrivateDir::open(&cell);
+    clear_acl(&ancestor);
+    assert_eq!(
+        opened.map(|dir| dir.path().to_path_buf()),
+        Err(PrivateSocketError::ReplaceableByAcl { at: ancestor }),
+        "an allow entry after a deny entry"
+    );
 }
 
 #[cfg(target_os = "linux")]
