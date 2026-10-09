@@ -290,6 +290,9 @@ mod tests {
             stream
                 .set_read_timeout(Some(PATIENCE))
                 .expect("the test client bounds its own reads");
+            stream
+                .set_write_timeout(Some(PATIENCE))
+                .expect("the test client bounds its own writes");
             BufReader::new(stream)
         }
     }
