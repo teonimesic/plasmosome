@@ -1,3 +1,4 @@
+use crate::spawn_lock::DescriptorsHeld;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -403,6 +404,10 @@ fn socket_error(fd: RawFd) -> Result<libc::c_int, ()> {
 }
 
 fn open_nonblocking() -> std::io::Result<OwnedFd> {
+    crate::spawn_lock::with_descriptors_held(create_nonblocking)
+}
+
+fn create_nonblocking(_held: &DescriptorsHeld) -> std::io::Result<OwnedFd> {
     #[cfg(target_os = "linux")]
     let raw = unsafe {
         libc::socket(
@@ -540,6 +545,15 @@ mod tests {
 
     fn a_budget(flag: &AtomicBool) -> ProbeBudget<'_> {
         ProbeBudget::new(DEADLINE, flag)
+    }
+
+    #[test]
+    fn the_probe_socket_is_close_on_exec_and_nonblocking() {
+        let socket = open_nonblocking().expect("a probe socket opens");
+        let descriptor_flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFD) };
+        let status_flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0, "close-on-exec");
+        assert_ne!(status_flags & libc::O_NONBLOCK, 0, "nonblocking");
     }
 
     #[test]
