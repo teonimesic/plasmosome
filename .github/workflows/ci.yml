@@ -83,10 +83,60 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: tests
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude plasmosome-guards
 
       - name: workspace guards
         run: cargo test -p plasmosome-guards
+
+      - name: review usage regression
+        run: python3 tools/pipeline-review-usage-regression.py
+
+      - name: pipeline health regression
+        run: python3 tools/check-pipeline-health-regression.py
+
+      - name: pinned beads
+        id: beads
+        run: |
+          python3 - <<'PY'
+          import os
+          import runpy
+          import shutil
+          import sys
+          import tarfile
+          import tomllib
+          import urllib.request
+          from pathlib import Path
+
+          launcher = runpy.run_path("tools/work-state")
+          pin = launcher["release_pin"]()
+          manifest = tomllib.loads(Path("tools/work-state-beads-1.1.2.toml").read_text())
+          url = manifest["checksums_url"].rsplit("/", 1)[0] + "/" + pin["archive"]
+          directory = Path(os.environ["RUNNER_TEMP"]) / "beads"
+          directory.mkdir()
+          archive = directory / pin["archive"]
+          with urllib.request.urlopen(url, timeout=120) as response, archive.open("wb") as output:
+              shutil.copyfileobj(response, output)
+          if launcher["digest"](archive) != pin["archive_sha256"]:
+              sys.exit(f"{archive.name} does not match the pinned archive SHA-256")
+          binary = directory / "bd"
+          with tarfile.open(archive) as bundle:
+              member = next(item for item in bundle.getmembers() if item.isfile() and os.path.normpath(item.name) == "bd")
+              with bundle.extractfile(member) as source, binary.open("wb") as output:
+                  shutil.copyfileobj(source, output)
+          if launcher["digest"](binary) != pin["binary_sha256"]:
+              sys.exit("bd does not match the pinned binary SHA-256")
+          print(f"Python {sys.version.split()[0]}, {pin['target']}")
+          print(f"{pin['archive_sha256']}  {archive}")
+          print(f"{pin['binary_sha256']}  {binary}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"archive={archive}\nbinary={binary}\n")
+          PY
+
+      - name: work-state regression
+        env:
+          ARCHIVE: ${{ steps.beads.outputs.archive }}
+          BINARY: ${{ steps.beads.outputs.binary }}
+        run: python3 tools/work-state-regression.py --archive "$ARCHIVE" --bd "$BINARY"
 
       - name: provenance guard
         run: ./.githooks/provenance-guard
