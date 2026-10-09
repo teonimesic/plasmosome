@@ -487,5 +487,5 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 - **How attached software becomes visible inside a cell.** A plasmid's software is not copied
   into a running cell: attach makes it visible, detach stops making it visible, and the layout
   that gives a later attach somewhere to land is prepared when the cell is created. All of that
-  is the kernel's, none of it is the author's to write, and
-  [spec 027](027-attached-software-and-an-invisible-membrane.md) specifies it under intent 011.
+  is the kernel's, none of it is the author's to write, and draft
+  [spec 027](027-attached-software-and-an-invisible-membrane.md) proposes it under intent 011.
