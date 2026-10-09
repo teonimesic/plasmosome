@@ -1763,6 +1763,20 @@ mod tests {
     }
 
     #[test]
+    fn cell_dir_reports_an_unreadable_cells_directory_as_io() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        make_cell(&root, "cell-1", None);
+        let restore = restrict(&root.join("cells"), 0o000);
+        let result = open_root(&root).cell_dir(&cell("cell-1"));
+        drop(restore);
+        expect_match!(result, Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, root.join("cells"));
+            assert_eq!(source.raw_os_error(), Some(libc::EACCES));
+        });
+    }
+
+    #[test]
     fn cell_dir_refuses_a_case_or_normalization_alias() {
         let (_dir, root) = temp_root();
         let composed: String = ['c', 'a', 'f', char::from_u32(0xe9).expect("U+00E9")]
