@@ -83,7 +83,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: tests
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude plasmosome-guards
 
       - name: workspace guards
         run: cargo test -p plasmosome-guards
@@ -100,3 +100,59 @@ jobs:
         env:
           RANGE: ${{ github.base_ref && format('origin/{0}..HEAD', github.base_ref) || (github.event.before == '0000000000000000000000000000000000000000' && github.sha || format('{0}..{1}', github.event.before, github.sha)) }}
         run: ./.githooks/attribution-guard "$RANGE"
+
+      - name: pipeline review usage regression
+        run: python3 tools/pipeline-review-usage-regression.py
+
+      - name: check pipeline health regression
+        run: python3 tools/check-pipeline-health-regression.py
+
+      - name: download pinned beads
+        id: beads
+        timeout-minutes: 5
+        run: |
+          python3 - <<'PY'
+          import os
+          import runpy
+          import shutil
+          import sys
+          import tarfile
+          import tomllib
+          import urllib.request
+          from pathlib import Path
+
+          launcher = runpy.run_path("tools/work-state")
+          pin = launcher["release_pin"]()
+          manifest = tomllib.loads(Path("tools/work-state-beads-1.1.2.toml").read_text())
+          url = manifest["checksums_url"].rsplit("/", 1)[0] + "/" + pin["archive"]
+          directory = Path(os.environ["RUNNER_TEMP"]) / "beads"
+          directory.mkdir()
+          archive = directory / pin["archive"]
+          with urllib.request.urlopen(url, timeout=120) as response, archive.open("wb") as output:
+              shutil.copyfileobj(response, output)
+          print(f"Python {sys.version.split()[0]}, {pin['target']}")
+          archive_digest = launcher["digest"](archive)
+          print(f"{archive_digest}  {archive}")
+          if archive_digest != pin["archive_sha256"]:
+              sys.exit(f"{archive.name} SHA-256 is {archive_digest}, not the pinned {pin['archive_sha256']}")
+          binary = directory / "bd"
+          with tarfile.open(archive) as bundle:
+              member = next((item for item in bundle.getmembers() if item.isfile() and os.path.normpath(item.name) == "bd"), None)
+              if member is None:
+                  sys.exit(f"{archive.name} has no regular file named bd")
+              with bundle.extractfile(member) as source, binary.open("wb") as output:
+                  shutil.copyfileobj(source, output)
+          binary_digest = launcher["digest"](binary)
+          print(f"{binary_digest}  {binary}")
+          if binary_digest != pin["binary_sha256"]:
+              sys.exit(f"bd SHA-256 is {binary_digest}, not the pinned {pin['binary_sha256']}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"archive={archive}\nbinary={binary}\n")
+          PY
+
+      - name: work-state regression
+        timeout-minutes: 15
+        env:
+          ARCHIVE: ${{ steps.beads.outputs.archive }}
+          BINARY: ${{ steps.beads.outputs.binary }}
+        run: python3 tools/work-state-regression.py --archive "$ARCHIVE" --bd "$BINARY"
