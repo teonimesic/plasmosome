@@ -84,4 +84,44 @@ mod tests {
             root.canonicalize().unwrap()
         );
     }
+
+    #[test]
+    fn a_workspace_named_through_a_symlink_is_located_by_its_canonical_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("root");
+        let link = directory.path().join("link-root");
+        let member = directory.path().join("member");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(member.join("src")).unwrap();
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"../member\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"member\"\nversion = \"0.1.0\"\nworkspace = \"../link-root\"\n",
+        )
+        .unwrap();
+        std::fs::write(member.join("src/lib.rs"), "").unwrap();
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let reported = Command::new(&cargo)
+            .current_dir(&member)
+            .args(["locate-project", "--workspace", "--message-format", "plain"])
+            .output()
+            .unwrap();
+        assert!(reported.status.success(), "{reported:?}");
+        let reported = PathBuf::from(String::from_utf8(reported.stdout).unwrap().trim_end());
+        assert_eq!(
+            reported.parent().and_then(Path::file_name),
+            Some(OsStr::new("link-root")),
+            "Cargo itself must report the symlink spelling here; if it resolves the link, this case can no longer tell a locator that canonicalizes from one that does not"
+        );
+        assert_eq!(
+            locate_workspace(&member, &cargo).unwrap(),
+            root.canonicalize().unwrap(),
+            "Cargo reported the workspace through a symlink, and the locator must return its canonical path: a symlink spelling of a root is the same root, not a different one"
+        );
+    }
 }
