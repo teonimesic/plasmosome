@@ -33,7 +33,6 @@ struct Walk {
     start: OwnedFd,
     start_path: PathBuf,
     components: Vec<CString>,
-    judge_start: bool,
 }
 
 impl Walk {
@@ -51,10 +50,8 @@ impl Walk {
         let mut held: Option<OwnedFd> = None;
         for (index, component) in self.components.iter().enumerate() {
             let parent = held.as_ref().unwrap_or(&self.start);
-            if index > 0 || self.judge_start {
-                judge_ancestor(&facts, euid, &at)?;
-                refuse_replacing_acl(parent, &at)?;
-            }
+            judge_ancestor(&facts, euid, &at)?;
+            refuse_replacing_acl(parent, &at)?;
             at.push(OsStr::from_bytes(component.as_bytes()));
             let access = if index + 1 == self.components.len() {
                 libc::O_RDONLY
@@ -107,7 +104,6 @@ impl PrivateDir {
             start,
             start_path: root.to_path_buf(),
             components,
-            judge_start: true,
         })
     }
 
@@ -122,7 +118,6 @@ impl PrivateDir {
             start,
             start_path: start_path.to_path_buf(),
             components,
-            judge_start: false,
         })
     }
 
@@ -225,12 +220,13 @@ impl PrivateListener {
     /// passes `effective_uid()`; a test passes another value to force a real mismatch. `name` is
     /// one path component. Any existing entry at the name is refused and left untouched. `dir`
     /// is walked and judged again before the socket is created, and again after it is bound; if
-    /// that second check fails, its error is returned and the socket found at the name in the
-    /// held directory is removed. `BindEscaped` means no socket is at the name in the held
-    /// directory after bind. The socket is owned by the effective UID and set to mode 0600
-    /// before it listens; umask plays no part. The listener is nonblocking. A caller that forks from another thread must hold
-    /// its descriptor lock around this call, because on macOS the socket is created before it is
-    /// marked close-on-exec.
+    /// that second check fails, its error is returned and the socket at the name in the held
+    /// directory is removed, but only if the effective UID owns it. `BindEscaped` means no
+    /// socket owned by the effective UID is at the name in the held directory after bind. The
+    /// socket is owned by the effective UID and set to mode 0600 before it listens; umask plays
+    /// no part. The listener is nonblocking. A caller that forks from another thread must hold
+    /// its descriptor lock around this call, because on macOS the socket is created before it
+    /// is marked close-on-exec.
     pub fn bind(
         dir: PrivateDir,
         name: &str,
@@ -910,33 +906,33 @@ fn unix_socket() -> io::Result<OwnedFd> {
     Ok(socket)
 }
 
-fn refuse_acl(dir: &OwnedFd, path: &Path) -> Result<(), PrivateSocketError> {
-    match acl_present(dir) {
+fn refuse_if(
+    found: Result<bool, (&'static str, i32)>,
+    at: &Path,
+    refusal: impl FnOnce(PathBuf) -> PrivateSocketError,
+) -> Result<(), PrivateSocketError> {
+    match found {
         Ok(false) => Ok(()),
-        Ok(true) => Err(PrivateSocketError::AclPresent {
-            path: path.to_path_buf(),
-        }),
+        Ok(true) => Err(refusal(at.to_path_buf())),
         Err((op, errno)) => Err(PrivateSocketError::Io {
             op,
-            at: path.to_path_buf(),
+            at: at.to_path_buf(),
             errno,
         }),
     }
 }
 
+fn refuse_acl(dir: &OwnedFd, path: &Path) -> Result<(), PrivateSocketError> {
+    refuse_if(acl_present(dir), path, |path| {
+        PrivateSocketError::AclPresent { path }
+    })
+}
+
 #[cfg(target_os = "macos")]
 fn refuse_replacing_acl(dir: &OwnedFd, at: &Path) -> Result<(), PrivateSocketError> {
-    match darwin_acl::lets_others_replace_entries(dir) {
-        Ok(false) => Ok(()),
-        Ok(true) => Err(PrivateSocketError::ReplaceableByAcl {
-            at: at.to_path_buf(),
-        }),
-        Err((op, errno)) => Err(PrivateSocketError::Io {
-            op,
-            at: at.to_path_buf(),
-            errno,
-        }),
-    }
+    refuse_if(darwin_acl::allows_replacing_entries(dir), at, |at| {
+        PrivateSocketError::ReplaceableByAcl { at }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1011,7 +1007,7 @@ mod darwin_acl {
         Ok(Acl::of(dir)?.is_some_and(|acl| acl.entries().next().is_some()))
     }
 
-    pub(super) fn lets_others_replace_entries(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
+    pub(super) fn allows_replacing_entries(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
         let Some(acl) = Acl::of(dir)? else {
             return Ok(false);
         };
