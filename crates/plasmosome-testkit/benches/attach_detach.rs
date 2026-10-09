@@ -1,7 +1,7 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use plasmosome_backend::{
-    Capability, Diff, DrainSpec, EnforcementBackend, FakeBackend, Grant, GrantKind, PluginId,
-    ResidueReport,
+    Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, Grant,
+    GrantKind, PluginId, ResidueReport,
 };
 use plasmosome_ledger::{Closure, DetachReport, Effect, InverseVia, Ledger, SealedLedger};
 
@@ -25,7 +25,10 @@ fn attach_detach(
     .enumerate()
     {
         let entry = backend.grant(Grant {
-            plugin: PluginId::from("attach-detach"),
+            owner: CellOwner {
+                cell: CellId::from("attach-detach-cell"),
+                plugin: PluginId::from("attach-detach"),
+            },
             capability,
             kind: GrantKind::Hot,
         });
@@ -37,7 +40,13 @@ fn attach_detach(
     let Closure::ExternalFree(mut sealed) = ledger.close() else {
         unreachable!();
     };
-    let report = sealed.detach(&mut backend, DrainSpec::forcing()).unwrap();
+    let report = sealed
+        .detach(
+            &mut backend,
+            &CellId::from("attach-detach-cell"),
+            DrainSpec::forcing(),
+        )
+        .unwrap();
     let after = backend.snapshot_os_state();
     let residue = ResidueReport::from_diff(Diff::between(&before, &after), Vec::new());
     assert_eq!(residue, ResidueReport::Empty, "{residue}");

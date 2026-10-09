@@ -18,6 +18,12 @@ JSON fragment without a newline is treated as a torn write.
 A split UTF-8 character may be discarded with that incomplete final record; other invalid UTF-8
 is rejected with its record's line number. Opening a log never rewrites the source file.
 
+A log names its plugin but not the cell that plugin is attached to. `detach` and `detach_forced`
+take that cell from the caller, so every universe and compensation removal names the owner
+`{cell, plugin}`; the cell is never read from old bytes or defaulted. Every removal and revoke uses
+the detach's drain. A graceful timeout stops the replay with the pending cursor on that effect, and
+a later detach resumes there without replaying what already succeeded.
+
 ## What's inside
 
 | Concept | Meaning |
