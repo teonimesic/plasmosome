@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use plasmosome_backend::CellId;
 use serde::{Deserialize, Serialize};
@@ -64,6 +65,64 @@ impl fmt::Display for InstanceNameError {
 }
 
 impl std::error::Error for InstanceNameError {}
+
+pub(crate) const CELLS_DIR: &str = "cells";
+pub(crate) const CELL_JOURNAL_FILE: &str = "ledger.ndjson";
+pub(crate) const CELL_SUPERVISOR_SOCKET: &str = "membrane.uds";
+
+/// Checks that `cell` can name one directory under `<root>/cells`: nonempty, not exactly `.` or
+/// `..`, and free of `/`, `\` and NUL. A dot inside a name such as `a.b` is allowed. An invalid ID
+/// is refused with its text unchanged; nothing is trimmed or replaced.
+pub fn validate_cell_id(cell: &CellId) -> Result<(), CellPathError> {
+    let text = cell.as_str();
+    if text.is_empty() {
+        return Err(CellPathError::Empty);
+    }
+    if text == "." || text == ".." || text.contains(['/', '\\', '\0']) {
+        return Err(CellPathError::NotACellName(text.to_string()));
+    }
+    Ok(())
+}
+
+/// Returns `<root>/cells/<cell>/ledger.ndjson`, the cell's journal. This is the only function that
+/// names the journal: every reader and writer resolves it here. An invalid ID is refused as
+/// [`validate_cell_id`] refuses it. `root` is used as given.
+pub fn cell_ledger_path(root: &Path, cell: &CellId) -> Result<PathBuf, CellPathError> {
+    Ok(cell_path(root, cell)?.join(CELL_JOURNAL_FILE))
+}
+
+/// Returns `<root>/cells/<cell>/membrane.uds`, the cell supervisor's socket, refusing an invalid
+/// ID as [`validate_cell_id`] does. It builds the path only; it does not check what is there.
+pub fn cell_supervisor_socket_path(root: &Path, cell: &CellId) -> Result<PathBuf, CellPathError> {
+    Ok(cell_path(root, cell)?.join(CELL_SUPERVISOR_SOCKET))
+}
+
+fn cell_path(root: &Path, cell: &CellId) -> Result<PathBuf, CellPathError> {
+    validate_cell_id(cell)?;
+    Ok(root.join(CELLS_DIR).join(cell.as_str()))
+}
+
+/// Why a cell ID cannot name a cell directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellPathError {
+    Empty,
+    /// The refused ID, exactly as given.
+    NotACellName(String),
+}
+
+impl fmt::Display for CellPathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CellPathError::Empty => write!(f, "a cell ID must not be empty"),
+            CellPathError::NotACellName(text) => write!(
+                f,
+                "{text:?} is not a valid cell ID (no path separators, NUL, `.`, or `..`)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CellPathError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
