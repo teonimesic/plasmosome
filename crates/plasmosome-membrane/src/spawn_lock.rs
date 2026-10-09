@@ -413,6 +413,21 @@ mod tests {
     }
 
     #[test]
+    fn a_fork_after_a_nested_creation_returns_still_refuses() {
+        let lock = fresh_lock();
+        let refused = on_a_thread(move || {
+            write_held(lock, || {
+                write_held(lock, || ());
+                fork_holding(lock, || 4242)
+            })
+        });
+        assert!(
+            matches!(refused, Ok(Err(SpawnError::DescriptorLockHeld))),
+            "the outer creation still holds the write side; a timeout means it deadlocked"
+        );
+    }
+
+    #[test]
     fn a_panic_during_creation_leaves_the_lock_and_the_thread_usable() {
         let lock = fresh_lock();
         let unwound =
