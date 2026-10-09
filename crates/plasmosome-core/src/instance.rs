@@ -1468,6 +1468,19 @@ mod tests {
     }
 
     #[test]
+    fn a_journal_linked_to_a_readable_file_is_refused_as_a_symlink() {
+        let (_dir, root) = temp_root();
+        let cell = make_cell(&root, "cell-1", None);
+        let target = root.join("elsewhere");
+        fs::write(&target, b"{}\n").expect("the target is made");
+        symlink(&target, cell.join("ledger.ndjson")).expect("the link is made");
+        assert_eq!(
+            described(&discover(&root)),
+            ["cell cell-1: refused: symlink"]
+        );
+    }
+
+    #[test]
     fn a_fifo_journal_is_refused_without_blocking() {
         let (_dir, root) = temp_root();
         let cell = make_cell(&root, "cell-1", None);
