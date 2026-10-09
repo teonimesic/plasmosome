@@ -1,7 +1,7 @@
 use crate::backend::{
     BackendError, Capability, DrainSpec, EnforcementBackend, Grant, Handle, LedgerEntry,
 };
-use crate::universe::{OsObject, OsState, PluginId, UniverseClass, UniverseOp, UniverseRemoval};
+use crate::universe::{CellOwner, OsObject, OsState, UniverseClass, UniverseOp, UniverseRemoval};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Leaf {
@@ -84,10 +84,11 @@ impl EnforcementBackend for CompositeBackend {
     fn apply_removal(
         &mut self,
         removal: UniverseRemoval,
-        owner: &PluginId,
+        owner: &CellOwner,
+        drain: DrainSpec,
     ) -> Result<(), BackendError> {
         self.leaf_for_class(removal.class())
-            .apply_removal(removal, owner)
+            .apply_removal(removal, owner, drain)
     }
 
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError> {
@@ -125,11 +126,18 @@ mod tests {
     use super::*;
     use crate::backend::GrantKind;
     use crate::fake::FakeBackend;
-    use crate::universe::GrantId;
+    use crate::universe::{CellId, CellOwner, GrantId, PluginId};
     use std::time::Duration;
 
     fn fake() -> Box<dyn EnforcementBackend> {
         Box::new(FakeBackend::new())
+    }
+
+    fn cell_owner(plugin: &str) -> CellOwner {
+        CellOwner {
+            cell: CellId::from("cell-1"),
+            plugin: PluginId::from(plugin),
+        }
     }
 
     fn composite() -> CompositeBackend {
@@ -140,14 +148,14 @@ mod tests {
     fn handles_route_by_class_without_rewriting_identity() {
         let mut backend = composite();
         let file = backend.grant(Grant {
-            plugin: PluginId::from("github-pr"),
+            owner: cell_owner("github-pr"),
             capability: Capability::SessionFile {
                 path: "skills/pr.md".to_string(),
             },
             kind: GrantKind::Hot,
         });
         let proxy = backend.grant(Grant {
-            plugin: PluginId::from("network"),
+            owner: cell_owner("network"),
             capability: Capability::ProxyMap {
                 host: "api.github.com".to_string(),
                 route: "splice".to_string(),
@@ -180,7 +188,7 @@ mod tests {
     fn failed_revoke_preserves_the_original_handle_and_leaf_state() {
         let mut network = FakeBackend::new();
         let entry = network.grant(Grant {
-            plugin: PluginId::from("network"),
+            owner: cell_owner("network"),
             capability: Capability::UdsSocket {
                 path: "/run/ak/egressd.uds".to_string(),
             },
@@ -207,7 +215,7 @@ mod tests {
     #[test]
     fn a_handle_from_another_backend_cannot_withdraw_an_equal_grant() {
         let grant = Grant {
-            plugin: PluginId::from("network"),
+            owner: cell_owner("network"),
             capability: Capability::UdsSocket {
                 path: "/run/ak/egressd.uds".to_string(),
             },
@@ -228,12 +236,65 @@ mod tests {
     }
 
     #[test]
+    fn apply_removal_routes_the_owner_and_drain_to_the_owning_leaf() {
+        let owner = CellOwner {
+            cell: CellId::from("cell-1"),
+            plugin: PluginId::from("workspace"),
+        };
+        let elsewhere = CellOwner {
+            cell: CellId::from("cell-2"),
+            plugin: PluginId::from("workspace"),
+        };
+        let op = UniverseOp::AddMount {
+            id: GrantId::new(),
+            source: "/code".to_string(),
+            target: "/workspace".to_string(),
+            owner: owner.clone(),
+        };
+        let mut filesystem = FakeBackend::new();
+        filesystem.stall_graceful_drains_for_owner(owner.clone());
+        let mut backend =
+            CompositeBackend::new(fake(), Box::new(filesystem), fake()).expect("valid leaves");
+        backend.apply(op.clone()).unwrap();
+        let before = backend.snapshot_os_state();
+        let graceful = DrainSpec::graceful(Duration::from_millis(3));
+        assert_eq!(
+            backend
+                .apply_removal(op.removal(), &elsewhere, graceful)
+                .unwrap_err(),
+            BackendError::UnknownObject {
+                class: "mount",
+                key: "/workspace".to_string(),
+                owner: elsewhere,
+                id: op.id(),
+            }
+        );
+        assert_eq!(
+            backend
+                .apply_removal(op.removal(), &owner, graceful)
+                .unwrap_err(),
+            BackendError::DrainTimedOut {
+                handle: Handle {
+                    class: UniverseClass::Mount,
+                    id: op.id(),
+                },
+                deadline_ms: 3,
+            }
+        );
+        assert_eq!(backend.snapshot_os_state(), before);
+        backend
+            .apply_removal(op.removal(), &owner, DrainSpec::forcing())
+            .unwrap();
+        assert!(backend.snapshot_os_state().is_empty());
+    }
+
+    #[test]
     fn constructor_refuses_out_of_class_initial_observations() {
         let mut network = FakeBackend::new();
         network
             .plant(OsObject {
                 id: GrantId::new(),
-                owner: PluginId::from("workspace"),
+                owner: cell_owner("workspace"),
                 capability: Capability::SessionFile {
                     path: "skills/pr.md".to_string(),
                 },
@@ -252,7 +313,7 @@ mod tests {
             id,
             source: "/code".to_string(),
             target: "/workspace".to_string(),
-            owner: PluginId::from("workspace"),
+            owner: cell_owner("workspace"),
         };
         let expected = op.object();
         let removal = UniverseRemoval {
@@ -271,7 +332,7 @@ mod tests {
         );
 
         let conflict = OsObject {
-            owner: PluginId::from("audit"),
+            owner: cell_owner("audit"),
             ..expected.clone()
         };
         let before_conflict = backend.snapshot_os_state();
@@ -282,7 +343,7 @@ mod tests {
         assert_eq!(backend.snapshot_os_state(), before_conflict);
 
         backend
-            .apply_removal(removal.clone(), &expected.owner)
+            .apply_removal(removal.clone(), &expected.owner, DrainSpec::forcing())
             .unwrap();
         assert!(backend.snapshot_os_state().is_empty());
         backend.plant(expected.clone()).unwrap();
@@ -293,7 +354,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![&expected]
         );
-        backend.apply_removal(removal, &expected.owner).unwrap();
+        backend
+            .apply_removal(removal, &expected.owner, DrainSpec::forcing())
+            .unwrap();
         assert!(backend.snapshot_os_state().is_empty());
     }
 }

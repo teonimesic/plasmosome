@@ -1,52 +1,63 @@
 use plasmosome_backend::FakeBackend;
 use plasmosome_testkit::conformance;
 
+fn fake_backend() -> FakeBackend {
+    let mut backend = FakeBackend::new();
+    backend.stall_graceful_drains_for_owner(conformance::stalled_owner());
+    backend
+}
+
 #[test]
 fn fake_backend_grants_are_replayable() {
-    conformance::grant_is_replayable(FakeBackend::new);
+    conformance::grant_is_replayable(fake_backend);
 }
 
 #[test]
 fn fake_backend_rejects_an_unknown_handle() {
-    conformance::revoke_unknown_handle_is_error(FakeBackend::new);
+    conformance::revoke_unknown_handle_is_error(fake_backend);
 }
 
 #[test]
 fn fake_backend_removes_the_object_a_drained_revoke_owned() {
-    conformance::drained_revoke_removes_object(FakeBackend::new);
+    conformance::drained_revoke_removes_object(fake_backend);
 }
 
 #[test]
 fn fake_backend_leaves_planted_residue_alone() {
-    conformance::planted_residue_survives_unrelated_revoke(FakeBackend::new);
+    conformance::planted_residue_survives_unrelated_revoke(fake_backend);
 }
 
 #[test]
 fn fake_backend_snapshots_invent_nothing() {
-    conformance::snapshot_never_invents_objects(FakeBackend::new);
+    conformance::snapshot_never_invents_objects(fake_backend);
 }
 
 #[test]
 fn fake_backend_gives_every_live_grant_its_own_handle() {
-    conformance::live_grants_hold_distinct_handles(FakeBackend::new);
+    conformance::live_grants_hold_distinct_handles(fake_backend);
 }
 
 #[test]
 fn fake_backend_applies_and_removes_universe_objects() {
-    conformance::apply_and_removal_reach_the_universe(FakeBackend::new);
+    conformance::apply_and_removal_reach_the_universe(fake_backend);
 }
 
 #[test]
 fn fake_backend_rejects_a_handle_it_already_revoked() {
-    conformance::revoke_of_a_revoked_handle_is_error(FakeBackend::new);
+    conformance::revoke_of_a_revoked_handle_is_error(fake_backend);
 }
 
 #[test]
 fn fake_backend_revokes_only_its_owners_object() {
-    conformance::revoke_takes_its_owners_object(FakeBackend::new);
+    conformance::revoke_takes_its_owners_object(fake_backend);
 }
 
 #[test]
 fn fake_backend_removes_repeated_grants_independently() {
-    conformance::repeated_grants_are_independently_removable(FakeBackend::new);
+    conformance::repeated_grants_are_independently_removable(fake_backend);
+}
+
+#[test]
+fn fake_backend_keeps_a_timed_out_holding_and_its_peers() {
+    conformance::graceful_timeouts_preserve_the_selected_holding(fake_backend);
 }

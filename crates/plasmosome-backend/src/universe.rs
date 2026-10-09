@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, btree_map};
 use std::fmt;
 
-use serde::de::Error as _;
+use serde::de::{Error as _, MapAccess, Visitor};
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::{Uuid, Variant, Version};
@@ -32,6 +32,85 @@ impl From<String> for PluginId {
 impl fmt::Display for PluginId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// The cell a plugin is attached to. It is a bare name with no validation, and it serializes as
+/// a bare JSON string.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CellId(String);
+
+impl CellId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for CellId {
+    fn from(value: &str) -> Self {
+        CellId(value.to_string())
+    }
+}
+
+impl From<String> for CellId {
+    fn from(value: String) -> Self {
+        CellId(value)
+    }
+}
+
+impl fmt::Display for CellId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The owner of a holding: a plugin as attached to one cell. The same plugin in two cells is two
+/// owners, so every ownership comparison must compare both fields. Its JSON is exactly the object
+/// `{"cell": ..., "plugin": ...}`; an array, a missing, repeated or unknown field is refused. It
+/// displays as both names quoted, `"cell"/"plugin"`, because neither name is validated yet.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct CellOwner {
+    pub cell: CellId,
+    pub plugin: PluginId,
+}
+
+impl fmt::Display for CellOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}/{:?}", self.cell.as_str(), self.plugin.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CellOwner {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<CellOwner, D::Error> {
+        deserializer.deserialize_map(CellOwnerVisitor)
+    }
+}
+
+struct CellOwnerVisitor;
+
+impl<'de> Visitor<'de> for CellOwnerVisitor {
+    type Value = CellOwner;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a cell owner object with exactly a cell and a plugin")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<CellOwner, A::Error> {
+        let mut cell: Option<CellId> = None;
+        let mut plugin: Option<PluginId> = None;
+        while let Some(key) = entries.next_key::<String>()? {
+            match key.as_str() {
+                "cell" if cell.is_some() => return Err(A::Error::duplicate_field("cell")),
+                "cell" => cell = Some(entries.next_value()?),
+                "plugin" if plugin.is_some() => return Err(A::Error::duplicate_field("plugin")),
+                "plugin" => plugin = Some(entries.next_value()?),
+                other => return Err(A::Error::unknown_field(other, &["cell", "plugin"])),
+            }
+        }
+        Ok(CellOwner {
+            cell: cell.ok_or_else(|| A::Error::missing_field("cell"))?,
+            plugin: plugin.ok_or_else(|| A::Error::missing_field("plugin"))?,
+        })
     }
 }
 
@@ -116,7 +195,7 @@ impl UniverseClass {
 #[serde(deny_unknown_fields)]
 pub struct OsObject {
     pub id: GrantId,
-    pub owner: PluginId,
+    pub owner: CellOwner,
     pub capability: Capability,
 }
 
@@ -166,17 +245,23 @@ impl OsState {
         }
     }
 
-    /// Takes only the object matching the exact removal, capability, and owner.
-    pub fn remove(&mut self, removal: &UniverseRemoval, owner: &PluginId) -> Option<OsObject> {
+    /// Takes the object at the removal's exact address when its full capability and its owner,
+    /// cell included, both match, and returns it. Returns `None` and changes nothing otherwise.
+    pub fn remove(&mut self, removal: &UniverseRemoval, owner: &CellOwner) -> Option<OsObject> {
         let address = (removal.class(), removal.id);
-        let matches = self.objects.get(&address).is_some_and(|object| {
-            object.owner == *owner && object.capability == removal.capability
-        });
-        matches.then(|| {
+        self.selects(removal, owner).then(|| {
             self.objects
                 .remove(&address)
                 .expect("the exact object was observed before removal")
         })
+    }
+
+    /// Reports whether `remove` with the same arguments would take an object, without changing
+    /// anything. A backend calls it to resolve the exact holding before it starts any drain.
+    pub fn selects(&self, removal: &UniverseRemoval, owner: &CellOwner) -> bool {
+        self.objects
+            .get(&(removal.class(), removal.id))
+            .is_some_and(|object| object.owner == *owner && object.capability == removal.capability)
     }
 
     pub fn contains(&self, class: UniverseClass, key: &str) -> bool {
@@ -214,7 +299,7 @@ impl OsState {
         .any(|class| self.objects.contains_key(&(class, id)))
     }
 
-    fn canonical_multiset(&self) -> BTreeMap<(&PluginId, &Capability), usize> {
+    fn canonical_multiset(&self) -> BTreeMap<(&CellOwner, &Capability), usize> {
         let mut counts = BTreeMap::new();
         for object in self.objects.values() {
             *counts
@@ -316,30 +401,30 @@ pub enum UniverseOp {
     WriteSessionFile {
         id: GrantId,
         path: String,
-        owner: PluginId,
+        owner: CellOwner,
     },
     BindUds {
         id: GrantId,
         path: String,
-        owner: PluginId,
+        owner: CellOwner,
     },
     SetProxyMap {
         id: GrantId,
         host: String,
         route: String,
-        owner: PluginId,
+        owner: CellOwner,
     },
     SpawnBroker {
         id: GrantId,
         pid: u32,
         name: String,
-        owner: PluginId,
+        owner: CellOwner,
     },
     AddMount {
         id: GrantId,
         source: String,
         target: String,
-        owner: PluginId,
+        owner: CellOwner,
     },
 }
 
@@ -493,7 +578,7 @@ mod tests {
     fn object(owner: &str, capability: Capability) -> OsObject {
         OsObject {
             id: GrantId::new(),
-            owner: PluginId::from(owner),
+            owner: cell_owner("cell-1", owner),
             capability,
         }
     }
@@ -529,7 +614,7 @@ mod tests {
         assert!(state.insert(original.clone()).unwrap());
         assert!(!state.insert(original.clone()).unwrap());
         let conflicting = OsObject {
-            owner: PluginId::from("audit"),
+            owner: cell_owner("cell-1", "audit"),
             ..original.clone()
         };
         assert_eq!(
@@ -556,17 +641,17 @@ mod tests {
         };
         assert!(
             state
-                .remove(&wrong_capability, &PluginId::from("deploy"))
+                .remove(&wrong_capability, &cell_owner("cell-1", "deploy"))
                 .is_none()
         );
         assert!(
             state
-                .remove(&held.removal(), &PluginId::from("audit"))
+                .remove(&held.removal(), &cell_owner("cell-1", "audit"))
                 .is_none()
         );
         assert_eq!(state.len(), 2);
         assert_eq!(
-            state.remove(&held.removal(), &PluginId::from("deploy")),
+            state.remove(&held.removal(), &cell_owner("cell-1", "deploy")),
             Some(held)
         );
         assert_eq!(state.objects().collect::<Vec<_>>(), vec![&neighbour]);
@@ -592,7 +677,7 @@ mod tests {
 
         let survivor = right.objects().next().cloned().unwrap();
         right
-            .remove(&survivor.removal(), &PluginId::from("workspace"))
+            .remove(&survivor.removal(), &cell_owner("cell-1", "workspace"))
             .unwrap();
         assert!(!left.canonically_equivalent(&right));
         right.insert(object("audit", capability)).unwrap();
@@ -673,7 +758,7 @@ mod tests {
         assert!(partial.added.is_empty());
 
         let conflicting_object = OsObject {
-            owner: PluginId::from("audit"),
+            owner: cell_owner("cell-1", "audit"),
             ..after
                 .objects()
                 .find(|object| object.id == after_id)
@@ -711,6 +796,154 @@ mod tests {
         assert!(leaked.describe().contains(&leaked.id.to_string()));
         assert!(lost.is_empty());
         assert!(assertions.is_empty());
+    }
+
+    fn cell_owner(cell: &str, plugin: &str) -> CellOwner {
+        CellOwner {
+            cell: CellId::from(cell),
+            plugin: PluginId::from(plugin),
+        }
+    }
+
+    #[test]
+    fn cell_owner_wire_is_exactly_its_cell_and_plugin() {
+        let owner = cell_owner("cell-1", "github-pr");
+        assert_eq!(
+            serde_json::to_value(&owner).unwrap(),
+            serde_json::json!({"cell": "cell-1", "plugin": "github-pr"})
+        );
+        assert_eq!(
+            serde_json::to_value(CellId::from(String::from("cell-1"))).unwrap(),
+            serde_json::json!("cell-1")
+        );
+        assert_eq!(
+            serde_json::from_value::<CellOwner>(
+                serde_json::json!({"cell": "cell-1", "plugin": "github-pr"})
+            )
+            .unwrap(),
+            owner
+        );
+        for refused in [
+            serde_json::json!({"cell": "cell-1"}),
+            serde_json::json!({"plugin": "github-pr"}),
+            serde_json::json!({"cell": "cell-1", "plugin": "github-pr", "instance": "work"}),
+            serde_json::json!("github-pr"),
+            serde_json::json!(["cell-1", "github-pr"]),
+            serde_json::json!({"cell": "cell-1", "plugin": 7}),
+        ] {
+            assert!(
+                serde_json::from_value::<CellOwner>(refused.clone()).is_err(),
+                "{refused} must not decode as a cell owner"
+            );
+        }
+        for (duplicated, field) in [
+            (
+                r#"{"cell": "cell-1", "plugin": "github-pr", "cell": "cell-2"}"#,
+                "cell",
+            ),
+            (
+                r#"{"cell": "cell-1", "plugin": "github-pr", "plugin": "audit"}"#,
+                "plugin",
+            ),
+        ] {
+            assert!(
+                serde_json::from_str::<CellOwner>(duplicated)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(&format!("duplicate field `{field}`")),
+                "{duplicated} must not decode as a cell owner"
+            );
+        }
+        assert_eq!(owner.cell.as_str(), "cell-1");
+        assert_eq!(owner.cell.to_string(), "cell-1");
+    }
+
+    #[test]
+    fn a_cell_owner_displays_both_names_quoted_so_a_slash_cannot_blur_them() {
+        assert_eq!(
+            cell_owner("cell-1", "github-pr").to_string(),
+            r#""cell-1"/"github-pr""#
+        );
+        assert_ne!(
+            cell_owner("a/b", "c").to_string(),
+            cell_owner("a", "b/c").to_string()
+        );
+        assert_eq!(cell_owner("a\"/\"b", "c").to_string(), r#""a\"/\"b"/"c""#);
+    }
+
+    #[test]
+    fn removal_and_selection_refuse_the_same_plugins_object_in_another_cell() {
+        let mut state = OsState::new();
+        let held = OsObject {
+            id: GrantId::new(),
+            owner: cell_owner("cell-1", "deploy"),
+            capability: Capability::ProxyMap {
+                host: "api.github.com".to_string(),
+                route: "splice".to_string(),
+            },
+        };
+        state.insert(held.clone()).unwrap();
+        let elsewhere = cell_owner("cell-2", "deploy");
+        assert!(!state.selects(&held.removal(), &elsewhere));
+        assert_eq!(state.remove(&held.removal(), &elsewhere), None);
+        assert_eq!(state.objects().collect::<Vec<_>>(), vec![&held]);
+        assert!(state.selects(&held.removal(), &held.owner));
+        assert_eq!(state.remove(&held.removal(), &held.owner), Some(held));
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn selection_requires_the_exact_address_capability_and_owner_and_changes_nothing() {
+        let mut state = OsState::new();
+        let held = OsObject {
+            id: GrantId::new(),
+            owner: cell_owner("cell-1", "workspace"),
+            capability: Capability::Mount {
+                source: "/code".to_string(),
+                target: "/workspace".to_string(),
+            },
+        };
+        state.insert(held.clone()).unwrap();
+        let before = state.clone();
+        let other_source = UniverseRemoval {
+            id: held.id,
+            capability: Capability::Mount {
+                source: "/secrets".to_string(),
+                target: "/workspace".to_string(),
+            },
+        };
+        let other_id = UniverseRemoval {
+            id: GrantId::new(),
+            capability: held.capability.clone(),
+        };
+        assert!(!state.selects(&other_source, &held.owner));
+        assert!(!state.selects(&other_id, &held.owner));
+        assert!(!state.selects(&held.removal(), &cell_owner("cell-1", "audit")));
+        assert!(state.selects(&held.removal(), &held.owner));
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn canonical_equivalence_distinguishes_the_same_plugin_in_another_cell() {
+        let capability = Capability::SessionFile {
+            path: "skills/pr.md".to_string(),
+        };
+        let mut left = OsState::new();
+        left.insert(OsObject {
+            id: GrantId::new(),
+            owner: cell_owner("cell-1", "github-pr"),
+            capability: capability.clone(),
+        })
+        .unwrap();
+        let mut right = OsState::new();
+        let moved = OsObject {
+            id: GrantId::new(),
+            owner: cell_owner("cell-2", "github-pr"),
+            capability,
+        };
+        right.insert(moved.clone()).unwrap();
+        assert!(!left.canonically_equivalent(&right));
+        assert!(moved.describe().contains(r#""cell-2"/"github-pr""#));
     }
 
     impl OsObject {
