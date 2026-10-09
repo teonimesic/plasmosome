@@ -20,6 +20,8 @@ nothing later is constrained by it. There is no binary either, which is why
 `cargo install plasmosome` refuses rather than putting a command on your PATH that does nothing.
 The first release with something in it picks its own version number.
 
-To follow the work, read the repository. To build a capability module today, the contract is
-[`plasmid-sdk`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid-sdk) and the
-authoring tool is [`plasmid`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid).
+To follow the work, read the repository. Nothing for building a capability module is ready yet:
+[`plasmid-sdk`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid-sdk), the
+contract a module will build against, is reserved and unimplemented, and the authoring tool
+[`plasmid`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid) does not yet write
+one.
