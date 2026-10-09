@@ -1,6 +1,7 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use plasmosome_backend::{
-    Capability, DrainSpec, EnforcementBackend, FakeBackend, Grant, GrantKind, PluginId,
+    Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, FakeBackend, Grant, GrantKind,
+    PluginId,
 };
 use plasmosome_ledger::{Effect, InverseVia, Ledger};
 
@@ -9,7 +10,10 @@ fn fixture(size: usize) -> (plasmosome_ledger::SealedLedger, FakeBackend) {
     let mut ledger = Ledger::new("bench");
     for index in 0..size {
         let entry = backend.grant(Grant {
-            plugin: PluginId::from("bench"),
+            owner: CellOwner {
+                cell: CellId::from("bench-cell"),
+                plugin: PluginId::from("bench"),
+            },
             capability: Capability::SessionFile {
                 path: format!("file-{index}"),
             },
@@ -33,7 +37,13 @@ fn bench(c: &mut Criterion) {
             b.iter_batched(
                 || fixture(size),
                 |(mut ledger, mut backend)| {
-                    let report = ledger.detach(&mut backend, DrainSpec::forcing()).unwrap();
+                    let report = ledger
+                        .detach(
+                            &mut backend,
+                            &CellId::from("bench-cell"),
+                            DrainSpec::forcing(),
+                        )
+                        .unwrap();
                     (ledger, backend, report)
                 },
                 BatchSize::SmallInput,
