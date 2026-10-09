@@ -926,20 +926,25 @@ mod tests {
             assert_eq!(member.release, expected);
             assert_eq!(member.mock, "simulate");
         }
-        let without_digest = format!(
-            "{header}\n[plasmids.github-pr]\nrelease = {{ {} }}\n",
-            six.split(", digest").next().unwrap()
-        );
-        let error = toml::from_str::<Genome>(&without_digest).unwrap_err();
-        assert!(
-            error.to_string().contains("missing field `digest`"),
-            "{error}"
-        );
-        let map_form_kind = format!(
-            "{header}\n[plasmids.github-pr]\nrelease = {{ {} }}\n",
-            six.replace("kind = \"plasmid\"", "kind = { plasmid = {} }")
-        );
-        assert!(toml::from_str::<Genome>(&map_form_kind).is_err());
+        let member = |release: &str| {
+            format!(
+                "{header}\n[plasmids.github-pr]\nrelease = {{ {release} }}\nmock = \"simulate\"\n"
+            )
+        };
+        assert!(toml::from_str::<Genome>(&member(&six)).is_ok());
+        for (release, reason) in [
+            (
+                six.split(", digest").next().unwrap().to_string(),
+                "missing field `digest`",
+            ),
+            (
+                six.replace("kind = \"plasmid\"", "kind = { plasmid = {} }"),
+                "invalid type: map",
+            ),
+        ] {
+            let error = toml::from_str::<Genome>(&member(&release)).unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
+        }
     }
 
     #[test]
