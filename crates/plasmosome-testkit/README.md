@@ -50,7 +50,7 @@ deadline, each entry point and each of those steps has its own defective backend
 one of them turns its witness red, and so does moving the neighbour or the other-cell holding
 across the forced withdrawal in either order. `repeated_grants_are_independently_removable`
 removes a granted holding through `apply_removal` under both policies and checks that its handle
-is retired.
+is retired, and each policy has its own defective backend.
 
 The order a clause revokes in is part of what it proves. A detach replays a ledger in reverse push
 order, so a backend that accepts revokes only in grant order was conformant right up until task 012
