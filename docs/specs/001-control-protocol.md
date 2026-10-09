@@ -100,9 +100,13 @@ Application error codes (closed set; additions are a contract change):
 | 105 | `illegal_state` | `from`, `to`; private recovery methods additionally carry the typed `recovery` refusal in §4.1 |
 | 106 | `drain_timeout` | `handle`, `deadline_ms` |
 | 107 | `not_running` | `target` — the named instance is not up |
-| 108 | `manifest_invalid` | `detail`, `path` |
+| 108 | `manifest_invalid` | `detail`, `path`; `fix` when the author can repair the declaration |
 | 109 | `widening_forbidden` | `plasmid` |
 | 110 | `attestation_required` | `verb` — the E13b residual: subject spawn needs host-side attestation |
+
+The 108 `fix` is spec 011's amendment to this table: a 108 that refuses what a declaration says
+carries the line its author would write, or exactly `remove this entry`, and a 108 whose file
+cannot be read or is not TOML carries no `fix`.
 
 **Control-socket lifecycle, as delivered (both daemons).** Each daemon binds the control socket
 named by its config and never unlinks a path it did not create. A start whose path already
