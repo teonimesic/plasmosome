@@ -1,20 +1,23 @@
 use std::ffi::{CStr, CString, OsStr};
 use std::fmt;
-use std::fs::{File, OpenOptions, Permissions};
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
 use plasmosome_backend::CellId;
 
-use crate::state::{CELL_JOURNAL_FILE, CELLS_DIR, cell_ledger_path, validate_cell_id};
+use crate::state::{
+    CELL_JOURNAL_FILE, CELLS_DIR, CellPathError, cell_ledger_path, validate_cell_id,
+};
 
 const LOCK_FILE: &str = "controller.lock";
 const PRIVATE_FILE: libc::mode_t = 0o600;
+const PRIVATE_DIRECTORY: libc::mode_t = 0o700;
 const DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 const JOURNAL_FLAGS: libc::c_int = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
@@ -82,8 +85,7 @@ impl InstanceRoot {
             return Err(LockError::NotRegular { path });
         }
         if created {
-            file.set_permissions(Permissions::from_mode(PRIVATE_FILE.into()))
-                .map_err(io_error)?;
+            change_mode(file.as_fd(), PRIVATE_FILE).map_err(io_error)?;
             sync_directory(self.dir.as_fd()).map_err(io_error)?;
         }
         match lock_exclusive_nonblocking(file.as_fd()) {
@@ -105,7 +107,7 @@ impl InstanceRoot {
         let cells_path = self.path.join(CELLS_DIR);
         let cells = match self.open_cells() {
             Ok(cells) => cells,
-            Err(DirectoryRefusal::Missing) => {
+            Err(DirectoryRefusal::Missing(_)) => {
                 return Ok(Discovery {
                     cells_dir_present: false,
                     entries: Vec::new(),
@@ -139,6 +141,78 @@ impl InstanceRoot {
             cells_dir_present: true,
             entries,
         })
+    }
+
+    /// Opens an existing cell's directory, following no symlink at `cells` or at the cell. An
+    /// invalid ID is refused before anything is opened.
+    pub fn cell_dir(&self, cell: &CellId) -> Result<CellDir, CellDirError> {
+        let journal_path = cell_ledger_path(&self.path, cell).map_err(CellDirError::InvalidCell)?;
+        let cells_path = self.path.join(CELLS_DIR);
+        let cells = self
+            .open_cells()
+            .map_err(|refusal| refusal.into_cell_dir_error(cells_path.clone()))?;
+        let cell_path = cells_path.join(cell.as_str());
+        let name = c_name(cell.as_str().as_bytes()).map_err(|source| CellDirError::Io {
+            path: cell_path.clone(),
+            source,
+        })?;
+        let dir = open_at(cells.as_fd(), &name, DIRECTORY_FLAGS, 0).map_err(|error| {
+            directory_refusal(cells.as_fd(), &name, error).into_cell_dir_error(cell_path)
+        })?;
+        Ok(CellDir {
+            dir,
+            cell: cell.clone(),
+            journal_path,
+        })
+    }
+
+    /// Creates `<root>/cells/<cell>` exclusively with mode 0700, whatever the umask, creating
+    /// `cells` the same way when it is missing. Each directory is made from its opened parent,
+    /// which is synced afterwards. An existing cell directory is `AlreadyExists` and is never
+    /// adopted. An invalid ID is refused before anything is created.
+    pub fn create_cell_dir(&self, cell: &CellId) -> Result<CellDir, CellDirError> {
+        let journal_path = cell_ledger_path(&self.path, cell).map_err(CellDirError::InvalidCell)?;
+        let cells_path = self.path.join(CELLS_DIR);
+        let cells = self
+            .create_cells()
+            .map_err(|refusal| refusal.into_cell_dir_error(cells_path.clone()))?;
+        let cell_path = cells_path.join(cell.as_str());
+        let io_error = |source| CellDirError::Io {
+            path: cell_path.clone(),
+            source,
+        };
+        let name = c_name(cell.as_str().as_bytes()).map_err(io_error)?;
+        match make_directory_at(cells.as_fd(), &name) {
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+                return Err(CellDirError::AlreadyExists { path: cell_path });
+            }
+            made => made.map_err(io_error)?,
+        }
+        let dir = open_at(cells.as_fd(), &name, DIRECTORY_FLAGS, 0).map_err(|error| {
+            directory_refusal(cells.as_fd(), &name, error).into_cell_dir_error(cell_path.clone())
+        })?;
+        change_mode(dir.as_fd(), PRIVATE_DIRECTORY).map_err(io_error)?;
+        sync_directory(cells.as_fd()).map_err(io_error)?;
+        Ok(CellDir {
+            dir,
+            cell: cell.clone(),
+            journal_path,
+        })
+    }
+
+    fn create_cells(&self) -> Result<OwnedFd, DirectoryRefusal> {
+        let name = c_name(CELLS_DIR.as_bytes()).map_err(DirectoryRefusal::Io)?;
+        let created = match make_directory_at(self.dir.as_fd(), &name) {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => false,
+            Err(error) => return Err(DirectoryRefusal::Io(error)),
+        };
+        let cells = self.open_cells()?;
+        if created {
+            change_mode(cells.as_fd(), PRIVATE_DIRECTORY).map_err(DirectoryRefusal::Io)?;
+            sync_directory(self.dir.as_fd()).map_err(DirectoryRefusal::Io)?;
+        }
+        Ok(cells)
     }
 
     fn open_cells(&self) -> Result<OwnedFd, DirectoryRefusal> {
@@ -265,6 +339,44 @@ impl CellDir {
             Err(refusal) => JournalOpen::Refused(refusal),
         }
     }
+
+    /// Opens the journal for reading and appending, without following a symlink, blocking on a
+    /// FIFO or truncating. An existing regular journal returns `created: false`. A missing one
+    /// is created exclusively with mode 0600 and returns `created: true`; this call does not
+    /// sync it or its directory. An existing inode is never replaced.
+    pub fn open_journal_for_append(&self) -> Result<JournalAppend, JournalRefusal> {
+        let access = libc::O_RDWR | libc::O_APPEND;
+        match open_journal_at(self.dir.as_fd(), access, 0) {
+            Ok(file) => Ok(JournalAppend {
+                file,
+                created: false,
+            }),
+            Err(JournalRefusal::Io(error)) if error.raw_os_error() == Some(libc::ENOENT) => {
+                let exclusive = access | libc::O_CREAT | libc::O_EXCL;
+                let file = open_journal_at(self.dir.as_fd(), exclusive, PRIVATE_FILE)?;
+                change_mode(file.as_fd(), PRIVATE_FILE).map_err(JournalRefusal::Io)?;
+                Ok(JournalAppend {
+                    file,
+                    created: true,
+                })
+            }
+            Err(refusal) => Err(refusal),
+        }
+    }
+
+    /// Syncs this cell directory, making entries created in it durable.
+    pub fn sync(&self) -> io::Result<()> {
+        sync_directory(self.dir.as_fd())
+    }
+}
+
+/// A journal opened for reading and appending through one descriptor. `created` is true when
+/// this open created the file: its directory entry is not yet durable until the caller syncs
+/// the file and then the cell directory with [`CellDir::sync`].
+#[derive(Debug)]
+pub struct JournalAppend {
+    pub file: File,
+    pub created: bool,
 }
 
 /// The result of opening a cell's journal for reading.
@@ -328,6 +440,16 @@ pub enum DiscoveryError {
     Classify { path: PathBuf, source: io::Error },
 }
 
+/// Why a cell directory could not be opened or created.
+#[derive(Debug)]
+pub enum CellDirError {
+    InvalidCell(CellPathError),
+    Symlink { path: PathBuf },
+    NotADirectory { path: PathBuf },
+    AlreadyExists { path: PathBuf },
+    Io { path: PathBuf, source: io::Error },
+}
+
 /// Why an instance root could not be opened.
 #[derive(Debug)]
 pub enum InstanceRootError {
@@ -354,14 +476,7 @@ fn open_at(
     flags: libc::c_int,
     mode: libc::mode_t,
 ) -> io::Result<OwnedFd> {
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            flags,
-            libc::c_uint::from(mode),
-        )
-    };
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, mode as libc::c_uint) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -379,15 +494,27 @@ fn collect_names(names: impl Iterator<Item = io::Result<Vec<u8>>>) -> io::Result
 }
 
 enum DirectoryRefusal {
-    Missing,
+    Missing(io::Error),
     Symlink,
     NotADirectory,
     Io(io::Error),
 }
 
+impl DirectoryRefusal {
+    fn into_cell_dir_error(self, path: PathBuf) -> CellDirError {
+        match self {
+            DirectoryRefusal::Symlink => CellDirError::Symlink { path },
+            DirectoryRefusal::NotADirectory => CellDirError::NotADirectory { path },
+            DirectoryRefusal::Missing(source) | DirectoryRefusal::Io(source) => {
+                CellDirError::Io { path, source }
+            }
+        }
+    }
+}
+
 fn directory_refusal(parent: BorrowedFd<'_>, name: &CStr, error: io::Error) -> DirectoryRefusal {
     match error.raw_os_error() {
-        Some(libc::ENOENT) => DirectoryRefusal::Missing,
+        Some(libc::ENOENT) => DirectoryRefusal::Missing(error),
         Some(libc::ELOOP) => DirectoryRefusal::Symlink,
         Some(libc::ENOTDIR) => match kind_at(parent, name) {
             Ok(Kind::Symlink) => DirectoryRefusal::Symlink,
@@ -503,6 +630,22 @@ fn clear_errno() {
 #[cfg(target_os = "linux")]
 fn clear_errno() {
     unsafe { *libc::__errno_location() = 0 };
+}
+
+fn make_directory_at(parent: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
+    let made = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), PRIVATE_DIRECTORY) };
+    if made != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn change_mode(fd: BorrowedFd<'_>, mode: libc::mode_t) -> io::Result<()> {
+    let changed = unsafe { libc::fchmod(fd.as_raw_fd(), mode) };
+    if changed != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn lock_exclusive_nonblocking(file: BorrowedFd<'_>) -> io::Result<()> {

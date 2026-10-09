@@ -22,8 +22,8 @@ pub use control::{Controller, Handler, MAX_LINE_BYTES, serve_connection};
 pub use daemon::{ConfigError, DaemonConfig, DaemonError, parse_config, run};
 pub use gatekeeper::Gatekeeper;
 pub use instance::{
-    CellDir, DiscoveredEntry, Discovery, DiscoveryError, EntryClass, InstanceRoot,
-    InstanceRootError, JournalOpen, JournalRefusal, LockError, NotACell, WriterLock,
+    CellDir, CellDirError, DiscoveredEntry, Discovery, DiscoveryError, EntryClass, InstanceRoot,
+    InstanceRootError, JournalAppend, JournalOpen, JournalRefusal, LockError, NotACell, WriterLock,
 };
 pub use lifecycle::{PluginState, StateError};
 pub use manifest::{ManifestError, PlasmidManifest};
@@ -32,8 +32,9 @@ pub use reconciler::{DesiredState, ObservedState, ReconcilePlan, Reconciler};
 pub use registry::{LookupError, RegistryEntry, ToolRegistry};
 pub use session_log::{SessionLog, read_events};
 pub use state::{
-    CellRecord, CellStatus, ControllerState, GenomeName, InstanceName, InstanceNameError,
-    InstanceRecord, MockMode, PlasmidRecord,
+    CellPathError, CellRecord, CellStatus, ControllerState, GenomeName, InstanceName,
+    InstanceNameError, InstanceRecord, MockMode, PlasmidRecord, cell_ledger_path,
+    cell_supervisor_socket_path, validate_cell_id,
 };
 pub use version::{
     Candidate, ConflictPolicy, Provision, Requirement, SelectionError, Version, VersionReq,
