@@ -621,9 +621,9 @@ fn a_record_that_cannot_be_encoded_leaves_every_target_as_it_was() {
     let error = unencodable.append_to_file(&log).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(
-        error
-            .to_string()
-            .contains("`path` must be an absolute path, not \"skills/c.md\""),
+        error.to_string().contains(
+            "effect 2 of 2 cannot be encoded: `path` must be an absolute path, not \"skills/c.md\""
+        ),
         "{error}"
     );
     let after = std::fs::read(&log).unwrap();

@@ -1171,6 +1171,21 @@ mod tests {
     }
 
     #[test]
+    fn a_positional_log_record_is_refused_by_its_public_name() {
+        for error in [
+            serde_json::from_str::<LogRecord>("[]").unwrap_err(),
+            serde_json::from_value::<LogRecord>(serde_json::json!([])).unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid type: sequence, expected struct LogRecord"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn every_ledger_record_decodes_from_an_object_and_refuses_a_positional_array() {
         let removal = UniverseRemoval {
             id: GrantId::new(),

@@ -867,5 +867,10 @@ mod tests {
             assert_eq!(backend.plant(op.object()).unwrap_err(), expected);
             assert_eq!(backend.snapshot_os_state(), before);
         }
+        assert_eq!(
+            backend.apply(mount_by(&owner)).unwrap_err(),
+            BackendError::Fault("injected refusal".to_string())
+        );
+        assert_eq!(backend.snapshot_os_state(), before);
     }
 }

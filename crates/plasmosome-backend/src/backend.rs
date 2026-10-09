@@ -547,6 +547,32 @@ mod tests {
     }
 
     #[test]
+    fn validate_reports_the_first_broken_field_in_field_order() {
+        for (capability, first) in [
+            (
+                Capability::Mount {
+                    source: "srv/repo".to_string(),
+                    target: "/workspace/".to_string(),
+                },
+                RecipeError::NotAbsolute {
+                    field: "source",
+                    value: "srv/repo".to_string(),
+                },
+            ),
+            (
+                Capability::ProxyMap {
+                    host: "api.github\0.com".to_string(),
+                    route: "spl\0ice".to_string(),
+                },
+                RecipeError::ContainsNul { field: "host" },
+            ),
+        ] {
+            assert_eq!(capability.validate(), Err(first.clone()), "{capability:?}");
+            assert_eq!(operation(GrantId::new(), capability).validate(), Err(first));
+        }
+    }
+
+    #[test]
     fn selection_names_need_only_be_nul_free_and_valid_values_round_trip() {
         for capability in [
             Capability::SessionFile {

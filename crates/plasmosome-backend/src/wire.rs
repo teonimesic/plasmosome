@@ -461,6 +461,39 @@ mod tests {
         );
     }
 
+    fn refusals<T: DeserializeOwned + Debug>(value: Value) -> [String; 2] {
+        [
+            serde_json::from_str::<T>(&value.to_string())
+                .unwrap_err()
+                .to_string(),
+            serde_json::from_value::<T>(value).unwrap_err().to_string(),
+        ]
+    }
+
+    #[test]
+    fn a_refusal_names_the_shape_it_expected_and_the_public_record() {
+        let struct_variant = "invalid type: unit variant, expected struct variant";
+        for (errors, expected) in [
+            (refusals::<Capability>(json!("Mount")), struct_variant),
+            (refusals::<UniverseOp>(json!("AddMount")), struct_variant),
+            (
+                refusals::<LedgerEntry>(json!([])),
+                "invalid type: sequence, expected struct LedgerEntry",
+            ),
+            (
+                refusals::<OsState>(json!([])),
+                "invalid type: sequence, expected struct OsState",
+            ),
+        ] {
+            for error in errors {
+                assert!(
+                    error.contains(expected),
+                    "`{error}` does not say `{expected}`"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_launch_array_cannot_swap_its_two_endpoints() {
         let swapped = json!([
