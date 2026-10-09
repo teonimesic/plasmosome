@@ -22,8 +22,10 @@ pub enum SessionLogError {
         line: usize,
         fault: LogFault,
     },
-    /// An earlier failure stopped this log from accepting appends. Open a new `SessionLog` on the
-    /// same path to validate the file and continue.
+    /// An earlier failure stopped this log from accepting appends and released its writer lock.
+    /// One recovering owner opens a new `SessionLog` on the same path, which validates the file;
+    /// every other holder of the poisoned value must use that new log rather than open its own,
+    /// because a second open is refused with [`SessionLogError::Locked`].
     Poisoned { path: PathBuf },
     /// Another open `SessionLog`, in this process or another, holds the writer lock on the file
     /// at `path`. Nothing was read or written.
@@ -221,17 +223,23 @@ impl LogFile for std::fs::File {
     }
 }
 
-/// The append-only event log one instance's cells share. Each line is one JSON object whose
-/// envelope is `ts_ms`, `seq` and `kind`.
+/// The append-only event log one instance's cells share through a single value of this type.
+/// Each line is one JSON object whose envelope is `ts_ms`, `seq` and `kind`.
+///
+/// An open log holds an exclusive advisory lock (`flock`) on its file, so any other open of that
+/// file, from this process or another, returns [`SessionLogError::Locked`]. The lock is released
+/// when this value is dropped, or as soon as an append poisons it: before that append returns its
+/// [`SessionLogError::Io`], before a panic inside it continues to unwind, and once it has written
+/// `seq` `u64::MAX`. The lock is advisory: it stops other `SessionLog`s, not a process that
+/// writes the file without asking for it.
 pub struct SessionLog {
     path: PathBuf,
     state: Mutex<LogState>,
 }
 
 struct LogState {
-    file: Box<dyn LogFile>,
+    file: Option<Box<dyn LogFile>>,
     next_seq: u64,
-    poisoned: bool,
 }
 
 impl SessionLog {
@@ -284,9 +292,8 @@ impl SessionLog {
         Ok(SessionLog {
             path,
             state: Mutex::new(LogState {
-                file,
+                file: Some(file),
                 next_seq,
-                poisoned: false,
             }),
         })
     }
@@ -303,30 +310,39 @@ impl SessionLog {
     /// flushed and synced with `sync_all`. The first write, flush or sync error poisons this log:
     /// that call returns [`SessionLogError::Io`] and every later append, from any thread, returns
     /// [`SessionLogError::Poisoned`]. A panic while appending poisons it the same way, and so does
-    /// writing `seq` `u64::MAX`, after which no event can be numbered. An error does not mean
-    /// the line is absent: it may be on disk whole or in part, so open a new `SessionLog` to
-    /// validate the file before continuing.
+    /// writing `seq` `u64::MAX`, after which no event can be numbered. Poisoning releases the
+    /// writer lock. An error does not mean the line is absent: it may be on disk whole or in part,
+    /// so one recovering owner opens a new `SessionLog` to validate the file before continuing.
     pub fn append(&self, kind: &str, payload: serde_json::Value) -> Result<u64, SessionLogError> {
         let poisoned = || SessionLogError::Poisoned {
             path: self.path.clone(),
         };
         let mut state = self.state.lock().map_err(|_| poisoned())?;
-        if state.poisoned {
-            return Err(poisoned());
-        }
         let seq = state.next_seq;
-        let line = event_line(seq, kind, payload);
-        if let Err((step, source)) = write_durably(state.file.as_mut(), line.as_bytes()) {
-            state.poisoned = true;
-            return Err(SessionLogError::Io {
-                path: self.path.clone(),
-                step,
-                source,
-            });
+        let Some(file) = state.file.as_mut() else {
+            return Err(poisoned());
+        };
+        let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            write_durably(file.as_mut(), event_line(seq, kind, payload).as_bytes())
+        }));
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err((step, source))) => {
+                state.file = None;
+                return Err(SessionLogError::Io {
+                    path: self.path.clone(),
+                    step,
+                    source,
+                });
+            }
+            Err(panic) => {
+                state.file = None;
+                std::panic::resume_unwind(panic);
+            }
         }
         match seq.checked_add(1) {
             Some(next) => state.next_seq = next,
-            None => state.poisoned = true,
+            None => state.file = None,
         }
         Ok(seq)
     }
@@ -1018,6 +1034,12 @@ mod tests {
         assert_eq!(log.append("b", json!({})).unwrap(), u64::MAX);
         assert_poisoned(log.append("c", json!({})));
         assert_eq!(seqs_on_disk(&path), [u64::MAX - 1, u64::MAX]);
+        assert_malformed(
+            open_error(path.clone(), &OsLogStore),
+            &path,
+            (2, LogFault::SequenceExhausted),
+            "the exhausted writer released its lock",
+        );
     }
 
     #[test]
@@ -1191,5 +1213,72 @@ mod tests {
         assert_locked(refused, &path);
         let after = SessionLog::open(path.clone()).unwrap();
         assert_eq!(after.append("a", json!({})).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_torn_line_cannot_be_extended_by_a_second_writer() {
+        let store = FaultLogStore::new().tear(1, 5);
+        let path = store.root().join(LOG);
+        let first = open_in(&store);
+        assert_locked(SessionLog::open(path.clone()), &path);
+        assert_io(
+            first.append("force", json!({ "cell": "a" })),
+            LogStep::Write,
+            &path,
+        );
+        let torn = std::fs::read(&path).unwrap();
+        assert_eq!(torn.len(), 5);
+        assert_malformed(
+            open_error(path.clone(), &OsLogStore),
+            &path,
+            (1, LogFault::MissingNewline),
+            "a second writer after a torn line",
+        );
+        assert_poisoned(first.append("force", json!({ "cell": "a" })));
+        assert_eq!(std::fs::read(&path).unwrap(), torn);
+    }
+
+    #[test]
+    fn a_poisoned_writer_releases_its_lock() {
+        fn after_open(store: FaultLogStore, step: Step) -> FaultLogStore {
+            let nth = store.count(step) + 1;
+            store.fail(step, nth)
+        }
+        let cases: [(&str, fn(FaultLogStore) -> FaultLogStore, u64); 4] = [
+            ("failed write", |store| after_open(store, Step::Write), 1),
+            ("failed flush", |store| after_open(store, Step::Flush), 2),
+            (
+                "failed file sync",
+                |store| after_open(store, Step::SyncFile),
+                2,
+            ),
+            (
+                "panic",
+                |store| {
+                    let nth = store.count(Step::Write) + 1;
+                    store.panic_on_write(nth)
+                },
+                1,
+            ),
+        ];
+        for (case, arm, next) in cases {
+            let store = FaultLogStore::new();
+            let path = store.root().join(LOG);
+            let first = open_in(&store);
+            let store = arm(store);
+            let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                first.append("force", json!({ "cell": "a" }))
+            }));
+            assert!(!matches!(failed, Ok(Ok(_))), "{case}: the append failed");
+            let second = SessionLog::open(path.clone())
+                .unwrap_or_else(|error| panic!("{case}: reopen while poisoned: {error}"));
+            assert_eq!(
+                second.append("force", json!({ "cell": "a" })).unwrap(),
+                next,
+                "{case}"
+            );
+            assert_poisoned(first.append("force", json!({ "cell": "a" })));
+            drop(store);
+        }
     }
 }
