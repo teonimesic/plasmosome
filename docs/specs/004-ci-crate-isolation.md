@@ -32,8 +32,9 @@ blocked on owner decisions. This spec ships the strongest check available short 
 ### Jobs
 
 - **`gates`** — the integration gate; the testkit's cross-crate tests run here. This spec sets
-  only its ignored-test report and the test-output capture that feeds it (below); its other
-  steps belong to the specs that add them.
+  only its ignored-test report, the `--no-fail-fast` and output capture on its test steps that
+  feed it, and the `ignore_without_reason` flag on its clippy step (below); its other steps
+  belong to the specs that add them.
 - **`crate`** — a matrix job, one entry per workspace member, hardcoded in `ci.yml`. Two steps
   per entry, one command per step (the existing `ci.yml` rule: a multi-command step can pass
   while a command inside it failed):
@@ -45,7 +46,7 @@ blocked on owner decisions. This spec ships the strongest check available short 
   version, not the image: GitHub updates the image about weekly, so the minor version and the
   clang that compiles `darwin_group.c` can change without a commit here. The toolchain and cache
   actions are those of `gates`. Steps:
-  1. `cargo clippy --workspace --all-targets -- -D warnings`
+  1. `cargo clippy --workspace --all-targets -- -D warnings -D clippy::ignore_without_reason`
   2. `cargo test --workspace --exclude plasmosome-guards`
   3. `cargo test -p plasmosome-guards`
   4. the ignored-test report
@@ -102,9 +103,8 @@ workspace test needed any of these, so at that commit every test runs on `macos`
 A test that needs a prerequisite asserts it, so a missing prerequisite fails the test. Where a CI
 runner cannot supply it, the test is marked `#[ignore = "needs <prerequisite>"]`. A bare
 `#[ignore]` fails clippy in every workspace member, including one with no `[lints]` table and any
-member added later. `clippy::ignore_without_reason` provides the failure; the implementing task
-chooses how it reaches every member: a `-D` flag on both CI's and the root gate's clippy command,
-or `[lints] workspace = true` in every member plus a check that each one opts in. A test never
+member added later, because CI's and the root gate's clippy commands carry
+`-D clippy::ignore_without_reason`. A test never
 returns early when its prerequisite is missing: it would report `ok` having tested nothing, and
 that pass reads the same as a real one. No mechanical check sees an early return, so review
 holds that line.
@@ -112,7 +112,10 @@ holds that line.
 The ignored-test report runs in `gates` and in `macos`. In those two jobs each `cargo test` step
 runs with `--no-fail-fast`, so one failing test binary does not hide the rest, and captures its
 output with `2>&1 | tee -a` into one file, so each test's line follows the `Running` line that
-names its crate. The report step runs with `if: always()`. It reads the harness's
+names its test executable. Two crates can hold test files of one name, as `tests/daemon_cli.rs`
+in `plasmosome-core` and `plasmosome-membrane`, so the report maps each executable to its package
+with `cargo test --no-run --message-format=json` over the same packages; a doctest's crate is on
+its `Doc-tests` line. The report step runs with `if: always()`. It reads the harness's
 `test <name> ... ignored, <reason>` lines and writes each ignored test's crate, name and reason
 to the step summary; an ignored doctest carries no reason and is listed with `no reason given`.
 When every test step succeeded and nothing was ignored, it says so. When a test step did not
@@ -214,18 +217,18 @@ whichever of 6ja and 52e lands first.
   says no test step ran; an unused variable in `darwin_group.c` fails `macos` and the root gate
   on a Mac; and a bare `#[ignore]` in a member whose manifest has no `[lints]` table fails CI's
   clippy and the root gate.
-- (6ja) On a green throwaway commit with a `#[ignore = "needs a hypervisor"]` test in a crate the
-  workspace test step runs, another in `plasmosome-guards`, and an ` ```ignore ` doctest, the
-  `gates` and `macos` summaries each name all three with their crates, the doctest with
-  `no reason given`.
+- (6ja) On a green throwaway commit with `#[ignore = "needs a hypervisor"]` tests in
+  `tests/daemon_cli.rs` of both `plasmosome-core` and `plasmosome-membrane`, another in
+  `plasmosome-guards`, and an ` ```ignore ` doctest, the `gates` and `macos` summaries each name
+  all four with their own crates, the doctest with `no reason given`.
 - (6ja) On a throwaway commit where a failing test runs in an earlier binary than an ignored one,
   `gates` and `macos` go red at that test step, still name the ignored test, and say the step did
   not succeed. The introducing PR's own runs name exactly the tests ignored in each run, or say
   there are none.
 - (6ja) `crates/plasmosome-testkit/AGENTS.md`'s layer table shows the reasoned
   `#[ignore = "..."]` form, never a bare `#[ignore]`.
-- (6ja) Once `macos` has been green on ten consecutive pushes to main, the owner question above
-  is put to the owner and the task's notes record it.
+- (6ja) The task stays open after its PR merges until `macos` has been green on ten consecutive
+  pushes to main; the owner question above is put to the owner then, and the notes record it.
 - (52e) `coverage` has exactly the steps above, with `--exclude plasmosome-guards` and nothing
   narrower; uploads `lcov.info`; adds no `permissions` entry; installs `cargo-llvm-cov` at an
   exact version with `--locked`; and carries none of the forbidden settings, flags or steps.
