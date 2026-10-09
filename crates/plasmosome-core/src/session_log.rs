@@ -1362,4 +1362,30 @@ mod tests {
             Err(timeout) => panic!("read_events did not return: {timeout:?}"),
         }
     }
+
+    #[test]
+    fn an_unreadable_ancestor_refuses_open_at_its_sync() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            let reason = "skipped an_unreadable_ancestor_refuses_open_at_its_sync: root opens a \
+                          directory whatever its mode\n";
+            std::io::Write::write_all(&mut std::io::stderr(), reason.as_bytes()).unwrap();
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let opened = SessionLog::open(locked.join("inner").join(LOG));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        match opened {
+            Err(SessionLogError::Io { path, step, source }) => {
+                assert_eq!(step, LogStep::SyncDirectory);
+                assert_eq!(path, locked);
+                assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            Err(other) => panic!("expected an Io error at SyncDirectory, got {other:?}"),
+            Ok(_) => panic!("opened a log under an ancestor this process cannot read"),
+        }
+    }
 }
