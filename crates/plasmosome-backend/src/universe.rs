@@ -64,6 +64,48 @@ impl fmt::Display for CellId {
     }
 }
 
+/// How a plasmid's calls are served in a cell: `Simulate`, `Capture`, or `Passthrough` to the
+/// real backend, which is the default. The vocabulary is closed. It serializes as the lower-case
+/// name, and decoding refuses any other name, including a capitalized one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MockMode {
+    Simulate,
+    Capture,
+    #[default]
+    Passthrough,
+}
+
+impl MockMode {
+    /// The lower-case wire name: `simulate`, `capture` or `passthrough`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MockMode::Simulate => "simulate",
+            MockMode::Capture => "capture",
+            MockMode::Passthrough => "passthrough",
+        }
+    }
+
+    /// Reads exactly `simulate`, `capture` or `passthrough`; any other text, including a
+    /// capitalized name, is `None`.
+    pub fn parse(text: &str) -> Option<MockMode> {
+        match text {
+            "simulate" => Some(MockMode::Simulate),
+            "capture" => Some(MockMode::Capture),
+            "passthrough" => Some(MockMode::Passthrough),
+            _ => None,
+        }
+    }
+
+    /// The status-list tag: `[mock:simulate]`, `[mock:capture]` or `[real]`.
+    pub fn list_tag(&self) -> String {
+        match self {
+            MockMode::Simulate | MockMode::Capture => format!("[mock:{}]", self.as_str()),
+            MockMode::Passthrough => "[real]".to_string(),
+        }
+    }
+}
+
 /// The owner of a holding: a plugin as attached to one cell. The same plugin in two cells is two
 /// owners, so every ownership comparison must compare both fields. Its JSON is exactly the object
 /// `{"cell": ..., "plugin": ...}`; an array, a missing, repeated or unknown field is refused. It
