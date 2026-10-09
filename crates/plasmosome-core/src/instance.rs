@@ -230,11 +230,11 @@ impl InstanceRoot {
 
     /// Creates `<root>/cells/<cell>` exclusively with mode 0700, whatever the umask, creating
     /// `cells` when it is missing. It needs this root's writer lock; a lock taken on another root
-    /// is `ForeignLock` and nothing is created. Each directory is made from its opened parent. Every call
-    /// sets `cells` to mode 0700 and syncs the root and then `cells`, including a call that finds
-    /// the cell already there, so a retry after a failed call makes durable what the failed call
-    /// created. A failed sync names the directory that was being synced. An existing cell
-    /// directory is `AlreadyExists` and is never adopted. An invalid ID is refused before
+    /// is `ForeignLock` and nothing is created. Each directory is made from its opened parent.
+    /// Every call sets `cells` to mode 0700 and syncs the root and then `cells`, including a call
+    /// that finds the cell already there, so a retry after a failed call makes durable what the
+    /// failed call created. A failed sync names the directory that was being synced. An existing
+    /// cell directory is `AlreadyExists` and is never adopted. An invalid ID is refused before
     /// anything is created.
     pub fn create_cell_dir(
         &self,
@@ -444,10 +444,10 @@ impl CellDir {
 
     /// Opens the journal for reading and appending, without following a symlink, blocking on a
     /// FIFO or truncating. It needs the writer lock of the root this directory was opened from;
-    /// another root's lock is `ForeignLock`. An existing regular journal returns `created: false`. A missing one
-    /// is created exclusively and returns `created: true`. Either way the journal is set to mode
-    /// 0600. This call does not sync the journal or its directory. An existing inode is never
-    /// replaced.
+    /// another root's lock is `ForeignLock`. An existing regular journal returns
+    /// `created: false`. A missing one is created exclusively and returns `created: true`. Either
+    /// way the journal is set to mode 0600. This call does not sync the journal or its directory.
+    /// An existing inode is never replaced.
     pub fn open_journal_for_append(
         &self,
         lock: &WriterLock,
