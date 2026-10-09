@@ -232,7 +232,7 @@ impl PlasmidManifest {
             .map(PathBuf::from);
         let network = raw
             .get("network")
-            .map(|n| parse_network(&id, "network", n))
+            .map(|n| parse_network(&id, "network", "network", n))
             .transpose()?;
         let requires = raw
             .get("requires")
@@ -434,24 +434,19 @@ fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>,
     Ok(tools)
 }
 
-fn parse_network(id: &str, section: &str, n: &toml::Value) -> Result<NetworkSpec, ManifestError> {
+fn parse_network(
+    id: &str,
+    section: &str,
+    path: &str,
+    n: &toml::Value,
+) -> Result<NetworkSpec, ManifestError> {
     if !n.is_table() {
         return Err(ManifestError::Invalid(format!(
             "plasmid {id}: [{section}] must be a table"
         )));
     }
     let hosts = declared_string_list(id, section, "hosts", n.get("hosts"))?;
-    let ports = n
-        .get("ports")
-        .and_then(toml::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(toml::Value::as_integer)
-                .map(|p| p as u16)
-                .collect()
-        })
-        .unwrap_or_default();
+    let ports = declared_ports(id, &format!("{path}.ports"), n.get("ports"))?;
     let pin_cidrs = declared_string_list(id, section, "pin_cidrs", n.get("pin_cidrs"))?;
     Ok(NetworkSpec {
         hosts,
@@ -582,7 +577,14 @@ fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, M
                 .map(String::from),
             network: decl
                 .get("network")
-                .map(|n| parse_network(plasmid_id, &format!("commands.{id}.network"), n))
+                .map(|n| {
+                    parse_network(
+                        plasmid_id,
+                        &format!("commands.{id}.network"),
+                        &format!("commands.commands.{}.network", diagnostic_key(id)),
+                        n,
+                    )
+                })
                 .transpose()?,
             secrets: decl
                 .get("secrets")
@@ -756,6 +758,52 @@ fn declared_string_list(
             })
         })
         .collect()
+}
+
+fn declared_ports(
+    id: &str,
+    field: &str,
+    value: Option<&toml::Value>,
+) -> Result<Vec<u16>, ManifestError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let refuse = |offending: &toml::Value, detail: String| {
+        let port = evident_port(offending).unwrap_or(443);
+        field_error(id, field.to_string(), format!("ports = [{port}]"), &detail)
+    };
+    let Some(items) = value.as_array() else {
+        return Err(refuse(
+            value,
+            format!("expected a list of integer ports from 1 to 65535, found {value}"),
+        ));
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            item.as_integer().and_then(nonzero_port).ok_or_else(|| {
+                refuse(
+                    item,
+                    format!("ports[{index}] holds {item}, which is not an integer from 1 to 65535"),
+                )
+            })
+        })
+        .collect()
+}
+
+fn evident_port(value: &toml::Value) -> Option<u16> {
+    let number = match value {
+        toml::Value::Integer(number) => *number,
+        toml::Value::String(text) => text.parse().ok()?,
+        toml::Value::Float(number) if number.fract() == 0.0 => *number as i64,
+        _ => return None,
+    };
+    nonzero_port(number)
+}
+
+fn nonzero_port(number: i64) -> Option<u16> {
+    u16::try_from(number).ok().filter(|port| *port != 0)
 }
 
 fn string_list(value: Option<&toml::Value>) -> Vec<String> {
