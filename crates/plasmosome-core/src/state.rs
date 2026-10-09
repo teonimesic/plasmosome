@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use plasmosome_backend::{CellId, MockMode};
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,75 @@ impl fmt::Display for InstanceNameError {
 
 impl std::error::Error for InstanceNameError {}
 
+pub(crate) const CELLS_DIR: &str = "cells";
+pub(crate) const CELL_JOURNAL_FILE: &str = "ledger.ndjson";
+pub(crate) const CELL_SUPERVISOR_SOCKET: &str = "membrane.uds";
+
+/// Checks that `cell` can name one directory under `<root>/cells`: nonempty, not exactly `.` or
+/// `..`, and free of `/`, `\` and NUL. A dot inside a name such as `a.b` is allowed. An invalid ID
+/// is refused with its text unchanged; nothing is trimmed, lower-cased or replaced. On a
+/// filesystem that folds case or Unicode normalization, two valid IDs can reach one directory;
+/// [`InstanceRoot::cell_dir`](crate::InstanceRoot::cell_dir) refuses the spelling that is not
+/// the name on disk.
+pub fn validate_cell_id(cell: &CellId) -> Result<(), CellPathError> {
+    let text = cell.as_str();
+    if text.is_empty() {
+        return Err(CellPathError::Empty);
+    }
+    if text == "." || text == ".." || text.contains(['/', '\\', '\0']) {
+        return Err(CellPathError::NotACellName(text.to_string()));
+    }
+    Ok(())
+}
+
+/// Returns `<root>/cells/<cell>/ledger.ndjson`, the cell's journal path, for messages and
+/// reports. It is built from the same names the instance root opens, but no reader or writer
+/// opens this path: opening it would follow a symlink at `cells` or at the cell. Open the journal
+/// relative to the cell directory instead, through
+/// [`InstanceRoot::cell_dir`](crate::InstanceRoot::cell_dir) and
+/// [`CellDir::open_journal`](crate::CellDir::open_journal). An invalid ID is refused as
+/// [`validate_cell_id`] refuses it. `root` is used as given.
+pub fn cell_ledger_path(root: &Path, cell: &CellId) -> Result<PathBuf, CellPathError> {
+    Ok(cell_path(root, cell)?.join(CELL_JOURNAL_FILE))
+}
+
+/// Returns `<root>/cells/<cell>/membrane.uds`, the cell supervisor's socket, refusing an invalid
+/// ID as [`validate_cell_id`] does. It builds the path only; it does not check what is there.
+/// Connecting by this path follows a symlink in any of its components, so a caller must not
+/// connect through it until `cells` and the cell directory have been validated without following
+/// a symlink (spec 008: only socket paths under validated no-follow directories are used). This
+/// crate does not perform that validation for sockets.
+pub fn cell_supervisor_socket_path(root: &Path, cell: &CellId) -> Result<PathBuf, CellPathError> {
+    Ok(cell_path(root, cell)?.join(CELL_SUPERVISOR_SOCKET))
+}
+
+fn cell_path(root: &Path, cell: &CellId) -> Result<PathBuf, CellPathError> {
+    validate_cell_id(cell)?;
+    Ok(root.join(CELLS_DIR).join(cell.as_str()))
+}
+
+/// Why a cell ID cannot name a cell directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellPathError {
+    Empty,
+    /// The refused ID, exactly as given.
+    NotACellName(String),
+}
+
+impl fmt::Display for CellPathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CellPathError::Empty => write!(f, "a cell ID must not be empty"),
+            CellPathError::NotACellName(text) => write!(
+                f,
+                "{text:?} is not a valid cell ID (no path separators, NUL, `.`, or `..`)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CellPathError {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlasmidRecord {
     pub plasmid: String,
@@ -116,7 +186,98 @@ pub struct ControllerState {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
+
+    const REFUSED_NAMES: [&str; 6] = [".", "..", "a/b", "a\\b", "a\0b", "/abs"];
+
+    #[test]
+    fn cell_ledger_path_puts_the_journal_under_cells_and_the_cell() {
+        assert_eq!(
+            cell_ledger_path(Path::new("/inst"), &CellId::from("cell-1")),
+            Ok(PathBuf::from("/inst/cells/cell-1/ledger.ndjson"))
+        );
+    }
+
+    #[test]
+    fn invalid_cell_ids_are_refused_not_sanitized() {
+        let root = Path::new("/inst");
+        assert_eq!(
+            cell_ledger_path(root, &CellId::from("")),
+            Err(CellPathError::Empty)
+        );
+        assert_eq!(
+            validate_cell_id(&CellId::from("")),
+            Err(CellPathError::Empty)
+        );
+        for name in REFUSED_NAMES {
+            let refusal = CellPathError::NotACellName(name.to_string());
+            assert_eq!(
+                cell_ledger_path(root, &CellId::from(name)),
+                Err(refusal.clone()),
+                "{name:?}"
+            );
+            assert_eq!(
+                validate_cell_id(&CellId::from(name)),
+                Err(refusal),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cell_id_with_an_inner_dot_is_valid() {
+        for name in ["a.b", "..a", "a.."] {
+            assert_eq!(
+                cell_ledger_path(Path::new("/inst"), &CellId::from(name)),
+                Ok(PathBuf::from(format!("/inst/cells/{name}/ledger.ndjson")))
+            );
+            assert_eq!(validate_cell_id(&CellId::from(name)), Ok(()));
+        }
+    }
+
+    #[test]
+    fn a_cell_id_is_used_exactly_as_given() {
+        for name in [" Cell-1 ", "CELL-1", "cell 1"] {
+            assert_eq!(
+                cell_ledger_path(Path::new("/inst"), &CellId::from(name)),
+                Ok(PathBuf::from(format!("/inst/cells/{name}/ledger.ndjson")))
+            );
+        }
+    }
+
+    #[test]
+    fn the_supervisor_socket_sits_beside_the_journal() {
+        let root = Path::new("/inst");
+        assert_eq!(
+            cell_supervisor_socket_path(root, &CellId::from("cell-1")),
+            Ok(PathBuf::from("/inst/cells/cell-1/membrane.uds"))
+        );
+        assert_eq!(
+            cell_supervisor_socket_path(root, &CellId::from("")),
+            Err(CellPathError::Empty)
+        );
+        for name in REFUSED_NAMES {
+            assert_eq!(
+                cell_supervisor_socket_path(root, &CellId::from(name)),
+                Err(CellPathError::NotACellName(name.to_string())),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cell_path_error_names_the_refused_text_escaped() {
+        assert_eq!(
+            CellPathError::Empty.to_string(),
+            "a cell ID must not be empty"
+        );
+        assert_eq!(
+            CellPathError::NotACellName("a\0b".to_string()).to_string(),
+            "\"a\\0b\" is not a valid cell ID (no path separators, NUL, `.`, or `..`)"
+        );
+    }
 
     #[test]
     fn instance_names_reject_path_shaped_text() {

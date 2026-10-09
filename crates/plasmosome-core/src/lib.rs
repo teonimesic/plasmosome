@@ -8,6 +8,7 @@
 pub mod control;
 pub mod daemon;
 pub mod gatekeeper;
+pub mod instance;
 pub mod lifecycle;
 pub mod manifest;
 pub mod protocol;
@@ -20,6 +21,10 @@ pub mod version;
 pub use control::{Controller, Handler, MAX_LINE_BYTES, serve_connection};
 pub use daemon::{ConfigError, DaemonConfig, DaemonError, parse_config, run};
 pub use gatekeeper::Gatekeeper;
+pub use instance::{
+    CellDir, CellDirError, DiscoveredEntry, Discovery, DiscoveryError, EntryClass, InstanceRoot,
+    InstanceRootError, JournalAppend, JournalOpen, JournalRefusal, LockError, NotACell, WriterLock,
+};
 pub use lifecycle::{PluginState, StateError};
 pub use manifest::{ManifestError, PlasmidManifest};
 pub use protocol::{ErrorCode, Request, Response, StatusResult, WireError};
@@ -29,8 +34,9 @@ pub use session_log::{
     LogFault, LogFile, LogStep, LogStore, OsLogStore, SessionLog, SessionLogError, read_events,
 };
 pub use state::{
-    CellRecord, CellStatus, ControllerState, GenomeName, InstanceName, InstanceNameError,
-    InstanceRecord, PlasmidRecord,
+    CellPathError, CellRecord, CellStatus, ControllerState, GenomeName, InstanceName,
+    InstanceNameError, InstanceRecord, PlasmidRecord, cell_ledger_path,
+    cell_supervisor_socket_path, validate_cell_id,
 };
 pub use version::{
     Candidate, ConflictPolicy, Provision, Requirement, SelectionError, Version, VersionReq,
