@@ -1277,6 +1277,21 @@ mod tests {
     }
 
     #[test]
+    fn open_from_refuses_a_group_writable_ancestor_two_levels_up() {
+        let root = test_root();
+        make_dir(&root.path().join("a"), 0o775);
+        make_dir(&root.path().join("a/b"), 0o755);
+        make_dir(&root.path().join("a/b/cell"), 0o700);
+        assert_eq!(
+            open_in(&root, "a/b/cell").map(|dir| dir.path().to_path_buf()),
+            Err(PrivateSocketError::Replaceable {
+                at: root.path().join("a"),
+                mode: 0o775
+            })
+        );
+    }
+
+    #[test]
     fn open_from_refuses_a_0750_final_directory() {
         let root = test_root();
         make_dir(&root.path().join("cell"), 0o750);
@@ -1524,6 +1539,49 @@ mod tests {
     }
 
     #[test]
+    fn prepare_leaves_a_socket_it_did_not_bind_when_the_recheck_fails() {
+        let root = test_root();
+        let cell = root.path().join("cell");
+        make_dir(&cell, 0o700);
+        let sock = cell.join("sock");
+        let dir = open_in(&root, "cell").expect("a private directory opens");
+        let mut other = None;
+        let stand_in = effective_uid().wrapping_add(1);
+        let refusal = refusal_of(prepare_as(dir, "sock", stand_in, || {
+            fs::remove_file(&sock).expect("unlink");
+            other = Some(UnixListener::bind(&sock).expect("bind another socket"));
+            set_mode(&cell, 0o770);
+        }));
+        let left = fs::symlink_metadata(&sock).expect("the socket this call did not bind stays");
+        assert!(left.file_type().is_socket());
+        assert_eq!(refusal, PrivateSocketError::BindEscaped { path: sock });
+        drop(other);
+    }
+
+    #[test]
+    fn a_test_root_is_removed_even_when_its_test_panics() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let root = test_root();
+            sender
+                .send(root.path().to_path_buf())
+                .expect("the root path is sent");
+            let a = root.path().join("a");
+            make_dir(&a, 0o755);
+            make_dir(&a.join("cell"), 0o700);
+            set_mode(&a, 0o311);
+            panic!("deliberate panic: the root must still be removed");
+        }));
+        assert!(outcome.is_err(), "the closure panics");
+        let path = receiver.recv().expect("the root path");
+        assert!(
+            fs::symlink_metadata(&path).is_err(),
+            "{} was left behind",
+            path.display()
+        );
+    }
+
+    #[test]
     fn check_peer_uid_refuses_a_socket_without_peer_credentials() {
         let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
         assert!(raw >= 0, "socket: {}", std::io::Error::last_os_error());
@@ -1573,7 +1631,9 @@ mod tests {
             ),
             (
                 PrivateSocketError::ReplaceableByAcl { at: at() },
-                "/r/cell has an ACL entry that lets another principal replace entries in it",
+                "/r/cell has an ACL allow entry granting add_file, add_subdirectory, delete_child, \
+                 delete, writesecurity or chown; such an entry is refused on an ancestor whoever it \
+                 names, even if it applies only to new children",
             ),
             (
                 PrivateSocketError::NotPrivate {

@@ -209,6 +209,24 @@ fn open_refuses_the_system_temp_directories_and_the_root_directory() {
             mode: 0o1777
         }
     );
+    #[cfg(target_os = "macos")]
+    let sticky = Path::new("/private/tmp");
+    #[cfg(target_os = "linux")]
+    let sticky = Path::new("/tmp");
+    let held = tempfile::Builder::new()
+        .prefix("ps")
+        .tempdir_in(sticky)
+        .expect("a directory in the sticky temp directory");
+    set_mode(held.path(), 0o700);
+    make_dir(&held.path().join("cell"), 0o700);
+    assert_eq!(
+        PrivateDir::open(&held.path().join("cell")).map(|dir| dir.path().to_path_buf()),
+        Err(PrivateSocketError::Replaceable {
+            at: sticky.to_path_buf(),
+            mode: 0o1777
+        }),
+        "a private directory two levels under the sticky directory"
+    );
     let expected = if effective_uid() == 0 {
         PrivateSocketError::NotPrivate {
             path: PathBuf::from("/"),
@@ -221,6 +239,35 @@ fn open_refuses_the_system_temp_directories_and_the_root_directory() {
         }
     };
     assert_eq!(PrivateDir::open(Path::new("/")).unwrap_err(), expected);
+}
+
+#[test]
+fn a_test_root_is_removed_even_when_its_test_panics() {
+    let (sender, receiver) = mpsc::channel();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let root = private_root();
+        sender
+            .send(root.path().to_path_buf())
+            .expect("the root path is sent");
+        let locked = root.path().join("locked");
+        make_dir(&locked, 0o700);
+        make_dir(&locked.join("inner"), 0o700);
+        set_mode(&locked, 0o000);
+        #[cfg(target_os = "macos")]
+        {
+            let held = root.path().join("held");
+            make_dir(&held, 0o700);
+            add_acl(&held, "everyone deny delete");
+        }
+        panic!("deliberate panic: the root must still be removed");
+    }));
+    assert!(outcome.is_err(), "the closure panics");
+    let path = receiver.recv().expect("the root path");
+    assert!(
+        fs::symlink_metadata(&path).is_err(),
+        "{} was left behind",
+        path.display()
+    );
 }
 
 #[test]
@@ -322,17 +369,24 @@ fn an_ancestor_acl_that_allows_replacing_entries_is_refused() {
     make_dir(&ancestor, 0o755);
     let cell = ancestor.join("cell");
     make_dir(&cell, 0o700);
+    let user = std::process::Command::new("/usr/bin/id")
+        .arg("-un")
+        .output()
+        .expect("id runs");
+    let user = String::from_utf8(user.stdout).expect("utf-8");
     for rule in [
-        "everyone allow add_file,add_subdirectory,delete_child",
-        "everyone allow add_file",
-        "everyone allow add_subdirectory",
-        "everyone allow delete_child",
-        "everyone allow delete",
-        "everyone allow writesecurity",
-        "everyone allow chown",
-        "everyone allow list,search,add_file,directory_inherit",
+        "everyone allow add_file,add_subdirectory,delete_child".to_string(),
+        "everyone allow add_file".to_string(),
+        "everyone allow add_subdirectory".to_string(),
+        "everyone allow delete_child".to_string(),
+        "everyone allow delete".to_string(),
+        "everyone allow writesecurity".to_string(),
+        "everyone allow chown".to_string(),
+        "everyone allow list,search,add_file,directory_inherit".to_string(),
+        "everyone allow add_file,only_inherit,file_inherit".to_string(),
+        format!("user:{} allow add_file,delete_child", user.trim()),
     ] {
-        add_acl(&ancestor, rule);
+        add_acl(&ancestor, &rule);
         let opened = PrivateDir::open(&cell);
         clear_acl(&ancestor);
         assert_eq!(
@@ -349,8 +403,21 @@ fn an_ancestor_acl_that_allows_replacing_entries_is_refused() {
     clear_acl(&ancestor);
     assert_eq!(
         opened.map(|dir| dir.path().to_path_buf()),
-        Err(PrivateSocketError::ReplaceableByAcl { at: ancestor }),
+        Err(PrivateSocketError::ReplaceableByAcl {
+            at: ancestor.clone()
+        }),
         "an allow entry after a deny entry"
+    );
+    let middle = ancestor.join("middle");
+    make_dir(&middle, 0o755);
+    make_dir(&middle.join("cell"), 0o700);
+    add_acl(&ancestor, "everyone allow add_subdirectory,delete_child");
+    let opened = PrivateDir::open(&middle.join("cell"));
+    clear_acl(&ancestor);
+    assert_eq!(
+        opened.map(|dir| dir.path().to_path_buf()),
+        Err(PrivateSocketError::ReplaceableByAcl { at: ancestor }),
+        "an allow entry on a grandparent"
     );
 }
 
@@ -873,17 +940,47 @@ print $reply;
 exit 0;"#;
 
 #[cfg(target_os = "macos")]
+fn run_fixture_client(
+    prefix: &[&str],
+    socket: &Path,
+    mut serve: impl FnMut(),
+) -> std::process::Output {
+    use std::process::{Command, Stdio};
+
+    let (program, arguments) = prefix.split_first().expect("a nonempty command prefix");
+    let mut client = Command::new(program)
+        .args(arguments)
+        .args(["/usr/bin/perl", "-e", CONNECT_AND_SEND])
+        .arg(socket)
+        .arg("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"plasmosome.recovery\"}\n")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the fixture runs perl");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while client.try_wait().expect("wait").is_none() {
+        serve();
+        if Instant::now() > deadline {
+            let _ = client.kill();
+            panic!("the fixture client did not finish");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    serve();
+    client.wait_with_output().expect("collect")
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 #[ignore = "needs a distinct-UID fixture: set PLASMOSOME_OTHER_UID_PREFIX (owner decision O-8)"]
 fn a_different_uid_client_cannot_reach_the_socket() {
-    use std::process::{Command, Stdio};
-
     let Ok(prefix) = std::env::var("PLASMOSOME_OTHER_UID_PREFIX") else {
         panic!("unproved: no distinct-UID fixture (O-8)");
     };
     let prefix: Vec<&str> = prefix.split_whitespace().collect();
     let (program, arguments) = prefix.split_first().expect("a nonempty command prefix");
-    let identity = Command::new(program)
+    let identity = std::process::Command::new(program)
         .args(arguments)
         .args(["/usr/bin/id", "-u"])
         .output()
@@ -897,34 +994,46 @@ fn a_different_uid_client_cannot_reach_the_socket() {
     let euid = effective_uid();
     assert_ne!(other, euid, "the fixture runs as this test's own UID");
 
-    let root = private_root();
-    let listener = bind(&root, "sock");
-    let mut client = Command::new(program)
-        .args(arguments)
-        .args(["/usr/bin/perl", "-e", CONNECT_AND_SEND])
-        .arg(&listener.entry().path)
-        .arg("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"plasmosome.recovery\"}\n")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the fixture runs perl");
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let temp = &root_bases()[0];
+    let base = temp
+        .parent()
+        .expect("the per-user temp directory has a parent");
+    let root = tempfile::Builder::new()
+        .prefix("ps")
+        .tempdir_in(base)
+        .expect("a root other UIDs can search");
+    set_mode(root.path(), 0o755);
+    let open = root.path().join("open");
+    make_dir(&open, 0o755);
+    let control = UnixListener::bind(open.join("sock")).expect("bind the control socket");
+    control.set_nonblocking(true).expect("nonblocking");
+    set_mode(&open.join("sock"), 0o777);
+    let private = root.path().join("private");
+    make_dir(&private, 0o700);
+    let listener = PrivateListener::bind(
+        PrivateDir::open(&private).expect("a private directory opens"),
+        "sock",
+        euid,
+    )
+    .expect("bind");
+
+    let reached = run_fixture_client(&prefix, &open.join("sock"), || {
+        while let Ok((stream, _)) = control.accept() {
+            drop(stream);
+        }
+    });
+    assert!(
+        reached.status.success(),
+        "unproved: the fixture UID cannot reach the test root (O-8): {}",
+        String::from_utf8_lossy(&reached.stderr)
+    );
+
     let mut outcomes = Vec::new();
-    while client.try_wait().expect("wait").is_none() {
-        if let Some(accepted) = listener.accept().expect("accept") {
+    let output = run_fixture_client(&prefix, &listener.entry().path, || {
+        while let Some(accepted) = listener.accept().expect("accept") {
             outcomes.push(accepted);
         }
-        if Instant::now() > deadline {
-            let _ = client.kill();
-            panic!("the fixture client did not finish");
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    while let Some(accepted) = listener.accept().expect("accept") {
-        outcomes.push(accepted);
-    }
-    let output = client.wait_with_output().expect("collect");
+    });
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.stdout.is_empty(), "the other UID received a reply");
     if other == 0 {
@@ -953,6 +1062,9 @@ fn a_different_uid_client_cannot_reach_the_socket() {
             "uid {other}'s connect failed for another reason"
         );
         assert!(outcomes.is_empty(), "uid {other} reached accept");
-        println!("proved: uid {other} was refused at connect with EACCES (O-8)");
+        println!(
+            "proved: uid {other} reached a 0777 socket beside the private directory and was \
+             refused at connect with EACCES inside it (O-8)"
+        );
     }
 }
