@@ -29,7 +29,7 @@ pub use session_log::{
     LogFault, LogFile, LogStep, LogStore, OsLogStore, SessionLog, SessionLogError, read_events,
 };
 pub use state::{
-    CellId, CellRecord, CellStatus, ControllerState, GenomeName, InstanceName, InstanceNameError,
+    CellRecord, CellStatus, ControllerState, GenomeName, InstanceName, InstanceNameError,
     InstanceRecord, MockMode, PlasmidRecord,
 };
 pub use version::{
