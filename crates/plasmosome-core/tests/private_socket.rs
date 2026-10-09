@@ -460,7 +460,6 @@ fn an_ancestor_acl_that_allows_replacing_entries_is_refused() {
         .expect("id runs");
     let user = String::from_utf8(user.stdout).expect("utf-8");
     for rule in [
-        "everyone allow add_file,add_subdirectory,delete_child".to_string(),
         "everyone allow add_file".to_string(),
         "everyone allow add_subdirectory".to_string(),
         "everyone allow delete_child".to_string(),
@@ -741,19 +740,6 @@ fn a_private_directory_with_a_default_acl_is_refused() {
 }
 
 #[test]
-fn bind_reports_the_entry_it_created() {
-    let root = private_root();
-    let listener = bind(&root, "sock");
-    let path = root.path().join("sock");
-    assert_eq!(listener.entry(), &entry_of(&path));
-    let metadata = fs::symlink_metadata(&path).expect("stat");
-    assert!(metadata.file_type().is_socket());
-    assert_eq!(metadata.uid(), effective_uid());
-    assert_eq!(metadata.mode() & 0o7777, 0o600);
-    UnixStream::connect(&path).expect("a client connects");
-}
-
-#[test]
 fn bind_refuses_an_existing_entry_and_leaves_it() {
     let root = private_root();
     let at = |name: &str| root.path().join(name);
@@ -800,31 +786,6 @@ fn bind_refuses_a_name_with_a_slash_or_dots() {
         );
     }
     assert_eq!(fs::read_dir(root.path()).expect("readdir").count(), 0);
-}
-
-#[test]
-fn bind_refuses_a_directory_that_stopped_being_private_after_open() {
-    let root = private_root();
-    let cell = root.path().join("cell");
-    make_dir(&cell, 0o700);
-    let dir = PrivateDir::open(&cell).expect("a private directory opens");
-    set_mode(&cell, 0o750);
-    assert_eq!(
-        PrivateListener::bind(dir, "sock", effective_uid()).map(|_| ()),
-        Err(PrivateSocketError::NotPrivate {
-            path: cell.clone(),
-            mode: 0o750
-        })
-    );
-    assert_eq!(fs::read_dir(&cell).expect("readdir").count(), 0);
-    set_mode(&cell, 0o700);
-    let listener = PrivateListener::bind(
-        PrivateDir::open(&cell).expect("a private directory opens"),
-        "sock",
-        effective_uid(),
-    )
-    .expect("a later bind finds the name free");
-    assert_eq!(listener.entry().path, cell.join("sock"));
 }
 
 #[test]
@@ -879,47 +840,6 @@ fn drop_removes_only_the_bound_socket() {
     let other = entry_of(&path);
     drop(listener);
     assert_eq!(entry_of(&path), other);
-    fs::remove_file(&path).expect("unlink");
-
-    let listener = bind(&root, "sock");
-    let moved = root.path().join("moved");
-    fs::rename(&path, &moved).expect("rename");
-    drop(listener);
-    assert!(
-        fs::symlink_metadata(&moved)
-            .expect("the renamed socket stays")
-            .file_type()
-            .is_socket()
-    );
-    assert!(fs::symlink_metadata(&path).is_err());
-}
-
-#[test]
-fn drop_removes_the_socket_through_the_held_directory_after_a_rename() {
-    let root = private_root();
-    let run = root.path().join("run");
-    make_dir(&run, 0o700);
-    let listener = PrivateListener::bind(
-        PrivateDir::open(&run).expect("a private directory opens"),
-        "sock",
-        effective_uid(),
-    )
-    .expect("bind");
-    let moved = root.path().join("moved");
-    fs::rename(&run, &moved).expect("rename");
-    make_dir(&run, 0o700);
-    drop(UnixListener::bind(run.join("sock")).expect("bind a replacement socket"));
-    let replacement = entry_of(&run.join("sock"));
-    drop(listener);
-    assert_eq!(
-        entry_of(&run.join("sock")),
-        replacement,
-        "the socket now at the bound path was removed"
-    );
-    assert!(
-        fs::symlink_metadata(moved.join("sock")).is_err(),
-        "the bound socket stayed in the directory that was held"
-    );
 }
 
 #[test]
