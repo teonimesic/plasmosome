@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 
 use plasmosome_backend::{CellId, MockMode};
 
+use crate::manifest::ManifestError;
 use crate::state::{CellStatus, GenomeName};
 
 /// One control request as it arrives on the wire.
@@ -257,6 +258,8 @@ pub struct WireError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    fix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     verb: Option<String>,
 }
 
@@ -279,6 +282,7 @@ impl WireError {
             deadline_ms: None,
             detail: None,
             path: None,
+            fix: None,
             verb: None,
         }
     }
@@ -395,6 +399,19 @@ impl WireError {
         error
     }
 
+    /// Code 108 for a declaration `PlasmidManifest` refused: `path` is the
+    /// declaration file and `detail` the refusal's text. `fix` is the line the
+    /// author would write, present only when the refusal names a field; a file
+    /// that could not be read or is not TOML carries none.
+    pub fn manifest_refusal(path: String, error: &ManifestError) -> WireError {
+        let mut wire = WireError::manifest_invalid(error.to_string(), path);
+        wire.fix = match error {
+            ManifestError::Field { fix, .. } => Some(fix.clone()),
+            ManifestError::Io(_) | ManifestError::Parse(_) => None,
+        };
+        wire
+    }
+
     /// Code 109: the request would widen an existing grant.
     pub fn widening_forbidden(plasmid: String) -> WireError {
         let mut error = WireError::bare(
@@ -506,6 +523,7 @@ pub struct StatusParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::{ManifestError, PlasmidManifest};
     use crate::state::PlasmidRecord;
 
     fn raw_id(token: &str) -> Box<RawValue> {
@@ -539,6 +557,63 @@ mod tests {
             wire_fields(&error),
             expected,
             "the structured fields code {code} carries, on the wire as {value}"
+        );
+    }
+
+    const DECLARATION_PATH: &str = "plasmids/github-pr.toml";
+
+    fn author_refusal() -> ManifestError {
+        PlasmidManifest::parse(
+            "id = \"github-pr\"\ndescription = \"Reach the declared API.\"\n[network]\nports = [443]",
+        )
+        .expect_err("a network section with no hosts is refused")
+    }
+
+    fn declaration_refusals() -> [(ManifestError, Option<&'static str>); 3] {
+        [
+            (author_refusal(), Some("hosts = [\"api.example.com\"]")),
+            (
+                PlasmidManifest::parse("id = ").expect_err("a value is missing"),
+                None,
+            ),
+            (
+                ManifestError::Io(std::io::Error::other("the declaration could not be read")),
+                None,
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_manifest_refusal_carries_the_fix_only_when_the_declaration_names_one() {
+        for (error, fix) in declaration_refusals() {
+            let wire = WireError::manifest_refusal(DECLARATION_PATH.to_string(), &error);
+            let value = serde_json::to_value(&wire).expect("a wire error serializes");
+            assert_eq!(value["code"], Value::from(108), "{value}");
+            assert_eq!(value["path"], Value::from(DECLARATION_PATH), "{value}");
+            assert_eq!(value["detail"], Value::from(error.to_string()), "{value}");
+            assert_eq!(value.get("fix").and_then(Value::as_str), fix, "{value}");
+            assert_eq!(
+                value.as_object().unwrap().contains_key("fix"),
+                fix.is_some(),
+                "a refusal with no fix has no fix key at all: {value}"
+            );
+            let line = serde_json::to_string(&wire).expect("a wire error serializes");
+            let back: WireError = serde_json::from_str(&line).expect("a wire error reads back");
+            assert_eq!(back, wire, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_manifest_refusal_names_the_plasmid_and_field_in_its_detail() {
+        let wire = WireError::manifest_refusal(DECLARATION_PATH.to_string(), &author_refusal());
+        let value = serde_json::to_value(&wire).expect("a wire error serializes");
+        assert_eq!(
+            value["detail"],
+            Value::from(
+                "plasmid github-pr: network.hosts: a network section must name at least one host; \
+                 write hosts = [\"api.example.com\"]"
+            ),
+            "{value}"
         );
     }
 
@@ -600,6 +675,11 @@ mod tests {
             ),
             108,
             &["detail", "path"],
+        );
+        expect_code_and_fields(
+            WireError::manifest_refusal(DECLARATION_PATH.to_string(), &author_refusal()),
+            108,
+            &["detail", "fix", "path"],
         );
         expect_code_and_fields(
             WireError::widening_forbidden("github-pr".to_string()),

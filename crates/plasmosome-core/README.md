@@ -51,7 +51,7 @@ impl.wasm = "github-pr.wasm"
 }
 ```
 
-Missing or invalid purpose, tool declarations and missing/non-string IDs return
+Missing or invalid purpose, tool declarations and missing, empty or non-string IDs return
 `ManifestError::Field` with the declaration ID when available, a TOML field path and a suggested
 repair. Credential-reference refusals use that same form, including the indexed reference and,
 for command credentials, the quoted command key. So does a `ports` value that is not a list, or an
@@ -62,7 +62,18 @@ otherwise `remove this entry`. A value that is not a list is named `network.port
 `ports = [P]` or `remove this entry`. Following a fix never drops a valid declared port, repeats
 one, or adds one the author did not evidently write. A port inside a nested array, an inline table
 or a string such as `"443, 8080"` is removed, not unwrapped. The parser itself never drops or
-wraps an entry. Other manifest errors retain their existing forms. `ToolDeclaration` lives in
+wraps an entry.
+
+Every other refusal of what a declaration says takes the same form, naming the plasmid: a network
+section that is not a table or names no host; `hosts`, `pin_cidrs` or `[mock]` `hosts` that are
+not lists of strings; a declaration with no capability and no implementation; `[commands]` with
+no commands table; a command with no `exec`; and a `[mock]` with no `[network]`, or naming a host
+`[network]` does not declare, whose fix is that one host to add. A list entry that is not a
+string is named by its index, with fix `remove this entry`. A command's refusals name it by its
+TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file could not be read) and
+`ManifestError::Parse` (the text is not TOML) carry no field: the TOML parser reports a position,
+not a field path, and naming one would be a guess. `WireError::manifest_refusal` turns any of
+them into code 108, carrying the fix when there is one. `ToolDeclaration` lives in
 `plasmosome_core::manifest`; `RegistryEntry` includes the tool's description.
 
 Credential `delivery` is optional in both `[secrets]` and command-local refs. Omission derives one
