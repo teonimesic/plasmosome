@@ -913,6 +913,51 @@ mod tests {
         assert!(toml::from_str::<Genome>(&map_form_kind).is_err());
     }
 
+    #[test]
+    fn release_keys_sort_like_the_catalog() {
+        use ArtifactKind::{Genome, Plasmid};
+        use Population::{Curated, User};
+        let key = |kind, population, publisher, name, version| {
+            ReleaseKey::new(kind, population, publisher, name, version).unwrap()
+        };
+        let catalog = vec![
+            key(Genome, Curated, "z", "z", "9"),
+            key(Genome, User, "a", "a", "1"),
+            key(Plasmid, Curated, "a", "a", "1"),
+            key(Plasmid, Curated, "a", "a", "1.10.0"),
+            key(Plasmid, Curated, "a", "a", "1.9.0"),
+            key(Plasmid, Curated, "a", "a", "B"),
+            key(Plasmid, Curated, "a", "a", "a"),
+            key(Plasmid, Curated, "a", "a-b", "1"),
+            key(Plasmid, Curated, "a", "a1", "1"),
+            key(Plasmid, Curated, "a", "b", "0"),
+            key(Plasmid, Curated, "b", "a", "0"),
+            key(Plasmid, User, "a", "a", "0"),
+        ];
+        let mut sorted = catalog.clone();
+        sorted.reverse();
+        sorted.sort();
+        assert_eq!(sorted, catalog);
+        let low = Digest::from_sha256([0; 32]);
+        let high = Digest::from_sha256([0xff; 32]);
+        assert!(low < high && low.to_string() < high.to_string());
+        let first = catalog[0].clone();
+        let mut references = vec![
+            ReleaseRef::new(catalog[1].clone(), low),
+            ReleaseRef::new(first.clone(), high),
+            ReleaseRef::new(first.clone(), low),
+        ];
+        references.sort();
+        assert_eq!(
+            references,
+            vec![
+                ReleaseRef::new(first.clone(), low),
+                ReleaseRef::new(first, high),
+                ReleaseRef::new(catalog[1].clone(), low),
+            ]
+        );
+    }
+
     proptest! {
         #[test]
         fn generated_identifiers_round_trip(
