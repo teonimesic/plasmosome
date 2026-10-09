@@ -124,6 +124,10 @@ whether the verb should wait instead). `plasmosome recovery` sends `plasmosome.r
 page on one connection, because spec 001 §3.3a binds a capture to its connection. It prints only
 the complete, checked logical result, never a page or a prefix.
 
+A caller that waits for a process runs `plasmosome exec status --cell C --exec-id E` again, with
+its own pause between runs, until `result.state` is no longer `running`. Every run exits 0
+whatever the process did, so the loop reads the state, not the exit code.
+
 The grammar is spec 001 §3's v1 verb set plus spec 020 §5's registry commands. Verbs spec 001
 marks RESERVED are not commands, and naming one is a usage error. "Changes state" decides exit 3
 (section 4).
@@ -573,7 +577,8 @@ Two tasks, which together are the first deliverable. They can land in either ord
 - The root README's status quickstart puts its sockets in a private directory under the user's
   own temporary directory, at its canonical path (on macOS, `/private/var/folders/...`), not under
   the shared `/private/tmp`. It asks the controller with `plasmosome status --socket` instead of
-  its hand-written controller client.
+  its hand-written controller client, and waits for the controller to come up by repeating that
+  command while it exits 1.
 - Spec 001 §6, item 1 records that the command exists.
 
 Each later command arrives in its own task, once its verb's spec is accepted and a daemon serves
