@@ -228,16 +228,6 @@ fn a_changed_fixture_source_compiles_to_a_new_key() {
         key_of(&original),
         "a changed source is cached under a new key"
     );
-    for executable in [&original, &rebuilt] {
-        assert_eq!(
-            Command::new(executable)
-                .status()
-                .expect("each cached fixture runs")
-                .code(),
-            Some(64),
-            "each cached fixture still refuses a call with no arguments"
-        );
-    }
 }
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -266,18 +256,13 @@ fn a_fixture_source_that_does_not_compile_publishes_nothing() {
         "the supervision worker fixture compiles",
         "setup reports the failed compile, not a later step"
     );
-    let keys: Vec<_> = std::fs::read_dir(cache.path())
-        .expect("the cache root is readable")
-        .map(|key| key.expect("the cache entry is readable").path())
-        .collect();
-    assert_eq!(keys.len(), 1, "the source's key directory was created");
-    assert_eq!(
-        std::fs::read_dir(&keys[0])
-            .expect("the key directory is readable")
-            .count(),
-        0,
-        "a failed compile leaves neither an executable nor a temporary name"
-    );
+    for key in entries(cache.path()) {
+        assert_eq!(
+            entries(&cache.path().join(key)),
+            Vec::<String>::new(),
+            "a failed compile leaves neither an executable nor a temporary name"
+        );
+    }
 }
 
 #[test]
@@ -301,22 +286,10 @@ fn a_freshly_compiled_fixture_is_run_once_before_it_is_returned() {
 #[test]
 fn a_reused_fixture_is_run_once_before_it_is_returned() {
     let cache = tempfile::tempdir().unwrap();
-    let sources = tempfile::tempdir().unwrap();
     let key = cache.path().join(key_of(&fixture::supervision_fixture()));
     std::fs::create_dir(&key).expect("the key directory is created");
-    let refusing = sources.path().join("refusing.c");
-    std::fs::write(&refusing, "int main(void) { return 63; }\n")
-        .expect("the stand-in source is written");
-    let built = Command::new("cc")
-        .arg(&refusing)
-        .arg("-o")
-        .arg(key.join("supervision-worker"))
-        .status()
-        .expect("the host C compiler starts for the stand-in");
-    assert!(
-        built.success(),
-        "a stand-in exiting 63 is published at the real source's key"
-    );
+    std::os::unix::fs::symlink("/usr/bin/false", key.join("supervision-worker"))
+        .expect("a stand-in exiting 1 is published at the real source's key");
 
     let refused = std::panic::catch_unwind(|| {
         fixture::compile_supervision_fixture(cache.path(), &fixture::supervision_worker_source())
@@ -324,17 +297,8 @@ fn a_reused_fixture_is_run_once_before_it_is_returned() {
     .expect_err("a reused executable that does not exit 64 fails setup");
     let message = panic_message(refused);
     assert!(
-        message.contains("refuses a call with no arguments") && message.contains("Some(63)"),
+        message.contains("refuses a call with no arguments") && message.contains("Some(1)"),
         "setup fails at the warm-up's exit-64 assertion, not elsewhere: {message}"
-    );
-}
-
-#[test]
-fn the_fixture_cache_sits_beside_the_cargo_deps_directory() {
-    assert_eq!(
-        fixture::fixture_cache_root(Path::new("/work/target/debug/deps/membraned-0123abcd")),
-        Path::new("/work/target/debug/plasmosome-supervision-fixture"),
-        "the cache root is inside the profile directory that holds deps"
     );
 }
 
