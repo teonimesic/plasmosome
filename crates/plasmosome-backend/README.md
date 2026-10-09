@@ -43,19 +43,20 @@ filesystem that ignores case or Unicode normalization, such as default APFS, can
 two names. Spec 017's preflight creates nothing, so it cannot compare endpoints that do not
 exist yet; after binding both, the adapter compares the `(st_dev, st_ino)` that `lstat` reports
 for the two paths, never `fstat` on the socket descriptors, and treats a match as a failed grant
-under spec 017's incomplete-effect rules. Decoding refuses a missing, unknown or positional
-field, and decoding JSON text also refuses a repeated field; a `serde_json::Value` or `Map` keeps only the
-last copy of a repeated key. Decoding and encoding both refuse any value `validate` refuses;
-neither reads the filesystem or resolves a name. `Capability` does not carry these records yet.
+under spec 017's incomplete-effect rules. Decoding refuses a missing or unknown field and a
+positional array, and decoding JSON text also refuses a repeated field; a `serde_json::Value` or
+`Map` keeps only the last copy of a repeated key. Decoding and encoding both refuse any value
+`validate` refuses; neither reads the filesystem or resolves a name. `Capability` does not carry
+these records yet.
 
 A `Capability` checks its own strings with the same rules. `SessionFile.path`, `UdsSocket.path`,
 `Mount.source` and `Mount.target` are canonical absolute paths; `host`, `route` and `name` are
 exact selection names and only need to be NUL-free. A `UniverseOp` checks the capability it
 creates. Both refuse an invalid value on decode and on encode, so every record that carries one
 does too, and an invalid capability can be neither read from nor written to a log.
-`FakeBackend`'s `apply` and `plant` check before any change and return
-`BackendError::InvalidOperation` naming the address and the broken rule. `grant` does not check
-yet.
+The trait's `apply` and `plant` refuse an invalid value before any change, with
+`BackendError::InvalidOperation` naming the address and the broken rule; `FakeBackend` does.
+`grant` does not check yet.
 
 Every holding is owned by a `CellOwner { cell, plugin }`: the same plugin attached to two cells is
 two owners, and no comparison looks at the plugin alone. It decodes only from a JSON object with

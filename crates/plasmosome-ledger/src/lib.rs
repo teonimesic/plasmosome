@@ -579,9 +579,11 @@ impl Ledger {
         &self.effects
     }
 
-    /// Appends one record per effect to `path`, creating it and its parent directories when
-    /// missing. Every record is encoded before the file is touched, so an effect that cannot
-    /// be encoded returns `InvalidData` and leaves the file, or its absence, as it was.
+    /// Appends one record for every effect this ledger holds to `path`, creating it and its
+    /// parent directories when missing. That includes the effects `open_file` read, so appending
+    /// a ledger opened from the same file writes those records a second time. Every record is
+    /// encoded before the file is touched, so an effect that cannot be encoded returns
+    /// `InvalidData` naming it and leaves the file, or its absence, as it was.
     pub fn append_to_file(&self, path: &Path) -> std::io::Result<usize> {
         let records = self.encode()?;
         if let Some(parent) = path.parent()
@@ -599,7 +601,7 @@ impl Ledger {
     }
 
     /// Writes one record per effect. Every record is encoded first, so an effect that cannot
-    /// be encoded returns `InvalidData` and writes nothing.
+    /// be encoded returns `InvalidData` naming it and writes nothing.
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<usize> {
         writer.write_all(&self.encode()?)?;
         writer.flush()?;

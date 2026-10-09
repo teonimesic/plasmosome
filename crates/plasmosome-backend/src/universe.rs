@@ -455,8 +455,8 @@ impl Diff {
 
 /// One recorded operation: an exact address, its owner and the capability it creates.
 ///
-/// Decoding refuses a missing, unknown or positional field, and decoding and encoding both
-/// refuse any operation `validate` refuses. A value built in memory is not checked: call
+/// Decoding refuses a missing or unknown field and a positional array, and decoding and encoding
+/// both refuse any operation `validate` refuses. A value built in memory is not checked: call
 /// `validate` before acting on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UniverseOp {

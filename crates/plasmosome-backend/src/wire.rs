@@ -10,7 +10,12 @@ use serde::{Deserialize, Deserializer, forward_to_deserialize_any};
 /// fields without naming either, so two fields of one type can swap unnoticed. A derived shape
 /// decoded through `ObjectOnly::new(deserializer)` refuses a sequence as an invalid type. Only
 /// the value it wraps is affected: every field still decodes through its own type, so each
-/// nested record must refuse a sequence itself. Wrap only a struct or an enum.
+/// nested record must refuse a sequence itself.
+///
+/// Wrap only a derived struct, or an enum that serde tags externally (the default). Anything
+/// else is read as a map and refused even when valid: an untagged or internally tagged enum, an
+/// `Option`, a sequence. It reads a struct with `deserialize_map`, not `deserialize_struct`, so
+/// it needs a self-describing format such as JSON.
 pub struct ObjectOnly<D>(D);
 
 impl<D> ObjectOnly<D> {

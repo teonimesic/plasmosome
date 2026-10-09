@@ -274,12 +274,13 @@ validated_object_serde!(
     BrokerLaunch through BrokerLaunchShape
 );
 
-/// The first structural rule a recipe breaks. `field` is the serde field name; every word of
-/// `command` reports as `"command"`.
+/// The first structural rule a recipe or a capability breaks. `field` is the serde field name;
+/// every word of `command` reports as `"command"`.
 ///
 /// A path field must be a canonical absolute path: NUL-free, starting with `/`, with no empty,
-/// `.` or `..` component and no trailing `/`. `/` alone is refused, because every path field
-/// names a file, a socket or a program. A path that breaks this is refused, never rewritten, so
+/// `.` or `..` component and no trailing `/`. `/` alone is refused: a path field names a file, a
+/// socket, a program or a mount's directory, never the root, so a mount can neither expose the
+/// whole host nor cover the guest's root. A path that breaks this is refused, never rewritten, so
 /// an accepted path has one textual spelling and round-trips unchanged. One textual spelling is
 /// not one file: see `BrokerLaunch::validate`. Later `command` words are arguments, not paths,
 /// and only need to be NUL-free.

@@ -47,9 +47,9 @@ impl GrantKind {
 
 /// A capability, identified by its class and its exact fields.
 ///
-/// Decoding refuses a missing, unknown or positional field, and decoding and encoding both
-/// refuse any value `validate` refuses. A value built in memory is not checked: call `validate`
-/// before acting on it.
+/// Decoding refuses a missing or unknown field and a positional array, and decoding and encoding
+/// both refuse any value `validate` refuses. A value built in memory is not checked: call
+/// `validate` before acting on it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
     SessionFile { path: String },
@@ -336,6 +336,8 @@ pub trait EnforcementBackend {
     fn grant(&mut self, grant: Grant) -> LedgerEntry;
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError>;
     fn snapshot_os_state(&self) -> OsState;
+    /// Records `op` under the identity and owner it names. An operation whose `validate` fails
+    /// returns `InvalidOperation` before any change.
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError>;
     /// Withdraws only the holding at the removal's exact address whose full capability and
     /// cell-qualified owner match. It resolves that holding before draining: a mismatch returns
@@ -350,6 +352,8 @@ pub trait EnforcementBackend {
         owner: &CellOwner,
         drain: DrainSpec,
     ) -> Result<(), BackendError>;
+    /// Records an observed object, such as residue, under its own identity. An object whose
+    /// capability fails `validate` returns `InvalidOperation` before any change.
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError>;
 }
 
