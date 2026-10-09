@@ -1088,6 +1088,10 @@ mod tests {
             let address: IpAddr = written.parse().unwrap();
             assert_eq!(address.to_string(), displayed, "Display of {written}");
             assert_accepted(&proxy(displayed, 443));
+            if written != displayed {
+                let expected = uncanonical_address(written, displayed);
+                assert_refused(&proxy(written, 443), expected);
+            }
         }
         let mapped: IpAddr = "0:0:0:0:0:ffff:7f00:1".parse().unwrap();
         assert_eq!(mapped.to_string(), "::ffff:127.0.0.1");
