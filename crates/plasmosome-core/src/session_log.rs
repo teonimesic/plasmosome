@@ -243,12 +243,15 @@ impl LogFile for OsLogFile {
 /// The append-only event log one instance's cells share through a single value of this type.
 /// Each line is one JSON object whose envelope is `ts_ms`, `seq` and `kind`.
 ///
-/// An open log holds an exclusive advisory lock (`flock`) on its file, so any other open of that
-/// file, from this process or another, returns [`SessionLogError::Locked`]. The lock is released
-/// when this value is dropped, or as soon as an append poisons it: before that append returns its
-/// [`SessionLogError::Io`], before a panic inside it continues to unwind, and once it has written
-/// `seq` `u64::MAX`. The lock is advisory: it stops other `SessionLog`s, not a process that
-/// writes the file without asking for it.
+/// An open log holds an exclusive advisory lock (`flock`) on its file, so on a local filesystem
+/// any other open of that file, from this process or another, returns
+/// [`SessionLogError::Locked`]. The lock is released when this value is dropped, or as soon as an
+/// append poisons it: before that append returns its [`SessionLogError::Io`], before a panic
+/// inside it continues to unwind, and once it has written `seq` `u64::MAX`. The lock is
+/// advisory: it stops other `SessionLog`s, not a process that writes the file without asking
+/// for it. On NFS, Linux emulates `flock` with per-process record locks, so there a second open
+/// from the same process is not refused, and closing any other descriptor of the file, as
+/// [`read_events`] does, drops the lock.
 ///
 /// The lock belongs to the open file, which a child process forked while the log is open shares.
 /// Dropping or poisoning this value unlocks the file explicitly, so such a child does not keep
@@ -289,7 +292,9 @@ impl SessionLog {
     /// Before returning, every open syncs the file, then its directory and each ancestor of that
     /// directory up to the root, whether or not this call created them. A directory an earlier,
     /// interrupted open created is therefore made durable by the next open. An ancestor this
-    /// process cannot open for reading fails the open at [`LogStep::SyncDirectory`]. Syncing the
+    /// process cannot open for reading fails the open at [`LogStep::SyncDirectory`]. On macOS
+    /// each directory sync is an `F_FULLFSYNC`, measured at 5 ms or more on every call, so an
+    /// open pays that for every component of the log's absolute path. Syncing the
     /// file again does not prove that a line written before a failed sync is on disk: on Linux a
     /// failed `fsync` can drop the unwritten pages, and the next sync then succeeds without them.
     /// After an append that returned an error, assert that event again rather than relying on
