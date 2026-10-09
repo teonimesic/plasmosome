@@ -532,15 +532,16 @@ mod tests {
         let too_long = padded_request(MAX_REQUEST_BYTES + 1);
         assert_eq!(too_long.len(), MAX_REQUEST_BYTES + 1);
         let mut stream = over_cap.get_ref().try_clone().expect("clone for writing");
-        let _ = writeln!(stream, "{too_long}");
-        let _ = stream.flush();
+        stream
+            .write_all(too_long.as_bytes())
+            .expect("the request reaches the server");
         let reply = read_reply(&mut over_cap);
         assert_eq!(reply.get("id"), Some(&Value::Null));
         assert_eq!(reply.pointer("/error/code"), Some(&json!(INVALID_REQUEST)));
         let mut after = String::new();
         assert_eq!(
-            over_cap.read_line(&mut after).ok(),
-            Some(0),
+            over_cap.read_line(&mut after).map_err(|error| error.kind()),
+            Ok(0),
             "the connection closes after an over-long line, got {after:?}"
         );
     }
