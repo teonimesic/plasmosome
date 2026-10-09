@@ -151,22 +151,33 @@ mod tests {
     }
 
     struct RecordsWhereItCloses<'a> {
-        fd: OwnedFd,
+        fd: Option<OwnedFd>,
         closed_under_lock: &'a Cell<Option<bool>>,
     }
 
     impl AsFd for RecordsWhereItCloses<'_> {
         fn as_fd(&self) -> BorrowedFd<'_> {
-            self.fd.as_fd()
+            self.fd
+                .as_ref()
+                .expect("the descriptor is still held")
+                .as_fd()
+        }
+    }
+
+    impl From<RecordsWhereItCloses<'_>> for OwnedFd {
+        fn from(mut held: RecordsWhereItCloses<'_>) -> OwnedFd {
+            held.fd.take().expect("the descriptor is still held")
         }
     }
 
     impl Drop for RecordsWhereItCloses<'_> {
         fn drop(&mut self) {
-            self.closed_under_lock.set(Some(matches!(
-                SPAWN_LOCK.try_read(),
-                Err(TryLockError::WouldBlock)
-            )));
+            if self.fd.is_some() {
+                self.closed_under_lock.set(Some(matches!(
+                    SPAWN_LOCK.try_read(),
+                    Err(TryLockError::WouldBlock)
+                )));
+            }
         }
     }
 
@@ -227,7 +238,7 @@ mod tests {
         let closed_under_lock = Cell::new(None);
         let created = with_descriptors_held(|_held| {
             Ok(RecordsWhereItCloses {
-                fd: inheritable_null(),
+                fd: Some(inheritable_null()),
                 closed_under_lock: &closed_under_lock,
             })
         });
