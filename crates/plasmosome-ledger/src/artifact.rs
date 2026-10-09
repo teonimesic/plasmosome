@@ -333,6 +333,7 @@ pub struct ReleaseRef {
 }
 
 impl ReleaseRef {
+    /// Pairs a key with its digest. Both are already checked, so this cannot fail.
     pub fn new(key: ReleaseKey, digest: Digest) -> ReleaseRef {
         ReleaseRef { key, digest }
     }
@@ -439,13 +440,17 @@ pub fn check_version(text: &str) -> Result<(), ArtifactRefError> {
     }
 }
 
-/// Why a text is not a spec 020 reference value. `field` names the record field, and every
-/// variant keeps the refused text unchanged.
+/// Why a text is not a spec 020 reference value. Every variant keeps the refused text
+/// unchanged, and `Display` starts with the field's name and the quoted text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactRefError {
+    /// Not the lower-case hyphenated text of a non-nil UUID.
     RegistryId { text: String },
+    /// Not `sha256:` followed by 64 lower-case hex digits.
     Digest { text: String },
+    /// A publisher or name, as `field` says, outside `[a-z0-9]+(-[a-z0-9]+)*` or over 64 bytes.
     Identifier { field: &'static str, text: String },
+    /// Outside `[A-Za-z0-9][A-Za-z0-9._-]*` or over 128 bytes.
     Version { text: String },
 }
 
