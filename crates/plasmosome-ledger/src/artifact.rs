@@ -161,10 +161,8 @@ impl Digest {
             return Err(refused());
         }
         let mut bytes = [0; 32];
-        for (byte, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
-            let high = nibble(pair[0]).ok_or_else(refused)?;
-            let low = nibble(pair[1]).ok_or_else(refused)?;
-            *byte = high << 4 | low;
+        for (byte, &[high, low]) in bytes.iter_mut().zip(digits.as_chunks::<2>().0) {
+            *byte = nibble(high).ok_or_else(refused)? << 4 | nibble(low).ok_or_else(refused)?;
         }
         Ok(Digest(bytes))
     }
