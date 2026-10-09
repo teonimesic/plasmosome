@@ -134,4 +134,5 @@ not in the root file.
 The netstack shim and the vsock bridges belong to this crate by that rule, and none of it is
 built: the modules present are `brokers`, `control`, `daemon`, `exec`, `readiness`, `runtime`
 and `vmm`.
-They arrive in the next P1 step.
+Native task `plasmosome-qep`, which boots one real cell from the qualified Darwin runtime bundle,
+carries the first part of that work: the vsock endpoints and their handshake.

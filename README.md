@@ -52,7 +52,8 @@ reserved. See the [`plasmosome-core`](crates/plasmosome-core/README.md),
 [`plasmid`](crates/plasmid/README.md) guides for their narrower current contracts.
 
 The SDK WIT, plasmid declaration scaffold, VM launch/orchestration and guest execution remain
-separate work; the scaffold and SDK residuals are tracked in native task `plasmosome-q7d`.
+separate work. Native task `plasmosome-soh` carries the declaration scaffold. `plasmid-sdk` is
+reserved in this repository and unimplemented, and no spec defines its interface yet.
 
 ## Status-only quickstart
 
