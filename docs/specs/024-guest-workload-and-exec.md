@@ -1,7 +1,7 @@
 ---
 id: 024
 title: The guest workload, and how cell.exec reaches it
-status: draft
+status: accepted
 intents: [009, 003, 011, 004]
 ---
 
@@ -24,7 +24,8 @@ control channel, creating a user namespace, mounting or tracing PID1, fail with 
 error; the process is never killed for trying. When a plasmid is attached, its mount and its
 proxied hosts appear inside the namespaces the process already runs in, without a restart. When
 one is removed, the removal does not wait for the workload: the grant's backing is revoked, and a
-reference the process still holds into it fails with an ordinary error from then on. A started
+reference the process still holds into it fails with an ordinary error from then on. A write to a
+stream whose peer is gone also raises `SIGPIPE`, as on any Linux system. A started
 process is not a capability: it is not journaled or observed as a grant, and removing a plasmid
 does not stop it. It survives a controller restart when recovery re-adopts the cell.
 
@@ -125,6 +126,9 @@ None of the three verbs writes a journal record or takes part in spec 008's tran
   was sent to the guest.
 - `workload_stop` is a mutation, but it is exempt from waiting: `cell.kill` must not wait behind a
   stuck drain.
+- At most 16 waiting `exec.status` requests per cell are outstanding at once, a provisional
+  default. Beyond that, a request is answered at once as if `wait` were false. Waits use capacity
+  of their own on the normal lane, never the capacity `install`, `activate` or `drain` need.
 - No grant transaction waits for an `exec` or a status request. None of them enters the
   withdrawal lane, so none can delay a Force.
 
@@ -315,40 +319,64 @@ operation started after the removal replies, through a reference a process still
 withdrawn grant, fails with one named error in both branches: a read, write, `stat`, directory
 listing or lookup, through a working directory or an open descriptor. The expected value is
 `ENOTCONN`; the implementing task measures it on the pinned runtime and records it here before
-item 10 runs. An operation in flight at the revocation ends with an error too, expected
-`ECONNABORTED`, within the removal's deadline. `close()` succeeds. The process keeps running.
+item 10 runs. An operation in flight at the revocation ends with an error too, within the
+removal's deadline; the expected value is `ECONNABORTED`, measured and recorded the same way.
+`close()` succeeds. The process keeps running.
 After the last holding at a target goes, a lookup by path there fails with `ENOENT`. All of this
 rests on spec 017's direct IO, zero cache timeouts and refusal of file-backed mappings
 (`017:416-424`), which need O-7 (§8); without them, cached pages and mappings outlive the grant.
 
 **A revoked binding.** Observation reports the binding as `revoked` while references to it
-remain. It counts as absent, so `plasmid.remove` completes while a process sits in the target.
-Once the removal has completed, no host authority remains to match it, so it is left out of
-association checks, residue, drift and recovery matching, and it never blocks readiness or a
-later attach at the same target (the amendments to spec 001 and spec 008 below).
+remain. It counts as absent, so `plasmid.remove` completes while a process sits in the target. It
+accounts for its own guest object, the aborted connection or the withdrawn grant's inodes on a
+shared connection, so that object is never unknown. It is not a holding at its target: when the
+surviving peer is later removed, that peer's connection counts as its own and is aborted. Once the
+removal has completed, the binding is exempt only from host-authority association, residue,
+drift and readiness: no host authority remains to match it, and it never blocks readiness or a
+later attach at the same target. The host side is checked against the supervisor's own inventory
+keyed by GrantId (gates, source roots, handles, listeners and flows), as spec 001 §4.2's absence
+check requires (`001:1040-1041`). It must hold nothing for that grant; a holding found there has
+no journal record and is an unknown holding (`008:400-402`). The amendments to spec 001 and spec
+008 below say the same.
 
 **A binding that stands while the host refuses it.** A grant can stop serving while its guest
 binding stands: a fence (draft spec 028), a graceful removal's reversible pause, or a Force
 removal before guest cleanup. The host gate refuses (spec 001 §4.2's `grant_inactive`), and the
 guest turns that into an ordinary error:
 
+Every error in this table is expected, not yet measured: the implementing task measures each on
+the pinned runtime and records it here, as for Mount above.
+
 | Grant | Refused while standing: a fence, or Force before guest cleanup | During a graceful removal's reversible pause |
 | --- | --- | --- |
-| Mount | An operation through a reference bound to the grant: expected `ENOTCONN`, as above. A fresh lookup when the only grant at the target is refused: expected `ENOENT`. | Each operation fails at once with the same errors. A failed operation destroys nothing, so after a restore new operations succeed. |
-| UdsSocket or Broker stream | The stream is closed: a read returns end-of-file, and a write fails with `EPIPE`. A new connection is closed the same way as soon as it is accepted. | Nothing is closed, since the pause may be undone. Data waits, and a blocked read or write returns when the pause is restored, or fails as on the left when the removal goes ahead. |
-| ProxyMap flow | An established TCP flow is reset, so its next call fails with `ECONNRESET`. A new TCP connect fails with `ECONNREFUSED`. A UDP datagram on a refused flow gets an ICMP port unreachable, so a connected socket's next call fails with `ECONNREFUSED`. DNS answers NXDOMAIN. No flow is dropped silently. | As for a stream. |
+| Mount | An operation through a reference bound to the grant: `ENOTCONN`, as above. A fresh lookup when the only grant at the target is refused: `ENOENT`. | Each operation, a fresh lookup included, fails at once with `ENOTCONN`, so a file that still stands never looks deleted. A failed operation destroys nothing, so after a restore new operations succeed. |
+| UdsSocket or Broker stream | The stream is closed: a read returns end-of-file, and a write fails with `EPIPE`. A new connection is closed the same way as soon as it is accepted. | Nothing is closed, since the pause may be undone. Data waits, and a blocked read or write returns when the pause is restored, or gets the outcome on the left when the removal goes ahead. |
+| ProxyMap flow | An established TCP flow is reset, so its next call fails with `ECONNRESET`. A new TCP connect fails with `ECONNREFUSED`, never a silent drop. A UDP datagram on a refused flow gets an ICMP port unreachable, so a connected socket's next call fails with `ECONNREFUSED`. DNS answers NXDOMAIN (`001:1068-1069`). | As for a stream. |
+
+Two outcomes have kernel caveats. A Unix stream read can fail with `ECONNRESET` instead of
+returning end-of-file, when PID1 closes its end while the workload's bytes sit unread. An
+unconnected UDP socket is not told of the ICMP error unless it set `IP_RECVERR`, so its receive
+waits, as for any lost datagram.
 
 A write to a closed stream also raises `SIGPIPE`, as for any stream whose peer has gone, and a
-process that has not ignored it ends. The guest could prevent that only by changing the process's
-signal dispositions, which §4 resets to the defaults, or by dropping writes silently, so it does
-neither; a reader sees end-of-file and no signal. SessionFile handles belong to the spec that
-realizes SessionFile in the guest.
+process that has not ignored it ends. The same holds for a TCP flow: after the reset, the first
+write fails with `ECONNRESET` and a later one raises `SIGPIPE`. The guest could prevent that only
+by changing the process's signal dispositions, which §4 resets to the defaults, or by dropping
+writes silently, so it does neither; a reader sees end-of-file and no signal. SessionFile handles
+belong to the spec that realizes SessionFile in the guest.
 
-**No call waits forever.** A workload call on a refused, paused or removed grant fails at once
-when it starts after the gate closed. One already in progress, or waiting on a paused stream or
-flow, returns no later than that removal's or pause's deadline. Host IO that cannot be
-interrupted by then keeps the removal incomplete, as spec 001 §4.2 says, and the workload's call
-does not wait for it.
+**No call waits forever.** Each workload call on a refused, paused or removed grant returns
+within a bound:
+
+- one that starts after the gate closed fails at once, except on a paused stream or flow;
+- one on a paused stream or flow waits, and returns by the pause's deadline at the latest, when
+  the pause is restored or the removal goes ahead. A pause expires at its original host deadline
+  (`001:993-995`), so the guest needs no deadline of its own;
+- one already in progress when its grant is revoked or refused returns by that removal's
+  deadline.
+
+Host IO that cannot be interrupted by then keeps the removal incomplete, as spec 001 §4.2 says,
+and the workload's call does not wait for it.
 
 ### 10. What a started process is not
 
@@ -441,10 +469,14 @@ active | draining | closed`." with:
 > GuestAdmission is exactly `staged | active | draining | closed | revoked`. `revoked` is a Mount
 > binding whose backing is revoked under spec 024: the guest serves nothing for its grant and the
 > host side is closed, while workload references to it may remain, and every use of them fails.
-> Once its removal has completed, a `revoked` binding needs no retained host authority or cell
-> association: the association, attribution and inventory rules below leave it out, residue,
-> drift and recovery matching ignore it, and it never blocks readiness or a later attach at the
-> same target. The host still verifies that it holds no access for that grant.
+> A `revoked` binding accounts for its own physical object, the aborted connection or the
+> withdrawn grant's inodes on a shared connection, so the inventory rules below still apply to
+> that object. Once its removal has completed, it is exempt only from host-authority
+> association, residue, drift and readiness: it needs no retained host authority, and it never
+> blocks readiness or a later attach at the same target. The host checks, against its own
+> inventory keyed by GrantId (gates, source roots, handles, listeners and flows), that it holds
+> nothing for that grant, as withdrawal's absence check requires; a holding found there is an
+> unknown holding under spec 008.
 
 and after "Closed/staged attachments remain visible until physically removed;", add "a `revoked`
 binding also remains visible until its last reference goes, and counts as absent for removal;".
@@ -454,11 +486,13 @@ with "beyond §4.2's selected launch, observation, data and shutdown contract an
 and workload verbs".
 
 **Spec 008, observation (`008:400-402`).** After "not empty projections or guessed grant IDs.",
-add "A guest binding that spec 024 reports as `revoked`, after its removal completed, is neither
-drift nor an unknown resource, and recovery matches nothing to it (spec 001 §4.2)."
+add "A guest binding that spec 024 reports as `revoked`, after its removal completed, accounts
+for its own guest object and is not drift, and recovery matches no journal record to it. A host
+holding still found for that grant has no journal record and is unknown (spec 001 §4.2)."
 
 **Spec 008, readiness (`008:552-553`).** After "an empty instance is ready only after the same
-startup requirements.", add "A `revoked` guest binding (spec 024) is none of these."
+startup requirements.", add "A `revoked` guest binding (spec 024), after its removal
+completed, is none of these."
 
 **Spec 017, mounts (`017:411-412`).** After "For mounts, lazy detach alone does not establish
 absent connections/handles or closed host access.", add:
@@ -548,15 +582,17 @@ O-7). Items marked **mount** also need the Mount adapter and its guest filesyste
     `["sh", "-c", "cd /workspace && exec probe"]`, where the probe holds an open file there and
     loops on reading it and on `stat(".")`. `plasmid.remove workspace` completes without waiting
     for the probe. Then each call started after the reply fails with the recorded error, `close()`
-    succeeds, the probe still runs, and observation reports the binding `revoked`. SIGKILL the
-    controller and restart it while the probe still holds them: recovery adopts the cell ready,
-    and adding `workspace` again succeeds at the same target. Repeat with two equal Mount grants
+    succeeds, the probe still runs, and observation reports the binding `revoked`. The
+    supervisor's own inventory holds no gate, source root, handle, listener or flow for the
+    removed grant. SIGKILL the controller and restart it while the probe still holds them:
+    recovery adopts the cell ready, and adding `workspace` again succeeds at the same target. A
+    host that kept the source root open fails this item. Repeat with two equal Mount grants
     at one target: the probe opens a file and enters a directory below the target through the
     grant with the smaller GrantId, and that grant is removed. Those references fail with the
     same error, while the target's root, a fresh lookup and an open handle through the peer still
     work. Catches: a removal that waits on the workload, a lazy detach that leaves the backing
-    reachable, two errors for one state, a revoked binding that fails recovery or blocks a
-    re-attach, and a detach that takes a peer's mount.
+    reachable, a host that keeps the grant's access, two errors for one state, a revoked binding
+    that fails recovery or blocks a re-attach, and a detach that takes a peer's mount.
 11. **Model.** A 4090 test double holds a `drain` reply. `exec.status`, `exec.output` and
     `workload_stop` answer at once. `exec` waits, then is 105 `busy` at its deadline, and the
     double saw no `exec`. Then the double holds an `exec` reply: a Force removal and a new attach
@@ -611,17 +647,29 @@ O-7). Items marked **mount** also need the Mount adapter and its guest filesyste
     descriptors.
 22. **Guest.** `exec.status` with `wait: true` on `["sleep", "1"]` replies `exited` 0 after about
     a second; on `["sleep", "600"]` with `deadline_ms` 2,000 it replies `running` before 2
-    seconds. Every result of `cell.exec`, `exec.status` and `exec.output` names `cell`. Catches: a
-    wait that ignores its deadline, a deadline reported as an error, and a result a client cannot
-    attribute.
-23. **Guest, with the host side of 4091 replaced by a test double.** The double refuses a
-    standing binding's gate. A read through a bound Mount handle fails at once with the recorded
-    error, and a fresh lookup at a target whose only grant is refused fails with `ENOENT`. An
-    established stream gives end-of-file to a read and `EPIPE` to a write; a TCP flow is reset.
-    Then the double pauses a stream's gate: a blocked read does not fail, and returns data once
-    the double restores the gate. Paused again and then removed, the read fails by the pause
-    deadline. Catches: a silent drop, a call that waits forever, and a stream closed for a pause
-    that is then undone.
+    seconds. Every result of `cell.exec`, `exec.status` and `exec.output` names `cell`. With 16
+    waits outstanding, a 17th answers at once with `running`, and an attach and a safe removal
+    still complete. Catches: a wait that ignores its deadline, a deadline reported as an error, a
+    result a client cannot attribute, and waits that starve grant transactions.
+23. **Guest, with the host side of 4091 replaced by a test double.** Every error is the one
+    recorded in §9.
+    - The double refuses a standing binding's gate. A read through a bound Mount handle fails at
+      once, and a fresh lookup at a target whose only grant is refused fails with `ENOENT`. An
+      established stream gives end-of-file to a read. A process writing to it with the default
+      disposition ends `signaled` 13, and one that ignores `SIGPIPE` gets `EPIPE`. A TCP flow is
+      reset, and a new TCP connect fails at once.
+    - The double receives a Mount read and never answers it, and the removal proceeds: the read
+      returns with the recorded in-flight error (expected `ECONNABORTED`) by the removal's
+      deadline.
+    - The double pauses a Mount gate: a read through an open handle and a fresh lookup each fail
+      at once with `ENOTCONN`. After the restore, the same open handle reads again.
+    - The double pauses a stream's gate: a blocked read does not fail, and returns data once the
+      double restores the gate. Paused again and then removed, the read returns end-of-file by
+      the pause deadline.
+
+    Catches: a silent drop, a dropped new connect, a call that waits forever, a Mount connection
+    aborted for a pause, a standing file reported deleted, and a stream closed for a pause that
+    is then undone.
 
 ## Out of scope
 
