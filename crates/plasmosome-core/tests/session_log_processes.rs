@@ -1,4 +1,4 @@
-use plasmosome_core::{LogStep, SessionLog, SessionLogError};
+use plasmosome_core::{LogStep, SessionLog, SessionLogError, read_events};
 use serde_json::json;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -85,5 +85,28 @@ fn open_refuses_a_log_that_is_not_a_regular_file() {
         }
         Ok(other) => panic!("expected an Io error at Open, got {other:?}"),
         Err(timeout) => panic!("open did not return: {timeout:?}"),
+    }
+}
+
+#[test]
+fn read_events_refuses_a_fifo_without_hanging() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(LOG);
+    mkfifo(&path);
+    let (sender, receiver) = mpsc::channel();
+    let reading = path.clone();
+    std::thread::spawn(move || sender.send(read_events(&reading).err()));
+    match receiver.recv_timeout(Duration::from_secs(10)) {
+        Ok(Some(SessionLogError::Io {
+            path: at,
+            step,
+            source,
+        })) => {
+            assert_eq!(step, LogStep::Read);
+            assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(at, path);
+        }
+        Ok(other) => panic!("expected an Io error at Read, got {other:?}"),
+        Err(timeout) => panic!("read_events did not return: {timeout:?}"),
     }
 }

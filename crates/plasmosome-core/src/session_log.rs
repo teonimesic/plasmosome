@@ -171,14 +171,10 @@ impl LogStore for OsLogStore {
     fn open_log(&self, path: &Path) -> std::io::Result<OpenedLog> {
         let options = |create: bool| {
             let mut options = std::fs::OpenOptions::new();
-            options
-                .read(true)
-                .append(true)
-                .create_new(create)
-                .custom_flags(libc::O_NOFOLLOW);
+            options.read(true).append(true).create_new(create);
             options
         };
-        match options(true).open(path) {
+        match open_regular(&mut options(true), path) {
             Ok(file) => {
                 file.try_lock()?;
                 Ok(OpenedLog {
@@ -188,13 +184,7 @@ impl LogStore for OsLogStore {
                 })
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let mut file = options(false).open(path)?;
-                if !file.metadata()?.is_file() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "the session log path is not a regular file",
-                    ));
-                }
+                let mut file = open_regular(&mut options(false), path)?;
                 file.try_lock()?;
                 let mut existing = Vec::new();
                 std::io::Read::read_to_end(&mut file, &mut existing)?;
@@ -207,6 +197,19 @@ impl LogStore for OsLogStore {
             Err(error) => Err(error),
         }
     }
+}
+
+fn open_regular(options: &mut std::fs::OpenOptions, path: &Path) -> std::io::Result<std::fs::File> {
+    let file = options
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the session log path is not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 impl LogFile for std::fs::File {
@@ -427,18 +430,26 @@ fn event_line(seq: u64, kind: &str, payload: serde_json::Value) -> String {
     line
 }
 
-/// Reads every event in the log at `path`, in file order. A missing file has no events.
+/// Reads every event in the log at `path`, in file order.
+///
+/// When nothing exists at `path` the log has no events and this returns an empty list. The file
+/// is opened the way [`SessionLog::open`] opens it, without following a symlink and without
+/// blocking, so a symlink at `path`, dangling or not, and anything that is not a regular file,
+/// such as a FIFO, is refused with [`SessionLogError::Io`] at [`LogStep::Read`].
 ///
 /// The whole read is refused with [`SessionLogError::Malformed`], naming the first bad physical
 /// line, when the file does not end with LF, or a line is not UTF-8, is not a JSON object, lacks
 /// an unsigned integer `seq` or a string `kind`, or has a `seq` not greater than the line before.
-/// No line is skipped and the file is never changed.
+/// No line is skipped and the file is never changed. The read takes no lock, so reading while a
+/// writer appends can see its line half written and refuse it as a missing newline.
 pub fn read_events(path: &Path) -> Result<Vec<serde_json::Value>, SessionLogError> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+    let file = match open_regular(std::fs::OpenOptions::new().read(true), path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => return Err(io_error(path, LogStep::Read)(source)),
     };
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut &file, &mut bytes).map_err(io_error(path, LogStep::Read))?;
     Ok(parse_lines(path, &bytes)?.0)
 }
 
@@ -1239,5 +1250,32 @@ mod tests {
             .collect();
         assert_eq!(synced, synced_up_from(&directory));
         assert_eq!(log.append("a", json!({})).unwrap(), 1);
+    }
+
+    #[test]
+    fn read_events_refuses_a_symlinked_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let forged = dir.path().join("forged");
+        std::fs::write(
+            &forged,
+            b"{\"seq\":1,\"kind\":\"force\",\"cell\":\"forged\"}\n",
+        )
+        .unwrap();
+        let planted = dir.path().join(LOG);
+        std::os::unix::fs::symlink(&forged, &planted).unwrap();
+        match read_events(&planted) {
+            Err(error) => assert_io_error(error, LogStep::Read, &planted),
+            Ok(events) => panic!("read through a symlink: {events:?}"),
+        }
+        match events_of_kind(&planted, "force") {
+            Err(error) => assert_io_error(error, LogStep::Read, &planted),
+            Ok(events) => panic!("read through a symlink: {events:?}"),
+        }
+        let dangling = dir.path().join("dangling.ndjson");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &dangling).unwrap();
+        match read_events(&dangling) {
+            Err(error) => assert_io_error(error, LogStep::Read, &dangling),
+            Ok(events) => panic!("a dangling symlink read as {events:?}"),
+        }
     }
 }
