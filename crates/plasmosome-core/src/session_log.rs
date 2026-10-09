@@ -1388,4 +1388,26 @@ mod tests {
             Ok(_) => panic!("opened a log under an ancestor this process cannot read"),
         }
     }
+
+    #[test]
+    fn an_opened_log_blocks_once_it_is_known_to_be_a_regular_file() {
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG);
+        std::fs::write(&path, b"").unwrap();
+        let mut writer = std::fs::OpenOptions::new();
+        writer.read(true).append(true);
+        let mut reader = std::fs::OpenOptions::new();
+        reader.read(true);
+        for (case, options) in [("writer", &mut writer), ("reader", &mut reader)] {
+            let file = open_regular(options, &path).unwrap();
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+            assert_ne!(flags, -1, "{case}: {}", std::io::Error::last_os_error());
+            assert_eq!(
+                flags & libc::O_NONBLOCK,
+                0,
+                "{case} descriptor is nonblocking"
+            );
+        }
+    }
 }
