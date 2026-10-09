@@ -22,6 +22,7 @@ one.
 | `session_log` | Append-only record of everything that happened in a cell |
 | `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode` |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
+| `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends |
 
 ## Use
 
@@ -122,3 +123,84 @@ it and says why.
 Connections are taken one at a time. The shutdown flag is read between accepts and between reads,
 and both halves of a connection carry a timeout, so neither an idle client nor one that never
 reads its replies can hold the daemon open past shutdown.
+
+## Private recovery sockets
+
+`private_socket` gives a recovery socket the boundary spec 001 §4.1 requires, on macOS and Linux.
+It refuses every peer whose kernel-reported effective UID is not the trusted one. It also keeps
+other UIDs from reaching the socket path. That second property has not yet been shown with a
+second UID: the distinct-UID test waits on owner decision O-8. It does not change the public
+control socket described above.
+
+- `PrivateDir::open` walks the socket's parent directory from `/`, without following symlinks.
+  The path must be absolute and normal: no `.` or `..` component, no empty component and no
+  trailing `/`. `check_private_path` applies the same rule to the socket path.
+  - Each ancestor must be owned by root or by the effective UID, and writable by neither group
+    nor other. A sticky `/tmp` is refused as well.
+  - On macOS, an ancestor is also refused when its ACL has an allow entry that grants
+    `add_file`, `add_subdirectory`, `delete_child`, `delete`, `writesecurity` or `chown`, or
+    the generic write or generic all right that implies them. This holds whoever the entry
+    names, this user included, and for entries that apply only to new children. Extended ACLs do not show in the mode bits. Deny entries and allow entries for
+    reading still pass, such as the home directory's `everyone deny delete`.
+  - On Linux, an ACL that grants write raises the mask, which shows in the group bits, so the
+    mode rule covers it. Linux reads only POSIX ACLs, so neither rule sees an NFSv4 or CIFS
+    ACL.
+  - On macOS, a directory on a volume mounted with ownership ignored (`noowners`, the
+    `MNT_IGNORE_OWNERSHIP` flag) is refused, whether it is an ancestor or the directory itself.
+    On such a volume every user is treated as the owner, so owner and mode keep no one out.
+  - Otherwise owner and mode are taken as the filesystem reports them. NFS, SMB and FUSE
+    filesystems, on Linux and on macOS, can map, squash or invent owners, and the walk does not
+    check the filesystem type. Keep the socket's directory on a local filesystem.
+  - A component this user may not open is judged from a no-follow `fstatat` in its parent. A
+    root-owned 0700 directory is therefore refused as `ForeignOwner`; only a component that
+    breaks no rule is reported as `Io`.
+  - Ancestors only need search permission, so a root-owned 0711 `/home` passes.
+  - The directory itself must be owned by the effective UID, have no group or other permission
+    bits, and carry no ACL. It stays open for the checks that follow.
+- `PrivateListener::bind` refuses any entry already at the name and never unlinks it.
+  - It walks and judges the directory again before it creates the socket, and again after
+    `bind`. If the second check fails, it returns that check's error and removes the socket it
+    finds at the name in the held directory, but only if the effective UID owns it.
+  - It sets the socket to mode 0600 through the held directory before `listen`. On Linux,
+    glibc implements `fchmodat` with `AT_SYMLINK_NOFOLLOW` through `/proc` and reports
+    `EOPNOTSUPP` without it. The socket is then matched by device and inode and set with
+    `fchmodat` without that flag.
+  - On drop, it removes only the socket it created, matched by device and inode, through the
+    held directory.
+- `PrivateListener::accept` reads the peer's effective UID from the kernel: `getpeereid` on
+  macOS, `SO_PEERCRED` on Linux. It closes an untrusted peer before reading a byte.
+- A client calls `check_private_path` before its own nonblocking connect, then `check_peer_uid`
+  on the connected stream before it sends anything. A missing directory is `NoDirectory`; a
+  missing socket entry in a directory that exists is `NoSocket`.
+
+The integration tests make each private root where every ancestor passes:
+- on macOS, under the per-user temp directory that `confstr(_CS_DARWIN_USER_TEMP_DIR)` reports,
+  whatever `TMPDIR` says;
+- on Linux, under `XDG_RUNTIME_DIR` when it is set, else under `CARGO_TARGET_TMPDIR`.
+
+If no base passes, the tests fail and name each base with the ancestor that refused it. Each
+test root is removed when its test ends, even after a panic: modes are opened up and, on macOS,
+ACLs stripped before removal.
+
+The distinct-UID test is ignored by default. It runs with `--ignored` and
+`PLASMOSOME_OTHER_UID_PREFIX` set to a command prefix that runs its arguments as another UID
+(owner decision O-8). On macOS it makes its root under the parent of the per-user temp
+directory, which is 0755 and owned by this user. The other UID must first reach a 0777 control
+socket in a 0755 directory there; otherwise the test fails as unproved. Only then does it try
+the socket in the 0700 private directory beside it.
+
+The integration tests replace the allocator with one that overwrites `errno` after every
+allocation, so an error read too late shows up as the wrong variant.
+
+The Linux ACL tests fail when the filesystem refuses POSIX ACLs. Set
+`PLASMOSOME_ACL_TESTS_UNSUPPORTED=1` to skip them there instead.
+
+One test connects to a socket served by another UID and expects the kernel to report that UID,
+not this process's own: `/private/var/run/mDNSResponder` on macOS, the system D-Bus socket or
+the journal's stdout socket on Linux. It fails when none of them accepts a connection. Set
+`PLASMOSOME_FOREIGN_PEER_TESTS_UNSUPPORTED=1` to skip it there instead.
+
+On macOS, the generic-rights test writes an ACL entry that holds only a generic right, through
+the raw `chmod_extended` system call. The `noowners` test creates a
+1 MB HFS+ image under the test root, attaches it with `hdiutil attach -owners off`, which
+needs no root, and detaches it when the test ends.
