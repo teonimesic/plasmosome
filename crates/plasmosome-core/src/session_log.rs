@@ -200,6 +200,13 @@ fn open_regular(options: &mut std::fs::OpenOptions, path: &Path) -> std::io::Res
             "the session log path is not a regular file",
         ));
     }
+    let descriptor = std::os::fd::AsRawFd::as_raw_fd(&file);
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags == -1
+        || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags & !libc::O_NONBLOCK) } == -1
+    {
+        return Err(std::io::Error::last_os_error());
+    }
     Ok(file)
 }
 
