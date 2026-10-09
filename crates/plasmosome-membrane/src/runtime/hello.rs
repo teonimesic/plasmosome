@@ -678,11 +678,12 @@ mod tests {
             }
         );
         let key = json!({"id": 1, "result": {}, &long: 0});
-        let HelloRefusal::UnknownField { field } = refusal(ControlLane::Normal, &key.to_string())
-        else {
-            panic!("an unknown key refuses");
-        };
-        assert_eq!(field, format!("/{}", &long[..1023]));
+        assert_eq!(
+            refusal(ControlLane::Normal, &key.to_string()),
+            HelloRefusal::UnknownField {
+                field: format!("/{}", &long[..1023])
+            }
+        );
         let id = json!({"id": long, "result": {}});
         assert_eq!(
             refusal(ControlLane::Normal, &id.to_string()),
