@@ -390,6 +390,8 @@ impl std::error::Error for ArtifactRefError {}
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use proptest::prelude::*;
     use serde_json::{Value, json};
 
@@ -653,6 +655,203 @@ mod tests {
             refused("Acme", "researcher", "1").to_string(),
             "publisher \"Acme\" does not match [a-z0-9]+(-[a-z0-9]+)* within 64 bytes"
         );
+    }
+
+    const SIX: [&str; 6] = [
+        "kind",
+        "population",
+        "publisher",
+        "name",
+        "version",
+        "digest",
+    ];
+
+    fn release_json() -> Value {
+        json!({
+            "kind": "plasmid",
+            "population": "curated",
+            "publisher": "plasmosome",
+            "name": "github-pr",
+            "version": "1.2.0",
+            "digest": digest_text(),
+        })
+    }
+
+    fn key_json() -> Value {
+        let mut key = release_json();
+        key.as_object_mut().unwrap().remove("digest");
+        key
+    }
+
+    fn refusal<T: serde::de::DeserializeOwned + fmt::Debug>(text: &str) -> String {
+        serde_json::from_str::<T>(text).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn release_ref_round_trips_its_six_fields() {
+        let text = release_json().to_string();
+        let release: ReleaseRef = serde_json::from_str(&text).unwrap();
+        let key = release.key();
+        assert_eq!(key.kind(), ArtifactKind::Plasmid);
+        assert_eq!(key.population(), Population::Curated);
+        assert_eq!(key.publisher(), "plasmosome");
+        assert_eq!(key.name(), "github-pr");
+        assert_eq!(key.version(), "1.2.0");
+        assert_eq!(release.digest(), &Digest::parse(&digest_text()).unwrap());
+        assert_eq!(
+            serde_json::to_string(&release).unwrap(),
+            format!(
+                "{{\"kind\":\"plasmid\",\"population\":\"curated\",\"publisher\":\"plasmosome\",\
+                 \"name\":\"github-pr\",\"version\":\"1.2.0\",\"digest\":\"{}\"}}",
+                digest_text()
+            )
+        );
+        assert_eq!(serde_json::to_value(&release).unwrap(), release_json());
+        let alone: ReleaseKey = serde_json::from_str(&key_json().to_string()).unwrap();
+        assert_eq!(&alone, key);
+        assert_eq!(
+            serde_json::to_string(&alone).unwrap(),
+            "{\"kind\":\"plasmid\",\"population\":\"curated\",\"publisher\":\"plasmosome\",\
+             \"name\":\"github-pr\",\"version\":\"1.2.0\"}"
+        );
+        assert_eq!(ReleaseRef::new(alone, *release.digest()), release);
+    }
+
+    #[test]
+    fn release_ref_refuses_missing_unknown_null_and_duplicate_fields() {
+        for (record, value, fields) in [
+            ("ReleaseRef", release_json(), &SIX[..]),
+            ("ReleaseKey", key_json(), &SIX[..5]),
+        ] {
+            let mut cases = Vec::new();
+            for field in fields {
+                let mut missing = value.clone();
+                missing.as_object_mut().unwrap().remove(*field);
+                cases.push((missing.to_string(), format!("missing field `{field}`")));
+                let mut null = value.clone();
+                null[*field] = Value::Null;
+                cases.push((null.to_string(), "invalid type: null".to_string()));
+            }
+            let mut unknown = value.clone();
+            unknown["registry_id"] = json!(UUID);
+            cases.push((
+                unknown.to_string(),
+                "unknown field `registry_id`".to_string(),
+            ));
+            let text = value.to_string();
+            let duplicated = text.replacen(
+                "\"name\":\"github-pr\"",
+                "\"name\":\"github-pr\",\"name\":\"github-pr\"",
+                1,
+            );
+            assert_ne!(duplicated, text);
+            cases.push((duplicated, "duplicate field `name`".to_string()));
+            let positional: Vec<Value> = fields.iter().map(|field| value[*field].clone()).collect();
+            cases.push((
+                Value::Array(positional).to_string(),
+                "invalid type: sequence".to_string(),
+            ));
+            for (text, reason) in cases {
+                let error = if record == "ReleaseRef" {
+                    refusal::<ReleaseRef>(&text)
+                } else {
+                    refusal::<ReleaseKey>(&text)
+                };
+                assert!(error.contains(&reason), "{record} {text}: {error}");
+            }
+        }
+        let mut with_digest = key_json();
+        with_digest["digest"] = json!(digest_text());
+        assert!(refusal::<ReleaseKey>(&with_digest.to_string()).contains("unknown field `digest`"));
+    }
+
+    #[test]
+    fn release_ref_refuses_each_field_grammar_violation() {
+        for (field, bad) in [
+            ("kind", "plugin"),
+            ("population", "users"),
+            ("publisher", "Plasmosome"),
+            ("name", "github_pr"),
+            ("version", "1.2.0+build"),
+            ("digest", "sha256:abc"),
+        ] {
+            let mut value = release_json();
+            value[field] = json!(bad);
+            let error = refusal::<ReleaseRef>(&value.to_string());
+            assert!(
+                error.starts_with(&format!("{field} {bad:?} ")),
+                "{field}: {error}"
+            );
+            if field != "digest" {
+                let mut key = key_json();
+                key[field] = json!(bad);
+                let error = refusal::<ReleaseKey>(&key.to_string());
+                assert!(
+                    error.starts_with(&format!("{field} {bad:?} ")),
+                    "{field}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn release_ref_parses_from_the_spec_020_toml_inline_table() {
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Member {
+            release: ReleaseRef,
+            mock: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Genome {
+            id: String,
+            version: String,
+            description: String,
+            plasmids: BTreeMap<String, Member>,
+        }
+
+        let expected: ReleaseRef = serde_json::from_value(release_json()).unwrap();
+        let header = "id = \"researcher\"\nversion = \"1.0.0\"\n\
+                      description = \"Work on pull requests with recorded GitHub responses.\"\n";
+        let six = format!(
+            "kind = \"plasmid\", population = \"curated\", publisher = \"plasmosome\", \
+             name = \"github-pr\", version = \"1.2.0\", digest = \"{}\"",
+            digest_text()
+        );
+        let inline =
+            format!("{header}\n[plasmids.github-pr]\nrelease = {{ {six} }}\nmock = \"simulate\"\n");
+        let nested = format!(
+            "{header}\n[plasmids.github-pr]\nmock = \"simulate\"\n\n\
+             [plasmids.github-pr.release]\n{}\n",
+            six.replace(", ", "\n")
+        );
+        for text in [inline, nested] {
+            let genome: Genome = toml::from_str(&text).unwrap();
+            assert_eq!(
+                (genome.id.as_str(), genome.version.as_str()),
+                ("researcher", "1.0.0")
+            );
+            assert!(genome.description.starts_with("Work on pull requests"));
+            let member = &genome.plasmids["github-pr"];
+            assert_eq!(member.release, expected);
+            assert_eq!(member.mock, "simulate");
+        }
+        let without_digest = format!(
+            "{header}\n[plasmids.github-pr]\nrelease = {{ {} }}\n",
+            six.split(", digest").next().unwrap()
+        );
+        let error = toml::from_str::<Genome>(&without_digest).unwrap_err();
+        assert!(
+            error.to_string().contains("missing field `digest`"),
+            "{error}"
+        );
+        let map_form_kind = format!(
+            "{header}\n[plasmids.github-pr]\nrelease = {{ {} }}\n",
+            six.replace("kind = \"plasmid\"", "kind = { plasmid = {} }")
+        );
+        assert!(toml::from_str::<Genome>(&map_form_kind).is_err());
     }
 
     proptest! {
