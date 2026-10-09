@@ -3,14 +3,13 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use plasmosome_backend::{
-    BackendError, Capability, DrainSpec, EnforcementBackend, Grant, GrantId, GrantKind, Handle,
-    LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass, UniverseOp,
+    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, Grant, GrantId,
+    GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass,
+    UniverseOp, UniverseRemoval,
 };
 
 use crate::builders::GrantSequence;
 
-const CONFORMANCE_PLUGIN: &str = "conformance";
-const SECOND_PLUGIN: &str = "conformance-second";
 const DRAIN: Duration = Duration::from_millis(50);
 
 #[cfg(test)]
@@ -142,7 +141,7 @@ pub fn grant_is_replayable<B: EnforcementBackend>(make: impl Fn() -> B) {
         let mut backend = make();
         for grant in sample_grants() {
             let entry = backend.grant(grant.clone());
-            contract_assert_eq!(entry.plugin, grant.plugin);
+            contract_assert_eq!(entry.owner, grant.owner);
             contract_assert_eq!(entry.capability, grant.capability);
             contract_assert_eq!(entry.kind, grant.kind);
             contract_assert_eq!(
@@ -304,65 +303,97 @@ where
     I: FnMut() -> GrantId,
 {
     for capability in sample_capabilities() {
-        for order in orders() {
-            let mut backend = make();
-            let mut expected: Vec<OsObject> = residue_objects_with(&mut new_id)
-                .into_iter()
-                .filter(|object| object.class() != capability.class())
-                .collect();
-            let residue = OsObject {
-                id: new_id(),
-                owner: PluginId::from(SECOND_PLUGIN),
-                capability: capability.clone(),
-            };
-            expected.push(residue.clone());
-            for object in &expected {
-                contract_expect!(
-                    backend.plant(object.clone()),
-                    "the residue fixture must plant"
+        for drain in drains() {
+            for order in orders() {
+                let mut backend = make();
+                let mut expected: Vec<OsObject> = residue_objects_with(&mut new_id)
+                    .into_iter()
+                    .filter(|object| object.class() != capability.class())
+                    .collect();
+                let residues = [
+                    OsObject {
+                        id: new_id(),
+                        owner: second_owner(),
+                        capability: capability.clone(),
+                    },
+                    OsObject {
+                        id: new_id(),
+                        owner: other_cell(&conformance_owner()),
+                        capability: capability.clone(),
+                    },
+                ];
+                expected.extend(residues.iter().cloned());
+                for object in &expected {
+                    contract_expect!(
+                        backend.plant(object.clone()),
+                        "the residue fixture must plant"
+                    );
+                }
+                let first = op_for(new_id(), conformance_owner(), capability.clone());
+                let second = op_for(new_id(), conformance_owner(), capability.clone());
+                contract_unwrap!(backend.apply(first.clone()));
+                contract_unwrap!(backend.apply(second.clone()));
+                expected.extend([first.object(), second.object()]);
+                assert_exact_state(
+                    &backend.snapshot_os_state(),
+                    &expected,
+                    "applied operations must coexist with all unrelated observations",
                 );
-            }
-            let first = op_for(new_id(), CONFORMANCE_PLUGIN, capability.clone());
-            let second = op_for(new_id(), CONFORMANCE_PLUGIN, capability.clone());
-            contract_unwrap!(backend.apply(first.clone()));
-            contract_unwrap!(backend.apply(second.clone()));
-            expected.extend([first.object(), second.object()]);
-            assert_exact_state(
-                &backend.snapshot_os_state(),
-                &expected,
-                "applied operations must coexist with all unrelated observations",
-            );
-            let arranged = order.arrange_ops(vec![first, second]);
-            for (index, op) in arranged.into_iter().enumerate() {
-                let object = op.object();
-                backend
-                    .apply_removal(op.removal(), &object.owner)
-                    .unwrap_or_else(|error| {
-                        contract_panic!(
-                            "removing the applied {} on the {} pass failed: {error}",
+                let arranged = order.arrange_ops(vec![first, second]);
+                for (index, op) in arranged.into_iter().enumerate() {
+                    let object = op.object();
+                    for wrong_owner in [other_cell(&object.owner), second_owner()] {
+                        contract_assert_eq!(
+                            backend.apply_removal(op.removal(), &wrong_owner, drain),
+                            Err(BackendError::UnknownObject {
+                                class: object.class().as_str(),
+                                key: object.key(),
+                                owner: wrong_owner.clone(),
+                                id: object.id,
+                            }),
+                            "a {} removal naming {wrong_owner} took the applied {} on the {} pass",
+                            policy_of(drain),
                             object.describe(),
                             order.name()
-                        )
-                    });
-                remove_expected(&mut expected, &object);
-                let state = backend.snapshot_os_state();
-                assert_exact_state(
-                    &state,
-                    &expected,
-                    "an applied removal selected the wrong instance or damaged unrelated state",
-                );
-                contract_assert!(
-                    !holds_exact(&state, &object),
-                    "an applied removal left its exact object standing"
-                );
-                let owner_still_holds_key =
-                    owner_holds_key(&state, &object.owner, object.class(), &object.key());
-                contract_assert_eq!(
-                    owner_still_holds_key,
-                    index == 0,
-                    "owner key membership must remain only while that owner has another holding"
-                );
-                contract_assert!(holds_exact(&state, &residue));
+                        );
+                        assert_exact_state(
+                            &backend.snapshot_os_state(),
+                            &expected,
+                            "a refused removal naming another owner changed the state",
+                        );
+                    }
+                    backend
+                        .apply_removal(op.removal(), &object.owner, drain)
+                        .unwrap_or_else(|error| {
+                            contract_panic!(
+                                "the {} removal of the applied {} on the {} pass failed: {error}",
+                                policy_of(drain),
+                                object.describe(),
+                                order.name()
+                            )
+                        });
+                    remove_expected(&mut expected, &object);
+                    let state = backend.snapshot_os_state();
+                    assert_exact_state(
+                        &state,
+                        &expected,
+                        "an applied removal selected the wrong instance or damaged unrelated state",
+                    );
+                    contract_assert!(
+                        !holds_exact(&state, &object),
+                        "an applied removal left its exact object standing"
+                    );
+                    let owner_still_holds_key =
+                        owner_holds_key(&state, &object.owner, object.class(), &object.key());
+                    contract_assert_eq!(
+                        owner_still_holds_key,
+                        index == 0,
+                        "owner key membership must remain only while that owner has another holding"
+                    );
+                    for residue in &residues {
+                        contract_assert!(holds_exact(&state, residue));
+                    }
+                }
             }
         }
     }
@@ -400,48 +431,47 @@ pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn(
 
 /// Checks that revoking one owner never takes an equal capability from another owner.
 pub fn revoke_takes_its_owners_object<B: EnforcementBackend>(make: impl Fn() -> B) {
-    for capability in sample_capabilities() {
-        for drain in drains() {
-            for order in orders() {
-                let mut backend = make();
-                let audit_request = Grant {
-                    plugin: PluginId::from("audit-owner"),
-                    capability: capability.clone(),
-                    kind: GrantKind::Hot,
-                };
-                let audit = backend.grant(audit_request.clone());
-                let audit_object = requested_object(&audit, &audit_request);
-                let deploy_request = Grant {
-                    plugin: PluginId::from("deploy-owner"),
-                    capability: capability.clone(),
-                    kind: GrantKind::Hot,
-                };
-                let deploy = backend.grant(deploy_request.clone());
-                let deploy_object = requested_object(&deploy, &deploy_request);
-                let mut expected = vec![audit_object.clone(), deploy_object.clone()];
-                for (entry, object) in
-                    order.arrange(vec![(audit, audit_object), (deploy, deploy_object)])
-                {
-                    backend.revoke(entry.handle, drain).unwrap_or_else(|error| {
-                        contract_panic!(
-                            "the {} revoke on the {} pass did not revoke its owner's object: {error}",
-                            policy_of(drain),
-                            order.name()
-                        )
-                    });
-                    remove_expected(&mut expected, &object);
-                    assert_exact_state(
-                        &backend.snapshot_os_state(),
-                        &expected,
-                        "revoke took another owner's object",
-                    );
+    let owner_pairs = [
+        (owned_by("audit-owner"), owned_by("deploy-owner")),
+        (conformance_owner(), other_cell(&conformance_owner())),
+    ];
+    for (first_owner, second_owner) in owner_pairs {
+        for capability in sample_capabilities() {
+            for drain in drains() {
+                for order in orders() {
+                    let mut backend = make();
+                    let first_request = hot_grant(first_owner.clone(), &capability);
+                    let first = backend.grant(first_request.clone());
+                    let first_object = requested_object(&first, &first_request);
+                    let second_request = hot_grant(second_owner.clone(), &capability);
+                    let second = backend.grant(second_request.clone());
+                    let second_object = requested_object(&second, &second_request);
+                    let mut expected = vec![first_object.clone(), second_object.clone()];
+                    for (entry, object) in
+                        order.arrange(vec![(first, first_object), (second, second_object)])
+                    {
+                        backend.revoke(entry.handle, drain).unwrap_or_else(|error| {
+                            contract_panic!(
+                                "the {} revoke on the {} pass did not revoke its owner's object: {error}",
+                                policy_of(drain),
+                                order.name()
+                            )
+                        });
+                        remove_expected(&mut expected, &object);
+                        assert_exact_state(
+                            &backend.snapshot_os_state(),
+                            &expected,
+                            "revoke took another owner's object",
+                        );
+                    }
                 }
             }
         }
     }
 }
 
-/// Checks repeated equal grants, complete resource collisions, and broker residue.
+/// Checks repeated equal grants, complete resource collisions, broker residue, and that a granted
+/// holding removed through `apply_removal`, gracefully or by force, retires its handle.
 pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: impl Fn() -> B) {
     let mut pairs: Vec<(Capability, Capability)> = sample_capabilities()
         .into_iter()
@@ -483,14 +513,14 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
             for order in orders() {
                 let mut backend = make();
                 let first_request = Grant {
-                    plugin: PluginId::from(CONFORMANCE_PLUGIN),
+                    owner: conformance_owner(),
                     capability: first_capability.clone(),
                     kind: GrantKind::Hot,
                 };
                 let first = backend.grant(first_request.clone());
                 let first_object = requested_object(&first, &first_request);
                 let second_request = Grant {
-                    plugin: PluginId::from(CONFORMANCE_PLUGIN),
+                    owner: conformance_owner(),
                     capability: second_capability.clone(),
                     kind: GrantKind::Hot,
                 };
@@ -532,12 +562,12 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
         let mut backend = make();
         let residue = OsObject {
             id: GrantId::new(),
-            owner: PluginId::from(CONFORMANCE_PLUGIN),
+            owner: conformance_owner(),
             capability: capability.clone(),
         };
         contract_expect!(backend.plant(residue.clone()), "broker residue must plant");
         let live_request = Grant {
-            plugin: residue.owner.clone(),
+            owner: residue.owner.clone(),
             capability: capability.clone(),
             kind: GrantKind::Hot,
         };
@@ -560,8 +590,281 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
                 capability: residue.capability.clone(),
             },
             &residue.owner,
+            drain,
         ));
         contract_assert!(backend.snapshot_os_state().is_empty());
+        let removed = backend.grant(live_request);
+        contract_unwrap!(backend.apply_removal(removed.removal(), &removed.owner, drain));
+        contract_assert!(backend.snapshot_os_state().is_empty());
+        contract_assert_eq!(
+            backend.revoke(removed.handle, DrainSpec::forcing()),
+            Err(BackendError::UnknownHandle {
+                handle: removed.handle
+            }),
+            "a successful {} apply_removal of a granted holding must retire its handle",
+            policy_of(drain)
+        );
+    }
+}
+
+/// The owner whose graceful withdrawals never finish. A factory passed to
+/// `graceful_timeouts_preserve_the_selected_holding` must return a backend in which every
+/// graceful withdrawal of a holding owned by exactly this owner, through `revoke` or
+/// `apply_removal` and with any deadline including zero, times out before any release, while a
+/// forced withdrawal succeeds. Every other owner must drain normally under any deadline, including
+/// another plugin in this cell and this plugin in another cell. `FakeBackend` is armed with
+/// `stall_graceful_drains_for_owner(stalled_owner())`.
+pub fn stalled_owner() -> CellOwner {
+    CellOwner {
+        cell: CellId::from("conformance-stalled-cell"),
+        plugin: PluginId::from("conformance-stalled"),
+    }
+}
+
+/// Checks that a graceful timeout, with a 50 ms or a zero deadline, keeps the selected holding,
+/// its issued record and every peer; that a removal naming the wrong owner is refused before any
+/// drain, whichever side is stalled; that the peer, another plugin in the stalled cell and the
+/// same plugin in another cell each drain normally under a 50 ms and under a zero deadline; that
+/// `apply_removal` of a granted holding keeps its handle on a timeout and retires it on success;
+/// and that Force withdraws only the stalled holding, both while every other holding stands and
+/// after all of them are gone. The factory's backend must stall every graceful withdrawal owned
+/// by `stalled_owner()`.
+pub fn graceful_timeouts_preserve_the_selected_holding<B: EnforcementBackend>(
+    make: impl Fn() -> B,
+) {
+    for capability in sample_capabilities() {
+        for granted in [true, false] {
+            for (order, normal) in withdrawal_passes() {
+                let mut backend = make();
+                let peer_request = hot_grant(conformance_owner(), &capability);
+                let peer = backend.grant(peer_request.clone());
+                let peer_object = requested_object(&peer, &peer_request);
+                let (stalled, stalled_entry) =
+                    hold(&mut backend, stalled_owner(), &capability, granted);
+                let (elsewhere, elsewhere_entry) = hold(
+                    &mut backend,
+                    other_cell(&stalled_owner()),
+                    &capability,
+                    granted,
+                );
+                let (neighbour, neighbour_entry) = hold(
+                    &mut backend,
+                    neighbour_of(&stalled_owner()),
+                    &capability,
+                    granted,
+                );
+                let pass = format!(
+                    "{} {} pass draining the others within {normal:?}",
+                    if granted { "revoke" } else { "apply_removal" },
+                    order.name()
+                );
+                let all = [
+                    peer_object.clone(),
+                    stalled.clone(),
+                    elsewhere.clone(),
+                    neighbour.clone(),
+                ];
+                assert_exact_state(
+                    &backend.snapshot_os_state(),
+                    &all,
+                    "a stalled holding must coexist with its equal peers",
+                );
+                let address = Handle {
+                    class: stalled.class(),
+                    id: stalled.id,
+                };
+                if granted {
+                    let refused = backend.apply_removal(
+                        removal_of(&stalled),
+                        &stalled_owner(),
+                        DrainSpec::graceful(DRAIN),
+                    );
+                    contract_assert!(
+                        matches!(refused, Err(BackendError::DrainTimedOut { handle, .. }) if handle == address),
+                        "a graceful apply_removal of the stalled grant must time out at its address on the {pass}, not {refused:?}"
+                    );
+                    assert_exact_state(
+                        &backend.snapshot_os_state(),
+                        &all,
+                        "a timed-out apply_removal of a grant must keep the holding and every peer",
+                    );
+                }
+                for deadline in [DRAIN, Duration::ZERO] {
+                    let drain = DrainSpec::graceful(deadline);
+                    contract_assert_eq!(
+                        withdraw(
+                            &mut backend,
+                            &stalled,
+                            stalled_entry.as_ref(),
+                            granted,
+                            drain
+                        ),
+                        Err(BackendError::DrainTimedOut {
+                            handle: address,
+                            deadline_ms: drain.deadline_ms(),
+                        }),
+                        "a graceful withdrawal of the stalled holding with a {deadline:?} deadline must time out, its handle still issued, on the {pass}"
+                    );
+                    assert_exact_state(
+                        &backend.snapshot_os_state(),
+                        &all,
+                        "a graceful timeout must keep the selected holding and every peer",
+                    );
+                }
+                for (holding, wrong_owner) in [
+                    (&stalled, conformance_owner()),
+                    (&peer_object, stalled_owner()),
+                ] {
+                    contract_assert_eq!(
+                        backend.apply_removal(
+                            removal_of(holding),
+                            &wrong_owner,
+                            DrainSpec::graceful(DRAIN)
+                        ),
+                        Err(BackendError::UnknownObject {
+                            class: holding.class().as_str(),
+                            key: holding.key(),
+                            owner: wrong_owner.clone(),
+                            id: holding.id,
+                        }),
+                        "a removal of {} naming {wrong_owner} must be refused before any drain on the {pass}",
+                        holding.describe()
+                    );
+                    assert_exact_state(
+                        &backend.snapshot_os_state(),
+                        &all,
+                        "a refused wrong-owner removal changed the state",
+                    );
+                }
+                let forced_stalled = (&stalled, stalled_entry.as_ref(), DrainSpec::forcing());
+                let graceful_peer = (&peer_object, Some(&peer), DrainSpec::graceful(normal));
+                let graceful_elsewhere = (
+                    &elsewhere,
+                    elsewhere_entry.as_ref(),
+                    DrainSpec::graceful(normal),
+                );
+                let graceful_neighbour = (
+                    &neighbour,
+                    neighbour_entry.as_ref(),
+                    DrainSpec::graceful(normal),
+                );
+                let steps = match order {
+                    WithdrawalOrder::StalledFirst => [
+                        forced_stalled,
+                        graceful_peer,
+                        graceful_elsewhere,
+                        graceful_neighbour,
+                    ],
+                    WithdrawalOrder::PeerFirst => [
+                        graceful_peer,
+                        graceful_elsewhere,
+                        graceful_neighbour,
+                        forced_stalled,
+                    ],
+                };
+                let mut remaining = all.to_vec();
+                for (object, entry, drain) in steps {
+                    withdraw(&mut backend, object, entry, granted, drain).unwrap_or_else(|error| {
+                        contract_panic!(
+                            "withdrawing {} with {} failed on the {pass}: {error}",
+                            object.describe(),
+                            policy_of(drain)
+                        )
+                    });
+                    remove_expected(&mut remaining, object);
+                    assert_exact_state(
+                        &backend.snapshot_os_state(),
+                        &remaining,
+                        "a withdrawal must take only its own holding",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn hold<B: EnforcementBackend>(
+    backend: &mut B,
+    owner: CellOwner,
+    capability: &Capability,
+    granted: bool,
+) -> (OsObject, Option<LedgerEntry>) {
+    if granted {
+        let request = hot_grant(owner, capability);
+        let entry = backend.grant(request.clone());
+        (requested_object(&entry, &request), Some(entry))
+    } else {
+        let op = op_for(GrantId::new(), owner, capability.clone());
+        contract_unwrap!(backend.apply(op.clone()));
+        (op.object(), None)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WithdrawalOrder {
+    StalledFirst,
+    PeerFirst,
+}
+
+impl WithdrawalOrder {
+    fn name(self) -> &'static str {
+        match self {
+            WithdrawalOrder::StalledFirst => "stalled-first",
+            WithdrawalOrder::PeerFirst => "peer-first",
+        }
+    }
+}
+
+fn withdrawal_passes() -> impl Iterator<Item = (WithdrawalOrder, Duration)> {
+    [WithdrawalOrder::StalledFirst, WithdrawalOrder::PeerFirst]
+        .into_iter()
+        .flat_map(|order| [DRAIN, Duration::ZERO].map(|normal| (order, normal)))
+}
+
+fn withdraw<B: EnforcementBackend>(
+    backend: &mut B,
+    object: &OsObject,
+    entry: Option<&LedgerEntry>,
+    through_revoke: bool,
+    drain: DrainSpec,
+) -> Result<(), BackendError> {
+    match entry {
+        Some(entry) if through_revoke => {
+            let returned = backend.revoke(entry.handle, drain)?;
+            contract_assert_eq!(
+                returned,
+                *entry,
+                "revoking a handle must return the entry the grant issued"
+            );
+        }
+        _ => {
+            backend.apply_removal(removal_of(object), &object.owner, drain)?;
+            if let Some(entry) = entry {
+                contract_assert_eq!(
+                    backend.revoke(entry.handle, DrainSpec::forcing()),
+                    Err(BackendError::UnknownHandle {
+                        handle: entry.handle
+                    }),
+                    "a successful apply_removal of a granted holding must retire its handle"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn hot_grant(owner: CellOwner, capability: &Capability) -> Grant {
+    Grant {
+        owner,
+        capability: capability.clone(),
+        kind: GrantKind::Hot,
+    }
+}
+
+fn removal_of(object: &OsObject) -> UniverseRemoval {
+    UniverseRemoval {
+        id: object.id,
+        capability: object.capability.clone(),
     }
 }
 
@@ -602,8 +905,45 @@ fn orders() -> [RevokeOrder; 2] {
     [RevokeOrder::ReversePush, RevokeOrder::GrantOrder]
 }
 
+fn conformance_cell() -> CellId {
+    CellId::from("conformance-cell")
+}
+
+fn owned_by(plugin: &str) -> CellOwner {
+    CellOwner {
+        cell: conformance_cell(),
+        plugin: PluginId::from(plugin),
+    }
+}
+
+fn conformance_owner() -> CellOwner {
+    owned_by("conformance")
+}
+
+fn second_owner() -> CellOwner {
+    owned_by("conformance-second")
+}
+
+fn abandoned_owner() -> CellOwner {
+    owned_by("abandoned")
+}
+
+fn neighbour_of(owner: &CellOwner) -> CellOwner {
+    CellOwner {
+        cell: owner.cell.clone(),
+        plugin: PluginId::from("conformance-neighbour"),
+    }
+}
+
+fn other_cell(owner: &CellOwner) -> CellOwner {
+    CellOwner {
+        cell: CellId::from("conformance-other-cell"),
+        plugin: owner.plugin.clone(),
+    }
+}
+
 fn sample_grants() -> Vec<Grant> {
-    let mut sequence = GrantSequence::for_plugin(CONFORMANCE_PLUGIN);
+    let mut sequence = GrantSequence::for_owner(conformance_owner());
     for capability in sample_capabilities() {
         sequence = if matches!(&capability, Capability::Broker { .. }) {
             sequence.generation_bound(capability)
@@ -640,7 +980,7 @@ fn sample_capabilities() -> Vec<Capability> {
 fn grants_with_two_of_one_class() -> Vec<Grant> {
     let mut grants = sample_grants();
     grants.push(Grant {
-        plugin: PluginId::from(SECOND_PLUGIN),
+        owner: second_owner(),
         capability: Capability::SessionFile {
             path: "skills/review.md".to_string(),
         },
@@ -660,8 +1000,8 @@ fn requested_object(entry: &LedgerEntry, request: &Grant) -> OsObject {
         "a grant handle must name the requested capability class"
     );
     contract_assert_eq!(
-        entry.plugin,
-        request.plugin,
+        entry.owner,
+        request.owner,
         "a grant must retain its requested owner"
     );
     contract_assert_eq!(
@@ -676,7 +1016,7 @@ fn requested_object(entry: &LedgerEntry, request: &Grant) -> OsObject {
     );
     OsObject {
         id: entry.handle.id,
-        owner: request.plugin.clone(),
+        owner: request.owner.clone(),
         capability: request.capability.clone(),
     }
 }
@@ -697,14 +1037,13 @@ fn residue_objects_with(mut new_id: impl FnMut() -> GrantId) -> Vec<OsObject> {
         .into_iter()
         .map(|capability| OsObject {
             id: new_id(),
-            owner: PluginId::from("abandoned"),
+            owner: abandoned_owner(),
             capability,
         })
         .collect()
 }
 
-fn op_for(id: GrantId, owner: &str, capability: Capability) -> UniverseOp {
-    let owner = PluginId::from(owner);
+fn op_for(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
     match capability {
         Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
         Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
@@ -733,7 +1072,7 @@ fn holds_exact(state: &OsState, expected: &OsObject) -> bool {
     state.objects().any(|object| object == expected)
 }
 
-fn owner_holds_key(state: &OsState, owner: &PluginId, class: UniverseClass, key: &str) -> bool {
+fn owner_holds_key(state: &OsState, owner: &CellOwner, class: UniverseClass, key: &str) -> bool {
     state
         .objects()
         .any(|object| &object.owner == owner && object.class() == class && object.key() == key)

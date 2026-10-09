@@ -3,7 +3,9 @@ use plasmosome_testkit::conformance;
 
 fn composite_over_fake_leaves() -> CompositeBackend {
     fn leaf() -> Box<dyn EnforcementBackend> {
-        Box::new(FakeBackend::new())
+        let mut leaf = FakeBackend::new();
+        leaf.stall_graceful_drains_for_owner(conformance::stalled_owner());
+        Box::new(leaf)
     }
     CompositeBackend::new(leaf(), leaf(), leaf()).expect("empty fake leaves are valid")
 }
@@ -56,4 +58,9 @@ fn composite_backend_revokes_only_its_owners_object() {
 #[test]
 fn composite_backend_removes_repeated_grants_independently() {
     conformance::repeated_grants_are_independently_removable(composite_over_fake_leaves);
+}
+
+#[test]
+fn composite_backend_keeps_a_timed_out_holding_and_its_peers() {
+    conformance::graceful_timeouts_preserve_the_selected_holding(composite_over_fake_leaves);
 }
