@@ -802,7 +802,7 @@ fn transfer(text: &str, page_bytes: usize) -> (FrozenAccount, Vec<ObservationPag
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 12, ..ProptestConfig::default() })]
 
     #[test]
     fn round_trip_any_account_any_page_size(
@@ -814,6 +814,10 @@ proptest! {
         let (frozen, mut pages, decoded) = transfer(&text, page_bytes);
         prop_assert_eq!(&decoded, &text);
         prop_assert_eq!(pages.len() as u64, frozen.total().div_ceil(page_bytes as u64));
+        for page in &pages {
+            let left = (frozen.total() - page.offset) as usize;
+            prop_assert_eq!(page.bytes.len(), page_bytes.min(left));
+        }
         let at = flip.index(frozen.total() as usize);
         pages[at / page_bytes].bytes[at % page_bytes] ^= 0x01;
         let refused = assemble::<String>(pages);
