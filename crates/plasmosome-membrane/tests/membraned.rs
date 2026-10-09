@@ -1,10 +1,12 @@
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -851,12 +853,32 @@ fn the_supervision_fixture_is_compiled_once_per_source_and_reused() {
     );
 }
 
+fn inodes_published_under(root: &Path, finished: &AtomicBool) -> HashSet<u64> {
+    let mut seen = HashSet::new();
+    while !finished.load(Ordering::Acquire) {
+        for key in std::fs::read_dir(root).expect("the cache root is readable") {
+            let key = key.expect("the cache entry is readable").path();
+            if let Ok(metadata) = std::fs::metadata(key.join("supervision-worker")) {
+                seen.insert(metadata.ino());
+            }
+        }
+        thread::yield_now();
+    }
+    seen
+}
+
 #[test]
 fn concurrent_callers_share_one_published_fixture_that_is_never_replaced() {
     const CALLERS: usize = 8;
     let cache = tempfile::tempdir().unwrap();
     let source = fixture::supervision_worker_source();
     let start = Arc::new(Barrier::new(CALLERS));
+    let finished = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let root = cache.path().to_path_buf();
+        let finished = Arc::clone(&finished);
+        thread::spawn(move || inodes_published_under(&root, &finished))
+    };
 
     let callers: Vec<_> = (0..CALLERS)
         .map(|_| {
@@ -877,11 +899,18 @@ fn concurrent_callers_share_one_published_fixture_that_is_never_replaced() {
         .into_iter()
         .map(|caller| caller.join().expect("every concurrent caller returns"))
         .collect();
+    finished.store(true, Ordering::Release);
+    let observed = watcher.join().expect("the watcher returns");
 
     let published = &returned[0].0;
     let inode = std::fs::metadata(published)
         .expect("the published fixture exists")
         .ino();
+    assert_eq!(
+        observed,
+        HashSet::from([inode]),
+        "the published fixture was never replaced while the callers raced"
+    );
     for (path, seen) in &returned {
         assert_eq!(
             path, published,
