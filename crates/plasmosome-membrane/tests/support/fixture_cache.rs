@@ -251,10 +251,11 @@ fn a_fixture_source_that_does_not_compile_publishes_nothing() {
         std::panic::catch_unwind(|| fixture::compile_supervision_fixture(cache.path(), &broken))
             .expect_err("a source that does not compile fails setup");
 
-    assert_eq!(
-        panic_message(refused),
-        "the supervision worker fixture compiles",
-        "setup reports the failed compile, not a later step"
+    let message = panic_message(refused);
+    assert!(
+        message.starts_with("the supervision worker fixture compiles")
+            && message.contains(&broken.display().to_string()),
+        "setup reports the failed compile and names its source, not a later step: {message}"
     );
     for key in entries(cache.path()) {
         assert_eq!(
@@ -278,8 +279,10 @@ fn a_freshly_compiled_fixture_is_run_once_before_it_is_returned() {
             .expect_err("a freshly compiled executable that does not exit 64 fails setup");
     let message = panic_message(refused);
     assert!(
-        message.contains("refuses a call with no arguments") && message.contains("Some(63)"),
-        "setup fails at the warm-up's exit-64 assertion, not elsewhere: {message}"
+        message.contains("refuses a call with no arguments")
+            && message.contains("Some(63)")
+            && message.contains(&cache.path().display().to_string()),
+        "setup fails at the warm-up's exit-64 assertion and names the executable: {message}"
     );
 }
 
@@ -297,8 +300,10 @@ fn a_reused_fixture_is_run_once_before_it_is_returned() {
     .expect_err("a reused executable that does not exit 64 fails setup");
     let message = panic_message(refused);
     assert!(
-        message.contains("refuses a call with no arguments") && message.contains("Some(1)"),
-        "setup fails at the warm-up's exit-64 assertion, not elsewhere: {message}"
+        message.contains("refuses a call with no arguments")
+            && message.contains("Some(1)")
+            && message.contains(&key.join("supervision-worker").display().to_string()),
+        "setup fails at the warm-up's exit-64 assertion and names the stale executable: {message}"
     );
 }
 
