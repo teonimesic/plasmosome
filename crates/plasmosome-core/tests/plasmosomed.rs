@@ -142,6 +142,15 @@ fn send(client: &BufReader<UnixStream>, bytes: &[u8]) {
     stream.flush().expect("the request is flushed");
 }
 
+fn send_unterminated(client: &BufReader<UnixStream>, bytes: &[u8]) {
+    let mut stream = client.get_ref().try_clone().expect("clone for writing");
+    stream
+        .write_all(bytes)
+        .expect("the request reaches plasmosomed");
+    stream.flush().expect("the request is flushed");
+}
+
+#[track_caller]
 fn read_reply(client: &mut BufReader<UnixStream>) -> Value {
     let mut reply = String::new();
     let read = client.read_line(&mut reply).expect("plasmosomed answers");
@@ -245,7 +254,7 @@ fn the_envelope_edges_hold_on_the_wire() {
 
     let mut over_cap = addressable(&control);
     let (too_long, _) = padded_status(MAX_LINE_BYTES + 1);
-    send(&over_cap, too_long.as_bytes());
+    send_unterminated(&over_cap, too_long.as_bytes());
     let refusal = read_reply(&mut over_cap);
     assert_eq!(
         refusal.pointer("/error/code").and_then(Value::as_i64),
