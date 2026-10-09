@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   bench:
@@ -156,3 +156,66 @@ jobs:
           ARCHIVE: ${{ steps.beads.outputs.archive }}
           BINARY: ${{ steps.beads.outputs.binary }}
         run: python3 tools/work-state-regression.py --archive "$ARCHIVE" --bd "$BINARY"
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable branch head, 2026-08-05
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - name: install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --version 0.9.1 --locked
+
+      - name: clean coverage data
+        run: cargo llvm-cov clean --workspace
+
+      - name: measured run
+        run: cargo llvm-cov --workspace --exclude plasmosome-guards --no-report
+
+      - name: coverage summary
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          table = subprocess.run(
+              ["cargo", "llvm-cov", "report", "--summary-only"],
+              check=True,
+              stdout=subprocess.PIPE,
+              text=True,
+          ).stdout
+          runner = " ".join(os.environ.get(name, f"{name} unset") for name in ("RUNNER_OS", "RUNNER_ARCH"))
+          image = " ".join(os.environ.get(name, f"{name} unset") for name in ("ImageOS", "ImageVersion"))
+          lines = [
+              "## Coverage of the workspace tests",
+              "",
+              f"Measured on {runner}, runner image {image}.",
+              "",
+              "`plasmosome-guards` is excluded: its tests read the repository and drive nested cargo builds.",
+              "",
+              'Code under `cfg(target_os = "macos")` is not compiled on Linux, so it is absent from the count.',
+              "",
+              "```",
+              table.rstrip("\n"),
+              "```",
+          ]
+          summary = "\n".join(lines) + "\n"
+          print(summary, end="")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              output.write(summary)
+          PY
+
+      - name: lcov report
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lcov
+          path: lcov.info
+          if-no-files-found: error
