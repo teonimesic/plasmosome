@@ -1304,4 +1304,62 @@ mod tests {
         let log = SessionLog::open_with(path, &store).unwrap();
         assert_eq!(log.append("k", json!({})).unwrap(), 5);
     }
+
+    fn mkfifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(
+            made,
+            0,
+            "mkfifo {path:?}: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    #[test]
+    fn open_refuses_a_log_that_is_not_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG);
+        mkfifo(&path);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let opening = path.clone();
+        std::thread::spawn(move || sender.send(SessionLog::open(opening).err()));
+        match receiver.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Some(SessionLogError::Io {
+                path: at,
+                step,
+                source,
+            })) => {
+                assert_eq!(step, LogStep::Open);
+                assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+                assert_eq!(at, path);
+            }
+            Ok(other) => panic!("expected an Io error at Open, got {other:?}"),
+            Err(timeout) => panic!("open did not return: {timeout:?}"),
+        }
+    }
+
+    #[test]
+    fn read_events_refuses_a_fifo_without_hanging() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG);
+        mkfifo(&path);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reading = path.clone();
+        std::thread::spawn(move || sender.send(read_events(&reading).err()));
+        match receiver.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Some(SessionLogError::Io {
+                path: at,
+                step,
+                source,
+            })) => {
+                assert_eq!(step, LogStep::Read);
+                assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+                assert_eq!(at, path);
+            }
+            Ok(other) => panic!("expected an Io error at Read, got {other:?}"),
+            Err(timeout) => panic!("read_events did not return: {timeout:?}"),
+        }
+    }
 }

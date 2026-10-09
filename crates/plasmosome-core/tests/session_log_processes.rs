@@ -1,9 +1,8 @@
-use plasmosome_core::{LogFault, LogStep, SessionLog, SessionLogError, read_events};
+use plasmosome_core::{LogFault, SessionLog, SessionLogError};
 use serde_json::json;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const LOG: &str = "session.ndjson";
@@ -61,11 +60,6 @@ fn assert_locked(result: Result<SessionLog, SessionLogError>, at: &Path) {
     }
 }
 
-fn mkfifo(path: &Path) {
-    let made = Command::new("mkfifo").arg(path).status().unwrap();
-    assert!(made.success(), "mkfifo {path:?}");
-}
-
 #[test]
 fn hold_a_writer_lock_for_another_process() {
     let Some(path) = std::env::var_os(LOCK_HOLDER) else {
@@ -106,52 +100,6 @@ fn a_second_writer_in_another_process_is_refused() {
     assert_locked(refused, &path);
     let after = SessionLog::open(path.clone()).unwrap();
     assert_eq!(after.append("a", json!({})).unwrap(), 1);
-}
-
-#[test]
-fn open_refuses_a_log_that_is_not_a_regular_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(LOG);
-    mkfifo(&path);
-    let (sender, receiver) = mpsc::channel();
-    let opening = path.clone();
-    std::thread::spawn(move || sender.send(SessionLog::open(opening).err()));
-    match receiver.recv_timeout(Duration::from_secs(10)) {
-        Ok(Some(SessionLogError::Io {
-            path: at,
-            step,
-            source,
-        })) => {
-            assert_eq!(step, LogStep::Open);
-            assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
-            assert_eq!(at, path);
-        }
-        Ok(other) => panic!("expected an Io error at Open, got {other:?}"),
-        Err(timeout) => panic!("open did not return: {timeout:?}"),
-    }
-}
-
-#[test]
-fn read_events_refuses_a_fifo_without_hanging() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(LOG);
-    mkfifo(&path);
-    let (sender, receiver) = mpsc::channel();
-    let reading = path.clone();
-    std::thread::spawn(move || sender.send(read_events(&reading).err()));
-    match receiver.recv_timeout(Duration::from_secs(10)) {
-        Ok(Some(SessionLogError::Io {
-            path: at,
-            step,
-            source,
-        })) => {
-            assert_eq!(step, LogStep::Read);
-            assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
-            assert_eq!(at, path);
-        }
-        Ok(other) => panic!("expected an Io error at Read, got {other:?}"),
-        Err(timeout) => panic!("read_events did not return: {timeout:?}"),
-    }
 }
 
 #[test]
