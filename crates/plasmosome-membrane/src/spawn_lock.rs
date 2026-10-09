@@ -259,14 +259,36 @@ mod tests {
         child_status: libc::c_int,
     }
 
+    fn reaped_within(pid: libc::pid_t, patience: Duration) -> libc::c_int {
+        let deadline = Instant::now() + patience;
+        let mut status = 0;
+        loop {
+            match unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } {
+                reaped if reaped == pid => return status,
+                0 if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(1)),
+                0 => {
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    unsafe { libc::waitpid(pid, &mut status, 0) };
+                    panic!("the child did not exit within {patience:?}, so it was killed");
+                }
+                _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+                other => panic!(
+                    "waitpid returned {other}: {}",
+                    std::io::Error::last_os_error()
+                ),
+            }
+        }
+    }
+
     fn fork_during_creation(lock: &'static RwLock<()>) -> ForkDuringCreation {
         let released = Arc::new(AtomicBool::new(false));
         let (starting, started) = mpsc::channel();
-        let (forker, watched) = write_held(lock, || {
+        let (answer, answered) = mpsc::channel();
+        let watched = write_held(lock, || {
             let watched = inheritable_null();
             let fd = watched.as_raw_fd();
             let seen = Arc::clone(&released);
-            let forker = std::thread::spawn(move || {
+            std::thread::spawn(move || {
                 let _ = starting.send(());
                 let reached_the_lock_while_held = !seen.load(Ordering::SeqCst);
                 let mut forked_while_held = false;
@@ -274,7 +296,7 @@ mod tests {
                     forked_while_held = !seen.load(Ordering::SeqCst);
                     unsafe { libc::fork() }
                 });
-                match forked {
+                let outcome = match forked {
                     Ok(Forked::Child) => {
                         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
                         let code = if flags == -1 {
@@ -290,7 +312,8 @@ mod tests {
                         Ok((reached_the_lock_while_held, forked_while_held, pid))
                     }
                     Err(error) => Err(error),
-                }
+                };
+                let _ = answer.send(outcome);
             });
             started
                 .recv_timeout(PATIENCE)
@@ -302,14 +325,13 @@ mod tests {
                 "the descriptor is marked close-on-exec"
             );
             released.store(true, Ordering::SeqCst);
-            (forker, watched)
+            watched
         });
-        let (reached_the_lock_while_held, forked_while_held, pid) = forker
-            .join()
-            .expect("the forking thread finishes")
+        let (reached_the_lock_while_held, forked_while_held, pid) = answered
+            .recv_timeout(PATIENCE)
+            .expect("the forking thread forks once creation ends; a timeout means it never got the lock")
             .expect("the fork succeeds");
-        let mut child_status = 0;
-        assert_eq!(unsafe { libc::waitpid(pid, &mut child_status, 0) }, pid);
+        let child_status = reaped_within(pid, PATIENCE);
         drop(watched);
         ForkDuringCreation {
             reached_the_lock_while_held,
