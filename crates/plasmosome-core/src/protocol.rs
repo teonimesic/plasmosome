@@ -3,9 +3,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
-use plasmosome_backend::CellId;
+use plasmosome_backend::{CellId, MockMode};
 
-use crate::state::{CellStatus, GenomeName, MockMode};
+use crate::state::{CellStatus, GenomeName};
 
 /// One control request as it arrives on the wire.
 ///
