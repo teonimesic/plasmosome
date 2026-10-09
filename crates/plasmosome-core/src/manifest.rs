@@ -1599,9 +1599,8 @@ subject = "git"
     }
 
     fn refusal_of(declaration: &str) -> (String, String, String) {
-        let row = declaration;
-        let error =
-            PlasmidManifest::parse(declaration).expect_err(&format!("{row} must be refused"));
+        let error = PlasmidManifest::parse(declaration)
+            .expect_err(&format!("{declaration} must be refused"));
         let ManifestError::Field {
             plasmid,
             field,
@@ -1609,9 +1608,9 @@ subject = "git"
             detail,
         } = error
         else {
-            panic!("{row} was not refused with its field: {error:?}");
+            panic!("{declaration} was not refused with its field: {error:?}");
         };
-        assert_eq!(plasmid.as_deref(), Some("github-pr"), "{row}");
+        assert_eq!(plasmid.as_deref(), Some("github-pr"), "{declaration}");
         (field, fix, detail)
     }
 
@@ -1808,6 +1807,27 @@ subject = "git"
                 repaired,
                 "{ports}"
             );
+        }
+    }
+
+    #[test]
+    fn a_removal_fix_reads_as_a_removal_and_a_line_fix_as_a_line_to_write() {
+        let (section, _) = PORT_SECTIONS[0];
+        for (ports, rendered) in [
+            (
+                "ports = [443, \"x\"]",
+                "plasmid github-pr: network.ports[1]: \"x\" is not an integer from 1 to 65535; \
+                 remove this entry",
+            ),
+            (
+                "ports = 8080",
+                "plasmid github-pr: network.ports: 8080 is not a list of integers from 1 to 65535; \
+                 write ports = [8080]",
+            ),
+        ] {
+            let error = PlasmidManifest::parse(&ports_declaration(section, ports))
+                .expect_err(&format!("{ports} must be refused"));
+            assert_eq!(error.to_string(), rendered, "{ports}");
         }
     }
 
