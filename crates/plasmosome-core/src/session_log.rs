@@ -1119,12 +1119,25 @@ mod tests {
             "session log /logs/session.ndjson refuses appends after an earlier failure; reopen it"
         );
         assert!(poisoned.source().is_none());
-        let locked = SessionLogError::Locked { path };
+        let locked = SessionLogError::Locked { path: path.clone() };
         assert_eq!(
             locked.to_string(),
             "session log /logs/session.ndjson is held by another writer"
         );
         assert!(locked.source().is_none());
+        let too_long = SessionLogError::EventTooLong {
+            path,
+            bytes: 1_048_577,
+        };
+        assert_eq!(
+            too_long.to_string(),
+            "session log /logs/session.ndjson: an event line of 1048577 bytes is longer than 1048576"
+        );
+        assert!(too_long.source().is_none());
+        assert_eq!(
+            LogFault::LineTooLong.to_string(),
+            "longer than 1048576 bytes"
+        );
         let steps = [
             LogStep::CreateDirectory,
             LogStep::SyncDirectory,
@@ -1143,6 +1156,7 @@ mod tests {
             LogFault::MissingEnvelope,
             LogFault::SequenceNotIncreasing,
             LogFault::SequenceExhausted,
+            LogFault::LineTooLong,
         ]
         .map(|fault| fault.to_string());
         for names in [&steps[..], &faults[..]] {
@@ -1434,6 +1448,60 @@ mod tests {
                 0,
                 "{case} descriptor is nonblocking"
             );
+        }
+    }
+
+    fn padded_line(seq: u64, bytes: usize) -> String {
+        let bare = format!("{{\"seq\":{seq},\"kind\":\"k\",\"pad\":\"\"}}");
+        let pad = "x".repeat(bytes - bare.len());
+        format!("{{\"seq\":{seq},\"kind\":\"k\",\"pad\":\"{pad}\"}}\n")
+    }
+
+    #[test]
+    fn an_event_line_longer_than_the_limit_is_refused_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG);
+        let log = SessionLog::open(path.clone()).unwrap();
+        let envelope = event_line(1, "k", json!({ "pad": "" })).len() - 1;
+        let padded = |bytes: usize| json!({ "pad": "x".repeat(bytes - envelope) });
+        assert_eq!(
+            log.append("k", padded(SessionLog::MAX_LINE_BYTES)).unwrap(),
+            1
+        );
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(written.len(), SessionLog::MAX_LINE_BYTES + 1);
+        match log.append("k", padded(SessionLog::MAX_LINE_BYTES + 1)) {
+            Err(SessionLogError::EventTooLong { path: at, bytes }) => {
+                assert_eq!(at, path);
+                assert_eq!(bytes, SessionLog::MAX_LINE_BYTES + 1);
+            }
+            other => panic!("expected EventTooLong, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), written);
+        assert_eq!(log.append("k", json!({})).unwrap(), 2);
+        assert_eq!(seqs_on_disk(&path), [1, 2]);
+    }
+
+    #[test]
+    fn a_line_longer_than_the_limit_refuses_open_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let fits = dir.path().join("fits.ndjson");
+        std::fs::write(&fits, padded_line(1, SessionLog::MAX_LINE_BYTES)).unwrap();
+        assert_eq!(read_events(&fits).unwrap().len(), 1);
+        let log = SessionLog::open(fits).unwrap();
+        assert_eq!(log.append("k", json!({})).unwrap(), 2);
+        let terminated = padded_line(1, 40) + &padded_line(2, SessionLog::MAX_LINE_BYTES + 1);
+        let unterminated = padded_line(1, 40) + &"x".repeat(SessionLog::MAX_LINE_BYTES + 1);
+        for (case, bytes) in [("terminated", terminated), ("unterminated", unterminated)] {
+            let path = dir.path().join(format!("{case}.ndjson"));
+            std::fs::write(&path, &bytes).unwrap();
+            let expected = (2, LogFault::LineTooLong);
+            assert_malformed(open_error(path.clone(), &OsLogStore), &path, expected, case);
+            match read_events(&path) {
+                Err(error) => assert_malformed(error, &path, expected, case),
+                Ok(events) => panic!("{case}: read {} events", events.len()),
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes(), "{case}");
         }
     }
 }
