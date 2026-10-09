@@ -1,12 +1,6 @@
 //! Typed reversibility: a plugin's effects, their inverses, and the two-phase
 //! closure that decides whether detach is safe or needs an operator `Force`.
-//!
-//! A ledger's contents are serde data framed one `LogRecord` per ndjson line,
-//! so the ledger is recoverable by replaying its log alone — `Ledger::open_file`
-//! rebuilds it from disk and replay proceeds unchanged, so durable state never
-//! lives only in the crashiest process. `append_to_file` appends
-//! the whole current ledger; rebuild-then-extend is `open_file` → `push` →
-//! `append_to_file` on the reopened ledger.
+//! A caller pushes effects onto a `Ledger`, closes it, and detaches the result.
 
 use std::fmt;
 use std::io::Write;
