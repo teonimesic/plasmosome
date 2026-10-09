@@ -1546,29 +1546,98 @@ subject = "git"
         assert!(manifest.network.as_ref().unwrap().pin_cidrs.is_empty());
     }
 
-    const PORT_SECTIONS: [(&str, &str); 2] = [
+    const PORT_SECTIONS: [(&str, &str); 4] = [
         ("[network]\nhosts = [\"api.example.com\"]\n", "network"),
         (
-            "[network]\nhosts = [\"api.example.com\"]\n\
-             [commands.commands.\"git ops\"]\nexec = [\"git\"]\n\
+            "[commands.commands.\"git ops\"]\nexec = [\"git\"]\n\
              [commands.commands.\"git ops\".network]\nhosts = [\"api.example.com\"]\n",
             "commands.commands.\"git ops\".network",
         ),
+        (
+            "[commands.commands.'say \"hi\"']\nexec = [\"say\"]\n\
+             [commands.commands.'say \"hi\"'.network]\nhosts = [\"api.example.com\"]\n",
+            "commands.commands.'say \"hi\"'.network",
+        ),
+        (
+            "[commands.commands.git]\nexec = [\"git\"]\n\
+             [commands.commands.git.network]\nhosts = [\"api.example.com\"]\n",
+            "commands.commands.git.network",
+        ),
     ];
+
+    const REMOVAL: &str = "remove this entry";
 
     fn ports_declaration(section: &str, ports: &str) -> String {
         format!("id = \"github-pr\"\ndescription = \"Reach the declared API.\"\n{section}{ports}\n")
     }
 
-    fn parsed_ports(section: &str, ports: &str) -> Result<Vec<u16>, ManifestError> {
-        let manifest = PlasmidManifest::parse(&ports_declaration(section, ports))?;
+    fn ports_of(manifest: PlasmidManifest) -> Vec<u16> {
         let network = match manifest.commands {
             Some(commands) => commands.commands[0].network.clone(),
             None => manifest.network,
         };
-        Ok(network
+        network
             .expect("the declaration has a network section")
-            .ports)
+            .ports
+    }
+
+    fn parsed_ports(section: &str, ports: &str) -> Result<Vec<u16>, ManifestError> {
+        PlasmidManifest::parse(&ports_declaration(section, ports)).map(ports_of)
+    }
+
+    fn port_refusal(section: &str, ports: &str) -> (String, String, String) {
+        let row = format!("{section}{ports}");
+        let error = PlasmidManifest::parse(&ports_declaration(section, ports))
+            .expect_err(&format!("{row} must be refused"));
+        let ManifestError::Field {
+            plasmid,
+            field,
+            fix,
+            detail,
+        } = error
+        else {
+            panic!("{row} was not refused with its field: {error:?}");
+        };
+        assert_eq!(plasmid.as_deref(), Some("github-pr"), "{row}");
+        (field, fix, detail)
+    }
+
+    fn repaired_ports(section: &str, ports: &str, entry: Option<usize>, fix: &str) -> Vec<u16> {
+        let mut declaration: toml::Value =
+            toml::from_str(&ports_declaration(section, ports)).unwrap();
+        let network = match declaration.get_mut("commands") {
+            Some(commands) => {
+                let (_, command) = commands["commands"]
+                    .as_table_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .next()
+                    .unwrap();
+                &mut command["network"]
+            }
+            None => &mut declaration["network"],
+        };
+        let network = network.as_table_mut().unwrap();
+        match (entry, fix) {
+            (Some(index), REMOVAL) => {
+                network["ports"].as_array_mut().unwrap().remove(index);
+            }
+            (Some(index), replacement) => {
+                let entry: toml::Table = toml::from_str(&format!("entry = {replacement}")).unwrap();
+                network["ports"][index] = entry["entry"].clone();
+            }
+            (None, REMOVAL) => {
+                network.remove("ports");
+            }
+            (None, line) => {
+                let line: toml::Table = toml::from_str(line).unwrap();
+                network.insert("ports".into(), line["ports"].clone());
+            }
+        }
+        let repaired = toml::to_string(&declaration).unwrap();
+        PlasmidManifest::parse(&repaired)
+            .map(ports_of)
+            .unwrap_or_else(|error| panic!("{ports} with {fix:?} applied is refused: {error}"))
     }
 
     #[test]
@@ -1592,72 +1661,118 @@ subject = "git"
     }
 
     #[test]
-    fn a_port_that_is_not_an_integer_from_1_to_65535_is_refused_naming_its_ports_field() {
+    fn a_port_that_is_not_an_integer_from_1_to_65535_is_refused_at_its_own_entry() {
         for (section, path) in PORT_SECTIONS {
-            for (ports, entry) in [
-                ("ports = [65536]", "65536"),
-                ("ports = [70000]", "70000"),
-                ("ports = [0]", "0"),
-                ("ports = [-1]", "-1"),
-                ("ports = [\"443\"]", "\"443\""),
-                ("ports = [443.0]", "443.0"),
-                ("ports = [443, \"x\", 8080]", "\"x\""),
-                ("ports = 443", "443"),
-                ("ports = [1, 65536]", "65536"),
-                ("ports = [true]", "true"),
+            for (ports, entry, value, fix, repaired) in [
+                ("ports = [65536]", Some(0), "65536", REMOVAL, vec![]),
+                ("ports = [70000]", Some(0), "70000", REMOVAL, vec![]),
+                ("ports = [0]", Some(0), "0", REMOVAL, vec![]),
+                ("ports = [-1]", Some(0), "-1", REMOVAL, vec![]),
+                ("ports = [\"443\"]", Some(0), "\"443\"", "443", vec![443]),
+                ("ports = [443.0]", Some(0), "443.0", "443", vec![443]),
+                ("ports = [true]", Some(0), "true", REMOVAL, vec![]),
+                (
+                    "ports = [443, \"x\", 8080]",
+                    Some(1),
+                    "\"x\"",
+                    REMOVAL,
+                    vec![443, 8080],
+                ),
+                ("ports = [1, 65536]", Some(1), "65536", REMOVAL, vec![1]),
+                ("ports = [443, 70000]", Some(1), "70000", REMOVAL, vec![443]),
+                (
+                    "ports = [8080, 70000]",
+                    Some(1),
+                    "70000",
+                    REMOVAL,
+                    vec![8080],
+                ),
+                (
+                    "ports = [8080, \"8080\"]",
+                    Some(1),
+                    "\"8080\"",
+                    REMOVAL,
+                    vec![8080],
+                ),
+                (
+                    "ports = [443, \"8080\", 22]",
+                    Some(1),
+                    "\"8080\"",
+                    "8080",
+                    vec![443, 8080, 22],
+                ),
+                ("ports = 443", None, "443", "ports = [443]", vec![443]),
+                ("ports = \"http\"", None, "\"http\"", REMOVAL, vec![]),
             ] {
-                let error = PlasmidManifest::parse(&ports_declaration(section, ports)).unwrap_err();
-                let ManifestError::Field {
-                    plasmid,
-                    field,
-                    fix,
-                    detail,
-                } = error
-                else {
-                    panic!("{ports} was not refused with its field: {error:?}");
+                let row = format!("{section}{ports}");
+                let (field, actual_fix, detail) = port_refusal(section, ports);
+                let expected_field = match entry {
+                    Some(index) => format!("{path}.ports[{index}]"),
+                    None => format!("{path}.ports"),
                 };
-                assert_eq!(plasmid.as_deref(), Some("github-pr"), "{ports}");
-                assert_eq!(field, format!("{path}.ports"), "{ports}");
-                assert!(detail.contains(entry), "{ports}: {detail}");
-                assert_eq!(fix, "ports = [443]", "{ports}");
-                assert_eq!(parsed_ports(section, &fix).unwrap(), vec![443], "{ports}");
+                assert_eq!(field, expected_field, "{row}");
+                assert!(
+                    detail.starts_with(&format!("{value} is not ")),
+                    "{row}: {detail}"
+                );
+                assert_eq!(actual_fix, fix, "{row}");
+                assert_eq!(
+                    repaired_ports(section, ports, entry, &actual_fix),
+                    repaired,
+                    "{row}"
+                );
             }
         }
     }
 
     #[test]
-    fn a_port_refusal_fix_carries_the_port_the_author_evidently_meant() {
+    fn a_port_refusal_fix_is_the_port_the_author_evidently_meant_or_the_entry_removed() {
         let (section, path) = PORT_SECTIONS[0];
-        for (ports, meant) in [
-            ("ports = 8080", 8080),
-            ("ports = \"8080\"", 8080),
-            ("ports = 8080.0", 8080),
-            ("ports = [\"8080\"]", 8080),
-            ("ports = [8080.0]", 8080),
-            ("ports = [443, \"8080\", 70000]", 8080),
-            ("ports = [\"1\"]", 1),
-            ("ports = [\"65535\"]", 65535),
-            ("ports = [1.0]", 1),
-            ("ports = [65535.0]", 65535),
-            ("ports = 70000", 443),
-            ("ports = 0", 443),
-            ("ports = -8080", 443),
-            ("ports = [\"0\"]", 443),
-            ("ports = [\"65536\"]", 443),
-            ("ports = [\"http\"]", 443),
-            ("ports = [8080.5]", 443),
-            ("ports = [0.0]", 443),
-            ("ports = [65536.0]", 443),
-            ("ports = [-8080.0]", 443),
-            ("ports = [nan]", 443),
-            ("ports = [inf]", 443),
-            ("ports = [[8080]]", 443),
-            ("ports = { port = 8080 }", 443),
+        for (ports, entry, fix, repaired) in [
+            ("ports = 8080", None, "ports = [8080]", vec![8080]),
+            ("ports = \"8080\"", None, "ports = [8080]", vec![8080]),
+            ("ports = \" 8080 \"", None, "ports = [8080]", vec![8080]),
+            ("ports = 8080.0", None, "ports = [8080]", vec![8080]),
+            ("ports = 70000", None, REMOVAL, vec![]),
+            ("ports = 0", None, REMOVAL, vec![]),
+            ("ports = -8080", None, REMOVAL, vec![]),
+            ("ports = { port = 8080 }", None, REMOVAL, vec![]),
+            ("ports = [\"8080\"]", Some(0), "8080", vec![8080]),
+            ("ports = [\"8080 \"]", Some(0), "8080", vec![8080]),
+            ("ports = [\" 8080\"]", Some(0), "8080", vec![8080]),
+            ("ports = [\"+8080\"]", Some(0), "8080", vec![8080]),
+            ("ports = [\"08080\"]", Some(0), "8080", vec![8080]),
+            ("ports = [8080.0]", Some(0), "8080", vec![8080]),
+            ("ports = [22, \"8080\"]", Some(1), "8080", vec![22, 8080]),
+            ("ports = [\"1\"]", Some(0), "1", vec![1]),
+            ("ports = [\"65535\"]", Some(0), "65535", vec![65535]),
+            ("ports = [1.0]", Some(0), "1", vec![1]),
+            ("ports = [65535.0]", Some(0), "65535", vec![65535]),
+            ("ports = [\"8080\", 8080]", Some(0), REMOVAL, vec![8080]),
+            ("ports = [8080, 8080.0]", Some(1), REMOVAL, vec![8080]),
+            ("ports = [\"0\"]", Some(0), REMOVAL, vec![]),
+            ("ports = [\"65536\"]", Some(0), REMOVAL, vec![]),
+            ("ports = [\"http\"]", Some(0), REMOVAL, vec![]),
+            ("ports = [8080.5]", Some(0), REMOVAL, vec![]),
+            ("ports = [0.0]", Some(0), REMOVAL, vec![]),
+            ("ports = [65536.0]", Some(0), REMOVAL, vec![]),
+            ("ports = [-8080.0]", Some(0), REMOVAL, vec![]),
+            ("ports = [nan]", Some(0), REMOVAL, vec![]),
+            ("ports = [inf]", Some(0), REMOVAL, vec![]),
+            ("ports = [[8080]]", Some(0), REMOVAL, vec![]),
         ] {
-            let source = ports_declaration(section, ports);
-            let fix = field_fix(&source, &format!("{path}.ports"));
-            assert_eq!(fix, format!("ports = [{meant}]"), "{ports}");
-            assert_eq!(parsed_ports(section, &fix).unwrap(), vec![meant], "{ports}");
+            let (field, actual_fix, _) = port_refusal(section, ports);
+            let expected_field = match entry {
+                Some(index) => format!("{path}.ports[{index}]"),
+                None => format!("{path}.ports"),
+            };
+            assert_eq!(field, expected_field, "{ports}");
+            assert_eq!(actual_fix, fix, "{ports}");
+            assert_eq!(
+                repaired_ports(section, ports, entry, &actual_fix),
+                repaired,
+                "{ports}"
+            );
         }
     }
 
