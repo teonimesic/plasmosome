@@ -5,6 +5,7 @@
 pub mod backend;
 pub mod composite;
 pub mod fake;
+pub mod recipe;
 pub mod universe;
 
 pub use backend::{
@@ -13,6 +14,10 @@ pub use backend::{
 };
 pub use composite::{CompositeBackend, Leaf};
 pub use fake::FakeBackend;
+pub use recipe::{
+    BrokerLaunch, FileAccess, MAX_SESSION_FILE_BYTES, MountRecipe, ProxyRecipe, ProxyTransport,
+    RecipeError, SessionFileRecipe, UdsRecipe,
+};
 pub use universe::{
     Diff, GrantId, OsObject, OsState, PluginId, ResidueReport, UniverseClass, UniverseOp,
     UniverseRemoval,
