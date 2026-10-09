@@ -335,9 +335,14 @@ Different mount sources at one target and different routes at one host are diffe
 capabilities. Both remain represented and independently removable. A real adapter multiplexes
 them rather than overwriting a path or relying on bare stacked mounts. New unqualified
 lookups/connections choose the lexicographically smallest active full GrantId at that logical
-target; an already-open file handle or flow stays bound to its original grant. Withdrawal never
-silently retargets it to a surviving peer. Each covered root/rule still has an actual independent
-access attachment, not only an entry in a desired-state count.
+target. For a ProxyMap connection that target is the host together with the connection's destination
+port and transport: only grants whose recipe has that port and transport take part, so a host held
+on two ports, or over TCP and UDP on one port, serves each from its own grant. A DNS answer has no
+port and is selected per host. Old and replacement holdings that a reload stages at one target can
+both take part with different recipes, and selection prefers neither generation. Spec001 §4.2 gives
+the record and the rules. An already-open file handle or flow stays bound to its original grant.
+Withdrawal never silently retargets it to a surviving peer. Each covered root/rule still has an
+actual independent access attachment, not only an entry in a desired-state count.
 Spec001 §4.2 defines the exact host-to-guest install/activate/drain/remove transitions and the
 ProxyMap DNS/address/TUN-flow binding. Closed staged attachments do not participate in selection.
 Activation is per operation after durable prepare, not an atomic visibility change for an
@@ -638,6 +643,14 @@ source acceptance still supplies neither deployed artifacts nor successful platf
   a changed kind or direct-applied address cannot issue another one.
 - **A2 — resource collisions:** two mount sources at one target and two routes at one host retain
   all input fields, coexist for one owner, and each exact removal preserves the other object.
+  ProxyMap grants for one host on two ports, and on one port over TCP and UDP, each serve a new flow
+  on their own port and transport, and a flow on a port or transport no grant covers refuses
+  `no_active_grant`; a selector keyed by host alone must fail this. That host's DNS answer exists
+  while any of its grants is eligible and disappears with the last. The 4091 codec refuses `port` or
+  `transport` on a target of another kind, and a `proxy_map` target missing either. During a reload
+  that changes a destination, a new flow binds to the smaller eligible GrantId of the old and
+  replacement holdings, and a flow bound to the old grant closes with its withdrawal instead of
+  moving.
 - **A3 — broker residue:** same owner, broker name and complete launch with different IDs remain
   distinct; live revoke preserves exact planted residue, which its own inverse can then remove.
   Process diagnostics are separate: loss of original child authority cannot authorize a signal

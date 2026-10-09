@@ -1063,16 +1063,31 @@ or a recovery guess.
 On the first installed ProxyMap the shim creates the shared DNS listener (UDP/TCP127.0.0.53:53)
 and synthetic-prefix TUN/route in the controlled guest namespace, initially admitting no grant.
 The trusted image supplies that resolver address and no fallback. These are actual attachments
-of the installed grant; later grants add their own independently gated bindings. It answers
-A queries for effectively active exact hosts (ASCII DNS query case is ignored) with their
-assigned address, after host-authoritative grant.select below. AAAA has no data and
-unknown/inactive hosts return NXDOMAIN. No external DNS forwarding, fallback route or arbitrary
-destination service exists. At a new TCP connection/UDP flow, the shim obtains that host's
-smallest currently eligible GrantId through4091grant.select before checking packet transport
-and destination port against the selected recipe. Mismatches refuse, never fall through to
-another rule. A stale locally active grant is not an authority to bypass this host selection.
-It binds the actual guest flow and4091stream/datagram handle to that original grant. Existing
-flows never follow a later selector change. Each UDP five-tuple is one flow until closed;
+of the installed grant; later grants add their own independently gated bindings. It answers A
+queries for effectively active exact hosts (ASCII DNS query case is ignored) with their assigned
+address, after host-authoritative 4091 `grant.select` of the host's `proxy_host` target below. DNS
+selection is per host: a query carries no port or transport, so a host has an answer while any of
+its ProxyMap grants, on any port and transport, is eligible, and an answer binds no flow. AAAA has
+no data and unknown/inactive hosts return NXDOMAIN. No external DNS forwarding, fallback route or
+arbitrary destination service exists. At a new TCP connection/UDP flow, the shim maps the
+destination address to its bound host and calls 4091 `grant.select` with the `proxy_map` target of
+that host and the flow's destination port and transport. The host returns the smallest currently
+eligible GrantId among that host's grants whose recipe has that port and transport. So a host held
+on two ports, or over TCP and UDP on one port, serves each flow from the grant for its own port and
+transport, and a flow on a port or transport that no eligible grant covers refuses with
+`no_active_grant`. The shim still checks the flow against the selected recipe; a mismatch is an
+observation fault that refuses, never a fall-through to another rule. A stale locally active grant
+is not an authority to bypass this host selection. It binds the actual guest flow
+and4091stream/datagram handle to that original grant. Existing flows never follow a later selector
+change. While a reload stages a replacement (spec008), an old holding and its activated replacement
+at one host, port and transport can both be eligible, and their routes and recipes can differ;
+nothing here assumes them equal. Selection does not read generations: a new flow in that window
+binds to the lexicographically smaller GrantId of the two, which may be either. Spec008's preflight
+has already refused a replacement that could not be staged without widening access. Once the old
+holding's host gate stops admitting new IO during its retirement after commit, fresh flows select
+only the replacement; after an abort, the replacement's withdrawal leaves only the old holding. A
+flow already bound to either grant stays bound to it and closes with that grant's drain or removal;
+it is never moved to the survivor. Each UDP five-tuple is one flow until closed;
 drain/remove closes that grant's flows, not a peer's. Last active-host removal withdraws its DNS
 answer and forwarding rule; stale cached addresses refuse rather than reaching a reused host.
 The shared resolver/TUN/route persist while peer bindings exist; last ProxyMap removal destroys
@@ -1114,14 +1129,22 @@ one byte payload/read is at most65,536bytes, also subject to the enclosing frame
 | `datagram.receive` | `{handle, length}` | `{bytes:[u8], truncated:bool}` |
 | `datagram.close` | `{handle}` | `{closed:true}` |
 
-`SelectionTarget` is the closed record `{kind:SelectionKind,key:String}`. SelectionKind is
-exactly `session_file | uds_socket | proxy_map | broker | mount`; key is respectively the
-recorded guest_path, guest_path, host, name or target. Strings retain their exact recorded
-identity and validation rules. Selection searches only this authenticated cell's original
-standing holdings whose host gate currently admits new IO, and returns the lexicographically
-smallest full GrantId at that target. It never creates a holding or selects an incomplete,
-closed, staged or foreign object. If no grant is eligible, return code105 with
-`detail:{kind:"no_active_grant",target:SelectionTarget}`, never an invented ID.
+`SelectionTarget` is a closed record whose fields follow its kind. A `proxy_map` target is exactly
+`{kind:"proxy_map", key:String, port:u16, transport:ProxyTransport}`; a target of any other kind is
+exactly `{kind:SelectionKind, key:String}`. A `port` or `transport` field on another kind refuses
+like any unknown field, and a `proxy_map` target missing either refuses like any missing field.
+SelectionKind is exactly `session_file | uds_socket | proxy_map | proxy_host | broker | mount`; key
+is respectively the recorded guest_path, guest_path, host, host, name or target. `port` is nonzero
+and ProxyTransport is spec017's `tcp | udp`. Strings retain their exact recorded identity and
+validation rules. A holding is at a target when its class is the kind's class (`proxy_map` and
+`proxy_host` both name ProxyMap) and its recorded key equals key. A ProxyMap holding is at a
+`proxy_map` target only when its recipe's `port` and `transport` also equal the target's, and at a
+`proxy_host` target whatever its port and transport. A `proxy_host` selection serves only the DNS
+answer above; its result binds no flow or data handle. Selection searches only this authenticated
+cell's original standing holdings whose host gate currently admits new IO, and returns the
+lexicographically smallest full GrantId among the holdings at that target. It never creates a
+holding or selects an incomplete, closed, staged or foreign object. If no grant is eligible, return
+code105 with `detail:{kind:"no_active_grant",target:SelectionTarget}`, never an invented ID.
 
 The trusted shim must make this host selection before each fresh unqualified path lookup,
 DNS answer or new flow, before local recipe/permission/transport checks. A guest-side eligibility
