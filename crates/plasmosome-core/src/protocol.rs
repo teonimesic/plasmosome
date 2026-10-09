@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 
 use plasmosome_backend::{CellId, MockMode};
 
+use crate::manifest::ManifestError;
 use crate::state::{CellStatus, GenomeName};
 
 /// One control request as it arrives on the wire.
@@ -257,6 +258,8 @@ pub struct WireError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    fix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     verb: Option<String>,
 }
 
@@ -279,6 +282,7 @@ impl WireError {
             deadline_ms: None,
             detail: None,
             path: None,
+            fix: None,
             verb: None,
         }
     }
@@ -393,6 +397,19 @@ impl WireError {
         error.detail = Some(detail);
         error.path = Some(path);
         error
+    }
+
+    /// Code 108 for a declaration `PlasmidManifest` refused: `path` is the
+    /// declaration file and `detail` the refusal's text. `fix` is the line the
+    /// author would write, present only when the refusal names a field; a file
+    /// that could not be read or is not TOML carries none.
+    pub fn manifest_refusal(path: String, error: &ManifestError) -> WireError {
+        let mut wire = WireError::manifest_invalid(error.to_string(), path);
+        wire.fix = match error {
+            ManifestError::Field { fix, .. } => Some(fix.clone()),
+            ManifestError::Io(_) | ManifestError::Parse(_) => None,
+        };
+        wire
     }
 
     /// Code 109: the request would widen an existing grant.
