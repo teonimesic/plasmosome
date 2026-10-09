@@ -982,6 +982,46 @@ fn a_changed_fixture_source_compiles_to_a_new_key() {
     }
 }
 
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => payload
+            .downcast_ref::<&str>()
+            .map(|message| message.to_string())
+            .unwrap_or_default(),
+    }
+}
+
+#[test]
+fn a_fixture_source_that_does_not_compile_publishes_nothing() {
+    let cache = tempfile::tempdir().unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    let broken = sources.path().join("broken.c");
+    std::fs::write(&broken, "int main(void) { return }\n").expect("the broken source is written");
+
+    let refused =
+        std::panic::catch_unwind(|| fixture::compile_supervision_fixture(cache.path(), &broken))
+            .expect_err("a source that does not compile fails setup");
+
+    assert_eq!(
+        panic_message(refused),
+        "the supervision worker fixture compiles",
+        "setup reports the failed compile, not a later step"
+    );
+    let keys: Vec<_> = std::fs::read_dir(cache.path())
+        .expect("the cache root is readable")
+        .map(|key| key.expect("the cache entry is readable").path())
+        .collect();
+    assert_eq!(keys.len(), 1, "the source's key directory was created");
+    assert_eq!(
+        std::fs::read_dir(&keys[0])
+            .expect("the key directory is readable")
+            .count(),
+        0,
+        "a failed compile leaves neither an executable nor a temporary name"
+    );
+}
+
 #[test]
 fn a_reused_fixture_is_run_once_before_it_is_returned() {
     let cache = tempfile::tempdir().unwrap();
@@ -1006,10 +1046,7 @@ fn a_reused_fixture_is_run_once_before_it_is_returned() {
         fixture::compile_supervision_fixture(cache.path(), &fixture::supervision_worker_source())
     })
     .expect_err("a reused executable that does not exit 64 fails setup");
-    let message = refused
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_default();
+    let message = panic_message(refused);
     assert!(
         message.contains("refuses a call with no arguments") && message.contains("Some(63)"),
         "setup fails at the warm-up's exit-64 assertion, not elsewhere: {message}"
