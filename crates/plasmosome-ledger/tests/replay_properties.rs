@@ -1,6 +1,19 @@
-use plasmosome_backend::{Diff, EnforcementBackend, FakeBackend, GrantId, PluginId, UniverseOp};
+use plasmosome_backend::{
+    CellId, CellOwner, Diff, EnforcementBackend, FakeBackend, GrantId, PluginId, UniverseOp,
+};
 use plasmosome_ledger::{Closure, Effect, Force, InverseVia, Ledger};
 use proptest::prelude::*;
+
+fn generated_cell() -> CellId {
+    CellId::from("generated-cell")
+}
+
+fn generated_owner() -> CellOwner {
+    CellOwner {
+        cell: generated_cell(),
+        plugin: PluginId::from("generated"),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -39,7 +52,7 @@ impl GeneratedEffect {
                 let op = UniverseOp::WriteSessionFile {
                     id: GrantId::new(),
                     path: format!("skills/generated-{index}.md"),
-                    owner: PluginId::from("generated"),
+                    owner: generated_owner(),
                 };
                 let effect = Effect::exact(
                     format!("exact file {index}"),
@@ -52,7 +65,7 @@ impl GeneratedEffect {
                     id: GrantId::new(),
                     host: format!("host-{index}.example.test"),
                     route: "staged".to_string(),
-                    owner: PluginId::from("generated"),
+                    owner: generated_owner(),
                 };
                 let effect =
                     Effect::compensating(format!("compensating proxy {index}"), op.removal());
@@ -113,7 +126,7 @@ proptest! {
             panic!("ledgers without External or published Delayed entries must close safely");
         };
         let drain = plasmosome_backend::DrainSpec::graceful(std::time::Duration::from_millis(1));
-        let report = sealed.detach(&mut backend, drain).expect("replay over generated ledgers must succeed");
+        let report = sealed.detach(&mut backend, &generated_cell(), drain).expect("replay over generated ledgers must succeed");
 
         let mut expected_replay: Vec<String> = effects.iter().filter_map(GeneratedEffect::replayed_description).collect();
         expected_replay.reverse();
@@ -146,6 +159,7 @@ proptest! {
         let report = forced_ledger
             .detach_forced(
                 &mut backend,
+                &generated_cell(),
                 plasmosome_backend::DrainSpec::forcing(),
                 Force::operator_asserted("property-test", "asserted by generation"),
             )
