@@ -23,17 +23,20 @@ pub(crate) struct DescriptorsHeld(());
 ///
 /// Use it only to create a descriptor and mark it close-on-exec, where the
 /// platform needs two calls for that. `create` receives the `DescriptorsHeld`
-/// proof, so a function that takes one cannot be called outside. A descriptor
-/// that is not close-on-exec when `create` returns is closed before the lock
-/// is released, and an error is returned instead.
+/// proof, so a function that takes one cannot be called outside. `create`
+/// returns the value that owns the descriptor, and only that descriptor is
+/// checked: if it is not close-on-exec when `create` returns, it is closed
+/// before the lock is released, and an error is returned instead. A
+/// descriptor created inside `create` and kept anywhere else is not checked,
+/// so the caller must make it close-on-exec before `create` returns.
 ///
 /// Never hold it across a blocking call such as `accept`: every
 /// `VmmChild::spawn` in the process waits until `create` returns. A spawn on
 /// this thread from inside `create` forks nothing and returns
 /// `SpawnError::DescriptorLockHeld`, and a nested call runs under the lock
-/// already held. Only descriptors created inside `create` are covered, and
-/// forks that bypass this lock, such as `std::process::Command`, are not held
-/// back.
+/// already held. Only descriptors created inside `create` are held back from
+/// a fork, and forks that bypass this lock, such as `std::process::Command`,
+/// are not held back.
 pub(crate) fn with_descriptors_held<T: AsFd + Into<OwnedFd>>(
     create: impl FnOnce(&DescriptorsHeld) -> std::io::Result<T>,
 ) -> std::io::Result<T> {

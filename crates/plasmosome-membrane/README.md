@@ -94,9 +94,11 @@ exists for a moment before `FD_CLOEXEC` is set, and a fork in that moment hands 
 `VmmChild::spawn` forks holding the read side of one process-wide lock. The readiness probe
 creates its socket holding the write side, so a spawn waits while a probe socket is created; on
 Linux that socket is close-on-exec from the start, so the wait matters only on Darwin. Creation
-under the write side must hand back a descriptor that is already close-on-exec: one that is not is
-closed before the lock is released, and creation fails. A spawn from the thread that holds the
-write side returns `SpawnError::DescriptorLockHeld` instead of waiting on itself.
+under the write side returns the value that owns its descriptor, and only that descriptor is
+checked: if it is not already close-on-exec, it is closed before the lock is released and creation
+fails. A descriptor created under the lock and kept anywhere else is not checked, so the code that
+creates it must mark it close-on-exec before the lock is released. A spawn from the thread that
+holds the write side returns `SpawnError::DescriptorLockHeld` instead of waiting on itself.
 
 The lock covers only those two paths. Forks that do not go through `VmmChild::spawn`, such as
 `std::process::Command`, do not take it, and neither do the standard library's `bind` in
