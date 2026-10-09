@@ -2,7 +2,8 @@ use plasmosome_core::{LogFault, SessionLog, SessionLogError};
 use serde_json::json;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const LOG: &str = "session.ndjson";
@@ -60,7 +61,26 @@ fn assert_locked(result: Result<SessionLog, SessionLogError>, at: &Path) {
     }
 }
 
+fn give_up(child: &mut Child, waiting_for: &str) -> ! {
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("{waiting_for} within {PATIENCE:?}");
+}
+
+fn wait_within(child: &mut Child) -> ExitStatus {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            Ok(None) => give_up(child, "the holder exits"),
+            Err(error) => give_up(child, &format!("the holder's state is readable ({error})")),
+        }
+    }
+}
+
 #[test]
+#[ignore = "run by a_second_writer_in_another_process_is_refused"]
 fn hold_a_writer_lock_for_another_process() {
     let Some(path) = std::env::var_os(LOCK_HOLDER) else {
         return;
@@ -79,6 +99,7 @@ fn a_second_writer_in_another_process_is_refused() {
         .args([
             "--exact",
             "hold_a_writer_lock_for_another_process",
+            "--ignored",
             "--nocapture",
             "--test-threads=1",
         ])
@@ -87,16 +108,31 @@ fn a_second_writer_in_another_process_is_refused() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut lines = std::io::BufReader::new(holder.stdout.take().unwrap()).lines();
-    let held = lines
-        .by_ref()
-        .map_while(Result::ok)
-        .any(|line| line.contains(HOLDING));
-    assert!(held, "the other process took the writer lock");
+    let output = holder.stdout.take().unwrap();
+    let (sender, lines) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(output)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        match lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) if line.contains(HOLDING) => break,
+            Ok(_) => {}
+            Err(_) => give_up(&mut holder, "the other process takes the writer lock"),
+        }
+    }
     let refused = SessionLog::open(path.clone());
     drop(holder.stdin.take());
-    let rest: Vec<String> = lines.map_while(Result::ok).collect();
-    assert!(holder.wait().unwrap().success(), "{rest:?}");
+    let status = wait_within(&mut holder);
+    let rest: Vec<String> = lines.iter().collect();
+    assert!(status.success(), "{rest:?}");
     assert_locked(refused, &path);
     let after = SessionLog::open(path.clone()).unwrap();
     assert_eq!(after.append("a", json!({})).unwrap(), 1);
