@@ -20,7 +20,8 @@ one.
 | `reconciler` | Desired state vs observed state, converging by generation |
 | `gatekeeper` | Credential custody — the cell receives handles, never secrets |
 | `session_log` | Append-only record of everything that happened in a cell |
-| `state` | Wire types: instances, cells, genomes, mock modes |
+| `state` | Wire types: instances, cells, genomes, mock modes; the one constructor for a cell's journal and socket paths |
+| `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
 
 ## Use
