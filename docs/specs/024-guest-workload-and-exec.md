@@ -329,7 +329,8 @@ unaccounted is 101 to every verb, so its processes cannot be queried until it is
 These are proposed text, not edits made in this PR. `docs/specs/README.md` does not say that the
 accepting PR applies them, and spec 001 says its text changes in a pull request with the
 reasoning written down. So the PR that accepts this spec must carry these edits, or this spec
-stays draft. Spec 023 proposes a change to the same 105 row; the accepting PRs merge the two.
+stays draft. Spec 023 changes the same 105 row of spec 001 §1, so the row below is the merged
+text both specs propose.
 
 **Spec 001 §1, the 105 row.** Replace the structured fields with:
 
