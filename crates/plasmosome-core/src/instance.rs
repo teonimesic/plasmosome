@@ -22,6 +22,8 @@ const DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 const JOURNAL_FLAGS: libc::c_int = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
 
+type SyncDirectory = fn(BorrowedFd<'_>) -> io::Result<()>;
+
 /// An opened instance root directory. The operator supplies and trusts the root, so `open` may
 /// reach it through a symlink; every name beneath it is opened relative to this descriptor
 /// without following a symlink.
@@ -29,6 +31,7 @@ const JOURNAL_FLAGS: libc::c_int = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O
 pub struct InstanceRoot {
     dir: OwnedFd,
     path: PathBuf,
+    sync: SyncDirectory,
 }
 
 impl InstanceRoot {
@@ -51,6 +54,7 @@ impl InstanceRoot {
         Ok(InstanceRoot {
             dir: OwnedFd::from(dir),
             path: path.to_path_buf(),
+            sync: sync_directory,
         })
     }
 
@@ -86,7 +90,7 @@ impl InstanceRoot {
         }
         if created {
             change_mode(file.as_fd(), PRIVATE_FILE).map_err(io_error)?;
-            sync_directory(self.dir.as_fd()).map_err(io_error)?;
+            (self.sync)(self.dir.as_fd()).map_err(io_error)?;
         }
         match lock_exclusive_nonblocking(file.as_fd()) {
             Ok(()) => Ok(WriterLock { file, path }),
@@ -163,6 +167,7 @@ impl InstanceRoot {
             dir,
             cell: cell.clone(),
             journal_path,
+            sync: self.sync,
         })
     }
 
@@ -192,11 +197,12 @@ impl InstanceRoot {
             directory_refusal(cells.as_fd(), &name, error).into_cell_dir_error(cell_path.clone())
         })?;
         change_mode(dir.as_fd(), PRIVATE_DIRECTORY).map_err(io_error)?;
-        sync_directory(cells.as_fd()).map_err(io_error)?;
+        (self.sync)(cells.as_fd()).map_err(io_error)?;
         Ok(CellDir {
             dir,
             cell: cell.clone(),
             journal_path,
+            sync: self.sync,
         })
     }
 
@@ -210,7 +216,7 @@ impl InstanceRoot {
         let cells = self.open_cells()?;
         if created {
             change_mode(cells.as_fd(), PRIVATE_DIRECTORY).map_err(DirectoryRefusal::Io)?;
-            sync_directory(self.dir.as_fd()).map_err(DirectoryRefusal::Io)?;
+            (self.sync)(self.dir.as_fd()).map_err(DirectoryRefusal::Io)?;
         }
         Ok(cells)
     }
@@ -244,6 +250,7 @@ impl InstanceRoot {
                             dir,
                             cell: cell.clone(),
                             journal_path,
+                            sync: self.sync,
                         }
                         .open_journal(),
                         Err(error) => JournalOpen::Refused(JournalRefusal::CellDirectory(error)),
@@ -313,6 +320,7 @@ pub struct CellDir {
     dir: OwnedFd,
     cell: CellId,
     journal_path: PathBuf,
+    sync: SyncDirectory,
 }
 
 impl CellDir {
@@ -365,7 +373,7 @@ impl CellDir {
 
     /// Syncs this cell directory, making entries created in it durable.
     pub fn sync(&self) -> io::Result<()> {
-        sync_directory(self.dir.as_fd())
+        (self.sync)(self.dir.as_fd())
     }
 }
 
