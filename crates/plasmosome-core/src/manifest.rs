@@ -177,7 +177,11 @@ impl std::fmt::Display for ManifestError {
                 if let Some(id) = plasmid {
                     write!(f, "plasmid {id}: ")?;
                 }
-                write!(f, "{field}: {detail}; write {fix}")
+                if fix == REMOVE_ENTRY {
+                    write!(f, "{field}: {detail}; {fix}")
+                } else {
+                    write!(f, "{field}: {detail}; write {fix}")
+                }
             }
             ManifestError::Invalid(d) => write!(f, "invalid manifest: {d}"),
         }
