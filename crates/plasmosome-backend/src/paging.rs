@@ -375,3 +375,36 @@ impl std::error::Error for PagingError {}
 impl<E: std::error::Error> std::error::Error for CaptureError<E> {}
 
 impl std::error::Error for AssemblyFault {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::convert::Infallible;
+    use std::time::Duration;
+
+    #[test]
+    fn snapshot_ids_run_out_instead_of_wrapping_to_zero() {
+        let now = Instant::now();
+        let expires = now + Duration::from_secs(1);
+        let account = FrozenAccount::freeze(&1).expect("a number freezes");
+        let mut slot = CaptureSlot::<()>::new();
+        slot.last_snapshot = u64::MAX - 1;
+        let last = slot
+            .capture((), expires, &|| now, || {
+                Ok::<_, Infallible>(account.clone())
+            })
+            .expect("the last snapshot ID is issued");
+        assert_eq!(last.snapshot, u64::MAX);
+        let refused = slot.capture((), expires, &|| now, || {
+            Ok::<_, Infallible>(account.clone())
+        });
+        assert!(
+            matches!(
+                refused,
+                Err(CaptureError::Paging(PagingError::SnapshotsExhausted))
+            ),
+            "{refused:?}"
+        );
+        assert!(!slot.is_holding());
+    }
+}

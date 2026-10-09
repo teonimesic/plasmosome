@@ -259,6 +259,48 @@ mod tests {
     }
 
     #[test]
+    fn digest_serde_round_trips_as_lowercase_hex() {
+        let digest = Digest::parse_hex(ABC).expect("64 lowercase digits parse");
+        let encoded = serde_json::to_string(&digest).expect("a digest encodes");
+        assert_eq!(encoded, format!("\"{ABC}\""));
+        assert_eq!(
+            serde_json::from_str::<Digest>(&encoded).expect("its encoding decodes"),
+            digest
+        );
+        assert_eq!(
+            serde_json::from_value::<Digest>(serde_json::Value::String(ABC.to_string()))
+                .expect("a JSON string value decodes"),
+            digest
+        );
+    }
+
+    #[test]
+    fn digest_serde_refuses_uppercase_and_short() {
+        let cases = [
+            (
+                format!("\"{}\"", ABC.to_uppercase()),
+                "byte 0 of a SHA-256 digest is not a lowercase hexadecimal digit",
+            ),
+            (
+                format!("\"{}\"", &ABC[..63]),
+                "a SHA-256 digest is 64 lowercase hexadecimal digits, not 63 bytes",
+            ),
+            (
+                "12".to_string(),
+                "invalid type: integer `12`, expected 64 lowercase hexadecimal digits",
+            ),
+            (
+                format!("[\"{ABC}\"]"),
+                "invalid type: sequence, expected 64 lowercase hexadecimal digits",
+            ),
+        ];
+        for (text, reason) in cases {
+            let error = serde_json::from_str::<Digest>(&text).expect_err(&text);
+            assert!(error.to_string().starts_with(reason), "{text}: {error}");
+        }
+    }
+
+    #[test]
     fn faults_describe_themselves() {
         assert_eq!(
             DigestError::WrongLength { bytes: 63 }.to_string(),
