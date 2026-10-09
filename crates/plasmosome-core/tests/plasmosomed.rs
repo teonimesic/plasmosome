@@ -122,6 +122,9 @@ fn addressable(socket: &Path) -> BufReader<UnixStream> {
             stream
                 .set_read_timeout(Some(PATIENCE))
                 .expect("the test client bounds its own reads");
+            stream
+                .set_write_timeout(Some(PATIENCE))
+                .expect("the test client bounds its own writes");
             return BufReader::new(stream);
         }
         assert!(
