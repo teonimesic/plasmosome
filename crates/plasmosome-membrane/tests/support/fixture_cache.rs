@@ -4,9 +4,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 fn entries(directory: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(directory)
@@ -74,38 +74,27 @@ fn a_second_test_process_publishes_no_new_key_and_leaves_no_temporary_files() {
     );
 }
 
-#[test]
-fn the_supervision_fixture_is_compiled_once_per_source_and_reused() {
-    let cache = tempfile::tempdir().unwrap();
-    let source = fixture::supervision_worker_source();
+const RACE_BUDGET: Duration = Duration::from_secs(60);
 
-    let first = fixture::compile_supervision_fixture(cache.path(), &source);
-    let published = fixture_identity(&first);
-    let second = fixture::compile_supervision_fixture(cache.path(), &source);
-
-    assert_eq!(
-        second, first,
-        "two calls with one cache root return the same path"
-    );
-    assert_eq!(
-        fixture_identity(&second),
-        published,
-        "the second call reuses the published executable without compiling it again"
-    );
-}
-
-fn inodes_published_under(root: &Path, finished: &AtomicBool) -> HashSet<u64> {
+fn versions_published_under(root: &Path, finished: &AtomicBool) -> HashSet<(u64, SystemTime)> {
     let mut seen = HashSet::new();
-    while !finished.load(Ordering::Acquire) {
-        for key in std::fs::read_dir(root).expect("the cache root is readable") {
-            let key = key.expect("the cache entry is readable").path();
-            if let Ok(metadata) = std::fs::metadata(key.join("supervision-worker")) {
-                seen.insert(metadata.ino());
+    loop {
+        let last = finished.load(Ordering::Acquire);
+        for key in entries(root) {
+            if let Ok(metadata) = std::fs::metadata(root.join(key).join("supervision-worker")) {
+                seen.insert((
+                    metadata.ino(),
+                    metadata
+                        .modified()
+                        .expect("the fixture's modification time is readable"),
+                ));
             }
+        }
+        if last {
+            return seen;
         }
         thread::yield_now();
     }
-    seen
 }
 
 #[test]
@@ -118,71 +107,99 @@ fn concurrent_callers_share_one_published_fixture_that_is_never_replaced() {
     let watcher = {
         let root = cache.path().to_path_buf();
         let finished = Arc::clone(&finished);
-        thread::spawn(move || inodes_published_under(&root, &finished))
+        thread::spawn(move || versions_published_under(&root, &finished))
     };
-
+    let (report, reports) = mpsc::channel();
     let callers: Vec<_> = (0..CALLERS)
         .map(|_| {
             let start = Arc::clone(&start);
             let root = cache.path().to_path_buf();
             let source = source.clone();
+            let report = report.clone();
             thread::spawn(move || {
                 start.wait();
-                let path = fixture::compile_supervision_fixture(&root, &source);
-                let inode = std::fs::metadata(&path)
-                    .expect("the returned fixture exists")
-                    .ino();
-                (path, inode)
+                let outcome = std::panic::catch_unwind(|| {
+                    let path = fixture::compile_supervision_fixture(&root, &source);
+                    let inode = std::fs::metadata(&path)
+                        .expect("the returned fixture exists")
+                        .ino();
+                    (path, inode)
+                });
+                let _ = report.send(outcome.map_err(panic_message));
             })
         })
         .collect();
-    let returned: Vec<(PathBuf, u64)> = callers
-        .into_iter()
-        .map(|caller| caller.join().expect("every concurrent caller returns"))
+    drop(report);
+
+    let deadline = Instant::now() + RACE_BUDGET;
+    let outcomes: Vec<_> = (0..CALLERS)
+        .map_while(|_| {
+            reports
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .ok()
+        })
         .collect();
     finished.store(true, Ordering::Release);
     let observed = watcher.join().expect("the watcher returns");
+    assert_eq!(
+        outcomes.len(),
+        CALLERS,
+        "every concurrent caller returns within {RACE_BUDGET:?}"
+    );
+    for caller in callers {
+        caller
+            .join()
+            .expect("a caller thread exits after reporting");
+    }
+    assert_eq!(
+        observed.len(),
+        1,
+        "the published fixture was never replaced or rewritten while the callers raced: {observed:?}"
+    );
+    let returned: Vec<(PathBuf, u64)> = outcomes
+        .into_iter()
+        .map(|outcome| {
+            outcome.unwrap_or_else(|message| panic!("a concurrent caller failed: {message}"))
+        })
+        .collect();
 
     let published = &returned[0].0;
-    let inode = std::fs::metadata(published)
-        .expect("the published fixture exists")
-        .ino();
+    let settled = fixture_identity(published);
     assert_eq!(
         observed,
-        HashSet::from([inode]),
-        "the published fixture was never replaced while the callers raced"
+        HashSet::from([(settled.0, settled.1)]),
+        "the watcher saw the file the callers returned"
     );
-    for (path, seen) in &returned {
+    for (path, inode) in &returned {
         assert_eq!(
             path, published,
             "every concurrent caller returns the same path"
         );
         assert_eq!(
-            *seen, inode,
+            *inode, settled.0,
             "no caller's executable was replaced after that caller returned"
         );
     }
-    let names = |directory: &Path| -> Vec<String> {
-        std::fs::read_dir(directory)
-            .expect("the cache directory is readable")
-            .map(|entry| {
-                entry
-                    .expect("the cache entry is readable")
-                    .file_name()
-                    .into_string()
-                    .expect("the cache entry name is UTF-8")
-            })
-            .collect()
-    };
     assert_eq!(
-        names(cache.path()).len(),
+        entries(cache.path()).len(),
         1,
         "one source is cached under one key"
     );
     assert_eq!(
-        names(published.parent().expect("the fixture has a key directory")),
+        entries(published.parent().expect("the fixture has a key directory")),
         ["supervision-worker"],
         "the key directory holds one executable and no temporary names"
+    );
+
+    let again = fixture::compile_supervision_fixture(cache.path(), &source);
+    assert_eq!(
+        &again, published,
+        "a later call with the same cache root returns the same path"
+    );
+    assert_eq!(
+        fixture_identity(&again),
+        settled,
+        "a later call reuses the published executable without compiling it again"
     );
 }
 
