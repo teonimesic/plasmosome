@@ -1,8 +1,170 @@
 #!/usr/bin/env -S python3 -I
-import subprocess
+"""Spec 026's git-only step: refuse a commit whose tracked files would swap or wrap what cargo builds.
+
+Usage: build-input-guard [COMMIT]    (COMMIT defaults to HEAD)
+
+The step reads COMMIT from git's object store with `git rev-parse`, `git ls-tree` and
+`git cat-file blob`. It never checks out, never reads the working tree, and never runs cargo, rustc
+or rustup, because any of them can run a program the commit names.
+
+Exit 0: clean. Exit 1: refused. Each finding is one line, `build-input-guard: <path>: <key>:
+<reason>`, and the harm follows once. Exit 2: the step could not read the commit, or was run the
+wrong way. It refuses rather than passing, since a commit it cannot read is a commit it cannot clear.
+
+A reviewer runs main's copy against a contributor's PR before checking anything out:
+
+    git fetch origin pull/N/head
+    ./.githooks/build-input-guard FETCH_HEAD
+
+A CI verdict counts only when the PR leaves `.github/`, `.githooks/` and the `tools/` files a
+workflow runs unchanged. The script runs as `python3 -I`, so a module planted beside it cannot
+shadow the standard library. It is one file and imports nothing from this repository.
+"""
+
 import sys
 
-commit = sys.argv[1] if len(sys.argv) > 1 else "HEAD"
-sha = subprocess.run(["git", "rev-parse", commit], capture_output=True, text=True).stdout.strip()
-print(f"build-input-guard: clean ({sha})")
-sys.exit(0)
+if not sys.flags.isolated:
+    print(
+        "build-input-guard: run it as ./.githooks/build-input-guard or with python3 -I; "
+        "without isolation a module beside it shadows the standard library",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+import re
+import subprocess
+import threading
+
+try:
+    import tomllib
+except ImportError:
+    print(
+        "build-input-guard: cannot read TOML: this step needs Python 3.11 or later, for tomllib",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+MAX_BYTES = 8 * 1024 * 1024
+GIT_TIMEOUT_SECONDS = 60
+
+HARM = (
+    "A program nobody reviewed runs at the first cargo command on every machine that builds main, "
+    "including ones that hold publish credentials. Nothing from this commit was built or run."
+)
+
+COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+RECORD = re.compile(r"([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40}|[0-9a-f]{64})")
+
+
+class CannotRead(Exception):
+    def __init__(self, what, detail):
+        super().__init__(what, detail)
+        self.what = what
+        self.detail = detail
+
+
+class Entry:
+    def __init__(self, path, mode, kind, oid):
+        self.path = path
+        self.mode = mode
+        self.kind = kind
+        self.oid = oid
+
+
+def printable(text):
+    return text.encode("unicode_escape").decode("ascii")
+
+
+def git(arguments, what, limit=None):
+    try:
+        process = subprocess.Popen(
+            ["git", *arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise CannotRead(what, f"git cannot run: {printable(str(error))}") from None
+    expired = threading.Event()
+
+    def expire():
+        expired.set()
+        process.kill()
+
+    timer = threading.Timer(GIT_TIMEOUT_SECONDS, expire)
+    timer.start()
+    try:
+        output = process.stdout.read(-1 if limit is None else limit + 1)
+        if limit is not None and len(output) > limit:
+            process.kill()
+            process.wait()
+            return None
+        errors = process.stderr.read()
+        process.wait()
+    finally:
+        timer.cancel()
+        process.stdout.close()
+        process.stderr.close()
+    if expired.is_set():
+        raise CannotRead(what, f"git {arguments[0]} did not finish within {GIT_TIMEOUT_SECONDS} s")
+    if process.returncode != 0:
+        detail = printable(" ".join(errors.decode("utf-8", "replace").split())) or "no message"
+        raise CannotRead(what, f"git {arguments[0]} exited {process.returncode}: {detail}")
+    return output
+
+
+def resolve(argument):
+    what = f"{printable(argument)} as a commit"
+    output = git(["rev-parse", "--verify", "--quiet", "--end-of-options", argument + "^{commit}"], what)
+    sha = output.decode("utf-8", "replace").strip()
+    if not COMMIT_ID.fullmatch(sha):
+        raise CannotRead(what, f"git rev-parse printed {printable(sha)}, not a commit id")
+    return sha
+
+
+def entries(sha):
+    what = f"the tree of {sha}"
+    output = git(["ls-tree", "-r", "-t", "-z", "--full-tree", sha], what)
+    listed = []
+    for record in output.split(b"\0"):
+        if not record:
+            continue
+        meta, tab, path = record.partition(b"\t")
+        match = RECORD.fullmatch(meta.decode("utf-8", "replace"))
+        if not (tab and path and match):
+            shown = printable(record.decode("utf-8", "replace"))
+            raise CannotRead(what, f"git ls-tree printed a record this step cannot parse: {shown}")
+        mode, kind, oid = match.groups()
+        listed.append(Entry(path.decode("utf-8", "surrogateescape"), mode, kind, oid))
+    return listed
+
+
+def check(entry):
+    return []
+
+
+def main(arguments):
+    if len(arguments) > 1:
+        print("usage: build-input-guard [COMMIT]", file=sys.stderr)
+        return 2
+    try:
+        sha = resolve(arguments[0] if arguments else "HEAD")
+        findings = [finding for entry in entries(sha) for finding in check(entry)]
+    except CannotRead as error:
+        print(f"build-input-guard: cannot read {error.what}: {error.detail}", file=sys.stderr)
+        print(
+            "Refusing rather than passing: a commit this step cannot read is a commit it cannot clear.",
+            file=sys.stderr,
+        )
+        return 2
+    if not findings:
+        print(f"build-input-guard: clean ({sha})")
+        return 0
+    for path, key, reason in findings:
+        print(f"build-input-guard: {printable(path)}: {key}: {reason}")
+    print(HARM)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
