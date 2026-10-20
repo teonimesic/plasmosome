@@ -101,7 +101,17 @@ fn versions_published_under(root: &Path, finished: &AtomicBool) -> HashSet<(u64,
 fn concurrent_callers_share_one_published_fixture_that_is_never_replaced() {
     const CALLERS: usize = 8;
     let cache = tempfile::tempdir().unwrap();
-    let source = fixture::supervision_worker_source();
+    let sources = tempfile::tempdir().unwrap();
+    let runs = sources.path().join("runs");
+    let source = sources.path().join("counting.c");
+    std::fs::write(
+        &source,
+        format!(
+            "#include <stdio.h>\nint main(void) {{ FILE *runs = fopen(\"{}\", \"a\"); if (!runs) return 1; fputc('x', runs); fclose(runs); return 64; }}\n",
+            runs.display()
+        ),
+    )
+    .expect("a source that records each run is written");
     let start = Arc::new(Barrier::new(CALLERS));
     let finished = Arc::new(AtomicBool::new(false));
     let watcher = {
@@ -189,6 +199,13 @@ fn concurrent_callers_share_one_published_fixture_that_is_never_replaced() {
         entries(published.parent().expect("the fixture has a key directory")),
         ["supervision-worker"],
         "the key directory holds one executable and no temporary names"
+    );
+    assert_eq!(
+        std::fs::read(&runs)
+            .expect("the callers ran the fixture")
+            .len(),
+        CALLERS,
+        "every concurrent caller ran the fixture once before returning it"
     );
 
     let again = fixture::compile_supervision_fixture(cache.path(), &source);
