@@ -929,6 +929,50 @@ mod tests {
     }
 
     #[test]
+    fn the_last_descriptor_the_table_allows_does_not_survive_the_exec() {
+        run_probe("runtime::launch::tests::probe_launch_holding_the_last_descriptor");
+    }
+
+    #[test]
+    #[ignore = "helper process for the_last_descriptor_the_table_allows_does_not_survive_the_exec"]
+    #[allow(unsafe_code)]
+    fn probe_launch_holding_the_last_descriptor() {
+        if !probing() {
+            return;
+        }
+        let fitting = record_recipe();
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            // SAFETY: `limit` is a local rlimit that getrlimit may write.
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        limit.rlim_cur = limit.rlim_max;
+        assert_eq!(
+            // SAFETY: `limit` is a local rlimit that setrlimit only reads. This probe process runs
+            // only this test, so a higher limit reaches no other test.
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) },
+            0
+        );
+        // SAFETY: getdtablesize takes no arguments.
+        let last = unsafe { libc::getdtablesize() } - 1;
+        let held = inheritable_null_from(last);
+        assert_eq!(
+            held, last,
+            "the probe holds the last descriptor its table allows"
+        );
+        let report = launched(HelperExec::prepare(&fitting).expect("the record recipe prepares"));
+        // SAFETY: `held` is the descriptor opened above, which nothing else owns.
+        unsafe { libc::close(held) };
+        report.assert_exited_cleanly();
+        let open: Vec<i32> = report.descriptors().into_keys().collect();
+        assert_eq!(open, [0, 1, 2, 3], "held {last}: {}", report.text);
+    }
+
+    #[test]
     fn descriptor_three_yields_the_canonical_recipe_line_then_end_of_file() {
         let recorded = record();
         recorded.report.assert_exited_cleanly();
