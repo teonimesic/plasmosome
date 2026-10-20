@@ -56,6 +56,7 @@ if not sys.flags.isolated:
 import re
 import subprocess
 import threading
+import unicodedata
 
 try:
     import tomllib
@@ -71,6 +72,7 @@ except ImportError:
 MAX_BYTES = 8 * 1024 * 1024
 SYMLINK_TARGET_BYTES = 4096
 GIT_TIMEOUT_SECONDS = 60
+MAX_SYMLINKS = 40
 
 # Spec 026 section 1 names no key that tracked Cargo configuration may hold. A key is added here
 # only after the spec names it.
@@ -117,6 +119,97 @@ class Entry:
         self.mode = mode
         self.kind = kind
         self.oid = oid
+
+
+LEAVES = "leaves"
+OUTSIDE = "outside"
+LOOP = "loop"
+AMBIGUOUS = "ambiguous"
+UNREADABLE_TARGET = "unreadable target"
+MISSING = "missing"
+FILE = "file"
+SUBMODULE = "submodule"
+DIRECTORY = "directory"
+
+
+def folded(name):
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", name).casefold())
+
+
+def lexical(base, value):
+    if value.startswith("/"):
+        return None
+    parts = list(base)
+    for name in value.split("/"):
+        if name == "..":
+            if not parts:
+                return None
+            parts.pop()
+        elif name not in ("", "."):
+            parts.append(name)
+    return parts
+
+
+class Tree:
+    def __init__(self, listed):
+        self.found = {}
+        self.targets = {}
+        self.holding_a_manifest = set()
+        for entry in listed:
+            parts = [folded(part) for part in entry.path.split("/")]
+            self.found.setdefault("/".join(parts), []).append(entry)
+            if entry.path.casefold().split("/")[-1] == "cargo.toml":
+                self.holding_a_manifest.update("/".join(parts[:depth]) for depth in range(len(parts)))
+
+    def target(self, entry):
+        if entry.oid not in self.targets:
+            data = git(
+                ["cat-file", "blob", entry.oid], blob_what(entry), limit=SYMLINK_TARGET_BYTES
+            )
+            self.targets[entry.oid] = (
+                None if data is None else data.decode("utf-8", "surrogateescape")
+            )
+        return self.targets[entry.oid]
+
+    def walk(self, parts):
+        pending = list(reversed(parts))
+        reached = []
+        hops = 0
+        while pending:
+            name = pending.pop()
+            if name in ("", "."):
+                continue
+            if name == "..":
+                if not reached:
+                    return OUTSIDE, None
+                reached.pop()
+                continue
+            here = [*reached, folded(name)]
+            found = self.found.get("/".join(here), [])
+            if found and all(entry.kind == "tree" for entry in found):
+                reached = here
+                continue
+            if len(found) != 1:
+                return (AMBIGUOUS if found else MISSING), None
+            entry = found[0]
+            if entry.kind == "commit":
+                return SUBMODULE, None
+            if entry.mode != SYMLINK:
+                return (MISSING if pending else FILE), None
+            hops += 1
+            if hops > MAX_SYMLINKS:
+                return LOOP, None
+            target = self.target(entry)
+            if target is None or "\0" in target:
+                return UNREADABLE_TARGET, None
+            if target.startswith("/"):
+                return OUTSIDE, None
+            pending.extend(reversed(target.split("/")))
+        return DIRECTORY, "/".join(reached)
+
+    def reach(self, base, value):
+        parts = lexical(base, value)
+        return (LEAVES, None) if parts is None else self.walk(parts)
 
 
 def printable(text):
