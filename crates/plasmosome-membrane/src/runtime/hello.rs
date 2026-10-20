@@ -349,6 +349,11 @@ mod tests {
         BootToken::parse_hex(text).expect("a 64-digit lowercase token parses")
     }
 
+    fn flipped(digits: &str, at: usize) -> String {
+        let flip = if &digits[at..=at] == "0" { "1" } else { "0" };
+        format!("{}{flip}{}", &digits[..at], &digits[at + 1..])
+    }
+
     fn judge_on(lane: ControlLane, frame: &[u8]) -> Result<BootToken, HelloRefusal> {
         match lane {
             ControlLane::Normal => judge_normal(frame, &guest_policy()),
@@ -567,9 +572,10 @@ mod tests {
 
     #[test]
     fn a_policy_other_than_the_expected_refuses_naming_both() {
+        let expected = guest_policy();
+        let near = |at| Digest::parse_hex(&flipped(&expected.hex(), at)).expect("64 digits");
         for lane in LANES {
-            for found in [Digest::of(b"some other policy"), host_policy()] {
-                let expected = guest_policy();
+            for found in [Digest::of(b"other"), host_policy(), near(0), near(63)] {
                 let refused = refusal(lane, reply(lane, BOOT, &found.hex()));
                 assert_eq!(refused, HelloRefusal::PolicyMismatch { expected, found });
             }
@@ -608,14 +614,16 @@ mod tests {
         let policy = guest_policy().hex();
         let normal = reply(ControlLane::Normal, BOOT, &policy).to_string();
         let normal = judge_normal(normal.as_bytes(), &guest_policy()).expect("normal answers");
-        let changed = reply(ControlLane::Withdrawal, OTHER_BOOT, &policy).to_string();
-        assert_eq!(
-            judge_withdrawal(changed.as_bytes(), &guest_policy(), &normal),
-            Err(HelloRefusal::BootChanged {
-                expected: boot(BOOT),
-                found: boot(OTHER_BOOT),
-            })
-        );
+        for other in [OTHER_BOOT, &flipped(BOOT, 0), &flipped(BOOT, 63)] {
+            let changed = reply(ControlLane::Withdrawal, other, &policy).to_string();
+            assert_eq!(
+                judge_withdrawal(changed.as_bytes(), &guest_policy(), &normal),
+                Err(HelloRefusal::BootChanged {
+                    expected: boot(BOOT),
+                    found: boot(other),
+                })
+            );
+        }
     }
 
     #[test]
@@ -639,12 +647,12 @@ mod tests {
             assert_eq!(
                 refusal(
                     lane,
-                    json!({"id": null, "error": {"code": -32600, "message": "x"}})
+                    r#"{"id":null,"error":{"code":-32600,"detail":{"z":1, "a":0}}}"#
                 ),
                 HelloRefusal::GuestError {
                     code: Some(-32600),
-                    message: owned("x"),
-                    detail: None,
+                    message: String::new(),
+                    detail: Some(owned(r#"{"a":0,"z":1}"#)),
                 }
             );
             let mut both = reply(lane, BOOT, &guest_policy().hex());
@@ -732,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn refusal_messages_put_expected_before_found_and_never_call_a_token_a_digest() {
+    fn refusal_messages_name_found_before_expected_and_never_call_a_token_a_digest() {
         assert_eq!(
             BootToken::parse_hex("abc")
                 .expect_err("three digits refuse")
@@ -879,16 +887,33 @@ mod tests {
         })
     }
 
+    fn repeated_key() -> impl Strategy<Value = String> {
+        let outer = prop::collection::vec(prop::option::of(guest_key()), 0..5);
+        (outer, guest_key(), guest_value()).prop_map(|(outer, key, value)| {
+            let key = Value::from(key);
+            let inner = format!("{{{key}:{value},{key}:{value}}}");
+            outer.into_iter().fold(inner, |text, wrap| match wrap {
+                Some(name) => format!("{{{}:{text}}}", Value::from(name)),
+                None => format!("[{text}]"),
+            })
+        })
+    }
+
     proptest! {
         #[test]
         fn no_guest_bytes_or_json_panic_either_judge(
             bytes in proptest::collection::vec(any::<u8>(), 0..64),
             reply in reply_like(),
             other in guest_value(),
+            repeated in repeated_key(),
         ) {
             for frame in [bytes, reply.to_string().into_bytes(), other.to_string().into_bytes()] {
                 let _ = judge_on(ControlLane::Normal, &frame);
                 let _ = judge_on(ControlLane::Withdrawal, &frame);
+            }
+            for lane in LANES {
+                let refused = judge_on(lane, repeated.as_bytes());
+                prop_assert!(matches!(refused, Err(HelloRefusal::DuplicateKey { .. })), "{refused:?}");
             }
         }
 
