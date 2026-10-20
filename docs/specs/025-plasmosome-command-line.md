@@ -105,10 +105,11 @@ Each command sends one verb. It never combines verbs, never polls, and never ret
 that waits for a process runs `plasmosome exec status` again, with its own pause between runs,
 until `result.state` is no longer `running`. Every run exits 0 whatever the process did.
 
-The commands are spec 001 §3's v1 verbs, spec 024's `exec.output`, and spec 020's registry
-commands. Verbs spec 001 marks RESERVED are not commands. "Changes state" decides exit 3
-(section 4). A command's flags are fixed by the task that serves it, against its verb as
-accepted.
+The commands are spec 001 §3's v1 verbs, spec 024's `exec.output`, spec 028's `plasmid.renew`,
+and spec 020's registry commands. Verbs spec 001 marks RESERVED are not commands. "Changes
+state" decides exit 3 (section 4). A command's flags are fixed by the task that serves it,
+against its verb as accepted. Amended on 2026-10-20: this did not name spec 028's
+`plasmid.renew`.
 
 | Command | Wire method | Changes state | Served |
 | --- | --- | --- | --- |
@@ -766,13 +767,14 @@ logic goes when its trigger fires. Spec 011: `plasmid new` keeps its exit 2. Spe
 
 ## Requests to specs 022, 023 and 024
 
-This spec made four requests while those specs were drafts. Each is now settled:
+This spec made four requests while those specs were drafts. Three are granted, and one is
+deferred:
 
 - Spec 022 (#125): name `cell` in the plasmid verbs' results, which serving the plasmid
   commands needs (section 2). Granted: spec 001 §2 says the results of `plasmid.list`,
   `plasmid.add`, `plasmid.remove` and `plasmid.reload` carry `cell`.
 - Spec 023 (#126): a client request ID on `cell.new`, so that a repeat after exit 3 does not
-  create a second cell. Declined: spec 023 leaves it out of scope, to task plasmosome-bnkf, so a
+  create a second cell. Deferred to plasmosome-bnkf: spec 023 leaves it out of scope, so a
   repeated `cell new` still creates a second cell (section 4).
 - Spec 024 (#127): name `cell` in the `cell.exec`, `exec.status` and `exec.output` results,
   which serving the exec commands needs (section 2). Granted: every result names `cell`, and
@@ -786,8 +788,8 @@ as open.
 
 ## Out of scope
 
-- The verbs: their fields, states and refusals. Specs 001, 008, 011, 020, 022, 023 and 024 own
-  them.
+- The verbs: their fields, states and refusals. Specs 001, 008, 011, 020, 022, 023, 024, 027 and
+  028 own them. Amended on 2026-10-20: this did not name specs 027 and 028.
 - Output streaming for `cell.exec`, which spec 001 reserves.
 - Shell completion, a configuration file for the client, and aliases other than `germinate`.
 - How a daemon serves concurrent connections (decision 005).

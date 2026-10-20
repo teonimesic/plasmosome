@@ -221,12 +221,13 @@ the scaffold writes the declaration now and still refuses the component, saying 
   carries spec 024's insertion, which is not applied separately. Until then this bullet said that
   a surviving reference with no owner fails the detach, and that one held past its bound is
   reported against the owner named at detach.
-- **What a refusal cannot protect.** A detach that would strand an attached requirer is refused,
-  and that covers dependence some declaration states. It does not cover dependence nothing
-  declared — work the agent did against a tool while it was attached, state it holds that assumes
-  a capability. No declaration in the closure records that, so nothing can refuse on its behalf.
-  Removing a capability is the operation with no declaration standing behind it, and this
-  contract says so rather than implying a protection it does not have.
+- **What a refusal cannot protect.** A detach that would strand an attached requirer is refused
+  with spec 001 §3.11's 105, and that covers dependence some declaration states. It does not cover
+  dependence nothing declared — work the agent did against a tool while it was attached, state it
+  holds that assumes a capability. No declaration in the closure records that, so nothing can
+  refuse on its behalf. Removing a capability is the operation with no declaration standing behind
+  it, and this contract says so rather than implying a protection it does not have. Amended on
+  2026-10-20: this gave the refusal no code.
 
 ### What this amends in spec 001
 
@@ -251,12 +252,14 @@ a change nobody reviewed.
   alone: both report a transition, and the plasmid on the far side of it has been denied nothing
   yet — a reloaded plasmid is a new generation, and the previous generation's denials belong to
   the status and list responses that report accumulated state. Each per-plasmid object
-  gains one field, `denials` — omitted when empty, per §1's rule that a field with nothing in it
-  is never sent. Each entry names one distinct denial: what was reached for, in the
-  declaration's own vocabulary; the declaration field it belongs in; the `fix` line the author
-  would write; and how often it was denied. A repeat of the same denial raises `count` rather
-  than adding an entry; the session log, which records events rather than state, carries every
-  denial as its own line.
+  gains one field, `denials` — omitted when empty, the exception spec 001 §1 names to its rule
+  that an empty collection is sent as `[]`. Each entry names one distinct denial: what was
+  reached for, in the declaration's own vocabulary; the declaration field it belongs in; the
+  `fix` line the author would write; and how often it was denied. A repeat of the same denial
+  raises `count` rather than adding an entry; the session log, which records events rather than
+  state, carries every denial as its own line. Corrected on 2026-10-20: this said `denials` is
+  omitted under §1's rule for a field with nothing in it, which spec 001 §1 now says does not
+  cover an empty collection.
 
   ```json
   {"plasmid": "github-pr", "mock": "simulate", "generation": 3, "state": "active",
@@ -357,9 +360,11 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   a plasmid; it names the missing `id` instead. Where a refusal must name more than one plasmid —
   the requirers a detach would strand — it names them in the message, sorted, not in a new
   structured field: §1's assertion carries a single plasmid, and adding a field to it would be a
-  fourth amendment this spec does not make. That refusal is spec 001's 105 and carries no `fix`,
-  since spec 001's closed table gives `fix` only to 108. Corrected on 2026-10-20: this said the
-  requirers are named in the message and the `fix`.
+  fourth amendment this spec does not make. That refusal is spec 001's 105 and carries no `fix`.
+  It is not a third exception to the rule above: a detach refusal is not one an author causes,
+  and spec 001's closed table gives `fix` only to 108. Corrected on 2026-10-20: this said the
+  requirers are named in the message and the `fix`, and did not say why a detach refusal carries
+  none.
 - **A capability denied at the boundary is reported as a missing declaration.** The report names
   what was denied and the declaration field it belongs in, and names nothing that was granted or
   would have been. It is written to the cell's session log, one line per denial, and to the
@@ -377,10 +382,11 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 - **Detach requires nothing from the plasmid** and cannot be refused or failed by it. It revokes
   every grant the plasmid's own declaration held and unregisters its tools. A provider is
   revoked only with its last requirer; a detach that would strand an attached requirer is
-  refused, naming the requirers. That is not the only refusal: spec 001 §3.11 already refuses a
-  safe removal with code `105` when external effects are outstanding, and force requires the
-  operator/reason pair — unchanged here, and named so that the promise above is not read as a
-  claim that a detach never refuses. Neither refusal is the plasmid's to make. Revocation is
+  refused with spec 001 §3.11's 105, naming the requirers. That is not the only refusal: spec 001
+  §3.11 also refuses a safe removal with code `105` and an assertion list when external effects
+  are outstanding, and force requires the operator/reason pair — unchanged here, and named so
+  that the promise above is not read as a claim that a detach never refuses. Neither refusal is
+  the plasmid's to make. Revocation is
   enforcement rather than erasure: after detach nothing the plasmid's grants allowed passes the
   boundary, and what a running process already read is not claimed back. Detach returns when no
   new reference can be obtained; a reference taken before it keeps its object alive. A reference
@@ -392,7 +398,9 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   `SCM_RIGHTS` is not. Amended on 2026-10-20, as
   [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs) requires. Until then
   this bullet said that a surviving reference with no owner failed the detach, and that one held
-  past its bound was an obligation reported against the owner named at detach.
+  past its bound was an obligation reported against the owner named at detach. Amended on
+  2026-10-20: this gave the stranding refusal no code, and did not say that the other 105 carries
+  an assertion list.
 - **`plasmid new <name>` writes exactly one file, the declaration**, grants nothing, attaches
   nothing, and prints the sections the author must add. It writes no component, says that it
   will not until the plasmid interface is frozen, and exits `2` — the code decision 010 fixed
@@ -462,6 +470,8 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   after which a call the provider's grants had allowed is denied.
 - Detaching a provider that an attached plasmid still requires is refused, and the refusal names
   the requirer.
+- That refusal is 105 `{from: "active", to: "removed"}`, with no `fix` and no assertion list, and
+  its `message` names every requirer, sorted. Amended on 2026-10-20: this item is new.
 - A reference into a grant taken before a detach is refused on its next use after the detach,
   and the same use succeeds before it; the cases differ only in the detach. With an equal
   grant of another plugin in the cell, one still effective past its bound leaves the removal

@@ -58,9 +58,9 @@ The **bound** B is the moment a lifetime ends. A lease's B is fixed at prepare a
 (section 3); time before activation comes out of the lease. An idle limit or exec scope that ends
 the lifetime first moves B earlier. D, the drain budget, is the declaration's `drain_ms`, 1 to
 30,000 ms, or 5,000 ms when none is named. D is fixed at prepare and recorded in the journal's
-`Lifetime` as `drain_ms`, because withdrawal never opens the declaration file (section 2).
-**H = B + 2 s + D** bounds grant references. Amended on 2026-10-20: this did not say where D is
-kept after prepare.
+`Lifetime` as `drain_ms`, because a withdrawal never re-reads the plasmid's own declaration,
+where `[lifecycle]` names it. **H = B + 2 s + D** bounds grant references. Amended on
+2026-10-20: this did not say where D is kept after prepare.
 
 ### 2. Who declares it, and the default
 
