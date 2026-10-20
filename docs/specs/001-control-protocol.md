@@ -100,13 +100,22 @@ Application error codes (closed set; additions are a contract change):
 | 105 | `illegal_state` | `from`, `to`; private recovery methods additionally carry the typed `recovery` refusal in §4.1 |
 | 106 | `drain_timeout` | `handle`, `deadline_ms` |
 | 107 | `not_running` | `target` — the named instance is not up |
-| 108 | `manifest_invalid` | `detail`, `path`; `fix` when the author can repair the declaration |
+| 108 | `manifest_invalid` | `detail`, `path`; `fix` when the refusal names a declaration field |
 | 109 | `widening_forbidden` | `plasmid` |
 | 110 | `attestation_required` | `verb` — the E13b residual: subject spawn needs host-side attestation |
 
-The 108 `fix` is spec 011's amendment to this table: a 108 that refuses what a declaration says
-carries the line its author would write, or exactly `remove this entry`, and a 108 whose file
-cannot be read or is not TOML carries no `fix`.
+The 108 `fix` is spec 011's amendment to this table. A 108 whose refusal names a declaration
+field carries a `fix` in one of three forms:
+
+- TOML to write in place of that field: a line such as `hosts = ["api.github.com"]`, or a
+  section such as `[impl]` followed by `wasm = "component.wasm"`;
+- a bare entry, such as `"api.github.example"`, added to the list the field names, or written in
+  place of the entry when the field ends in an index, such as `network.pin_cidrs[0]`;
+- exactly `remove this entry`, which deletes the entry or key the field names.
+
+A 108 whose refusal names no declaration field carries no `fix`: a file that cannot be read; text
+that is not TOML, a syntax error included, since the parser reports a position and not a field;
+or a fault in the file rather than in what it declares, such as spec 022's trust checks.
 
 **Control-socket lifecycle, as delivered (both daemons).** Each daemon binds the control socket
 named by its config and never unlinks a path it did not create. A start whose path already

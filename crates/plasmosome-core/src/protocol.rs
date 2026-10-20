@@ -388,7 +388,9 @@ impl WireError {
         error
     }
 
-    /// Code 108: a manifest failed the frozen grammar.
+    /// Code 108 with no `fix`, for a fault the author cannot repair from the
+    /// refusal, such as spec 022's operator faults. A `ManifestError` goes
+    /// through `manifest_refusal` instead, which keeps its fix.
     pub fn manifest_invalid(detail: String, path: String) -> WireError {
         let mut error = WireError::bare(
             ErrorCode::ManifestInvalid,
@@ -400,9 +402,12 @@ impl WireError {
     }
 
     /// Code 108 for a declaration `PlasmidManifest` refused: `path` is the
-    /// declaration file and `detail` the refusal's text. `fix` is the line the
-    /// author would write, present only when the refusal names a field; a file
-    /// that could not be read or is not TOML carries none.
+    /// declaration file and `detail` the refusal's text. `fix` is present only
+    /// when the refusal names a field, in one of three forms: the TOML to
+    /// write in place of that field, a bare entry for the list the field names
+    /// (written in place of the entry when the field ends in an index), or
+    /// exactly `remove this entry`. A file that could not be read or is not
+    /// TOML, a syntax error included, carries none.
     pub fn manifest_refusal(path: String, error: &ManifestError) -> WireError {
         let mut wire = WireError::manifest_invalid(error.to_string(), path);
         wire.fix = match error {

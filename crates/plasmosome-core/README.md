@@ -66,16 +66,32 @@ or a string such as `"443, 8080"` is removed, not unwrapped. The parser itself n
 wraps an entry.
 
 Every other refusal of what a declaration says takes the same form, naming the plasmid: a network
-section that is not a table or names no host; `hosts`, `pin_cidrs` or `[mock]` `hosts` that are
-not lists of strings; a declaration with no capability and no implementation; `[commands]` with
-no commands table; a command with no `exec`; and a `[mock]` with no `[network]`, or naming a host
-`[network]` does not declare, whose fix is that one host to add. A list entry that is not a
-string is named by its index, with fix `remove this entry`. A command's refusals name it by its
-TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file could not be read) and
-`ManifestError::Parse` (the text is not TOML) carry no field: the TOML parser reports a position,
-not a field path, and naming one would be a guess. `WireError::manifest_refusal` turns any of
-them into code 108, carrying the fix when there is one. `ToolDeclaration` lives in
-`plasmosome_core::manifest`; `RegistryEntry` includes the tool's description.
+section that is not a table; a top-level `[network]` that names no host (a command's own network
+section with no host still parses); `hosts`, `pin_cidrs` or `[mock]` `hosts` that are not lists
+of strings; a declaration with no capability and no implementation, or whose only capability is
+an empty commands table; `[commands]`, its commands table or a command that is not a table, or
+`[commands]` with no commands table; a command whose `exec` is missing, is not a list or names no
+program; and a `[mock]` with no `[network]`, or naming a host `[network]` does not declare. In
+`hosts`, `pin_cidrs` and `[mock]` `hosts`, an entry that is not a string is named by its index.
+Its fix is `remove this entry`, except in a pin list with no string entry, where it is the
+example pin `"192.0.2.0/24"`: removing the last pin would leave egress unpinned.
+
+For a network section that is not a table, or a `hosts` that is not a list, the fix uses the
+string the author wrote there. For the top-level `[network]`, it then uses the `[mock]` hosts.
+The `[mock]` check also runs before the no-host check, so an empty top-level `hosts` is offered
+the `[mock]` hosts. Only after those does a fix name the example `api.example.com`. A `[mock]`
+`hosts` with no string in it, and a `[mock]` with no host and no `[network]`, get
+`remove this entry`. A command fix runs the program the author wrote, else the command's key,
+else `command-name`.
+
+Paths, the plasmid ID, refused values and fixes are written as TOML: a key that is not bare, and
+every string, is a basic string on one line, with every control character escaped. A command's
+refusals name it by its TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file
+could not be read) and `ManifestError::Parse` (the text is not TOML) carry no field: the TOML
+parser reports a position, not a field path, and naming one would be a guess.
+`WireError::manifest_refusal` turns any of them into code 108, carrying the fix when there is one.
+`ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
+description.
 
 Credential `delivery` is optional in both `[secrets]` and command-local refs. Omission derives one
 mode: `handle` for `wasm`, `helper` for `git`, and `inject` for `http` or `process` that declare
