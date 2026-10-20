@@ -116,8 +116,9 @@ pub enum HelloRefusal {
     WrongId { expected: u64, found: String },
     /// The guest answered with an error object, under any id. `code` is
     /// `None` when the error has no `code` that is a signed 64-bit integer;
-    /// `message` is empty when it has no string `message`; `detail` is the
-    /// compact JSON of its `detail`, when it has one.
+    /// `message` is empty when it has no string `message`. `detail`, when the
+    /// error has one, is the guest's `detail` re-encoded as JSON with its keys
+    /// sorted and cut to 1 KiB, so it may not parse.
     GuestError {
         code: Option<i64>,
         message: String,
