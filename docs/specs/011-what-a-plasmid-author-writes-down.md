@@ -190,8 +190,9 @@ the scaffold writes the declaration now and still refuses the component, saying 
   needs.** Grants are held per declaration, so detaching a plasmid revokes its own grants and
   unregisters its own tools. A provider that arrived as part of a closure stays while any
   attached plasmid still requires it and goes with its last requirer; a detach that would strand
-  an attached requirer is refused, naming the requirers. A detach changes no remaining plasmid's
-  mock mode: each keeps the mode it attached at (spec 022).
+  an attached requirer is refused with spec 001's 105 `{from: "active", to: "removed"}`, naming
+  the requirers (spec 001 §3.11). A detach changes no remaining plasmid's mock mode: each keeps
+  the mode it attached at (spec 022). Amended on 2026-10-20: this gave that refusal no code.
 - **Revocation is enforcement, not erasure.** After detach, no tool of the plasmid resolves and
   nothing its grants allowed passes the boundary — for processes that were already running when
   it happened, not only for ones started after. What detach does not claim is what had already
@@ -354,9 +355,11 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   spec 020 §2 gives each declaration. They name no field and carry no `fix`. An unknown key is not
   one of them. Apart from those two, a declaration with no `id` is the single case that cannot name
   a plasmid; it names the missing `id` instead. Where a refusal must name more than one plasmid —
-  the requirers a detach would strand — it names them in the message and the `fix`, not in a new
+  the requirers a detach would strand — it names them in the message, sorted, not in a new
   structured field: §1's assertion carries a single plasmid, and adding a field to it would be a
-  fourth amendment this spec does not make.
+  fourth amendment this spec does not make. That refusal is spec 001's 105 and carries no `fix`,
+  since spec 001's closed table gives `fix` only to 108. Corrected on 2026-10-20: this said the
+  requirers are named in the message and the `fix`.
 - **A capability denied at the boundary is reported as a missing declaration.** The report names
   what was denied and the declaration field it belongs in, and names nothing that was granted or
   would have been. It is written to the cell's session log, one line per denial, and to the
