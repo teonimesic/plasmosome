@@ -5,6 +5,12 @@ use plasmosome_backend::{
 };
 use plasmosome_ledger::{Effect, InverseVia, Ledger};
 
+fn session_file(path: &str) -> Capability {
+    Capability::SessionFile {
+        path: path.to_string(),
+    }
+}
+
 fn fixture(size: usize) -> (plasmosome_ledger::SealedLedger, FakeBackend) {
     let mut backend = FakeBackend::new();
     let mut ledger = Ledger::new("bench");
@@ -14,9 +20,7 @@ fn fixture(size: usize) -> (plasmosome_ledger::SealedLedger, FakeBackend) {
                 cell: CellId::from("bench-cell"),
                 plugin: PluginId::from("bench"),
             },
-            capability: Capability::SessionFile {
-                path: format!("/file-{index}"),
-            },
+            capability: session_file(&format!("/file-{index}")),
             kind: GrantKind::Hot,
         });
         ledger.push(Effect::exact(

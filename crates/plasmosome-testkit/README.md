@@ -73,7 +73,7 @@ and verifies the backend snapshot shows no residue.
 
 | Module | Holds |
 | --- | --- |
-| `builders` | `PlasmidManifest`, `Grant` sequences, `Effect`s and `DesiredState` — a test states only what it is about |
+| `builders` | `PlasmidManifest`, capabilities, `Grant` sequences, `Effect`s and `DesiredState` — a test states only what it is about |
 | `conformance` | Eleven clauses of the backend contract, each generic over `EnforcementBackend` |
 | `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |
@@ -86,5 +86,16 @@ crate's non-dev dependencies.
 test data directly; it is not a second TOML validator. The description scenario in
 `tests/attach_detach_residue.rs` instead parses a real declaration and reads the resulting
 descriptions through `ToolRegistry::lookup`, then verifies withdrawal removes them.
+
+`session_file`, `uds_socket`, `proxy_map`, `broker` and `mount` return the capability of their
+class with exactly the values given, and neither check nor normalize them. The suite's fixtures
+build every capability through them, and every universe operation through the private `op_for`,
+so adding a recipe changes these five bodies and `op_for`, not every fixture. Changing
+`broker(pid, name)` to `broker(name)` also changes each call that passes a pid.
+
+`plasmosome-backend`'s unit tests cannot use these. A dev-dependency on this crate links a second
+build of the backend, and its `Capability` is a different type from the one those tests see
+(E0308, "multiple different versions of crate"). So the backend keeps a test-only `fixtures`
+module with the same five functions and `op`, the twin of `op_for`. Change both copies together.
 
 Tests: `cargo test -p plasmosome-testkit`
