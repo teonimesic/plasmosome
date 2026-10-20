@@ -53,12 +53,18 @@ pub enum Unverifiable {
     /// kernel answers every sandbox query about an absent pid or a zombie as denied, so those
     /// answers count only when the process is read running on both sides of them.
     ProcessUnreadable {
-        /// The errno it set: `ESRCH` for an absent pid or a zombie, `EPERM` for another user's
-        /// process.
+        /// The errno it set: `ESRCH` for an absent pid or a zombie.
         errno: i32,
     },
-    /// The process read after the sandbox queries started at a different time from the one read
-    /// before them, so the pid was reused while it was observed.
+    /// `proc_pidinfo` returned a byte count other than the size of the process's unique
+    /// identifier record, before or after the sandbox queries. It sets no errno for that, so
+    /// none is reported.
+    ProcessInfoWrongSize {
+        /// The byte count it returned.
+        bytes: i32,
+    },
+    /// The process read after the sandbox queries has a different unique id from the one read
+    /// before them, so another process took the pid while it was observed.
     ProcessReplaced,
     /// This platform has no supervisor-side sandbox observation. Every pid off Darwin gives
     /// this.
@@ -70,6 +76,7 @@ pub enum Unverifiable {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfinementEvidence {
     pid: libc::pid_t,
+    unique_id: u64,
     denied: Vec<&'static str>,
     binding: PolicyBinding,
 }
@@ -78,6 +85,13 @@ impl ConfinementEvidence {
     /// The pid that was observed.
     pub fn pid(&self) -> libc::pid_t {
         self.pid
+    }
+
+    /// The kernel's unique id of the process that was observed, read before and after the
+    /// sandbox queries. Unlike a pid, the kernel never gives it to another process while the
+    /// system runs.
+    pub fn unique_id(&self) -> u64 {
+        self.unique_id
     }
 
     /// The operations the kernel reported denied: all of `REQUIRED_DENIALS`.
@@ -106,8 +120,9 @@ pub enum PolicyBinding {
 ///
 /// Pass the pid of a process this process keeps from being reaped, such as the helper child it
 /// owns. `observe` asks `sandbox_check` whether this process is sandboxed, whether `pid` is, and
-/// whether each operation in `REQUIRED_DENIALS` is denied. It reads the start time of `pid` with
-/// `proc_pidinfo` before and after those queries. It changes nothing.
+/// whether each operation in `REQUIRED_DENIALS` is denied. It reads the kernel's unique id of
+/// `pid` with `proc_pidinfo` before and after those queries, and the evidence keeps it. It changes
+/// nothing.
 ///
 /// Only `Confined` lets readiness go ahead. It shows properties of the sandbox, not the policy:
 /// nothing about which profile is installed, about arguments a policy allows for a denied
@@ -116,7 +131,10 @@ pub enum PolicyBinding {
 /// `Unverifiable`; the crate's macOS tests check the answers it gives today.
 #[cfg(target_os = "macos")]
 pub fn observe(pid: libc::pid_t) -> Confinement {
-    judge(pid, &darwin::read(pid))
+    judge(
+        pid,
+        &read(pid, std::process::id().cast_signed(), &mut darwin::Darwin),
+    )
 }
 
 /// Off Darwin there is no supervisor-side sandbox observation, so every `pid` gives
@@ -133,27 +151,86 @@ pub fn observe(_pid: libc::pid_t) -> Confinement {
 #[cfg(any(target_os = "macos", test))]
 pub(crate) type Answer = Result<libc::c_int, i32>;
 
-/// One read of the observed process's start time, as seconds and microseconds, or the errno the
-/// read set.
+/// The size of XNU's `struct proc_uniqidentifierinfo`, the record `proc_pidinfo` fills for
+/// PROC_PIDUNIQIDENTIFIERINFO.
 #[cfg(any(target_os = "macos", test))]
-pub(crate) type Started = Result<(u64, u64), i32>;
+pub(crate) const UNIQUE_IDENTIFIERS_SIZE: libc::c_int = 56;
+
+/// What one `proc_pidinfo` read of a process's unique identifier record returned: its byte count,
+/// the unique id in the record, and errno as it was right after the call.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PidInfo {
+    pub(crate) written: libc::c_int,
+    pub(crate) unique_id: u64,
+    pub(crate) errno: i32,
+}
+
+/// One read of the observed process's unique id, or why it could not be read.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) type Identity = Result<u64, Unverifiable>;
+
+/// The two kernel calls an observation makes.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) trait Kernel {
+    /// `sandbox_check` of `pid` with no filter: whether it is sandboxed when `operation` is
+    /// `None`, else whether its sandbox denies `operation`.
+    fn sandbox_check(&mut self, pid: libc::pid_t, operation: Option<&str>) -> Answer;
+
+    /// `proc_pidinfo` of `pid`'s unique identifier record.
+    fn unique_identifiers(&mut self, pid: libc::pid_t) -> PidInfo;
+}
 
 /// Everything one observation read, in the order it was read.
 #[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Readings {
     pub(crate) own: Answer,
-    pub(crate) before: Started,
+    pub(crate) before: Identity,
     pub(crate) sandboxed: Answer,
     pub(crate) operations: Vec<(&'static str, Answer)>,
-    pub(crate) after: Started,
+    pub(crate) after: Identity,
+}
+
+/// Asks `kernel` whether the observer `own` is sandboxed, reads `pid`'s unique id, asks whether
+/// `pid` is sandboxed and whether it denies each of `REQUIRED_DENIALS`, then reads its unique id
+/// again.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn read(pid: libc::pid_t, own: libc::pid_t, kernel: &mut impl Kernel) -> Readings {
+    let own = kernel.sandbox_check(own, None);
+    let before = identity(kernel.unique_identifiers(pid));
+    let sandboxed = kernel.sandbox_check(pid, None);
+    let operations = REQUIRED_DENIALS
+        .into_iter()
+        .map(|operation| (operation, kernel.sandbox_check(pid, Some(operation))))
+        .collect();
+    let after = identity(kernel.unique_identifiers(pid));
+    Readings {
+        own,
+        before,
+        sandboxed,
+        operations,
+        after,
+    }
+}
+
+/// The unique id in a record of the full size. A count of zero or less is a failure with its
+/// errno, and any other count is a record of the wrong size, for which errno says nothing.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn identity(info: PidInfo) -> Identity {
+    match info.written {
+        UNIQUE_IDENTIFIERS_SIZE => Ok(info.unique_id),
+        written if written <= 0 => Err(Unverifiable::ProcessUnreadable { errno: info.errno }),
+        bytes => Err(Unverifiable::ProcessInfoWrongSize { bytes }),
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn judge(pid: libc::pid_t, readings: &Readings) -> Confinement {
-    if let Err(reason) = trusted(readings) {
-        return Confinement::Unverifiable { reason };
-    }
+    let unique_id = match trusted(readings) {
+        Ok(unique_id) => unique_id,
+        Err(reason) => return Confinement::Unverifiable { reason },
+    };
     let sandboxed = readings.sandboxed == Ok(1);
     let allowed: Vec<&'static str> = REQUIRED_DENIALS
         .into_iter()
@@ -164,6 +241,7 @@ pub(crate) fn judge(pid: libc::pid_t, readings: &Readings) -> Confinement {
     }
     Confinement::Confined(ConfinementEvidence {
         pid,
+        unique_id,
         denied: REQUIRED_DENIALS.to_vec(),
         binding: PolicyBinding::PropertiesObserved,
     })
@@ -181,7 +259,7 @@ fn denied(readings: &Readings, required: &str) -> bool {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn trusted(readings: &Readings) -> Result<(), Unverifiable> {
+fn trusted(readings: &Readings) -> Result<u64, Unverifiable> {
     match readings.own {
         Ok(0) => {}
         Ok(_) => return Err(Unverifiable::SupervisorSandboxed),
@@ -192,12 +270,8 @@ fn trusted(readings: &Readings) -> Result<(), Unverifiable> {
             });
         }
     }
-    let before = readings
-        .before
-        .map_err(|errno| Unverifiable::ProcessUnreadable { errno })?;
-    let after = readings
-        .after
-        .map_err(|errno| Unverifiable::ProcessUnreadable { errno })?;
+    let before = readings.before?;
+    let after = readings.after?;
     if before != after {
         return Err(Unverifiable::ProcessReplaced);
     }
@@ -216,16 +290,33 @@ fn trusted(readings: &Readings) -> Result<(), Unverifiable> {
             operation: Some(operation),
             errno,
         }),
-        None => Ok(()),
+        None => Ok(before),
     }
 }
 
 #[cfg(target_os = "macos")]
 mod darwin {
-    use super::{Answer, REQUIRED_DENIALS, Readings, Started};
+    use super::{Answer, Kernel, PidInfo, UNIQUE_IDENTIFIERS_SIZE};
     use std::ffi::{c_char, c_int};
 
-    const INFO_SIZE: c_int = size_of::<libc::proc_bsdinfo>() as c_int;
+    /// The `proc_pidinfo` flavor PROC_PIDUNIQIDENTIFIERINFO, from XNU's private
+    /// `proc_info_private.h`.
+    const PROC_PIDUNIQIDENTIFIERINFO: c_int = 17;
+
+    /// XNU's `struct proc_uniqidentifierinfo`, declared in its private `proc_info_private.h` and
+    /// in no SDK header. `proc_pidinfo` fills it only for a running process when asked with
+    /// argument 0, and answers a buffer of any other size with ENOMEM.
+    #[repr(C)]
+    struct UniqueIdentifiers {
+        _executable_uuid: [u8; 16],
+        unique_id: u64,
+        parent_unique_id: u64,
+        _id_version: i32,
+        _original_parent_id_version: i32,
+        _reserved: [u64; 2],
+    }
+
+    const _: () = assert!(size_of::<UniqueIdentifiers>() == UNIQUE_IDENTIFIERS_SIZE as usize);
 
     #[allow(unsafe_code)]
     unsafe extern "C" {
@@ -245,61 +336,57 @@ mod darwin {
         ) -> c_int;
     }
 
-    pub(super) fn read(pid: libc::pid_t) -> Readings {
-        let own = check(std::process::id().cast_signed(), None);
-        let before = started(pid);
-        let sandboxed = check(pid, None);
-        let operations = REQUIRED_DENIALS
-            .into_iter()
-            .map(|operation| (operation, check(pid, Some(operation))))
-            .collect();
-        let after = started(pid);
-        Readings {
-            own,
-            before,
-            sandboxed,
-            operations,
-            after,
+    /// The running kernel.
+    pub(super) struct Darwin;
+
+    impl Kernel for Darwin {
+        #[allow(unsafe_code)]
+        fn sandbox_check(&mut self, pid: libc::pid_t, operation: Option<&str>) -> Answer {
+            let name = operation.map(|operation| [operation.as_bytes(), b"\0"].concat());
+            let pointer = name
+                .as_ref()
+                .map_or(std::ptr::null(), |name| name.as_ptr().cast::<c_char>());
+            // SAFETY: `pointer` is null or points into `name`, a buffer ending in NUL that lives
+            // until this function returns, and sandbox_check reads it during the call only.
+            // Filter type 0 names no filter, so no variadic argument is passed or read.
+            let value = unsafe { sandbox_check(pid, pointer, 0) };
+            if value == -1 {
+                Err(last_errno())
+            } else {
+                Ok(value)
+            }
+        }
+
+        fn unique_identifiers(&mut self, pid: libc::pid_t) -> PidInfo {
+            let (written, record, errno) = unique_identifier_record(pid);
+            PidInfo {
+                written,
+                unique_id: record.unique_id,
+                errno,
+            }
         }
     }
 
+    /// `proc_pidinfo`'s unique identifier record of `pid`, with the byte count it returned and
+    /// errno right after the call.
     #[allow(unsafe_code)]
-    fn check(pid: libc::pid_t, operation: Option<&str>) -> Answer {
-        let name = operation.map(|operation| [operation.as_bytes(), b"\0"].concat());
-        let pointer = name
-            .as_ref()
-            .map_or(std::ptr::null(), |name| name.as_ptr().cast::<c_char>());
-        // SAFETY: `pointer` is null or points into `name`, a buffer ending in NUL that lives until
-        // this function returns, and sandbox_check reads it during the call only. Filter type 0
-        // names no filter, so no variadic argument is passed or read.
-        let value = unsafe { sandbox_check(pid, pointer, 0) };
-        if value == -1 {
-            Err(last_errno())
-        } else {
-            Ok(value)
-        }
-    }
-
-    #[allow(unsafe_code)]
-    fn started(pid: libc::pid_t) -> Started {
-        // SAFETY: proc_bsdinfo is a plain C struct, for which all zeroes is a valid value.
-        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-        // SAFETY: `info` is a local proc_bsdinfo and INFO_SIZE is its exact size, so proc_pidinfo
-        // writes at most that many bytes into it, and it keeps no pointer.
+    fn unique_identifier_record(pid: libc::pid_t) -> (c_int, UniqueIdentifiers, i32) {
+        // SAFETY: UniqueIdentifiers is a plain C struct of integers, for which all zeroes is a
+        // valid value.
+        let mut record: UniqueIdentifiers = unsafe { std::mem::zeroed() };
+        // SAFETY: `record` is a local UniqueIdentifiers and UNIQUE_IDENTIFIERS_SIZE is its exact
+        // size, so proc_pidinfo writes at most that many bytes into it, and it keeps no pointer.
         let written = unsafe {
             libc::proc_pidinfo(
                 pid,
-                libc::PROC_PIDTBSDINFO,
+                PROC_PIDUNIQIDENTIFIERINFO,
                 0,
-                (&raw mut info).cast(),
-                INFO_SIZE,
+                (&raw mut record).cast(),
+                UNIQUE_IDENTIFIERS_SIZE,
             )
         };
-        if written == INFO_SIZE {
-            Ok((info.pbi_start_tvsec, info.pbi_start_tvusec))
-        } else {
-            Err(last_errno())
-        }
+        let errno = last_errno();
+        (written, record, errno)
     }
 
     fn last_errno() -> i32 {
