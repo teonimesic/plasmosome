@@ -169,7 +169,3 @@ proptest! {
         assert!(backend.snapshot_os_state().is_empty());
     }
 }
-
-#[test]
-#[ignore]
-fn throwaway_bare_ignore() {}
