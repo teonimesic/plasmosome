@@ -46,8 +46,8 @@ fn copy_tree(from: &Path, to: &Path) {
         if entry.file_type().expect("a file type").is_dir() {
             copy_tree(&entry.path(), &target);
         } else {
-            fs::copy(entry.path(), &target).expect("a bundle file is copied");
-            set_mode(&target, 0o644);
+            let bytes = fs::read(entry.path()).expect("a bundle file is read");
+            fs::write(&target, bytes).expect("a bundle file is copied without its flags");
         }
     }
 }
