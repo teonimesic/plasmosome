@@ -1019,8 +1019,30 @@ mod tests {
         record(&[(pointer, None)])
     }
 
+    fn body_value(record: &[u8]) -> Option<Value> {
+        let body = record.strip_suffix(b"\n")?;
+        strict_json::parse_value(body).ok()
+    }
+
+    fn parse_checked(
+        record: &[u8],
+        limits: &PlatformLimits,
+    ) -> Result<RuntimeRecipe, RecipeRefusal> {
+        let parsed = RuntimeRecipe::parse(record, limits);
+        let framing = matches!(parsed, Err(NotOneLine | TooLarge { .. } | NotUtf8));
+        if let (false, Some(value)) = (framing, body_value(record)) {
+            assert_eq!(
+                RuntimeRecipe::from_value(&value, limits),
+                parsed,
+                "from_value and parse disagree on {}",
+                String::from_utf8_lossy(record)
+            );
+        }
+        parsed
+    }
+
     fn parsed_under(record: &[u8], limits: &PlatformLimits) -> RuntimeRecipe {
-        RuntimeRecipe::parse(record, limits).unwrap_or_else(|refusal| {
+        parse_checked(record, limits).unwrap_or_else(|refusal| {
             panic!("{} refused: {refusal:?}", String::from_utf8_lossy(record))
         })
     }
@@ -1030,7 +1052,7 @@ mod tests {
     }
 
     fn refused_under(record: &[u8], limits: &PlatformLimits) -> RecipeRefusal {
-        match RuntimeRecipe::parse(record, limits) {
+        match parse_checked(record, limits) {
             Err(refusal) => {
                 let shown = refusal.to_string();
                 assert!(!shown.contains(['\n', '\r']), "{shown:?} is one line");
@@ -1890,6 +1912,123 @@ mod tests {
                 "`helper.path` and `libraries[3].path` are the same path",
                 "`host_policy.path` and `guest_policy.path` are the same path",
             ]
+        );
+    }
+
+    #[test]
+    fn from_value_matches_parse() {
+        let control = json!("/var/cell/c1/control.sock");
+        let records = [
+            record(&[]),
+            with("/libraries", json!([])),
+            with("/vcpus", json!(9)),
+            with("/vcpus", json!(0)),
+            with("/memory_mib", json!(16_385)),
+            with("/version", json!(2)),
+            with("/kernel_format", json!("bzImage")),
+            with("/architecture", json!("x86_64")),
+            with("/data_path", control),
+            with("/control_path", path_of_length(104)),
+            with("/writable_root", json!("/opt/cell/root.raw")),
+            with("/helper/sha256", json!("A".repeat(64))),
+            with("/kernel/path", json!("relative/path")),
+            with("/libraries/0/size", json!(1)),
+            with("/extra", json!(1)),
+            without("/guest_policy"),
+            with("/libraries", json!({})),
+            with("/kernel", json!("/opt/cell/kernel")),
+            b"[]\n".to_vec(),
+        ];
+        for record in records {
+            let shown = String::from_utf8_lossy(&record).into_owned();
+            let value = body_value(&record).expect("the record is one strict JSON value");
+            assert_eq!(
+                RuntimeRecipe::from_value(&value, &LIMITS),
+                RuntimeRecipe::parse(&record, &LIMITS),
+                "{shown}"
+            );
+        }
+        let recipe = parsed(&record(&[]));
+        let value = body_value(&recipe.to_ndjson()).expect("the encoding is strict JSON");
+        assert_eq!(RuntimeRecipe::from_value(&value, &LIMITS), Ok(recipe));
+    }
+
+    #[test]
+    fn from_value_sees_no_framing() {
+        let padded = format!("{}{}", valid(), " ".repeat(1_048_577));
+        let value = strict_json::parse_value(padded.as_bytes()).expect("strict JSON");
+        assert_eq!(
+            RuntimeRecipe::from_value(&value, &LIMITS),
+            Ok(parsed(&record(&[])))
+        );
+    }
+
+    fn artifact_refused(value: &Value, field: &str) -> RecipeRefusal {
+        match Artifact::from_value(value, field) {
+            Err(refusal) => {
+                let shown = refusal.to_string();
+                assert!(!shown.contains(['\n', '\r']), "{shown:?} is one line");
+                for name in names_shown_by(&refusal) {
+                    assert!(shown.contains(&name), "{shown:?} names {name}");
+                }
+                refusal
+            }
+            Ok(read) => panic!("{value} read as {read:?}"),
+        }
+    }
+
+    #[test]
+    fn artifact_from_value_reads_exactly_path_and_sha256_naming_the_given_field() {
+        let field = "cell_runtime.membraned";
+        let membraned = "/usr/local/lib/plasmosome/membraned";
+        let read = Artifact::from_value(&artifact(membraned, '8'), field)
+            .expect("an object with exactly path and sha256 reads");
+        assert_eq!(read.path().as_str(), membraned);
+        assert_eq!(read.sha256().hex(), digest('8'));
+        let sha256 = digest('8');
+        let cases = [
+            (
+                json!({"path": membraned}),
+                missing("cell_runtime.membraned.sha256"),
+            ),
+            (
+                json!({"sha256": sha256}),
+                missing("cell_runtime.membraned.path"),
+            ),
+            (
+                json!({"path": membraned, "sha256": sha256, "size": 1}),
+                unknown("cell_runtime.membraned.size"),
+            ),
+            (
+                json!({"path": "relative/membraned", "sha256": sha256}),
+                BadPath {
+                    field: "cell_runtime.membraned.path".to_owned(),
+                    fault: PathError::NotAbsolute,
+                },
+            ),
+            (
+                json!({"path": membraned, "sha256": "A".repeat(64)}),
+                BadDigest {
+                    field: "cell_runtime.membraned.sha256".to_owned(),
+                    fault: DigestError::NotLowercaseHex { at: 0 },
+                },
+            ),
+            (
+                json!({"path": 1, "sha256": sha256}),
+                wrong_type("cell_runtime.membraned.path", "a string"),
+            ),
+            (json!(membraned), not_an_object("cell_runtime.membraned")),
+        ];
+        for (value, refusal) in cases {
+            assert_eq!(artifact_refused(&value, field), refusal, "{value}");
+        }
+        let elsewhere = json!({"path": "relative", "sha256": digest('8')});
+        assert_eq!(
+            artifact_refused(&elsewhere, "helper"),
+            BadPath {
+                field: "helper.path".to_owned(),
+                fault: PathError::NotAbsolute,
+            }
         );
     }
 }
