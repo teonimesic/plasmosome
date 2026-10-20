@@ -230,6 +230,25 @@ fn a_changed_fixture_source_compiles_to_a_new_key() {
     );
 }
 
+#[test]
+fn the_same_fixture_source_at_another_path_reuses_the_published_fixture() {
+    let sources = tempfile::tempdir().unwrap();
+    let copy = sources.path().join("copy.c");
+    std::fs::copy(fixture::supervision_worker_source(), &copy)
+        .expect("the fixture source is copied to another path");
+    let published = fixture::supervision_fixture();
+    let root = published
+        .parent()
+        .and_then(Path::parent)
+        .expect("the fixture sits two directories below its cache root");
+
+    assert_eq!(
+        fixture::compile_supervision_fixture(root, &copy),
+        published,
+        "the same source at another path is cached under the same key and reuses the published fixture"
+    );
+}
+
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     match payload.downcast::<String>() {
         Ok(message) => *message,
