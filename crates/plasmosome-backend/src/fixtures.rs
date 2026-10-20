@@ -59,10 +59,10 @@ pub(crate) fn op(id: GrantId, owner: CellOwner, capability: Capability) -> Unive
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::Capability;
-    use crate::universe::{CellId, CellOwner, GrantId, OsObject, PluginId, UniverseOp};
+    use crate::universe::{CellId, OsObject, PluginId};
 
     fn owner(cell: &str, plugin: &str) -> CellOwner {
         CellOwner {
