@@ -2,11 +2,11 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde::de::value::MapAccessDeserializer;
-use serde::de::{DeserializeOwned, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
+use crate::wire::object_serde;
 
 /// The most account bytes one page carries (spec 001 §4.1).
 pub const MAX_PAGE_BYTES: usize = 65_536;
@@ -20,7 +20,7 @@ pub const MAX_FRAME_BYTES: usize = 1_048_576;
 /// It decodes only from a JSON object that holds each of these six fields exactly once. Decoding
 /// checks the shape only: pass the page to a [`PageAssembler`], or call
 /// [`ObservationPage::check`], before trusting any field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservationPage {
     /// The capture this page belongs to. Never zero.
     pub snapshot: u64,
@@ -36,9 +36,13 @@ pub struct ObservationPage {
     pub complete: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PageFields {
+#[derive(Serialize, Deserialize)]
+#[serde(
+    remote = "ObservationPage",
+    deny_unknown_fields,
+    expecting = "an observation page object"
+)]
+struct PageShape {
     snapshot: u64,
     offset: u64,
     total: u64,
@@ -47,33 +51,7 @@ struct PageFields {
     complete: bool,
 }
 
-struct PageObject;
-
-impl<'de> Visitor<'de> for PageObject {
-    type Value = ObservationPage;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("an observation page object")
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<ObservationPage, A::Error> {
-        let fields = PageFields::deserialize(MapAccessDeserializer::new(map))?;
-        Ok(ObservationPage {
-            snapshot: fields.snapshot,
-            offset: fields.offset,
-            total: fields.total,
-            sha256: fields.sha256,
-            bytes: fields.bytes,
-            complete: fields.complete,
-        })
-    }
-}
-
-impl<'de> Deserialize<'de> for ObservationPage {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<ObservationPage, D::Error> {
-        deserializer.deserialize_map(PageObject)
-    }
-}
+object_serde!(ObservationPage through PageShape);
 
 impl ObservationPage {
     /// Checks the rules spec 001 §4.1 sets on one page and returns the first one broken, in this
