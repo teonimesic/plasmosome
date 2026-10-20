@@ -224,9 +224,9 @@ enum Step {
 ///
 /// A root that is itself a link is refused. The root is then resolved once to its canonical
 /// path, which is opened without following a link; it must be the directory the first check
-/// saw, by device and inode, so a root swapped for a link in between is refused. Every
-/// directory is opened before it is listed, and every file before it is read, with a flag that
-/// refuses links. What that flag covers differs:
+/// saw, by device and inode, so a root swapped in between, for a link or anything else, is
+/// refused. Every directory is opened before it is listed, and every file before it is read,
+/// with a flag that refuses links. What that flag covers differs:
 ///
 /// - On macOS it is `O_NOFOLLOW_ANY`, which refuses a link in any component. So no file is
 ///   read, and no directory opened, through a link, even one swapped in while `pin` runs. A

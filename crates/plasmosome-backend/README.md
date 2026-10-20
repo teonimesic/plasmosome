@@ -82,9 +82,10 @@ refuses such a name when the file is created (`EILSEQ`).
 What `pin` guarantees about links differs by system. On both, a root that is itself a link is
 refused. The root's own path may pass through a link, as macOS's `/var` does, so the root is
 resolved once to its canonical path. That path is then opened without following a link, and it
-must be the directory the first check saw, by device and inode. So a root swapped for a link
-between the check and the open is refused as `Link { path: "." }`. Every directory is opened
-before it is listed, and every file before it is read.
+must be the directory the first check saw, by device and inode. So a root swapped between the
+check and the open, for a link or for anything else, is refused as `Link { path: "." }`, and
+the open does not wait on a FIFO. Every directory is opened before it is listed, and every file
+before it is read.
 
 - **macOS.** Every open uses `O_NOFOLLOW_ANY`, which refuses a link in any component of the
   canonical path. So no file is read, and no directory opened, through a link, even one swapped
