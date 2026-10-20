@@ -831,14 +831,26 @@ mod tests {
     }
 
     #[test]
-    fn descriptors_zero_to_three_are_null_null_diagnostics_and_a_blocking_recipe_pipe() {
+    fn descriptors_zero_to_three_are_read_write_null_a_diagnostics_writer_and_a_recipe_reader() {
         let recorded = record();
         recorded.report.assert_exited_cleanly();
         let descriptors = recorded.report.descriptors();
-        assert_eq!(descriptors.get(&0), Some(&"kind=chr null=1 nonblock=0"));
-        assert_eq!(descriptors.get(&1), Some(&"kind=chr null=1 nonblock=0"));
-        assert_eq!(descriptors.get(&2), Some(&"kind=fifo null=0 nonblock=0"));
-        assert_eq!(descriptors.get(&3), Some(&"kind=fifo null=0 nonblock=0"));
+        assert_eq!(
+            descriptors.get(&0),
+            Some(&"kind=chr null=1 nonblock=0 access=rw")
+        );
+        assert_eq!(
+            descriptors.get(&1),
+            Some(&"kind=chr null=1 nonblock=0 access=rw")
+        );
+        assert_eq!(
+            descriptors.get(&2),
+            Some(&"kind=fifo null=0 nonblock=0 access=w")
+        );
+        assert_eq!(
+            descriptors.get(&3),
+            Some(&"kind=fifo null=0 nonblock=0 access=r")
+        );
     }
 
     #[test]
@@ -1030,7 +1042,7 @@ mod tests {
         report.assert_exited_cleanly();
         assert_eq!(
             report.descriptors().get(&0),
-            Some(&"kind=chr null=1 nonblock=0")
+            Some(&"kind=chr null=1 nonblock=0 access=rw")
         );
     }
 

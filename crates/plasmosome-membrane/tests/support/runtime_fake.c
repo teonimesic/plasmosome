@@ -116,6 +116,22 @@ static const char *kind(mode_t mode) {
     return "other";
 }
 
+static const char *access_mode(int flags) {
+    if (flags == -1) {
+        return "unknown";
+    }
+    switch (flags & O_ACCMODE) {
+    case O_RDONLY:
+        return "r";
+    case O_WRONLY:
+        return "w";
+    case O_RDWR:
+        return "rw";
+    default:
+        return "other";
+    }
+}
+
 static void report_descriptors(FILE *report) {
     struct stat null_device;
     if (stat("/dev/null", &null_device) != 0) {
@@ -127,14 +143,14 @@ static void report_descriptors(FILE *report) {
         int number = numbers[index];
         struct stat status;
         if (fstat(number, &status) != 0) {
-            fprintf(report, "fd=%d kind=unreadable null=0 nonblock=0\n", number);
+            fprintf(report, "fd=%d kind=unreadable null=0 nonblock=0 access=unknown\n", number);
             continue;
         }
         int flags = fcntl(number, F_GETFL);
         int is_null = S_ISCHR(status.st_mode) && status.st_rdev == null_device.st_rdev;
         int nonblock = flags != -1 && (flags & O_NONBLOCK) != 0;
-        fprintf(report, "fd=%d kind=%s null=%d nonblock=%d\n", number, kind(status.st_mode),
-                is_null, nonblock);
+        fprintf(report, "fd=%d kind=%s null=%d nonblock=%d access=%s\n", number,
+                kind(status.st_mode), is_null, nonblock, access_mode(flags));
     }
     free(numbers);
 }
