@@ -1449,12 +1449,17 @@ fn list_trusted_dir_returns_a_name_that_is_not_utf8_as_its_bytes() {
     let root = private_root();
     let name = [b'c', 0xff, 0xfe, b'l'];
     fs::write(root.path().join(OsStr::from_bytes(&name)), b"").expect("write");
+    fs::write(root.path().join("c\u{1F600}"), b"").expect("write");
     assert_eq!(
         list_trusted_dir(root.path()),
-        Ok(vec![ListedEntry {
-            name: name.to_vec(),
-            kind: EntryKind::Other
-        }])
+        Ok(vec![
+            listed("c\u{1F600}", EntryKind::Other),
+            ListedEntry {
+                name: name.to_vec(),
+                kind: EntryKind::Other
+            },
+        ]),
+        "by bytes, the 0xf0 that starts the emoji sorts before 0xff"
     );
 }
 
