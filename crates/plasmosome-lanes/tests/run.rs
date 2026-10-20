@@ -80,11 +80,11 @@ fn a_console_past_the_bound_is_not_run_even_after_a_complete_run() {
 }
 
 #[test]
-fn stderr_past_its_bound_keeps_the_first_mebibyte_and_does_not_block_the_launcher() {
+fn stderr_past_its_bound_keeps_the_first_mebibyte_and_the_launcher_keeps_writing() {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let lane = common::lane_config(dir.path(), "run-1");
     let body = format!(
-        "cat > /dev/null\nyes e | head -c {} >&2\n{}",
+        "cat > /dev/null\nyes e | head -c {} >&2 || exit 1\n{}",
         2 * STDERR_BOUND,
         complete_run(&lane.console)
     );
