@@ -947,6 +947,7 @@ fn accept_refuses_a_peer_whose_uid_is_not_trusted_before_reading() {
     );
 }
 
+/// The caller keeps `fd` open for the call.
 #[allow(unsafe_code)]
 fn set_blocking(fd: RawFd) {
     // SAFETY: fcntl with F_GETFL takes no pointer, and the caller keeps `fd` open for the call.

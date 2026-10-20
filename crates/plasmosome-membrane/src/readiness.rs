@@ -391,6 +391,7 @@ fn halted(budget: &ProbeBudget<'_>) -> ProbeStopped {
     }
 }
 
+/// The caller keeps `fd` open for the call.
 #[allow(unsafe_code)]
 fn socket_error(fd: RawFd) -> Result<libc::c_int, ()> {
     let mut code: libc::c_int = 0;
