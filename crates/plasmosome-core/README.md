@@ -112,10 +112,10 @@ non-ASCII ID on HFS+ at creation.
 - `registry_root` is optional and absolute when given. Without it the daemon is purely local;
   no other path, `HOME` or request supplies a default.
 
-An unknown key, a key given twice, or an explicit `null` refuses the config, and the refusal
-names the key. The binary prints it and exits 2. This build validates the recovery keys but does
-not use them: it does not open the instance root, recover cells or read registry imports
-(spec 001 §6, item 7).
+The config must be one JSON object: an array is refused rather than read by position. An unknown
+key, a key given twice, or an explicit `null` refuses the config, and the refusal names the key.
+The binary prints it and exits 2. This build checks these keys for shape only: it does not open
+the instance root, recover cells or read registry imports (spec 001 §6, item 7).
 
 ## Socket ownership
 

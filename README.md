@@ -450,11 +450,11 @@ PY
 
 The controller response has `ready:true`, `cells:[]` and `ledger_generation:0`: the controller can
 answer status, but no guest exists. Its config must name an absolute `instance_root` and a
-`recovery_deadline_ms` of at least 1. This build checks both and uses neither: it does not open
-the root or recover cells yet, so the example never creates `instance`. The independently started membrane returns exactly
-`{"ready":false,"state":"empty"}` because `brokers:[]`; that is the expected successful response,
-not a failed daemon start. Its `status_deadline_ms` is a broker probe budget, not a strict elapsed
-bound.
+`recovery_deadline_ms` of at least 1. This build checks both for shape only and uses neither: it
+does not open the root or recover cells yet, so the example never creates `instance`. The
+independently started membrane returns exactly `{"ready":false,"state":"empty"}` because
+`brokers:[]`; that is the expected successful response, not a failed daemon start. Its
+`status_deadline_ms` is a broker probe budget, not a strict elapsed bound.
 
 This example creates no cell and launches no OMP, Claude Code, Codex or other agent harness. It
 does not establish hardware/OS isolation, enforcement, credential custody, attach/detach,
