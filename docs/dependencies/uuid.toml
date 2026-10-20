@@ -2,24 +2,30 @@ name = "uuid"
 range = "1"
 reason = """\
   Generates random version 4 UUIDs, and parses and prints the canonical hyphenated text of a UUID, \
-  for grant identities and registry IDs.\
+  for grant identities, registry IDs and host boot sessions.\
   """
-write_it_instead.lines = 70
+write_it_instead.lines = 75
 write_it_instead.how = """\
-  On 2026-10-20, at main 1d93c81, `git grep -l 'uuid::' -- '*.rs' | wc -l` gives 2 files, \
-  crates/plasmosome-backend/src/universe.rs and crates/plasmosome-ledger/src/artifact.rs. `git \
-  grep -h -o -E 'Uuid::(new_v4|parse_str)|[.](hyphenated|is_nil|get_variant|get_version)[(]' -- \
-  '*.rs' | tr -d '.(' | sort | uniq -c` gives hyphenated 5, parse_str 3, one of them in a doc \
-  comment, is_nil 2, new_v4 1, get_variant 1 and get_version 1. Each file holds the UUID in a \
-  newtype that derives Debug, Clone, Copy, Eq, Ord and Hash through it and writes its own serde \
-  impls over the text, so a replacement needs no serde support. Both newtypes refuse every text \
-  but the lower-case hyphenated form after parsing. A replacement with the standard library alone \
-  needs: a 16-byte type with those derives, is_nil, and the variant and version checks (20 lines); \
-  new_v4, 16 bytes read from /dev/urandom with the version and variant bits set, where getrandom \
-  calls getentropy on macOS and the getrandom system call on Linux (15); parse_str for the \
-  lower-case hyphenated form only, 32 hex digits with a hyphen after the 8th, 12th, 16th and 20th \
-  (25); and hyphenated, which writes that form (10): 70 lines. Replacing it removes 1 package from \
-  Cargo.lock: uuid@1.\
+  On 2026-10-20, at main e61cc2e, `git grep -l 'uuid::' -- '*.rs' | wc -l` gives 4 files, \
+  crates/plasmosome-backend/src/universe.rs, crates/plasmosome-backend/src/lifetime.rs, \
+  crates/plasmosome-backend/src/clock.rs and crates/plasmosome-ledger/src/artifact.rs, where \
+  clock.rs uses it only in its tests. `git grep -h -o -E \
+  'Uuid::(new_v4|parse_str|try_parse|from_u128)|[.](hyphenated|is_nil|get_variant|get_version)[(]' \
+  -- '*.rs' | tr -d '.(' | sort | uniq -c` gives hyphenated 6, parse_str 3, one of them in a doc \
+  comment, from_u128 3, all of them in tests, is_nil 2, try_parse 1, new_v4 1, get_variant 1 and \
+  get_version 1. universe.rs and artifact.rs each hold the UUID in a newtype that derives Debug, \
+  Clone, Copy, Eq, Ord and Hash through it and writes its own serde impls over the text, so a \
+  replacement needs no serde support. Both newtypes refuse every text but the lower-case \
+  hyphenated form after parsing. The newtype for a host boot session in lifetime.rs derives Debug, \
+  Clone, Copy, Eq and Hash. It hands try_parse only text of 36 bytes, which leaves the hyphenated \
+  form in either case, and prints it in lower case with hyphenated. Tests build UUIDs from an \
+  integer with from_u128. A replacement with the standard library alone needs: a 16-byte type with \
+  those derives, is_nil, and the variant and version checks (20 lines); from_u128, the integer's \
+  16 bytes in big-endian order (5); new_v4, 16 bytes read from /dev/urandom with the version and \
+  variant bits set, where getrandom calls getentropy on macOS and the getrandom system call on \
+  Linux (15); parse_str and try_parse for the hyphenated form only, in either case, 32 hex digits \
+  with a hyphen after the 8th, 12th, 16th and 20th (25); and hyphenated, which writes that form in \
+  lower case (10): 75 lines. Replacing it removes 1 package from Cargo.lock: uuid@1.\
   """
 exception = ""
 # The two hosts build cfg-if, getrandom, libc and serde_core of these. The rest are here through
