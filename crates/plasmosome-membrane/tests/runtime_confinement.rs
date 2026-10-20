@@ -79,6 +79,7 @@ mod darwin {
     struct Sleeper {
         child: Child,
         _stdin: ChildStdin,
+        unique_id: u64,
     }
 
     impl Sleeper {
@@ -93,22 +94,30 @@ mod darwin {
             let stdin = child.stdin.take().expect("the sleeper's stdin is piped");
             let stdout = child.stdout.take().expect("the sleeper's stdout is piped");
             let mut stderr = child.stderr.take().expect("the sleeper's stderr is piped");
-            let sleeper = Sleeper {
+            let mut sleeper = Sleeper {
                 child,
                 _stdin: stdin,
+                unique_id: 0,
             };
             let mut line = String::new();
             BufReader::new(stdout)
                 .read_line(&mut line)
                 .expect("the sleeper's stdout is readable");
-            if line != "ready\n" {
-                let mut message = String::new();
-                stderr
-                    .read_to_string(&mut message)
-                    .expect("the sleeper's stderr is readable");
-                panic!(
-                    "the sleeper applied {profile:?} and paused; it wrote {line:?} and {message:?}"
-                );
+            match line
+                .strip_prefix("ready ")
+                .and_then(|rest| rest.strip_suffix('\n'))
+                .and_then(|unique_id| unique_id.parse().ok())
+            {
+                Some(unique_id) => sleeper.unique_id = unique_id,
+                None => {
+                    let mut message = String::new();
+                    stderr
+                        .read_to_string(&mut message)
+                        .expect("the sleeper's stderr is readable");
+                    panic!(
+                        "the sleeper applied {profile:?} and reported its unique id; it wrote {line:?} and {message:?}"
+                    );
+                }
             }
             sleeper
         }
@@ -192,6 +201,11 @@ mod darwin {
         match observe(sleeper.pid()) {
             Confinement::Confined(evidence) => {
                 assert_eq!(evidence.pid(), sleeper.pid());
+                assert_eq!(
+                    evidence.unique_id(),
+                    sleeper.unique_id,
+                    "the evidence names the process by the unique id it reads for itself"
+                );
                 assert_eq!(evidence.denied(), FIVE);
                 assert_eq!(evidence.binding(), PolicyBinding::PropertiesObserved);
             }

@@ -312,16 +312,51 @@ mod darwin {
     mod tests {
         use super::*;
 
+        use crate::runtime::confinement::{Kernel, UNIQUE_IDENTIFIERS_SIZE};
+        use std::process::{Command, Stdio};
+
         #[test]
         fn a_query_the_kernel_cannot_answer_reads_as_its_errno_never_a_value() {
             let own = std::process::id().cast_signed();
             for operation in ["process-exec", "no-such-operation"] {
                 assert_eq!(
-                    check(own, Some(operation)),
+                    Darwin.sandbox_check(own, Some(operation)),
                     Err(libc::EINVAL),
                     "{operation} needs a filter or is unknown, so sandbox_check returns -1"
                 );
             }
+        }
+
+        #[test]
+        fn the_unique_identifier_record_has_the_kernels_size_and_layout() {
+            let own = std::process::id().cast_signed();
+            let mine = Darwin.unique_identifiers(own);
+            assert_eq!(
+                mine.written, UNIQUE_IDENTIFIERS_SIZE,
+                "the kernel fills exactly the record's size: {mine:?}"
+            );
+            let launchd = Darwin.unique_identifiers(1);
+            assert_eq!(
+                (launchd.written, launchd.unique_id),
+                (UNIQUE_IDENTIFIERS_SIZE, 1),
+                "launchd is the first process the kernel starts"
+            );
+            let mut child = Command::new("/bin/cat")
+                .stdin(Stdio::piped())
+                .spawn()
+                .expect("cat starts");
+            let pid = child.id().cast_signed();
+            let theirs = Darwin.unique_identifiers(pid);
+            let (written, record, _) = unique_identifier_record(pid);
+            drop(child.stdin.take());
+            child.wait().expect("cat ends at the end of its input");
+            assert_eq!(written, UNIQUE_IDENTIFIERS_SIZE);
+            assert_eq!(theirs.unique_id, record.unique_id);
+            assert_ne!(theirs.unique_id, mine.unique_id);
+            assert_eq!(
+                record.parent_unique_id, mine.unique_id,
+                "a child's record names this process as its parent"
+            );
         }
     }
 }
@@ -340,7 +375,9 @@ mod tests {
         "file-write-create",
     ];
     const OTHER_NAMES: [&str; 3] = ["file-read-data", "process-exec", "mach-lookup"];
-    const STARTED: (u64, u64) = (1_792_518_707, 399_673);
+    const UNIQUE_ID: u64 = 90_210;
+    const OWN: libc::pid_t = 77;
+    const STALE: i32 = 9999;
 
     fn answering(answer: Answer) -> Vec<(&'static str, Answer)> {
         REQUIRED_DENIALS
@@ -352,10 +389,10 @@ mod tests {
     fn confined() -> Readings {
         Readings {
             own: Ok(0),
-            before: Ok(STARTED),
+            before: Ok(UNIQUE_ID),
             sandboxed: Ok(1),
             operations: answering(Ok(1)),
-            after: Ok(STARTED),
+            after: Ok(UNIQUE_ID),
         }
     }
 
@@ -386,6 +423,7 @@ mod tests {
             panic!("every rule holds, so the process is confined");
         };
         assert_eq!(evidence.pid(), PID);
+        assert_eq!(evidence.unique_id(), UNIQUE_ID);
         assert_eq!(evidence.denied(), FIVE);
         assert_eq!(evidence.binding(), PolicyBinding::PropertiesObserved);
     }
@@ -560,20 +598,24 @@ mod tests {
 
     #[test]
     fn a_process_not_read_running_on_both_sides_of_the_queries_is_unverifiable() {
-        for errno in [libc::ESRCH, libc::EPERM] {
+        for reason in [
+            Unverifiable::ProcessUnreadable { errno: libc::ESRCH },
+            Unverifiable::ProcessUnreadable { errno: libc::EPERM },
+            Unverifiable::ProcessInfoWrongSize { bytes: 10 },
+        ] {
             for readings in [
                 Readings {
-                    before: Err(errno),
+                    before: Err(reason),
                     ..confined()
                 },
                 Readings {
-                    after: Err(errno),
+                    after: Err(reason),
                     ..confined()
                 },
             ] {
                 assert_eq!(
                     judge(PID, &readings),
-                    unverifiable(Unverifiable::ProcessUnreadable { errno }),
+                    unverifiable(reason),
                     "a dead pid answers 1 to every sandbox query, so those answers are not used: {readings:?}"
                 );
             }
@@ -581,12 +623,8 @@ mod tests {
     }
 
     #[test]
-    fn a_pid_naming_a_later_process_after_the_queries_is_unverifiable() {
-        for after in [
-            (STARTED.0, STARTED.1 + 1),
-            (STARTED.0 + 1, STARTED.1),
-            (STARTED.0 - 1, STARTED.1),
-        ] {
+    fn a_pid_naming_another_process_after_the_queries_is_unverifiable() {
+        for after in [UNIQUE_ID + 1, UNIQUE_ID - 1, 0] {
             assert_eq!(
                 judge(
                     PID,
@@ -596,8 +634,174 @@ mod tests {
                     }
                 ),
                 unverifiable(Unverifiable::ProcessReplaced),
-                "the process read after the queries started at {after:?}"
+                "the process read after the queries has unique id {after}"
             );
+        }
+    }
+
+    #[test]
+    fn a_record_of_the_full_size_gives_the_process_unique_id() {
+        assert_eq!(
+            identity(PidInfo {
+                written: UNIQUE_IDENTIFIERS_SIZE,
+                unique_id: UNIQUE_ID,
+                errno: STALE,
+            }),
+            Ok(UNIQUE_ID)
+        );
+        for (written, errno) in [(0, libc::ESRCH), (-1, libc::EPERM)] {
+            assert_eq!(
+                identity(PidInfo {
+                    written,
+                    unique_id: UNIQUE_ID,
+                    errno,
+                }),
+                Err(Unverifiable::ProcessUnreadable { errno }),
+                "proc_pidinfo returned {written}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_of_another_size_names_its_size_not_a_stale_errno() {
+        for bytes in [
+            1,
+            10,
+            UNIQUE_IDENTIFIERS_SIZE - 1,
+            UNIQUE_IDENTIFIERS_SIZE + 1,
+        ] {
+            assert_eq!(
+                identity(PidInfo {
+                    written: bytes,
+                    unique_id: UNIQUE_ID,
+                    errno: STALE,
+                }),
+                Err(Unverifiable::ProcessInfoWrongSize { bytes }),
+                "proc_pidinfo returned {bytes} bytes and left an earlier errno"
+            );
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Life {
+        Running,
+        Dead,
+        Replaced,
+    }
+
+    struct FakeKernel {
+        allows: bool,
+        fate: Life,
+        life: Life,
+        record_bytes: libc::c_int,
+        own_queries: usize,
+    }
+
+    impl FakeKernel {
+        fn new(allows: bool, fate: Life) -> FakeKernel {
+            FakeKernel {
+                allows,
+                fate,
+                life: Life::Running,
+                record_bytes: UNIQUE_IDENTIFIERS_SIZE,
+                own_queries: 0,
+            }
+        }
+    }
+
+    impl Kernel for FakeKernel {
+        fn sandbox_check(&mut self, pid: libc::pid_t, operation: Option<&str>) -> Answer {
+            if pid == OWN {
+                self.own_queries += 1;
+                return Ok(0);
+            }
+            assert_eq!(pid, PID, "the fake knows only the observer and one process");
+            if operation.is_some() && self.life == Life::Running {
+                self.life = self.fate;
+            }
+            match (self.life, operation) {
+                (Life::Running, Some(_)) if self.allows => Ok(0),
+                _ => Ok(1),
+            }
+        }
+
+        fn unique_identifiers(&mut self, pid: libc::pid_t) -> PidInfo {
+            assert_eq!(pid, PID, "only the observed process is read");
+            match self.life {
+                Life::Running => PidInfo {
+                    written: self.record_bytes,
+                    unique_id: UNIQUE_ID,
+                    errno: STALE,
+                },
+                Life::Replaced => PidInfo {
+                    written: UNIQUE_IDENTIFIERS_SIZE,
+                    unique_id: UNIQUE_ID + 1,
+                    errno: STALE,
+                },
+                Life::Dead => PidInfo {
+                    written: 0,
+                    unique_id: 0,
+                    errno: libc::ESRCH,
+                },
+            }
+        }
+    }
+
+    fn observed(kernel: &mut FakeKernel) -> Confinement {
+        judge(PID, &read(PID, OWN, kernel))
+    }
+
+    #[test]
+    fn a_running_process_is_judged_on_what_the_kernel_answers() {
+        let Confinement::Confined(evidence) = observed(&mut FakeKernel::new(false, Life::Running))
+        else {
+            panic!("a running process that denies the five is confined");
+        };
+        assert_eq!((evidence.pid(), evidence.unique_id()), (PID, UNIQUE_ID));
+        assert_eq!(
+            observed(&mut FakeKernel::new(true, Life::Running)),
+            unconfined(true, &FIVE)
+        );
+    }
+
+    #[test]
+    fn a_process_that_dies_during_the_queries_is_unverifiable() {
+        assert_eq!(
+            observed(&mut FakeKernel::new(true, Life::Dead)),
+            unverifiable(Unverifiable::ProcessUnreadable { errno: libc::ESRCH }),
+            "an allow-default process that dies at its first operation query answers 1 to the rest"
+        );
+    }
+
+    #[test]
+    fn a_pid_taken_by_another_process_during_the_queries_is_unverifiable() {
+        assert_eq!(
+            observed(&mut FakeKernel::new(true, Life::Replaced)),
+            unverifiable(Unverifiable::ProcessReplaced),
+            "an allow-default process replaced at its first operation query by one that denies the five"
+        );
+    }
+
+    #[test]
+    fn a_record_of_another_size_stops_the_observation() {
+        for bytes in [10, UNIQUE_IDENTIFIERS_SIZE - 8] {
+            let mut kernel = FakeKernel {
+                record_bytes: bytes,
+                ..FakeKernel::new(false, Life::Running)
+            };
+            assert_eq!(
+                observed(&mut kernel),
+                unverifiable(Unverifiable::ProcessInfoWrongSize { bytes })
+            );
+        }
+    }
+
+    #[test]
+    fn every_observation_asks_whether_the_observer_is_sandboxed() {
+        let mut kernel = FakeKernel::new(false, Life::Running);
+        for observations in 1..=3 {
+            observed(&mut kernel);
+            assert_eq!(kernel.own_queries, observations);
         }
     }
 
@@ -609,11 +813,12 @@ mod tests {
         ]
     }
 
-    fn started() -> impl Strategy<Value = Started> {
+    fn identities() -> impl Strategy<Value = Identity> {
         prop_oneof![
-            8 => Just(Ok(STARTED)),
-            1 => (0..3u64, 0..3u64).prop_map(Ok),
-            1 => (1..120).prop_map(Err),
+            8 => Just(Ok(UNIQUE_ID)),
+            1 => (0..3u64).prop_map(Ok),
+            1 => (1..120).prop_map(|errno| Err(Unverifiable::ProcessUnreadable { errno })),
+            1 => (1..56).prop_map(|bytes| Err(Unverifiable::ProcessInfoWrongSize { bytes })),
         ]
     }
 
@@ -639,15 +844,20 @@ mod tests {
     }
 
     fn readings() -> impl Strategy<Value = Readings> {
-        (answer(0), started(), answer(1), operations(), started()).prop_map(
-            |(own, before, sandboxed, operations, after)| Readings {
+        (
+            answer(0),
+            identities(),
+            answer(1),
+            operations(),
+            identities(),
+        )
+            .prop_map(|(own, before, sandboxed, operations, after)| Readings {
                 own,
                 before,
                 sandboxed,
                 operations,
                 after,
-            },
-        )
+            })
     }
 
     proptest! {

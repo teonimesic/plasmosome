@@ -8,11 +8,29 @@
 #include <string.h>
 #include <unistd.h>
 
+#define UNIQUE_IDENTIFIERS_FLAVOR 17
+
+struct unique_identifiers {
+    uint8_t executable_uuid[16];
+    uint64_t unique_id;
+    uint64_t parent_unique_id;
+    int32_t id_version;
+    int32_t original_parent_id_version;
+    uint64_t reserved[2];
+};
+
 int sandbox_init(const char *profile, uint64_t flags, char **errorbuf);
+int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize);
 
 int main(int argc, char **argv) {
     if (argc != 2) {
         return 64;
+    }
+    struct unique_identifiers identifiers;
+    int written = proc_pidinfo(getpid(), UNIQUE_IDENTIFIERS_FLAVOR, 0, &identifiers, (int)sizeof identifiers);
+    if (written != (int)sizeof identifiers) {
+        fprintf(stderr, "proc_pidinfo read %d bytes of this process's unique identifiers: %s\n", written, strerror(errno));
+        return 70;
     }
     if (strcmp(argv[1], "none") != 0) {
         char *error = NULL;
@@ -21,7 +39,7 @@ int main(int argc, char **argv) {
             return 71;
         }
     }
-    if (write(STDOUT_FILENO, "ready\n", 6) != 6) {
+    if (printf("ready %llu\n", (unsigned long long)identifiers.unique_id) < 0 || fflush(stdout) != 0) {
         return 74;
     }
     char byte;
