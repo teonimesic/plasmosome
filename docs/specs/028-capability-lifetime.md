@@ -57,7 +57,10 @@ process in the cell can reach them (spec 024 §5).
 The **bound** B is the moment a lifetime ends. A lease's B is fixed at prepare as two readings
 (section 3); time before activation comes out of the lease. An idle limit or exec scope that ends
 the lifetime first moves B earlier. D, the drain budget, is the declaration's `drain_ms`, 1 to
-30,000 ms, or 5,000 ms when none is named. **H = B + 2 s + D** bounds grant references.
+30,000 ms, or 5,000 ms when none is named. D is fixed at prepare and recorded in the journal's
+`Lifetime` as `drain_ms`, because a withdrawal never re-reads the plasmid's own declaration,
+where `[lifecycle]` names it. **H = B + 2 s + D** bounds grant references. Amended on
+2026-10-20: this did not say where D is kept after prepare.
 
 ### 2. Who declares it, and the default
 
@@ -240,8 +243,10 @@ only moves the bound later, and never past the ceiling recorded at attach: `not_
 that ceiling from now, and `until_revoked` needs an `until_revoked` ceiling. Anything else, or a
 bound earlier than the one in force, is `-32602` naming the limit. A requirer is never renewed past
 a provider's bound: that is 103, with the provider in `plasmid` and the capability it provides in
-`capability`. A `not_after` equal to the bound in force writes nothing and replies as before, so a
-repeat after spec 025's exit 3 is safe.
+`capability`. The result is `{cell, plasmid, lifetime}`, with `cell` the cell the verb acted on
+and `lifetime` the renewed lifetime in the shape `plasmid.list` gives it (section 9). A
+`not_after` equal to the bound in force writes nothing and replies as before, so a repeat after
+spec 025's exit 3 is safe. Amended on 2026-10-20: this gave the result no shape.
 
 A renewal is a spec 008 transaction whose replacement changes only the lease; an idle limit or exec
 scope stays. After its prepare is durable, a session-log `renew` event records operator, reason,
@@ -327,7 +332,8 @@ are this spec's.
     AttachmentSource, "effects": [RecordedEffect, ...] }`." with "a replacement is `{ "mock":
     MockMode, "source": AttachmentSource, "lifetime": Lifetime, "effects": [RecordedEffect, ...]
     }`, where `Lifetime` is spec 028's required record of the attachment's bound in both readings,
-    its limits and ceiling, their sources, and its renewal count."
+    its limits and ceiling, their sources, its drain budget D as `drain_ms`, and its renewal
+    count." Amended on 2026-10-20: this text did not name `drain_ms`.
   - Desired state (`008:351-352`): replace "`DesiredPlasmid` is `{ plugin: PluginId, mock:
     MockMode, source: AttachmentSource, generation: u64, effects: Vec<RecordedEffect> }`." with
     "`DesiredPlasmid` is `{ plugin: PluginId, mock: MockMode, source: AttachmentSource, lifetime:
