@@ -23,9 +23,9 @@ will say, and it shows each terminal control in a key as `<U+XXXX>`.
 `scan` refuses input longer than `json::MAX_REPLY_BYTES`, spec 025's bound of 16,777,216 bytes,
 before reading any of it. The reader that reads a reply through that limit is a later task and
 uses the same constant. Nesting depth has no limit, by design. The scan keeps its own stack, so
-nesting costs memory and never the call stack: a million nested arrays scan, write, compare and
-drop. At the bound, in a release build, 8,388,608 nested arrays peak at 508 MB resident to scan
-and drop, and 779 MB to scan and write either form.
+nesting costs memory and never the call stack. The tests scan, write and drop a million nested
+arrays, and compare values 200,000 levels deep. At the bound, in a release build, 8,388,608
+nested arrays peak at 508 MB resident to scan and drop, and 779 MB to scan and write either form.
 
 ## Writing output
 
