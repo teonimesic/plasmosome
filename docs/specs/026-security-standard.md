@@ -464,8 +464,11 @@ when Q1 is answered. It never names a route nobody receives.
 This spec governs a PR, whatever task it maps to, when the PR changes any of these: a lockfile; a
 manifest's dependency, `[lints]`, `[patch]` or `[replace]` tables; `.cargo/config*`, `build.rs`,
 `clippy.toml`, `rust-toolchain*` or `deny.toml`; anything under `.github/`, `.githooks/` or
-`docs/dependencies/`; `unsafe` or native code; a parser of less-trusted bytes or a fuzz corpus; or
-`SECURITY.md`. Its reviewer checks the reviewer rows of section 7.
+`docs/dependencies/`; any file under `tools/` that a workflow runs or reads, directly or through
+another file; `unsafe` or native code; a parser of less-trusted bytes or a fuzz corpus; or
+`SECURITY.md`. Its reviewer checks the reviewer rows of section 7, and reads such a `tools/` file
+as a workflow change: a PR that changes only a script CI runs can switch a check off and still pass
+its own CI. Amended on 2026-10-20: `tools/` was not in this list.
 
 ## Changes proposed to accepted specs and documents
 
