@@ -193,6 +193,8 @@ class FakeDocker:
         self.unshared, self.inspect_out, self.create_code, self.export_code, self.rm_code = False, None, 0, 0, 0
         self.repo_digests = [f"debian@sha256:{DIGEST}"]
         self.platform = {"Os": "linux", "Architecture": "arm64"}
+        self.descriptor = {"mediaType": "application/vnd.oci.image.index.v1+json", "digest": f"sha256:{DIGEST}"}
+        self.create_out, self.after = CONTAINER + "\n", None
 
     def __call__(self, argv, env):
         self.calls.append(list(argv))
@@ -206,11 +208,10 @@ class FakeDocker:
                     "digest": f"sha256:{PLATFORM_DIGEST}"}}]), "")
             if self.inspect_out is not None:
                 return Result(0, self.inspect_out, "")
-            return Result(0, json.dumps([{"Id": f"sha256:{DIGEST}", "RepoDigests": self.repo_digests,
-                                          "Descriptor": {"mediaType": "application/vnd.oci.image.index.v1+json",
-                                                         "digest": f"sha256:{DIGEST}"}}]), "")
+            record = {"Id": f"sha256:{DIGEST}", "RepoDigests": self.repo_digests}
+            return Result(0, json.dumps([{**record, **({"Descriptor": self.descriptor} if self.descriptor else {})}]), "")
         if argv[:2] == ["docker", "create"]:
-            return Result(self.create_code, CONTAINER + "\n" if self.create_code == 0 else "", "no create\n")
+            return Result(self.create_code, self.create_out if self.create_code == 0 else "", "no create\n")
         if argv[:2] == ["docker", "export"]:
             write_tar(Path(argv[3]), self.base)
             return Result(self.export_code, "", "no export\n")
@@ -251,6 +252,8 @@ class FakeDocker:
                       "ls -p": lambda: debugfs_ls(tree, key).encode()}[verb]()
             (check / name).write_bytes(output)
             (check / f"{name}.err").write_text(BANNER)
+        if self.after is not None:
+            self.after(work)
 
 
 def built(root, fake, base=REF, adds=(), extra=(), work_name="work"):
@@ -301,6 +304,11 @@ def an_existing_workload_name_or_id_1000_refuses():
             ("etc/group", GROUP + b"workload:x:1001:\n"),
             ("etc/shadow", SHADOW + b"workload:*:20731:0:99999:7:::\n"),
             ("etc/gshadow", GSHADOW + b"workload:*::\n"),
+            ("etc/passwd", USERS + b"alice:x:1001:1000::/home/alice:/bin/sh\n"),
+            ("etc/group", GROUP + b"sudo:x:27:workload\n"),
+            ("etc/group", GROUP + b"staff:x:50:alice,workload\n"),
+            ("etc/gshadow", GSHADOW + b"sudo:*::workload\n"),
+            ("etc/gshadow", GSHADOW + b"staff:*:workload:\n"),
         ]:
             _, mode, uid, gid, _, _ = DEBIAN[path]
             detail = refusal("stage", stage_with, root, {path: f(data, mode, uid, gid)})
@@ -700,6 +708,10 @@ def manifest_has_sorted_keys_and_files_equal_sha256sums():
         assert (manifest["created_unix"], manifest["source_date_epoch"]) == (NOW, EPOCH)
         assert manifest["content_sha256"] == digest and manifest["added"] == []
         assert manifest["limits"] and all(isinstance(line, str) for line in manifest["limits"])
+        assert any("mke2fs, e2fsck, dumpe2fs and debugfs" in line and "checks itself" in line
+                   for line in manifest["limits"]), manifest["limits"]
+        assert any("content.jsonl" in line and "stage tar" in line for line in manifest["limits"]), manifest["limits"]
+        assert manifest["tool_sha256"] == sha(SOURCE.read_bytes())
         assert sorted(os.listdir(image)) == ["SHA256SUMS", "content.jsonl", "manifest.json", "rootfs.raw"]
         assert {stat.S_IMODE(os.stat(image / name).st_mode) for name in os.listdir(image)} == {0o444}
         assert stat.S_IMODE(os.stat(image).st_mode) == 0o555
@@ -820,6 +832,97 @@ def work_and_images_roots_are_checked_before_docker():
         assert API["docker_env"](ENVIRON) == ENV
 
 
+def a_member_under_a_link_or_a_file_refuses():
+    with scratch() as root:
+        for changes, name in [
+            ({"zz-etc": s("etc"), "zz-etc/hostname": f(b"4f1c0a9e2b7d\n")}, "/zz-etc/hostname"),
+            ({"zz-tmp": s("tmp"), "zz-tmp/planted": f(b"planted")}, "/zz-tmp/planted"),
+            ({"zz-home": s("home"), "zz-home/workload/.bash_aliases": f(b"alias")}, "/zz-home/workload/.bash_aliases"),
+            ({"zz-dev": s("dev"), "zz-dev/console": f(mode=0o755)}, "/zz-dev/console"),
+            ({"etc/passwd/x": f()}, "/etc/passwd/x"),
+            ({"var/cache/x": f()}, "/var/cache/x"),
+        ]:
+            detail = refusal("stage", stage_with, root, changes)
+            assert name in detail and "earlier directory" in detail, detail
+        assert "normalised" in refusal("stage", stage_with, root, {".": d(0o777)})
+
+
+def planted(work, name, target):
+    (work / name).unlink()
+    (work / name).symlink_to(target)
+
+
+def files_the_container_leaves_in_the_work_root_are_not_trusted():
+    with scratch() as root:
+        host = root / "host-file"
+        host.write_bytes(ROOTFS)
+        for number, (after, step, needle) in enumerate([
+            (lambda work: planted(work, "rootfs.raw", host), "publish", "rootfs.raw"),
+            (lambda work: planted(work, "rootfs.raw", "/dev/zero"), "publish", "rootfs.raw"),
+            (lambda work: (work / "rootfs.raw").write_bytes(ROOTFS[:-1]), "publish", str(SIZE_MIB << 20)),
+            (lambda work: (work / "rootfs.raw").write_bytes(ROOTFS + b"x"), "publish", str(SIZE_MIB << 20)),
+            (lambda work: (shutil.move(work / "check", work / "elsewhere"), (work / "check").symlink_to("elsewhere")),
+             "filesystem", "check"),
+        ]):
+            fake = FakeDocker()
+            fake.after = after
+            code, out, err, work, images = built(root, fake, work_name=f"planted-{number}")
+            assert code == 1 and err.startswith(f"root-image: refused {step}: ") and needle in err, (number, err)
+            assert [name for name in os.listdir(images) if not name.startswith(".")] == [], os.listdir(images)
+        fake = FakeDocker()
+        fake.after = lambda work: (work / "content.jsonl").write_bytes(b'{"path":"/forged"}\n')
+        code, out, err, work, images = built(root, fake, work_name="forged")
+        assert code == 0, err
+        result = json.loads(out)
+        image = Path(result["image_dir"])
+        manifest = json.loads((image / "manifest.json").read_text())
+        placed = (image / "content.jsonl").read_bytes()
+        assert sha(placed) == result["content_sha256"] == manifest["content_sha256"] == manifest["files"]["content.jsonl"]
+        assert b"/forged" not in placed and b'"/etc/hostname"' in placed
+        assert (image / "rootfs.raw").read_bytes() == ROOTFS and manifest["files"]["rootfs.raw"] == sha(ROOTFS)
+        assert os.stat(image / "rootfs.raw").st_blocks * 512 < len(ROOTFS) // 2, os.stat(image / "rootfs.raw")
+
+
+class Failing:
+    """A module whose one named function raises the OSError a full disk or a denied write gives."""
+
+    def __init__(self, module, name):
+        self.module, self.name = module, name
+
+    def __getattr__(self, attribute):
+        if attribute == self.name:
+            def fail(*args, **kwargs):
+                raise PermissionError(13, "Permission denied")
+            return fail
+        return getattr(self.module, attribute)
+
+
+def failures_of_the_os_print_the_refused_line():
+    with scratch() as root:
+        fake = FakeDocker()
+        images = root / "read-only"
+        images.mkdir(mode=0o555)
+        argv = ["build", "--base", REF, "--work-root", str(root / "work"), "--images-root", str(images)]
+        err = io.StringIO()
+        with redirect_stderr(err):
+            assert API["main"](argv, run=fake, now=lambda: NOW, environ=ENVIRON) == 1
+        assert fake.calls == [] and err.getvalue().startswith("root-image: refused images root: "), err.getvalue()
+        with patched("tempfile", Failing(tempfile, "mkdtemp")):
+            code, out, err, work, images = built(root, FakeDocker(), work_name="no-stage")
+        assert code == 1 and err.startswith("root-image: refused publish: ") and "denied" in err, err
+        for name, needle in (("rename", "cannot rename"), ("chmod", "in place")):
+            places = root / f"images-{name}"
+            places.mkdir()
+            stage_dir, _ = staged_image(places)
+            with patched("os", Failing(os, name)):
+                detail = refusal("place", API["place"], lambda argv, env: Result(0, "", ""), ENV, places, stage_dir)
+            assert needle in detail and "denied" in detail, detail
+        fake = FakeDocker()
+        fake.inspect_out = "[" * 1_000_000 + "]" * 1_000_000
+        code, out, err, work, images = built(root, fake, work_name="deep")
+        assert code == 1 and err.startswith("root-image: refused export: ") and "no image record" in err, err
+
+
 TESTS = [
     stage_adds_the_workload_account_home_and_tmp,
     an_existing_workload_name_or_id_1000_refuses,
@@ -845,6 +948,9 @@ TESTS = [
     failure_before_placement_removes_the_stage_and_keeps_the_work_root,
     reads_from_the_base_are_bounded,
     work_and_images_roots_are_checked_before_docker,
+    a_member_under_a_link_or_a_file_refuses,
+    files_the_container_leaves_in_the_work_root_are_not_trusted,
+    failures_of_the_os_print_the_refused_line,
 ]
 
 
