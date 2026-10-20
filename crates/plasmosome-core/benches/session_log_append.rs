@@ -7,11 +7,15 @@ fn bench(c: &mut Criterion) {
         b.iter_batched_ref(
             || {
                 let dir = tempfile::tempdir().unwrap();
-                let log = SessionLog::create(dir.path().join("session.ndjson")).unwrap();
+                let log =
+                    SessionLog::open(dir.path().join("session.ndjson")).expect("open session log");
                 (dir, log)
             },
             |(_, log)| {
-                black_box(log.append("bench", serde_json::json!({"value": 1})));
+                black_box(
+                    log.append("bench", serde_json::json!({"value": 1}))
+                        .expect("append to session log"),
+                );
             },
             BatchSize::PerIteration,
         )
