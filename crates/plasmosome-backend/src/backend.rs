@@ -270,7 +270,15 @@ impl DrainSpec {
     /// drain's deadline. `None` with `RevokePolicy::Force`, and when under 1 ms would be left:
     /// then no `shutdown` is sent, and the helper is killed at the drain deadline.
     pub fn shutdown_deadline(&self) -> Option<Duration> {
-        unimplemented!()
+        const MS: Duration = Duration::from_millis(1);
+        match self.policy {
+            RevokePolicy::Force => None,
+            RevokePolicy::Graceful => {
+                let left = self.deadline.saturating_sub(MS.max(self.deadline / 10));
+                let whole = Duration::new(left.as_secs(), left.subsec_millis() * 1_000_000);
+                (whole >= MS).then_some(whole)
+            }
+        }
     }
 }
 

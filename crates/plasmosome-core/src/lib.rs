@@ -30,7 +30,7 @@ pub use instance::{
     InstanceRootError, JournalAppend, JournalOpen, JournalRefusal, LockError, NotACell, WriterLock,
 };
 pub use kill_budget::{
-    GuestStop, Incomplete, KillBudget, Share, Shortfall, Withdrawal, shutdown_deadline,
+    GuestStop, Incomplete, KillBudget, Share, Shortfall, Withdrawal, WorkloadStop,
 };
 pub use lifecycle::{PluginState, StateError};
 pub use manifest::{ManifestError, PlasmidManifest};

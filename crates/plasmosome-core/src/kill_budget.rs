@@ -30,6 +30,18 @@ pub enum Share<T = Duration> {
     NoBudget,
 }
 
+/// Step 1's budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkloadStop {
+    /// Stop the workload within this deadline: whole milliseconds, at least 1 ms.
+    Run(Duration),
+    /// The step's share would be under 1 ms. The caller sends no stop, and lists
+    /// `workload_stop`.
+    NoBudget,
+    /// The kill has `now`. The caller sends no stop, and lists nothing.
+    Skipped,
+}
+
 /// Step 2's share and how it divides: the removal's drain deadline, its effect allowance and
 /// its publication allowance. Each part is at least 1 ms, and the three together fit inside
 /// `share`, so the publication exchange ends within D.
@@ -74,15 +86,17 @@ impl<C: Fn() -> Instant> KillBudget<C> {
         (self.total / 10).clamp(MS, MOST_LOCK_RESERVE)
     }
 
-    /// Step 1's share. With `now` it is `NoBudget`, and the caller skips the step without
-    /// listing it. Without `now`, `NoBudget` means under 1 ms was left, and the caller lists
-    /// `workload_stop`.
-    pub fn workload_stop(&self) -> Share {
+    /// Step 1's budget: `Skipped` with `now`, otherwise its share, or `NoBudget` when the share
+    /// would be under 1 ms.
+    pub fn workload_stop(&self) -> WorkloadStop {
         if self.now {
-            return Share::NoBudget;
+            return WorkloadStop::Skipped;
         }
         let cap = (self.total / 10).clamp(MS, MOST_WORKLOAD_STOP);
-        at_least_one_ms(cap.min(self.spendable() / 3))
+        match at_least_one_ms(cap.min(self.spendable() / 3)) {
+            Share::Run(share) => WorkloadStop::Run(share),
+            Share::NoBudget => WorkloadStop::NoBudget,
+        }
     }
 
     /// Step 2's share, the publication exchange included. `NoBudget` when any of its three
@@ -138,22 +152,6 @@ impl<C: Fn() -> Instant> KillBudget<C> {
 
     fn spendable(&self) -> Duration {
         self.remaining().saturating_sub(self.lock_reserve())
-    }
-}
-
-/// The deadline `membraned` sends with the 4090 `shutdown` for this drain, strictly below the
-/// drain's own deadline. `None` with `RevokePolicy::Force`, and when under 1 ms would be left:
-/// then no `shutdown` is sent, and the helper is killed at the drain deadline.
-pub fn shutdown_deadline(drain: &DrainSpec) -> Option<Duration> {
-    match drain.policy {
-        RevokePolicy::Force => None,
-        RevokePolicy::Graceful => {
-            let kill_margin = MS.max(drain.deadline / 10);
-            match at_least_one_ms(drain.deadline.saturating_sub(kill_margin)) {
-                Share::Run(deadline) => Some(deadline),
-                Share::NoBudget => None,
-            }
-        }
     }
 }
 
