@@ -16,12 +16,90 @@ fn process_exists(pid: u32) -> bool {
         .success()
 }
 
+const CONSOLE_BOUND: u64 = 16 * 1024 * 1024;
+const STDERR_BOUND: usize = 1024 * 1024;
+
 fn complete_run(console: &std::path::Path) -> String {
     format!(
         "printf 'LANE-BEGIN run-1\\nLANE-RESULT %s\\nLANE-END run-1 1\\n' '{}' > '{}'",
         common::result_json("id", 1000),
         console.display()
     )
+}
+
+fn complete_run_padded_to(console: &std::path::Path, total: u64) -> String {
+    format!(
+        "cat > /dev/null\n{}\nsize=$(wc -c < '{path}')\nyes x | head -c $(({total} - size)) >> '{path}'",
+        complete_run(console),
+        path = console.display(),
+    )
+}
+
+#[test]
+fn a_console_of_exactly_the_bound_is_read_whole() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let lane = common::lane_config(dir.path(), "run-1");
+    let body = complete_run_padded_to(&lane.console, CONSOLE_BOUND);
+    let launcher = common::script(dir.path(), "at-bound", &body);
+    let guest = common::guest_config("run-1", &["id"]);
+
+    let run = run_lane(&launcher, &lane, &guest, Duration::from_secs(30)).expect("spawned");
+
+    assert!(
+        matches!(run.outcome, Outcome::Finished(_)),
+        "a console of {CONSOLE_BOUND} bytes must be read: {:?}",
+        run.outcome
+    );
+    assert_eq!(run.console.len() as u64, CONSOLE_BOUND);
+}
+
+#[test]
+fn a_console_past_the_bound_is_not_run_even_after_a_complete_run() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let lane = common::lane_config(dir.path(), "run-1");
+    let body = complete_run_padded_to(&lane.console, CONSOLE_BOUND + 1);
+    let launcher = common::script(dir.path(), "past-bound", &body);
+    let guest = common::guest_config("run-1", &["id"]);
+
+    let run = run_lane(&launcher, &lane, &guest, Duration::from_secs(30)).expect("spawned");
+
+    match &run.outcome {
+        Outcome::NotRun(reason) => {
+            assert!(
+                reason.contains(&format!("{CONSOLE_BOUND} bytes")),
+                "{reason}"
+            )
+        }
+        other => panic!("a console past the bound must be not run, it was {other:?}"),
+    }
+    assert!(
+        run.console.len() as u64 <= CONSOLE_BOUND,
+        "the run kept {} console bytes",
+        run.console.len()
+    );
+}
+
+#[test]
+fn stderr_past_its_bound_keeps_the_first_mebibyte_and_does_not_block_the_launcher() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let lane = common::lane_config(dir.path(), "run-1");
+    let body = format!(
+        "cat > /dev/null\nyes e | head -c {} >&2\n{}",
+        2 * STDERR_BOUND,
+        complete_run(&lane.console)
+    );
+    let launcher = common::script(dir.path(), "loud", &body);
+    let guest = common::guest_config("run-1", &["id"]);
+
+    let run = run_lane(&launcher, &lane, &guest, Duration::from_secs(30)).expect("spawned");
+
+    assert!(
+        matches!(run.outcome, Outcome::Finished(_)),
+        "a launcher writing past the stderr bound must still finish: {:?}",
+        run.outcome
+    );
+    assert_eq!(run.stderr.len(), STDERR_BOUND);
+    assert!(run.stderr.starts_with("e\ne\n"), "{:?}", &run.stderr[..8]);
 }
 
 #[test]
