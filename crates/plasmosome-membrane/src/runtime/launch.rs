@@ -337,14 +337,14 @@ fn open_null(path: &CStr) -> Result<OwnedFd, LaunchRefusal> {
     }
 }
 
-fn create_pipes(_held: &DescriptorsHeld) -> std::io::Result<[OwnedFd; 4]> {
-    let [diagnostics, diagnostics_write] = pipe_above_stdio()?;
-    let [recipe_read, recipe_write] = pipe_above_stdio()?;
+fn create_pipes(held: &DescriptorsHeld) -> std::io::Result<[OwnedFd; 4]> {
+    let [diagnostics, diagnostics_write] = pipe_above_stdio(held)?;
+    let [recipe_read, recipe_write] = pipe_above_stdio(held)?;
     Ok([diagnostics, diagnostics_write, recipe_read, recipe_write])
 }
 
 #[allow(unsafe_code)]
-fn pipe_above_stdio() -> std::io::Result<[OwnedFd; 2]> {
+fn pipe_above_stdio(_held: &DescriptorsHeld) -> std::io::Result<[OwnedFd; 2]> {
     let mut ends: [RawFd; 2] = [-1; 2];
     #[cfg(target_os = "linux")]
     // SAFETY: `ends` is a local array of two c_int, the size pipe2 writes.
