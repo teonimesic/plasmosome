@@ -40,12 +40,27 @@ blocked on owner decisions. This spec ships the strongest check available short 
   while a command inside it failed):
   1. `cargo build -p <crate> --all-targets`
   2. `cargo test -p <crate>`
-- **`msrv`** — `dtolnay/rust-toolchain@1.96` (the pinned toolchain action, not `@stable`), then
-  one step: `cargo check --workspace --all-targets`.
+- **`msrv`**: installs Rust 1.96.0, then runs `cargo +1.96.0 check --locked --workspace
+  --all-targets`. The explicit `+1.96.0` is required. A `rust-toolchain.toml`
+  ([spec 026](026-security-standard.md#3-the-toolchain)) outranks the default toolchain an action
+  sets, so a bare `cargo check` would run the pinned compiler while the action's log reports 1.96.
+  Clippy's `incompatible_msrv` in `gates` already refuses newer standard-library APIs. This job
+  catches newer language features in any target, and dependencies whose own `rust-version` is
+  above 1.96.
+
+  Amended on 2026-10-20, as [spec 026](026-security-standard.md#spec-004-the-msrv-job) requires.
+  Until then this bullet named `dtolnay/rust-toolchain@1.96` and a bare `cargo check`. With the
+  pin in place that pair checks with the pinned release, while the action's log says 1.96,
+  wherever the pin is installed or auto-install is on. Under the `RUSTUP_AUTO_INSTALL: "0"` that
+  `ci.yml` sets, it fails at the bare `cargo check`, because the pin is not installed. Either way
+  a plan that follows the old text does not meet this one. The job installs 1.96.0 by name before
+  any cargo command, for example with
+  `rustup toolchain install 1.96.0 --profile minimal --no-self-update`.
 - **`macos`** — runs on `macos-26`, the standard arm64 runner. The label pins the major macOS
   version, not the image: GitHub updates the image about weekly, so the minor version and the
   clang that compiles `darwin_group.c` can change without a commit here. The toolchain and cache
-  actions are those of `gates`. Steps:
+  steps are those of `gates`. Corrected on 2026-10-20: this said actions, but since spec 026's pin
+  `gates` installs the toolchain with rustup commands, not an action. Steps:
   1. `cargo clippy --workspace --all-targets -- -D warnings -D clippy::ignore_without_reason`
   2. `cargo test --workspace --exclude plasmosome-guards`
   3. `cargo test -p plasmosome-guards`
@@ -61,15 +76,19 @@ blocked on owner decisions. This spec ships the strongest check available short 
   clippy alone passes it as a `cargo:warning` line. The preferred way is `cc`'s
   `warnings_into_errors(true)` in the membrane's `build.rs`, which reaches that file alone, where
   a job-wide `CFLAGS` would reach every C dependency and miss the local gate.
-- **`coverage`** — runs on `ubuntu-latest`. The stable toolchain with `llvm-tools-preview`, then
-  `cargo-llvm-cov` at an exact version installed with `--locked`, the way `audit.yml` pins
-  `cargo-audit`. That pins the tool, not the instrumentation: `toolchain: stable` floats, so a
-  Rust release can still move the numbers. Steps: `cargo llvm-cov clean --workspace`, so no
+- **`coverage`** — runs on `ubuntu-latest`. The toolchain `rust-toolchain.toml` pins, installed
+  and printed as [spec 026](026-security-standard.md#3-the-toolchain) requires, with
+  `llvm-tools-preview` added by `rustup component add`; then `cargo-llvm-cov` at an exact version
+  installed with `--locked`, the way `audit.yml` pins `cargo-audit`. That pins the instrumentation
+  as well as the tool, so a Rust release moves the numbers only through a commit that bumps the
+  pin. Steps: `cargo llvm-cov clean --workspace`, so no
   earlier run's data is counted; `cargo llvm-cov --workspace --exclude plasmosome-guards
   --no-report`, the one measured run; then reports from it, the tool's summary table to the step
   summary and `lcov.info` as a workflow artifact. No step carries `continue-on-error` or
   `|| true`, narrows the report with `--ignore-filename-regex`, or acts on the percentage, by a
-  `--fail-under-*` or `--fail-uncovered-*` flag or by a step of its own.
+  `--fail-under-*` or `--fail-uncovered-*` flag or by a step of its own. Corrected on 2026-10-20:
+  this bullet said the job used the stable toolchain and that `toolchain: stable` floats, which
+  spec 026's pin made untrue.
 
 `macos` and `coverage` run on every pull request and every push to main: the workflow's triggers
 carry no `paths` filter and neither job has an `if:`. Each step runs one command, except that a
@@ -205,6 +224,9 @@ whichever of 6ja and 52e lands first.
 - (005) `ci.yml` has the `crate` matrix job covering every workspace member at merge time, two
   steps per entry, one command per step.
 - (005) `ci.yml` has the `msrv` job pinned to 1.96 and it is green.
+- (005) Each of these makes the `msrv` job fail while `gates` passes, shown by mutation in the PR
+  that adds the job: locking a dependency version whose `rust-version` is above 1.96, and a
+  language feature newer than 1.96 in an integration test.
 - (005) The guard fails when a workspace member is missing from the matrix or the matrix names a
   non-member, and the mutation test (entry removed, failure observed, entry restored) is recorded
   in the PR.
