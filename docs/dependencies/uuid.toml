@@ -6,7 +6,7 @@ reason = """\
   """
 write_it_instead.lines = 70
 write_it_instead.how = """\
-  On 2026-10-20, at main ec4603c, `git grep -l 'uuid::' -- '*.rs' | wc -l` gives 2 files, \
+  On 2026-10-20, at main 2b321cb, `git grep -l 'uuid::' -- '*.rs' | wc -l` gives 2 files, \
   crates/plasmosome-backend/src/universe.rs and crates/plasmosome-ledger/src/artifact.rs. `git \
   grep -h -o -E 'Uuid::(new_v4|parse_str)|[.](hyphenated|is_nil|get_variant|get_version)[(]' -- \
   '*.rs' | tr -d '.(' | sort | uniq -c` gives hyphenated 5, parse_str 3, one of them in a doc \
