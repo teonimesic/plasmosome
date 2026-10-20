@@ -508,6 +508,32 @@ def report_covers_every_lockfile_with_warnings():
         assert "failed to read directory entry: an invented reason" in summary, summary
 
 
+def report_output_holds_no_workflow_command():
+    """Text from cargo-deny never starts a line of the job log, where the runner reads workflow commands.
+
+    The runner ends a line at a CR as well as an LF, so a CR in an advisory's title could start a
+    `::set-output` line. Every finding and note is printed on one line, its whitespace collapsed.
+    """
+    with tempfile.TemporaryDirectory(prefix="cargo-deny-check-report-commands-") as directory:
+        repository = Repository(directory, {**BASE, "rust-toolchain.toml": PIN})
+        result, calls, summary, document = report(repository, "push", channel(directory, "1.99.1"), {
+            "Cargo.toml advisories": "vulnerability-hostile-title",
+            "Cargo.toml licenses": ["warn-log-hostile", "licenses-quiet"]})
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        vulnerability = next(item for item in document["findings"] if item["kind"] == "vulnerability")
+        assert "\r::set-output name=findings::" in vulnerability["title"], vulnerability
+        assert vulnerability["url"].endswith("\r::warning::forged in the url"), vulnerability
+        for text, finding, note in ((result.stdout, "finding: vulnerability ", "note: Cargo.lock licenses: warning log: "),
+                                    (summary, "- vulnerability ", "- Cargo.lock licenses: warning log: ")):
+            lines = re.split(r"\r\n|\r|\n", text)
+            assert not any(line.lstrip().startswith("::") for line in lines), text
+            forged = [line for line in lines if "forged" in line]
+            assert len(forged) == 2 and forged[0].startswith(finding) and forged[1].startswith(note), forged
+            assert forged[0].endswith("::error::forged https://github.com/servo/rust-smallvec/issues/252 "
+                                      "::warning::forged in the url"), forged
+            assert forged[1].endswith("::warning::forged in a note"), forged
+
+
 def report_tool_failures():
     with tempfile.TemporaryDirectory(prefix="cargo-deny-check-report-failures-") as directory:
         repository = Repository(directory, {**BASE, "rust-toolchain.toml": PIN})
@@ -677,6 +703,7 @@ def main():
     ignore_expiry()
     stable_comparison()
     report_covers_every_lockfile_with_warnings()
+    report_output_holds_no_workflow_command()
     report_tool_failures()
     report_weekly_checks()
     report_arguments()

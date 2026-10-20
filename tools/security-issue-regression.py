@@ -361,6 +361,20 @@ def tool_failures():
             assert loaded == {} and sections == {} and [item["kind"] for item in own] == ["tool-failure"], (text, own)
             assert "RUSTSEC-2099-0099" not in json.dumps(own), (text, own)
 
+        forge.findings.write_text(json.dumps(document(other)))
+        loaded, sections, own = API["load"](str(forge.findings), "success")
+        assert sections == {"lockfiles": [other], "weekly": []} and own == [], (sections, own)
+        for handover, text in (("failure", f"over the {OUTPUT_LIMIT} bytes the issue job can read"),
+                               ("skipped", "handed over no findings"), ("", "handed over no findings")):
+            loaded, sections, own = API["load"](str(forge.findings), handover)
+            assert loaded == {} and sections == {} and [item["kind"] for item in own] == ["tool-failure"], (handover, own)
+            assert text in own[0]["title"] and "RUSTSEC-2099-0099" not in json.dumps(own), (handover, own)
+        result, calls = forge.run(None, "--handover", "failure", run_url=LAST_URL)
+        assert result.returncode == 1 and "left as it is" not in result.stdout, (result.stdout, result.stderr)
+        body = forge.issues()[1]["body"]
+        assert f"over the {OUTPUT_LIMIT} bytes" in body and LAST_URL in body and "RUSTSEC-2021-0003" in body, body
+        assert "RUSTSEC-2099-0099" not in body, body
+
         forge.findings.write_text(json.dumps(document({**other, "section": "weekly"}, sections=("lockfiles",))))
         result, calls = forge.run()
         assert result.returncode == 1, (result.stdout, result.stderr)
@@ -455,24 +469,35 @@ def long_body():
         assert "`" + "y" * 500 + "...`" in forge.issues()[1]["body"], forge.issues()[1]["body"]
 
 
+HOSTILE = '@octocat <a href="https://evil.example/x">x</a> `tick` ``` \r::warning::forged\r\nnext'
+
+
+def outside_spans(text):
+    """The text with the tool's own markers and every one-line code span taken out."""
+    return re.sub(r"`[^`\n]*`", "", re.sub(r"(?m)^<!-- spec026-[a-z0-9 -]+ -->$", "", text))
+
+
 def findings_are_not_markup():
-    hostile = {**VULNERABILITY, "title": "ping @everyone\nand <img src=x> | `tick`"}
+    """The report job builds and runs third-party code, so every field of its findings file is untrusted text."""
+    hostile = {**VULNERABILITY, **{key: HOSTILE for key in ("kind", "lockfile", "check", "package", "advisory", "title", "url")}}
+    report = {**document(hostile), "commit": HOSTILE, "date": HOSTILE, "event": HOSTILE}
+    span = "`" + " ".join(HOSTILE.split()).replace("`", "'") + "`"
     with tempfile.TemporaryDirectory(prefix="security-issue-markup-") as directory:
         forge = Forge(directory, labels=["security"])
-        result, calls = forge.run(document(hostile))
+        result, calls = forge.run(report)
         assert result.returncode == 0, (result.stdout, result.stderr)
         body = forge.issues()[1]["body"]
-        span = "`ping @everyone and <img src=x> | 'tick'`"
-        assert body.count(span) == 1, body
-        assert "@everyone" not in body.replace(span, "") and "<img" not in body.replace(span, ""), body
-
     with tempfile.TemporaryDirectory(prefix="security-issue-markup-comment-") as directory:
         forge = Forge(directory, issues=[issue(4, MARKER)], labels=["security"])
-        result, calls = forge.run(document(hostile))
+        result, calls = forge.run(report)
         assert result.returncode == 0, (result.stdout, result.stderr)
         comment = forge.issues()[4]["comments"][0]
-        assert comment.count(span) == 1, comment
-        assert "@everyone" not in comment.replace(span, "") and "<img" not in comment.replace(span, ""), comment
+    # Seven fields of the finding, and the commit, date and trigger of each section shown: two in the body, one in the comment.
+    for text, spans in ((body, 7 + 3 * 2), (comment, 7 + 3)):
+        rest = outside_spans(text)
+        for token in ("@", "<", "evil.example", "::warning", "tick", "forged"):
+            assert token not in rest, (token, rest)
+        assert "\r" not in text and text.count(span) == spans, (text.count(span), text)
 
     forged = {**VULNERABILITY, "title": "before\n<!-- spec026-section-end lockfiles -->\n<!-- spec026-section-end weekly -->\nafter"}
     with tempfile.TemporaryDirectory(prefix="security-issue-markup-marker-") as directory:
@@ -551,7 +576,8 @@ def audit_workflow():
     assert re.search(r"(?m)^    permissions:\n      contents: read\n      issues: write\n(?!      )", issue), issue
     assert len(re.findall(r"(?m)^\s+issues: write$", audit)) == 1, audit
     assert re.search(r"(?m)^    needs: report$", issue) and re.search(r"(?m)^    if: \$\{\{ !cancelled\(\) \}\}$", issue), issue
-    assert re.search(r"(?m)^    outputs:\n      findings: \$\{\{ steps\.report\.outputs\.findings \}\}\n(?!      )", report), report
+    assert re.search(r"(?m)^    outputs:\n      findings: \$\{\{ steps\.handover\.outputs\.findings \}\}\n"
+                     r"      handover: \$\{\{ steps\.handover\.outcome \}\}\n(?!      )", report), report
 
     actions = {name: re.findall(r"(?m)^\s+(?:- )?uses: (\S+)", job) for name, job in jobs.items()}
     for action in actions["report"] + actions["issue"]:
@@ -566,13 +592,18 @@ def audit_workflow():
     assert re.findall(r"(?m)^\s+key:\s*(\S+)\s*$", report) == [f"cargo-deny-{versions[0]}"], report
 
     reporting = [step for step in steps_of(report) if "tools/cargo-deny-check report" in step]
-    assert len(reporting) == 1 and re.search(r"(?m)^        id: report$", reporting[0]), reporting
+    handing = [step for step in steps_of(report) if re.search(r"(?m)^        id: handover$", step)]
+    assert len(reporting) == 1 and steps_of(report)[-2:] == reporting + handing, steps_of(report)
     assert "EVENT: ${{ github.event_name }}" in reporting[0] and '--event "$EVENT"' in script(reporting[0]), reporting
+    assert "GITHUB_OUTPUT" not in reporting[0] and "python" not in handing[0] and "tools/" not in handing[0], handing
+    limits = re.findall(r'(?m)^if \[ "\$size" -gt (\d+) \]; then', script(handing[0]))
+    assert limits == [str(OUTPUT_LIMIT)] and API["HANDOVER_LIMIT"] == OUTPUT_LIMIT, (limits, handing)
     writing = [step for step in steps_of(issue) if "tools/security-issue" in step]
     assert len(writing) == 1 and len(steps_of(issue)) == 2, steps_of(issue)
-    for line in ("FINDINGS: ${{ needs.report.outputs.findings }}", "GH_TOKEN: ${{ github.token }}",
-                 "MODE: ${{ inputs.dry-run && 'dry-run' || 'write' }}"):
+    for line in ("FINDINGS: ${{ needs.report.outputs.findings }}", "HANDOVER: ${{ needs.report.outputs.handover }}",
+                 "GH_TOKEN: ${{ github.token }}", "MODE: ${{ inputs.dry-run && 'dry-run' || 'write' }}"):
         assert line in writing[0], (line, writing[0])
+    assert '--handover "$HANDOVER"' in script(writing[0]), writing
 
     tests = [step for step in steps_of(jobs_of(gates)["gates"]) if "tools/security-issue-regression.py" in step]
     assert len(tests) == 1 and re.search(r"(?m)^        run: python3 tools/security-issue-regression\.py$", tests[0]), tests
@@ -581,23 +612,29 @@ def audit_workflow():
 OUTPUT_LIMIT = 100000
 
 
-def near_the_output_limit():
-    """The longest findings line, newline included, that still fits OUTPUT_LIMIT bytes."""
+def at_the_output_limit():
+    """A findings line of exactly OUTPUT_LIMIT bytes, newline included."""
     many = [{**VULNERABILITY, "package": f"crate{index} 1.0.0", "title": "y" * 400} for index in range(1000)]
     count = 1
     while len(json.dumps(document(*many[:count + 1]))) + 1 <= OUTPUT_LIMIT:
         count += 1
-    return json.dumps(document(*many[:count])) + "\n"
+    findings = many[:count]
+    short = OUTPUT_LIMIT - 1 - len(json.dumps(document(*findings)))
+    findings[-1] = {**findings[-1], "title": findings[-1]["title"] + "y" * short}
+    return json.dumps(document(*findings)) + "\n"
 
 
 def the_jobs_hand_over_the_findings():
-    """Run the report and issue steps' scripts under bash, with a fake python3 for the report and the fake gh.
+    """Run the report job's last two steps and the issue step under bash, with a fake python3 for the report and the fake gh.
 
-    Linux refuses an environment string over 128 KiB, and the issue step reads the findings from one,
-    so the report step must refuse a findings line over OUTPUT_LIMIT bytes, and one at the limit must pass.
+    Linux refuses an environment string over 128 KiB, and the issue step reads the findings from one, so
+    the hand-over step refuses a findings file over OUTPUT_LIMIT bytes. The report step runs cargo-deny,
+    whose text might hold a workflow command that sets an output, so no job output reads that step. The
+    findings come from the hand-over step, and the issue step reads them only if that step succeeded.
     """
     jobs = jobs_of((ROOT / ".github" / "workflows" / "audit.yml").read_text())
     reporting = script(next(step for step in steps_of(jobs["report"]) if "tools/cargo-deny-check report" in step))
+    handing = script(next(step for step in steps_of(jobs["report"]) if re.search(r"(?m)^        id: handover$", step)))
     writing = script(next(step for step in steps_of(jobs["issue"]) if "tools/security-issue" in step))
     fake_report = (f"#!{sys.executable}\nimport os, sys\nassert sys.argv[1:3] == ['tools/cargo-deny-check', 'report'], sys.argv\n"
                    "assert sys.argv[sys.argv.index('--event') + 1] == os.environ['EVENT'], sys.argv\n"
@@ -613,57 +650,80 @@ def the_jobs_hand_over_the_findings():
         (fakes / "python3").chmod(0o755)
         system = os.pathsep.join(("/usr/bin", "/bin"))
 
-        def report_step(findings, status=0):
-            temp, output, planned = directory / "report-temp", directory / "report-output", directory / "planned.json"
-            shutil.rmtree(temp, ignore_errors=True)
-            temp.mkdir()
+        def step(text, environment):
+            output = directory / "step-output"
             output.write_text("")
-            planned.write_text(findings)
-            result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", reporting], cwd=ROOT,
-                                    env={"PATH": str(fakes) + os.pathsep + system, "EVENT": "schedule",
-                                         "RUNNER_TEMP": str(temp), "GITHUB_OUTPUT": str(output),
-                                         "FAKE_FINDINGS_FILE": str(planned), "FAKE_STATUS": str(status)},
-                                    capture_output=True, text=True, timeout=60)
+            result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", text], cwd=ROOT,
+                                    env={**environment, "GITHUB_OUTPUT": str(output)}, capture_output=True, text=True,
+                                    timeout=60)
             return result, output.read_text()
 
-        def issue_step(forge, findings):
+        def report_job(findings, status=0):
+            """The job's outputs as audit.yml maps them: the hand-over step's findings, and that step's outcome."""
+            temp, planned = directory / "report-temp", directory / "planned.json"
+            shutil.rmtree(temp, ignore_errors=True)
+            temp.mkdir()
+            planned.write_text(findings)
+            result, output = step(reporting, {"PATH": str(fakes) + os.pathsep + system, "EVENT": "schedule",
+                                              "RUNNER_TEMP": str(temp), "FAKE_FINDINGS_FILE": str(planned),
+                                              "FAKE_STATUS": str(status)})
+            assert output == "", output
+            if result.returncode != 0:
+                return {"findings": "", "handover": "skipped"}
+            result, output = step(handing, {"PATH": system, "RUNNER_TEMP": str(temp)})
+            assert output == "" or (result.returncode == 0 and output.startswith("findings=") and output.count("\n") == 1), (
+                result.returncode, output[:200])
+            return {"findings": output.removeprefix("findings=").removesuffix("\n"),
+                    "handover": "success" if result.returncode == 0 else "failure"}
+
+        def issue_step(forge, outputs):
             temp = directory / "issue-temp"
             shutil.rmtree(temp, ignore_errors=True)
             temp.mkdir()
             python = forge.bin / "python3"
             if not python.exists():
                 python.symlink_to(sys.executable)
-            environment = {**forge.environment(str(forge.bin) + os.pathsep + system), "FINDINGS": findings,
-                           "REPOSITORY": "example/repo", "RUN_URL": RUN_URL, "MODE": "write", "RUNNER_TEMP": str(temp)}
+            environment = {**forge.environment(str(forge.bin) + os.pathsep + system), "FINDINGS": outputs["findings"],
+                           "HANDOVER": outputs["handover"], "REPOSITORY": "example/repo", "RUN_URL": RUN_URL,
+                           "MODE": "write", "RUNNER_TEMP": str(temp)}
             return subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", writing], cwd=ROOT,
                                   env=environment, capture_output=True, text=True, timeout=60)
 
         line = json.dumps(document(VULNERABILITY, {**EXPIRED, "title": "naïve"}), ensure_ascii=True) + "\n"
-        result, output = report_step(line)
-        assert result.returncode == 0 and output == "findings=" + line, (result.stdout, result.stderr, output)
+        outputs = report_job(line)
+        assert outputs == {"findings": line[:-1], "handover": "success"}, outputs
         forge_directory = directory / "forge"
         forge_directory.mkdir()
         forge = Forge(forge_directory, labels=["security"])
-        result = issue_step(forge, output.removeprefix("findings=").removesuffix("\n"))
+        result = issue_step(forge, outputs)
         assert result.returncode == 0, (result.stdout, result.stderr)
         body = forge.issues()[1]["body"]
         assert "RUSTSEC-2021-0003" in body and "naïve" in body, body
 
-        largest = near_the_output_limit()
-        assert OUTPUT_LIMIT - 1000 < len(largest) <= OUTPUT_LIMIT, len(largest)
-        result, output = report_step(largest)
-        assert result.returncode == 0 and output == "findings=" + largest, (result.stdout, result.stderr, len(output))
-        result = issue_step(forge, output.removeprefix("findings=").removesuffix("\n"))
+        largest = at_the_output_limit()
+        assert len(largest) == OUTPUT_LIMIT, len(largest)
+        outputs = report_job(largest)
+        assert outputs == {"findings": largest[:-1], "handover": "success"}, (len(outputs["findings"]), outputs["handover"])
+        result = issue_step(forge, outputs)
         assert result.returncode == 0, (result.stdout, result.stderr)
         assert "crate0 1.0.0" in forge.issues()[1]["body"] and "more findings" in forge.issues()[1]["body"], forge.issues()
 
-        for findings, status in (("", 2), ("x" * OUTPUT_LIMIT + "\n", 0)):
-            result, output = report_step(findings, status)
-            assert result.returncode != 0 and output == "", (len(findings), result.stdout, result.stderr, output)
-        result = issue_step(forge, "")
+        outputs = report_job("x" * OUTPUT_LIMIT + "\n")
+        assert outputs == {"findings": "", "handover": "failure"}, (len(outputs["findings"]), outputs["handover"])
+        result = issue_step(forge, outputs)
         assert result.returncode == 1, (result.stdout, result.stderr)
         body = forge.issues()[1]["body"]
-        assert "the report wrote no findings file" in body and "RUSTSEC-2021-0003" in body, body
+        assert f"over the {OUTPUT_LIMIT} bytes the issue job can read" in body and "crate0 1.0.0" in body, body
+
+        result = issue_step(forge, {"findings": json.dumps(document()), "handover": "failure"})
+        assert result.returncode == 1 and "left as it is" not in result.stdout, (result.stdout, result.stderr)
+
+        outputs = report_job("", status=2)
+        assert outputs == {"findings": "", "handover": "skipped"}, outputs
+        result = issue_step(forge, outputs)
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        body = forge.issues()[1]["body"]
+        assert "handed over no findings" in body and "crate0 1.0.0" in body, body
 
 
 def main():
