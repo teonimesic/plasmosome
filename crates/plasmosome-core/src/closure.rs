@@ -3,8 +3,8 @@ use std::fmt;
 
 use plasmosome_backend::PluginId;
 
-/// One cell's attached plugins, the providers each one directly requires, and which of them an
-/// operator named. Providers attach before their requirers, so the graph has no cycle.
+/// One cell's attached plugins, the providers each one directly requires, and which of them were
+/// asked for by name. Providers attach before their requirers, so the graph has no cycle.
 #[derive(Debug, Default)]
 pub struct AttachmentGraph {
     providers: BTreeMap<PluginId, BTreeSet<PluginId>>,
@@ -17,8 +17,9 @@ impl AttachmentGraph {
         AttachmentGraph::default()
     }
 
-    /// Attaches `plugin`, which directly requires each of `providers`. Pass `named` true when an
-    /// operator's `plasmid.add` named the plugin, and false when it arrived only as a provider.
+    /// Attaches `plugin`, which directly requires each of `providers`. Pass `named` true when the
+    /// plugin was asked for by name, and false when it was attached only as another plugin's
+    /// provider.
     ///
     /// Every provider must be attached already, so a plugin cannot require itself. A plugin
     /// attached already is refused. A refusal changes nothing.
@@ -42,11 +43,6 @@ impl AttachmentGraph {
         }
         self.providers.insert(plugin, providers);
         Ok(())
-    }
-
-    /// Whether `plugin` is attached.
-    pub fn contains(&self, plugin: &PluginId) -> bool {
-        self.providers.contains_key(plugin)
     }
 
     /// Every attached plugin that directly requires `root`, sorted. Removing `root` would strand
@@ -92,6 +88,10 @@ impl AttachmentGraph {
             taken.extend(orphans);
         }
         Ok(taken.into_iter().collect())
+    }
+
+    fn contains(&self, plugin: &PluginId) -> bool {
+        self.providers.contains_key(plugin)
     }
 
     fn requirers<'a>(&'a self, provider: &'a PluginId) -> impl Iterator<Item = &'a PluginId> {
