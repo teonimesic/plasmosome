@@ -488,6 +488,7 @@ mod tests {
     const HOLD: Duration = Duration::from_millis(250);
     const PROBE: &str = "PLASMOSOME_LAUNCH_PROBE";
     const HIGH_TARGET: libc::c_int = 200_000;
+    const ROOM_FOR_CONCURRENT_HIGH_DESCRIPTORS: libc::c_int = 256;
     const HELPER_LINE_BOUND: usize = 1_048_576;
 
     struct Report {
@@ -628,7 +629,8 @@ mod tests {
                 unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) };
             }
             // SAFETY: getdtablesize takes no arguments.
-            let high = HIGH_TARGET.min(unsafe { libc::getdtablesize() } - 1);
+            let high = HIGH_TARGET
+                .min(unsafe { libc::getdtablesize() } - ROOM_FOR_CONCURRENT_HIGH_DESCRIPTORS);
             assert!(
                 high > 1024,
                 "this host lets the test open a descriptor above 1024, where a launcher that closes only 4 to 1023 leaves it open; the highest it allows is {high}"
