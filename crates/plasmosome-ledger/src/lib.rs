@@ -348,8 +348,9 @@ impl DetachReport {
     }
 }
 
-/// Why a detach stopped. Neither case moves the pending cursor, so a later call with the cell the
-/// first detach named resumes where this one stopped.
+/// Why a detach stopped. A backend error leaves the cursor on the failed effect, and the effects
+/// this call replayed before it stay replayed. `CellChanged` leaves the cursor where it was. A
+/// later call naming the cell the first detach named resumes at the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetachError {
     /// The backend refused the inverse of the effect the cursor is on.
@@ -394,8 +395,13 @@ impl SealedLedger {
     /// what already succeeded. The first call binds `cell` to this ledger,
     /// whatever its outcome. A later call naming another cell returns
     /// `DetachError::CellChanged` before any backend call and moves neither the
-    /// cursor nor the asserted list. To detach under another cell, `unseal` and
-    /// close again.
+    /// cursor nor the asserted list. Unsealing and closing again starts a new
+    /// detach that may name another cell, but it replays every effect from the
+    /// last. So it corrects a wrong first cell only while the first call has
+    /// undone nothing. Once that call has undone an effect, the new detach
+    /// replays that effect again and fails there, for example with
+    /// `UnknownHandle`, and this API cannot finish the remaining effects under
+    /// another cell.
     pub fn detach(
         &mut self,
         backend: &mut dyn EnforcementBackend,
@@ -414,8 +420,10 @@ impl SealedLedger {
     }
 
     /// Returns the open ledger with every effect. It drops the pending cursor and the cell the
-    /// first detach bound, so closing it again starts a new detach over every effect, including
-    /// those already replayed, which may name any cell.
+    /// first detach bound, so closing it again starts a new detach over every effect, which may
+    /// name any cell. That detach replays the effects the first one already undid, and their
+    /// inverses fail again, so this corrects a wrong first cell only while the first detach has
+    /// undone nothing.
     pub fn unseal(self) -> Ledger {
         Ledger {
             plugin: self.plugin,
@@ -446,6 +454,7 @@ impl ForcedLedger {
     /// `cell` and `drain` rules, and records the operator's `force` in the report.
     /// Its first call binds `cell` as `detach` does, and a later call naming
     /// another cell returns `DetachError::CellChanged` before any backend call.
+    /// `SealedLedger::detach` says when unsealing corrects a wrong first cell.
     pub fn detach_forced(
         &mut self,
         backend: &mut dyn EnforcementBackend,
@@ -473,8 +482,10 @@ impl ForcedLedger {
     }
 
     /// Returns the open ledger with every effect. It drops the pending cursor and the cell the
-    /// first detach bound, so closing it again starts a new detach over every effect, including
-    /// those already replayed, which may name any cell.
+    /// first detach bound, so closing it again starts a new detach over every effect, which may
+    /// name any cell. That detach replays the effects the first one already undid, and their
+    /// inverses fail again, so this corrects a wrong first cell only while the first detach has
+    /// undone nothing.
     pub fn unseal(self) -> Ledger {
         Ledger {
             plugin: self.plugin,

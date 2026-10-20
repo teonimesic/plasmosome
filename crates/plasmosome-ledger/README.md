@@ -27,8 +27,9 @@ effect the ledger holds, including those `open_file` read, so neither extends a 
 `append_to_file` also reads a nonempty target before it writes, through the reader `open_file`
 uses. It refuses three kinds of target with `InvalidData` and leaves their bytes as they were: one
 whose last byte is not a newline, one holding any record `open_file` refuses, and one naming another
-plugin. So it never joins a record to a torn or unterminated line, and never extends a log that
-could not be opened again. The read and the write share one file handle, but nothing stops a second writer.
+plugin. With no other writer, it never joins a record to a torn or unterminated line, and never
+extends a log that could not be opened again. The read and the write share one file handle, but
+nothing stops a second writer.
 
 A log names its plugin but not the cell that plugin is attached to. `detach` and `detach_forced`
 take that cell from the caller, so every universe and compensation removal names the owner
@@ -38,7 +39,9 @@ a later detach resumes there without replaying what already succeeded.
 The first detach of a closed ledger binds its cell, whatever that call's outcome. A later call
 naming another cell returns `DetachError::CellChanged` before any backend call, so a resume cannot
 move to another cell. The binding lives in memory beside the cursor, not in the log, and `unseal`
-drops both.
+drops both. Unsealing and closing again corrects a wrong first cell only while the first detach has
+undone nothing. Once it has undone an effect, the new detach replays that effect again and fails
+there, so this API cannot finish the remaining effects under another cell.
 
 ## What's inside
 
