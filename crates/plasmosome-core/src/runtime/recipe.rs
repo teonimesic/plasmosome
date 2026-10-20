@@ -1403,6 +1403,7 @@ mod tests {
 
     #[test]
     fn framing_is_checked_line_then_size_then_encoding() {
+        assert_eq!(refused(&vec![b' '; 1_048_578]), NotOneLine);
         let mut oversized = vec![b' '; 1_048_577];
         oversized[0] = 0xff;
         assert_eq!(refused(&oversized), NotOneLine);
