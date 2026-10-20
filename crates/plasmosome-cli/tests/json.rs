@@ -153,6 +153,29 @@ fn duplicate_keys_are_refused() {
 }
 
 #[test]
+fn a_wide_object_refuses_a_repeated_key() {
+    for width in [8, 9, 20] {
+        let members: Vec<String> = (0..width).map(|n| format!("\"k{n}\":{n}")).collect();
+        let wide = format!("{{{}}}", members.join(","));
+        assert!(scan(wide.as_bytes()).is_ok(), "{wide}");
+        for repeat in [0, width / 2, width - 1] {
+            let tail = format!("\"k{repeat}\":0}}");
+            let text = format!("{{{},{tail}", members.join(","));
+            assert_eq!(
+                refused(text.as_bytes()),
+                ScanError {
+                    offset: text.len() - tail.len(),
+                    reason: Reason::DuplicateKey {
+                        path: format!("/k{repeat}")
+                    },
+                },
+                "{text}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_key_may_repeat_in_another_object() {
     let value = scan(br#"{"a":{"a":1},"A":[{"a":2},{"a":3}]}"#).expect("no object repeats a key");
     assert_eq!(
