@@ -331,6 +331,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use serde_json::{Value, json};
+    use std::fmt::Display;
 
     const BOOT: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     const OTHER_BOOT: &str = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
@@ -348,22 +349,22 @@ mod tests {
         BootToken::parse_hex(text).expect("a 64-digit lowercase token parses")
     }
 
-    fn judge_on(lane: ControlLane, frame: &str) -> Result<BootToken, HelloRefusal> {
+    fn judge_on(lane: ControlLane, frame: &[u8]) -> Result<BootToken, HelloRefusal> {
         match lane {
-            ControlLane::Normal => judge_normal(frame.as_bytes(), &guest_policy()),
+            ControlLane::Normal => judge_normal(frame, &guest_policy()),
             ControlLane::Withdrawal => {
-                judge_withdrawal(frame.as_bytes(), &guest_policy(), &boot(BOOT))
-                    .map(|()| boot(BOOT))
+                judge_withdrawal(frame, &guest_policy(), &boot(BOOT)).map(|()| boot(BOOT))
             }
         }
     }
 
-    fn refusal(lane: ControlLane, frame: &str) -> HelloRefusal {
-        judge_on(lane, frame).expect_err(frame)
+    fn refusal(lane: ControlLane, frame: impl Display) -> HelloRefusal {
+        let frame = frame.to_string();
+        judge_on(lane, frame.as_bytes()).expect_err(&frame)
     }
 
-    fn reply(lane: ControlLane, boot: &str, policy: &str) -> String {
-        json!({"id": request_id(lane), "result": {"boot": boot, "policy": policy}}).to_string()
+    fn reply(lane: ControlLane, boot: &str, policy: &str) -> Value {
+        json!({"id": request_id(lane), "result": {"boot": boot, "policy": policy}})
     }
 
     fn owned(text: &str) -> String {
@@ -421,17 +422,10 @@ mod tests {
 
     #[test]
     fn a_valid_reply_yields_the_boot_token_on_either_lane() {
-        let policy = guest_policy().hex();
-        let normal = reply(ControlLane::Normal, BOOT, &policy);
-        assert_eq!(
-            judge_normal(normal.as_bytes(), &guest_policy()),
-            Ok(boot(BOOT))
-        );
-        let withdrawal = reply(ControlLane::Withdrawal, BOOT, &policy);
-        assert_eq!(
-            judge_withdrawal(withdrawal.as_bytes(), &guest_policy(), &boot(BOOT)),
-            Ok(())
-        );
+        for lane in LANES {
+            let frame = reply(lane, BOOT, &guest_policy().hex()).to_string();
+            assert_eq!(judge_on(lane, frame.as_bytes()), Ok(boot(BOOT)));
+        }
     }
 
     #[test]
@@ -441,21 +435,18 @@ mod tests {
             (ControlLane::Normal, ControlLane::Withdrawal),
             (ControlLane::Withdrawal, ControlLane::Normal),
         ] {
-            let id = request_id(lane);
+            let expected = request_id(lane);
             for (sent, found) in [
                 (json!(request_id(other)), request_id(other).to_string()),
-                (json!(id.to_string()), format!("\"{id}\"")),
-                (json!(id as f64), format!("{id}.0")),
+                (json!(expected.to_string()), format!("\"{expected}\"")),
+                (json!(expected as f64), format!("{expected}.0")),
                 (json!(-1), owned("-1")),
                 (Value::Null, owned("null")),
             ] {
                 let frame = json!({"id": sent, "result": {"boot": BOOT, "policy": policy}});
                 assert_eq!(
-                    refusal(lane, &frame.to_string()),
-                    HelloRefusal::WrongId {
-                        expected: id,
-                        found
-                    }
+                    refusal(lane, frame),
+                    HelloRefusal::WrongId { expected, found }
                 );
             }
         }
@@ -463,38 +454,20 @@ mod tests {
 
     #[test]
     fn a_field_hello_does_not_define_refuses_even_when_it_resembles_one() {
-        let policy = guest_policy().hex();
         for lane in LANES {
-            for (key, field) in [
-                ("deadline_ms", "/deadline_ms"),
-                ("ids", "/ids"),
-                ("results", "/results"),
-                ("a/b~", "/a~1b~0"),
+            for (parent, key, field) in [
+                ("", "deadline_ms", "/deadline_ms"),
+                ("", "ids", "/ids"),
+                ("", "results", "/results"),
+                ("", "a/b~", "/a~1b~0"),
+                ("/result", "grant", "/result/grant"),
+                ("/result", "boots", "/result/boots"),
+                ("/result", "policy2", "/result/policy2"),
             ] {
-                let mut frame =
-                    json!({"id": request_id(lane), "result": {"boot": BOOT, "policy": policy}});
-                frame[key] = json!(0);
-                assert_eq!(
-                    refusal(lane, &frame.to_string()),
-                    HelloRefusal::UnknownField {
-                        field: owned(field)
-                    }
-                );
-            }
-            for (key, field) in [
-                ("grant", "/result/grant"),
-                ("boots", "/result/boots"),
-                ("policy2", "/result/policy2"),
-            ] {
-                let mut frame =
-                    json!({"id": request_id(lane), "result": {"boot": BOOT, "policy": policy}});
-                frame["result"][key] = json!(0);
-                assert_eq!(
-                    refusal(lane, &frame.to_string()),
-                    HelloRefusal::UnknownField {
-                        field: owned(field)
-                    }
-                );
+                let mut frame = reply(lane, BOOT, &guest_policy().hex());
+                frame.pointer_mut(parent).expect("the parent exists")[key] = json!(0);
+                let field = owned(field);
+                assert_eq!(refusal(lane, frame), HelloRefusal::UnknownField { field });
             }
         }
     }
@@ -516,12 +489,8 @@ mod tests {
                     "/result/policy",
                 ),
             ] {
-                assert_eq!(
-                    refusal(lane, &frame.to_string()),
-                    HelloRefusal::MissingField {
-                        field: owned(missing)
-                    }
-                );
+                let field = owned(missing);
+                assert_eq!(refusal(lane, frame), HelloRefusal::MissingField { field });
             }
         }
     }
@@ -552,7 +521,7 @@ mod tests {
                     },
                 ),
             ] {
-                assert_eq!(refusal(lane, &frame.to_string()), expected);
+                assert_eq!(refusal(lane, frame), expected);
             }
         }
     }
@@ -566,16 +535,11 @@ mod tests {
                 host_policy().hex(),
                 guest_policy().hex()
             );
-            assert_eq!(
-                refusal(lane, &frame),
-                HelloRefusal::DuplicateKey {
-                    path: owned("/result/policy")
-                }
-            );
-            assert_eq!(
-                refusal(lane, &format!(r#"{{"id":7,"id":{id}}}"#)),
-                HelloRefusal::DuplicateKey { path: owned("/id") }
-            );
+            let path = owned("/result/policy");
+            assert_eq!(refusal(lane, frame), HelloRefusal::DuplicateKey { path });
+            let path = owned("/id");
+            let frame = format!(r#"{{"id":7,"id":{id}}}"#);
+            assert_eq!(refusal(lane, frame), HelloRefusal::DuplicateKey { path });
         }
     }
 
@@ -594,13 +558,9 @@ mod tests {
                 (format!("{BOOT}\n"), DigestError::WrongLength { bytes: 65 }),
                 (String::new(), DigestError::WrongLength { bytes: 0 }),
             ] {
-                assert_eq!(
-                    refusal(lane, &reply(lane, &token, &policy)),
-                    HelloRefusal::BadBoot {
-                        fault: BootTokenError(fault)
-                    },
-                    "{token:?}"
-                );
+                let fault = BootTokenError(fault);
+                let refused = refusal(lane, reply(lane, &token, &policy));
+                assert_eq!(refused, HelloRefusal::BadBoot { fault }, "{token:?}");
             }
         }
     }
@@ -609,13 +569,9 @@ mod tests {
     fn a_policy_other_than_the_expected_refuses_naming_both() {
         for lane in LANES {
             for found in [Digest::of(b"some other policy"), host_policy()] {
-                assert_eq!(
-                    refusal(lane, &reply(lane, BOOT, &found.hex())),
-                    HelloRefusal::PolicyMismatch {
-                        expected: guest_policy(),
-                        found,
-                    }
-                );
+                let expected = guest_policy();
+                let refused = refusal(lane, reply(lane, BOOT, &found.hex()));
+                assert_eq!(refused, HelloRefusal::PolicyMismatch { expected, found });
             }
         }
     }
@@ -641,11 +597,8 @@ mod tests {
                 (format!(" {policy}"), DigestError::WrongLength { bytes: 65 }),
                 (String::new(), DigestError::WrongLength { bytes: 0 }),
             ] {
-                assert_eq!(
-                    refusal(lane, &reply(lane, BOOT, &text)),
-                    HelloRefusal::BadPolicy { fault },
-                    "{text:?}"
-                );
+                let refused = refusal(lane, reply(lane, BOOT, &text));
+                assert_eq!(refused, HelloRefusal::BadPolicy { fault }, "{text:?}");
             }
         }
     }
@@ -653,12 +606,9 @@ mod tests {
     #[test]
     fn a_withdrawal_boot_other_than_the_normal_boot_refuses() {
         let policy = guest_policy().hex();
-        let normal = judge_normal(
-            reply(ControlLane::Normal, BOOT, &policy).as_bytes(),
-            &guest_policy(),
-        )
-        .expect("the normal lane answers");
-        let changed = reply(ControlLane::Withdrawal, OTHER_BOOT, &policy);
+        let normal = reply(ControlLane::Normal, BOOT, &policy).to_string();
+        let normal = judge_normal(normal.as_bytes(), &guest_policy()).expect("normal answers");
+        let changed = reply(ControlLane::Withdrawal, OTHER_BOOT, &policy).to_string();
         assert_eq!(
             judge_withdrawal(changed.as_bytes(), &guest_policy(), &normal),
             Err(HelloRefusal::BootChanged {
@@ -677,7 +627,7 @@ mod tests {
         for lane in LANES {
             for id in [json!(request_id(lane)), Value::Null, json!(7), json!("x")] {
                 assert_eq!(
-                    refusal(lane, &json!({"id": id, "error": refused}).to_string()),
+                    refusal(lane, json!({"id": id, "error": refused})),
                     HelloRefusal::GuestError {
                         code: Some(105),
                         message: owned("refused"),
@@ -686,22 +636,21 @@ mod tests {
                     "{id}"
                 );
             }
-            let protocol = json!({"id": null, "error": {"code": -32600, "message": "x"}});
             assert_eq!(
-                refusal(lane, &protocol.to_string()),
+                refusal(
+                    lane,
+                    json!({"id": null, "error": {"code": -32600, "message": "x"}})
+                ),
                 HelloRefusal::GuestError {
                     code: Some(-32600),
                     message: owned("x"),
                     detail: None,
                 }
             );
-            let both = json!({
-                "id": request_id(lane),
-                "result": {"boot": BOOT, "policy": guest_policy().hex()},
-                "error": {"code": 105, "message": "m"}
-            });
+            let mut both = reply(lane, BOOT, &guest_policy().hex());
+            both["error"] = json!({"code": 105, "message": "m"});
             assert!(matches!(
-                refusal(lane, &both.to_string()),
+                refusal(lane, both),
                 HelloRefusal::GuestError {
                     code: Some(105),
                     ..
@@ -722,7 +671,7 @@ mod tests {
             ] {
                 let frame = json!({"id": 1, "error": error});
                 assert_eq!(
-                    refusal(lane, &frame.to_string()),
+                    refusal(lane, &frame),
                     HelloRefusal::GuestError {
                         code: None,
                         message: String::new(),
@@ -735,54 +684,25 @@ mod tests {
     }
 
     #[test]
-    fn text_the_guest_chose_is_cut_to_1024_bytes_without_splitting_an_escape() {
-        let long = "k".repeat(2000);
+    fn a_cut_never_ends_inside_a_pointer_escape() {
         let tildes = "~".repeat(600);
         let escapes = format!("/{}", "~0".repeat(511));
         for lane in LANES {
-            let id = request_id(lane);
-            for (frame, kept) in [
-                (
-                    json!({"id": id, "error": {"code": 105, "message": long}}).to_string(),
-                    long[..1024].to_string(),
-                ),
-                (
-                    json!({"id": id, "error": {"detail": long}}).to_string(),
-                    format!("\"{}", &long[..1023]),
-                ),
-                (
-                    json!({"id": id, "result": {}, &long: 0}).to_string(),
-                    format!("/{}", &long[..1023]),
-                ),
-                (
-                    json!({"id": long, "result": {}}).to_string(),
-                    format!("\"{}", &long[..1023]),
-                ),
-                (
-                    format!(r#"{{"{long}":0,"{long}":0}}"#),
-                    format!("/{}", &long[..1023]),
-                ),
-                (
-                    json!({"id": id, "result": {}, &tildes: 0}).to_string(),
-                    escapes.clone(),
-                ),
-                (format!(r#"{{"{tildes}":0,"{tildes}":0}}"#), escapes.clone()),
-            ] {
-                assert_eq!(guest_text(refusal(lane, &frame)), kept, "{lane:?}");
-            }
+            let unknown = json!({"id": request_id(lane), "result": {}, &tildes: 0});
+            assert_eq!(guest_text(refusal(lane, unknown)), escapes);
+            let repeated = format!(r#"{{"{tildes}":0,"{tildes}":0}}"#);
+            assert_eq!(guest_text(refusal(lane, repeated)), escapes);
         }
     }
 
     #[test]
     fn bytes_that_are_not_utf8_refuse() {
         for lane in LANES {
-            let mut frame = reply(lane, BOOT, &guest_policy().hex()).into_bytes();
+            let mut frame = reply(lane, BOOT, &guest_policy().hex())
+                .to_string()
+                .into_bytes();
             frame[30] = 0xff;
-            let judged = match lane {
-                ControlLane::Normal => judge_normal(&frame, &guest_policy()).map(|_| ()),
-                ControlLane::Withdrawal => judge_withdrawal(&frame, &guest_policy(), &boot(BOOT)),
-            };
-            assert_eq!(judged, Err(HelloRefusal::NotUtf8));
+            assert_eq!(judge_on(lane, &frame), Err(HelloRefusal::NotUtf8));
         }
     }
 
@@ -797,7 +717,7 @@ mod tests {
             );
             let valid = reply(lane, BOOT, &guest_policy().hex());
             assert!(matches!(
-                refusal(lane, &format!("{valid}{valid}")),
+                refusal(lane, format!("{valid}{valid}")),
                 HelloRefusal::NotJson { .. }
             ));
         }
@@ -890,11 +810,11 @@ mod tests {
     }
 
     fn guest_key() -> impl Strategy<Value = String> {
+        let names = vec![
+            "id", "result", "error", "boot", "policy", "code", "message", "detail",
+        ];
         prop_oneof![
-            prop::sample::select(vec![
-                "id", "result", "error", "boot", "policy", "code", "message", "detail"
-            ])
-            .prop_map(str::to_owned),
+            prop::sample::select(names).prop_map(str::to_owned),
             "\\PC{0,8}",
             long_text(),
         ]
@@ -923,32 +843,35 @@ mod tests {
     }
 
     fn reply_like() -> impl Strategy<Value = Value> {
-        let field = |valid: Value| {
-            prop_oneof![
-                2 => Just(Some(valid)),
-                1 => guest_value().prop_map(Some),
-                1 => Just(None),
-            ]
-        };
+        let part = |valid: Value| prop_oneof![2 => Just(Some(valid)), 1 => guest_value().prop_map(Some), 1 => Just(None)];
         let extra = || prop::collection::vec((guest_key(), guest_value()), 0..2);
-        (
-            prop_oneof![Just(json!(1)), Just(json!(2)), guest_value()],
-            field(json!(BOOT)),
-            field(json!(guest_policy().hex())),
-            prop_oneof![3 => Just(None), 1 => guest_value().prop_map(Some)],
-            extra(),
-            extra(),
-        )
-            .prop_map(|(id, boot, policy, error, top, inner)| {
-                let mut result: Map<String, Value> = inner.into_iter().collect();
-                result.extend(boot.map(|boot| (owned("boot"), boot)));
-                result.extend(policy.map(|policy| (owned("policy"), policy)));
-                let mut reply: Map<String, Value> = top.into_iter().collect();
-                reply.insert(owned("id"), id);
-                reply.insert(owned("result"), Value::Object(result));
-                reply.extend(error.map(|error| (owned("error"), error)));
-                Value::Object(reply)
-            })
+        let pointers = ["/id", "/result/boot", "/result/policy", "/error"];
+        let error = prop_oneof![3 => Just(None), 1 => guest_value().prop_map(Some)];
+        let parts = (
+            part(json!(1)),
+            part(json!(BOOT)),
+            part(json!(guest_policy().hex())),
+            error,
+        );
+        (parts, extra(), extra()).prop_map(move |((id, boot, policy, error), top, inner)| {
+            let mut reply = reply(ControlLane::Normal, BOOT, &guest_policy().hex());
+            reply["result"]
+                .as_object_mut()
+                .expect("an object")
+                .extend(inner);
+            reply.as_object_mut().expect("an object").extend(top);
+            for (pointer, part) in pointers.iter().zip([id, boot, policy, error]) {
+                let (parent, key) = pointer.rsplit_once('/').expect("a pointer");
+                let record = reply.pointer_mut(parent).and_then(Value::as_object_mut);
+                if let Some(record) = record {
+                    match part {
+                        Some(part) => record.insert(key.to_owned(), part),
+                        None => record.remove(key),
+                    };
+                }
+            }
+            reply
+        })
     }
 
     proptest! {
@@ -959,8 +882,8 @@ mod tests {
             other in guest_value(),
         ) {
             for frame in [bytes, reply.to_string().into_bytes(), other.to_string().into_bytes()] {
-                let _ = judge_normal(&frame, &guest_policy());
-                let _ = judge_withdrawal(&frame, &guest_policy(), &boot(BOOT));
+                let _ = judge_on(ControlLane::Normal, &frame);
+                let _ = judge_on(ControlLane::Withdrawal, &frame);
             }
         }
 
@@ -968,21 +891,19 @@ mod tests {
         fn guest_text_is_cut_on_a_character_boundary_wherever_a_refusal_carries_it(
             text in long_text(),
         ) {
-            let policy = guest_policy().hex();
             for lane in LANES {
                 let id = request_id(lane);
+                let mut inner = reply(lane, BOOT, &guest_policy().hex());
+                inner["result"][&text] = json!(0);
                 for (frame, whole) in [
                     (json!({"id": id, "error": {"message": &text}}).to_string(), text.clone()),
                     (json!({"id": id, "error": {"detail": &text}}).to_string(), format!("\"{text}\"")),
                     (json!({"id": id, "result": {}, &text: 0}).to_string(), format!("/{text}")),
-                    (
-                        json!({"id": id, "result": {"boot": BOOT, "policy": policy, &text: 0}}).to_string(),
-                        format!("/result/{text}"),
-                    ),
+                    (inner.to_string(), format!("/result/{text}")),
                     (json!({"id": &text, "result": {}}).to_string(), format!("\"{text}\"")),
                     (format!(r#"{{"{text}":0,"{text}":0}}"#), format!("/{text}")),
                 ] {
-                    let kept = guest_text(refusal(lane, &frame));
+                    let kept = guest_text(refusal(lane, frame));
                     prop_assert!(whole.starts_with(&kept));
                     prop_assert!(kept.len() <= 1024);
                     prop_assert!(whole.len() <= 1024 || kept.len() > 1020);
