@@ -651,27 +651,46 @@ fn tells_the_contributor_how_to_fix_an_untraceable_trailer() {
     });
 }
 
+fn assert_refused_when_grep_fails_on_the_address(root: &Path, arms: &str, check: &str) {
+    let repository = repository_with_commit(UNTRACEABLE_CO_AUTHOR);
+    let grep = real_tool("grep");
+    let stub = format!(
+        "#!/bin/sh\ninput=$(cat)\ncase \"$*\" in\n{arms}\nesac\nprintf '%s\\n' \"$input\" | exec {} \"$@\"\n",
+        shell_quoted(grep.to_str().expect("the path to grep is UTF-8"))
+    );
+    let shadow = directory_shadowing("grep", &stub);
+    let output = run_guard_shadowed(root, repository.path(), shadow.path());
+    assert_refused_saying(
+        &output,
+        "grep exited 2",
+        &format!("a commit crediting `me@laptop.local` while grep fails only on {check}"),
+    );
+    assert!(
+        !said(&output).contains("is untraceable"),
+        "the guard reported the address untraceable although grep could not answer {check}, so that check never asked grep.\nguard said:\n{}",
+        said(&output)
+    );
+}
+
 #[test]
 fn judges_a_domain_through_the_matcher_it_checks() {
     check_workspace(|root| {
-        let repository = repository_with_commit(UNTRACEABLE_CO_AUTHOR);
-        let grep = real_tool("grep");
-        let stub = format!(
-            "#!/bin/sh\ninput=$(cat)\ncase \"$*\" in\n  *localdomain*)\n    [ \"$input\" = me@laptop.local ] && exit 2\n    ;;\nesac\nprintf '%s\\n' \"$input\" | exec {} \"$@\"\n",
-            shell_quoted(grep.to_str().expect("the path to grep is UTF-8"))
-        );
-        let shadow = directory_shadowing("grep", &stub);
-        let output = run_guard_shadowed(root, repository.path(), shadow.path());
-        assert_refused_saying(
-            &output,
-            "grep exited 2",
-            "a commit crediting `me@laptop.local` while grep fails only on the domain check (if the guard's domain pattern no longer holds `localdomain`, point the stub at the new pattern; that alone is not a guard bug)",
-        );
-        assert!(
-            !said(&output).contains("is untraceable"),
-            "the guard reported the address untraceable although grep could not answer the domain check, so that check never asked grep.\nguard said:\n{}",
-            said(&output)
-        );
+        assert_refused_when_grep_fails_on_the_address(
+            root,
+            "  *localdomain*) [ \"$input\" = me@laptop.local ] && exit 2 ;;",
+            "the domain check (if the guard's domain pattern no longer holds `localdomain`, point the stub at the new pattern; that alone is not a guard bug)",
+        )
+    });
+}
+
+#[test]
+fn judges_whether_there_is_an_address_through_the_matcher_it_checks() {
+    check_workspace(|root| {
+        assert_refused_when_grep_fails_on_the_address(
+            root,
+            "  *localdomain*) ;;\n  *) [ \"$input\" = me@laptop.local ] && exit 2 ;;",
+            "the check that the address holds an `@`, the one check other than the domain's that the guard runs on the bare address",
+        )
     });
 }
 
