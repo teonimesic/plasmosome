@@ -41,3 +41,6 @@ criterion = "0.7"
 plasmosome-backend = { path = "crates/plasmosome-backend" }
 plasmosome-ledger = { path = "crates/plasmosome-ledger" }
 plasmosome-core = { path = "crates/plasmosome-core" }
+
+[patch.crates-io]
+serde = { path = "crates/plasmosome" }
