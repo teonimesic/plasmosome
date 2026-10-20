@@ -69,25 +69,24 @@ matches() {
   esac
 }
 
-# Prints $1 without its leading and trailing whitespace.
-trimmed() {
-  local text=$1
-  text=${text#"${text%%[![:space:]]*}"}
-  printf '%s' "${text%"${text##*[![:space:]]}"}"
-}
-
 # Judges the identity on $2, a trailer value under the key on $1, and records an offence if it
 # credits a model or names somebody no reader can trace.
 #
 # The address is the text inside the value's last `<...>`, and the name is what comes before it. An
 # identity with no address is refused whatever its name: no account can be found for it. Its name
 # decides only what the refusal says.
+#
+# `read` does the splitting and the trimming. Pattern expansions such as `${value##*<}` take time
+# that grows with the square of a value's length or worse in bash: a name padded with 5,000 spaces
+# took 18 seconds to trim. The `x` keeps a trailing `<` from being dropped as an empty field.
 judge_trailer() {
-  local position=$1 value=$2 name=$2 address='' rest
-  rest=${value##*<}
-  if [ "$rest" != "$value" ] && [ "${rest%%>*}" != "$rest" ]; then
-    address=${rest%%>*}
-    name=$(trimmed "${value%<*}")
+  local position=$1 value=$2 name=$2 address='' segments last
+  IFS='<' read -r -a segments <<<"${value}x"
+  last=${segments[${#segments[@]}-1]}
+  last=${last%x}
+  if [ "${#segments[@]}" -gt 1 ] && [ "${last%%>*}" != "$last" ]; then
+    address=${last%%>*}
+    read -r name <<<"${value:0:${#value}-${#last}-1}"
   fi
   if ! matches '@' "$address"; then
     if matches "$vendor_word" "$name"; then
@@ -129,7 +128,7 @@ offence() {
 # The grep only nominates a paragraph; git's parser is what decides. That is the difference
 # between this and scanning the raw message, which flagged bodies that merely quoted a trailer.
 record_offending_trailers() {
-  local paragraph=$1 parsed line position
+  local paragraph=$1 parsed line position value
   matches "$nominate" "$paragraph" || return 0
   if ! parsed=$(printf 'x\n\n%s' "$paragraph" | git interpret-trailers --parse 2>&1); then
     echo "attribution-guard: cannot parse the trailers of a commit message:"
@@ -144,7 +143,8 @@ record_offending_trailers() {
     else
       position=Signed-off-by
     fi
-    judge_trailer "$position" "$(trimmed "${line#*:}")"
+    read -r value <<<"${line#*:}"
+    judge_trailer "$position" "$value"
   done <<< "$parsed"
 }
 
