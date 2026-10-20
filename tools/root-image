@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Build the workload root image: raw ext4 from a digest-pinned base, with spec 024's account.
+
+Usage: tools/root-image build --base NAME@sha256:HEX --work-root DIR --images-root DIR
+       [--platform linux/arm64] [--size-mib 1024] [--source-date-epoch UNIX] [--add SRC:DEST:MODE]
+
+It prints one JSON line and exits 0, or prints `root-image: refused <step>: <detail>` and exits 1.
+The repository README's "Root image" section says what the image holds and how to pin it.
+"""
+
+import argparse
+from collections import namedtuple
+import sys
+
+
+Base = namedtuple("Base", "reference digest")
+Add = namedtuple("Add", "source dest mode")
+Result = namedtuple("Result", "code out err")
+
+
+class Refused(Exception):
+    """A step refused; `step` names it and `detail` says what a stranger must fix."""
+
+    def __init__(self, step, detail):
+        super().__init__(f"{step}: {detail}")
+        self.step, self.detail = step, detail
+
+
+def parse_args(argv):
+    """Parse the build command line; argparse exits 2 on a malformed one."""
+    parser = argparse.ArgumentParser(prog="root-image")
+    commands = parser.add_subparsers(dest="command", required=True)
+    build_parser = commands.add_parser("build")
+    build_parser.add_argument("--base", required=True)
+    build_parser.add_argument("--platform", default="linux/arm64")
+    build_parser.add_argument("--work-root", required=True)
+    build_parser.add_argument("--images-root", required=True)
+    build_parser.add_argument("--size-mib", type=int, default=1024)
+    build_parser.add_argument("--source-date-epoch", type=int)
+    build_parser.add_argument("--add", action="append", default=[])
+    return parser.parse_args(argv)
+
+
+def parse_base(text):
+    """Return the Base for `NAME[:TAG]@sha256:HEX`, refusing any reference without a digest."""
+    raise NotImplementedError
+
+
+def parse_add(text):
+    """Return the Add for `SRC:DEST:MODE`, refusing a destination or mode the image cannot take."""
+    raise NotImplementedError
+
+
+def docker_env(environ):
+    """Return the environment every command runs with: PATH, HOME and DOCKER_* settings only."""
+    raise NotImplementedError
+
+
+def make_work_root(path):
+    """Create the work root with mode 0700, refusing one that already exists."""
+    raise NotImplementedError
+
+
+def export_base(run, env, base, platform, work):
+    """Check the local base carries the pinned digest, export it to work/base.tar, return its record."""
+    raise NotImplementedError
+
+
+def stage(base_tar, stage_tar, adds, epoch, limit):
+    """Write stage_tar from base_tar with the image contract applied; return the facts it read."""
+    raise NotImplementedError
+
+
+def content_listing(stage_tar):
+    """Return content.jsonl: one sorted JSON line per stage member, independent of ext4 layout."""
+    raise NotImplementedError
+
+
+def fs_uuid(content_sha256):
+    """Return the filesystem UUID: the first 16 bytes of the content digest."""
+    raise NotImplementedError
+
+
+def build_script(uuid, size_mib, adds):
+    """Return the shell script the build container runs over the bind-mounted work root at /w."""
+    raise NotImplementedError
+
+
+def filesystem(run, env, base, platform, work, uuid, size_mib, adds):
+    """Make work/rootfs.raw inside the pinned base, refusing unless e2fsck -fn is clean."""
+    raise NotImplementedError
+
+
+def judge_accounts(passwd, group):
+    """Refuse unless passwd and group meet spec 024's image contract."""
+    raise NotImplementedError
+
+
+def check_image(check, facts):
+    """Apply the image contract to the debugfs read-back in `check`; return the filesystem facts."""
+    raise NotImplementedError
+
+
+def write_stage(images_root, work, fields):
+    """Lay out the image under images_root/.stage-*; return the stage path and manifest bytes."""
+    raise NotImplementedError
+
+
+def place(run, env, images_root, stage_dir, manifest):
+    """Rename the stage to images_root/<id16> read-only and uchg; return (image_dir, id16)."""
+    raise NotImplementedError
+
+
+def build(args, run, now, environ):
+    """Run every step for parsed `args`; return the result line's fields."""
+    raise NotImplementedError
+
+
+def run_command(argv, env):
+    """Run argv with env and no stdin; return its exit code and bounded output."""
+    raise NotImplementedError
+
+
+def main(argv=None, run=run_command, now=None, environ=None):
+    """Print the result line and return 0, or print the refusal and return 1."""
+    raise NotImplementedError
+
+
+if __name__ == "__main__":
+    sys.exit(main())
