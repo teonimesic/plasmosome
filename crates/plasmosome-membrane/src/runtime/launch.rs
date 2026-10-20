@@ -615,8 +615,8 @@ mod tests {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
-            // SAFETY: `limit` is a local rlimit that getrlimit may write.
             assert_eq!(
+                // SAFETY: `limit` is a local rlimit that getrlimit may write.
                 unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
                 0
             );
