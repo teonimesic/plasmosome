@@ -154,8 +154,10 @@ and spec 026 §2 allows `unsafe` only in register packages.
   than `supervisor_config::MAX_RECORD_BYTES` (1,048,576) and one newline is `TooLarge`, whether or
   not it holds a newline. A buffer of `MAX_RECORD_BYTES + 1` bytes or fewer goes on to the
   one-line check, so one that does not end in a newline is `NotOneLine`. So a reader that stops
-  after `MAX_RECORD_BYTES + 2` bytes gets `TooLarge` for anything longer than a record can be, and
-  the refusal's `bytes` is then the number of bytes read, not the record's real size. `encode`
+  after `MAX_RECORD_BYTES + 2` bytes gets `TooLarge` for anything longer than a record can be. The
+  refusal's `bytes` is then the number of bytes read, less one if the last of them is a newline,
+  so it can be smaller than the record's real size. For example, a body of 1,048,577 bytes and a
+  newline is 1,048,578 bytes read, and `decode` returns `TooLarge { bytes: 1048577 }`. `encode`
   refuses a larger line, and a cell or a zero deadline that `decode` would refuse.
 - A refusal inside `runtime_recipe` names its field relative to the recipe, such as `vcpus`, and a
   template refusal names it relative to the template. `DuplicateKey` names a repeated key from the

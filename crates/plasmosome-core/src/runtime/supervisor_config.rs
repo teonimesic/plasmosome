@@ -48,9 +48,13 @@ pub enum ConfigRecordRefusal {
     /// bytes this way, with or without a newline. A buffer of
     /// `MAX_RECORD_BYTES + 1` bytes or fewer goes on to the one-line check, so
     /// one that does not end in a newline is `NotOneLine`. From `decode`,
-    /// `bytes` counts the buffer it was given: after a capped read, it is the
-    /// number of bytes read, not the record's real size. From
-    /// [`SupervisorConfig::encode`], it is the length of the line it built.
+    /// `bytes` is the length of the buffer it was given, not counting a final
+    /// newline. After a capped read, that is the number of bytes read, less
+    /// one if the last of them is a newline, so it can be smaller than the
+    /// record's real size. For example, a body of 1,048,577 bytes and a
+    /// newline is 1,048,578 bytes read, and `decode` returns
+    /// `TooLarge { bytes: 1048577 }`. From [`SupervisorConfig::encode`],
+    /// `bytes` is the length of the line it built.
     TooLarge { bytes: usize },
     /// The record is not UTF-8.
     NotUtf8,
@@ -128,8 +132,9 @@ impl SupervisorConfig {
     /// `instance_root`, `runtime_recipe` (read under `limits` by every rule
     /// [`RuntimeRecipe::parse`] applies after its framing and JSON checks) and
     /// `boot_deadline_ms`, each on its own, in that order. After a capped
-    /// read, a `TooLarge` refusal counts the bytes read, not the record's real
-    /// size.
+    /// read, a `TooLarge` refusal's `bytes` is the number of bytes read, less
+    /// one if the last of them is a newline, so it can be smaller than the
+    /// record's real size.
     pub fn decode(
         record: &[u8],
         limits: &PlatformLimits,
