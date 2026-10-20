@@ -184,13 +184,15 @@ fn a_read_only_complete_share_is_mounted_at_its_path_and_lists_the_hosts_file() 
         vec![
             probe("list", 1000, &["list", "/mnt/share"]),
             probe("mountinfo", 1000, &["mountinfo"]),
+            probe("create-as-root", 0, &["create", "/mnt/share/from-guest"]),
+            probe("write-as-root", 0, &["write", "/mnt/share/hello.txt"]),
         ],
     );
     let share = lane.lane.console.with_file_name("share");
     common::write_file(&share, "hello.txt", b"placed by the host\n");
     lane.lane.shares.push(Share {
         tag: "lanes0".to_string(),
-        path: share,
+        path: share.clone(),
         shm_size: 0,
         read_only: true,
         semantics: Semantics::Complete,
@@ -215,6 +217,22 @@ fn a_read_only_complete_share_is_mounted_at_its_path_and_lists_the_hosts_file() 
         .unwrap_or_else(|| panic!("nothing is mounted at /mnt/share: {mountinfo}"));
     assert_eq!(share_mount["fstype"], "virtiofs");
     assert_eq!(share_mount["source"], "lanes0");
+    for id in ["create-as-root", "write-as-root"] {
+        let refused = line(results, id);
+        assert_eq!(
+            refused["ok"], false,
+            "{id} changed the read-only share: {refused}"
+        );
+        assert_eq!(refused["errno"], "EROFS", "{refused}");
+    }
+    assert!(
+        !share.join("from-guest").exists(),
+        "the guest created a file in the read-only share"
+    );
+    assert_eq!(
+        fs::read(share.join("hello.txt")).expect("the host file is still there"),
+        b"placed by the host\n"
+    );
 }
 
 #[test]
