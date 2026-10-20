@@ -210,10 +210,12 @@ supervisor says. A cell whose `cell.kill` has started is `draining` until it is 
 that gives up leaves it `draining` after a 106, and otherwise in the state its supervisor
 reports. `cell.list` and `cell.status` show these states. `cell.exec` and every plasmid
 verb on a `germinating` or `draining` cell refuse at once with 105 `{from: <state>, to:
-"ready"}`, before any wait. Mutations of one cell (`cell.new`, plasmid verbs, `cell.kill` and
-the check of §8) run one at a time, in arrival order. Requests for other cells are not blocked.
-Reads never wait for mutations, except a read whose own query failed, which waits for the check
-it queued.
+"ready"}`, before any wait. Mutations of one cell (`cell.new`, `plasmid.add`, `plasmid.remove`,
+`plasmid.reload`, `plasmid.renew`, `cell.kill`, the check of §8 and spec 028's expiry) run one
+at a time, in arrival order. Requests for other cells are not blocked. Reads never wait for
+mutations, except a read whose own query failed, which waits for the check it queued.
+`plasmid.list` is a read. Corrected on 2026-10-20: this listed "plasmid verbs" among the
+mutations, which read as including `plasmid.list`, and left out spec 028's expiry.
 
 **From the supervisor.** A cell-configured membrane's `membrane.status` answers `{ready: true,
 state: "serving"}` exactly when its guest has said hello, no `membrane.workload.stop` or

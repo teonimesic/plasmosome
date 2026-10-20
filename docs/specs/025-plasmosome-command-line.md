@@ -27,9 +27,10 @@ same way.
 The first deliverable is two tasks. One gives the three existing binaries their `--help`,
 `--version` and usage rules. The other adds `plasmosome status`, against the one verb served
 today. Every later command lands when the spec behind its verb is accepted and a daemon serves
-the verb. Draft specs 022, 023 and 024 (PRs #125, #126 and #127) are still being revised. This
-spec fixes the shape every command shares and how each command maps onto its verb; it freezes
-no verb's fields.
+the verb. Specs 022, 023 and 024 (PRs #125, #126 and #127) were drafts when this spec was
+written, and all three are now accepted. This spec fixes the shape every command shares and how
+each command maps onto its verb; it freezes no verb's fields. Corrected on 2026-10-20: this said
+the three were still being revised, and this spec called each of them a draft.
 
 This serves intent 009: an agent takes a step, reads the result and chooses the next step, so
 each command is one small operation whose result the next step can read, and a person and an
@@ -104,10 +105,11 @@ Each command sends one verb. It never combines verbs, never polls, and never ret
 that waits for a process runs `plasmosome exec status` again, with its own pause between runs,
 until `result.state` is no longer `running`. Every run exits 0 whatever the process did.
 
-The commands are spec 001 §3's v1 verbs, draft 024's `exec.output`, and spec 020's registry
-commands. Verbs spec 001 marks RESERVED are not commands. "Changes state" decides exit 3
-(section 4). A command's flags are fixed by the task that serves it, against its verb as
-accepted.
+The commands are spec 001 §3's v1 verbs, spec 024's `exec.output`, spec 028's `plasmid.renew`,
+and spec 020's registry commands. Verbs spec 001 marks RESERVED are not commands. "Changes
+state" decides exit 3 (section 4). A command's flags are fixed by the task that serves it,
+against its verb as accepted. Amended on 2026-10-20: this did not name spec 028's
+`plasmid.renew`.
 
 | Command | Wire method | Changes state | Served |
 | --- | --- | --- | --- |
@@ -132,11 +134,14 @@ accepted.
 
 `--cell` is optional where spec 001 §2 makes it optional: the client leaves `cell` out, and the
 daemon resolves it or answers code 100 with candidates. `exec status` and `exec output` require
-`--cell`, because exec IDs repeat from cell to cell (draft 024). The exec and plasmid commands,
+`--cell`, because exec IDs repeat from cell to cell (spec 024). The exec and plasmid commands,
 whose verbs may pick the cell themselves, are served only once their results name the cell they
-acted on. Draft 024's results do not yet, and neither do spec 001's plasmid results, which a
-later spec changes, such as draft 022 (see "Requests to draft specs"). The client never adds a
-field to a result (section 3).
+acted on. The results of `cell.exec`, `exec.status` and `exec.output` name it (spec 024 §1), and
+so do those of `plasmid.list`, `plasmid.add`, `plasmid.remove`, `plasmid.reload` and
+`plasmid.renew` (spec 001 §2, spec 028 §8). So each of these commands may be served once a
+daemon serves its verb. The client never adds a field to a result (section 3). Corrected on
+2026-10-20: this said that spec 024's results and spec 001's plasmid results did not yet name the
+cell.
 
 `plasmid new` (spec 011) reaches no daemon or registry. It keeps spec 011's output, and its
 exit 2 already fits section 4.
@@ -248,7 +253,7 @@ Three commands print something other than an envelope on stdout: `--help`, `--ve
 | --- | --- | --- | --- |
 | 0 | Done. stdout holds the result. | Answered. | Not applicable. |
 | 1 | Unavailable. The instance is not up or could not be reached, or a request that changes no state got no complete answer. Nothing can have changed. | Not sent, read-only, or refused with 107. | Yes. |
-| 2 | Refused. The kernel, the registry or the client's own checks refused it. | Refused or never sent; `error` may name a partial effect, such as a cell a failed start left behind (draft 023). | No. Read `error`. |
+| 2 | Refused. The kernel, the registry or the client's own checks refused it. | Refused or never sent; `error` may name a partial effect, such as a cell a failed start left behind (spec 023). | No. Read `error`. |
 | 3 | Outcome unknown. A request that changes state was at least partly written and its answer did not reach the caller, or the kernel answered that its outcome is unknown. | It may take effect, even after this command has exited. | Observe first. |
 | 64 | Usage. The command line is wrong. | Not sent. | No. |
 | 70 | Internal. The client or the daemon broke the protocol or failed. | Unknown for a command that changes state. | Observe first, and report it. |
@@ -264,14 +269,14 @@ and an observation made afterwards is evidence, not proof. The client never retr
 observes before acting again, and repeats only where the verb deduplicates by a client request
 ID. Repeating `cell new` creates a second cell, and repeating `cell exec` runs the program again,
 so `cell exec` is served only while its verb deduplicates by a request ID (`request_key` in
-draft 024). The task that serves each later command states how to observe it after exit 3.
+spec 024). The task that serves each later command states how to observe it after exit 3.
 
 **Kernel errors** map by code:
 
 - 107 `not_running`: exit 1, the same as the client's own codes for a down instance. It is the
   same condition, whichever side noticed it (amendment A).
 - 105 whose `to` is `"unknown"`: exit 3. The kernel is saying that the outcome is unknown, as
-  draft 024 does when a guest's reply is lost and the process may have started.
+  spec 024 does when a guest's reply is lost and the process may have started.
 - 100 to 106 otherwise, 108 to 110, `-32601`, `-32602`, and any code this client does not
   recognise: exit 2. An unknown code is still a refusal the daemon chose to send.
 - `-32700` and `-32600`: exit 70, a client bug. Spec 001 answers these under a `null` id; such a
@@ -760,21 +765,31 @@ logic goes when its trigger fires. Spec 011: `plasmid new` keeps its exit 2. Spe
    wait for a command that changes state? Until the owner answers, this spec proceeds on yes:
    Task B adds the binary with `status`.
 
-## Requests to draft specs
+## Requests to specs 022, 023 and 024
 
-- Draft 022 (#125): name `cell` in the plasmid verbs' results, which serving the plasmid
-  commands needs (section 2).
-- Draft 023 (#126): a client request ID on `cell.new`, so that a repeat after exit 3 does not
-  create a second cell.
-- Draft 024 (#127): name `cell` in the `cell.exec`, `exec.status` and `exec.output` results,
-  which serving the exec commands needs (section 2).
-- Draft 024 (#127): a wait parameter on `exec.status`, so that one request returns when the
+This spec made four requests while those specs were drafts. Three are granted, and one is
+deferred:
+
+- Spec 022 (#125): name `cell` in the plasmid verbs' results, which serving the plasmid
+  commands needs (section 2). Granted: spec 001 §2 says the results of `plasmid.list`,
+  `plasmid.add`, `plasmid.remove` and `plasmid.reload` carry `cell`.
+- Spec 023 (#126): a client request ID on `cell.new`, so that a repeat after exit 3 does not
+  create a second cell. Deferred to plasmosome-bnkf: spec 023 leaves it out of scope, so a
+  repeated `cell new` still creates a second cell (section 4).
+- Spec 024 (#127): name `cell` in the `cell.exec`, `exec.status` and `exec.output` results,
+  which serving the exec commands needs (section 2). Granted: every result names `cell`, and
+  `cell.exec` deduplicates by `request_key` (spec 024 §1).
+- Spec 024 (#127): a wait parameter on `exec.status`, so that one request returns when the
   process ends or a deadline passes, instead of a polling loop costing a tool call per poll.
+  Granted: `wait` (spec 024 §1).
+
+Amended on 2026-10-20: this section was "Requests to draft specs", and listed the four requests
+as open.
 
 ## Out of scope
 
-- The verbs: their fields, states and refusals. Specs 001, 008, 011 and 020 own them, and draft
-  specs 022, 023 and 024 are revising theirs.
+- The verbs: their fields, states and refusals. Specs 001, 008, 011, 020, 022, 023, 024, 027 and
+  028 own them. Amended on 2026-10-20: this did not name specs 027 and 028.
 - Output streaming for `cell.exec`, which spec 001 reserves.
 - Shell completion, a configuration file for the client, and aliases other than `germinate`.
 - How a daemon serves concurrent connections (decision 005).
