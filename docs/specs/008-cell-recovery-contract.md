@@ -64,7 +64,8 @@ Private supervisor sockets additionally require spec001 §4.1's owner/mode, kern
 workload-confinement boundary. A trusted path or writer lock alone does not authorize an RPC.
 
 There is one controller writer per instance. Startup opens `<root>/controller.lock` without
-following a symlink and takes a nonblocking exclusive OS file lock before discovery; contention
+following a symlink and takes a nonblocking exclusive `flock(2)` lock on a
+close-on-exec descriptor before discovery; contention
 refuses startup. The lock is held through serving and recovery, released by process death, and
 its file is not unlinked. This is cooperative local writer exclusion, not authentication or a
 cross-host lock. All journal mutation runs under it and is serialized per cell. No later
@@ -468,7 +469,10 @@ Validate immutable boot/policy identity, actual managed mounts/handles/listeners
 exact associations to this cell's complete or incomplete operations before returning a complete
 observation. Stray verified holdings still appear in exact drift; unknown/unattributable physical
 resources, policy loss or incomplete guest inventory are Observation errors naming the resource,
-not empty projections or guessed grant IDs. The actual guest system image and private copied data
+not empty projections or guessed grant IDs. A guest binding that spec 024 reports as `revoked`,
+after its removal completed, accounts for its own guest object and is not drift, and recovery
+matches no journal record to it. A host holding still found for that grant has no journal record and
+is unknown (spec 001 §4.2). The actual guest system image and private copied data
 are not managed capability projections; the observer must explicitly delimit the managed
 namespaces rather than classify arbitrary guest processes as trusted evidence.
 Every projection array, including all nested network kinds, and actual per-binding admission
@@ -525,7 +529,10 @@ without being turned into requests to arbitrary socket paths.
 ### Quarantine and startup integration
 
 `QuarantineReport` carries instance, optional validated cell, raw entry name bytes, raw path,
-fault, optional line, lines_parsed, found objects, found incomplete effects and refusal claims.
+fault, optional line, lines_parsed, found objects, found incomplete effects and refusal claims. A
+report for a cell that spec 023's supervisor check quarantined also carries `lock`, which is always
+`free`, since the check quarantines only under a free lock, and `marker`, with the values spec 001
+§3.3a gives a set-aside cell. Every other report omits both.
 A valid cell's `found` is every independently observed object whose owner.cell is that cell;
 `incomplete` likewise contains every incomplete operation owned by the cell, even if the first
 journal line is corrupt and no plugin was parsed. Neither set authorizes cleanup.
@@ -549,11 +556,21 @@ existing path, discovers every entry, and queries every validated cell's
 socket paths under validated no-follow directories are used. A missing/failed/timed-out or
 malformed live response is an observation failure, not an empty cell. A cell's supervisor is
 allowed to report an observed dead cell; the controller must not derive that state from a PID
-file, socket existence or inability to connect.
+file, socket existence or inability to connect. Before that query, startup applies spec 023's
+supervisor check to each validated cell. It queries only cells whose `supervisor.lock` is held,
+concurrently, each within a cap below the startup deadline. The lock and the `launched` marker are
+the supervisor's own lifecycle evidence, not a PID file or socket existence. A failed query, or a
+free lock with a marker from this boot that records no clean stop, sets that one cell aside: it is
+handled as quarantine is, and never refuses startup. Otherwise a free lock may retire the directory
+to `<root>/retired/<cell>`, which is not discovered again. The same check runs while
+serving, when a query to a supervisor fails.
 
 No requests are answered until complete discovery and observation have succeeded, journals have
 been classified, pending cleanup has completed and every adopted cell's complete settled record
-has been reconciled with its membrane. Compare generations before any resumed effect operation:
+has been reconciled with its membrane. The pending cleanup here is an adopted cell's. A cell that
+spec 023's supervisor check sets aside is not adopted: its pending cleanup, reconciliation and
+publication wait, and the check that later adopts it runs them before the cell serves. Compare
+generations before any resumed effect operation:
 an observation newer than the journal is an unaccounted participant state and refuses startup
 without cleanup. A pending generation cannot already have been published at that same generation:
 publication follows durable finish, so that case also refuses rather than acknowledging an
@@ -605,21 +622,25 @@ budget reset on retry. Failure blocks that cell's next mutation and prevents a s
 result; recovery readiness is false until publication is settled.
 If observation, cleanup or publication remains incomplete, startup emits a structured recovery
 error and available quarantine diagnostics on stderr, releases its own socket/lock and exits
-nonzero rather than serving a partial instance. Generation refusal reports the cell and both
+nonzero rather than serving a partial instance. A cell set aside under spec 023 is not incomplete
+observation, cleanup or publication for this rule. Generation refusal reports the cell and both
 numeric generations as an observation error. Equal-generation content mismatch is
 `RecoveryError::DesiredConflict { cell, generation }`, reported with spec001's structured
 `desired_conflict` kind. It is not repaired by overwriting content or ignoring a field.
 This availability cost leaves live supervisors alone. An operator can repair the cause and
 restart. Journals and unknown socket paths are never
 unlinked as recovery. A stale control socket after SIGKILL still requires explicit operator/caller
-handling, as the existing daemon does.
+handling, as the existing daemon does. Retiring a cell under spec 023 renames its whole directory,
+journal and any stale `membrane.uds` included, to `<root>/retired/<cell>`; nothing is unlinked. The
+rule for the instance's control socket is unchanged.
 
 On successful startup, construct ControllerState from recovered identities/modes and actual
 supervisor state, retain the entire recovery account, and pass desired.generation to
 Controller::new. Quarantined cells are absent from the ordinary cell registry and visible in
 `plasmosome.recovery`. The controller's ready flag is false if any quarantine, unmatched effect,
 incomplete effect, drift or unsettled publication remains; an empty instance is ready only after the same startup
-requirements. An observed ready cell is not relabelled dead because its desired holdings drift.
+requirements. A `revoked` guest binding (spec 024), after its removal completed, is none of these.
+An observed ready cell is not relabelled dead because its desired holdings drift.
 The diagnostic surface states that discrepancy separately. Equal object snapshots do not
 establish equal participant generations or publication content. Matching published records do
 not establish matching holdings. No journal record or recovery result by itself proves liveness.
@@ -780,15 +801,18 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
 - **R8 — quarantine blast radius:** a corrupt cell is absent from desired and ordinary status,
   excluded from generation maximum and never mutated. Its report names raw path, fault/line,
   parsed count, every cell-owned found object and incomplete operation, and every refusal.
-  Same-plugin siblings are adopted normally. Unknown observation prevents startup success.
+  Same-plugin siblings are adopted normally. Unknown observation keeps readiness false and sets that
+  cell aside; it does not prevent startup (spec 023).
 - **R9 — observed startup:** run actual plasmosomed over a persistent instance with independently
   surviving supervisors and nonzero journals. While the controller is stopped, remove a promised
   holding, leave a stray, and corrupt one sibling journal. Restart, query status/recovery over
   the actual UDS, and observe correct desired cells/generations, both drift directions,
   quarantined cell absence, untouched quarantine holdings, omitted genome and false readiness.
   Inspect supervisor-side enforcement state, not a mirror populated from the same journals.
-  An unavailable supervisor, partial discovery, unfinished cleanup or unresolved publication
-  prevents serving and emits the specified error without killing cells or unlinking another
+  An unavailable supervisor sets only its cell aside under spec 023, with readiness false, and that
+  cell's cleanup and publication wait until it is adopted. Partial discovery, or an adopted cell's
+  unfinished cleanup or unresolved publication, prevents serving and emits the specified error
+  without killing cells or unlinking another
   process's socket. Lower observed generation republishes and converges within the single
   deadline; equal continues only with identical complete content; higher refuses even when all
   holdings match. Change an empty attachment's mode at the same generation: equal empty OS
