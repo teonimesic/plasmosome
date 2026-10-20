@@ -16,8 +16,10 @@ for what each piece does.
 - **Check the bundle before loading it.** `lane-vmm` calls `verify_bundle` before `dlopen`, and
   checks the loaded images after `krun_create_ctx`. Moving either check later lets unverified
   code run first.
-- **A check that cannot fail proves nothing.** The SBPL self-check counts a refusal only as
-  `EPERM` or `EACCES`; a missing directory is not a refusal. Keep a boot test that makes it fail.
+- **A check that cannot fail proves nothing.** The SBPL self-check runs unconfined first and
+  needs all four operations to succeed, so file modes cannot pass for the sandbox. Confined, it
+  counts a refusal only as `EPERM`; `EACCES` and a missing directory are not refusals. Keep the
+  boot tests that make the control and the check fail.
 - **Every spawn is reaped.** `run_lane` kills and reaps the VMM at its timeout; `lane-init` reaps
   orphans and kills what remains before it powers off.
 

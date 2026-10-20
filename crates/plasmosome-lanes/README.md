@@ -48,10 +48,13 @@ run's results come only from the guest console, and anything short of a complete
    spec 001 §4.2's `rdinit=/init panic=-1`, `krun_add_disk3` with the root image read-only,
    `krun_disable_implicit_init`, `krun_disable_implicit_vsock`, one `krun_add_virtiofs4` per
    share, and `krun_set_console_output`. A failed call exits 1, naming it.
-6. With a `confinement`, apply its SBPL profile with `sandbox_init`, then check that a read inside
-   `allowed` succeeds and that a write inside it, a read of `outside` and a write inside
-   `outside` are each refused with `EPERM` or `EACCES`. Exit 71 if the profile does not apply and
-   70 if any check gives the other answer. The VM does not start.
+6. With a `confinement`, first run four operations unconfined as a control: a read and a write
+   inside `allowed`, and a read and a write inside `outside`. All four must succeed, which shows
+   the directories refuse nothing by themselves. Then apply the SBPL profile with
+   `sandbox_init` and run them again: the read inside must succeed, and the other three must be
+   refused with `EPERM`. `EACCES` comes from file modes, not the sandbox, so it does not count.
+   Exit 70 if the control or the confined check gives another answer, and 71 if the profile
+   does not apply. In each case the VM does not start.
 7. `krun_start_enter`. When the guest powers off, libkrun ends the process.
 
 ### Where it departs from spec 001 §4.2
