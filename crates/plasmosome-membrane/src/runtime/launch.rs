@@ -769,22 +769,26 @@ mod tests {
 
     fn run_probe(test: &str) {
         let output = tempfile::tempfile().expect("the probe has a file for its output");
-        let mut child = std::process::Command::new(
+        let mut command = std::process::Command::new(
             std::env::current_exe().expect("the test executable has a path"),
-        )
-        .args([
-            "--exact",
-            test,
-            "--ignored",
-            "--test-threads=1",
-            "--nocapture",
-        ])
-        .env(PROBE, "1")
-        .stdin(Stdio::null())
-        .stdout(output.try_clone().expect("the output file is shared"))
-        .stderr(output.try_clone().expect("the output file is shared"))
-        .spawn()
-        .expect("the probe process starts");
+        );
+        command
+            .args([
+                "--exact",
+                test,
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(PROBE, "1")
+            .stdin(Stdio::null())
+            .stdout(output.try_clone().expect("the output file is shared"))
+            .stderr(output.try_clone().expect("the output file is shared"));
+        let spawned = {
+            let _no_pipe_mid_creation = crate::spawn_lock::hold_fork_side();
+            command.spawn()
+        };
+        let mut child = spawned.expect("the probe process starts");
         let started = Instant::now();
         let status = loop {
             if let Some(status) = child.try_wait().expect("the probe's status is readable") {
