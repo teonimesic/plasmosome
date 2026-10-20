@@ -1045,7 +1045,34 @@ mod tests {
             | BadPath { field, .. } => vec![format!("`{field}`")],
             SocketPathTooLong { field, .. } => vec![format!("`{field}`")],
             PathReused { first, second } => vec![format!("`{first}`"), format!("`{second}`")],
-            _ => Vec::new(),
+            UnsupportedVersion { found } => vec![format!("version {found}")],
+            UnknownKernelFormat { found } => vec![format!("`kernel_format` {found:?}")],
+            UnknownArchitecture { found } => vec![format!("architecture {found:?}")],
+            ZeroVcpus => vec!["`vcpus`".to_owned()],
+            ZeroMemory => vec!["`memory_mib`".to_owned()],
+            VcpusAboveLimit { requested, limit } => {
+                vec![
+                    format!("`vcpus` is {requested}"),
+                    format!("at most {limit}"),
+                ]
+            }
+            MemoryAboveLimit { requested, limit } => {
+                vec![
+                    format!("`memory_mib` is {requested}"),
+                    format!("at most {limit}"),
+                ]
+            }
+            UnadmittedBootPair => vec!["kernel format raw".to_owned(), "x86_64".to_owned()],
+            ArchitectureMismatch { recipe, host } => vec![
+                format!("built for {}", recipe.as_str()),
+                format!("this host is {}", host.as_str()),
+            ],
+            SocketPathsEqual => vec!["`control_path`".to_owned(), "`data_path`".to_owned()],
+            TooLarge { .. }
+            | NotOneLine
+            | NotUtf8
+            | NotJson { .. }
+            | HostLimitUnavailable { .. } => Vec::new(),
         }
     }
 
@@ -1807,6 +1834,13 @@ mod tests {
                     limit: "physical memory",
                 },
                 "this host did not report its physical memory",
+            ),
+            (
+                ArchitectureMismatch {
+                    recipe: Architecture::X86_64,
+                    host: Architecture::Aarch64,
+                },
+                "the recipe is built for x86_64 but this host is aarch64",
             ),
         ] {
             assert_eq!(refusal.to_string(), text);
