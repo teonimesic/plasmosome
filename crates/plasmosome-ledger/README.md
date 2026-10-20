@@ -51,9 +51,9 @@ The first detach of a closed ledger binds its cell, whatever that call's outcome
 naming another cell returns `DetachError::CellChanged` before any backend call, so a resume on
 that ledger cannot move to another cell. The binding lives in memory beside the cursor, not in the
 log. While a bound ledger is alive, `open_file` on the same log gives a new, unbound ledger, by
-design (spec 017 line 321), so the binding holds per ledger instance, not per log. `unseal` drops
-the binding with the cursor. `SealedLedger::unseal`'s doc says when that corrects a wrong first
-cell, and what is left when it cannot.
+design (spec 017, "Incomplete effects and their terminal transition"), so the binding holds per
+ledger instance, not per log. `unseal` drops the binding with the cursor. `SealedLedger::unseal`'s
+doc says when that corrects a wrong first cell, and what is left when it cannot.
 
 ## What's inside
 
