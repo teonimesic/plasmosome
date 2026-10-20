@@ -469,6 +469,52 @@ def a_pipe_in_a_reason_does_not_break_the_table():
     assert f"| plasmosome-core | boots | needs a guest {BACKSLASH}| or a host |" in result.summary, result
 
 
+def an_ignored_line_before_any_running_line_is_refused():
+    """Case 22. Catches dropping an ignored test that no block can own."""
+    log = ["test boots ... ignored, needs a hypervisor", ""] + CLEAN
+    result = report(log)
+    assert result.code == 1, result
+    assert "before any Running line" in result.stderr, result
+
+
+def unreadable_cargo_output_is_refused_for_a_step_that_succeeded():
+    """Case 23. Catches reading unparseable JSON as an empty listing."""
+    metadata = report(CLEAN, metadata=(0, "not json"))
+    assert metadata.code == 1, metadata
+    assert "unreadable" in metadata.stderr, metadata
+
+    build = report(CLEAN, builds={TESTS: (0, ["not json"]), GUARDS: (0, GUARDS_BUILD)})
+    assert build.code == 1, build
+    assert "unreadable" in build.stderr, build
+    assert "`tests`" in build.stderr, build
+
+
+def a_metadata_failure_after_a_failed_compile_is_named_not_fatal():
+    """Case 24. A broken manifest fails the test step and metadata alike; that is not the report's red."""
+    log = ["error: failed to parse manifest at `/w/crates/core/Cargo.toml`"]
+    result = report(log, outcomes=("failure", "skipped"), metadata=(101, ""))
+    assert result.code == 0, result
+    assert "`cargo metadata` failed" in result.summary, result
+    assert "`tests` failed" in result.summary, result
+    assert "`workspace guards` never ran" in result.summary, result
+
+
+def an_executable_claimed_by_two_packages_is_refused():
+    """Case 25. Catches silently picking one package for an executable two listings disagree on."""
+    build = GUARDS_BUILD + [artifact(GUARDS_ID, "daemon_cli", "test", "/w/target/debug/deps/daemon_cli-c0e2")]
+    result = report(CLEAN, builds={TESTS: (0, TESTS_BUILD), GUARDS: (0, build)})
+    assert result.code == 1, result
+    assert "more than one package" in result.stderr, result
+
+
+def unparseable_step_arguments_are_a_usage_error():
+    """Case 26. Catches a crash on an unbalanced quote in a step's package arguments."""
+    result = report(CLEAN, argv=lambda log: [log, "tests=success=--workspace 'unterminated",
+                                             f"workspace guards=success={GUARDS}"])
+    assert result.code == 2, result
+    assert result.calls == [], result
+
+
 CASES = [
     one_file_name_in_two_crates_lists_each_under_its_own_crate,
     a_doctest_is_listed_under_its_own_crate_with_no_reason_given,
@@ -491,6 +537,11 @@ CASES = [
     the_summary_is_appended_and_printed_under_the_job_name,
     a_name_containing_ignored_is_not_an_ignored_test,
     a_pipe_in_a_reason_does_not_break_the_table,
+    an_ignored_line_before_any_running_line_is_refused,
+    unreadable_cargo_output_is_refused_for_a_step_that_succeeded,
+    a_metadata_failure_after_a_failed_compile_is_named_not_fatal,
+    an_executable_claimed_by_two_packages_is_refused,
+    unparseable_step_arguments_are_a_usage_error,
 ]
 
 
