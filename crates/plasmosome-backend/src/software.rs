@@ -122,7 +122,7 @@ pub enum PinRefusal {
     NotRegular { path: String },
     /// The entry is a symbolic link, wherever it points. On macOS it is also a file or directory
     /// that pin reached through a link. For the root, `.`, it is also a root replaced between
-    /// its check and its resolution.
+    /// its check and its resolution by something that can be opened.
     Link { path: String },
     /// A listed path breaks spec 020 §2's file path rule; [`TreePath`] says what it allows.
     InvalidPath { path: String },
@@ -224,9 +224,10 @@ enum Step {
 ///
 /// A root that is itself a link is refused. The root is then resolved once to its canonical
 /// path, which is opened without following a link; it must be the directory the first check
-/// saw, by device and inode, so a root swapped in between, for a link or anything else, is
-/// refused. Every directory is opened before it is listed, and every file before it is read,
-/// with a flag that refuses links. What that flag covers differs:
+/// saw, by device and inode, so a root swapped in between is refused: as a link when what is
+/// there can be opened, and as unreadable when it cannot. Every directory is opened before it
+/// is listed, and every file before it is read, with a flag that refuses links. What that flag
+/// covers differs:
 ///
 /// - On macOS it is `O_NOFOLLOW_ANY`, which refuses a link in any component. So no file is
 ///   read, and no directory opened, through a link, even one swapped in while `pin` runs. A
@@ -538,8 +539,8 @@ pub fn check_names(
 
 /// The test-only route to a command, until spec 027's declaration field exists. It compiles only
 /// in this crate's tests and under the `test-fixture` feature. Enable that feature only from
-/// `[dev-dependencies]`. The workspace guard `only_the_testkit_enables_the_backend_test_fixture`
-/// fails when any crate but `plasmosome-testkit` turns it on by a normal or build dependency.
+/// `[dev-dependencies]`. The workspace guard `no_crate_enables_the_backend_test_fixture` fails
+/// when any crate, `plasmosome-testkit` included, turns it on by a normal or build dependency.
 #[cfg(any(test, feature = "test-fixture"))]
 pub mod fixture {
     use super::{CommandName, follows_path_rule};

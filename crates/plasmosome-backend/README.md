@@ -84,9 +84,10 @@ What `pin` guarantees about links differs by system. On both, a root that is its
 refused. The root's own path may pass through a link, as macOS's `/var` does, so the root is
 resolved once to its canonical path. That path is then opened without following a link, and it
 must be the directory the first check saw, by device and inode. So a root swapped between the
-check and the open, for a link or for anything else, is refused as `Link { path: "." }`, and
-the open does not wait on a FIFO. Every directory is opened before it is listed, and every file
-before it is read.
+check and the open is refused. It is `Link { path: "." }` when what is there now can be opened,
+such as a link, a FIFO, a file or another directory, and `Unreadable { path: "." }` when it
+cannot, such as a Unix socket or nothing at all. The open does not wait on a FIFO. Every
+directory is opened before it is listed, and every file before it is read.
 
 - **macOS.** Every open uses `O_NOFOLLOW_ANY`, which refuses a link in any component of the
   canonical path. So no file is read, and no directory opened, through a link, even one swapped
@@ -117,9 +118,11 @@ Spec 027 leaves the declaration field for commands blocked on consumers, so a `C
 only from `software::fixture::declare_commands`, or back from `PinnedTree::command_names`. The
 fixture compiles for this crate's tests and under the `test-fixture` feature. Enable that
 feature only from `[dev-dependencies]`. The workspace guard
-`only_the_testkit_enables_the_backend_test_fixture` fails the build when any other crate turns it
-on by a normal or build dependency, for any target, unless the edge comes through
-`plasmosome-testkit`, which is itself dev-only.
+`no_crate_enables_the_backend_test_fixture` fails when any crate, the testkit included, turns it
+on by a normal or build dependency, for any target. A `--workspace` build merges the features of
+every member it selects, so one crate's edge would turn the fixture on for product code too, and
+every gate builds that way. No crate needs the fixture yet. A crate that does must add, in the
+same change, a `cargo check -p` for each product crate, and change the guard.
 Core maps a `Conflict` to code 102 and a `PinRefusal` to code 108. The 102 does not carry spec
 027's `fix` yet, and neither does the 108 for `CommandNotInTree`, because the declaration field
 they would name does not exist. plasmosome-tbru adds both. No product path reaches
