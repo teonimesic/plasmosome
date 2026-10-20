@@ -143,6 +143,54 @@ pub fn exact_backend_effect(entry: &LedgerEntry) -> Effect {
     )
 }
 
+/// Returns `Capability::SessionFile` holding exactly `path`. Nothing is checked or normalized,
+/// so a test may pass an invalid path.
+/// Test support only: production capabilities will come from spec 017's manifest resolver.
+pub fn session_file(path: &str) -> Capability {
+    Capability::SessionFile {
+        path: path.to_string(),
+    }
+}
+
+/// Returns `Capability::UdsSocket` holding exactly `path`. Nothing is checked or normalized, so
+/// a test may pass an invalid path.
+/// Test support only: production capabilities will come from spec 017's manifest resolver.
+pub fn uds_socket(path: &str) -> Capability {
+    Capability::UdsSocket {
+        path: path.to_string(),
+    }
+}
+
+/// Returns `Capability::ProxyMap` holding exactly `host` and `route`. Nothing is checked or
+/// normalized, so a test may pass an invalid name.
+/// Test support only: production capabilities will come from spec 017's manifest resolver.
+pub fn proxy_map(host: &str, route: &str) -> Capability {
+    Capability::ProxyMap {
+        host: host.to_string(),
+        route: route.to_string(),
+    }
+}
+
+/// Returns `Capability::Broker` holding exactly `pid` and `name`. Nothing is checked or
+/// normalized, so a test may pass an invalid name.
+/// Test support only: production capabilities will come from spec 017's manifest resolver.
+pub fn broker(pid: u32, name: &str) -> Capability {
+    Capability::Broker {
+        pid,
+        name: name.to_string(),
+    }
+}
+
+/// Returns `Capability::Mount` holding exactly `source` and `target`. Nothing is checked or
+/// normalized, so a test may pass an invalid path.
+/// Test support only: production capabilities will come from spec 017's manifest resolver.
+pub fn mount(source: &str, target: &str) -> Capability {
+    Capability::Mount {
+        source: source.to_string(),
+        target: target.to_string(),
+    }
+}
+
 /// Builds a `DesiredState` one cell and one plasmid at a time. A plasmid named
 /// for a cell that was never declared creates that cell without a genome.
 pub struct DesiredStateBuilder {
@@ -186,6 +234,116 @@ impl DesiredStateBuilder {
         DesiredState {
             generation: self.generation,
             cells: self.cells,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_file_holds_exactly_its_path_unchecked() {
+        for path in [
+            "/skills/pr.md",
+            "skills/../pr.md/",
+            "/skills/pr\0.md",
+            "",
+            " /skills/pr.md\n",
+            "/skills/pr.md/",
+            "/Skills/PR.md",
+            "/skills//pr.md",
+        ] {
+            assert_eq!(
+                session_file(path),
+                Capability::SessionFile {
+                    path: path.to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn uds_socket_holds_exactly_its_path_unchecked() {
+        for path in [
+            "/run/plasmosome/egressd.uds",
+            "run//egressd.uds",
+            "",
+            "\t/run/plasmosome/egressd.uds ",
+            "/run/plasmosome/egressd.uds/",
+            "/RUN/Plasmosome/EgressD.uds",
+            "/run/egress\0d.uds",
+        ] {
+            assert_eq!(
+                uds_socket(path),
+                Capability::UdsSocket {
+                    path: path.to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_map_holds_exactly_its_host_and_route_in_place() {
+        for (host, route) in [
+            ("api.github.com", "splice"),
+            ("splice", "api.github.com"),
+            ("api.github\0.com", "../relative/route/"),
+            (" api.github.com\t", "\nsplice "),
+            ("API.GitHub.com", "Splice"),
+            ("api.github.com.", "/splice/"),
+            ("", "spl\0ice//"),
+            ("api.github.com", ""),
+        ] {
+            assert_eq!(
+                proxy_map(host, route),
+                Capability::ProxyMap {
+                    host: host.to_string(),
+                    route: route.to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn broker_holds_exactly_its_pid_and_name() {
+        for (pid, name) in [
+            (4242, "egressd"),
+            (0, "egress\0d"),
+            (u32::MAX, ""),
+            (7, " egressd\n"),
+            (31337, "EgressD"),
+        ] {
+            assert_eq!(
+                broker(pid, name),
+                Capability::Broker {
+                    pid,
+                    name: name.to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn mount_holds_exactly_its_source_and_target_in_place() {
+        for (source, target) in [
+            ("/srv/repo", "/workspace"),
+            ("/workspace", "/srv/repo"),
+            ("srv/repo", "/workspace/"),
+            ("/srv/repo/", "/workspace/"),
+            (" /srv/repo", "/workspace\n"),
+            ("/SRV/Repo", "/Workspace"),
+            ("/srv/re\0po\n", " /work//space"),
+            ("", ""),
+            ("/srv//repo", "/work\0space"),
+        ] {
+            assert_eq!(
+                mount(source, target),
+                Capability::Mount {
+                    source: source.to_string(),
+                    target: target.to_string(),
+                }
+            );
         }
     }
 }
