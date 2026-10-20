@@ -476,14 +476,21 @@ fn a_member_whose_manifest_is_not_valid_toml_is_refused_not_skipped() {
 }
 
 #[test]
-fn only_the_testkit_enables_the_backend_test_fixture() {
+fn no_crate_enables_the_backend_test_fixture() {
     check_workspace(|root| {
-        let outside = test_fixture_enablers_outside_the_testkit(root);
-        assert!(
-            outside.is_empty(),
-            "{outside:?} enable `{BACKEND}/{TEST_FIXTURE}` outside `[dev-dependencies]`. That feature lets code build a `CommandName` from text, so test scaffolding would ship to a consumer, which spec 013 puts in a guard's scope as \"test scaffolding leaving `[dev-dependencies]`\". Only `{TESTKIT}`, which `testkit_is_dev_only` keeps dev-only, may enable it"
-        );
+        if let Some(refusal) = test_fixture_refusal(root) {
+            panic!("{refusal}");
+        }
     });
+}
+
+fn test_fixture_refusal(root: &Path) -> Option<String> {
+    let enablers = test_fixture_enablers(root);
+    (!enablers.is_empty()).then(|| {
+        format!(
+            "{enablers:?} enable `{BACKEND}/{TEST_FIXTURE}` outside `[dev-dependencies]`. That feature lets code build a `CommandName` from text, so test scaffolding would ship to a consumer, which spec 013 puts in a guard's scope as \"test scaffolding leaving `[dev-dependencies]`\". No crate may enable it, `{TESTKIT}` included: a `--workspace` build merges the features of every member it selects, so one crate's edge turns the feature on for all of them, and every gate here builds that way. A crate that needs the fixture must, in the same PR, add a `cargo check -p` for each product crate and change this guard"
+        )
+    })
 }
 
 fn test_fixture_enablers(root: &Path) -> Vec<String> {
@@ -537,13 +544,6 @@ fn test_fixture_enablers(root: &Path) -> Vec<String> {
         }
     }
     enablers.into_iter().collect()
-}
-
-fn test_fixture_enablers_outside_the_testkit(root: &Path) -> Vec<String> {
-    test_fixture_enablers(root)
-        .into_iter()
-        .filter(|enabler| enabler != TESTKIT)
-        .collect()
 }
 
 fn fixture_feature_workspace(consumer: &str, workspace_dependencies: &str) -> tempfile::TempDir {
