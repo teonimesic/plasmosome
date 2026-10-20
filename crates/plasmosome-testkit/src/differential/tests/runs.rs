@@ -2,7 +2,8 @@ use serde_json::json;
 
 use super::{finding, ids, lane_run, manifest, object, observation, runs, set, verdict};
 use crate::differential::{
-    Channel, Finding, Lane, ManifestRefusal, Reason, Run, RunRefusal, Subject, Verdict, judge,
+    Channel, Finding, Lane, ManifestRefusal, MountKey, NeutralName, Reason, Rule, RuleKind, Run,
+    RunRefusal, Subject, Verdict, judge,
 };
 
 fn not_run(probe: &str, lane: Lane) -> Finding {
@@ -99,6 +100,71 @@ fn a_reach_probe_equal_in_the_open_and_absent_lanes_fails() {
             "disturbance-path-3",
             Reason::NoDiscrimination
         )])
+    );
+}
+
+#[test]
+fn a_reach_probe_that_differs_only_in_a_ruled_field_does_not_discriminate() {
+    let mut manifest = manifest();
+    manifest.rules.push(Rule {
+        probe: "refusal-host-1".to_string(),
+        field: "pid".to_string(),
+        kind: RuleKind::Pid,
+    });
+    let mut runs = runs();
+    never_discriminates(&mut runs, "refusal-host-1");
+    for (lane, pid) in [(Lane::Cell, 300), (Lane::Open, 310), (Lane::Absent, 300)] {
+        set(&mut runs, lane, "refusal-host-1", "pid", json!(pid));
+    }
+    assert_eq!(
+        verdict(&manifest, &runs),
+        Verdict::Fail(vec![finding("refusal-host-1", Reason::NoDiscrimination)])
+    );
+}
+
+#[test]
+fn a_failure_in_a_completed_run_is_listed_when_the_lanes_other_run_is_not_run() {
+    let mut runs = runs();
+    let copied = json!({"source": "plasmosome-software", "fstype": "virtiofs", "options": "ro"});
+    let mounts = &mut observation(&mut runs, Lane::Cell, 0, "hint-mounts").fields;
+    mounts.insert("/opt".to_string(), copied);
+    observation(&mut runs, Lane::Cell, 1, "hint-mounts").completed = false;
+    never_discriminates(&mut runs, "refusal-host-3");
+    observation(&mut runs, Lane::Open, 1, "refusal-host-3").completed = false;
+    let transcript = runs[0].transcript.as_mut().expect("a transcript");
+    transcript.insert("exit_statuses".to_string(), json!([1]));
+    runs[1].transcript = None;
+    let on_transcript = |reason| Finding {
+        subject: Subject::Transcript,
+        reason,
+    };
+    let name = NeutralName::Mount {
+        path: "/opt".to_string(),
+        key: MountKey::Source,
+    };
+    assert_eq!(
+        verdict(&manifest(), &runs),
+        Verdict::NotRun {
+            not_run: vec![
+                not_run("refusal-host-3", Lane::Open),
+                not_run("hint-mounts", Lane::Cell),
+                on_transcript(Reason::NotRun { lane: Lane::Cell }),
+            ],
+            failures: vec![
+                finding("refusal-host-3", Reason::NoDiscrimination),
+                finding(
+                    "hint-mounts",
+                    Reason::NotNeutral {
+                        lane: Lane::Cell,
+                        name
+                    }
+                ),
+                super::differs("hint-mounts", "/opt"),
+                on_transcript(Reason::Differs {
+                    field: "exit_statuses".to_string()
+                }),
+            ],
+        }
     );
 }
 
