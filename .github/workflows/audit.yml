@@ -37,9 +37,11 @@ env:
 
 # The issue belongs to the repository, not to a branch, so every run waits for the one in
 # progress. Two runs at once could both find no issue and both open one. GitHub keeps one pending
-# run per group, and a newer run cancels it. So a push or a dispatch that arrives while a scheduled
-# run is still pending cancels that run, and that week's weekly checks do not run. The cancelled
-# run shows grey; a dispatch runs the weekly checks again.
+# run per group, and a newer run cancels it. So a push or a dispatch can cancel a pending scheduled
+# run, and that week's weekly checks do not run, or a pending push run, whose lockfile check waits
+# for the next push or Monday. A cancelled run shows grey; a dispatch on main runs both again. A
+# dispatch on another branch writes that branch's findings into the issue for main, and each
+# section shows its commit but not its branch.
 concurrency:
   group: audit
   cancel-in-progress: false
