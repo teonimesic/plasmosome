@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Defend which lockfiles cargo-deny-check reads, when it runs, and how it classifies cargo-deny."""
+"""Defend which lockfiles cargo-deny-check reads, when it runs, how it classifies cargo-deny, and its report."""
 
+import atexit
 import contextlib
+import functools
+from datetime import date, datetime, timezone
 import io
 import json
 import os
@@ -10,9 +13,12 @@ import re
 import runpy
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import tomllib
 
 
 SOURCE = Path(__file__).resolve().with_name("cargo-deny-check")
@@ -32,10 +38,15 @@ manifest = sys.argv[sys.argv.index("--manifest-path") + 1]
 relative = os.path.relpath(os.path.abspath(manifest), os.getcwd())
 with open(os.environ["FAKE_LOG"], "a") as log:
     log.write(json.dumps({"argv": sys.argv, "manifest": relative, "color": os.environ.get("CARGO_TERM_COLOR")}) + "\\n")
-fixture = json.loads(open(os.environ["FAKE_FIXTURES"]).read())[plan[relative]]
-for line in fixture["stderr"]:
-    print(line, file=sys.stderr)
-sys.exit(fixture["exit"])
+check = sys.argv[sys.argv.index("check") + 1]
+names = plan.get(relative + " " + check, plan.get(relative))
+fixtures = json.loads(open(os.environ["FAKE_FIXTURES"]).read())
+status = 0
+for name in [names] if isinstance(names, str) else names:
+    for line in fixtures[name]["stderr"]:
+        print(line, file=sys.stderr)
+    status = status or fixtures[name]["exit"]
+sys.exit(status)
 """
 
 FAKE_CARGO = """\
@@ -92,6 +103,14 @@ def timeout():
             namespace["TIMEOUT"], os.environ["PATH"] = saved
         assert outcome["status"] == "tool failure" and outcome["code"] == 2, outcome
         assert "could not complete" in outcome["failures"][0] and "timed out" in outcome["failures"][0], outcome
+
+
+def unused_exceptions_are_reported():
+    """An unused licence exception stays a finding. So a dead exception leaves deny.toml rather than going quiet."""
+    licenses = tomllib.loads((SOURCE.parent.parent / "deny.toml").read_text()).get("licenses", {})
+    assert licenses.get("unused-license-exception", "warn") in ("warn", "deny"), licenses
+    found = API["classify"]("licenses", FIXTURES["clean-licenses"]["stderr"], 0)["findings"]
+    assert [(item["kind"], item["severity"]) for item in found] == [("license-exception-not-encountered", "warning")], found
 
 
 def cache_key_names_installed_version():
@@ -186,19 +205,25 @@ def commit(repository, message):
         "commit", "--quiet", "--no-verify", "-m", message)
 
 
+@functools.cache
+def fake_bin():
+    directory = Path(tempfile.mkdtemp(prefix="cargo-deny-check-fakes-"))
+    atexit.register(shutil.rmtree, directory, True)
+    for name, text in (("cargo-deny", FAKE_CARGO_DENY), ("cargo", FAKE_CARGO)):
+        write(directory / name, f"#!{sys.executable}\n{text}")
+        (directory / name).chmod(0o755)
+    return directory
+
+
 class Repository:
     def __init__(self, directory, files):
         self.root = Path(directory) / "repository"
-        self.bin = Path(directory) / "bin"
+        self.bin = fake_bin()
         self.log = Path(directory) / "cargo-deny.log"
         self.cargo_log = Path(directory) / "cargo.log"
         self.plan = Path(directory) / "plan.json"
         self.summary = Path(directory) / "summary.md"
         self.root.mkdir()
-        self.bin.mkdir()
-        for name, text in (("cargo-deny", FAKE_CARGO_DENY), ("cargo", FAKE_CARGO)):
-            write(self.bin / name, f"#!{sys.executable}\n{text}")
-            (self.bin / name).chmod(0o755)
         git(self.root, "init", "--quiet")
         for name, text in files.items():
             write(self.root / name, text)
@@ -382,7 +407,306 @@ def outcomes():
         assert "deny.toml" in result.stdout, result.stdout
 
 
+PIN = '[toolchain]\nchannel = "1.99.1"\ncomponents = ["clippy", "rustfmt"]\nprofile = "minimal"\n'
+QUIET = {f"{manifest} {check}": "licenses-quiet" if check == "licenses" else f"clean-{check}"
+         for manifest in ("Cargo.toml", "fuzz/Cargo.toml") for check in ("sources", "advisories", "licenses")}
+WEEKLY_KINDS = {"expired-ignore", "unparsable-ignore", "newer-stable"}
+
+
+def channel(directory, version):
+    path = Path(directory) / f"channel-rust-stable-{version}.toml"
+    path.write_text(f'manifest-version = "2"\n\n[pkg.rust]\nversion = "{version} (0123456789 2026-10-30)"\n')
+    return path.as_uri()
+
+
+def ignores(*entries):
+    return "[advisories]\nignore = [\n" + "".join(f"  {entry},\n" for entry in entries) + "]\n"
+
+
+def ignore(advisory, reason):
+    return f'{{ id = "{advisory}", reason = "{reason}" }}'
+
+
+def report(repository, event, stable, overrides=None, path=None):
+    output = repository.root.parent / "findings.json"
+    if output.exists():
+        output.unlink()
+    result, calls, summary = repository.run("report", "--json-out", str(output), "--event", event, "--stable-url", stable,
+                                            plan={**QUIET, **(overrides or {})}, path=path)
+    written = output.read_text() if output.exists() else None
+    if written is not None:
+        assert written.isascii() and written.endswith("\n") and "\n" not in written[:-1], written
+    document = json.loads(written) if written is not None else None
+    return result, calls, summary, document
+
+
+def kinds(document):
+    return [finding["kind"] for finding in document["findings"]]
+
+
+def report_covers_every_lockfile_with_warnings():
+    with tempfile.TemporaryDirectory(prefix="cargo-deny-check-report-") as directory:
+        repository = Repository(directory, {**BASE, "rust-toolchain.toml": PIN})
+        same = channel(directory, "1.99.1")
+        head = git(repository.root, "rev-parse", "HEAD").strip()
+        today = datetime.now(timezone.utc).date().isoformat()
+
+        result, calls, summary, document = report(repository, "push", same)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert document["findings"] == [], document
+        assert sorted((call["manifest"], call["argv"][call["argv"].index("check") + 1]) for call in calls) == sorted(
+            (manifest, check) for manifest in ("Cargo.toml", "fuzz/Cargo.toml") for check in API["CHECKS"]), calls
+        assert document["event"] == "push" and document["weekly"] is False, document
+        assert document["schema"] == 2 and document["sections"] == ["lockfiles"], document
+        assert document["commit"] == head and document["date"] == today, document
+
+        result, calls, summary, document = report(repository, "push", same, {
+            "Cargo.toml advisories": ["notice-warned", "yanked-warned"],
+            "Cargo.toml licenses": "licence-rejected",
+            "fuzz/Cargo.toml advisories": "unmaintained-warned",
+            "fuzz/Cargo.toml licenses": "clean-licenses",
+        })
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        found = {(item["kind"], item["lockfile"], item["package"], item["advisory"]) for item in document["findings"]}
+        for expected in (
+            ("notice", "Cargo.lock", "inconceivable 0.9.0", "RUSTSEC-2022-0058"),
+            ("yanked", "Cargo.lock", "smallvec 1.13.0", None),
+            ("rejected", "Cargo.lock", "m 0.1.0", None),
+            ("unmaintained", "fuzz/Cargo.lock", "bitmaps 3.1.0", "RUSTSEC-2026-0247"),
+            ("license-exception-not-encountered", "fuzz/Cargo.lock", None, None),
+        ):
+            assert expected in found, (expected, found)
+        assert "tool-failure" not in kinds(document), document
+        assert {item["section"] for item in document["findings"]} == {"lockfiles"}, document
+        notice = next(item for item in document["findings"] if item["kind"] == "notice")
+        assert notice["check"] == "advisories" and notice["severity"] == "warning", notice
+        assert notice["url"] == "https://crates.io/crates/inconceivable" and notice["title"], notice
+        for text in (result.stdout, summary):
+            assert "RUSTSEC-2022-0058" in text and "bitmaps 3.1.0" in text and "fuzz/Cargo.lock" in text, text
+
+        result, calls, summary, document = report(repository, "push", same, {
+            "fuzz/Cargo.toml advisories": "vulnerability", "Cargo.toml sources": "stale-lockfile",
+            "Cargo.toml advisories": "vulnerability-ignored-info", "Cargo.toml licenses": ["warn-log", "licenses-quiet"]})
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        vulnerability = next(item for item in document["findings"] if item["kind"] == "vulnerability")
+        assert vulnerability == {
+            "kind": "vulnerability", "check": "advisories", "lockfile": "fuzz/Cargo.lock", "severity": "error",
+            "package": "smallvec 1.6.0", "advisory": "RUSTSEC-2021-0003",
+            "title": "Buffer overflow in SmallVec::insert_many", "url": "https://github.com/servo/rust-smallvec/issues/252",
+            "section": "lockfiles",
+        }, vulnerability
+        stale = next(item for item in document["findings"] if item["kind"] == "stale-lockfile")
+        assert stale["lockfile"] == "Cargo.lock" and "--locked was passed to prevent this" in stale["title"], stale
+        assert "advisory-ignored" not in kinds(document), document
+        assert [item["lockfile"] for item in document["findings"] if item["kind"] == "vulnerability"] == [
+            "fuzz/Cargo.lock"], document
+        assert not any("directory entry" in item["title"] for item in document["findings"]), document
+        notes = [line for line in result.stdout.splitlines() if line.startswith("note: ")]
+        assert any(line.startswith("note: Cargo.lock licenses: ") and
+                   "warning log: failed to read directory entry: an invented reason" in line for line in notes), notes
+        assert any(line.startswith("note: Cargo.lock advisories: ") and "advisory-ignored" in line for line in notes), notes
+        assert "failed to read directory entry: an invented reason" in summary, summary
+
+
+def report_output_holds_no_workflow_command():
+    """Text from cargo-deny never starts a line of the job log, where the runner reads workflow commands.
+
+    The runner ends a line at a CR as well as an LF, so a CR in an advisory's title could start a
+    `::set-output` line. Every finding and note is printed on one line, its whitespace collapsed.
+    """
+    with tempfile.TemporaryDirectory(prefix="cargo-deny-check-report-commands-") as directory:
+        repository = Repository(directory, {**BASE, "rust-toolchain.toml": PIN})
+        result, calls, summary, document = report(repository, "push", channel(directory, "1.99.1"), {
+            "Cargo.toml advisories": "vulnerability-hostile-title",
+            "Cargo.toml licenses": ["warn-log-hostile", "licenses-quiet"]})
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        vulnerability = next(item for item in document["findings"] if item["kind"] == "vulnerability")
+        assert "\r::set-output name=findings::" in vulnerability["title"], vulnerability
+        assert vulnerability["url"].endswith("\r::warning::forged in the url"), vulnerability
+        for text, finding, note in ((result.stdout, "finding: vulnerability ", "note: Cargo.lock licenses: warning log: "),
+                                    (summary, "- vulnerability ", "- Cargo.lock licenses: warning log: ")):
+            lines = re.split(r"\r\n|\r|\n", text)
+            assert not any(line.lstrip().startswith("::") for line in lines), text
+            forged = [line for line in lines if "forged" in line]
+            assert len(forged) == 2 and forged[0].startswith(finding) and forged[1].startswith(note), forged
+            assert forged[0].endswith("::error::forged https://github.com/servo/rust-smallvec/issues/252 "
+                                      "::warning::forged in the url"), forged
+            assert forged[1].endswith("::warning::forged in a note"), forged
+
+
+def report_tool_failures():
+    with tempfile.TemporaryDirectory(prefix="cargo-deny-check-report-failures-") as directory:
+        repository = Repository(directory, {**BASE, "rust-toolchain.toml": PIN})
+        same = channel(directory, "1.99.1")
+
+        result, calls, summary, document = report(repository, "push", same, {
+            "fuzz/Cargo.toml advisories": "db-unreachable", "Cargo.toml advisories": "vulnerability"})
+        assert result.returncode == 0 and document is not None, (result.stdout, result.stderr)
+        failure = next(item for item in document["findings"] if item["kind"] == "tool-failure")
+        assert failure["lockfile"] == "fuzz/Cargo.lock" and failure["check"] == "advisories", failure
+        assert "failed to fetch advisory database" in failure["title"], failure
+        assert "vulnerability" in kinds(document), document
+
+        result, calls, summary, document = report(repository, "push", same, {"Cargo.toml advisories": "malformed-graphs",
+                                                                           "fuzz/Cargo.toml advisories": "notice-warned"})
+        assert result.returncode == 0 and document is not None, (result.stdout, result.stderr)
+        crashed = [item for item in document["findings"] if item["kind"] == "tool-failure"]
+        assert len(crashed) == 1 and crashed[0]["lockfile"] == "Cargo.lock" and "TypeError" in crashed[0]["title"], crashed
+        assert "notice" in kinds(document), document
+
+        bare = Path(directory) / "bare-bin"
+        bare.mkdir()
+        os.symlink(shutil.which("git"), bare / "git")
+        result, calls, summary, document = report(repository, "push", same, path=str(bare))
+        assert result.returncode == 0 and calls == [], (result.stdout, result.stderr)
+        assert kinds(document) == ["tool-failure"] * 6, document
+        assert all("not on PATH" in item["title"] for item in document["findings"]), document
+
+    with tempfile.TemporaryDirectory(prefix="cargo-deny-check-report-unconfigured-") as directory:
+        repository = Repository(directory, {name: text for name, text in BASE.items() if name != "deny.toml"})
+        result, calls, summary, document = report(repository, "push", channel(directory, "1.99.1"))
+        assert result.returncode == 0 and calls == [], (result.stdout, result.stderr)
+        assert kinds(document) == ["tool-failure"] and "deny.toml" in document["findings"][0]["title"], document
+        assert document["sections"] == ["lockfiles"] and document["findings"][0]["section"] == "lockfiles", document
+
+
+def report_weekly_checks():
+    """The CLI wiring of the weekly checks; ignore_expiry and stable_comparison cover their logic."""
+    with tempfile.TemporaryDirectory(prefix="cargo-deny-check-report-weekly-") as directory:
+        repository = Repository(directory, {**BASE, "rust-toolchain.toml": PIN, "deny.toml": ignores(
+            ignore("RUSTSEC-2000-0001", "until 2000-01-01; https://example.invalid/a; long past"),
+            ignore("RUSTSEC-2000-0002", "until 2999-12-31; https://example.invalid/b; still valid"),
+            ignore("RUSTSEC-2000-0003", "until 2026-9-30; https://example.invalid/c; not zero-padded, naïve"),
+        )})
+        newer = channel(directory, "1.100.0")
+        missing = (Path(directory) / "no-such-channel.toml").as_uri()
+
+        result, calls, summary, document = report(repository, "schedule", newer, {"Cargo.toml advisories": "notice-warned"})
+        assert result.returncode == 0 and document["weekly"] is True, (result.stdout, result.stderr)
+        assert document["sections"] == ["lockfiles", "weekly"], document
+        found = {(item["kind"], item["advisory"], item["section"]) for item in document["findings"]}
+        assert found == {("notice", "RUSTSEC-2022-0058", "lockfiles"), ("expired-ignore", "RUSTSEC-2000-0001", "weekly"),
+                         ("unparsable-ignore", "RUSTSEC-2000-0003", "weekly"), ("newer-stable", None, "weekly")}, document
+        stable = next(item for item in document["findings"] if item["kind"] == "newer-stable")
+        assert stable["package"] == "rust 1.100.0" and "1.99.1" in stable["title"] and stable["url"], stable
+        assert "naïve" in next(item["title"] for item in document["findings"] if item["kind"] == "unparsable-ignore")
+        assert "RUSTSEC-2000-0001" in result.stdout and "RUSTSEC-2000-0001" in summary, (result.stdout, summary)
+
+        result, calls, summary, document = report(repository, "workflow_dispatch", missing)
+        assert result.returncode == 0 and document["weekly"] is True, (result.stdout, result.stderr)
+        assert document["sections"] == ["lockfiles", "weekly"], document
+        found = {(item["kind"], item["advisory"], item["section"]) for item in document["findings"]}
+        assert found == {("expired-ignore", "RUSTSEC-2000-0001", "weekly"), ("unparsable-ignore", "RUSTSEC-2000-0003", "weekly"),
+                         ("tool-failure", None, "weekly")}, document
+        failure = next(item for item in document["findings"] if item["kind"] == "tool-failure")
+        assert "no-such-channel.toml" in failure["title"], failure
+
+        result, calls, summary, document = report(repository, "push", missing)
+        assert result.returncode == 0 and document["weekly"] is False, (result.stdout, result.stderr)
+        assert document["sections"] == ["lockfiles"] and document["findings"] == [], document
+
+
+def ignore_expiry():
+    today = date(2026, 10, 9)
+    text = ignores(
+        ignore("RUSTSEC-2026-0001", "until 2026-10-09; https://example.invalid/a; dated today"),
+        ignore("RUSTSEC-2026-0002", "until 2026-10-08; https://example.invalid/b; dated yesterday"),
+        ignore("RUSTSEC-2026-0003", "until 2026-9-30; https://example.invalid/c; not zero-padded"),
+        ignore("RUSTSEC-2026-0004", "until 2026-12-01; no link; a reason without a link"),
+        ignore("RUSTSEC-2026-0005", "until 2026-02-30; https://example.invalid/e; no such day"),
+        ignore("RUSTSEC-2026-0006", "until 2026-12-01; https://example.invalid/f; "),
+        ignore("RUSTSEC-2026-0007", "until 2026-12-01; https://example.invalid/g; why\\nwith a second line"),
+        ignore("RUSTSEC-2026-0008", "until \u0662\u0660\u0662\u0666-12-01; https://example.invalid/h; other digits"),
+        '"RUSTSEC-2026-0009"',
+        '{ id = "RUSTSEC-2026-0010" }',
+        '{ crate = "smallvec@1.13.0", reason = "until 2026-10-01; https://example.invalid/k; a yanked crate" }',
+    )
+    found = API["ignore_findings"](text, today)
+    assert {(item["kind"], item["advisory"]) for item in found} == {
+        ("expired-ignore", "RUSTSEC-2026-0002"),
+        *(("unparsable-ignore", f"RUSTSEC-2026-{number:04d}") for number in range(3, 11)),
+        ("expired-ignore", "smallvec@1.13.0"),
+    }, found
+    expired = next(item for item in found if item["advisory"] == "RUSTSEC-2026-0002")
+    assert "2026-10-08" in expired["title"] and expired["url"] == "https://example.invalid/b", expired
+    assert API["ignore_findings"]("[sources]\n", today) == []
+    assert API["ignore_findings"]("[advisories]\nignore = []\n", today) == []
+    for broken in ("[advisories\n", "[advisories]\nignore = 3\n", "advisories = 3\n", "[advisories]\nignore = [3]\n"):
+        found = API["ignore_findings"](broken, today)
+        assert [item["kind"] for item in found] == ["tool-failure"] and "deny.toml" in found[0]["title"], (broken, found)
+
+
+def serve(answer):
+    """Answer one HTTP request on localhost with these bytes, then close the connection."""
+    listener = socket.create_server(("127.0.0.1", 0))
+
+    def respond():
+        with listener:
+            connection, _ = listener.accept()
+            with connection:
+                connection.recv(65536)
+                connection.sendall(answer)
+
+    thread = threading.Thread(target=respond, daemon=True)
+    thread.start()
+    return f"http://127.0.0.1:{listener.getsockname()[1]}/channel-rust-stable.toml", thread
+
+
+def stable_comparison():
+    for answer, name in ((b"garbage\r\n\r\n", "BadStatusLine"),
+                         (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n40\r\nmanifest-version", "IncompleteRead")):
+        url, thread = serve(answer)
+        found = API["stable_findings"](PIN, url)
+        thread.join(10)
+        assert [item["kind"] for item in found] == ["tool-failure"] and name in found[0]["title"], (name, found)
+    with tempfile.TemporaryDirectory(prefix="cargo-deny-check-stable-") as directory:
+        for stable, pin, newer in (
+            ("1.99.1", "1.99.1", False), ("1.99.2", "1.99.1", True), ("1.100.0", "1.99.1", True),
+            ("1.98.9", "1.99.1", False), ("2.0.0", "1.99.1", True), ("1.99.1", "1.100.0", False),
+        ):
+            found = API["stable_findings"](PIN.replace("1.99.1", pin), channel(directory, stable))
+            assert [item["kind"] for item in found] == (["newer-stable"] if newer else []), (stable, pin, found)
+        for pin in ("stable", "1.99", "1.99.1-beta"):
+            found = API["stable_findings"](PIN.replace("1.99.1", pin), channel(directory, "1.99.1"))
+            assert [item["kind"] for item in found] == ["tool-failure"], (pin, found)
+        broken = Path(directory) / "broken.toml"
+        for text in ("not toml [", "[pkg.rust]\n", '[pkg.rust]\nversion = "nightly"\n'):
+            broken.write_text(text)
+            found = API["stable_findings"](PIN, broken.as_uri())
+            assert [item["kind"] for item in found] == ["tool-failure"], (text, found)
+        found = API["stable_findings"](PIN, (Path(directory) / "absent.toml").as_uri())
+        assert [item["kind"] for item in found] == ["tool-failure"], found
+        namespace = API["stable_findings"].__globals__
+        saved = namespace["CHANNEL_LIMIT"]
+        namespace["CHANNEL_LIMIT"] = 16
+        try:
+            found = API["stable_findings"](PIN, channel(directory, "1.100.0"))
+        finally:
+            namespace["CHANNEL_LIMIT"] = saved
+        assert [item["kind"] for item in found] == ["tool-failure"] and "over 16 bytes" in found[0]["title"], found
+
+
+def report_arguments():
+    with tempfile.TemporaryDirectory(prefix="cargo-deny-check-report-arguments-") as directory:
+        repository = Repository(directory, BASE)
+        output = Path(directory) / "findings.json"
+        for args in (("report", "--json-out", str(output)), ("report", "--event", "push"),
+                     ("report", "--json-out", str(output), "--event", "push", "--changed-since", "HEAD"),
+                     ("sources", "--event", "push"), ("advisories", "--json-out", str(output)),
+                     ("report", "--json-out", str(output), "--event", "pull_request")):
+            result, calls, summary = repository.run(*args, plan=QUIET)
+            assert result.returncode == 2 and "usage:" in result.stderr, (args, result.stdout, result.stderr)
+            assert calls == [] and not output.exists(), (args, calls)
+
+
 def main():
+    ignore_expiry()
+    stable_comparison()
+    report_covers_every_lockfile_with_warnings()
+    report_output_holds_no_workflow_command()
+    report_tool_failures()
+    report_weekly_checks()
+    report_arguments()
     classification()
     single_rules()
     timeout()
@@ -391,7 +715,9 @@ def main():
     trigger()
     outcomes()
     cache_key_names_installed_version()
-    print("PASS: cargo-deny output classified by code, tracked lockfiles at any depth, manifest trigger, worst outcome wins")
+    unused_exceptions_are_reported()
+    print("PASS: cargo-deny output classified by code, tracked lockfiles at any depth, manifest trigger, worst outcome wins, "
+          "report with warnings and weekly checks")
 
 
 if __name__ == "__main__":

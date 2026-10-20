@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Defend health-report uncertainty, delivery windows, pagination and read-only failure boundaries."""
+"""Defend health-report uncertainty, delivery windows, pagination, security issues and read-only failure boundaries."""
 
 from datetime import datetime, timedelta, timezone
 import json
@@ -172,6 +172,134 @@ def delivery_boundaries():
     assert failed["collection_status"] == "unavailable" and failed["pull_requests_total"] is None
     invalid = github(start=NOW, end=START)
     assert invalid["collection_status"] == "unavailable" and invalid["delivery"]["count"] is None
+
+
+def security_issue(number, age):
+    return {"number": number, "title": f"Security findings {number}",
+            "url": f"https://github.com/example/repo/issues/{number}", "createdAt": (NOW - age).isoformat()}
+
+
+def issues_page(nodes, total, cursor=None):
+    return {"data": {"repository": {"issues": {
+        "nodes": nodes, "totalCount": total,
+        "pageInfo": {"hasNextPage": cursor is not None, "endCursor": cursor},
+    }}}}
+
+
+def security(*pages):
+    calls = []
+    answer = responses(*pages)
+
+    def run(argv):
+        calls.append(argv)
+        return answer(argv)
+
+    report, errors = API["collect_security_issues"](run, repository="example/repo", observed_at=NOW)
+    return report, errors, calls
+
+
+def security_issues():
+    week, hour = timedelta(days=8), timedelta(hours=1)
+    report, errors, calls = security(issues_page([security_issue(4, week), security_issue(9, hour)], 2))
+    assert report["collection_status"] == "complete" and errors == [], (report, errors)
+    assert report["count"] == 2 and report["observed_count"] == 2, report
+    assert report["issues"] == [
+        {"number": 4, "title": "Security findings 4", "url": "https://github.com/example/repo/issues/4",
+         "created_at": API["timestamp"](NOW - week), "age_seconds": week.total_seconds()},
+        {"number": 9, "title": "Security findings 9", "url": "https://github.com/example/repo/issues/9",
+         "created_at": API["timestamp"](NOW - hour), "age_seconds": hour.total_seconds()},
+    ], report["issues"]
+    assert len(calls) == 1 and calls[0][:3] == ["gh", "api", "graphql"], calls
+    query = next(argument for argument in calls[0] if argument.startswith("query="))
+    assert 'labels:["security"]' in query and "states:OPEN" in query, query
+    assert "owner=example" in calls[0] and "name=repo" in calls[0], calls
+
+    paged, errors, calls = security(issues_page([security_issue(4, week)], 2, "next"),
+                                    issues_page([security_issue(9, hour)], 2))
+    assert paged["collection_status"] == "complete" and paged["count"] == 2 and errors == [], paged
+    assert "cursor=next" in calls[1], calls
+
+    empty, errors, calls = security(issues_page([], 0))
+    assert empty["collection_status"] == "complete" and empty["count"] == 0 and empty["issues"] == [], empty
+
+    failed, errors, calls = security(RuntimeError("offline"))
+    assert failed["collection_status"] == "unavailable", failed
+    assert failed["count"] is None and failed["issues"] is None, failed
+    assert errors and errors[0]["source"] == "github" and errors[0]["operation"] == "securityIssues", errors
+    assert "offline" in errors[0]["message"], errors
+
+    for pages in (
+        (issues_page([security_issue(4, week)], 2, "next"), RuntimeError("second page unavailable")),
+        (issues_page([security_issue(4, week)], 2, "next"), issues_page([security_issue(4, week)], 2)),
+        (issues_page([security_issue(4, week)], 2),),
+        ({**issues_page([security_issue(4, week)], 1), "errors": [{"message": "partial response"}]},),
+        (issues_page([{**security_issue(4, week), "createdAt": "not a date"}], 1),),
+        (issues_page([{**security_issue(4, week), "createdAt": (NOW - week).replace(tzinfo=None).isoformat()}], 1),),
+        (issues_page([{**security_issue(4, week), "title": None}], 1),),
+        (issues_page([{**security_issue(4, week), "number": "4"}], 1),),
+        (issues_page([security_issue(4, week)], 2, "next"), issues_page([security_issue(9, hour)], 2, "next")),
+        ({"data": {"repository": {"pullRequests": {}}}},),
+        (["not an object"],),
+        ({"data": {"repository": {"issues": {"nodes": "x", "totalCount": 1, "pageInfo": {}}}}},),
+        ({"data": {"repository": {"issues": {"nodes": [], "totalCount": 0, "pageInfo": {"endCursor": None}}}}},),
+    ):
+        partial, errors, calls = security(*pages)
+        assert partial["collection_status"] in {"partial", "unavailable"}, (pages, partial)
+        assert partial["count"] is None and errors, (pages, partial, errors)
+        assert all(item["operation"] == "securityIssues" for item in errors), errors
+    lost, errors, calls = security(issues_page([security_issue(4, week)], 2, "next"), RuntimeError("offline"))
+    assert lost["collection_status"] == "partial" and lost["observed_count"] == 1, lost
+    assert [item["number"] for item in lost["issues"]] == [4], lost
+
+
+def cli_security_issues():
+    with tempfile.TemporaryDirectory(prefix="pipeline-health-security-regression-") as directory:
+        root = Path(directory)
+        tools = root / "tools"
+        tools.mkdir()
+        shutil.copy2(SOURCE, tools / SOURCE.name)
+        shutil.copy2(SOURCE.with_name("pipeline_review_usage.py"), tools / "pipeline_review_usage.py")
+        created = datetime.now(timezone.utc) - timedelta(days=10)
+        pulls = {"data": {"repository": {"pullRequests": {
+            "nodes": [], "totalCount": 0, "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}
+        issues = {"data": {"repository": {"issues": {
+            "nodes": [{"number": 12, "title": "Security findings on main",
+                       "url": "https://github.com/example/repo/issues/12", "createdAt": created.isoformat()}],
+            "totalCount": 1, "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}
+        gh = root / "gh"
+        gh.write_text(f"#!{sys.executable}\nimport json, os, sys\n"
+                      "query = next(argument for argument in sys.argv if argument.startswith('query='))\n"
+                      "if 'issues(' in query and os.path.exists('fail-issues'):\n"
+                      "    print('fixture issues query refused', file=sys.stderr)\n"
+                      "    raise SystemExit(1)\n"
+                      f"print(json.dumps({issues!r} if 'issues(' in query else {pulls!r}))\n")
+        gh.chmod(0o755)
+        environment = {"PATH": str(root) + os.pathsep + os.defpath, "PYTHONDONTWRITEBYTECODE": "1"}
+
+        def collect():
+            result = subprocess.run([sys.executable, str(tools / SOURCE.name), "--repo", "example/repo", "--native-paused"],
+                                    cwd=root, env=environment, text=True, capture_output=True, timeout=15)
+            assert result.returncode == 2, result
+            return json.loads(result.stdout)
+
+        report = collect()
+        listed = report["github"]["security_issues"]
+        assert report["github"]["collection_status"] == "complete", report["github"]
+        assert listed["collection_status"] == "complete" and listed["count"] == 1, listed
+        assert listed["issues"][0]["number"] == 12 and listed["issues"][0]["url"].endswith("/issues/12"), listed
+        assert timedelta(days=10).total_seconds() <= listed["issues"][0]["age_seconds"] <= timedelta(days=10, minutes=1).total_seconds(), listed
+        assert not [item for item in report["errors"] if item["source"] == "github"], report["errors"]
+
+        (root / "fail-issues").write_text("")
+        report = collect()
+        listed = report["github"]["security_issues"]
+        assert report["github"]["collection_status"] == "partial", report["github"]
+        assert listed["collection_status"] == "unavailable" and listed["count"] is None and listed["issues"] is None, listed
+        assert report["github"]["source"]["inventory_complete"] is True, report["github"]["source"]
+        assert report["reviews"]["collection_status"] == "complete", report["reviews"]
+        failures = [item for item in report["errors"] if item["source"] == "github"]
+        assert [item["operation"] for item in failures] == ["securityIssues"], report["errors"]
+        assert "fixture issues query refused" in failures[0]["message"], failures
 
 
 def cli_failure_isolation():
@@ -361,12 +489,14 @@ def runner_released_group_identity():
 def main():
     native_uncertainty()
     delivery_boundaries()
+    security_issues()
+    cli_security_issues()
     cli_failure_isolation()
     cli_readonly_startup()
     runner_boundaries()
     cli_exit_metadata()
     runner_released_group_identity()
-    print("PASS: native uncertainty/ownership/drift/pause, complete-or-unknown delivery windows/pagination, CLI clock/failure isolation, bounded reaped source commands")
+    print("PASS: native uncertainty/ownership/drift/pause, complete-or-unknown delivery windows/pagination, security issues with ages or unknown, CLI clock/failure isolation, bounded reaped source commands")
 
 
 if __name__ == "__main__":

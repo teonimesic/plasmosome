@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""Open or update the one GitHub issue that holds the security report's findings.
+
+The findings come from `tools/cargo-deny-check report`, or from a later writer of the same file,
+such as the fuzz job. Spec 026 section 4, "The security issue", is the authority: any finding opens
+or updates one issue labelled `security`, and the job refuses nothing. Main's duty follows within
+seven days.
+
+The body has one section per check. A findings file (schema 2) names the sections its run ran, and
+each finding names its section. A run rewrites only those sections and keeps every other section
+as the last run of that check wrote it. So a push run, which skips the weekly checks, keeps the
+weekly section, and the report's runs keep the fuzz job's section. A later writer names its own
+section and runs in the `audit` concurrency group: a run reads the body and writes it back, so two
+runs at once could lose a section. This tool's own findings, an unreadable findings file and a
+second marked issue, form the security-issue section, which every run that writes replaces. An
+unreadable findings file replaces no other section.
+
+audit.yml passes `--handover` with the outcome of the step that handed the findings file over. Unless
+it is success the file is not read, and the run writes a tool failure that says why.
+
+- No findings: nothing happens. The issue is never closed here; closing it is Main's decision.
+- Findings: the open `security` issue whose body carries MARKER gets the new body. It gets a
+  comment only when the findings of a section the run rewrote changed, and the comment carries
+  those sections' findings. A body edit sends no notification. With no marked issue, the label is
+  created if missing and the issue is opened. With two or more, the lowest number is updated and
+  the others are reported as a finding.
+- An issue without MARKER is never edited, because a person filed it.
+
+Exit 0 when the issue holds the findings, 1 when it does and one of this run's findings is a tool
+failure, and 2 when gh failed, so a run that could not vouch for main shows red. `--mode dry-run`
+runs the reads and prints each write instead of running it.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import traceback
+
+
+MARKER = "<!-- spec026-security-report -->"
+TITLE = "Security findings on main"
+LABEL = "security"
+LABEL_COLOR = "b60205"
+LABEL_DESCRIPTION = "Findings from the weekly and push security report (spec 026)"
+SPEC = "docs/specs/026-security-standard.md#4-advisories-sources-licences-and-updates"
+SCHEMA = 2
+OWN = "security-issue"
+ORDER = (OWN, "lockfiles", "weekly")
+TITLES = {OWN: "The security issue tool", "lockfiles": "Every tracked lockfile", "weekly": "Weekly checks"}
+SECTION_NAME = re.compile(r"[a-z][a-z0-9-]{0,39}", re.ASCII)
+BLOCK = re.compile(r"(?ms)^<!-- spec026-section ([a-z][a-z0-9-]*) ([0-9a-f]{64}) -->\n.*?^<!-- spec026-section-end \1 -->\n")
+ISSUE_LIMIT = 1000
+BODY_LIMIT = 60000
+SECTION_LIMIT = 20000
+HANDOVER_LIMIT = 100000
+NOTE_RESERVE = 100
+TEXT_LIMIT = 500
+TIMEOUT = 120
+REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+\Z")
+FIELDS = ("lockfile", "check", "package", "advisory")
+
+
+class GhFailure(Exception):
+    pass
+
+
+def tool_failure(title):
+    return {"kind": "tool-failure", "check": None, "lockfile": None, "severity": "error", "package": None,
+            "advisory": None, "title": title, "url": None, "section": OWN}
+
+
+def problem(document):
+    """Say why a findings file is not a schema 2 report, or return None."""
+    if not isinstance(document, dict):
+        return "it is not a JSON object"
+    if document.get("schema") != SCHEMA:
+        return f"it does not say schema {SCHEMA}"
+    sections = document.get("sections")
+    if not isinstance(sections, list) or not sections or not all(
+            isinstance(name, str) and SECTION_NAME.fullmatch(name) for name in sections):
+        return "it needs a sections list of lowercase names"
+    if OWN in sections:
+        return f"the {OWN} section belongs to this tool"
+    if len(set(sections)) != len(sections):
+        return "it names a section twice"
+    findings = document.get("findings")
+    if not isinstance(findings, list) or not all(isinstance(item, dict) and isinstance(item.get("kind"), str)
+                                                 for item in findings):
+        return "it needs a findings list of objects with a kind"
+    if not all(item.get("section") in sections for item in findings):
+        return "a finding names no section, or one its sections list does not hold"
+    return None
+
+
+def load(path, handover="success"):
+    """Read a findings file into its sections; anything else is a tool failure, never "no findings".
+
+    handover is the outcome of the step that handed the file over. Unless it is success, the file is not
+    read, so a run whose hand-over failed is never taken for the report's findings.
+    """
+    if handover == "failure":
+        return {}, {}, [tool_failure(f"the findings file was over the {HANDOVER_LIMIT} bytes the issue job can read, so "
+                                     "the report job did not hand it over; that job's log lists every finding")]
+    if handover != "success":
+        return {}, {}, [tool_failure("the report job handed over no findings, because one of its steps failed; see the run")]
+    try:
+        with open(path) as source:
+            document = json.load(source)
+    except FileNotFoundError:
+        return {}, {}, [tool_failure(f"there is no findings file at {path}; see the run")]
+    except (OSError, ValueError) as error:
+        return {}, {}, [tool_failure(f"the findings file {path} could not be read: {error}")]
+    reason = problem(document)
+    if reason:
+        return {}, {}, [tool_failure(f"the findings file {path} is not a report: {reason}")]
+    sections = {name: [] for name in document["sections"]}
+    for finding in document["findings"]:
+        sections[finding["section"]].append(finding)
+    return document, sections, []
+
+
+def code(value):
+    text = " ".join(str(value).split())
+    if len(text) > TEXT_LIMIT:
+        text = text[:TEXT_LIMIT] + "..."
+    return "`" + text.replace("`", "'") + "`"
+
+
+def item(number, finding):
+    where = ", ".join(code(finding[key]) for key in FIELDS if finding.get(key))
+    link = f" {code(finding['url'])}" if finding.get("url") else ""
+    title = code(finding.get("title") or "no title")
+    return f"{number}. **{code(finding['kind'])}**{' in ' + where if where else ''}: {title}{link}\n"
+
+
+def digest(findings):
+    canonical = sorted(json.dumps(finding, sort_keys=True) for finding in findings)
+    return hashlib.sha256(json.dumps(canonical).encode()).hexdigest()
+
+
+def ordered(names):
+    return sorted(names, key=lambda name: (ORDER.index(name) if name in ORDER else len(ORDER), name))
+
+
+def section(name, findings, run, limit, markers=True):
+    """Render one section within limit characters; the findings that do not fit are counted, not dropped silently."""
+    run_url, commit, day, event = run
+    head = (f"## {TITLES.get(name, name)}\n\n- Run: {run_url}\n- Commit: {code(commit)}\n- Date: {code(day)}\n"
+            f"- Trigger: {code(event)}\n\n")
+    if markers:
+        head = f"<!-- spec026-section {name} {digest(findings)} -->\n" + head
+    end = f"\n<!-- spec026-section-end {name} -->\n" if markers else "\n"
+    if not findings:
+        return head + "No findings.\n" + end
+    head += f"{len(findings)} finding{'s' if len(findings) != 1 else ''}:\n\n"
+    budget = limit - len(head) - len(end) - NOTE_RESERVE
+    listing = ""
+    for index, finding in enumerate(findings):
+        text = item(index + 1, finding)
+        if len(listing) + len(text) > budget:
+            listing += f"\n{len(findings) - index} more findings are in the run's log.\n"
+            break
+        listing += text
+    return head + listing + end
+
+
+def compose(old, new, rewritten, run, repository):
+    """Return the body that keeps old's sections outside rewritten, and the rewritten sections whose findings changed."""
+    kept, digests = {}, {}
+    for match in BLOCK.finditer(old or ""):
+        if match.group(1) not in kept:
+            kept[match.group(1)], digests[match.group(1)] = match.group(0), match.group(2)
+    changed = [name for name in ordered(rewritten) if digests.get(name, digest([])) != digest(new.get(name, []))]
+    for name in rewritten:
+        kept.pop(name, None)
+    head = (f"{MARKER}\nThe security report's findings on main, one section per check. A run rewrites the sections "
+            "for the checks it ran and keeps the others, so each section shows the last run of its check.\n\n")
+    tail = ("\n## What happens next\n\n"
+            f"Main's duty under [spec 026 section 4](https://github.com/{repository}/blob/main/{SPEC}): within seven "
+            "days, a task, a dated ignore or a bump PR, or the issue put to the owner. A run with findings rewrites "
+            "its sections and comments only when their findings changed. This job never closes the issue; closing it "
+            "is Main's decision.\n")
+    blocks = dict(kept)
+    remaining = BODY_LIMIT - len(head) - len(tail) - sum(len(text) + 1 for text in kept.values())
+    for name in ordered(new):
+        blocks[name] = section(name, new[name], run, min(SECTION_LIMIT, remaining))
+        remaining -= len(blocks[name]) + 1
+    return head + "\n".join(blocks[name] for name in ordered(blocks)) + tail, changed
+
+
+def comment(changed, new, run):
+    text = (f"The security report's findings changed in {run[0]}. These are the sections whose findings changed; "
+            "the issue body lists every section.\n\n")
+    remaining = BODY_LIMIT - len(text)
+    for name in changed:
+        part = section(name, new.get(name, []), run, min(SECTION_LIMIT, remaining), markers=False)
+        text += part + "\n"
+        remaining -= len(part) + 1
+    return text
+
+
+class Gh:
+    def __init__(self, repository, dry_run):
+        self.repository = repository
+        self.dry_run = dry_run
+
+    def call(self, args, stdin=None):
+        argv = ["gh", *args, "--repo", self.repository]
+        environment = {**os.environ, "GH_PROMPT_DISABLED": "1", "GH_PAGER": "cat", "NO_COLOR": "1"}
+        environment.pop("GH_DEBUG", None)
+        try:
+            result = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=TIMEOUT,
+                                    env=environment, stdin=None if stdin is not None else subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise GhFailure(f"gh {' '.join(args[:2])} could not run: {error}") from error
+        if result.returncode != 0:
+            raise GhFailure(f"gh {' '.join(args[:2])} exited {result.returncode}: {result.stderr.strip()[:1500]}")
+        return result.stdout
+
+    def read(self, args):
+        try:
+            return json.loads(self.call(args))
+        except ValueError as error:
+            raise GhFailure(f"gh {' '.join(args[:2])} returned invalid JSON: {error}") from error
+
+    def write(self, args, body):
+        if self.dry_run:
+            print(f"dry run, not run: gh {' '.join(args)} --repo {self.repository}")
+            if body is not None:
+                print(body)
+            return
+        print(self.call(args, stdin=body).strip())
+
+
+def marked_issues(gh):
+    """Return (number, body) for each open security issue whose body carries MARKER, lowest number first."""
+    issues = gh.read(["issue", "list", "--label", LABEL, "--state", "open", "--limit", str(ISSUE_LIMIT),
+                      "--json", "number,body"])
+    if not isinstance(issues, list) or not all(isinstance(issue, dict) and type(issue.get("number")) is int
+                                               and isinstance(issue.get("body") or "", str) for issue in issues):
+        raise GhFailure("gh issue list returned something other than a list of issues")
+    if len(issues) >= ISSUE_LIMIT:
+        raise GhFailure(f"{ISSUE_LIMIT} or more open {LABEL} issues; the marked one may be past the listing")
+    return sorted((issue["number"], issue.get("body") or "") for issue in issues if MARKER in (issue.get("body") or ""))
+
+
+def ensure_label(gh):
+    """Return the repository's own spelling of the label, creating it when no label matches whatever its case."""
+    labels = gh.read(["label", "list", "--limit", str(ISSUE_LIMIT), "--json", "name"])
+    if not isinstance(labels, list):
+        raise GhFailure("gh label list returned something other than a list of labels")
+    for label in labels:
+        name = label.get("name") if isinstance(label, dict) else None
+        if isinstance(name, str) and name.casefold() == LABEL:
+            return name
+    gh.write(["label", "create", LABEL, "--color", LABEL_COLOR, "--description", LABEL_DESCRIPTION], None)
+    return LABEL
+
+
+def publish(gh, document, sections, own, run_url):
+    marked = marked_issues(gh)
+    if len(marked) > 1:
+        others = ", ".join(f"#{number}" for number, _ in marked[1:])
+        own.append({**tool_failure(f"{others} also carry this report's marker; this issue is the one kept up to date, "
+                                   "so close the others by hand"), "kind": "duplicate-issue", "severity": "warning"})
+    new = {**sections, **({OWN: own} if own else {})}
+    run = (run_url, document.get("commit") or os.environ.get("GITHUB_SHA") or "unknown",
+           document.get("date") or "unknown", document.get("event") or "unknown")
+    if not marked:
+        body, _ = compose("", new, {*sections, OWN}, run, gh.repository)
+        label = ensure_label(gh)
+        gh.write(["issue", "create", "--title", TITLE, "--label", label, "--body-file", "-"], body)
+        return
+    number, old = marked[0]
+    body, changed = compose(old, new, {*sections, OWN}, run, gh.repository)
+    gh.write(["issue", "edit", str(number), "--body-file", "-"], body)
+    if changed:
+        gh.write(["issue", "comment", str(number), "--body-file", "-"], comment(changed, new, run))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--findings", required=True, metavar="FILE", help="the file cargo-deny-check report wrote")
+    parser.add_argument("--handover", default="success", metavar="OUTCOME",
+                        help="the outcome of the step that handed the file over; the file is read only on success, "
+                             f"and failure means it was over {HANDOVER_LIMIT} bytes")
+    parser.add_argument("--repo", required=True, metavar="OWNER/REPO")
+    parser.add_argument("--run-url", required=True, metavar="URL", help="the workflow run, linked from the issue")
+    parser.add_argument("--mode", required=True, choices=("write", "dry-run"),
+                        help="dry-run runs the reads and prints each write instead of running it")
+    args = parser.parse_args(argv)
+    if not REPOSITORY.fullmatch(args.repo):
+        parser.error("--repo must be OWNER/REPO")
+    document, sections, own = load(args.findings, args.handover)
+    if not own and not any(sections.values()):
+        print("no findings: the security issue is left as it is")
+        return 0
+    try:
+        publish(Gh(args.repo, args.mode == "dry-run"), document, sections, own, args.run_url)
+    except GhFailure as failure:
+        print(f"the security issue was not updated: {failure}", file=sys.stderr)
+        return 2
+    findings = [finding for items in sections.values() for finding in items] + own
+    failures = [finding for finding in findings if finding["kind"] == "tool-failure"]
+    for finding in failures:
+        # One line each: the runner ends a log line at a CR too, and reads a line starting "::" as a command.
+        title = " ".join(str(finding.get("title")).split())
+        print(f"tool failure, written into the security issue: {title}", file=sys.stderr)
+    count = f"{len(findings)} finding{'s' if len(findings) != 1 else ''}"
+    if args.mode == "dry-run":
+        print(f"{count} would be in the security issue; this was a dry run")
+    else:
+        print(f"{count} {'are' if len(findings) != 1 else 'is'} in the security issue")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    try:
+        status = main()
+    except Exception:
+        print("the security issue was not updated: tools/security-issue crashed:", file=sys.stderr, flush=True)
+        print(traceback.format_exc(), end="", file=sys.stderr, flush=True)
+        status = 2
+    sys.exit(status)
