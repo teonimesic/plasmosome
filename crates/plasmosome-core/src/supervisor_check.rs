@@ -157,12 +157,12 @@ pub const fn after_query(result: QueryResult, cap_reached: bool) -> QueryOutcome
     }
 }
 
+const _: CheckOutcome = decide(LockFact::Free, MarkerFact::Absent, JournalFact::Empty);
+const _: QueryOutcome = after_query(QueryResult::NoAnswer, true);
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const _: CheckOutcome = decide(LockFact::Free, MarkerFact::Absent, JournalFact::Empty);
-    const _: QueryOutcome = after_query(QueryResult::NoAnswer, true);
 
     const HELD: LockFact = LockFact::Held;
     const FREE: LockFact = LockFact::Free;
