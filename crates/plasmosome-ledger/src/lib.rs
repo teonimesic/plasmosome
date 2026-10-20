@@ -1220,46 +1220,83 @@ mod tests {
         }
     }
 
+    fn another_cells_object(
+        make_effect: fn(&str, UniverseRemoval) -> Effect,
+        with_external: bool,
+    ) -> (FakeBackend, Closure, UniverseOp) {
+        let op = op(
+            GrantId::new(),
+            CellOwner {
+                cell: CellId::from("cell-2"),
+                plugin: PluginId::from("github-pr"),
+            },
+            session_file("/skills/pr.md"),
+        );
+        let mut backend = FakeBackend::new();
+        backend.apply(op.clone()).unwrap();
+        let mut ledger = Ledger::new("github-pr");
+        if with_external {
+            ledger.push(Effect::external("the PR comment already left the host"));
+        }
+        ledger.push(make_effect("skill file in cell-2", op.removal()));
+        (backend, ledger.close(), op)
+    }
+
+    fn unknown_in_cell_one(op: &UniverseOp) -> DetachError {
+        DetachError::Backend(BackendError::UnknownObject {
+            class: "session-file",
+            key: "session//skills/pr.md".to_string(),
+            owner: cell_owner("github-pr"),
+            id: op.id(),
+        })
+    }
+
     #[test]
     fn a_universe_inverse_naming_the_same_plugins_object_in_another_cell_is_refused() {
         for make_effect in universe_removal_effects() {
             for with_external in [false, true] {
-                let elsewhere = CellId::from("cell-2");
-                let op = op(
-                    GrantId::new(),
-                    CellOwner {
-                        cell: elsewhere.clone(),
-                        plugin: PluginId::from("github-pr"),
-                    },
-                    session_file("/skills/pr.md"),
-                );
-                let mut backend = FakeBackend::new();
-                backend.apply(op.clone()).unwrap();
-                let mut ledger = Ledger::new("github-pr");
-                if with_external {
-                    ledger.push(Effect::external("the PR comment already left the host"));
-                }
-                ledger.push(make_effect("skill file in cell-2", op.removal()));
-                let mut closure = ledger.close();
-                let unknown = DetachError::Backend(BackendError::UnknownObject {
-                    class: "session-file",
-                    key: "session//skills/pr.md".to_string(),
-                    owner: cell_owner("github-pr"),
-                    id: op.id(),
-                });
+                let (mut backend, mut closure, op) =
+                    another_cells_object(make_effect, with_external);
                 for drain in [
                     DrainSpec::graceful(Duration::from_millis(1)),
                     DrainSpec::forcing(),
                 ] {
                     assert_eq!(
                         detach_either(&mut closure, &mut backend, &cell(), drain).unwrap_err(),
-                        unknown
+                        unknown_in_cell_one(&op)
                     );
                     assert_eq!(
                         backend.snapshot_os_state().objects().collect::<Vec<_>>(),
                         vec![&op.object()]
                     );
                 }
+                let (mut owner_backend, mut owner_closure, _) =
+                    another_cells_object(make_effect, with_external);
+                let report = detach_either(
+                    &mut owner_closure,
+                    &mut owner_backend,
+                    &CellId::from("cell-2"),
+                    DrainSpec::forcing(),
+                )
+                .unwrap();
+                assert_eq!(report.replayed, vec!["skill file in cell-2"]);
+                assert!(owner_backend.snapshot_os_state().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_resume_in_another_cell_is_refused_before_it_removes_that_cells_object() {
+        for make_effect in universe_removal_effects() {
+            for with_external in [false, true] {
+                let elsewhere = CellId::from("cell-2");
+                let (mut backend, mut closure, op) =
+                    another_cells_object(make_effect, with_external);
+                assert_eq!(
+                    detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
+                        .unwrap_err(),
+                    unknown_in_cell_one(&op)
+                );
                 assert_eq!(
                     detach_either(&mut closure, &mut backend, &elsewhere, DrainSpec::forcing())
                         .unwrap_err(),
@@ -1275,7 +1312,7 @@ mod tests {
                 assert_eq!(
                     detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
                         .unwrap_err(),
-                    unknown
+                    unknown_in_cell_one(&op)
                 );
                 let mut reopened = closed_again(closure);
                 let report = detach_either(
