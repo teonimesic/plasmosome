@@ -54,9 +54,6 @@ pub enum SetAsideReason {
     SupervisorLost,
     /// No marker, but the journal holds a settled attachment or a pending operation.
     HoldingsWithoutSupervisor,
-    /// The cell would retire, but its session log line could not be appended. `decide` never
-    /// returns it: the caller whose append failed sets the cell aside with it.
-    RetireUnlogged,
 }
 
 /// What the controller does with one cell.
@@ -107,7 +104,7 @@ pub const fn decide(lock: LockFact, marker: MarkerFact, journal: JournalFact) ->
 }
 
 /// One query to a held lock's supervisor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryResult {
     /// The supervisor answered with this lifecycle.
     Answered { lifecycle: CellStatus },
@@ -128,7 +125,7 @@ pub enum QueryOutcome {
 
 /// Decides what one query's result means. `cap_reached` is true once the answer cap has passed.
 /// A supervisor that answers any lifecycle but `germinating` is adopted, `dead` included.
-pub const fn after_query(result: &QueryResult, cap_reached: bool) -> QueryOutcome {
+pub const fn after_query(result: QueryResult, cap_reached: bool) -> QueryOutcome {
     match (result, cap_reached) {
         (
             QueryResult::Answered {
