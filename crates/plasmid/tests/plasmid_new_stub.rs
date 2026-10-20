@@ -43,8 +43,3 @@ fn an_unknown_verb_is_a_named_refusal() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("unknown verb `attach`"), "{stderr}");
 }
-
-#[test]
-fn throwaway_failure_reverted_in_this_pull_request() {
-    panic!("a throwaway failure, to show which gates steps run after the tests step fails");
-}
