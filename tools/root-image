@@ -465,6 +465,7 @@ def build_script(uuid, size_mib, adds):
                                        (f"cat {add.dest}", f"add-{number}.data")))]
     lines = [
         "set -eu",
+        "test -f /w/stage.tar || { echo '/w is empty: Docker does not share the work root' >&2; exit 3; }",
         f"mkdir {TREE}",
         f"tar --numeric-owner -xpf /w/stage.tar -C {TREE}",
         "mke2fs -V 2>/w/check/mke2fs-version",
