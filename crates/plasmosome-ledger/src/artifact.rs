@@ -961,10 +961,48 @@ mod tests {
                 format!("{{ {} }}", six.replace("kind = \"plasmid\"", "kind = 1")),
                 "invalid type: integer `1`, expected kind as a string",
             ),
+            (
+                format!(
+                    "{{ {} }}",
+                    six.replace("version = \"1.2.0\"", "version = 1.10")
+                ),
+                "invalid type: floating point `1.1`, expected version as a string",
+            ),
+            (
+                format!(
+                    "{{ {} }}",
+                    six.replace("publisher = \"plasmosome\"", "publisher = true")
+                ),
+                "invalid type: boolean `true`, expected publisher as a string",
+            ),
         ] {
             let error = toml::from_str::<GenomeFile>(&member(&release)).unwrap_err();
             assert!(error.to_string().contains(reason), "{error}");
         }
+    }
+
+    #[test]
+    fn release_key_decodes_from_a_toml_table_and_refuses_an_array() {
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Descriptor {
+            release: ReleaseKey,
+        }
+
+        let expected: ReleaseKey = serde_json::from_value(key_json()).unwrap();
+        let table = "release = { kind = \"plasmid\", population = \"curated\", \
+                     publisher = \"plasmosome\", name = \"github-pr\", version = \"1.2.0\" }\n";
+        let descriptor: Descriptor = toml::from_str(table).unwrap();
+        assert_eq!(descriptor.release, expected);
+        let swapped =
+            "release = [\"plasmid\", \"curated\", \"github-pr\", \"plasmosome\", \"1.2.0\"]\n";
+        let error = toml::from_str::<Descriptor>(swapped).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid type: sequence, expected a ReleaseKey object"),
+            "{error}"
+        );
     }
 
     #[test]
