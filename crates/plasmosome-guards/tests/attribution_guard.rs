@@ -14,6 +14,7 @@ fn isolated_from_the_callers_git(command: &mut Command, repository: &Path) {
         .current_dir(repository)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env_remove("GIT_CONFIG")
         .env_remove("GIT_CONFIG_PARAMETERS")
         .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_DIR")
