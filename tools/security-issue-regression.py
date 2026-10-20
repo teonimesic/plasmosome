@@ -18,6 +18,7 @@ import tempfile
 
 
 SOURCE = Path(__file__).resolve().with_name("security-issue")
+API = runpy.run_path(str(SOURCE))
 ROOT = SOURCE.parent.parent
 MARKER = "<!-- spec026-security-report -->"
 TITLE = "Security findings on main"
@@ -356,11 +357,15 @@ def tool_failures():
                      json.dumps(document({**other, "section": "Fuzz"}, sections=("Fuzz",))),
                      json.dumps(document({**other, "section": "security-issue"}, sections=("security-issue",)))):
             forge.findings.write_text(text)
-            result, calls = forge.run()
-            assert result.returncode == 1, (text, result.stdout, result.stderr)
-            body = forge.issues()[1]["body"]
-            assert "tool-failure" in body and "RUSTSEC-2021-0003" in body, (text, body)
-            assert "RUSTSEC-2099-0099" not in body, (text, body)
+            loaded, sections, own = API["load"](str(forge.findings))
+            assert loaded == {} and sections == {} and [item["kind"] for item in own] == ["tool-failure"], (text, own)
+            assert "RUSTSEC-2099-0099" not in json.dumps(own), (text, own)
+
+        forge.findings.write_text(json.dumps(document({**other, "section": "weekly"}, sections=("lockfiles",))))
+        result, calls = forge.run()
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        body = forge.issues()[1]["body"]
+        assert "is not a report" in body and "RUSTSEC-2021-0003" in body and "RUSTSEC-2099-0099" not in body, body
         assert marked(forge) == [1], forge.issues()
 
         result, calls = forge.run(document(VULNERABILITY))
