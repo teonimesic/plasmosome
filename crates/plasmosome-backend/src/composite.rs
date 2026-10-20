@@ -126,6 +126,7 @@ mod tests {
     use super::*;
     use crate::backend::GrantKind;
     use crate::fake::FakeBackend;
+    use crate::fixtures::{self, mount, proxy_map, session_file, uds_socket};
     use crate::universe::{CellId, CellOwner, GrantId, PluginId};
     use std::time::Duration;
 
@@ -149,17 +150,12 @@ mod tests {
         let mut backend = composite();
         let file = backend.grant(Grant {
             owner: cell_owner("github-pr"),
-            capability: Capability::SessionFile {
-                path: "/skills/pr.md".to_string(),
-            },
+            capability: session_file("/skills/pr.md"),
             kind: GrantKind::Hot,
         });
         let proxy = backend.grant(Grant {
             owner: cell_owner("network"),
-            capability: Capability::ProxyMap {
-                host: "api.github.com".to_string(),
-                route: "splice".to_string(),
-            },
+            capability: proxy_map("api.github.com", "splice"),
             kind: GrantKind::Hot,
         });
         assert_ne!(file.handle.id, proxy.handle.id);
@@ -189,9 +185,7 @@ mod tests {
         let mut network = FakeBackend::new();
         let entry = network.grant(Grant {
             owner: cell_owner("network"),
-            capability: Capability::UdsSocket {
-                path: "/run/ak/egressd.uds".to_string(),
-            },
+            capability: uds_socket("/run/ak/egressd.uds"),
             kind: GrantKind::Hot,
         });
         network.mark_stuck(entry.handle);
@@ -216,9 +210,7 @@ mod tests {
     fn a_handle_from_another_backend_cannot_withdraw_an_equal_grant() {
         let grant = Grant {
             owner: cell_owner("network"),
-            capability: Capability::UdsSocket {
-                path: "/run/ak/egressd.uds".to_string(),
-            },
+            capability: uds_socket("/run/ak/egressd.uds"),
             kind: GrantKind::Hot,
         };
         let stale = FakeBackend::new().grant(grant.clone()).handle;
@@ -245,12 +237,7 @@ mod tests {
             cell: CellId::from("cell-2"),
             plugin: PluginId::from("workspace"),
         };
-        let op = UniverseOp::AddMount {
-            id: GrantId::new(),
-            source: "/code".to_string(),
-            target: "/workspace".to_string(),
-            owner: owner.clone(),
-        };
+        let op = fixtures::op(GrantId::new(), owner.clone(), mount("/code", "/workspace"));
         let mut filesystem = FakeBackend::new();
         filesystem.stall_graceful_drains_for_owner(owner.clone());
         let mut backend =
@@ -295,9 +282,7 @@ mod tests {
             .plant(OsObject {
                 id: GrantId::new(),
                 owner: cell_owner("workspace"),
-                capability: Capability::SessionFile {
-                    path: "/skills/pr.md".to_string(),
-                },
+                capability: session_file("/skills/pr.md"),
             })
             .unwrap();
         assert!(matches!(
@@ -309,12 +294,7 @@ mod tests {
     #[test]
     fn apply_and_plant_preserve_exact_ids_and_reject_alias_conflicts() {
         let id = GrantId::new();
-        let op = UniverseOp::AddMount {
-            id,
-            source: "/code".to_string(),
-            target: "/workspace".to_string(),
-            owner: cell_owner("workspace"),
-        };
+        let op = fixtures::op(id, cell_owner("workspace"), mount("/code", "/workspace"));
         let expected = op.object();
         let removal = UniverseRemoval {
             id,
