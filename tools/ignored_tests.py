@@ -16,6 +16,11 @@ covers only the tests that ran. It exits 0 once the summary is written, even whe
 because the test steps own that red. It exits 1 when it cannot vouch for its own list, and 2 when
 its arguments are wrong. It uses only the standard library, because it runs on each runner's
 system Python.
+
+The report vouches for its list only when each step that succeeded left every test executable it
+lists in the log, and each block's ignored lines match its result lines. A failing test can print
+a nested cargo run, Running line and all. So a block that no listing has, or that repeats, right
+after a block of a step that did not succeed is read as that block's output and named in a note.
 """
 
 import json
@@ -31,6 +36,8 @@ OUTCOMES = {"success": "succeeded", "failure": "failed", "cancelled": "was cance
 BUILD = ["cargo", "test", "--locked", "--no-run", "--message-format=json"]
 METADATA = ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"]
 LIBRARY_KINDS = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
+ARGS_HINT = "check that the `ignored tests` step passes the same package arguments as that test step"
+TEE_HINT = "check the step's `tee -a` path"
 
 ANSI = re.compile("\x1b\\[[0-9;]*[A-Za-z]")
 RUNNING = re.compile(r"^\s*Running (.+?) \((.+)\)$")
@@ -64,6 +71,13 @@ class Block:
         self.ignored = []
         self.counted = None
         self.package = None
+        self.steps = []
+
+    def absorb(self, other):
+        """Take OTHER's lines as this block's own: they came from a failing test in it."""
+        self.ignored += other.ignored
+        if other.counted is not None:
+            self.counted = (self.counted or 0) + other.counted
 
     def describe(self):
         if self.kind == "executable":
@@ -125,7 +139,7 @@ def package_names(metadata_text):
 
 def test_map(build_text, names):
     """Map test executable file names and library names to packages, from cargo's JSON lines."""
-    executables, libraries, unnamed = {}, {}, []
+    executables, libraries = {}, {}
     for line in build_text.splitlines():
         if not line.strip():
             continue
@@ -133,17 +147,14 @@ def test_map(build_text, names):
         if message.get("reason") != "compiler-artifact":
             continue
         package = names.get(message["package_id"])
+        if package is None:
+            continue
         executable = message.get("executable")
         if executable and message["profile"]["test"]:
-            key = executable.rsplit("/", 1)[-1]
-            if package is None:
-                unnamed.append(f"test executable {key} comes from {message['package_id']}, "
-                               "which cargo metadata does not name")
-            else:
-                executables[key] = package
-        if package is not None and LIBRARY_KINDS & set(message["target"]["kind"]):
+            executables[executable.rsplit("/", 1)[-1]] = package
+        if LIBRARY_KINDS & set(message["target"]["kind"]):
             libraries[message["target"]["name"].replace("-", "_")] = package
-    return executables, libraries, unnamed
+    return executables, libraries
 
 
 def last_line(text):
@@ -174,10 +185,9 @@ def list_steps(steps, run):
     for step in ran:
         code, output, error = run(BUILD + step.arguments)
         try:
-            step.executables, step.libraries, unnamed = test_map(output, names)
+            step.executables, step.libraries = test_map(output, names)
         except (ValueError, KeyError, TypeError) as failure:
-            code, error, unnamed = code or 1, f"unreadable output: {failure}", []
-        problems.extend(unnamed)
+            code, error = code or 1, f"unreadable output: {failure}"
         if code == 0:
             continue
         reason = f"exit {code}: {last_line(error)}"
@@ -188,46 +198,79 @@ def list_steps(steps, run):
     return problems, notes
 
 
+def unfinished(steps):
+    return [f"`{step.name}` {OUTCOMES[step.outcome]}" for step in steps if step.outcome != "success"]
+
+
 def check_blocks(steps, blocks):
-    """Give each block its package; return what stops the report vouching for its list."""
-    problems = []
+    """Give each block its package, and fold a failing test's printed cargo run into its block.
+
+    Return the blocks the list reads, what stops the report vouching for it, and notes.
+    """
     owners = {}
     for step in steps:
         for key, package in step.executables.items():
             owners.setdefault(("executable", key), []).append((step, package))
         for key, package in step.libraries.items():
             owners.setdefault(("library", key), []).append((step, package))
+    kept, seen, problems, notes = [], set(), [], []
     for block in blocks:
         found = owners.get((block.kind, block.key), [])
+        repeated = (block.kind, block.key) in seen
+        previous = kept[-1] if kept else None
+        failing = unfinished(previous.steps) if previous is not None else []
+        if failing and (repeated or not found):
+            why = "appears a second time" if repeated else "is in the log, but no step's cargo listing has it"
+            notes.append(f"{capitalized(block.describe())} {why}. It comes after {previous.describe()}, "
+                         f"and {joined(failing)}. The report reads it as output from a failing test in that block.")
+            previous.absorb(block)
+            continue
         packages = sorted({package for _, package in found})
         if not packages:
-            problems.append(f"{block.describe()} is in the log, but no step's cargo listing has it")
+            problems.append(f"{block.describe()} is in the log, but no step's cargo listing has it; {ARGS_HINT}")
             continue
         if len(packages) > 1:
             problems.append(f"{block.describe()} belongs to more than one package: {', '.join(packages)}")
             continue
         block.package = packages[0]
+        block.steps = [step for step, _ in found]
+        kept.append(block)
+        seen.add((block.kind, block.key))
+    for block in kept:
         if block.counted is None:
-            if all(step.outcome == "success" for step, _ in found):
+            if all(step.outcome == "success" for step in block.steps):
                 problems.append(f"{block.describe()} has no `test result:` line, though its step succeeded")
         elif block.counted != len(block.ignored):
             problems.append(f"{block.describe()} lists {len(block.ignored)} ignored tests, "
                             f"but its result lines count {block.counted}")
-    return problems
+    return kept, problems, notes
 
 
 def check_steps(steps, log_path, blocks):
-    """A step that succeeded must have left at least one of its test executables in the log."""
+    """A step that succeeded must have left every one of its test executables in the log."""
     problems = []
     logged = {block.key for block in blocks or [] if block.kind == "executable"}
     for step in steps:
         if step.outcome != "success":
             continue
         if blocks is None:
-            problems.append(f"`{step.name}` succeeded, but its log {log_path} does not exist")
-        elif step.executables and not logged & set(step.executables):
-            problems.append(f"`{step.name}` succeeded, but {log_path} has no Running line from it")
+            problems.append(f"`{step.name}` succeeded, but its log {log_path} does not exist; {TEE_HINT}")
+            continue
+        missing = sorted(set(step.executables) - logged)
+        if missing:
+            problems.append(f"`{step.name}` succeeded, but {log_path} has no Running line for "
+                            f"{joined(missing)}; {TEE_HINT}")
     return problems
+
+
+def failure_hint(steps):
+    """The sentence each refusal carries when a step that ran did not succeed, or an empty string."""
+    ran = [step for step in steps if step.outcome in ("failure", "cancelled")]
+    if not ran:
+        return ""
+    target = "that step" if len(ran) == 1 else "those steps"
+    return (f"{joined(unfinished(ran))}; a failing test that prints cargo output can cause this, "
+            f"so read {target} first.")
 
 
 def cell(text):
@@ -240,10 +283,14 @@ def joined(parts):
     return ", ".join(parts[:-1]) + " and " + parts[-1]
 
 
+def capitalized(text):
+    return text[:1].upper() + text[1:]
+
+
 def status(steps, count):
-    unfinished = [f"`{step.name}` {OUTCOMES[step.outcome]}" for step in steps if step.outcome != "success"]
-    if unfinished:
-        return f"Not every test step succeeded: {joined(unfinished)}, so this list covers only the tests that ran."
+    named = unfinished(steps)
+    if named:
+        return f"Not every test step succeeded: {joined(named)}, so this list covers only the tests that ran."
     if count == 0:
         return "Every test step succeeded and no test was ignored."
     return f"Every test step succeeded; {count} {'test was' if count == 1 else 'tests were'} ignored."
@@ -298,10 +345,15 @@ def main(argv, run=run_command, environ=None, stdout=None, stderr=None):
     blocks, problems = (None, []) if text is None else parse_log(text)
     listing_problems, notes = list_steps(steps, run)
     problems += listing_problems
-    problems += check_blocks(steps, blocks or [])
+    kept, block_problems, block_notes = check_blocks(steps, blocks or [])
+    problems += block_problems
+    notes += block_notes
     problems += check_steps(steps, log_path, blocks)
+    hint = failure_hint(steps)
+    if hint:
+        problems = [f"{problem}. {hint}" for problem in problems]
     job = environ.get("GITHUB_JOB", "local")
-    summary = render_refusal(job, problems) if problems else render(job, steps, blocks or [], notes)
+    summary = render_refusal(job, problems) if problems else render(job, steps, kept, notes)
     stdout.write(summary)
     destination = environ.get("GITHUB_STEP_SUMMARY")
     if destination:
