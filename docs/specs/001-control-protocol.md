@@ -56,7 +56,10 @@ brokers already speak, and the same shape the session log is written in.
   cover one closing case and one continuing case, and a client must not branch on `message`.
   End of input is the only signal that the conversation is over.
 - A response field with nothing in it is omitted, never sent as `null`. A cell with no genome
-  has no `genome` key (§3.3, §3.6).
+  has no `genome` key (§3.3, §3.6). An empty collection is not such a field: it is sent as `[]`,
+  or `{}` for a map, unless its own text says when it is present. Spec 011's per-plasmid
+  `denials` (§3.6, §3.9) does: it is omitted when it is empty. Amended on 2026-10-20: this did
+  not say whether an empty collection is sent, and spec 011 read it as omitted.
 
 Request envelope:
 
@@ -66,7 +69,9 @@ Request envelope:
 
 - `id` — client-chosen, echoed verbatim in the response. Any JSON value.
 - `method` — `<noun>.<verb>`, dotted, lowercase.
-- `params` — always an object (never omitted; empty object when the verb takes nothing).
+- `params` — always an object (never omitted; empty object when the verb takes nothing). A verb
+  of §3 refuses a key it does not define with `-32602`. Amended on 2026-10-20: this did not say
+  what a verb does with a key it does not define.
 
 Response envelope, success:
 
@@ -182,8 +187,9 @@ another effective UID (spec 025 §5 and §6). This does not change `membraned`'s
 - Addressing chains down `(kernel, cell, plasmid)`. `--kernel` / `--cell` are optional **only
   when unambiguous**. One running instance → default; otherwise code `100` with the candidate
   list. The server resolves; the client never guesses. The results of `plasmid.list`,
-  `plasmid.add`, `plasmid.remove` and `plasmid.reload` each carry `cell`, the cell the verb acted
-  on, whether the request named it or the server resolved it.
+  `plasmid.add`, `plasmid.remove`, `plasmid.reload` and `plasmid.renew` (spec 028 §8) each carry
+  `cell`, the cell the verb acted on, whether the request named it or the server resolved it.
+  Amended on 2026-10-20: this did not name `plasmid.renew`.
 
 ## 3. Verb schemas (the v1 set)
 
@@ -502,7 +508,11 @@ never punishes detachment). `--now` is the authority-class immediate removal.
 ```
 
 Outstanding external effects refuse the safe removal with code `105` carrying the assertion
-list; force requires the operator/reason pair exactly as `plasmosome.stop`.
+list; force requires the operator/reason pair exactly as `plasmosome.stop`. A removal that would
+strand an attached requirer (spec 011) is refused with code `105`
+`{from: "active", to: "removed"}` and no assertion list, and its `message` names the requirers,
+sorted; it carries no `fix`, which §1 gives only to 108. Amended on 2026-10-20: this gave spec
+011's stranding refusal no code.
 
 ### 3.12 `plasmid.reload`
 
