@@ -168,12 +168,12 @@ binds, the request refuses with 108 under spec 011's author-refusal rule: `path`
 `detail` naming the key and the plasmid ID, field `requires.capabilities[i]` for that key's entry,
 and `fix` exactly `remove this entry`. This holds for the named plasmid and for each candidate that
 joins the closure, even when an attached plasmid also provides the key. Refusing the attached case
-keeps a local add independent of what the cell holds, and the same declaration still attaches
-through the registry, because spec 020 binds the key to another release. Amended on 2026-10-20:
-this did not refuse such a key. When the plasmid was the key's only listed provider, step 2 made it
-its own candidate, and the add wrote a record spec 008 refuses as a requirer naming itself. With a
-second listed provider the add was 100. When an attached plasmid provided the key, the add
-attached, with a record spec 008 accepts, so the attached case is a new refusal.
+keeps a local add independent of what the cell holds, and the same declaration can still attach
+through the registry, where spec 020 binds each required key to a pinned provider release. Amended
+on 2026-10-20: this did not refuse such a key. When the plasmid was the key's only listed provider,
+step 2 made it its own candidate, and the add wrote a record spec 008 refuses as a requirer naming
+itself. With a second listed provider the add was 100. When an attached plasmid provided the key,
+the add attached, with a record spec 008 accepts, so the attached case is a new refusal.
 
 For each key the plasmid does not provide itself, in order:
 
