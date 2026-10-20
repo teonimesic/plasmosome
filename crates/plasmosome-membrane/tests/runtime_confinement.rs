@@ -283,6 +283,23 @@ mod darwin {
     }
 
     #[test]
+    fn profiles_looser_than_the_host_policy_are_confined_too() {
+        for profile in [
+            "(version 1)(deny default)(allow file-read*)(allow file-write* (subpath \"/\"))(allow network* (remote ip))(allow network* (local ip))",
+            "(version 1)(allow default)(deny process-fork)(deny network*)(deny file-write-create)",
+        ] {
+            assert!(
+                matches!(
+                    observed_under(profile),
+                    Confinement::Confined(evidence)
+                        if evidence.binding() == PolicyBinding::PropertiesObserved
+                ),
+                "observe asks the five with no filter and nothing else, so {profile} passes"
+            );
+        }
+    }
+
+    #[test]
     fn an_exited_process_not_yet_reaped_is_unverifiable() {
         let mut sleeper = Sleeper::start("none");
         let pid = sleeper.pid();
