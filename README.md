@@ -75,12 +75,28 @@ under `RUSTUP_HOME`; both remain after the example.
 The checkout is trusted host code: putting build output under the temporary directory does not
 isolate an untrusted build.
 
-The example keeps its files and sockets in a private directory under the per-user temporary
-directory, spelled by its real path, not under `/tmp`. `plasmosomed` refuses a control socket
-path that passes through a symlink, as `/tmp` and `/var` do on macOS, or that has an ancestor
-another user can replace, as the shared `/tmp` is on Linux. On macOS the real path is
-`/private/var/folders/...`. On Linux Python's temporary directory is `/tmp` unless `TMPDIR` names
-another, so set `TMPDIR` to a directory only you can write, such as `$XDG_RUNTIME_DIR`.
+The example makes a fresh 0700 directory inside a base directory and keeps its files, its
+sockets and its build there, about 240 MB. `plasmosomed` refuses a control socket unless every
+directory above the socket is owned by you or by root, is not a symlink, and is writable by
+neither group nor other (on macOS, nor through an ACL entry). Before it builds, the example
+checks the type, owner and mode of the base and of each directory above it, and stops naming the
+first that fails; `plasmosomed` makes the full check, ACL entries included, when it starts.
+
+The base is `PLASMOSOME_QUICKSTART_DIR` when that is set, and otherwise Python's temporary
+directory, spelled by its real path. On macOS that is the per-user temporary directory,
+`/private/var/folders/...`, which passes. On Linux, Python's temporary directory is the first of
+`TMPDIR`, `TEMP`, `TMP`, `/tmp`, `/var/tmp`, `/usr/tmp` and the current directory in which it can
+create a file. With none of the three variables set, that is usually `/tmp`, which everyone can
+write, so the check fails. `XDG_RUNTIME_DIR` passes the check where logind makes it, but it is
+held in memory, logind caps it at 10% of RAM by default, and containers and some SSH sessions do
+not set it. On Linux, make a base on disk under your home before you run the block:
+
+```shell
+mkdir -p -m 700 "$HOME/.plasmosome-quickstart"
+export PLASMOSOME_QUICKSTART_DIR="$HOME/.plasmosome-quickstart"
+```
+
+The example removes what it makes inside the base; the base itself stays.
 
 ```shell
 python3 - <<'PY'
@@ -120,9 +136,33 @@ for required in required_paths:
 for executable in ("cargo", "rustc"):
     require(shutil.which(executable), f"required executable is not on PATH: {executable}")
 
+BASE_RULE = (
+    "choose a base whose directories are each owned by you or by root and writable by neither "
+    "group nor other, such as a 0700 directory under your home, and name it in "
+    "PLASMOSOME_QUICKSTART_DIR"
+)
+private_base = Path(
+    os.path.realpath(os.environ.get("PLASMOSOME_QUICKSTART_DIR") or tempfile.gettempdir())
+)
+for directory in [*reversed(private_base.parents), private_base]:
+    try:
+        info = os.lstat(directory)
+    except OSError as error:
+        raise RuntimeError(f"cannot inspect {directory}: {error}; {BASE_RULE}") from error
+    require(stat.S_ISDIR(info.st_mode), f"{directory} is not a directory; {BASE_RULE}")
+    require(
+        info.st_uid in (0, os.geteuid()),
+        f"{directory} is owned by uid {info.st_uid}, not by you or root; {BASE_RULE}",
+    )
+    require(
+        info.st_mode & 0o022 == 0,
+        f"{directory} has mode {stat.S_IMODE(info.st_mode):04o}: group or other can replace "
+        f"entries in it; {BASE_RULE}",
+    )
+print(f"private base: {private_base}")
+
 failure = None
 scratch_path = None
-private_base = os.path.realpath(tempfile.gettempdir())
 with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir=private_base) as scratch_text:
     scratch_path = Path(scratch_text).resolve()
     require(
