@@ -180,8 +180,20 @@ pub struct Continuous {
 /// to where B fell on that reading: the reading's continuous value less the time overdue,
 /// saturating at 0, in the reading's boot session. The time overdue is `now.wait` less
 /// `wait_deadline(now, 0)`, both from that reading. The bound then reads as passed at every
-/// later reading of that boot session. Unless the subtraction saturated, its wait deadline
-/// stays where it was at the fence while the host is awake, and a sleep only moves it earlier.
+/// later reading of that boot session. Unless the subtraction saturated, its wait deadline is
+/// never later than at the fence while the host is awake, and a sleep only moves it earlier.
+/// If it saturated, the wait deadline is at most the extra time after boot. The rule never
+/// moves the deadline later, so the caller applies it again at each reading where the bound
+/// has passed. That keeps a reached cap reached: without it, a second wall step forward and
+/// back gives back time on a cap that the step forward had reached.
+///
+/// The rule does nothing at a refused reading, one whose continuous value is `u64::MAX`. The
+/// time overdue there is `u64::MAX` less the continuous deadline, so the rule gives back the
+/// old deadline, and at the next good reading the bound can read as not passed. At such a
+/// reading the caller sets the continuous deadline to 0, in the reading's boot session,
+/// instead. The bound then reads as passed at every later reading of that boot session, and
+/// its wait deadline is reached at every reading taken more than the extra time after boot.
+///
 /// `bound.earlier(Bound::after(&now, 0))` is not enough: it moves the continuous deadline to
 /// the reading at the fence, not to B, so after a wall step back the wait deadline is later by
 /// the time overdue at the fence.

@@ -9,7 +9,9 @@ const NS_PER_MS: u64 = 1_000_000;
 pub struct ClockReading {
     /// UTC wall-clock time. An operator or a time service can step it either way.
     pub wall: WallMs,
-    /// The continuous clock, with its boot session.
+    /// The continuous clock, with its boot session. `SystemClock` in `plasmosome-core` gives
+    /// `u64::MAX` for a read it refuses. Never keep such a reading as a start time, such as an
+    /// idle limit's last use.
     pub continuous: Continuous,
     /// The clock waits and timeouts use. It can stop while the host sleeps, so a deadline on it
     /// taken before a sleep comes late after it, by the time asleep.

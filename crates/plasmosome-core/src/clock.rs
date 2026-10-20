@@ -40,11 +40,12 @@ impl SystemClock {
     /// clock that refuses a read, or gives a negative time, reads as `u64::MAX`, so every bound
     /// of this boot session checked against that reading reads as passed. That holds only for
     /// that reading: the next good one is lower, and a bound checked against it reads as it
-    /// did before, so a lease ends for good only where the caller keeps a fence at that
-    /// reading ([`plasmosome_backend::Bound`] gives the rule). Never keep such a reading as a
-    /// start time, such as an idle limit's last use: the time since it would saturate to 0 at
-    /// every later reading, and the limit would never be reached. Check the bound and the idle
-    /// limit at that reading instead, so the caller fences there.
+    /// did before, so a lease ends for good only where the caller fences at that reading. The
+    /// fence rule in [`plasmosome_backend::Bound`] does nothing at such a reading, so there the
+    /// caller sets the bound's continuous deadline to 0 instead, as that doc says. Never keep
+    /// such a reading as a start time, such as an idle limit's last use: the time since it
+    /// would saturate to 0 at every later reading, and the limit would never be reached. Check
+    /// the bound and the idle limit at that reading instead, so the caller fences there.
     pub fn new() -> Result<SystemClock, ClockError> {
         wall_ms_at(SystemTime::now())?;
         continuous_ns()?;
