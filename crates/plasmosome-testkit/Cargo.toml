@@ -10,6 +10,8 @@ publish = false
 plasmosome-backend = { workspace = true }
 plasmosome-ledger = { workspace = true }
 plasmosome-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
