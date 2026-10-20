@@ -256,7 +256,9 @@ impl Closer {
     #[allow(unsafe_code)]
     fn close_above_three(self) -> bool {
         // SAFETY: close_range takes integers only and is a raw system call, so it allocates
-        // nothing. prepare showed the kernel offers it.
+        // nothing. prepare showed the kernel offers it. It also closes the descriptors the
+        // HelperExec holds, already copied onto 0 to 3, which is sound because launch never drops
+        // the HelperExec: it ends in execve or _exit.
         unsafe {
             libc::syscall(
                 libc::SYS_close_range,
@@ -299,7 +301,9 @@ impl Closer {
     fn close_above_three(self) -> bool {
         for fd in 4..self.limit {
             // SAFETY: close takes an integer and is async-signal-safe. Every descriptor above 3
-            // is one the helper must not inherit, whoever made it.
+            // is one the helper must not inherit, whoever made it. That includes the descriptors
+            // the HelperExec holds, already copied onto 0 to 3, which is sound because launch
+            // never drops the HelperExec: it ends in execve or _exit.
             unsafe { libc::close(fd) };
         }
         true

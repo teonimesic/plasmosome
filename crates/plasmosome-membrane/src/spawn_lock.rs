@@ -15,8 +15,8 @@ pub(crate) enum Forked {
 }
 
 /// Proof that the write side of the spawn lock is held. Only
-/// `with_descriptors_held` makes one, so a function that takes it can run only
-/// inside descriptor creation.
+/// `with_descriptors_held` and `with_each_descriptor_held` make one, so a
+/// function that takes it can run only inside descriptor creation.
 pub(crate) struct DescriptorsHeld(());
 
 /// Runs `create` while no `VmmChild::spawn` in this process can fork.
@@ -104,8 +104,8 @@ pub(crate) fn fork() -> Result<Forked, SpawnError> {
     // the panic hook has run. That `launch` does only async-signal-safe work rests on Launch's
     // documented contract, which safe code can break, as the test launcher PanicOnLaunch does.
     // fork_holding holds the read side of the spawn lock, so no descriptor made inside
-    // with_descriptors_held is mid-creation. The lock does not cover a descriptor made in two calls
-    // anywhere else, such as a socket or connection std makes on macOS, which has no SOCK_CLOEXEC
+    // with_descriptors_held or with_each_descriptor_held is mid-creation. The lock does not cover a
+    // descriptor made in two calls anywhere else, such as a socket or connection std makes on macOS, which has no SOCK_CLOEXEC
     // or accept4. daemon::run's doc gives the order that keeps the daemon's own sockets out of a
     // fork.
     fork_holding(&SPAWN_LOCK, || unsafe { libc::fork() })
