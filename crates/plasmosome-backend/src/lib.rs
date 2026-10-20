@@ -11,6 +11,7 @@ pub mod digest;
 pub mod fake;
 pub mod paging;
 pub mod recipe;
+pub mod software;
 pub mod universe;
 mod wire;
 
