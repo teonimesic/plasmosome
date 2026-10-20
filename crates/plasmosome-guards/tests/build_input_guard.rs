@@ -264,7 +264,7 @@ fn commits(fixtures: &[Vec<Plant>]) -> (TempDir, Vec<String>) {
         append_commit(&mut stream, reference, plants);
     }
     let mut child = git_command(repository.path())
-        .args(["fast-import", "--quiet"])
+        .args(["-c", "core.ignorecase=false", "fast-import", "--quiet"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
