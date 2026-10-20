@@ -41,6 +41,7 @@ HEADER = "| Crate | Test | Reason |"
 REFUSED = "The report cannot vouch for its list"
 ARGS_HINT = "check that the `ignored tests` step passes the same package arguments as that test step"
 TEE_HINT = "check the step's `tee -a` path"
+COUNT_HINT = "libtest's line format may have changed; see IGNORED and RESULT in tools/ignored_tests.py"
 TESTS_FAILED_HINT = "`tests` failed; a failing test that prints cargo output can cause this, so read that step first"
 ESC = chr(27)
 BACKSLASH = chr(92)
@@ -180,11 +181,23 @@ FAILING_CORE_CLI_MISCOUNTED = (running("tests/daemon_cli.rs", "target/debug/deps
 ])
 
 
-def nested_failure(executable):
+NESTED_STDOUT = [
+    "running 2 tests",
+    "test nested_held ... ignored, needs a registry",
+    "test only_the_held_names_are_publishable_to_a_registry ... ok",
+    "",
+    "test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 10 filtered out; finished in 0.10s",
+    "",
+]
+
+
+def nested_failure(executable, nested_stdout=NESTED_STDOUT):
     """workspace_roots failing with a nested cargo run in its panic message, cut from a real red run.
 
     The nested run's stdout comes first and ends with its own result line. Its stderr follows,
     with a Running line naming EXECUTABLE. The outer block's own result line comes after that.
+    The real run's nested stdout ignored nothing; NESTED_STDOUT adds one ignored test, so the
+    outer block's count is the sum of two result lines.
     """
     return running("tests/workspace_roots.rs", "target/debug/deps/workspace_roots-6a73") + [
         "running 2 tests",
@@ -200,11 +213,7 @@ def nested_failure(executable):
         "crates/plasmosome-guards/tests/workspace_roots.rs:506:9:",
         "outside Cargo manifest selection after B rebuild: only_the_held_names_are_publishable_to_a_registry",
         "",
-        "running 1 test",
-        "test only_the_held_names_are_publishable_to_a_registry ... ok",
-        "",
-        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.10s",
-        "",
+    ] + nested_stdout + [
         "",
         "    Blocking waiting for file lock on package cache",
         "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s",
@@ -431,6 +440,8 @@ def a_result_count_that_disagrees_with_the_listed_lines_is_refused():
     assert "daemon_cli-c0e2" in result.stderr, result
     assert "lists 1 ignored tests, but its result lines count 2" in result.stderr, result
     assert "a failing test that prints cargo output" not in result.stderr, result
+
+    assert f"count 2; {COUNT_HINT}" in result.stderr, result
 
     phantom = log_of(core_cli=running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
                      + tests("test boots ... ignored, needs a hypervisor",
@@ -702,7 +713,10 @@ def a_failing_guard_test_that_prints_a_nested_cargo_run_keeps_the_list():
         assert COVERS in result.summary, result
         key = nested.rsplit("/", 1)[-1]
         assert f"The Running block of {key} (tests/workspace_guards.rs) {why}" in result.summary, result
+        assert "It comes after the Running block of workspace_roots-6a73 (tests/workspace_roots.rs)" \
+            in result.summary, result
         assert "output from a failing test" in result.summary, result
+        assert "| plasmosome-guards | nested_held | needs a registry |" in result.summary, result
 
         vouched = report(log)
         assert vouched.code == 1, vouched
@@ -714,6 +728,57 @@ def a_failing_guard_test_that_prints_a_nested_cargo_run_keeps_the_list():
     result = report(log_of(roots=merged), outcomes=("success", "failure"))
     assert result.code == 0, result
     assert REFUSED not in result.summary, result
+
+
+def a_block_no_listing_has_after_a_passing_block_is_refused_on_a_red_run():
+    """Case 33. A red step does not excuse report arguments that drift from the step's own command.
+
+    In the first log the tests step ran membrane with other arguments than the report lists, and a
+    core test failed. In the second, the guards step succeeded and its first block is one no
+    listing has; it follows the failed tests step's last block, which passed. Catches folding a
+    block into one that holds no failing test, which lists a membrane test under plasmosome-core.
+    """
+    drifted = (running("unittests src/lib.rs", "target/debug/deps/plasmosome_membrane-d1f7")
+               + tests("test vmm::tests::reaps_the_child ... ok")
+               + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-d1f8")
+               + tests("test boots_a_cell ... ignored, needs a booted cell"))
+    within = report(FAILING_CORE_UNIT + CORE_CLI + drifted + CORE_DOCS + guards_log(), outcomes=("failure", "success"))
+    assert within.code == 1, within
+    assert f"daemon_cli-d1f8 (tests/daemon_cli.rs) is in the log, but no step's cargo listing has it; {ARGS_HINT}" \
+        in within.stderr, within
+    assert "| plasmosome-core | boots_a_cell |" not in within.summary, within
+
+    stray = running("tests/boots.rs", "target/debug/deps/boots-7b7b") + tests("test boots_a_cell ... ignored, needs a booted cell")
+    across = report(tests_log(core_unit=FAILING_CORE_UNIT) + stray + guards_log(), outcomes=("failure", "success"))
+    assert across.code == 1, across
+    assert f"boots-7b7b (tests/boots.rs) is in the log, but no step's cargo listing has it; {ARGS_HINT}" \
+        in across.stderr, across
+    assert "| plasmosome-core | boots_a_cell |" not in across.summary, across
+
+
+def failure_output_folds_into_a_failing_block_with_no_result_line_yet():
+    """Case 34. A nested run that printed only its stderr leaves the failing block uncounted so far.
+
+    Catches adding the folded count to None, which crashes the report.
+    """
+    result = report(log_of(roots=nested_failure(f"{NESTED}/workspace_guards-9f9f", nested_stdout=[])),
+                    outcomes=("success", "failure"))
+    assert result.code == 0, result
+    assert "| plasmosome-guards | held_names_stay_held | needs a registry |" in result.summary, result
+    assert "output from a failing test" in result.summary, result
+
+
+def a_cancelled_step_folds_its_failing_test_output_too():
+    """Case 35. A test failed and printed a nested run, then the run was cancelled before the step ended.
+
+    Catches folding only for a step that failed, which refuses this list.
+    """
+    log = tests_log() + GUARDS_UNIT + GUARDS_RUN + nested_failure(f"{NESTED}/workspace_guards-9f9f")
+    result = report(log, outcomes=("success", "cancelled"))
+    assert result.code == 0, result
+    assert "`workspace guards` was cancelled" in result.summary, result
+    assert "| plasmosome-guards | held_names_stay_held | needs a registry |" in result.summary, result
+    assert "output from a failing test" in result.summary, result
 
 
 CASES = [
@@ -749,6 +814,9 @@ CASES = [
     a_block_two_listings_share_needs_a_result_line_only_when_both_steps_succeeded,
     a_log_missing_whole_blocks_of_a_successful_step_is_refused,
     a_failing_guard_test_that_prints_a_nested_cargo_run_keeps_the_list,
+    a_block_no_listing_has_after_a_passing_block_is_refused_on_a_red_run,
+    failure_output_folds_into_a_failing_block_with_no_result_line_yet,
+    a_cancelled_step_folds_its_failing_test_output_too,
 ]
 
 
