@@ -6,6 +6,7 @@
 mod codes;
 mod envelope;
 pub mod json;
+pub mod reply;
 
 pub use codes::{ClientCode, Exit};
 pub use envelope::{
