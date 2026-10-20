@@ -449,6 +449,19 @@ fn a_repeated_key_shows_every_control_by_its_code_point() {
 }
 
 #[test]
+fn a_repeated_key_shows_every_control_in_its_parent_key() {
+    for control in terminal_controls() {
+        let point = u32::from(control);
+        let parent = format!("p{}", escaped(&format!("{point:04x}")));
+        let error = refused(format!(r#"{{"{parent}":[{{"a":1,"a":2}}]}}"#).as_bytes());
+        assert_eq!(
+            error.to_string(),
+            format!("the key /p<U+{point:04X}>/0/a repeats at byte 19")
+        );
+    }
+}
+
+#[test]
 fn every_reason_reads_as_prose() {
     let cases = [
         (Reason::NotUtf8, "the text is not UTF-8"),
