@@ -12,7 +12,7 @@ const LAST_SIGNAL: libc::c_int = 64;
 
 /// The exit code of a launched child whose setup before `execve` failed: the
 /// signal reset, a `dup2` onto descriptors 0 to 3, closing the descriptors
-/// above 3, or `chdir("/")`.
+/// above 3, `chdir("/")`, or emptying the signal mask.
 pub const SETUP_FAILED: i32 = 125;
 
 /// The exit code of a launched child whose `execve` of the helper returned.
@@ -39,8 +39,12 @@ pub const EXEC_FAILED: i32 = 127;
 /// all, sets umask 077 and the working directory `/`, and execs. It
 /// allocates nothing and takes no lock, so the parent may have other
 /// threads. It exits [`SETUP_FAILED`] when its setup fails and
-/// [`EXEC_FAILED`] when `execve` returns; both differ from the helper's own
-/// codes, 64 to 69 and 86, and from `VmmChild`'s 70 and 71.
+/// [`EXEC_FAILED`] when `execve` returns. On Linux, 127 is a hint: glibc's
+/// dynamic loader also exits 127, after a successful `execve`, when a library
+/// the helper needs cannot be loaded. Both differ from the helper's own codes,
+/// 64 to 69 and 86, and from `VmmChild`'s 70 and 71. The pinned libkrun's
+/// implicit init also exits 125 to 127 when it fails, but spec 001 §4.2 has
+/// the helper disable it.
 pub struct HelperExec {
     program: CString,
     dev_null: OwnedFd,

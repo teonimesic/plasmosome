@@ -118,7 +118,10 @@ default action, copies the four descriptors into place, closes every descriptor 
 077 and the working directory `/`, unblocks every signal last and calls `execve`.
 It exits 125 when that setup fails and 127 when `execve` returns. On Linux, 127 can also come from
 glibc's dynamic loader, after `execve` succeeded, when a library the helper needs is missing, so
-there it is a hint rather than proof.
+there it is a hint rather than proof. The pinned libkrun's implicit init uses the same codes: it
+exits 125, 126 or 127 when it fails after `krun_start_enter` (`include/libkrun.h` at v1.19.4,
+lines 1377 to 1380). Spec 001 §4.2 has the helper call `krun_disable_implicit_init`, so a helper
+that follows the spec never exits with them that way.
 
 Closing every descriptor above 3 is one `close_range` call on Linux; `prepare` refuses when the
 kernel does not offer it. Darwin has no such call, so the child closes each number below the larger
