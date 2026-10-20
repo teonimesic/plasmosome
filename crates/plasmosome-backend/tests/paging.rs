@@ -229,7 +229,8 @@ struct Response<'a> {
 
 #[test]
 fn largest_page_fits_the_frame() {
-    let mut largest = page(u64::MAX - 65_536, 65_536, u64::MAX);
+    let len = MAX_PAGE_BYTES;
+    let mut largest = page(u64::MAX - len as u64, len, u64::MAX);
     largest.snapshot = u64::MAX;
     largest.bytes.fill(255);
     assert_eq!(largest.check(), Ok(()));
@@ -330,23 +331,6 @@ fn repeated_offset_returns_the_same_page() {
 }
 
 #[test]
-fn later_pages_read_the_frozen_bytes() {
-    let t = Instant::now();
-    let mut source = Account { a: 1234 };
-    let mut slot = paged(4);
-    let first = slot.capture(SCOPE, t + SECOND, &|| t, || FrozenAccount::freeze(&source));
-    let mut pages = vec![first.expect("the capture succeeds")];
-    source.a = 9876;
-    let changed = FrozenAccount::freeze(&source).expect("the changed source freezes");
-    for offset in [4, 8] {
-        pages.push(read(&mut slot, 1, offset, t).expect("a later page is served"));
-    }
-    assert_ne!(changed.sha256(), account().sha256());
-    assert!(pages.iter().all(|page| page.sha256 == *account().sha256()));
-    assert_eq!(assemble::<Account>(pages), Ok(Account { a: 1234 }));
-}
-
-#[test]
 fn snapshot_ids_never_repeat_on_a_connection() {
     let t = Instant::now();
     let mut slot = paged(4);
@@ -364,35 +348,46 @@ fn new_capture_replaces_the_old_one() {
     let mut slot = paged(4);
     start(&mut slot, account(), t, t + SECOND);
     start(&mut slot, account(), t, t + SECOND);
-    let refused = read(&mut slot, 1, 4, t).expect_err("the old capture is gone");
-    assert_eq!(refused, PagingError::UnknownSnapshot { snapshot: 1 });
-    assert_eq!(refused.code(), -32602);
+    for offset in [0, 4] {
+        let refused = read(&mut slot, 1, offset, t).expect_err("the old capture is gone");
+        assert_eq!(refused, PagingError::UnknownSnapshot { snapshot: 1 });
+        assert_eq!(refused.code(), -32602);
+    }
     assert_eq!(read(&mut slot, 2, 4, t).map(|page| page.snapshot), Ok(2));
 }
 
 #[test]
 fn failed_restart_discards_the_previous_capture() {
     let t = Instant::now();
-    let mut slot = paged(4);
-    start(&mut slot, account(), t, t + SECOND);
-    let failed = slot.capture(SCOPE, t + SECOND, &|| t, || Err::<FrozenAccount, _>("gone"));
-    assert!(
-        matches!(failed, Err(CaptureError::Collect("gone"))),
-        "{failed:?}"
-    );
-    assert!(!slot.is_holding());
-    assert_eq!(
-        read(&mut slot, 1, 4, t),
-        Err(PagingError::UnknownSnapshot { snapshot: 1 })
-    );
+    for scope in [SCOPE, "cell-2"] {
+        let mut slot = paged(4);
+        start(&mut slot, account(), t, t + SECOND);
+        let failed = slot.capture(scope, t + SECOND, &|| t, || Err::<FrozenAccount, _>("gone"));
+        assert!(
+            matches!(failed, Err(CaptureError::Collect("gone"))),
+            "{failed:?}"
+        );
+        assert!(
+            !slot.is_holding(),
+            "a failed start in {scope} drops the old capture"
+        );
+        let refused = read(&mut slot, 1, 4, t);
+        assert_eq!(refused, Err(PagingError::UnknownSnapshot { snapshot: 1 }));
+    }
 }
 
 #[test]
 fn page_refuses_changed_scope() {
     let (mut slot, t, _) = ten_bytes_in_pages_of_four();
-    let refused = slot.page(&"cell-2", cursor(1, 4), t + SECOND, t);
-    assert_eq!(refused, Err(PagingError::ScopeChanged { snapshot: 1 }));
-    assert_eq!(refused.map_err(|error| error.code()), Err(-32602));
+    for offset in [0, 4] {
+        let refused = slot.page(&"cell-2", cursor(1, offset), t + SECOND, t);
+        assert_eq!(
+            refused,
+            Err(PagingError::ScopeChanged { snapshot: 1 }),
+            "offset {offset}"
+        );
+        assert_eq!(refused.map_err(|error| error.code()), Err(-32602));
+    }
 }
 
 #[test]
@@ -468,6 +463,16 @@ fn later_deadline_shortens_but_never_renews() {
     );
     let late = kept.page(&SCOPE, cursor(1, 8), t + 30 * SECOND, t + 10 * SECOND);
     assert_eq!(late, Err(PagingError::Expired));
+}
+
+#[test]
+fn a_request_past_its_own_deadline_gets_no_page() {
+    let t = Instant::now();
+    let mut slot = paged(4);
+    start(&mut slot, account(), t, t + 10 * SECOND);
+    let refused = slot.page(&SCOPE, cursor(1, 4), t + SECOND, t + SECOND);
+    assert_eq!(refused, Err(PagingError::Expired));
+    assert!(!slot.is_holding());
 }
 
 #[test]
@@ -620,6 +625,23 @@ fn errors_describe_themselves() {
         AssemblyFault::Decode { detail: detail() }
             => "the account is not the expected record: boom";
     }
+}
+
+#[test]
+fn a_one_page_account_is_complete_on_its_first_page() {
+    let t = Instant::now();
+    let mut slot = CaptureSlot::new();
+    let first = start(&mut slot, account(), t, t + SECOND);
+    assert_eq!(
+        (first.offset, first.bytes.len(), first.complete),
+        (0, 10, true)
+    );
+    let mut assembler = PageAssembler::new();
+    assembler
+        .accept(first)
+        .expect("a complete first page is accepted");
+    assert_eq!(assembler.next(), None);
+    assert_eq!(assembler.finish::<Account>(), Ok(Account { a: 1234 }));
 }
 
 #[test]

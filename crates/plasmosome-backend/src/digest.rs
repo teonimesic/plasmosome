@@ -299,6 +299,14 @@ mod tests {
                 "a SHA-256 digest is 64 lowercase hexadecimal digits, not 63 bytes",
             ),
             (
+                format!("\" {ABC}\""),
+                "a SHA-256 digest is 64 lowercase hexadecimal digits, not 65 bytes",
+            ),
+            (
+                format!("\"{ABC}\\n\""),
+                "a SHA-256 digest is 64 lowercase hexadecimal digits, not 65 bytes",
+            ),
+            (
                 "12".to_string(),
                 "invalid type: integer `12`, expected 64 lowercase hexadecimal digits",
             ),
