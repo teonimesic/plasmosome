@@ -892,6 +892,7 @@ def files_the_container_leaves_in_the_work_root_are_not_trusted():
             (lambda work: (work / "rootfs.raw").write_bytes(ROOTFS + b"x"), "publish", str(SIZE_MIB << 20)),
             (lambda work: (shutil.move(work / "check", work / "elsewhere"), (work / "check").symlink_to("elsewhere")),
              "filesystem", "check"),
+            (lambda work: shutil.rmtree(work / "check"), "filesystem", "check"),
         ]):
             fake = FakeDocker()
             fake.after = after
@@ -952,6 +953,12 @@ def failures_of_the_os_print_the_refused_line():
         with patched("tempfile", Failing(tempfile, "mkdtemp")):
             code, out, err, work, images = built(root, FakeDocker(), work_name="no-stage")
         assert code == 1 and err.startswith("root-image: refused publish: ") and "denied" in err, err
+        work = root / "laid-out"
+        work.mkdir()
+        (work / "rootfs.raw").write_bytes(ROOTFS)
+        with patched("os", Failing(os, "chmod")):
+            detail = refusal("publish", API["write_stage"], images, work, b"{}\n", len(ROOTFS), {})
+        assert "cannot lay out the image" in detail and [n for n in os.listdir(images) if n.startswith(".")] == []
         for name, needle in (("rename", "cannot rename"), ("chmod", "in place")):
             places = root / f"images-{name}"
             places.mkdir()
