@@ -553,6 +553,27 @@ mod tests {
     }
 
     #[test]
+    fn the_root_directory_is_not_regular() {
+        assert_eq!(
+            check_of(TrustedFile::open(Path::new("/"))),
+            (PathBuf::from("/"), TrustCheck::NotRegular)
+        );
+    }
+
+    #[test]
+    fn a_not_regular_reason_names_what_was_found() {
+        for (kind, name) in [
+            (Kind::Directory, "a directory"),
+            (Kind::Regular, "a regular file"),
+            (Kind::Socket, "a socket"),
+            (Kind::Symlink, "a symlink"),
+            (Kind::Other, "a FIFO, a device or another special file"),
+        ] {
+            assert_eq!(kind_name(kind), name);
+        }
+    }
+
+    #[test]
     fn checks_carry_the_names_spec_022_gives_them() {
         let cases = [
             (TrustCheck::Path, "path"),

@@ -1149,6 +1149,27 @@ mod tests {
     }
 
     #[test]
+    fn open_file_of_the_root_alone_shows_the_judge_a_directory_with_no_parent() {
+        let walk = Walk::from_root(Path::new("/")).expect("an absolute path");
+        let seen = std::cell::RefCell::new(None);
+        let opened = walk
+            .open_file(|reached: &Reached<'_>| -> Result<(), WalkRefusal> {
+                *seen.borrow_mut() = Some((
+                    reached.path.to_path_buf(),
+                    reached.facts.kind,
+                    reached.parent,
+                ));
+                Ok(())
+            })
+            .expect("the judge accepts it");
+        assert_eq!(
+            seen.into_inner(),
+            Some((PathBuf::from("/"), Kind::Directory, None))
+        );
+        assert_eq!(opened.chain, Vec::new());
+    }
+
+    #[test]
     fn open_directory_returns_the_start_and_every_directory_down_to_itself() {
         let root = TestRoot::new();
         make_dir(&root.join("a"), 0o755);
