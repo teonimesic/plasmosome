@@ -9,7 +9,9 @@ const LINEAR_KEYS: usize = 8;
 ///
 /// Dropping, comparing and printing a value never recurse, so no depth of nesting overflows the
 /// stack. Because `Json` implements `Drop`, a caller takes children out with `std::mem::take`
-/// rather than by moving them out of a pattern. `Debug` prints the compact form.
+/// rather than by moving them out of a pattern. Two values are equal when they hold the same
+/// members in the same order and the same number text, so `1` and `1.0` differ. `Debug` prints
+/// the compact form.
 #[derive(Default)]
 pub enum Json {
     #[default]
@@ -21,7 +23,8 @@ pub enum Json {
     /// The decoded string.
     String(String),
     Array(Vec<Json>),
-    /// The members in the order they arrived. A key appears at most once.
+    /// The members in the order they arrived. `scan` never gives a key twice, and a caller
+    /// building one must not either.
     Object(Vec<(String, Json)>),
 }
 
