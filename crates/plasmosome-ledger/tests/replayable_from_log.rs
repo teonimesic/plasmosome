@@ -18,51 +18,92 @@ fn cell_owner(plugin: &str) -> CellOwner {
     }
 }
 
+fn session_file(path: &str) -> Capability {
+    Capability::SessionFile {
+        path: path.to_string(),
+    }
+}
+
+fn uds_socket(path: &str) -> Capability {
+    Capability::UdsSocket {
+        path: path.to_string(),
+    }
+}
+
+fn proxy_map(host: &str, route: &str) -> Capability {
+    Capability::ProxyMap {
+        host: host.to_string(),
+        route: route.to_string(),
+    }
+}
+
+fn broker(pid: u32, name: &str) -> Capability {
+    Capability::Broker {
+        pid,
+        name: name.to_string(),
+    }
+}
+
+fn mount(source: &str, target: &str) -> Capability {
+    Capability::Mount {
+        source: source.to_string(),
+        target: target.to_string(),
+    }
+}
+
+fn op(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
+    match capability {
+        Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
+        Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
+        Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
+            id,
+            host,
+            route,
+            owner,
+        },
+        Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
+            id,
+            pid,
+            name,
+            owner,
+        },
+        Capability::Mount { source, target } => UniverseOp::AddMount {
+            id,
+            source,
+            target,
+            owner,
+        },
+    }
+}
+
 fn file_removal(path: &str) -> UniverseRemoval {
     UniverseRemoval {
         id: GrantId::new(),
-        capability: Capability::SessionFile {
-            path: path.to_string(),
-        },
+        capability: session_file(path),
     }
 }
 
 fn wire_capabilities() -> Vec<Capability> {
     vec![
-        Capability::SessionFile {
-            path: "/skills/pr.md".to_string(),
-        },
-        Capability::UdsSocket {
-            path: "/run/plasmosome/egressd.uds".to_string(),
-        },
-        Capability::ProxyMap {
-            host: "api.github.com".to_string(),
-            route: "splice".to_string(),
-        },
-        Capability::Broker {
-            pid: 31337,
-            name: "egressd".to_string(),
-        },
-        Capability::Mount {
-            source: "/secrets".to_string(),
-            target: "/workspace".to_string(),
-        },
+        session_file("/skills/pr.md"),
+        uds_socket("/run/plasmosome/egressd.uds"),
+        proxy_map("api.github.com", "splice"),
+        broker(31337, "egressd"),
+        mount("/secrets", "/workspace"),
     ]
 }
 
 fn populate(backend: &mut FakeBackend) -> (PluginId, Vec<Effect>) {
-    let op = UniverseOp::WriteSessionFile {
-        id: GrantId::new(),
-        path: "/skills/pr.md".to_string(),
-        owner: cell_owner("github-pr"),
-    };
+    let op = op(
+        GrantId::new(),
+        cell_owner("github-pr"),
+        session_file("/skills/pr.md"),
+    );
     let removal = op.removal();
     backend.apply(op).unwrap();
     let entry = backend.grant(Grant {
         owner: cell_owner("network"),
-        capability: Capability::UdsSocket {
-            path: "/run/plasmosome/egressd.uds".to_string(),
-        },
+        capability: uds_socket("/run/plasmosome/egressd.uds"),
         kind: GrantKind::Hot,
     });
     let effects = vec![
@@ -157,10 +198,7 @@ fn exact_state_wire_preserves_identity_and_refuses_ambiguous_rows() {
     let mut backend = FakeBackend::new();
     backend.grant(Grant {
         owner: cell_owner("network"),
-        capability: Capability::ProxyMap {
-            host: "api.github.com".to_string(),
-            route: "splice".to_string(),
-        },
+        capability: proxy_map("api.github.com", "splice"),
         kind: GrantKind::Hot,
     });
     let state = backend.snapshot_os_state();
@@ -216,9 +254,7 @@ fn ledger_entry_refuses_serializing_a_class_capability_mismatch() {
     let mut backend = FakeBackend::new();
     let entry = backend.grant(Grant {
         owner: cell_owner("network"),
-        capability: Capability::SessionFile {
-            path: "/skills/pr.md".to_string(),
-        },
+        capability: session_file("/skills/pr.md"),
         kind: GrantKind::Hot,
     });
     let encoded = serde_json::to_string(&entry).unwrap();
@@ -415,9 +451,7 @@ fn a_log_whose_lines_disagree_on_the_plugin_is_a_named_error() {
 fn exact_neighbours_survive_interrupted_logged_replay_and_resume() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("ledger.ndjson");
-    let capability = Capability::UdsSocket {
-        path: "/run/plasmosome/egressd.uds".to_string(),
-    };
+    let capability = uds_socket("/run/plasmosome/egressd.uds");
     let mut backend = FakeBackend::new();
     let first = backend.grant(Grant {
         owner: cell_owner("network"),
@@ -468,10 +502,7 @@ fn exact_neighbours_survive_interrupted_logged_replay_and_resume() {
 fn serialized_observations_restore_exact_inverses_but_not_backend_handles() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("ledger.ndjson");
-    let capability = Capability::Broker {
-        pid: 31337,
-        name: "egressd".to_string(),
-    };
+    let capability = broker(31337, "egressd");
     let mut source = FakeBackend::new();
     let first = source.grant(Grant {
         owner: cell_owner("network"),

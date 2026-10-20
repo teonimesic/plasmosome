@@ -710,6 +710,50 @@ mod tests {
         }
     }
 
+    fn session_file(path: &str) -> Capability {
+        Capability::SessionFile {
+            path: path.to_string(),
+        }
+    }
+
+    fn uds_socket(path: &str) -> Capability {
+        Capability::UdsSocket {
+            path: path.to_string(),
+        }
+    }
+
+    fn proxy_map(host: &str, route: &str) -> Capability {
+        Capability::ProxyMap {
+            host: host.to_string(),
+            route: route.to_string(),
+        }
+    }
+
+    fn op(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
+        match capability {
+            Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
+            Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
+            Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
+                id,
+                host,
+                route,
+                owner,
+            },
+            Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
+                id,
+                pid,
+                name,
+                owner,
+            },
+            Capability::Mount { source, target } => UniverseOp::AddMount {
+                id,
+                source,
+                target,
+                owner,
+            },
+        }
+    }
+
     fn detach_either(
         closure: &mut Closure,
         backend: &mut FakeBackend,
@@ -737,9 +781,7 @@ mod tests {
     fn grant_uds(backend: &mut FakeBackend, path: &str) -> (Handle, UniverseRemoval) {
         let entry = backend.grant(Grant {
             owner: cell_owner("network"),
-            capability: Capability::UdsSocket {
-                path: path.to_string(),
-            },
+            capability: uds_socket(path),
             kind: GrantKind::Hot,
         });
         (entry.handle, entry.removal())
@@ -748,9 +790,7 @@ mod tests {
     fn grant_file(backend: &mut FakeBackend, path: &str) -> (Handle, UniverseRemoval) {
         let entry = backend.grant(Grant {
             owner: cell_owner("github-pr"),
-            capability: Capability::SessionFile {
-                path: path.to_string(),
-            },
+            capability: session_file(path),
             kind: GrantKind::Hot,
         });
         (entry.handle, entry.removal())
@@ -767,11 +807,11 @@ mod tests {
     #[test]
     fn a_universe_inverse_naming_another_plugins_object_is_refused_and_leaves_it_standing() {
         let mut backend = FakeBackend::new();
-        let op = UniverseOp::WriteSessionFile {
-            id: GrantId::new(),
-            path: "/skills/pr.md".to_string(),
-            owner: cell_owner("workspace-bind"),
-        };
+        let op = op(
+            GrantId::new(),
+            cell_owner("workspace-bind"),
+            session_file("/skills/pr.md"),
+        );
         let removal = op.removal();
         backend.apply(op).unwrap();
         let mut ledger = Ledger::new("github-pr");
@@ -837,12 +877,11 @@ mod tests {
     fn replay_over_exact_compensating_and_delayed_produces_an_empty_diff() {
         let mut backend = FakeBackend::new();
         backend
-            .apply(UniverseOp::SetProxyMap {
-                id: GrantId::new(),
-                host: "api.github.com".to_string(),
-                route: "staged".to_string(),
-                owner: cell_owner("github-pr"),
-            })
+            .apply(op(
+                GrantId::new(),
+                cell_owner("github-pr"),
+                proxy_map("api.github.com", "staged"),
+            ))
             .unwrap();
         let before = backend.snapshot_os_state();
         let (handle_a, _) = grant_uds(&mut backend, "/run/ak/egressd.uds");
@@ -856,12 +895,11 @@ mod tests {
             "injected skill file",
             InverseVia::Backend(handle_b),
         ));
-        let op = UniverseOp::SetProxyMap {
-            id: GrantId::new(),
-            host: "api.github.com".to_string(),
-            route: "staged".to_string(),
-            owner: cell_owner("github-pr"),
-        };
+        let op = op(
+            GrantId::new(),
+            cell_owner("github-pr"),
+            proxy_map("api.github.com", "staged"),
+        );
         ledger.push(Effect::compensating(
             "posted a comment; compensation retracts the staged row",
             op.removal(),
@@ -1057,16 +1095,8 @@ mod tests {
         for make_effect in universe_removal_effects() {
             for with_external in [false, true] {
                 let owner = cell_owner("github-pr");
-                let stuck = UniverseOp::WriteSessionFile {
-                    id: GrantId::new(),
-                    path: "/skills/pr.md".to_string(),
-                    owner: owner.clone(),
-                };
-                let healthy = UniverseOp::WriteSessionFile {
-                    id: GrantId::new(),
-                    path: "/skills/pr.md".to_string(),
-                    owner,
-                };
+                let stuck = op(GrantId::new(), owner.clone(), session_file("/skills/pr.md"));
+                let healthy = op(GrantId::new(), owner, session_file("/skills/pr.md"));
                 let address = Handle {
                     class: stuck.class(),
                     id: stuck.id(),
@@ -1117,14 +1147,14 @@ mod tests {
         for make_effect in universe_removal_effects() {
             for with_external in [false, true] {
                 let elsewhere = CellId::from("cell-2");
-                let op = UniverseOp::WriteSessionFile {
-                    id: GrantId::new(),
-                    path: "/skills/pr.md".to_string(),
-                    owner: CellOwner {
+                let op = op(
+                    GrantId::new(),
+                    CellOwner {
                         cell: elsewhere.clone(),
                         plugin: PluginId::from("github-pr"),
                     },
-                };
+                    session_file("/skills/pr.md"),
+                );
                 let mut backend = FakeBackend::new();
                 backend.apply(op.clone()).unwrap();
                 let mut ledger = Ledger::new("github-pr");
@@ -1229,9 +1259,7 @@ mod tests {
     fn every_ledger_record_decodes_from_an_object_and_refuses_a_positional_array() {
         let removal = UniverseRemoval {
             id: GrantId::new(),
-            capability: Capability::SessionFile {
-                path: "/skills/pr.md".to_string(),
-            },
+            capability: session_file("/skills/pr.md"),
         };
         let exact = Effect::exact("skill file", InverseVia::Universe(removal.clone()));
         let Reversibility::Exact(inverse) = exact.reversibility.clone() else {
