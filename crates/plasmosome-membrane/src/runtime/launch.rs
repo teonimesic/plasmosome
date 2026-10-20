@@ -1021,7 +1021,7 @@ mod tests {
         if !probing() {
             return;
         }
-        let mut ignored = vec![
+        let classic = [
             libc::SIGHUP,
             libc::SIGINT,
             libc::SIGQUIT,
@@ -1029,8 +1029,10 @@ mod tests {
             libc::SIGTTOU,
         ];
         #[cfg(target_os = "linux")]
-        ignored.extend([libc::SIGRTMIN(), libc::SIGRTMAX()]);
-        for signal in ignored {
+        let real_time = [libc::SIGRTMIN(), libc::SIGRTMAX()];
+        #[cfg(not(target_os = "linux"))]
+        let real_time: [libc::c_int; 0] = [];
+        for signal in classic.into_iter().chain(real_time) {
             // SAFETY: signal takes integers and SIG_IGN. This probe process runs only this test,
             // so ignoring these signals reaches no other test.
             let previous = unsafe { libc::signal(signal, libc::SIG_IGN) };
