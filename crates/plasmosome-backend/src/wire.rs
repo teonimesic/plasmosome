@@ -503,4 +503,53 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_toml_array_is_refused_for_a_struct_and_for_a_struct_variant() {
+        #[derive(Debug, Deserialize)]
+        struct Document<T> {
+            record: T,
+        }
+
+        fn record<T: DeserializeOwned>(text: &str) -> Result<T, String> {
+            toml::from_str::<Document<T>>(text)
+                .map(|document| document.record)
+                .map_err(|error| error.to_string())
+        }
+
+        let uds = UdsRecipe {
+            upstream: "/run/plasmosome/upstream.sock".to_string(),
+            guest_path: "/run/agent.sock".to_string(),
+        };
+        assert_eq!(
+            record::<UdsRecipe>(
+                "record = { upstream = \"/run/plasmosome/upstream.sock\", \
+                 guest_path = \"/run/agent.sock\" }"
+            ),
+            Ok(uds)
+        );
+        assert_eq!(
+            record::<Capability>(
+                "record = { Mount = { source = \"/srv/repo\", target = \"/workspace\" } }"
+            ),
+            Ok(mount())
+        );
+        for (name, outcome) in [
+            (
+                "UdsRecipe",
+                record::<UdsRecipe>(
+                    "record = [\"/run/agent.sock\", \"/run/plasmosome/upstream.sock\"]",
+                )
+                .map(drop),
+            ),
+            (
+                "Capability::Mount",
+                record::<Capability>("record = { Mount = [\"/workspace\", \"/srv/repo\"] }")
+                    .map(drop),
+            ),
+        ] {
+            let error = outcome.expect_err(name);
+            assert!(error.contains("invalid type: sequence"), "{name}: {error}");
+        }
+    }
 }
