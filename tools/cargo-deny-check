@@ -4,6 +4,26 @@
 Exit 0 is a pass, 1 a refusal and 2 a tool failure. A run is classified by the diagnostic codes
 cargo-deny writes, never by its exit status alone, so a warned code cannot refuse a merge and a
 broken tool cannot pass one. Spec 026 section 4 is the authority.
+
+This file decides what the gates job enforces. A pull request that changes
+tools/cargo-deny-check* changes that policy, so review it as code, not as CI plumbing.
+
+A stale Cargo.lock is a refusal, because the fix is the contributor's: run
+`cargo update --workspace` and commit the lockfile. git-source-underspecified refuses, but no
+fixture holds it: cargo-deny writes it only when deny.toml sets [sources] required-git-spec.
+
+To bump cargo-deny:
+1. In .github/workflows/ci.yml, change the version on the `cargo install cargo-deny` line and in
+   the gates rust-cache `key:`. The cache saves nothing when its key matches, so a stale key
+   restores the old binary and every run rebuilds the new one. The regression suite fails when
+   the two disagree.
+2. Compare REFUSING, REPORTED and TOOL_FAILURE_CODES with the Code enums in the new release's
+   src/advisories/diags.rs, src/sources/diags.rs and src/licenses/diags.rs. An error whose code
+   no list names is a tool failure, so a new code fails closed until it is placed.
+3. Re-capture every fixture in tools/cargo-deny-check-fixtures.json whose origin says
+   "captured". Build the workspace its origin describes in a scratch directory, run the command
+   this wrapper logs after "$ " with the new binary, keep stderr's lines and the exit status, and
+   replace the scratch directory's path with /work. Then run tools/cargo-deny-check-regression.py.
 """
 
 import argparse

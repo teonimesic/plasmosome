@@ -2,8 +2,9 @@
 # section 4, docs/specs/026-security-standard.md. CI runs it through tools/cargo-deny-check,
 # which calls the cargo-deny binary and never `cargo deny`.
 #
-# Fix the dependency before you add an exception. An advisory ignore takes only `id` and
-# `reason`, and the reason reads "until YYYY-MM-DD; <link>; <why>", for example:
+# Fix the dependency before you add an exception. Write each advisory ignore as `id` and
+# `reason` only. Spec 026 asks that the reason read "until YYYY-MM-DD; <link>; <why>".
+# cargo-deny does not check that form, so the reviewer of the change does. For example:
 #   { id = "RUSTSEC-0000-0000", reason = "until 2026-12-01; https://example.org/fix; no release fixes it yet" }
 
 [advisories]
