@@ -242,9 +242,20 @@ reviewer items. Q7 asks the owner whether to enforce the action pin as a reposit
 **Every package forbids it, except the register.** The root manifest's `[workspace.lints]` sets
 `unsafe_code = "forbid"`. It also sets two clippy lints to `deny`: `undocumented_unsafe_blocks` and
 `missing_safety_doc`. Every package outside the register inherits all three with
-`lints.workspace = true`. That covers every target a package compiles: library, binaries, tests,
-benches, examples and build script. A `#![forbid(unsafe_code)]` in `lib.rs` alone does not meet
-this rule, because it leaves tests, benches and binaries open.
+`lints.workspace = true`. That covers every target a package compiles except its doctests:
+library, binaries, tests, benches, examples and build script. A `#![forbid(unsafe_code)]` in
+`lib.rs` alone does not meet this rule, because it leaves tests, benches and binaries open.
+
+**Doctests are reached only through the library root.** Cargo passes the manifest's levels to
+`rustdoc --test`, but rustdoc does not apply them to the doctests it compiles, and clippy never
+sees a doctest. So the library root of every package that forbids `unsafe_code` carries
+`#![doc(test(attr(forbid(unsafe_code))))]` as its first line after its comments. rustdoc puts that
+`forbid` into each doctest it compiles from the package. `-A unsafe_code` and `--cap-lints=allow`
+in rustdocflags were measured not to lift it. A missing or misspelled attribute is silent, so a
+test in `plasmosome-guards` refuses a forbid package whose library root lacks it. In a register
+package, an `unsafe` block in a doctest still needs its safety comment, but no lint checks it
+there; the reviewer does. Corrected on 2026-10-20: this section said the manifest's table covers
+every target a package compiles, and doctests are a target it does not reach.
 
 **The register** is the set of packages whose own `[lints]` table sets `unsafe_code = "deny"`.
 Today it holds `plasmosome-membrane` and `plasmosome-core`. Cargo does not let a package mix
@@ -428,6 +439,7 @@ when Q1 is answered. It never names a route nobody receives.
 | An advisory database or tool failure | The advisory step, as a tool failure | Fails closed: the step cannot vouch for the change |
 | An unlisted licence | Reviewer at PR time; release step at release | Below the bar until something ships (Q8) |
 | `unsafe` in a forbid package or outside an allowed item; a missing `// SAFETY:` comment or `# Safety` section | The compiler and clippy, through declared lint levels | Not a guard. See the spec 013 amendment. |
+| A forbid package's library root without `#![doc(test(attr(forbid(unsafe_code))))]` | A test in `plasmosome-guards` | Spec 013's carve-out for a local property that costs nothing to check and silently degrades a tool. rustdoc drops the manifest's level for doctests without a word, and so does a misspelled attribute. The omission a diff shows least is a new forbid package that never had the line. |
 | `unsafe` expanded from a dependency's macro | The record's `expands_unsafe` field and the reviewer | Judgement, because no lint sees it |
 | An `allow(unsafe_code)` wider than an item or a named FFI module; an undocumented `unsafe extern` declaration; joining the register without both lints or a reason | Reviewer | Judgement |
 | Native code in a forbid package | The compiler, for linked code; the reviewer, for test-built programs | Judgement for the second |
