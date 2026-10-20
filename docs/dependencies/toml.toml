@@ -6,7 +6,7 @@ reason = """\
   """
 write_it_instead.lines = 1865
 write_it_instead.how = """\
-  On 2026-10-20, at main bb918f0, `git grep -l 'toml::' -- '*.rs' | wc -l` gives 5 files, and `git \
+  On 2026-10-20, at main 16fffce, `git grep -l 'toml::' -- '*.rs' | wc -l` gives 5 files, and `git \
   grep -h -o -E 'toml::(from_str|to_string|Value|Table|de::Error|map::Map)' -- '*.rs' | sort | \
   uniq -c` gives Value 82, from_str 15, Table 6, to_string 5, Error 1 and Map 1. Reading the code \
   shows that the declaration reader in crates/plasmosome-core/src/manifest.rs parses text into a \
