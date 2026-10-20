@@ -73,13 +73,17 @@ There is deliberately no mocking-framework dependency. Expectation-style mocks c
 call sequences; a fake that models the contract couples tests to behavior. Hand-built fakes
 only.
 
-There is still no clock trait. Durations are passed in as arguments. Three decisions read elapsed
-time. `VmmChild::wait_terminal` spends a fixed child-termination allowance with no seam. The
-other two serve one shared readiness budget (spec001 §4): `BrokerSet::status_with` runs the
-set-level `ProbeBudget` checks and `readiness::probe_with` the socket-operation checks, and each
-takes its own injected clock seam — production supplies `Instant::now` at both, and the 9z0
-deterministic boundary tests inject a fake at each. If more decision sites appear, that is the
-moment to weigh a shared clock trait — not before.
+There is still no clock trait. Durations are passed in as arguments. Four decisions read elapsed
+time. `VmmChild::wait_terminal` spends a fixed child-termination allowance with no seam. Two serve
+one shared readiness budget (spec001 §4): `BrokerSet::status_with` runs the set-level `ProbeBudget`
+checks and `readiness::probe_with` the socket-operation checks, and each takes its own injected
+clock seam — production supplies `Instant::now` at both, and the 9z0 deterministic boundary tests
+inject a fake at each. The fourth is the capture deadline of a paged observation (spec001 §4.1).
+`CaptureSlot` in `plasmosome-backend::paging` decides it in `capture`, `page` and `expire`:
+`capture` takes an injected clock and reads it before and after collection, and `page` and `expire`
+take the current instant. Each server that pages a result passes its clock in and counts no decision
+of its own. If more decision sites appear, that is the moment to weigh a shared clock trait — not
+before.
 
 ### Workspace files belong to the invocation
 
