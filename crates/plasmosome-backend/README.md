@@ -23,8 +23,9 @@ vocabulary implements `Serialize`/`Deserialize` and holds no shared memory. In `
 process, and `FrozenAccount` shares its bytes through an `Arc`. Every record decodes
 only from a JSON object. serde's derived decoders also accept a positional array and fill fields
 by position, so two paths of one type could swap unnoticed; `ObjectOnly` refuses that shape for
-each record here and in the ledger. Why the crate names no VMM or broker process is covered in
-`AGENTS.md`.
+each record here and in the ledger. `ObservationPage` refuses it through its own visitor until
+plasmosome-8pr4 moves it onto `ObjectOnly`. Why the crate names no VMM or broker process is
+covered in `AGENTS.md`.
 
 Each successful grant gets a canonical RFC 4122 UUID-v4 identity and an exact handle made from
 its universe class and that identity. Equal capabilities remain separate holdings. Recorded
@@ -84,6 +85,6 @@ address or one owner time out.
 | Universe classes | What "system state" means for residue verification: sockets, mounts, processes, proxy entries, session files |
 | `MockMode` | How a plasmid's calls are served: `simulate`, `capture` or `passthrough`, the default. It lives here, beside `CellId`, so the ledger can record a mode without depending on core |
 | `digest` | The SHA-256 `Digest`: exactly 64 lowercase hexadecimal digits, as text and in JSON. The membrane re-exports it |
-| `paging` | Spec 001's observation pages, shared by guest, membrane and controller. A responder's `CaptureSlot` keeps one capture per connection: the compact JSON account that the caller's `collect` froze with `FrozenAccount::freeze`, served in pages of 1 to 65,536 bytes until its deadline. A caller's `PageAssembler` yields the account only when every page arrived in order from one capture and the bytes match the stated length and hash. `ObservationPage` decodes only from an object. Callers pass the clock and own the IO |
+| `paging` | Spec 001's observation pages, shared by guest, membrane and controller. On the responding side, a server keeps one `CaptureSlot` per connection. The slot holds the compact JSON account that the server's `collect` froze with `FrozenAccount::freeze`, and serves it in pages of 1 to 65,536 bytes until its deadline. On the requesting side, a caller's `PageAssembler` yields the account only when every page arrived in order from one capture and the bytes match the stated length and hash. `ObservationPage` decodes only from an object. Both sides pass the clock and own the IO |
 
 Tests: `cargo test -p plasmosome-backend`

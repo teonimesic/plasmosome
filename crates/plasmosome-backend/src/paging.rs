@@ -209,8 +209,8 @@ impl FrozenAccount {
 /// A page request with a different scope is refused with `ScopeChanged`, which is -32602.
 ///
 /// Keep the supervisor or guest association out of `S`. Losing it is not a bad request: the
-/// caller checks the association itself, calls [`CaptureSlot::discard`] and answers -32603. The
-/// slot reads no clock; the caller passes `now`.
+/// server checks the association itself, calls [`CaptureSlot::discard`] and answers -32603. The
+/// slot reads no clock; the server passes `now`.
 pub struct CaptureSlot<S> {
     page_bytes: usize,
     last_snapshot: u64,
@@ -304,12 +304,14 @@ impl<S: PartialEq> CaptureSlot<S> {
     /// Answers a request for a page of the capture this slot holds.
     ///
     /// Refuses a zero snapshot (`InvalidCursor`), a snapshot other than the one held
-    /// (`UnknownSnapshot`) and a `scope` other than the capture's (`ScopeChanged`). Then it lowers
-    /// the capture's deadline to `request_expires` when that is earlier, never raising it. If the
-    /// deadline is now at or before `now`, the result is `Expired` and the capture is dropped, so
-    /// a request whose own deadline has passed gets no page. An offset at or past the account's
-    /// end is `OffsetOutOfRange`. Otherwise it returns up to the slot's page size of bytes from
-    /// `cursor.offset`. The same offset always returns the same page.
+    /// (`UnknownSnapshot`) and a `scope` other than the capture's (`ScopeChanged`). These three
+    /// leave the capture and its deadline as they were. Any other request names this capture, so
+    /// it lowers the capture's deadline to `request_expires` when that is earlier, never raising
+    /// it. If the deadline is now at or before `now`, the result is `Expired` and the capture is
+    /// dropped, so a request whose own deadline has passed gets no page. An offset at or past the
+    /// account's end is `OffsetOutOfRange`, and its deadline still counts. Otherwise it returns up
+    /// to the slot's page size of bytes from `cursor.offset`. The same offset always returns the
+    /// same page.
     pub fn page(
         &mut self,
         scope: &S,
@@ -419,7 +421,7 @@ impl PagingError {
     }
 }
 
-/// Why [`CaptureSlot::capture`] returned no page: a paging rule, or the caller's collection.
+/// Why [`CaptureSlot::capture`] returned no page: a paging rule, or the server's collection.
 #[derive(Debug)]
 pub enum CaptureError<E> {
     Paging(PagingError),
