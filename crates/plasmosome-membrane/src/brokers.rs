@@ -346,6 +346,17 @@ mod tests {
         }
     }
 
+    struct ExpiryAwaitingProbe;
+
+    impl Probe for ExpiryAwaitingProbe {
+        fn probe(&self, _socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
+            while let Ok(left) = budget.remaining() {
+                std::thread::sleep(left);
+            }
+            Ok(ready())
+        }
+    }
+
     struct TimedProbe {
         clock: Clock,
         script: Mutex<Vec<(u64, Readiness)>>,
@@ -649,6 +660,24 @@ mod tests {
                 reason: NotReady::TimedOut,
             }),
             "`dnsd` answered ready 20ms after the budget ran out, so its ready is refused and it reports timed out"
+        );
+    }
+
+    #[test]
+    fn status_refuses_a_ready_that_arrives_after_the_real_clock_spent_the_budget() {
+        let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
+        let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
+        let set =
+            BrokerSet::spawn(specs, forking(), ExpiryAwaitingProbe).expect("every broker forks");
+
+        assert_eq!(
+            set.status(Duration::from_millis(20), &flag),
+            Ok(SetStatus::NotReady {
+                broker: "egressd".to_string(),
+                reason: NotReady::TimedOut,
+            }),
+            "`egressd` answered only once the real clock had spent the budget, so `status` must judge its ready on that clock and refuse it"
         );
     }
 
