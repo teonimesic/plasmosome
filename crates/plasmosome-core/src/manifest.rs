@@ -174,7 +174,7 @@ impl std::fmt::Display for ManifestError {
                 detail,
             } => {
                 if let Some(id) = plasmid {
-                    write!(f, "plasmid {id}: ")?;
+                    write!(f, "plasmid {}: ", diagnostic_key(id))?;
                 }
                 if fix == REMOVE_ENTRY {
                     write!(f, "{field}: {detail}; {fix}")
@@ -227,10 +227,6 @@ impl PlasmidManifest {
             .and_then(|impl_table| impl_table.get("wasm"))
             .and_then(toml::Value::as_str)
             .map(PathBuf::from);
-        let network = raw
-            .get("network")
-            .map(|n| parse_network(&id, "network", n))
-            .transpose()?;
         let requires = raw
             .get("requires")
             .map(|r| string_list(r.get("capabilities")))
@@ -287,15 +283,22 @@ impl PlasmidManifest {
                     hosts: declared_string_list(
                         &id,
                         "mock",
-                        "hosts",
-                        EXAMPLE_HOST,
                         m.get("hosts"),
+                        ListRepair::MockHosts,
                     )?,
                     kind,
                     api,
                     source,
                 })
             })
+            .transpose()?;
+        let mock_hosts = mock
+            .as_ref()
+            .map(|mock| mock.hosts.as_slice())
+            .unwrap_or_default();
+        let network = raw
+            .get("network")
+            .map(|n| parse_network(&id, "network", n, mock_hosts))
             .transpose()?;
         let model = raw.get("model").map(|m| ModelSpec {
             endpoint: m
@@ -319,8 +322,18 @@ impl PlasmidManifest {
             && workspace.is_none()
             && mock.is_none()
             && model.is_none()
-            && commands.is_none()
+            && commands
+                .as_ref()
+                .is_none_or(|commands| commands.commands.is_empty())
         {
+            if commands.is_some() {
+                return Err(field_error(
+                    &id,
+                    "commands.commands".into(),
+                    command_sections(&[EXAMPLE_COMMAND.into()]),
+                    "the commands table declares no command",
+                ));
+            }
             return Err(field_error(
                 &id,
                 "impl".into(),
@@ -328,18 +341,18 @@ impl PlasmidManifest {
                 "the declaration names no capability and no implementation",
             ));
         }
+        if let Some(spec) = &mock {
+            validate_mock(&id, spec, network.as_ref())?;
+        }
         if let Some(spec) = &network
             && spec.hosts.is_empty()
         {
             return Err(field_error(
                 &id,
                 "network.hosts".into(),
-                hosts_line(None),
+                strings_line("hosts", &[EXAMPLE_HOST.into()]),
                 "a network section must name at least one host",
             ));
-        }
-        if let Some(spec) = &mock {
-            validate_mock(&id, spec, network.as_ref())?;
         }
         if let Some(commands) = &commands {
             validate_commands(&id, commands)?;
@@ -387,7 +400,58 @@ fn field_error(id: &str, field: String, fix: String, detail: &str) -> ManifestEr
 }
 
 fn diagnostic_key(name: &str) -> String {
-    toml_edit::Key::new(name).display_repr().into_owned()
+    let bare = !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
+    if bare {
+        name.to_string()
+    } else {
+        toml_string(name)
+    }
+}
+
+fn toml_string(text: &str) -> String {
+    let mut quoted = String::from('"');
+    for character in text.chars() {
+        if matches!(character, '"' | '\\') {
+            quoted.push('\\');
+            quoted.push(character);
+        } else {
+            push_visible(&mut quoted, character);
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn without_controls(text: &str) -> String {
+    let mut visible = String::with_capacity(text.len());
+    for character in text.chars() {
+        push_visible(&mut visible, character);
+    }
+    visible
+}
+
+fn push_visible(text: &mut String, character: char) {
+    let escape = match character {
+        '\x08' => 'b',
+        '\t' => 't',
+        '\n' => 'n',
+        '\x0C' => 'f',
+        '\r' => 'r',
+        control if control.is_control() => {
+            text.push('\\');
+            text.push_str(&format!("u{:04X}", u32::from(control)));
+            return;
+        }
+        visible => {
+            text.push(visible);
+            return;
+        }
+    };
+    text.push('\\');
+    text.push(escape);
 }
 
 fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>, ManifestError> {
@@ -420,7 +484,10 @@ fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>,
                         "[{field}]\n{} = \"Describe what this tool does.\"",
                         diagnostic_key(tool)
                     ),
-                    format!("tool {tool:?} needs a description; replace the names list with a table"),
+                    format!(
+                        "tool {} needs a description; replace the names list with a table",
+                        toml_string(tool)
+                    ),
                 )
             } else {
                 (
@@ -456,19 +523,25 @@ fn parse_network(
     id: &str,
     field_path: &str,
     n: &toml::Value,
+    mock_hosts: &[String],
 ) -> Result<NetworkSpec, ManifestError> {
     if !n.is_table() {
+        let hosts = evident_or(n, mock_hosts, EXAMPLE_HOST);
         return Err(field_error(
             id,
             field_path.to_string(),
-            format!("[{field_path}]\n{}", hosts_line(n.as_str())),
+            format!("[{field_path}]\n{}", strings_line("hosts", &hosts)),
             &format!("{} is not a table", shown(n)),
         ));
     }
-    let hosts = declared_string_list(id, field_path, "hosts", EXAMPLE_HOST, n.get("hosts"))?;
+    let hosts = declared_string_list(
+        id,
+        field_path,
+        n.get("hosts"),
+        ListRepair::Hosts(mock_hosts),
+    )?;
     let ports = declared_ports(id, &format!("{field_path}.ports"), n.get("ports"))?;
-    let pin_cidrs =
-        declared_string_list(id, field_path, "pin_cidrs", EXAMPLE_PIN, n.get("pin_cidrs"))?;
+    let pin_cidrs = declared_string_list(id, field_path, n.get("pin_cidrs"), ListRepair::Pins)?;
     Ok(NetworkSpec {
         hosts,
         ports,
@@ -548,7 +621,10 @@ fn parse_secret_refs(
                 id,
                 field(name),
                 fix,
-                &format!("invalid credential reference: {error}"),
+                &format!(
+                    "invalid credential reference: {}",
+                    without_controls(error.message())
+                ),
             )
         })?;
         validate_secret_ref(id, section, index, &secret, delivery_omitted)?;
@@ -572,32 +648,67 @@ fn normalize_scope(item: &mut toml::Value) {
 }
 
 fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, ManifestError> {
+    if !raw.is_table() {
+        return Err(field_error(
+            plasmid_id,
+            "commands".into(),
+            command_sections(&evident_or(raw, &[], EXAMPLE_COMMAND)),
+            &format!("{} is not a table", shown(raw)),
+        ));
+    }
     let address_plan = raw
         .get("address_plan")
         .and_then(toml::Value::as_str)
         .unwrap_or("10.29.0.0/24")
         .to_string();
-    let table = raw
-        .get("commands")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| {
-            field_error(
+    let table = match raw.get("commands") {
+        Some(toml::Value::Table(table)) => table,
+        Some(other) => {
+            return Err(field_error(
                 plasmid_id,
                 "commands.commands".into(),
-                "[commands.commands.git]\nexec = [\"git\"]".into(),
+                command_sections(&evident_or(other, &[], EXAMPLE_COMMAND)),
+                &format!("{} is not a table", shown(other)),
+            ));
+        }
+        None => {
+            return Err(field_error(
+                plasmid_id,
+                "commands.commands".into(),
+                command_sections(&[EXAMPLE_COMMAND.into()]),
                 "[commands] holds no commands table",
-            )
-        })?;
+            ));
+        }
+    };
     let mut commands = Vec::new();
     for (id, decl) in table {
         let path = format!("commands.commands.{}", diagnostic_key(id));
-        let exec = string_list(decl.get("exec"));
+        if !decl.is_table() {
+            return Err(field_error(
+                plasmid_id,
+                path.clone(),
+                format!(
+                    "[{path}]\nexec = [{}]",
+                    toml_string(&program(Some(decl), id))
+                ),
+                &format!("{} is not a table", shown(decl)),
+            ));
+        }
+        let declared = decl.get("exec");
+        let exec = string_list(declared);
         if exec.is_empty() {
+            let detail = match declared {
+                None => "the command declares no exec".to_string(),
+                Some(value) if value.is_array() => {
+                    format!("{} names no program to run", shown(value))
+                }
+                Some(value) => format!("{} is not a list of strings", shown(value)),
+            };
             return Err(field_error(
                 plasmid_id,
                 format!("{path}.exec"),
-                format!("exec = [{}]", toml::Value::String(id.clone())),
-                "the command declares no exec",
+                format!("exec = [{}]", toml_string(&program(declared, id))),
+                &detail,
             ));
         }
         commands.push(CommandDecl {
@@ -609,7 +720,7 @@ fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, M
                 .map(String::from),
             network: decl
                 .get("network")
-                .map(|n| parse_network(plasmid_id, &format!("{path}.network"), n))
+                .map(|n| parse_network(plasmid_id, &format!("{path}.network"), n, &[]))
                 .transpose()?,
             secrets: decl
                 .get("secrets")
@@ -707,29 +818,44 @@ fn validate_mock(
     network: Option<&NetworkSpec>,
 ) -> Result<(), ManifestError> {
     let Some(network) = network else {
-        let hosts = if mock.hosts.is_empty() {
-            hosts_line(None)
-        } else {
-            format!("hosts = {}", toml::Value::from(mock.hosts.clone()))
-        };
+        if mock.hosts.is_empty() {
+            return Err(field_error(
+                id,
+                "mock".into(),
+                REMOVE_ENTRY.into(),
+                "[mock] names no host, and there is no [network]",
+            ));
+        }
         return Err(field_error(
             id,
             "network".into(),
-            format!("[network]\n{hosts}"),
+            format!("[network]\n{}", strings_line("hosts", &mock.hosts)),
             "a mock stands in for hosts that [network] declares, and there is no [network]",
         ));
     };
+    let mut undeclared: Vec<String> = Vec::new();
     for host in &mock.hosts {
-        if !network.hosts.iter().any(|declared| declared == host) {
-            return Err(field_error(
-                id,
-                "network.hosts".into(),
-                toml::Value::String(host.clone()).to_string(),
-                &format!("[mock] stands in for {host:?}, which [network] does not declare"),
-            ));
+        if !network.hosts.contains(host) && !undeclared.contains(host) {
+            undeclared.push(host.clone());
         }
     }
-    Ok(())
+    let Some(host) = undeclared.first() else {
+        return Ok(());
+    };
+    let fix = if network.hosts.is_empty() {
+        strings_line("hosts", &undeclared)
+    } else {
+        toml_string(host)
+    };
+    Err(field_error(
+        id,
+        "network.hosts".into(),
+        fix,
+        &format!(
+            "[mock] stands in for {}, which [network] does not declare",
+            toml_string(host)
+        ),
+    ))
 }
 
 fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestError> {
@@ -744,18 +870,13 @@ fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestEr
                     .as_deref()
                     .is_none_or(|subject| subject.trim().is_empty())
             {
-                let suggestion = if decl.id.trim().is_empty() {
-                    "command-name"
-                } else {
-                    &decl.id
-                };
                 return Err(field_error(
                     id,
                     format!(
                         "commands.commands.{}.secrets.refs[{index}].subject",
                         diagnostic_key(&decl.id)
                     ),
-                    format!("subject = {}", toml::Value::String(suggestion.into())),
+                    format!("subject = {}", toml_string(&program(None, &decl.id))),
                     "a command credential requires a nonblank ref or command subject",
                 ));
             }
@@ -768,33 +889,114 @@ const EXAMPLE_HOST: &str = "api.example.com";
 
 const EXAMPLE_PIN: &str = "192.0.2.0/24";
 
-fn hosts_line(evident: Option<&str>) -> String {
-    string_list_line("hosts", evident, EXAMPLE_HOST)
+const EXAMPLE_COMMAND: &str = "git";
+
+fn strings_line(field: &str, entries: &[String]) -> String {
+    let entries: Vec<String> = entries.iter().map(|entry| toml_string(entry)).collect();
+    format!("{field} = [{}]", entries.join(", "))
 }
 
-fn string_list_line(field: &str, evident: Option<&str>, example: &str) -> String {
-    let entry = evident
+fn evident_strings(value: &toml::Value) -> Vec<String> {
+    let nonblank = |item: &toml::Value| {
+        item.as_str()
+            .filter(|text| !text.trim().is_empty())
+            .map(String::from)
+    };
+    match value {
+        toml::Value::Array(items) => items
+            .iter()
+            .map(nonblank)
+            .collect::<Option<Vec<String>>>()
+            .unwrap_or_default(),
+        value => nonblank(value).into_iter().collect(),
+    }
+}
+
+fn evident_or(value: &toml::Value, fallback: &[String], example: &str) -> Vec<String> {
+    let evident = evident_strings(value);
+    if !evident.is_empty() {
+        evident
+    } else if !fallback.is_empty() {
+        fallback.to_vec()
+    } else {
+        vec![example.to_string()]
+    }
+}
+
+fn command_sections(names: &[String]) -> String {
+    let sections: Vec<String> = names
+        .iter()
+        .map(|name| {
+            format!(
+                "[commands.commands.{}]\nexec = [{}]",
+                diagnostic_key(name),
+                toml_string(name)
+            )
+        })
+        .collect();
+    sections.join("\n")
+}
+
+fn program(evident: Option<&toml::Value>, key: &str) -> String {
+    evident
+        .and_then(toml::Value::as_str)
         .filter(|text| !text.trim().is_empty())
-        .unwrap_or(example);
-    format!("{field} = [{}]", toml::Value::String(entry.into()))
+        .or(Some(key).filter(|key| !key.trim().is_empty()))
+        .unwrap_or("command-name")
+        .to_string()
+}
+
+#[derive(Clone, Copy)]
+enum ListRepair<'a> {
+    Hosts(&'a [String]),
+    Pins,
+    MockHosts,
+}
+
+impl ListRepair<'_> {
+    fn field(self) -> &'static str {
+        match self {
+            ListRepair::Hosts(_) | ListRepair::MockHosts => "hosts",
+            ListRepair::Pins => "pin_cidrs",
+        }
+    }
+
+    fn whole(self, value: &toml::Value) -> String {
+        match self {
+            ListRepair::Hosts(fallback) => {
+                strings_line("hosts", &evident_or(value, fallback, EXAMPLE_HOST))
+            }
+            ListRepair::Pins => strings_line("pin_cidrs", &evident_or(value, &[], EXAMPLE_PIN)),
+            ListRepair::MockHosts => match evident_strings(value) {
+                hosts if hosts.is_empty() => REMOVE_ENTRY.into(),
+                hosts => strings_line("hosts", &hosts),
+            },
+        }
+    }
+
+    fn entry(self, items: &[toml::Value]) -> String {
+        match self {
+            ListRepair::Pins if !items.iter().any(toml::Value::is_str) => toml_string(EXAMPLE_PIN),
+            _ => REMOVE_ENTRY.into(),
+        }
+    }
 }
 
 fn declared_string_list(
     id: &str,
     section: &str,
-    field: &str,
-    example: &str,
     value: Option<&toml::Value>,
+    repair: ListRepair,
 ) -> Result<Vec<String>, ManifestError> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
-    let path = format!("{section}.{field}");
+    let path = format!("{section}.{}", repair.field());
     let Some(items) = value.as_array() else {
         return Err(field_error(
             id,
             path,
-            string_list_line(field, value.as_str(), example),
+            repair.whole(value),
             &format!("{} is not a list of strings", shown(value)),
         ));
     };
@@ -806,7 +1008,7 @@ fn declared_string_list(
                 field_error(
                     id,
                     format!("{path}[{index}]"),
-                    REMOVE_ENTRY.into(),
+                    repair.entry(items),
                     &format!("{} is not a string", shown(item)),
                 )
             })
@@ -857,7 +1059,7 @@ fn declared_ports(
 
 fn shown(value: &toml::Value) -> String {
     match value {
-        toml::Value::String(text) => format!("{text:?}"),
+        toml::Value::String(text) => toml_string(text),
         toml::Value::Float(number) if number.is_nan() => "nan".into(),
         toml::Value::Float(number) => format!("{number:?}"),
         toml::Value::Datetime(datetime) => datetime.to_string(),
