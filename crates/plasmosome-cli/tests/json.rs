@@ -351,6 +351,26 @@ fn a_scan_error_says_where() {
 }
 
 #[test]
+fn a_scan_error_shows_each_control_in_a_repeated_key() {
+    let key = format!("a{}{}", escaped("001b"), escaped("202e"));
+    let error = refused(format!(r#"{{"{key}":1,"{key}":2}}"#).as_bytes());
+    assert_eq!(
+        error.reason,
+        Reason::DuplicateKey {
+            path: format!("/a{}{}", character(0x1b), character(0x202e)),
+        }
+    );
+    assert_eq!(
+        error.reason.to_string(),
+        "the key /a<U+001B><U+202E> repeats"
+    );
+    assert_eq!(
+        error.to_string(),
+        "the key /a<U+001B><U+202E> repeats at byte 19"
+    );
+}
+
+#[test]
 fn every_reason_reads_as_prose() {
     let cases = [
         (Reason::NotUtf8, "the text is not UTF-8"),
