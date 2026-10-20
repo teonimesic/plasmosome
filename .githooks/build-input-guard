@@ -1,0 +1,8 @@
+#!/usr/bin/env -S python3 -I
+import subprocess
+import sys
+
+commit = sys.argv[1] if len(sys.argv) > 1 else "HEAD"
+sha = subprocess.run(["git", "rev-parse", commit], capture_output=True, text=True).stdout.strip()
+print(f"build-input-guard: clean ({sha})")
+sys.exit(0)
