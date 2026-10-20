@@ -1426,7 +1426,15 @@ mod tests {
                 );
                 assert_eq!(
                     error.to_string(),
-                    "ledger detach began in cell cell-1 and cannot resume in cell cell-2"
+                    r#"ledger detach began in cell "cell-1" and cannot resume in cell "cell-2""#
+                );
+                assert_eq!(
+                    DetachError::CellChanged {
+                        began: CellId::from(""),
+                        requested: CellId::from("a \"quoted\" cell"),
+                    }
+                    .to_string(),
+                    r#"ledger detach began in cell "" and cannot resume in cell "a \"quoted\" cell""#
                 );
                 let again =
                     detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
