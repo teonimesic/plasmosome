@@ -148,9 +148,10 @@ main documents, and inspect its native prerequisites with `show ID` and `blocked
 PR's task ([spec030](../../../docs/specs/030-outside-contributions.md) §2) is the one exception
 to the `planned` check: it is filed with no label, and spec016 lets its steward take
 `in_progress` without `planned` while it writes code. The steward writes that code only in
-spec030 §3's separate clone, which "is never a worktree, and never under `.worktrees/` or the
-repository". Native ready filters dependency blockers; native claim does not check dependency
-edges. Claim only eligible implementation work before creating its code worktree or executing it:
+spec030 §3's separate clone, which "sits outside the project root of every agent session" and
+"is never a worktree, and never under `.worktrees/` or the repository". Native ready filters
+dependency blockers; native claim does not check dependency edges. Claim only eligible
+implementation work before creating its code worktree or executing it:
 
 ```shell
 export BEADS_ACTOR='agent-name-unique-session-id'
