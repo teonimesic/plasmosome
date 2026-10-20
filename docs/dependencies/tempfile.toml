@@ -6,16 +6,16 @@ reason = """\
   """
 write_it_instead.lines = 80
 write_it_instead.how = """\
-  On 2026-10-20, at main 16fffce, `git grep -l 'tempfile::' -- '*.rs' | wc -l` gives 46 files, all \
+  On 2026-10-20, at main a5e32b5, `git grep -l 'tempfile::' -- '*.rs' | wc -l` gives 46 files, all \
   of them tests, test modules or benchmarks, since eight of the ten members declare tempfile, all \
   eight as a dev-dependency, and the other two do not declare it. `git grep -h -o -E \
-  'tempfile::[A-Za-z_:]+' -- '*.rs' | sort | uniq -c` gives tempdir 223, TempDir 24, Builder::new \
-  3 and tempfile 2. Reading the code shows that it calls path() on a TempDir and relies on its \
-  drop to remove the tree, that each Builder::new() is followed by prefix("ps") and tempdir_in, \
-  and that tempfile() opens an unnamed file for a child's stderr. A replacement with the standard \
-  library alone needs: a TempDir that holds its path, gives path() and removes the tree when \
-  dropped (20 lines); a unique name, made of a prefix and six random letters and digits taken from \
-  std's RandomState, and tried again when the name exists (25); tempdir() under \
+  'tempfile::[A-Za-z_:]+' -- '*.rs' | sort | uniq -c` gives tempdir 205, TempDir 26, Builder::new \
+  5 and tempfile 2. Reading the code shows that it calls path() on a TempDir and relies on its \
+  drop to remove the tree, that each Builder::new() is followed by prefix("ps") or prefix("pd") \
+  and tempdir_in, and that tempfile() opens an unnamed file for a child's stderr. A replacement \
+  with the standard library alone needs: a TempDir that holds its path, gives path() and removes \
+  the tree when dropped (20 lines); a unique name, made of a prefix and six random letters and \
+  digits taken from std's RandomState, and tried again when the name exists (25); tempdir() under \
   std::env::temp_dir(), and a Builder with prefix and tempdir_in (20); and tempfile(), a file \
   opened with create_new and mode 0o600 and removed at once, which is what the crate does on \
   macOS, while on Linux it first asks for O_TMPFILE through rustix (15): 80 lines. Replacing it \
