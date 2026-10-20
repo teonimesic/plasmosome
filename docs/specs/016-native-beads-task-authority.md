@@ -157,7 +157,7 @@ or `contract-test` wrapper API.
 | `planning` | Owned, active work on this task's executable plan |
 | `open` + `planned` | Admitted implementation candidate; ready also excludes dependency blockers |
 | `in_progress` | Owned implementation, including active review repairs |
-| `review` | Same author owns a submitted candidate through review and merge; `external_ref` identifies its PR when opened |
+| `review` | Same author owns a submitted candidate through review and merge; an outside PR's task may be filed into `review` without a plan, or `blocked` until its spec is accepted, and its steward holds it (spec 030); `external_ref` identifies its PR when opened |
 | `blocked` | No current task work can advance; notes identify cause and the phase to resume |
 | `closed` | Delivered with merge evidence, or explicitly cancelled with its distinct reason |
 
@@ -236,8 +236,10 @@ with an ordinary status update, or an evidenced release returns the task to `ope
 Enter `review` when a settled candidate is handed to independent review, including local review
 before a PR exists. Record the actual PR URL as soon as it opens. Keep ownership while reviews,
 CI or an expected provider retry are pending. Active implementation repairs take `in_progress`,
-then return to `review` on resubmission; a real external impediment uses `blocked` with the
-resume phase. Do not flip status for a note, review reply or ordinary polling interval.
+then return to `review` on resubmission. An outside PR's task stays in `review` while its
+contributor repairs, and takes `in_progress` only while its steward writes code (spec 030); a real
+external impediment uses `blocked` with the resume phase. Do not flip status for a note, review
+reply or ordinary polling interval.
 After the full PR-review gate and observed GitHub `MERGED`, append the PR URL, actual squash
 commit and `mergedAt`. This proves source publication, not completion of the task's entire
 acceptance. Before closing, the author re-reads the complete native acceptance and verifies
