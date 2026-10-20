@@ -12,7 +12,9 @@ const FAKE_COMPILER_ARGUMENTS: [&str; 4] = ["-std=c11", "-Wall", "-Wextra", "-We
 const FAKE_MODES: [&str; 1] = ["record"];
 
 static FAKE_DIRECTORY: LazyLock<PathBuf> = LazyLock::new(|| {
-    let executable = std::env::current_exe().expect("the running test executable has a path");
+    let executable = std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .expect("the running test executable has a canonical path");
     let root = executable
         .ancestors()
         .skip(1)
