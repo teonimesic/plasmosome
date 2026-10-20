@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use plasmosome_backend::CellId;
+use plasmosome_backend::{BootSession, CellId};
 use plasmosome_core::{DiscoveryError, InstanceRoot};
 
 const ROOT_VARIABLE: &str = "PLASMOSOME_INSTANCE_CHILD_ROOT";
@@ -186,6 +186,22 @@ fn instance_under_a_restrictive_umask_child() {
         .open_journal_for_append(&lock)
         .expect("the journal is created");
     assert!(journal.created);
+    let boot = BootSession::parse("5d1e7c3a-0b2f-4e6d-9a8b-1c2d3e4f5a6b").expect("a boot session");
+    created.create_launched(boot).expect("launched is created");
+    created.create_created(&lock).expect("created is written");
+    drop(created.create_runtime_dir().expect("runtime is created"));
+    let ended = instance
+        .create_cell_dir(&lock, &CellId::from("cell-2"))
+        .expect("the second cell directory is created");
+    ended
+        .create_launched(boot)
+        .expect("its launched is created");
+    ended
+        .mark_launched_stopped()
+        .expect("its clean stop is recorded");
+    instance
+        .retire(&lock, ended)
+        .expect("the second cell retires");
 }
 
 #[test]
@@ -197,13 +213,25 @@ fn modes_are_private_whatever_the_umask() {
         "cells",
         "cells/cell-1",
         "cells/cell-1/ledger.ndjson",
+        "cells/cell-1/launched",
+        "cells/cell-1/created",
+        "cells/cell-1/runtime",
+        "retired",
+        "retired/cell-2",
+        "retired/cell-2/launched",
     ];
     let modes = names.map(|name| {
         fs::symlink_metadata(root.join(name))
             .map(|metadata| metadata.mode() & 0o7777)
             .ok()
     });
-    for name in ["cells", "cells/cell-1"] {
+    for name in [
+        "cells",
+        "cells/cell-1",
+        "cells/cell-1/runtime",
+        "retired",
+        "retired/cell-2",
+    ] {
         let _ = fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o700));
     }
     assert!(
@@ -213,7 +241,18 @@ fn modes_are_private_whatever_the_umask() {
     );
     assert_eq!(
         modes,
-        [Some(0o600), Some(0o700), Some(0o700), Some(0o600)],
+        [
+            Some(0o600),
+            Some(0o700),
+            Some(0o700),
+            Some(0o600),
+            Some(0o600),
+            Some(0o600),
+            Some(0o700),
+            Some(0o700),
+            Some(0o700),
+            Some(0o600),
+        ],
         "{names:?}"
     );
 }

@@ -2168,24 +2168,111 @@ mod tests {
         (metadata.dev(), metadata.ino())
     }
 
+    type BeforeSync = Box<dyn FnOnce()>;
+
     thread_local! {
         static SYNCED: RefCell<Vec<(u64, u64)>> = const { RefCell::new(Vec::new()) };
+        static SEEN: RefCell<Vec<Seen>> = const { RefCell::new(Vec::new()) };
         static FAIL_NEXT_SYNC_OF: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+        static FAIL_NEXT_FILE_SYNC: Cell<bool> = const { Cell::new(false) };
+        static BEFORE_NEXT_FILE_SYNC: RefCell<Option<BeforeSync>> = const { RefCell::new(None) };
     }
 
-    fn recording_sync(dir: BorrowedFd<'_>) -> io::Result<()> {
-        let synced = identity(&fs::File::from(dir.try_clone_to_owned()?).metadata()?);
+    const WATCHED: [&CStr; 6] = [
+        c"launched",
+        c"launched.tmp",
+        c"created",
+        c"runtime",
+        c"cell-1",
+        c"retired",
+    ];
+
+    #[derive(Debug, Clone)]
+    struct Seen {
+        synced: (u64, u64),
+        bytes: Option<u64>,
+        names: Vec<(&'static CStr, (u64, u64))>,
+    }
+
+    impl Seen {
+        fn named(&self, name: &CStr) -> Option<(u64, u64)> {
+            self.names
+                .iter()
+                .find(|(watched, _)| *watched == name)
+                .map(|&(_, found)| found)
+        }
+    }
+
+    fn identity_in(dir: BorrowedFd<'_>, name: &CStr) -> Option<(u64, u64)> {
+        let entry = open_at(dir, name, libc::O_RDONLY | FILE_FLAGS, 0).ok()?;
+        fs::File::from(entry)
+            .metadata()
+            .ok()
+            .map(|metadata| identity(&metadata))
+    }
+
+    fn seen_by(fd: BorrowedFd<'_>, metadata: &fs::Metadata) -> Seen {
+        let names = if metadata.is_dir() {
+            WATCHED
+                .iter()
+                .filter_map(|&name| identity_in(fd, name).map(|found| (name, found)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Seen {
+            synced: identity(metadata),
+            bytes: metadata.is_file().then_some(metadata.len()),
+            names,
+        }
+    }
+
+    fn recording_sync(fd: BorrowedFd<'_>) -> io::Result<()> {
+        let metadata = fs::File::from(fd.try_clone_to_owned()?).metadata()?;
+        let synced = identity(&metadata);
         SYNCED.with(|all| all.borrow_mut().push(synced));
+        SEEN.with(|all| all.borrow_mut().push(seen_by(fd, &metadata)));
         if FAIL_NEXT_SYNC_OF.with(|fail| fail.get()) == Some(synced) {
             FAIL_NEXT_SYNC_OF.with(|fail| fail.set(None));
             return Err(io::Error::from_raw_os_error(libc::EIO));
         }
-        sync_directory(dir)
+        if metadata.is_file() {
+            if FAIL_NEXT_FILE_SYNC.with(|fail| fail.replace(false)) {
+                return Err(io::Error::from_raw_os_error(libc::EIO));
+            }
+            if let Some(work) = BEFORE_NEXT_FILE_SYNC.with(|slot| slot.borrow_mut().take()) {
+                work();
+            }
+        }
+        sync_directory(fd)
     }
 
     fn reset_syncs() {
         SYNCED.with(|all| all.borrow_mut().clear());
+        SEEN.with(|all| all.borrow_mut().clear());
         FAIL_NEXT_SYNC_OF.with(|fail| fail.set(None));
+        FAIL_NEXT_FILE_SYNC.with(|fail| fail.set(false));
+        BEFORE_NEXT_FILE_SYNC.with(|slot| slot.borrow_mut().take());
+    }
+
+    fn last_seen(path: &Path) -> Seen {
+        let synced = identity_at(path);
+        SEEN.with(|all| {
+            all.borrow()
+                .iter()
+                .rev()
+                .find(|seen| seen.synced == synced)
+                .cloned()
+        })
+        .unwrap_or_else(|| panic!("{} was never synced", path.display()))
+    }
+
+    fn fail_next_file_sync() {
+        FAIL_NEXT_FILE_SYNC.with(|fail| fail.set(true));
+    }
+
+    fn before_next_file_sync(work: impl FnOnce() + 'static) {
+        BEFORE_NEXT_FILE_SYNC.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
     }
 
     fn recording_root(root: &Path) -> InstanceRoot {
@@ -3277,6 +3364,134 @@ mod tests {
         symlink(&target, &path).expect("the dangling link is made");
         expect_match!(dir.create_launched(boot()), Err(CellDirError::AlreadyExists { .. }) => ());
         assert!(!exists(&target), "the marker was created through the link");
+        assert!(
+            !exists(&root.join("cells/cell-1/launched.tmp")),
+            "a refused create left its temporary"
+        );
+    }
+
+    #[test]
+    fn create_launched_replaces_a_temporary_left_by_a_crash() {
+        for stale in ["a torn file", "a symlink"] {
+            let (_dir, root) = temp_root();
+            let dir = opened(&root, "cell-1");
+            let temporary = root.join("cells/cell-1/launched.tmp");
+            let target = root.join("elsewhere");
+            if stale == "a symlink" {
+                fs::write(&target, b"keep").expect("the target is written");
+                symlink(&target, &temporary).expect("the link is made");
+            } else {
+                fs::write(&temporary, b"{\"cell\":\"cel").expect("the temporary is written");
+            }
+            dir.create_launched(boot())
+                .unwrap_or_else(|error| panic!("{stale}: {error:?}"));
+            expect_match!(dir.read_launched(), MarkerRead::Present(found) => {
+                assert_eq!(found, marker("cell-1", false), "{stale}")
+            });
+            assert!(!exists(&temporary), "{stale} was left");
+            if stale == "a symlink" {
+                assert_eq!(fs::read(&target).expect("the target reads"), b"keep");
+            }
+        }
+    }
+
+    #[test]
+    fn a_directory_named_launched_tmp_is_an_io_error_and_no_marker_is_written() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = root.join("cells/cell-1/launched");
+        let temporary = root.join("cells/cell-1/launched.tmp");
+        fs::create_dir(&temporary).expect("the directory is made");
+        expect_match!(dir.create_launched(boot()), Err(CellDirError::Io { path: failed, .. }) => {
+            assert_eq!(failed, temporary)
+        });
+        expect_match!(dir.read_launched(), MarkerRead::Absent => ());
+        fs::write(&path, running_bytes()).expect("the marker is written");
+        expect_match!(dir.mark_launched_stopped(), Err(CellDirError::Io { path: failed, .. }) => {
+            assert_eq!(failed, temporary)
+        });
+        assert_eq!(fs::read(&path).expect("the marker reads"), running_bytes());
+        assert!(
+            temporary.is_dir(),
+            "the directory named launched.tmp was removed"
+        );
+    }
+
+    #[test]
+    fn create_launched_syncs_the_whole_record_and_then_the_directory_that_names_it() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        dir.create_launched(boot()).expect("the marker is created");
+        let path = root.join("cells/cell-1/launched");
+        assert_eq!(
+            last_seen(&path).bytes,
+            Some(running_bytes().len() as u64),
+            "the file was synced before its bytes were written"
+        );
+        let directory = last_seen(&root.join("cells/cell-1"));
+        assert_eq!(
+            directory.named(c"launched"),
+            Some(identity_at(&path)),
+            "the directory was synced before it named the marker"
+        );
+        assert_eq!(directory.named(c"launched.tmp"), None);
+    }
+
+    #[test]
+    fn a_failed_file_sync_leaves_no_launched_and_a_retry_creates_it() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        let cell_path = root.join("cells/cell-1");
+        fail_next_file_sync();
+        expect_match!(dir.create_launched(boot()), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, cell_path.join("launched.tmp"));
+            assert_injected(&source);
+        });
+        expect_match!(dir.read_launched(), MarkerRead::Absent => ());
+        assert_eq!(
+            syncs_of(&cell_path),
+            0,
+            "the directory was synced after a failed file sync"
+        );
+        dir.create_launched(boot())
+            .expect("a retry creates the marker");
+        expect_match!(dir.read_launched(), MarkerRead::Present(found) => {
+            assert_eq!(found, marker("cell-1", false))
+        });
+        assert!(!exists(&cell_path.join("launched.tmp")));
+    }
+
+    #[test]
+    fn a_failed_directory_sync_after_create_launched_leaves_the_whole_marker() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        let cell_path = root.join("cells/cell-1");
+        fail_next_sync_of(&cell_path);
+        expect_match!(dir.create_launched(boot()), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, cell_path);
+            assert_injected(&source);
+        });
+        expect_match!(dir.read_launched(), MarkerRead::Present(found) => {
+            assert_eq!(found, marker("cell-1", false))
+        });
+        expect_match!(dir.create_launched(boot()), Err(CellDirError::AlreadyExists { .. }) => ());
+        assert!(!exists(&cell_path.join("launched.tmp")));
+        dir.sync().expect("a later sync of the directory completes");
+    }
+
+    #[test]
+    fn create_launched_reports_a_marker_it_cannot_put_in_place() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        let taken = root.join("cells/cell-1/launched.tmp");
+        before_next_file_sync(move || {
+            let _ = fs::remove_file(&taken);
+        });
+        expect_match!(dir.create_launched(boot()), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, root.join("cells/cell-1/launched"));
+            assert_eq!(source.raw_os_error(), Some(libc::ENOENT), "{source}");
+        });
+        expect_match!(dir.read_launched(), MarkerRead::Absent => ());
     }
 
     #[test]
@@ -3415,41 +3630,153 @@ mod tests {
     }
 
     #[test]
-    fn a_reader_never_sees_a_partial_marker_while_it_is_rewritten() {
+    fn mark_launched_stopped_syncs_the_whole_record_and_then_the_directory_after_the_rename() {
         let (_dir, root) = temp_root();
-        make_cell(&root, "cell-1", None);
-        let mut instance = open_root(&root);
-        instance.sync = no_sync;
-        let writer = instance.cell_dir(&cell("cell-1")).expect("the cell opens");
-        let reader = instance.cell_dir(&cell("cell-1")).expect("the cell opens");
-        writer
-            .create_launched(boot())
-            .expect("the marker is created");
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        dir.create_launched(boot()).expect("the marker is created");
+        reset_syncs();
+        dir.mark_launched_stopped()
+            .expect("the clean stop is recorded");
+        let path = root.join("cells/cell-1/launched");
+        assert_eq!(
+            last_seen(&path).bytes,
+            Some(marker("cell-1", true).encode().len() as u64),
+            "the file was synced before its bytes were written"
+        );
+        let directory = last_seen(&root.join("cells/cell-1"));
+        assert_eq!(
+            directory.named(c"launched"),
+            Some(identity_at(&path)),
+            "the directory was synced before the rename"
+        );
+        assert_eq!(directory.named(c"launched.tmp"), None);
+    }
+
+    #[test]
+    fn a_failed_sync_in_mark_launched_stopped_leaves_one_whole_record() {
+        for failing in ["the file", "the directory"] {
+            let (_dir, root) = temp_root();
+            let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+            dir.create_launched(boot()).expect("the marker is created");
+            reset_syncs();
+            let cell_path = root.join("cells/cell-1");
+            let (failed_at, kept) = if failing == "the file" {
+                fail_next_file_sync();
+                (cell_path.join("launched.tmp"), marker("cell-1", false))
+            } else {
+                fail_next_sync_of(&cell_path);
+                (cell_path.clone(), marker("cell-1", true))
+            };
+            expect_match!(dir.mark_launched_stopped(), Err(CellDirError::Io { path, source }) => {
+                assert_eq!(path, failed_at, "{failing}");
+                assert_injected(&source);
+            });
+            expect_match!(dir.read_launched(), MarkerRead::Present(found) => {
+                assert_eq!(found, kept, "{failing}")
+            });
+            dir.mark_launched_stopped()
+                .unwrap_or_else(|error| panic!("{failing}: a retry failed: {error:?}"));
+            expect_match!(dir.read_launched(), MarkerRead::Present(found) => {
+                assert_eq!(found, marker("cell-1", true), "{failing}")
+            });
+            assert!(!exists(&cell_path.join("launched.tmp")), "{failing}");
+        }
+    }
+
+    #[test]
+    fn mark_launched_stopped_reports_a_rename_it_cannot_make_and_keeps_the_temporary() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        dir.create_launched(boot()).expect("the marker is created");
+        let path = root.join("cells/cell-1/launched");
+        let obstacle = path.clone();
+        before_next_file_sync(move || {
+            fs::remove_file(&obstacle).expect("the marker is removed");
+            fs::create_dir(&obstacle).expect("a directory takes its name");
+            fs::write(obstacle.join("keep"), b"x").expect("the directory is not empty");
+        });
+        expect_match!(dir.mark_launched_stopped(), Err(CellDirError::Io { path: failed, source }) => {
+            assert_eq!(failed, path);
+            assert_eq!(source.raw_os_error(), Some(libc::EISDIR), "{source}");
+        });
+        assert_eq!(
+            fs::read(path.join("keep")).expect("the directory is kept"),
+            b"x"
+        );
+        assert_eq!(
+            fs::read(root.join("cells/cell-1/launched.tmp")).expect("the temporary is kept"),
+            marker("cell-1", true).encode()
+        );
+    }
+
+    fn read_while(reader: CellDir, accepted: fn(&MarkerRead) -> bool, work: impl FnOnce()) {
         let done = Arc::new(AtomicBool::new(false));
         let reading = {
             let done = Arc::clone(&done);
             thread::spawn(move || {
                 let mut reads = 0_u64;
                 while !done.load(Ordering::SeqCst) {
-                    match reader.read_launched() {
-                        MarkerRead::Present(found) if found.cell == cell("cell-1") => reads += 1,
-                        other => return Err(format!("{other:?}")),
+                    let read = reader.read_launched();
+                    if !accepted(&read) {
+                        return Err(format!("{read:?}"));
                     }
+                    reads += 1;
                 }
                 Ok(reads)
             })
         };
-        for _ in 0..1_000 {
-            writer
-                .mark_launched_stopped()
-                .expect("the clean stop is recorded");
-        }
+        work();
         done.store(true, Ordering::SeqCst);
         let reads = reading
             .join()
             .expect("the reader did not panic")
             .unwrap_or_else(|seen| panic!("a reader saw {seen}"));
         assert!(reads > 0, "the reader never read the marker");
+    }
+
+    fn writer_and_reader(root: &Path) -> (CellDir, CellDir) {
+        make_cell(root, "cell-1", None);
+        let mut instance = open_root(root);
+        instance.sync = no_sync;
+        let writer = instance.cell_dir(&cell("cell-1")).expect("the cell opens");
+        let reader = instance.cell_dir(&cell("cell-1")).expect("the cell opens");
+        (writer, reader)
+    }
+
+    #[test]
+    fn a_reader_never_sees_a_partial_marker_while_it_is_rewritten() {
+        let (_dir, root) = temp_root();
+        let (writer, reader) = writer_and_reader(&root);
+        writer
+            .create_launched(boot())
+            .expect("the marker is created");
+        let present = |read: &MarkerRead| matches!(read, MarkerRead::Present(found) if found.cell == cell("cell-1"));
+        read_while(reader, present, || {
+            for _ in 0..1_000 {
+                writer
+                    .mark_launched_stopped()
+                    .expect("the clean stop is recorded");
+            }
+        });
+    }
+
+    #[test]
+    fn a_reader_never_sees_a_partial_marker_while_it_is_created() {
+        let (_dir, root) = temp_root();
+        let (writer, reader) = writer_and_reader(&root);
+        let absent_or_whole = |read: &MarkerRead| match read {
+            MarkerRead::Absent => true,
+            MarkerRead::Present(found) => *found == marker("cell-1", false),
+            MarkerRead::Unreadable(_) => false,
+        };
+        read_while(reader, absent_or_whole, || {
+            for _ in 0..500 {
+                writer
+                    .create_launched(boot())
+                    .expect("the marker is created");
+                writer.remove_launched().expect("the marker is removed");
+            }
+        });
     }
 
     #[test]
@@ -3524,6 +3851,28 @@ mod tests {
         expect_match!(dir.create_created(&lock), Err(CellDirError::AlreadyExists { path: refused }) => {
             assert_eq!(refused, path)
         });
+    }
+
+    #[test]
+    fn a_failed_sync_after_create_created_leaves_created_in_place() {
+        for failing in ["the file", "the directory"] {
+            let (_dir, root) = temp_root();
+            let (_instance, lock, dir) = recording_cell(&root, "cell-1");
+            let cell_path = root.join("cells/cell-1");
+            let failed_at = if failing == "the file" {
+                fail_next_file_sync();
+                cell_path.join("created")
+            } else {
+                fail_next_sync_of(&cell_path);
+                cell_path.clone()
+            };
+            expect_match!(dir.create_created(&lock), Err(CellDirError::Io { path, source }) => {
+                assert_eq!(path, failed_at, "{failing}");
+                assert_injected(&source);
+            });
+            assert!(dir.has_created().expect("created is checked"), "{failing}");
+            expect_match!(dir.create_created(&lock), Err(CellDirError::AlreadyExists { .. }) => ());
+        }
     }
 
     #[test]
@@ -3618,6 +3967,50 @@ mod tests {
                 ],
                 "{existing:?}"
             );
+        }
+    }
+
+    #[test]
+    fn retire_syncs_cells_and_retired_after_the_rename() {
+        let (_dir, root) = temp_root();
+        let (instance, lock, dir) = recording_cell(&root, "cell-1");
+        instance.retire(&lock, dir).expect("the cell retires");
+        let retired = root.join("retired");
+        assert_eq!(
+            last_seen(&root).named(c"retired"),
+            Some(identity_at(&retired)),
+            "the root was synced before it named retired"
+        );
+        assert_eq!(
+            last_seen(&root.join("cells")).named(c"cell-1"),
+            None,
+            "cells was synced before the rename"
+        );
+        assert_eq!(
+            last_seen(&retired).named(c"cell-1"),
+            Some(identity_at(&retired.join("cell-1"))),
+            "retired was synced before the rename"
+        );
+    }
+
+    #[test]
+    fn retire_returns_a_failed_sync_naming_the_directory() {
+        for (failing, renamed) in [("the root", false), ("cells", true), ("retired", true)] {
+            let (_dir, root) = temp_root();
+            fs::create_dir(root.join("retired")).expect("retired is made");
+            let (instance, lock, dir) = recording_cell(&root, "cell-1");
+            let failed_at = if failing == "the root" {
+                root.clone()
+            } else {
+                root.join(failing)
+            };
+            fail_next_sync_of(&failed_at);
+            expect_match!(instance.retire(&lock, dir), Err(RetireError::Io { path, source }) => {
+                assert_eq!(path, failed_at, "{failing}");
+                assert_injected(&source);
+            });
+            assert_eq!(exists(&root.join("retired/cell-1")), renamed, "{failing}");
+            assert_eq!(exists(&root.join("cells/cell-1")), !renamed, "{failing}");
         }
     }
 
