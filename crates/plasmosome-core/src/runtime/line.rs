@@ -1,7 +1,13 @@
 use super::strict_json::{self, StrictJsonError};
 use serde_json::Value;
 
-pub(crate) const MAX_RECORD_BYTES: usize = 1_048_576;
+/// The most bytes a config record may hold before its newline, as spec 023
+/// §4 bounds it; a recipe line has the same bound. The largest record is this
+/// many bytes and one newline, so a reader that stops after
+/// `MAX_RECORD_BYTES + 2` bytes has read more than any record can be, and
+/// [`SupervisorConfig::decode`](super::supervisor_config::SupervisorConfig::decode)
+/// refuses that as `TooLarge`.
+pub const MAX_RECORD_BYTES: usize = 1_048_576;
 
 pub(crate) enum LineFault {
     NotOneLine,

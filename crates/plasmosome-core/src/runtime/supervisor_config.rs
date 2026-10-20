@@ -1,5 +1,7 @@
 use super::cell_id::{MAX_CELL_NUMBER, parse_cell_id};
-use super::line::{LineFault, MAX_RECORD_BYTES, read_line};
+pub use super::line::MAX_RECORD_BYTES;
+
+use super::line::{LineFault, read_line};
 use super::path::{PathError, RecipePath};
 use super::recipe::{PlatformLimits, RecipeRefusal, RuntimeRecipe};
 use plasmosome_backend::CellId;
@@ -40,8 +42,10 @@ pub enum ConfigRecordRefusal {
     /// The record does not end in one newline, holds another newline, or holds
     /// a carriage return.
     NotOneLine,
-    /// The record holds `bytes` bytes before its newline; at most 1,048,576
-    /// are allowed.
+    /// The record holds `bytes` bytes, not counting a final newline; at most
+    /// [`MAX_RECORD_BYTES`] are allowed. Checked before anything else, so a
+    /// buffer cut off past the bound refuses this way whether or not it holds
+    /// a newline.
     TooLarge { bytes: usize },
     /// The record is not UTF-8.
     NotUtf8,
@@ -105,9 +109,10 @@ impl SupervisorConfig {
     }
 
     /// Reads a record, refusing it whole at the first rule it breaks, so no
-    /// caller acts on part of one. The rules, in order: exactly one newline,
-    /// at the end, and no carriage return; at most 1,048,576 bytes before the
-    /// newline; UTF-8; one strict JSON value, with no key repeated at any
+    /// caller acts on part of one. The rules, in order: at most 1,048,576
+    /// bytes, not counting a final newline, whether or not the record holds
+    /// one; exactly one newline, at the end, and no carriage return; UTF-8;
+    /// one strict JSON value, with no key repeated at any
     /// depth; an object with exactly the four keys, refusing an unknown key
     /// before a missing one; then `cell`, `instance_root`, `runtime_recipe`
     /// (read by [`RuntimeRecipe::from_value`] under `limits`) and
@@ -116,6 +121,10 @@ impl SupervisorConfig {
         record: &[u8],
         limits: &PlatformLimits,
     ) -> Result<SupervisorConfig, ConfigRecordRefusal> {
+        if record.len() > MAX_RECORD_BYTES + 1 {
+            let bytes = record.strip_suffix(b"\n").unwrap_or(record).len();
+            return Err(ConfigRecordRefusal::TooLarge { bytes });
+        }
         let value = read_line(record).map_err(refused_line)?;
         let Value::Object(entries) = &value else {
             return Err(ConfigRecordRefusal::NotAnObject);
@@ -190,7 +199,7 @@ impl std::fmt::Display for ConfigRecordRefusal {
             ),
             ConfigRecordRefusal::TooLarge { bytes } => write!(
                 f,
-                "the config record is {bytes} bytes before its newline; at most {MAX_RECORD_BYTES} are allowed"
+                "the config record is {bytes} bytes, not counting a final newline; at most {MAX_RECORD_BYTES} are allowed"
             ),
             ConfigRecordRefusal::NotUtf8 => f.write_str("the config record is not UTF-8"),
             ConfigRecordRefusal::NotJson { detail } => {
