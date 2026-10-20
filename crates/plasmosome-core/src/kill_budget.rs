@@ -75,14 +75,14 @@ impl<C: Fn() -> Instant> KillBudget<C> {
     }
 
     /// What is left of D now. Zero once D has passed.
-    pub fn remaining(&self) -> Duration {
+    pub(crate) fn remaining(&self) -> Duration {
         let elapsed = (self.clock)().saturating_duration_since(self.arrival);
         self.total.saturating_sub(elapsed)
     }
 
     /// The reserve kept for the lock wait: a tenth of D, from 1 ms to 3 s. Fixed for the
     /// request.
-    pub fn lock_reserve(&self) -> Duration {
+    pub(crate) fn lock_reserve(&self) -> Duration {
         (self.total / 10).clamp(MS, MOST_LOCK_RESERVE)
     }
 
