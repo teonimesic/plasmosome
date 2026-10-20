@@ -231,11 +231,9 @@ fn neutral_names_without_opt_usr_local_bin_or_a_fuse_workspace_are_refused() {
 #[test]
 fn a_misspelt_key_or_text_that_is_not_json_is_refused_as_malformed() {
     let mut manifest = manifest_json();
-    let rules = manifest["rules"].take();
-    manifest
-        .as_object_mut()
-        .expect("an object")
-        .insert("rule".to_string(), rules);
+    let top = manifest.as_object_mut().expect("an object");
+    let rules = top.remove("rules").expect("the fixture has rules");
+    top.insert("rule".to_string(), rules);
     for text in [manifest.to_string(), "not json".to_string()] {
         assert!(
             matches!(load(&text), Err(ManifestRefusal::Malformed { .. })),
