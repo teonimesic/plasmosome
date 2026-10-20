@@ -1,7 +1,7 @@
 use std::io::{BufReader, ErrorKind, Read};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -10,6 +10,9 @@ use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
 use crate::control::{Controller, serve_connection};
+use crate::private_socket::{
+    Accepted, PrivateDir, PrivateListener, PrivateSocketError, effective_uid,
+};
 use crate::state::{ControllerState, InstanceName, InstanceNameError};
 
 const ACCEPT_POLL: Duration = Duration::from_millis(25);
@@ -182,36 +185,22 @@ fn registry_root<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Pa
     unusable::<D, _>("registry_root", PathBuf::deserialize(deserializer)).map(Some)
 }
 
-/// Why the daemon could not start, or could not keep serving.
+/// Why the daemon could not start, or could not keep serving. `Boundary` is the private-socket
+/// boundary's refusal of the control socket path, or a failed bind under it: the daemon served
+/// nothing.
 #[derive(Debug)]
 pub enum DaemonError {
-    Bind {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    Boundary(PrivateSocketError),
     Listener(std::io::Error),
-    SocketIdentity {
-        path: PathBuf,
-        source: std::io::Error,
-    },
 }
 
 impl std::fmt::Display for DaemonError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DaemonError::Bind { path, source } => write!(
-                f,
-                "cannot bind the control socket {}: {source}",
-                path.display()
-            ),
+            DaemonError::Boundary(refusal) => write!(f, "{refusal}"),
             DaemonError::Listener(source) => write!(
                 f,
                 "the control socket stopped accepting connections: {source}"
-            ),
-            DaemonError::SocketIdentity { path, source } => write!(
-                f,
-                "cannot inspect the control socket {}: {source}",
-                path.display()
             ),
         }
     }
@@ -220,9 +209,8 @@ impl std::fmt::Display for DaemonError {
 impl std::error::Error for DaemonError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            DaemonError::Bind { source, .. } => Some(source),
+            DaemonError::Boundary(refusal) => Some(refusal),
             DaemonError::Listener(source) => Some(source),
-            DaemonError::SocketIdentity { source, .. } => Some(source),
         }
     }
 }
@@ -242,86 +230,78 @@ fn accept_outcome(error: &std::io::Error) -> Next {
     }
 }
 
-#[derive(Debug)]
-struct BoundSocket {
-    path: PathBuf,
-    dev: u64,
-    ino: u64,
-}
-impl BoundSocket {
-    fn capture(path: PathBuf) -> Result<Self, DaemonError> {
-        let metadata =
-            std::fs::symlink_metadata(&path).map_err(|source| DaemonError::SocketIdentity {
-                path: path.clone(),
-                source,
-            })?;
-        if !metadata.file_type().is_socket() {
-            return Err(DaemonError::SocketIdentity {
-                path,
-                source: std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "the entry at the pathname is not a socket",
-                ),
-            });
-        }
-        Ok(Self {
-            path,
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-        })
-    }
-}
-
-impl Drop for BoundSocket {
-    fn drop(&mut self) {
-        if let Ok(metadata) = std::fs::symlink_metadata(&self.path)
-            && metadata.file_type().is_socket()
-            && metadata.dev() == self.dev
-            && metadata.ino() == self.ino
-        {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+fn split_socket_path(path: &Path) -> Result<(&Path, &str), PrivateSocketError> {
+    let normal = path
+        .as_os_str()
+        .as_bytes()
+        .strip_prefix(b"/")
+        .is_some_and(|relative| {
+            relative
+                .split(|byte| *byte == b'/')
+                .all(|component| !matches!(component, b"" | b"." | b".."))
+        });
+    let (true, Some(parent), Some(name)) = (normal, path.parent(), path.file_name()) else {
+        return Err(PrivateSocketError::BadPath {
+            path: path.to_path_buf(),
+        });
+    };
+    let name = name.to_str().ok_or_else(|| PrivateSocketError::BadName {
+        name: name.to_string_lossy().into_owned(),
+    })?;
+    Ok((parent, name))
 }
 
 /// Runs the controller daemon until `shutdown` is set, then tears it down.
 /// Binds the control socket named by `config` first, so a start that cannot
-/// bind has done nothing else. A path already there is refused, whether it
-/// holds a live daemon's socket or a stale file; the daemon never unlinks a
-/// path it did not create, so clearing a stale path is the caller's job.
-/// Right after binding, the daemon records the socket's device and inode; a
-/// start that cannot capture that identity refuses without unlinking
-/// anything, leaving any residue for the operator.
+/// bind has done nothing else. The path is held to spec 001 §4.1's boundary
+/// for private sockets: it must be absolute with no empty, `.` or `..`
+/// component and pass through no symlink. Its ancestors must be owned by root
+/// or the effective UID, and neither group, other nor an ACL entry may let
+/// another user replace them. Its directory must be owned by the effective
+/// UID, with no group or other permission and no ACL. A path that fails is
+/// refused as `DaemonError::Boundary`, naming the failing component, and
+/// nothing is bound. A path already there is refused too, whether it holds a live
+/// daemon's socket or a stale file; the daemon never unlinks a path it did not
+/// create, so clearing a stale path is the caller's job. The socket is set to
+/// mode 0600 before it listens, whatever the umask. A connection whose kernel
+/// peer UID is not the effective UID is closed before a byte is read or
+/// written, and the daemon goes on to the next one.
 /// Returning — cleanly, on an error raised after the bind, or through an
-/// unwinding panic — removes the socket path only when the entry still at
-/// that name is the socket this daemon bound: a no-follow device-and-inode
-/// match. A replacement a caller settles at the pathname in the meantime — a
-/// regular file or a symlink — is left exactly as it was, and so is the
-/// original socket once renamed elsewhere. The check and the unlink are two
-/// steps, not one atomic one: a writer with authority over the directory can
-/// still substitute a victim between them, so this is ownership-correct
-/// cleanup under a coordinated namespace, not race-free protection. A
-/// `SIGKILL` runs no destructor, so callers must not read the path's absence
-/// as the daemon being gone.
+/// unwinding panic — removes the socket only while the entry at that name in
+/// the directory opened at start is still the socket this daemon bound, by
+/// device and inode, without following a symlink. A replacement a caller
+/// settles at the name in the meantime — a regular file or a symlink — is
+/// left exactly as it was, and so is the original socket once renamed
+/// elsewhere. The check and the unlink are two steps, not one atomic one: a
+/// writer with authority over the directory can still substitute a victim
+/// between them, so this is ownership-correct cleanup under a coordinated
+/// namespace, not race-free protection. A `SIGKILL` runs no destructor, so
+/// callers must not read the path's absence as the daemon being gone.
 /// Requests on a connection are answered in order, and `shutdown` is honored
 /// against a client that stops reading its replies. The instance starts with
 /// no cells at ledger generation zero. A handler panic answers `-32603` and
 /// then unwinds out of this function.
 pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonError> {
+    let (parent, name) =
+        split_socket_path(&config.control_socket).map_err(DaemonError::Boundary)?;
+    let directory = PrivateDir::open(parent).map_err(DaemonError::Boundary)?;
     let listener =
-        UnixListener::bind(&config.control_socket).map_err(|source| DaemonError::Bind {
-            path: config.control_socket.clone(),
-            source,
-        })?;
-    let _bound = BoundSocket::capture(config.control_socket.clone())?;
-    listener
-        .set_nonblocking(true)
-        .map_err(DaemonError::Listener)?;
+        PrivateListener::bind(directory, name, effective_uid()).map_err(DaemonError::Boundary)?;
 
     let mut controller = Controller::new(config.name, ControllerState::default(), NO_LEDGER_YET);
+    serve(&listener, shutdown, &mut controller)
+}
+
+fn serve(
+    listener: &PrivateListener,
+    shutdown: &AtomicBool,
+    controller: &mut Controller,
+) -> Result<(), DaemonError> {
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept() {
-            Ok((stream, _)) => converse(stream, shutdown, &mut controller),
+            Ok(Some(Accepted::Trusted(stream))) => converse(stream, shutdown, controller),
+            Ok(Some(Accepted::Refused(_))) => {}
+            Ok(None) => std::thread::sleep(ACCEPT_POLL),
             Err(error) => match accept_outcome(&error) {
                 Next::Poll => std::thread::sleep(ACCEPT_POLL),
                 Next::Retry => {}
