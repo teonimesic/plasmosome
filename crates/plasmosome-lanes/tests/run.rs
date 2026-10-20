@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use plasmosome_lanes::config::{GuestConfig, LaneConfig};
+use plasmosome_lanes::config::{GuestConfig, LaneConfig, Share};
 use plasmosome_lanes::run::{LaneRun, Outcome, run_lane};
 
 fn process_exists(pid: u32) -> bool {
@@ -563,4 +563,72 @@ fn a_symlink_to_a_complete_run_elsewhere_is_not_read_as_the_console() {
         Outcome::NotRun(reason) => assert!(reason.contains("link"), "{reason}"),
         other => panic!("a console that is a symlink must be not run, it was {other:?}"),
     }
+}
+
+#[test]
+fn a_configuration_the_launcher_never_reads_does_not_hold_run_lane_past_its_timeout() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let pid = dir.path().join("launcher.pid");
+    let _cleanup = KillOnDrop(vec![pid.clone()]);
+    let mut lane = common::lane_config(dir.path(), "run-1");
+    let first = lane.shares[0].clone();
+    let long = "s".repeat(1000);
+    lane.shares = (0..200)
+        .map(|index| Share {
+            tag: format!("lanes{index}"),
+            path: dir.path().join(&long).join(index.to_string()),
+            ..first.clone()
+        })
+        .collect();
+    let size = lane.to_json().expect("the configuration serializes").len();
+    assert!(
+        size > 200_000,
+        "the configuration is {size} bytes, which a pipe's buffer could hold"
+    );
+    let body = format!("echo $$ > '{}'\nexec sleep 60", pid.display());
+    let launcher = common::script(dir.path(), "never-reads", &body);
+    let guest = common::guest_config("run-1", &["id"]);
+    let timeout = Duration::from_secs(1);
+
+    let (run, elapsed) = run_within(Duration::from_secs(30), launcher, lane, guest, timeout);
+
+    assert_eq!(run.outcome, Outcome::TimedOut);
+    assert!(
+        elapsed < timeout + PROMPT,
+        "run_lane returned only after {elapsed:?}"
+    );
+    assert!(
+        !process_exists(run.pid),
+        "the launcher {} still exists",
+        run.pid
+    );
+}
+
+#[test]
+fn a_finished_run_whose_group_holds_only_a_zombie_is_not_an_error() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let moved = dir.path().join("moved.pid");
+    let _cleanup = KillOnDrop(vec![moved.clone()]);
+    let lane = common::lane_config(dir.path(), "run-1");
+    let body = format!(
+        r#"cat > /dev/null
+{}
+perl -e 'my $z = fork(); exit 0 if $z == 0; until (`ps -o stat= -p $z` =~ /Z/) {{ select(undef, undef, undef, 0.05) }} setpgrp(0, 0) or die; open(my $f, ">", $ARGV[0]) or die; print $f "$$\n"; close $f; sleep 60' '{}' &
+while [ ! -s '{}' ]; do sleep 0.05; done
+exit 0"#,
+        complete_run(&lane.console),
+        moved.display(),
+        moved.display()
+    );
+    let launcher = common::script(dir.path(), "leaves-zombie", &body);
+    let guest = common::guest_config("run-1", &["id"]);
+
+    let run = run_lane(&launcher, &lane, &guest, Duration::from_secs(30))
+        .expect("a group left holding only a zombie has nothing left to kill");
+
+    assert!(
+        matches!(run.outcome, Outcome::Finished(_)),
+        "{:?}",
+        run.outcome
+    );
 }

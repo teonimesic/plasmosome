@@ -244,3 +244,42 @@ pub fn run_lane(
         stderr,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_zombie(pid: u32) -> bool {
+        Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .trim_start()
+                    .starts_with('Z')
+            })
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn stopping_a_launcher_that_exited_after_the_last_wait_is_not_an_error() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .process_group(0)
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("sh starts");
+        let pid = child.id();
+        let started = Instant::now();
+        while !is_zombie(pid) {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "the launcher {pid} never became a zombie"
+            );
+            thread::sleep(POLL);
+        }
+
+        stop(&mut child, pid)
+            .expect("a group whose only member is the launcher's zombie has nothing left to kill");
+    }
+}
