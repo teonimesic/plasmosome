@@ -1,15 +1,21 @@
 use crate::backend::Capability;
+use crate::recipe::{
+    BrokerLaunch, FileAccess, MountRecipe, ProxyRecipe, ProxyTransport, SessionFileRecipe,
+    UdsRecipe,
+};
 use crate::universe::{CellOwner, GrantId, UniverseOp};
 
 pub(crate) fn session_file(path: &str) -> Capability {
     Capability::SessionFile {
         path: path.to_string(),
+        recipe: session_recipe(),
     }
 }
 
 pub(crate) fn uds_socket(path: &str) -> Capability {
     Capability::UdsSocket {
         path: path.to_string(),
+        recipe: uds_recipe(),
     }
 }
 
@@ -17,13 +23,14 @@ pub(crate) fn proxy_map(host: &str, route: &str) -> Capability {
     Capability::ProxyMap {
         host: host.to_string(),
         route: route.to_string(),
+        recipe: proxy_recipe(),
     }
 }
 
-pub(crate) fn broker(pid: u32, name: &str) -> Capability {
+pub(crate) fn broker(name: &str) -> Capability {
     Capability::Broker {
-        pid,
         name: name.to_string(),
+        launch: launch(),
     }
 }
 
@@ -31,29 +38,88 @@ pub(crate) fn mount(source: &str, target: &str) -> Capability {
     Capability::Mount {
         source: source.to_string(),
         target: target.to_string(),
+        recipe: mount_recipe(),
+    }
+}
+
+pub(crate) fn session_recipe() -> SessionFileRecipe {
+    SessionFileRecipe {
+        contents: Vec::new(),
+        mode: FileAccess::ReadOnly,
+        guest_path: "/run/plasmosome/session".to_string(),
+    }
+}
+
+pub(crate) fn uds_recipe() -> UdsRecipe {
+    UdsRecipe {
+        upstream: "/run/plasmosome/upstream.sock".to_string(),
+        guest_path: "/run/plasmosome/guest.sock".to_string(),
+    }
+}
+
+pub(crate) fn proxy_recipe() -> ProxyRecipe {
+    ProxyRecipe {
+        transport: ProxyTransport::Tcp,
+        destination: "upstream.plasmosome.test".to_string(),
+        port: 443,
+        allow_private: false,
+    }
+}
+
+pub(crate) fn mount_recipe() -> MountRecipe {
+    MountRecipe {
+        access: FileAccess::ReadOnly,
+    }
+}
+
+pub(crate) fn launch() -> BrokerLaunch {
+    BrokerLaunch {
+        command: vec!["/usr/libexec/plasmosome-broker".to_string()],
+        control_socket: "/run/plasmosome/broker.control".to_string(),
+        data_socket: "/run/plasmosome/broker.data".to_string(),
     }
 }
 
 pub(crate) fn op(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
     match capability {
-        Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
-        Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
-        Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
+        Capability::SessionFile { path, recipe } => UniverseOp::WriteSessionFile {
+            id,
+            path,
+            recipe,
+            owner,
+        },
+        Capability::UdsSocket { path, recipe } => UniverseOp::BindUds {
+            id,
+            path,
+            recipe,
+            owner,
+        },
+        Capability::ProxyMap {
+            host,
+            route,
+            recipe,
+        } => UniverseOp::SetProxyMap {
             id,
             host,
             route,
+            recipe,
             owner,
         },
-        Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
+        Capability::Broker { name, launch } => UniverseOp::SpawnBroker {
             id,
-            pid,
             name,
+            launch,
             owner,
         },
-        Capability::Mount { source, target } => UniverseOp::AddMount {
+        Capability::Mount {
+            source,
+            target,
+            recipe,
+        } => UniverseOp::AddMount {
             id,
             source,
             target,
+            recipe,
             owner,
         },
     }
@@ -92,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn session_file_holds_exactly_its_path_unchecked() {
+    fn session_file_holds_exactly_its_path_unchecked_and_the_default_recipe() {
         for path in [
             "/skills/pr.md",
             "skills/../pr.md/",
@@ -107,13 +173,18 @@ mod tests {
                 session_file(path),
                 Capability::SessionFile {
                     path: path.to_string(),
+                    recipe: SessionFileRecipe {
+                        contents: Vec::new(),
+                        mode: FileAccess::ReadOnly,
+                        guest_path: "/run/plasmosome/session".to_string(),
+                    },
                 }
             );
         }
     }
 
     #[test]
-    fn uds_socket_holds_exactly_its_path_unchecked() {
+    fn uds_socket_holds_exactly_its_path_unchecked_and_the_default_recipe() {
         for path in [
             "/run/plasmosome/egressd.uds",
             "run//egressd.uds",
@@ -127,13 +198,17 @@ mod tests {
                 uds_socket(path),
                 Capability::UdsSocket {
                     path: path.to_string(),
+                    recipe: UdsRecipe {
+                        upstream: "/run/plasmosome/upstream.sock".to_string(),
+                        guest_path: "/run/plasmosome/guest.sock".to_string(),
+                    },
                 }
             );
         }
     }
 
     #[test]
-    fn proxy_map_holds_exactly_its_host_and_route_in_place() {
+    fn proxy_map_holds_exactly_its_host_and_route_in_place_and_the_default_recipe() {
         for (host, route) in [
             ("api.github.com", "splice"),
             ("splice", "api.github.com"),
@@ -149,32 +224,36 @@ mod tests {
                 Capability::ProxyMap {
                     host: host.to_string(),
                     route: route.to_string(),
+                    recipe: ProxyRecipe {
+                        transport: ProxyTransport::Tcp,
+                        destination: "upstream.plasmosome.test".to_string(),
+                        port: 443,
+                        allow_private: false,
+                    },
                 }
             );
         }
     }
 
     #[test]
-    fn broker_holds_exactly_its_pid_and_name() {
-        for (pid, name) in [
-            (4242, "egressd"),
-            (0, "egress\0d"),
-            (u32::MAX, ""),
-            (7, " egressd\n"),
-            (31337, "EgressD"),
-        ] {
+    fn broker_holds_exactly_its_name_and_the_default_launch() {
+        for name in ["egressd", "egress\0d", "", " egressd\n", "EgressD"] {
             assert_eq!(
-                broker(pid, name),
+                broker(name),
                 Capability::Broker {
-                    pid,
                     name: name.to_string(),
+                    launch: BrokerLaunch {
+                        command: vec!["/usr/libexec/plasmosome-broker".to_string()],
+                        control_socket: "/run/plasmosome/broker.control".to_string(),
+                        data_socket: "/run/plasmosome/broker.data".to_string(),
+                    },
                 }
             );
         }
     }
 
     #[test]
-    fn mount_holds_exactly_its_source_and_target_in_place() {
+    fn mount_holds_exactly_its_source_and_target_in_place_and_the_default_recipe() {
         for (source, target) in [
             ("/srv/repo", "/workspace"),
             ("/workspace", "/srv/repo"),
@@ -191,84 +270,84 @@ mod tests {
                 Capability::Mount {
                     source: source.to_string(),
                     target: target.to_string(),
+                    recipe: MountRecipe {
+                        access: FileAccess::ReadOnly,
+                    },
                 }
             );
         }
     }
 
     #[test]
-    fn op_writes_a_session_file_with_its_id_owner_and_path() {
-        assert_op_builds(
-            Capability::SessionFile {
-                path: "/skills/pr.md".to_string(),
-            },
-            |id, owner| UniverseOp::WriteSessionFile {
+    fn every_factory_given_valid_values_returns_a_capability_that_validates() {
+        for capability in [
+            session_file("/skills/pr.md"),
+            uds_socket("/run/plasmosome/egressd.uds"),
+            proxy_map("api.github.com", "splice"),
+            broker("egressd"),
+            mount("/srv/repo", "/workspace"),
+        ] {
+            assert_eq!(capability.validate(), Ok(()), "{capability:?}");
+        }
+    }
+
+    #[test]
+    fn op_writes_a_session_file_with_its_id_owner_path_and_recipe() {
+        assert_op_builds(session_file("/skills/pr.md"), |id, owner| {
+            UniverseOp::WriteSessionFile {
                 id,
                 path: "/skills/pr.md".to_string(),
+                recipe: session_recipe(),
                 owner,
-            },
-        );
+            }
+        });
     }
 
     #[test]
-    fn op_binds_a_socket_with_its_id_owner_and_path() {
-        assert_op_builds(
-            Capability::UdsSocket {
-                path: "/run/plasmosome/egressd.uds".to_string(),
-            },
-            |id, owner| UniverseOp::BindUds {
+    fn op_binds_a_socket_with_its_id_owner_path_and_recipe() {
+        assert_op_builds(uds_socket("/run/plasmosome/egressd.uds"), |id, owner| {
+            UniverseOp::BindUds {
                 id,
                 path: "/run/plasmosome/egressd.uds".to_string(),
+                recipe: uds_recipe(),
                 owner,
-            },
-        );
+            }
+        });
     }
 
     #[test]
-    fn op_sets_a_proxy_map_with_its_id_owner_host_and_route() {
-        assert_op_builds(
-            Capability::ProxyMap {
-                host: "api.github.com".to_string(),
-                route: "splice".to_string(),
-            },
-            |id, owner| UniverseOp::SetProxyMap {
+    fn op_sets_a_proxy_map_with_its_id_owner_host_route_and_recipe() {
+        assert_op_builds(proxy_map("api.github.com", "splice"), |id, owner| {
+            UniverseOp::SetProxyMap {
                 id,
                 host: "api.github.com".to_string(),
                 route: "splice".to_string(),
+                recipe: proxy_recipe(),
                 owner,
-            },
-        );
+            }
+        });
     }
 
     #[test]
-    fn op_spawns_a_broker_with_its_id_owner_pid_and_name() {
-        assert_op_builds(
-            Capability::Broker {
-                pid: 4242,
-                name: "egressd".to_string(),
-            },
-            |id, owner| UniverseOp::SpawnBroker {
-                id,
-                pid: 4242,
-                name: "egressd".to_string(),
-                owner,
-            },
-        );
+    fn op_spawns_a_broker_with_its_id_owner_name_and_launch() {
+        assert_op_builds(broker("egressd"), |id, owner| UniverseOp::SpawnBroker {
+            id,
+            name: "egressd".to_string(),
+            launch: launch(),
+            owner,
+        });
     }
 
     #[test]
-    fn op_adds_a_mount_with_its_id_owner_source_and_target() {
-        assert_op_builds(
-            Capability::Mount {
-                source: "/srv/repo".to_string(),
-                target: "/workspace".to_string(),
-            },
-            |id, owner| UniverseOp::AddMount {
+    fn op_adds_a_mount_with_its_id_owner_source_target_and_recipe() {
+        assert_op_builds(mount("/srv/repo", "/workspace"), |id, owner| {
+            UniverseOp::AddMount {
                 id,
                 source: "/srv/repo".to_string(),
                 target: "/workspace".to_string(),
+                recipe: mount_recipe(),
                 owner,
-            },
-        );
+            }
+        });
     }
 }
