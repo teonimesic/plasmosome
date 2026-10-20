@@ -88,22 +88,108 @@ fn a_warm_up_still_running_at_its_bound_is_killed_and_reaped() {
     assert_eq!(reaped.signal(), Some(libc::SIGKILL), "{reaped}");
 }
 
-#[test]
-#[should_panic(expected = "warm-up of plasmosomed did not exit within 60s")]
-fn a_warm_up_that_did_not_exit_fails_setup() {
-    exited_with_usage("plasmosomed", None);
+fn shell(script: &str) -> Command {
+    let mut command = Command::new("sh");
+    command.args(["-c", script]);
+    command
 }
 
 #[test]
-#[should_panic(
-    expected = "warm-up of plasmosomed exits with its usage status 2, not exit status: 3"
-)]
-fn a_warm_up_that_exits_otherwise_fails_setup() {
-    exited_with_usage("plasmosomed", Some(ExitStatus::from_raw(3 << 8)));
+fn the_usage_exit_passes_the_warm_up() {
+    assert_eq!(run_once("plasmosomed", shell("exit 2"), BOUND), Ok(()));
 }
 
 #[test]
-#[should_panic(expected = "warm-up of plasmosomed exits with its usage status 2, not signal: 9")]
+fn a_warm_up_that_never_exits_fails_within_its_bound() {
+    let bound = Duration::from_millis(200);
+    let mut sleeper = Command::new("sleep");
+    sleeper.arg("60");
+
+    let started = Instant::now();
+    let outcome = run_once("plasmosomed", sleeper, bound);
+    let took = started.elapsed();
+
+    assert_eq!(
+        outcome,
+        Err("warm-up of plasmosomed did not exit within 200ms; its stderr: \"\"".to_string())
+    );
+    assert!(
+        took < Duration::from_secs(10),
+        "the warm-up gave up after {took:?}, not near its {bound:?} bound"
+    );
+}
+
+#[test]
+fn a_warm_up_that_cannot_start_fails_setup_with_the_cause() {
+    let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+    let missing = Command::new(directory.path().join("absent"));
+
+    let failure = run_once("plasmosomed", missing, BOUND)
+        .expect_err("a missing executable fails the warm-up");
+
+    assert!(
+        failure.starts_with("warm-up of plasmosomed could not start: "),
+        "{failure}"
+    );
+    assert!(failure.contains("No such file or directory"), "{failure}");
+}
+
+#[test]
+fn a_warm_up_that_exits_with_another_code_fails_setup() {
+    assert_eq!(
+        run_once("plasmosomed", shell("exit 3"), BOUND),
+        Err(
+            "warm-up of plasmosomed exits with its usage status 2, not exit status: 3; its stderr: \"\""
+                .to_string()
+        )
+    );
+}
+
+#[test]
 fn a_warm_up_killed_by_a_signal_fails_setup() {
-    exited_with_usage("plasmosomed", Some(ExitStatus::from_raw(libc::SIGKILL)));
+    let failure = run_once("plasmosomed", shell("kill -9 $$"), BOUND)
+        .expect_err("a death by signal fails the warm-up");
+
+    assert!(
+        failure.starts_with("warm-up of plasmosomed exits with its usage status 2, not signal: 9"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn a_failed_warm_up_reports_its_stderr_up_to_4096_bytes() {
+    let noisy = shell("printf 'loader refused' >&2; printf '%010000d' 0 | tr 0 Q >&2; exit 1");
+
+    let failure = run_once("plasmosomed", noisy, BOUND).expect_err("exit 1 fails the warm-up");
+
+    assert!(
+        failure.contains("not exit status: 1; its stderr: \"loader refusedQ"),
+        "{failure}"
+    );
+    assert_eq!(
+        failure.matches('Q').count(),
+        4096 - "loader refused".len(),
+        "the report keeps the first 4096 bytes of stderr and no more"
+    );
+}
+
+#[test]
+fn an_unreadable_child_state_is_reported_without_a_panic() {
+    let mut child = Command::new("true").spawn().expect("true starts");
+    let pid = child.id() as libc::pid_t;
+    let mut raw = 0;
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut raw, 0) },
+        pid,
+        "the test reaps the child behind its handle's back"
+    );
+
+    let unreadable =
+        exit_within(&mut child, BOUND).expect_err("a child reaped elsewhere has no readable state");
+
+    assert_eq!(
+        unreadable.raw_os_error(),
+        Some(libc::ECHILD),
+        "{unreadable}"
+    );
 }
