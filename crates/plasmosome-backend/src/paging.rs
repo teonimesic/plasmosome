@@ -215,6 +215,7 @@ pub struct CaptureSlot<S> {
     page_bytes: usize,
     last_snapshot: u64,
     current: Option<Capture<S>>,
+    ended: Option<(u64, S)>,
 }
 
 struct Capture<S> {
@@ -247,6 +248,7 @@ impl<S: PartialEq> CaptureSlot<S> {
             page_bytes: MAX_PAGE_BYTES,
             last_snapshot: 0,
             current: None,
+            ended: None,
         }
     }
 
@@ -278,6 +280,7 @@ impl<S: PartialEq> CaptureSlot<S> {
         collect: impl FnOnce() -> Result<FrozenAccount, E>,
     ) -> Result<ObservationPage, CaptureError<E>> {
         self.current = None;
+        self.ended = None;
         if now() >= expires {
             return Err(CaptureError::Paging(PagingError::Expired));
         }
@@ -311,7 +314,8 @@ impl<S: PartialEq> CaptureSlot<S> {
     /// dropped, so a request whose own deadline has passed gets no page. An offset at or past the
     /// account's end is `OffsetOutOfRange`, and its deadline still counts. Otherwise it returns up
     /// to the slot's page size of bytes from `cursor.offset`. The same offset always returns the
-    /// same page.
+    /// same page. Until the next zero/zero request, a request for a capture that expired or was
+    /// discarded gets `ScopeChanged` for another scope and `Expired` for its own.
     pub fn page(
         &mut self,
         scope: &S,
@@ -328,14 +332,20 @@ impl<S: PartialEq> CaptureSlot<S> {
             .as_mut()
             .filter(|held| held.snapshot == snapshot)
         else {
-            return Err(PagingError::UnknownSnapshot { snapshot });
+            return Err(match &self.ended {
+                Some((ended, held)) if *ended == snapshot && held != scope => {
+                    PagingError::ScopeChanged { snapshot }
+                }
+                Some((ended, _)) if *ended == snapshot => PagingError::Expired,
+                _ => PagingError::UnknownSnapshot { snapshot },
+            });
         };
         if capture.scope != *scope {
             return Err(PagingError::ScopeChanged { snapshot });
         }
         capture.expires = capture.expires.min(request_expires);
         if now >= capture.expires {
-            self.current = None;
+            self.end();
             return Err(PagingError::Expired);
         }
         let total = capture.account.total();
@@ -346,20 +356,27 @@ impl<S: PartialEq> CaptureSlot<S> {
     }
 
     /// Drops the capture if `now` is at or past its deadline. Call it while no request arrives,
-    /// so retained bytes do not outlive the deadline.
+    /// so retained bytes do not outlive the deadline. A later request for it gets `Expired`.
     pub fn expire(&mut self, now: Instant) {
         if self
             .current
             .as_ref()
             .is_some_and(|held| now >= held.expires)
         {
-            self.current = None;
+            self.end();
         }
     }
 
-    /// Drops the capture, if any. Snapshot IDs keep counting from where they were.
+    /// Drops the capture, if any, and a later request for it gets `Expired`. Snapshot IDs keep
+    /// counting from where they were.
     pub fn discard(&mut self) {
-        self.current = None;
+        self.end();
+    }
+
+    fn end(&mut self) {
+        if let Some(held) = self.current.take() {
+            self.ended = Some((held.snapshot, held.scope));
+        }
     }
 
     /// True while a capture is held.
@@ -392,7 +409,7 @@ pub enum PagingError {
         offset: u64,
         total: u64,
     },
-    /// The capture's deadline passed; its bytes are gone.
+    /// The capture ended: its deadline passed or the server discarded it. Its bytes are gone.
     Expired,
     SnapshotsExhausted,
     BadPageSize {
@@ -653,7 +670,9 @@ impl fmt::Display for PagingError {
             PagingError::OffsetOutOfRange { offset, total } => {
                 write!(f, "offset {offset} is outside the {total}-byte account")
             }
-            PagingError::Expired => f.write_str("the capture's deadline has passed"),
+            PagingError::Expired => {
+                f.write_str("the capture has ended: its deadline passed or the server dropped it")
+            }
             PagingError::SnapshotsExhausted => {
                 f.write_str("this connection has issued every snapshot ID")
             }
