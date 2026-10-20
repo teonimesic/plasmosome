@@ -1,0 +1,59 @@
+name = "toml"
+range = "0.8"
+reason = """\
+  Parses TOML into a tree of values, or through serde into typed structs, and writes a tree back \
+  as TOML text. Declarations are written in TOML, and tests also read Cargo manifests with it.\
+  """
+write_it_instead.lines = 2400
+write_it_instead.how = """\
+  On 2026-10-20, at main ec4603c, `git grep -l 'toml::' -- '*.rs' | wc -l` gives 5 files, and `git \
+  grep -h -o -E 'toml::(from_str|to_string|Value|Table|de::Error|map::Map)' -- '*.rs' | sort | \
+  uniq -c` gives Value 82, from_str 15, Table 6, to_string 5, Error 1 and Map 1. Reading the code \
+  shows that the declaration reader in crates/plasmosome-core/src/manifest.rs parses text into a \
+  Value, walks it with get, as_str, as_array and as_table, and turns a credential entry into a \
+  typed struct with Value::try_into. Its tests parse with str::parse, change a Value and write it \
+  back with to_string. Two test files in crates/plasmosome-guards parse Cargo manifests with \
+  str::parse, and tests in crates/plasmosome-backend and crates/plasmosome-ledger read serde types \
+  with from_str and match serde's error text. A replacement, using serde for the typed part, \
+  needs: a TOML 1.0 reader into a tree, with tables, arrays of tables, inline tables, dotted keys \
+  and the refusal of a key or table defined twice (500 lines); the four string forms with their \
+  escapes (200); integers in four bases, and floats with inf and nan (150); the four datetime \
+  forms, read and written (250); errors that give line and column (100); Value and Table, with the \
+  accessors, FromStr, Display and indexing used here (300); a serde Deserializer over the tree for \
+  from_str and try_into, with structs, enums, options and sequences (600); and a writer for \
+  to_string that puts tables in sections and quotes strings and keys (300): 2400 lines. Replacing \
+  it removes 1 package from Cargo.lock: toml@0.8. `cargo tree --locked --offline -e features -i \
+  serde_spanned --target all` shows that only toml turns on toml_edit's serde feature, which is \
+  what brings serde_spanned, so serde_spanned@0.6 would leave too. Replacing toml and toml_edit \
+  together removes 9 packages from Cargo.lock: equivalent@1, hashbrown@0.17, indexmap@2, \
+  serde_spanned@0.6, toml@0.8, toml_datetime@0.6, toml_edit@0.22, toml_write@0.1 and winnow@0.7.\
+  """
+exception = ""
+brings = [
+  "equivalent@1",
+  "hashbrown@0.17",
+  "indexmap@2",
+  "memchr@2",
+  "proc-macro2@1",
+  "quote@1",
+  "serde@1",
+  "serde_core@1",
+  "serde_derive@1",
+  "serde_spanned@0.6",
+  "syn@3",
+  "toml_datetime@0.6",
+  "toml_edit@0.22",
+  "toml_write@0.1",
+  "unicode-ident@1",
+  "winnow@0.7",
+]
+build_time_code = [
+  "proc-macro2@1 build script",
+  "quote@1 build script",
+  "serde@1 build script",
+  "serde_core@1 build script",
+  "serde_derive@1 proc macro",
+]
+expands_unsafe = "none"
+native_code = "none"
+verdict = "kept-pending-owner"

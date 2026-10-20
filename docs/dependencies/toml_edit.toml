@@ -1,0 +1,56 @@
+name = "toml_edit"
+range = "0.22"
+reason = """\
+  Parses TOML into a document that keeps its formatting, so that a test can apply a refusal's fix \
+  as an edit to the author's text and read the edited text back.\
+  """
+write_it_instead.lines = 540
+write_it_instead.how = """\
+  On 2026-10-20, at main ec4603c, `git grep -l toml_edit -- '*.rs' | wc -l` gives 1 file, \
+  crates/plasmosome-core/tests/fix_following.rs, and `git grep -n toml_edit -- '*.rs'` shows it \
+  importing DocumentMut, Item, Key, TableLike and Value, and naming toml_edit::Array once. Since \
+  #153, merged as 8fe24e3, that test is the only use, and toml_edit is a dev-dependency there with \
+  its parse feature on; before it, the declaration reader called toml_edit::Key::new for its \
+  diagnostic keys. The test parses a DocumentMut, finds a table with Key::parse and \
+  as_table_like_mut, removes or inserts a key, and removes, replaces or pushes an Array entry, \
+  then prints the document back with its formatting kept. One of its tests needs an inline table \
+  to stay inline, so that a [table] fix written under it is refused. A replacement may lean on \
+  toml, also a direct dependency, to read values and to check what it writes. It needs: a reader \
+  that records where each table header, key and array entry sits in the text, through TOML's \
+  strings, comments, arrays and inline tables (300 lines); Key::parse, for dotted keys with bare \
+  and quoted parts (40); finding a table by its key path, through headers, dotted keys and inline \
+  tables (80); the edits, splicing text for a removed or inserted key and for a removed, replaced \
+  or pushed entry, keeping commas and newlines right (100); and reading a fix as one key line or \
+  one entry (20): 540 lines. Replacing it removes nothing from Cargo.lock: toml brings toml_edit \
+  too. Replacing toml and toml_edit together removes 9 packages from Cargo.lock: equivalent@1, \
+  hashbrown@0.17, indexmap@2, serde_spanned@0.6, toml@0.8, toml_datetime@0.6, toml_edit@0.22, \
+  toml_write@0.1 and winnow@0.7.\
+  """
+exception = ""
+brings = [
+  "equivalent@1",
+  "hashbrown@0.17",
+  "indexmap@2",
+  "memchr@2",
+  "proc-macro2@1",
+  "quote@1",
+  "serde@1",
+  "serde_core@1",
+  "serde_derive@1",
+  "serde_spanned@0.6",
+  "syn@3",
+  "toml_datetime@0.6",
+  "toml_write@0.1",
+  "unicode-ident@1",
+  "winnow@0.7",
+]
+build_time_code = [
+  "proc-macro2@1 build script",
+  "quote@1 build script",
+  "serde@1 build script",
+  "serde_core@1 build script",
+  "serde_derive@1 proc macro",
+]
+expands_unsafe = "none"
+native_code = "none"
+verdict = "kept-pending-owner"
