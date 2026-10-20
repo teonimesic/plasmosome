@@ -388,8 +388,8 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   delays a detach, and is reported while the guest's scan finds it; a descriptor in flight over
   `SCM_RIGHTS` is not. Amended on 2026-10-20, as
   [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs) requires. Until then
-  a surviving reference with no owner failed the detach, and one held past its bound was an
-  obligation reported against the owner named at detach.
+  this bullet said that a surviving reference with no owner failed the detach, and that one held
+  past its bound was an obligation reported against the owner named at detach.
 - **`plasmid new <name>` writes exactly one file, the declaration**, grants nothing, attaches
   nothing, and prints the sections the author must add. It writes no component, says that it
   will not until the plasmid interface is frozen, and exits `2` — the code decision 010 fixed
