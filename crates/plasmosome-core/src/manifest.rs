@@ -438,7 +438,7 @@ fn field_error(id: &str, field: String, fix: String, detail: &str) -> ManifestEr
     }
 }
 
-fn diagnostic_key(name: &str) -> String {
+pub(crate) fn diagnostic_key(name: &str) -> String {
     let bare = !name.is_empty()
         && name
             .chars()

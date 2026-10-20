@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use plasmosome_backend::{CellId, MockMode};
 
-use crate::manifest::ManifestError;
+use crate::manifest::{ManifestError, diagnostic_key};
 use crate::state::{CellStatus, GenomeName};
 
 /// One control request as it arrives on the wire.
@@ -477,6 +477,34 @@ impl WireError {
             ErrorCode::InvalidRequest,
             format!("the line exceeds {cap} bytes"),
         )
+    }
+}
+
+impl WireError {
+    /// Code 102 for a software command name that is already taken (spec 027 §3.1): `target` is
+    /// the command's path, and the message names what holds it: another plasmid, the root
+    /// image, or another command of the same tree.
+    pub fn name_conflict(conflict: &plasmosome_backend::software::Conflict) -> WireError {
+        let mut error = WireError::bare(ErrorCode::AlreadyExists, conflict.to_string());
+        error.target = Some(conflict.target.clone());
+        error
+    }
+
+    /// Code 108 for plasmid `plasmid`'s software tree that cannot be pinned (spec 027 §3.1).
+    /// `detail` names the plasmid as a declaration refusal does and says what is wrong. `path`
+    /// is relative to the tree's root, not a declaration file's path as in other 108s.
+    pub fn pin_refusal(
+        plasmid: &str,
+        refusal: &plasmosome_backend::software::PinRefusal,
+    ) -> WireError {
+        let detail = format!("plasmid {}: {refusal}", diagnostic_key(plasmid));
+        let mut error = WireError::bare(
+            ErrorCode::ManifestInvalid,
+            format!("the software tree cannot be pinned: {detail}"),
+        );
+        error.detail = Some(detail);
+        error.path = Some(refusal.path().to_string());
+        error
     }
 }
 
