@@ -46,17 +46,19 @@ const KINDS: [(ReachKind, &str); 3] = [
 #[test]
 fn every_channel_left_with_no_probes_or_two_is_refused_naming_it() {
     assert_eq!(CHANNELS.map(|(channel, _)| channel), Channel::ALL);
-    for (channel, name) in CHANNELS {
+    for (index, (channel, name)) in CHANNELS.into_iter().enumerate() {
+        let elsewhere = CHANNELS[(index + 1) % CHANNELS.len()].1;
         for count in [0, 2] {
             let mut manifest = manifest_json();
             let mut kept = 0;
-            manifest["probes"]
-                .as_array_mut()
-                .expect("probes is a list")
-                .retain(|probe| {
-                    kept += usize::from(probe["channel"] == name);
-                    probe["channel"] != name || kept <= count
-                });
+            for probe in manifest["probes"].as_array_mut().expect("probes is a list") {
+                if probe["channel"] == name {
+                    kept += 1;
+                    if kept > count {
+                        probe["channel"] = json!(elsewhere);
+                    }
+                }
+            }
             assert_eq!(
                 refusal(&manifest),
                 ManifestRefusal::ChannelShort { channel, count },
@@ -110,7 +112,7 @@ fn a_rule_kind_spec_027_does_not_list_is_refused_naming_it() {
 
 #[test]
 fn a_rule_kind_written_in_another_case_is_refused_naming_it() {
-    for kind in ["PID", "System_Time"] {
+    for kind in ["PID", "System_Time", " pid", "pid "] {
         let mut manifest = manifest_json();
         push(
             &mut manifest,
@@ -162,20 +164,24 @@ fn every_rule_kind_spec_027_lists_loads_by_its_name() {
 }
 
 #[test]
-fn a_rule_on_a_field_the_workload_set_is_refused_naming_it() {
-    let mut manifest = manifest_json();
-    push(
-        &mut manifest,
-        "rules",
-        json!({"probe": "op-utimensat", "field": "mtime", "kind": "system_time"}),
-    );
-    assert_eq!(
-        refusal(&manifest),
-        ManifestRefusal::RuleOnWorkloadSetField {
-            probe: "op-utimensat".to_string(),
-            field: "mtime".to_string()
-        }
-    );
+fn a_rule_of_any_kind_on_a_field_the_workload_set_is_refused_naming_it() {
+    for kind in RuleKind::ALL {
+        let mut manifest = manifest_json();
+        push(
+            &mut manifest,
+            "rules",
+            json!({"probe": "op-utimensat", "field": "mtime", "kind": kind.name()}),
+        );
+        assert_eq!(
+            refusal(&manifest),
+            ManifestRefusal::RuleOnWorkloadSetField {
+                probe: "op-utimensat".to_string(),
+                field: "mtime".to_string()
+            },
+            "{}",
+            kind.name()
+        );
+    }
 }
 
 #[test]
@@ -218,6 +224,53 @@ fn a_probe_that_leaves_out_its_workload_set_is_refused() {
         .remove("workload_set");
     let reason = malformed(&manifest.to_string());
     assert!(reason.contains("missing field `workload_set`"), "{reason}");
+}
+
+#[test]
+fn a_probe_that_leaves_out_its_step_is_refused() {
+    let mut manifest = manifest_json();
+    let index = probe_index(&manifest, "op-times");
+    manifest["probes"][index]
+        .as_object_mut()
+        .expect("a probe is an object")
+        .remove("step");
+    let reason = malformed(&manifest.to_string());
+    assert!(reason.contains("missing field `step`"), "{reason}");
+}
+
+#[test]
+fn a_key_repeated_in_one_object_is_refused_naming_it() {
+    let text = manifest_json().to_string();
+    let repeated = |once: &str, twice: &str| {
+        assert_eq!(text.matches(once).count(), 1, "{once}");
+        text.replacen(once, twice, 1)
+    };
+    for (manifest, key) in [
+        (
+            repeated(r#""probes":["#, r#""rules":[],"probes":["#),
+            "rules",
+        ),
+        (
+            repeated(
+                r#""workload_set":["mtime"]"#,
+                r#""workload_set":["mtime"],"workload_set":[]"#,
+            ),
+            "workload_set",
+        ),
+        (
+            repeated(
+                r#""cell_value":"0600""#,
+                r#""cell_value":"0600","cell_value":"0777""#,
+            ),
+            "cell_value",
+        ),
+    ] {
+        let reason = malformed(&manifest);
+        assert!(
+            reason.contains(&format!("duplicate field `{key}`")),
+            "{reason}"
+        );
+    }
 }
 
 #[test]
@@ -317,6 +370,17 @@ fn a_rule_and_an_allowance_on_one_field_are_refused_naming_it() {
 }
 
 #[test]
+fn an_allowance_may_name_a_field_another_probe_has_a_rule_on() {
+    let mut manifest = manifest_json();
+    push(
+        &mut manifest,
+        "allowances",
+        json!({"probe": "hint-self", "field": "pids", "cell_value": [1]}),
+    );
+    assert!(load_value(&manifest).is_ok());
+}
+
+#[test]
 fn neutral_names_without_opt_or_usr_local_bin_are_refused() {
     for (index, mount) in [(0, RequiredMount::Opt), (1, RequiredMount::UsrLocalBin)] {
         let mut manifest = manifest_json();
@@ -346,6 +410,21 @@ fn neutral_names_need_a_fuse_mount_at_a_path_of_its_own() {
                 mount: RequiredMount::FuseWorkspace
             },
             "FUSE at {fuse_at:?}"
+        );
+    }
+}
+
+#[test]
+fn only_the_type_fuse_itself_makes_a_workspace() {
+    for fstype in ["fuseblk", "fuse.passthrough"] {
+        let mut manifest = manifest_json();
+        manifest["neutral"]["mounts"][2]["fstype"] = json!(fstype);
+        assert_eq!(
+            refusal(&manifest),
+            ManifestRefusal::NeutralMountMissing {
+                mount: RequiredMount::FuseWorkspace
+            },
+            "{fstype}"
         );
     }
 }
