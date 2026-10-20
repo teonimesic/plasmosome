@@ -522,3 +522,5 @@ MIT — see [LICENSE](LICENSE).
 ## Author
 
 Written by Stefano Benatti ([@teonimesic](https://github.com/teonimesic)).
+
+Throwaway B2: a Markdown-only change.
