@@ -343,6 +343,7 @@ impl std::error::Error for RangeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::{Clock, ManualClock};
     use proptest::prelude::*;
     use std::time::Duration;
 
@@ -435,8 +436,9 @@ mod tests {
         );
         assert_eq!(
             b.remaining_ms(&at(B_WALL - 10_000, B_CONTINUOUS - 1_500_000)),
-            1
+            2
         );
+        assert_eq!(b.remaining_ms(&at(B_WALL - 10_000, B_CONTINUOUS - 1)), 1);
         assert_eq!(
             b.remaining_ms(&at(B_WALL + 5, B_CONTINUOUS - 10_000 * MS)),
             0
@@ -450,6 +452,24 @@ mod tests {
         assert_eq!(b.remaining_ms(&other_boot), 10_000);
         let other_boot_past = reading(B_WALL - 10_000, boot(2), u64::MAX, Instant::now());
         assert_eq!(b.remaining_ms(&other_boot_past), 10_000);
+    }
+
+    #[test]
+    fn remaining_is_zero_exactly_when_passed() {
+        let b = bound(B_WALL, boot(1), B_CONTINUOUS);
+        let readings = [
+            at(B_WALL - 1, B_CONTINUOUS - 1),
+            at(B_WALL - 1, B_CONTINUOUS),
+            at(B_WALL - 1, B_CONTINUOUS + 1),
+            at(B_WALL, B_CONTINUOUS - 1),
+            at(B_WALL + 1, B_CONTINUOUS - 1),
+            at(B_WALL - HOUR_MS, B_CONTINUOUS - 999_999),
+            reading(B_WALL - 1, boot(2), u64::MAX, Instant::now()),
+            reading(B_WALL, boot(2), 0, Instant::now()),
+        ];
+        for now in readings {
+            assert_eq!(b.remaining_ms(&now) == 0, b.passed(&now), "{now:?}");
+        }
     }
 
     #[test]
@@ -497,18 +517,119 @@ mod tests {
         let slept = reading(B_WALL + 5_000, boot(1), B_CONTINUOUS + 5_000 * MS, base);
         assert_eq!(b.wait_deadline(&slept, 2_000), base + s(7));
 
-        let past = reading(B_WALL + 60_000, boot(1), B_CONTINUOUS + 60_000 * MS, base);
-        assert_eq!(b.wait_deadline(&past, 2_000), base + s(2));
-        assert_eq!(b.wait_deadline(&past, 0), base);
+        let past = reading(
+            B_WALL + 10_000,
+            boot(1),
+            B_CONTINUOUS + 10_000 * MS,
+            base + s(10),
+        );
+        assert_eq!(b.wait_deadline(&past, 2_000), base + s(12));
+        assert_eq!(b.wait_deadline(&past, 0), base + s(10));
+        let later = reading(
+            B_WALL + 13_000,
+            boot(1),
+            B_CONTINUOUS + 13_000 * MS,
+            base + s(13),
+        );
+        assert_eq!(b.wait_deadline(&later, 2_000), base + s(12));
     }
 
     #[test]
-    fn wait_deadline_saturates_instead_of_overflowing() {
+    fn wait_deadline_does_not_overflow() {
         let base = Instant::now();
         let b = bound(u64::MAX, boot(1), u64::MAX);
         let now = reading(0, boot(1), 0, base);
-        let expected = base + Duration::from_millis(u64::MAX);
+        let expected = base + Duration::from_nanos(u64::MAX) + Duration::from_millis(u64::MAX);
         assert_eq!(b.wait_deadline(&now, u64::MAX), expected);
+    }
+
+    #[test]
+    fn work_admitted_a_second_before_b_is_cut_at_b_plus_d() {
+        let clock = ManualClock::new(WallMs::from_unix_ms(B_WALL), boot(1), B_CONTINUOUS);
+        let admitted = clock.now();
+        let b = Bound::after(&admitted, 1_000).unwrap();
+        let cap = admitted.wait + Duration::from_millis(1_000 + DEFAULT_DRAIN_MS);
+        assert_eq!(b.wait_deadline(&admitted, DEFAULT_DRAIN_MS), cap);
+        for step in 1..=16 {
+            clock.advance_all_ms(500);
+            let now = clock.now();
+            assert_eq!(
+                b.wait_deadline(&now, DEFAULT_DRAIN_MS),
+                cap,
+                "{} ms after admission",
+                step * 500
+            );
+            assert_eq!(now.wait >= cap, step >= 12);
+        }
+    }
+
+    #[test]
+    fn a_deadline_derived_again_never_moves_later() {
+        let clock = ManualClock::new(WallMs::from_unix_ms(B_WALL), boot(1), B_CONTINUOUS);
+        let b = Bound::after(&clock.now(), 2_000).unwrap();
+        let mut last = b.wait_deadline(&clock.now(), DEFAULT_DRAIN_MS);
+        let steps: [(u64, u64); 8] = [
+            (1_500, 1_500),
+            (1_000, 1_000),
+            (0, 700),
+            (1_000, 1_000),
+            (2_000, 2_000),
+            (0, 3_000),
+            (500, 500),
+            (0, 60_000),
+        ];
+        for (awake_ms, slept_ms) in steps {
+            clock.advance_all_ms(awake_ms);
+            let asleep = slept_ms - awake_ms;
+            clock.advance_wall_ms(i64::try_from(asleep).unwrap());
+            clock.advance_continuous_ms(asleep);
+            let now = clock.now();
+            let deadline = b.wait_deadline(&now, DEFAULT_DRAIN_MS);
+            assert!(deadline <= last, "moved later after {awake_ms} ms awake");
+            if asleep == 0 {
+                assert_eq!(deadline, last, "moved after {awake_ms} ms awake");
+            }
+            last = deadline;
+        }
+        assert!(last <= clock.now().wait);
+    }
+
+    #[test]
+    fn a_sleep_past_b_plus_d_leaves_the_deadline_reached() {
+        let clock = ManualClock::new(WallMs::from_unix_ms(B_WALL), boot(1), B_CONTINUOUS);
+        let admitted = clock.now();
+        let b = Bound::after(&admitted, 1_000).unwrap();
+        clock.advance_wall_ms(60_000);
+        clock.advance_continuous_ms(60_000);
+        let woke = clock.now();
+        assert_eq!(woke.wait, admitted.wait);
+        assert!(b.wait_deadline(&woke, DEFAULT_DRAIN_MS) <= woke.wait);
+        assert!(b.wait_deadline(&woke, DEFAULT_DRAIN_MS) < admitted.wait);
+    }
+
+    #[test]
+    fn wait_deadline_follows_the_reading_with_less_time_left() {
+        let base = Instant::now();
+        let start = reading(B_WALL, boot(1), B_CONTINUOUS, base);
+        let b = Bound::after(&start, 600_000).unwrap();
+        let s = Duration::from_secs;
+
+        let wall_back = reading(B_WALL - HOUR_MS, boot(1), B_CONTINUOUS, base);
+        assert_eq!(b.wait_deadline(&wall_back, 0), base + s(600));
+
+        let wall_forward = reading(B_WALL + 3_000, boot(1), B_CONTINUOUS, base);
+        assert_eq!(b.wait_deadline(&wall_forward, 0), base + s(597));
+
+        let wall_past = reading(B_WALL + 601_000, boot(1), B_CONTINUOUS, base);
+        assert_eq!(b.wait_deadline(&wall_past, 2_000), base + s(1));
+
+        let continuous_ahead = reading(B_WALL, boot(1), B_CONTINUOUS + 4_000 * MS, base);
+        assert_eq!(b.wait_deadline(&continuous_ahead, 0), base + s(596));
+
+        let other_boot = reading(B_WALL + 5_000, boot(2), 0, base);
+        assert_eq!(b.wait_deadline(&other_boot, 0), base + s(595));
+        let other_boot_past = reading(B_WALL + 5_000, boot(2), u64::MAX, base);
+        assert_eq!(b.wait_deadline(&other_boot_past, 0), base + s(595));
     }
 
     #[test]
@@ -594,6 +715,17 @@ mod tests {
             ("2100-02-28T12:34:56Z", 4_107_501_296_000),
             ("1972-06-30T23:59:59Z", 78_796_799_000),
             ("9999-12-31T23:59:59.999Z", LATEST_TEXT_MS),
+            ("2026-01-31T00:00:00Z", 1_769_817_600_000),
+            ("2026-03-31T00:00:00Z", 1_774_915_200_000),
+            ("2026-05-31T00:00:00Z", 1_780_185_600_000),
+            ("2026-07-31T00:00:00Z", 1_785_456_000_000),
+            ("2026-08-31T00:00:00Z", 1_788_134_400_000),
+            ("2026-10-31T00:00:00Z", 1_793_404_800_000),
+            ("2026-12-31T00:00:00Z", 1_798_675_200_000),
+            ("2026-04-30T00:00:00Z", 1_777_507_200_000),
+            ("2026-06-30T00:00:00Z", 1_782_777_600_000),
+            ("2026-09-30T00:00:00Z", 1_790_726_400_000),
+            ("2026-11-30T00:00:00Z", 1_795_996_800_000),
         ];
         for (text, ms) in accepted {
             assert_eq!(
@@ -627,6 +759,11 @@ mod tests {
             ("2026-10-20T08:00:00Z ", TimeTextError::Form),
             ("2026-10-20T08:00:00Z\n", TimeTextError::Form),
             ("2026-10-2xT08:00:00Z", TimeTextError::Form),
+            ("2026/10-20T08:00:00Z", TimeTextError::Form),
+            ("2026-10/20T08:00:00Z", TimeTextError::Form),
+            ("2026-10-20T08x00:00Z", TimeTextError::Form),
+            ("2026-10-20T08:00x00Z", TimeTextError::Form),
+            ("2026-10-20T08:00:00x123Z", TimeTextError::Form),
             ("2026-10-20T08:00:00.1x3Z", TimeTextError::Form),
             ("２026-10-20T08:00:00Z", TimeTextError::Form),
             ("", TimeTextError::Form),
@@ -653,6 +790,9 @@ mod tests {
             ("2026-10-00T08:00:00Z", TimeTextError::Field { name: "day" }),
             ("2026-10-32T08:00:00Z", TimeTextError::Field { name: "day" }),
             ("2026-04-31T08:00:00Z", TimeTextError::Field { name: "day" }),
+            ("2026-06-31T08:00:00Z", TimeTextError::Field { name: "day" }),
+            ("2026-09-31T08:00:00Z", TimeTextError::Field { name: "day" }),
+            ("2026-11-31T08:00:00Z", TimeTextError::Field { name: "day" }),
             ("2026-02-29T08:00:00Z", TimeTextError::Field { name: "day" }),
             ("2100-02-29T08:00:00Z", TimeTextError::Field { name: "day" }),
             ("1969-12-31T23:59:59Z", TimeTextError::BeforeEpoch),

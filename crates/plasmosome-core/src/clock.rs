@@ -159,6 +159,7 @@ impl std::error::Error for ClockError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plasmosome_backend::{Bound, DEFAULT_LEASE_MS};
     use std::time::{Duration, Instant, UNIX_EPOCH};
 
     const UUID_TEXT: &str = "5D1E7C3A-0B2F-4E6D-9A8B-1C2D3E4F5A6B";
@@ -278,6 +279,34 @@ mod tests {
             before.saturating_sub(1_000_000) <= reading && reading <= after + 1_000_000,
             "{before} {reading} {after}"
         );
+    }
+
+    #[test]
+    fn a_refused_continuous_read_fences_every_bound_of_the_boot_session() {
+        let boot = BootSession::parse(UUID_TEXT).unwrap();
+        let wait = Instant::now();
+        let good = reading_from(boot, Ok(1_792_483_200_000), Ok(5_000_000_000), wait);
+        assert_eq!(good.wall.unix_ms(), 1_792_483_200_000);
+        assert_eq!(good.continuous.boot, boot);
+        assert_eq!(good.continuous.ns, 5_000_000_000);
+        assert_eq!(good.wait, wait);
+        let lease = Bound::after(&good, DEFAULT_LEASE_MS).unwrap();
+        assert!(!lease.passed(&good));
+
+        let refused = Err(ClockError::Continuous { errno: 22 });
+        let failed = reading_from(boot, Ok(1_792_483_200_000), refused, wait);
+        assert_eq!(failed.continuous.ns, u64::MAX);
+        assert!(lease.passed(&failed));
+        assert_eq!(lease.remaining_ms(&failed), 0);
+    }
+
+    #[test]
+    fn a_wall_clock_set_before_1970_reads_as_1970() {
+        let boot = BootSession::parse(UUID_TEXT).unwrap();
+        let wait = Instant::now();
+        let reading = reading_from(boot, Err(ClockError::BeforeEpoch), Ok(7), wait);
+        assert_eq!(reading.wall.unix_ms(), 0);
+        assert_eq!(reading.continuous.ns, 7);
     }
 
     #[test]
