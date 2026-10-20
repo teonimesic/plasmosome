@@ -972,7 +972,7 @@ fn sample_capabilities() -> Vec<Capability> {
             target: "/workspace".to_string(),
         },
         Capability::SessionFile {
-            path: "skills/pr.md".to_string(),
+            path: "/var/lib/plasmosome/conformance/skills/pr.md".to_string(),
         },
     ]
 }
@@ -982,7 +982,7 @@ fn grants_with_two_of_one_class() -> Vec<Grant> {
     grants.push(Grant {
         owner: second_owner(),
         capability: Capability::SessionFile {
-            path: "skills/review.md".to_string(),
+            path: "/var/lib/plasmosome/conformance/skills/review.md".to_string(),
         },
         kind: GrantKind::Hot,
     });
