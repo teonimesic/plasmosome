@@ -651,6 +651,22 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_query_for_another_operation_is_unverifiable_too() {
+        for operation in OTHER_NAMES {
+            let mut readings = confined();
+            readings.operations.push((operation, Err(libc::EINVAL)));
+            assert_eq!(
+                judge(PID, &readings),
+                unverifiable(Unverifiable::CheckFailed {
+                    operation: Some(operation),
+                    errno: libc::EINVAL,
+                }),
+                "five denials and a failed query for {operation}"
+            );
+        }
+    }
+
+    #[test]
     fn a_sandboxed_supervisor_is_not_trusted() {
         for value in [1, 2, -2] {
             assert_eq!(
