@@ -273,7 +273,7 @@ fn plain(out: &mut impl Sink, value: Option<&Json>) {
     match value {
         None => {}
         Some(Json::String(text)) => json::show(out, text),
-        Some(Json::Number(number)) => out.push_str(number.as_str()),
+        Some(Json::Number(number)) => json::write_number(out, number),
         Some(other) => json::write_value(out, other, Style::Human, 0),
     }
 }

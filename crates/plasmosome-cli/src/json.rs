@@ -609,7 +609,7 @@ pub(crate) fn write_value(out: &mut impl Sink, value: &Json, style: Style, depth
                 Json::Null => out.push_str("null"),
                 Json::Bool(true) => out.push_str("true"),
                 Json::Bool(false) => out.push_str("false"),
-                Json::Number(number) => out.push_str(number.as_str()),
+                Json::Number(number) => write_number(out, number),
                 Json::String(text) => write_string(out, text, style),
                 Json::Array(items) if items.is_empty() => out.push_str("[]"),
                 Json::Object(members) if members.is_empty() => out.push_str("{}"),
@@ -700,6 +700,12 @@ pub(crate) fn write_string(out: &mut impl Sink, text: &str, style: Style) {
         }
     }
     out.push('"');
+}
+
+pub(crate) fn write_number(out: &mut impl Sink, number: &Number) {
+    for character in number.as_str().chars() {
+        out.push(character);
+    }
 }
 
 pub(crate) fn show(out: &mut impl Sink, text: &str) {
