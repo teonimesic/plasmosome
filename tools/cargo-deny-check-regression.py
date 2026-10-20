@@ -25,7 +25,7 @@ plan = json.loads(open(os.environ["FAKE_PLAN"]).read())
 manifest = sys.argv[sys.argv.index("--manifest-path") + 1]
 relative = os.path.relpath(os.path.abspath(manifest), os.getcwd())
 with open(os.environ["FAKE_LOG"], "a") as log:
-    log.write(json.dumps({"argv": sys.argv, "manifest": relative}) + "\\n")
+    log.write(json.dumps({"argv": sys.argv, "manifest": relative, "color": os.environ.get("CARGO_TERM_COLOR")}) + "\\n")
 fixture = json.loads(open(os.environ["FAKE_FIXTURES"]).read())[plan[relative]]
 for line in fixture["stderr"]:
     print(line, file=sys.stderr)
@@ -155,7 +155,7 @@ class Repository:
             "HOME": os.environ.get("HOME", str(self.root)),
             "FAKE_PLAN": str(self.plan), "FAKE_LOG": str(self.log), "FAKE_CARGO_LOG": str(self.cargo_log),
             "FAKE_FIXTURES": str(SOURCE.with_name("cargo-deny-check-fixtures.json")),
-            "GITHUB_STEP_SUMMARY": str(self.summary), "PYTHONDONTWRITEBYTECODE": "1",
+            "GITHUB_STEP_SUMMARY": str(self.summary), "PYTHONDONTWRITEBYTECODE": "1", "CARGO_TERM_COLOR": "always",
         }
         result = subprocess.run([sys.executable, str(SOURCE), *args], cwd=self.root, env=environment,
                                 capture_output=True, text=True, timeout=60)
@@ -198,6 +198,7 @@ def tracked_lockfiles_and_invocation():
                 assert argv[argv.index("--format") + 1] == "json", argv
                 assert Path(argv[argv.index("--config") + 1]).resolve() == (repository.root / "deny.toml").resolve(), argv
                 assert argv[-2 - len(extra):] == ["check", check, *extra], argv
+                assert call["color"] == "never", call
             assert "`Cargo.lock`" in summary and "`fuzz/Cargo.lock`" in summary, summary
             assert "scratch" not in result.stdout + summary
 
