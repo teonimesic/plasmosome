@@ -1805,6 +1805,19 @@ mod tests {
     }
 
     #[test]
+    fn host_readings_saturate_at_the_largest_value_a_recipe_can_hold() {
+        assert_eq!(
+            [254, 255, 256, 1_000].map(capped_vcpus),
+            [254, 255, 255, 255]
+        );
+        let most = u128::from(u32::MAX);
+        assert_eq!(
+            [most - 1, most, most + 1, 1 << 40].map(capped_mib),
+            [u32::MAX - 1, u32::MAX, u32::MAX, u32::MAX]
+        );
+    }
+
+    #[test]
     fn limits_report_what_they_were_built_with() {
         let limits = PlatformLimits::new(Architecture::X86_64, 3, 5, 7);
         assert_eq!(limits.architecture(), Architecture::X86_64);
