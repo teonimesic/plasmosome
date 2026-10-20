@@ -166,6 +166,9 @@ jobs:
       - name: check pipeline health regression
         run: python3 tools/check-pipeline-health-regression.py
 
+      - name: root image regression
+        run: python3 tools/root-image-regression.py
+
       - name: download pinned beads
         id: beads
         timeout-minutes: 5

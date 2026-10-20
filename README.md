@@ -502,6 +502,41 @@ If rustup cannot download it then, because you are offline or `RUSTUP_AUTO_INSTA
 `rustup toolchain install` in the checkout first, while online. macOS (Apple Silicon) is the first
 target; Linux follows.
 
+## Root image
+
+Every cell boots the same root image: a raw, unpartitioned ext4 file that the guest sees as
+`/dev/vda`. `tools/root-image` builds it from `debian:bookworm-slim`, pinned by digest, and adds
+spec 024's `workload` account. It needs Docker and python3. The tool never pulls an image, so
+`docker pull` is your own step, and its containers run with `--network none`.
+
+```shell
+BASE=debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+docker pull "$BASE"
+mkdir -p "$HOME/.cache/plasmosome"
+tools/root-image build --base "$BASE" --source-date-epoch 1792454400 \
+  --work-root "$HOME/.cache/plasmosome/root-image-$(date -u +%Y%m%d%H%M%S)" \
+  --images-root /usr/local/var/plasmosome/runtime/images
+```
+
+The images root must exist. The work root must not exist yet, and it must sit where Docker
+Desktop shares files with its VM, such as under your home directory. Docker Desktop does not share
+`/usr/local` by default, so a work root there reaches the container empty and the tool refuses.
+Intermediate files stay in the work root, so you can read them after a failure.
+
+The tool prints one JSON line: `image_dir`, `image_id16`, `manifest_sha256`, `rootfs_sha256`,
+`content_sha256` and `kind`. The image directory is `<images-root>/<image_id16>`, the first 16 hex
+digits of the manifest's sha256. It holds `rootfs.raw`, `content.jsonl` (one line per file in the
+image), `SHA256SUMS` and `manifest.json`, all read-only and `uchg`. An existing directory is never
+replaced. Pin an image by `manifest_sha256`.
+
+The image is the base with these changes: the `workload` account (uid and gid 1000, home
+`/home/workload` with mode 0700 and the skel files), `/tmp` with mode 01777, empty `/dev`, `/proc`
+and `/sys`, and fixed `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf`. The tool refuses a base
+with anything under `/opt` or `/usr/local/bin`, or with a path that names plasmosome or plasmid
+(spec 027). `--add SRC:DEST:MODE` adds a root-owned file and makes the kind `test`, never
+`product`. Two builds with the same base and `--source-date-epoch` give the same `content_sha256`.
+The ext4 bytes can differ, so compare rebuilds by `content_sha256`.
+
 ## Development work
 
 Tasks live entirely in shared native Beads: their descriptions, plans, acceptance, notes, status
