@@ -45,6 +45,26 @@ pub(crate) fn with_descriptors_held<T: AsFd + Into<OwnedFd>>(
     })
 }
 
+/// Runs `create` as `with_descriptors_held` does, for a creation that makes
+/// several descriptors, such as the two ends of a pipe.
+///
+/// `create` returns every descriptor it made, and each one is checked: if any
+/// is not close-on-exec when `create` returns, all of them are closed before
+/// the lock is released, and an error is returned instead. What
+/// `with_descriptors_held` says about blocking calls, spawns, nesting and
+/// descriptors kept elsewhere holds here too.
+pub(crate) fn with_each_descriptor_held<const N: usize>(
+    create: impl FnOnce(&DescriptorsHeld) -> std::io::Result<[OwnedFd; N]>,
+) -> std::io::Result<[OwnedFd; N]> {
+    let _ = create;
+    todo!()
+}
+
+#[cfg(test)]
+pub(crate) fn hold_fork_side() -> std::sync::RwLockReadGuard<'static, ()> {
+    SPAWN_LOCK.read().unwrap_or_else(PoisonError::into_inner)
+}
+
 #[allow(unsafe_code)]
 fn close_on_exec_or_closed<T: AsFd>(created: T) -> std::io::Result<T> {
     // SAFETY: fcntl with F_GETFD takes no pointer, and `created` keeps its descriptor open for the
