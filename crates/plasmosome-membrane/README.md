@@ -83,27 +83,37 @@ includes a supervisor that is sandboxed itself and a query the kernel cannot ans
 
 `Confined` does not show that the verified host policy is installed, and its evidence says so with
 `PolicyBinding::PropertiesObserved`. Profiles much looser than the host policy read `Confined` too.
-A reviewer measured two on macOS 26.6.2:
+Measured on macOS 26.6.2, a child under each of these three could still do the following:
 
 - `(version 1)(deny default)(allow file-read*)(allow file-write* (subpath "/"))(allow network* (remote ip))(allow network* (local ip))`.
-  The child created a file, connected over TCP to 127.0.0.1 and bound a TCP socket. Only `fork`
-  was denied. Asked with no filter, the operations answered denied although the policy allows
-  them under filters that match every argument.
+  The child created, overwrote and unlinked files outside the work tree, connected over TCP to
+  127.0.0.1 and bound a TCP socket. Only `fork` and running `/bin/echo` were denied. Asked with
+  no filter, its four file and network operations answered denied although it allows them for
+  every path under `/` and for any IP address.
 - `(version 1)(allow default)(deny process-fork)(deny network*)(deny file-write-create)`.
   The child overwrote and unlinked existing files and ran `/bin/echo`. Operations outside the
   five are not asked.
+- `(version 1)(allow default)` with a `deny` for exactly the five operations and nothing else.
+  The child could do what it could under the second profile. A profile can always deny exactly
+  the operations it is asked about, so asking more operations with no filter cannot settle O-3.
 
-The macOS tests here apply both and expect `Confined`.
+The macOS tests here apply all three and expect `Confined`.
 
 A bare `(deny default)` profile reads `Confined` as well. Spec 001 §4.2 says "Substituting another
 policy, even one called deny-default, must fail." This check alone cannot meet that: Darwin has no
 call that returns a process's installed profile, and the profiles above are substitutes that pass.
 Nor does it give the evidence §4.2 asks for, binding the verified policy and its installation to
 the process; the unique id binds only the process. Owner gate O-3 on native task `plasmosome-qep`
-decides what Darwin evidence is enough. One option the same reviewer measured: `file-write-create`
-asked with a path filter, for a path outside the work tree, answers allowed under
-`(allow file-write* (subpath "/"))` and denied under a policy that allows writes in one subpath
-only. The network operations have no filter like that.
+decides what Darwin evidence is enough.
+
+One option tells the first looser profile from the host policy: `file-write-create` asked with a
+path filter. Measured on macOS 26.6.2, for a file outside the work tree, the first profile answers
+allowed and the host policy denied. The path must exist. For a path that does not exist, the query
+answers denied under every profile measured, `(allow default)` included, and so does the host
+policy inside its own work tree. A create check that names a file not there yet therefore catches
+nothing. The option does not catch the second or third looser profile: for a file outside the work
+tree, both answer denied, as the host policy does. The network operations have no filter like
+that.
 
 It also says nothing about descriptors the helper already holds, or about the images it loaded
 (owner gate O-5).
