@@ -16,9 +16,11 @@ import re
 import runpy
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import traceback
 
 
@@ -572,6 +574,12 @@ def contract_check_reads_debugfs_output():
             ("home.ls", (check / "home.ls").read_text().replace(".profile", ".prof1le"), ".profile"),
             ("home.ls", (check / "home.ls").read_text().replace("/1000/1000/.bashrc", "/0/0/.bashrc"), ".bashrc"),
             ("home.ls", (check / "home.ls").read_text().replace("/1000/1000/.bashrc", "/1000/0/.bashrc"), ".bashrc"),
+            ("home.ls", (check / "home.ls").read_text().replace("/1000/1000/.bashrc", "/1000/1000\u00b2/.bashrc"),
+             "cannot parse"),
+            ("home.ls", (check / "home.ls").read_text().replace("/1000/1000/.bashrc", "/1000/" + "1" * 5000 + "/.bashrc"),
+             "cannot parse"),
+            ("home.stat", home.replace("User:  1000", "User:  \u0661\u0660\u0660\u0660"), "/home/workload"),
+            ("home.stat", home.replace("User:  1000", "User:  " + "1" * 5000), "/home/workload"),
             ("add-1.stat", (check / "add-1.stat").read_text().replace("Mode:  0755", "Mode:  0644"), "lane-probe"),
             ("add-1.stat", (check / "add-1.stat").read_text().replace("User:     0", "User:  1000"), "lane-probe"),
             ("add-1.data", "other bytes", "lane-probe"),
@@ -602,6 +610,31 @@ def contract_check_reads_debugfs_output():
         (check / "group").unlink()
         os.mkfifo(check / "group")
         assert "not a regular file" in refusal("check", API["check_image"], check, facts, uuid)
+
+
+WORST_STAT = """
+import runpy, sys
+from pathlib import Path
+api = runpy.run_path(sys.argv[1])
+try:
+    api["read_stat"](Path(sys.argv[2]), sys.argv[3], "/tmp")
+except api["Refused"] as error:
+    print(error.step)
+"""
+
+
+def a_worst_case_stat_read_back_is_refused_in_seconds():
+    with scratch() as root:
+        size = TOOL["MAX_OUTPUT_BYTES"]
+        for name, head, text in [("pairs.stat", "", "Type: regular    Mode:  0644   "),
+                                 ("users.stat", "Inode: 12   Type: directory    Mode:  01777   Flags: 0x80000\n",
+                                  "User:  1000   ")]:
+            (root / name).write_text(head + text * ((size - len(head)) // len(text)))
+            (root / f"{name}.err").write_text(BANNER)
+            started = time.monotonic()
+            done = subprocess.run([sys.executable, "-c", WORST_STAT, str(SOURCE), str(root), name],
+                                  capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+            assert done.stdout == "check\n", (name, done.stdout, done.stderr[-500:], time.monotonic() - started)
 
 
 def judge_accounts_accepts_exactly_the_contract():
@@ -1071,6 +1104,7 @@ TESTS = [
     docker_create_times_do_not_reach_the_stage,
     contract_check_reads_debugfs_output,
     judge_accounts_accepts_exactly_the_contract,
+    a_worst_case_stat_read_back_is_refused_in_seconds,
     build_runs_export_then_filesystem_in_the_pinned_base,
     a_base_without_a_digest_refuses_before_docker,
     a_base_that_is_not_local_or_not_pinned_refuses_before_create,
