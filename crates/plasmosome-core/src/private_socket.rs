@@ -1872,6 +1872,17 @@ mod tests {
     }
 
     #[test]
+    fn a_name_holding_a_nul_byte_is_a_bad_name() {
+        let root = test_root();
+        let name = vec![b'a', 0, b'b'];
+        let spelled = String::from_utf8(name.clone()).expect("ASCII");
+        assert_eq!(
+            listed_from(&start(&root), root.path(), vec![Ok(name)].into_iter()),
+            Err(PrivateSocketError::BadName { name: spelled })
+        );
+    }
+
+    #[test]
     fn listing_a_descriptor_that_is_not_a_directory_is_io() {
         let root = test_root();
         let file = root.path().join("file");
