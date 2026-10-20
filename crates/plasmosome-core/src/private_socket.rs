@@ -1,7 +1,6 @@
 use std::ffi::{CStr, CString, OsStr};
 use std::fmt;
 use std::io;
-use std::net::Shutdown;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -305,7 +304,7 @@ impl PrivateListener {
             Err(error) => return Err(error),
         };
         if let Err(refusal) = check_peer_uid(&stream, self.trusted_uid) {
-            let _ = stream.shutdown(Shutdown::Both);
+            drop(stream);
             return Ok(Some(Accepted::Refused(refusal)));
         }
         stream.set_nonblocking(false)?;
