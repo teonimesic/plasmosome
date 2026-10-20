@@ -348,6 +348,7 @@ def tool_failures():
                      json.dumps({**document(other), "schema": 1}),
                      json.dumps({key: value for key, value in document(other).items() if key != "sections"}),
                      json.dumps({**document(other), "sections": "lockfiles"}),
+                     json.dumps({**document(), "findings": [{"title": "no kind", "section": "lockfiles"}]}),
                      json.dumps(document(other, sections=("lockfiles", "lockfiles"))),
                      json.dumps(document(unsectioned)),
                      json.dumps(document({**other, "section": "weekly"}, sections=("lockfiles",))),
