@@ -1,8 +1,8 @@
 name = "sha2"
 range = "0.11"
 reason = """\
-  Computes SHA-256 for plasmosome-backend's Digest type, which lets a paged reader check that it \
-  reassembled exactly the bytes a frozen account holds.\
+  Computes SHA-256, which lets a paged reader check that it reassembled exactly the bytes a \
+  frozen account holds.\
   """
 write_it_instead.lines = 100
 write_it_instead.how = """\

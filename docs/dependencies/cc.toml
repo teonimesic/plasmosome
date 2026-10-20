@@ -1,8 +1,9 @@
 name = "cc"
 range = "1"
 reason = """\
-  Compiles the membrane's one C file, src/darwin_group.c, which reads the macOS process table. \
-  It runs in plasmosome-membrane's build script, on macOS only.\
+  Compiles C source with the platform's C compiler from a build script, and tells cargo to link \
+  the result. We have one C file, which reads the macOS process table, and it is built on macOS \
+  only.\
   """
 write_it_instead.lines = 80
 write_it_instead.how = """\

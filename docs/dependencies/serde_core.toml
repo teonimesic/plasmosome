@@ -1,8 +1,8 @@
 name = "serde_core"
 range = "1"
 reason = """\
-  Gives the membrane's strict JSON reader the deserialization traits it drives serde_json with, \
-  so that a duplicate object key is refused while parsing. It is serde without the derive.\
+  Provides serde's deserialization traits without the derive. Implementing them by hand lets a \
+  reader drive serde_json's parser and refuse a duplicate object key while parsing.\
   """
 write_it_instead.lines = 700
 write_it_instead.how = """\

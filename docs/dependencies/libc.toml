@@ -1,9 +1,9 @@
 name = "libc"
 range = "0.2"
 reason = """\
-  Declares the C library's calls, types and constants that plasmosome-core and \
-  plasmosome-membrane use directly: spawning and reaping processes, signals, Unix sockets, \
-  descriptors and file metadata, on macOS and Linux.\
+  Declares the C library's calls, types and constants for macOS and Linux, so that Rust code can \
+  spawn and reap processes, handle signals, use Unix sockets and descriptors, and read file \
+  metadata through the operating system directly.\
   """
 write_it_instead.lines = 560
 write_it_instead.how = """\
@@ -17,9 +17,14 @@ write_it_instead.how = """\
   sigset_t and sockaddr_un differ between the two hosts (240); types (30); and constants, many \
   of whose values differ by host (180): 560 lines. Nothing here would check those layouts \
   against the C headers, as libc's own test suite does. Replacing it removes nothing from \
-  Cargo.lock. libc stays locked on both hosts through getrandom (which uuid and tempfile bring), \
-  errno, rustix and wait-timeout, and on aarch64-apple-darwin also through sha2's cpufeatures. \
-  On x86_64-unknown-linux-gnu, sha2 does not reach libc.\
+  Cargo.lock. The lockfile keeps libc through cpufeatures, errno, getrandom 0.3, getrandom 0.4, \
+  rustix and wait-timeout. `cargo tree --locked --offline -i libc -e normal,build,dev --depth 1 \
+  --target x86_64-unknown-linux-gnu` lists getrandom 0.3, getrandom 0.4 and wait-timeout as what \
+  builds libc there; rustix uses linux-raw-sys on that host and leaves its libc and errno \
+  dependencies off. `cargo tree --locked --offline -i libc -e normal,build,dev --depth 1 \
+  --target aarch64-apple-darwin` lists cpufeatures, errno, getrandom 0.3, getrandom 0.4, rustix \
+  and wait-timeout. uuid and tempfile bring getrandom 0.4, proptest brings getrandom 0.3 and \
+  wait-timeout, tempfile brings rustix, and sha2 brings cpufeatures.\
   """
 exception = ""
 brings = []
