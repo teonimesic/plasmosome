@@ -5,6 +5,8 @@
 //! the frozen control protocol on an ndjson connection, which its binary
 //! `plasmosomed` serves on the control socket its config names.
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod clock;
 pub mod control;
 pub mod daemon;
 pub mod gatekeeper;
@@ -17,11 +19,18 @@ pub mod private_socket;
 pub mod protocol;
 pub mod reconciler;
 pub mod registry;
+/// The hardware runtime's launch input, shared by the controller and the
+/// cell supervisor: the strictly parsed `RuntimeRecipe` and spec 023's
+/// template, canonical paths, cell IDs, the supervisor's config record and a
+/// JSON reader that refuses repeated keys.
+pub mod runtime;
 pub mod session_log;
 pub mod state;
 pub mod supervisor_check;
 pub mod version;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub use clock::{ClockError, SystemClock, boot_session};
 pub use control::{Controller, Handler, MAX_LINE_BYTES, serve_connection};
 pub use daemon::{ConfigError, DaemonConfig, DaemonError, parse_config, run};
 pub use gatekeeper::Gatekeeper;

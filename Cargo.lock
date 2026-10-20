@@ -461,6 +461,7 @@ dependencies = [
  "plasmosome-backend",
  "proptest",
  "serde",
+ "serde_core",
  "serde_json",
  "tempfile",
  "toml",
@@ -497,8 +498,8 @@ dependencies = [
  "cc",
  "libc",
  "plasmosome-backend",
+ "plasmosome-core",
  "proptest",
- "serde_core",
  "serde_json",
  "tempfile",
 ]

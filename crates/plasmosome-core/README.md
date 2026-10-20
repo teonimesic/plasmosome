@@ -25,7 +25,9 @@ one.
 | `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens |
 | `supervisor_check` | Spec 023 §8's supervisor check, with no IO: `decide` gives the outcome of the first table row a cell's lock, marker and journal match, and `after_query` says whether one answer from a held lock's supervisor, given within the answer cap, adopts the cell, waits, or sets it aside once the cap passes. Adopting does not promise the cell is served: spec 008's journal replay can still quarantine it, and spec 023's no-`created` rule can end it. Callers gather the facts and carry out the outcome |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
+| `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends |
+| `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
 ## Use
 
@@ -124,6 +126,44 @@ Registration preserves last-registration-wins behavior; withdrawal removes the o
 and their descriptions. `list()` still returns sorted names.
 
 Tests: `cargo test -p plasmosome-core`
+
+## The runtime recipe and the config record
+
+`runtime` holds the input that launches one hardware cell, so that the controller and the cell
+supervisor read it with the same rules. It lives here, not in `plasmosome-membrane`, because the
+controller must build it and this crate never depends on membrane; membrane depends on this
+crate and re-exports `runtime::path` and `runtime::recipe`. It is not in `plasmosome-backend`
+because `PlatformLimits::host` reads the machine's memory through `sysconf`, which is `unsafe`,
+and spec 026 §2 allows `unsafe` only in register packages.
+
+- `RuntimeRecipe::parse` reads a whole recipe line. It checks the line before the size, so a
+  buffer that does not end in a newline is `NotOneLine` whatever its length, and a reader that
+  stops at a cap must report an oversized recipe itself.
+- `RuntimeRecipe::from_value` applies the same rules, after framing and JSON, to a recipe nested in
+  a larger record. It is crate-private until a caller outside this crate needs it: `decode` and
+  `RuntimeTemplate::complete` read through it. Its value must come from `strict_json::parse_value`,
+  which refuses a repeated key at any depth; `serde_json` would keep the last one. So must the
+  value given to `Artifact::from_value` and `RuntimeTemplate::from_value`.
+- `RuntimeTemplate` is spec 023 §1's template: a recipe without `writable_root`, `control_path`
+  and `data_path`. Reading one refuses any of those three by name, then an unknown or missing key.
+  Its values are checked only when `complete` adds one cell's three paths and reads the result as
+  a recipe, so a caller that must refuse a bad template at startup completes it once there.
+- `cell_id::parse_cell_id` accepts exactly `cell-` and one to ten ASCII digits, the first not `0`.
+- `SupervisorConfig` is spec 023 §4's record, one line:
+  `{"cell":…,"instance_root":…,"runtime_recipe":{…},"boot_deadline_ms":…}` and a newline. The
+  recipe is a nested object, not a string holding JSON, so its escapes are not doubled. `decode`
+  refuses the whole record at the first broken rule. It checks the size first: a buffer longer
+  than `supervisor_config::MAX_RECORD_BYTES` (1,048,576) and one newline is `TooLarge`, whether or
+  not it holds a newline. A buffer of `MAX_RECORD_BYTES + 1` bytes or fewer goes on to the
+  one-line check, so one that does not end in a newline is `NotOneLine`. So a reader that stops
+  after `MAX_RECORD_BYTES + 2` bytes gets `TooLarge` for anything longer than a record can be. The
+  refusal's `bytes` is then the number of bytes read, less one if the last of them is a newline,
+  so it can be smaller than the record's real size. For example, a body of 1,048,577 bytes and a
+  newline is 1,048,578 bytes read, and `decode` returns `TooLarge { bytes: 1048577 }`. `encode`
+  refuses a larger line, and a cell or a zero deadline that `decode` would refuse.
+- A refusal inside `runtime_recipe` names its field relative to the recipe, such as `vcpus`, and a
+  template refusal names it relative to the template. `DuplicateKey` names a repeated key from the
+  record's root, such as `runtime_recipe.vcpus`.
 
 ## Cell IDs on a normalizing filesystem
 
