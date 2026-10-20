@@ -53,14 +53,17 @@ fn client_failure(code: ClientCode, message: &str, fields: Vec<(&str, Json)>) ->
     Envelope {
         command: "invalid".to_string(),
         instance: None,
-        outcome: Err(ErrorBody::Client(ClientError {
-            code,
-            message: message.to_string(),
-            fields: fields
-                .into_iter()
-                .map(|(key, value)| (key.to_string(), value))
-                .collect(),
-        })),
+        outcome: Err(ErrorBody::Client(
+            ClientError::new(
+                code,
+                message.to_string(),
+                fields
+                    .into_iter()
+                    .map(|(key, value)| (key.to_string(), value))
+                    .collect(),
+            )
+            .expect("the fixture's fields are distinct and not reserved"),
+        )),
     }
 }
 
@@ -97,11 +100,14 @@ fn hostile_unreachable() -> Envelope {
     Envelope {
         command: hostile("plasmosome.status"),
         instance: hostile_instance(),
-        outcome: Err(ErrorBody::Client(ClientError {
-            code: ClientCode::Unreachable,
-            message: hostile("refused"),
-            fields: vec![("path".to_string(), Json::String(hostile("/socket")))],
-        })),
+        outcome: Err(ErrorBody::Client(
+            ClientError::new(
+                ClientCode::Unreachable,
+                hostile("refused"),
+                vec![("path".to_string(), Json::String(hostile("/socket")))],
+            )
+            .expect("one field that is not reserved"),
+        )),
     }
 }
 
@@ -183,6 +189,38 @@ fn a_client_error_writes_its_code_and_fields() {
         emitted(&envelope, Form::Json),
         (String::new(), format!("{expected}\n"))
     );
+}
+
+fn null_fields(keys: &[&str]) -> Vec<(String, Json)> {
+    keys.iter()
+        .map(|key| (key.to_string(), Json::Null))
+        .collect()
+}
+
+#[test]
+fn a_client_error_refuses_a_repeated_or_reserved_field() {
+    for keys in [
+        &["path", "path"][..],
+        &["path", "errno", "path"],
+        &["domain"],
+        &["code"],
+        &["errno", "message"],
+    ] {
+        assert_eq!(
+            ClientError::new(ClientCode::Transport, "m".to_string(), null_fields(keys)),
+            Err(null_fields(keys)),
+            "{keys:?} would give the error object a repeated key"
+        );
+    }
+    let error = ClientError::new(
+        ClientCode::Transport,
+        "m".to_string(),
+        null_fields(&["path", "errno"]),
+    )
+    .expect("distinct keys that are not reserved");
+    assert_eq!(error.code(), ClientCode::Transport);
+    assert_eq!(error.message(), "m");
+    assert_eq!(error.fields(), &null_fields(&["path", "errno"])[..]);
 }
 
 #[test]
