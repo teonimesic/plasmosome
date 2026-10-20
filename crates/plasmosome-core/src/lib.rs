@@ -5,6 +5,8 @@
 //! the frozen control protocol on an ndjson connection, which its binary
 //! `plasmosomed` serves on the control socket its config names.
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod clock;
 pub mod closure;
 pub mod control;
 pub mod daemon;
@@ -27,6 +29,8 @@ pub mod state;
 pub mod supervisor_check;
 pub mod version;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub use clock::{ClockError, SystemClock, boot_session};
 pub use control::{Controller, Handler, MAX_LINE_BYTES, serve_connection};
 pub use daemon::{ConfigError, DaemonConfig, DaemonError, parse_config, run};
 pub use gatekeeper::Gatekeeper;
