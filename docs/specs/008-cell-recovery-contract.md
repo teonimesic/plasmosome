@@ -101,13 +101,15 @@ nonblank. It is a recorded operator assertion, not authentication. Each change i
 `{ "mock": MockMode, "source": AttachmentSource, "lifetime": Lifetime, "named": bool, "requires":
 [RecordedRequirement, ...], "effects": [RecordedEffect, ...] }`, where `Lifetime` is spec 028's
 required record of the attachment's bound in both readings, its limits and ceiling, their
-sources, and its renewal count.
+sources, its drain budget D as `drain_ms`, and its renewal count.
 Null removes the attachment. An empty
 effects array is a real attached plasmid with a known mode, not an accidental removal. Changes
 contain each plugin at most once, are nonempty, and carry the complete replacement for each
 changed attachment. Unmentioned attachments remain unchanged. Effect order is grant order.
 Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs)
 requires. Until then a replacement carried no `lifetime`.
+Amended on 2026-10-20: this did not name `drain_ms`, the drain budget spec 028 §1 records at
+prepare.
 Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default)
 requires. Until then a replacement carried no `named` or `requires`.
 
