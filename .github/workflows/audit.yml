@@ -1,21 +1,32 @@
-# Separate from `ci.yml` on purpose, because a red run means something different per trigger.
-# On the schedule: a new advisory landed against code nobody touched. On a pull request: that
-# pull request's `Cargo.lock` brought a known-vulnerable dependency in. On a manual dispatch:
-# whatever the person running it wanted to know. One workflow carrying both triggers makes the
-# scheduled meaning unreadable, which is the one nobody is watching for.
+# The security report for code already on main (spec 026 section 4, "The security issue").
 #
-# `cargo-audit` is pinned. Installing the latest release would let a version published upstream
-# change what this job accepts, with no commit in this repository saying so.
+# It refuses nothing. Pull requests are refused by `gates` in ci.yml, and this workflow never runs
+# on one. It runs on each push to main, weekly, and on manual dispatch. Each run checks sources,
+# advisories and licences over every git-tracked Cargo.lock, warnings included. The weekly and
+# dispatched runs also flag ignores past their date or with a reason that does not parse, and a
+# stable Rust newer than rust-toolchain.toml. Any finding opens or updates one issue labelled
+# `security`, and Main answers it within seven days. A run rewrites only the issue's sections for
+# the checks it ran, and comments only when their findings changed. Findings leave the run green. A
+# tool failure is written into the issue and turns the run red, so a run that could not check main
+# never reads as a clean one.
+#
+# A dispatch can set dry-run: every read runs, and each issue write is printed instead of made.
+#
+# cargo-deny is pinned at the version gates installs, under the same rust-cache key. Bump them
+# together, with the steps in tools/cargo-deny-check's docstring.
 name: audit
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "23 6 * * 1"
-  pull_request:
-    paths:
-      - Cargo.lock
-      - .github/workflows/audit.yml
   workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Print the issue writes instead of making them
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -24,13 +35,28 @@ permissions:
 env:
   RUSTUP_AUTO_INSTALL: "0"
 
+# The issue belongs to the repository, not to a branch, so every run waits for the one in
+# progress. Two runs at once could both find no issue and both open one. GitHub keeps one pending
+# run per group, and a newer run cancels it. So a push or a dispatch can cancel a pending scheduled
+# run, and that week's weekly checks do not run, or a pending push run, whose lockfile check waits
+# for the next push or Monday. A cancelled run shows grey; a dispatch on main runs both again. A
+# dispatch on another branch writes that branch's findings into the issue for main, and each
+# section shows its commit but not its branch.
 concurrency:
-  group: audit-${{ github.ref }}
-  cancel-in-progress: true
+  group: audit
+  cancel-in-progress: false
 
 jobs:
-  audit:
+  # cargo-deny's install compiles its dependencies, build scripts included, and the report runs the
+  # binary. Both are third-party code, so this job holds no write token. Its findings reach the
+  # issue job as a job output.
+  report:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      findings: ${{ steps.handover.outputs.findings }}
+      handover: ${{ steps.handover.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,8 +68,56 @@ jobs:
       - name: toolchain in use
         run: rustup show active-toolchain --verbose
 
-      - name: install cargo-audit
-        run: cargo install cargo-audit --version 0.22.2 --locked
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: cargo-deny-0.20.2
 
-      - name: audit
-        run: cargo audit --deny warnings
+      - name: install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+
+      - name: report
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          python3 tools/cargo-deny-check report --json-out "$RUNNER_TEMP/findings.json" --event "$EVENT"
+
+      # The report step prints cargo-deny's text, and a line in a step's log can set that step's
+      # outputs. So the findings leave this job only through this step, which prints only its own
+      # fixed text. The findings file is one line of ASCII JSON, so it is one output line. The issue
+      # step reads it from an environment variable, and Linux refuses an environment string over
+      # 128 KiB. So a file over 100000 bytes fails this step. The issue job gets this step's outcome
+      # too, and reads the findings only when that outcome is success.
+      - name: hand over the findings
+        id: handover
+        run: |
+          size=$(wc -c < "$RUNNER_TEMP/findings.json")
+          if [ "$size" -gt 100000 ]; then echo "::error::the findings file is $size bytes, over the 100000 the issue job can read"; exit 1; fi
+          printf 'findings=%s\n' "$(cat "$RUNNER_TEMP/findings.json")" >> "$GITHUB_OUTPUT"
+
+  # This job runs only checkout, this repository's standard-library script and gh. It runs after a
+  # failed report job too, so a broken install reaches the issue as a tool failure instead of
+  # leaving the issue silent.
+  issue:
+    needs: report
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    # Labels and issues are both under the issues permission. Nothing else is written.
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: security issue
+        env:
+          FINDINGS: ${{ needs.report.outputs.findings }}
+          HANDOVER: ${{ needs.report.outputs.handover }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MODE: ${{ inputs.dry-run && 'dry-run' || 'write' }}
+        run: |
+          printf '%s\n' "$FINDINGS" > "$RUNNER_TEMP/findings.json"
+          python3 tools/security-issue --findings "$RUNNER_TEMP/findings.json" --handover "$HANDOVER" --repo "$REPOSITORY" --run-url "$RUN_URL" --mode "$MODE"
