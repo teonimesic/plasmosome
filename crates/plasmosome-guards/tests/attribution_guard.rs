@@ -200,9 +200,8 @@ fn assert_cleared(root: &Path, message: &str, why: &str) {
     let output = run_guard_over(root, message);
     assert!(
         output.status.success(),
-        "the guard refused a commit that {why}; a guard that flags prose about attribution makes writing about the rule impossible.\nmessage:\n{message}\nguard said:\n{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "the guard refused a commit that {why}; a guard that flags prose about attribution makes writing about the rule impossible.\nmessage:\n{message}\nguard said:\n{}",
+        said(&output)
     );
 }
 
