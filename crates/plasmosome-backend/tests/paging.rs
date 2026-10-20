@@ -453,10 +453,7 @@ fn a_capture_dropped_by_expire_still_answers_expired() {
     assert!(!slot.is_holding());
     for offset in [0, 4] {
         let refused = read(&mut slot, 2, offset, t).expect_err("snapshot 2 expired");
-        assert_eq!(
-            (refused.clone(), refused.code()),
-            (PagingError::Expired, -32603)
-        );
+        assert_eq!((refused.code(), refused), (-32603, PagingError::Expired));
     }
     let moved = slot.page(&"cell-2", cursor(2, 4), t + SECOND, t);
     assert_eq!(moved, Err(PagingError::ScopeChanged { snapshot: 2 }));
@@ -797,18 +794,15 @@ fn assembler_refuses_a_mixed_snapshot() {
 #[test]
 fn assembler_refuses_a_changed_total() {
     let (_, _, pages) = ten_bytes_in_pages_of_four();
-    for (found, complete) in [(12, false), (8, true)] {
-        let mut changed = pages[1].clone();
-        (changed.total, changed.complete) = (found, complete);
-        let fault = refused_after(&pages[..1], changed);
-        assert_eq!(
-            fault,
-            AssemblyFault::TotalChanged {
-                expected: 10,
-                found
-            }
-        );
-    }
+    let mut longer = pages[1].clone();
+    longer.total = 12;
+    let (expected, found) = (10, 12);
+    let fault = refused_after(&pages[..1], longer);
+    assert_eq!(fault, AssemblyFault::TotalChanged { expected, found });
+    let mut shorter = pages[1].clone();
+    (shorter.total, shorter.complete) = (8, true);
+    let fault = refused_after(&pages[..1], shorter);
+    assert_eq!(fault, AssemblyFault::TotalChanged { expected, found: 8 });
 }
 
 #[test]
