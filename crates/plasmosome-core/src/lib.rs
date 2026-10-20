@@ -20,6 +20,7 @@ pub mod reconciler;
 pub mod registry;
 pub mod session_log;
 pub mod state;
+pub mod supervisor_check;
 pub mod version;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

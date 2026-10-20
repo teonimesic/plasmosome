@@ -258,8 +258,11 @@ mod tests {
     struct SleepForever;
 
     impl Launch for SleepForever {
+        #[allow(unsafe_code)]
         fn launch(self) -> ! {
             loop {
+                // SAFETY: pause takes no arguments and is async-signal-safe, which is all this
+                // forked child may call.
                 unsafe { libc::pause() };
             }
         }
@@ -443,8 +446,11 @@ mod tests {
         |_spec: &BrokerSpec| VmmChild::spawn(SleepForever)
     }
 
+    #[allow(unsafe_code)]
     fn assert_reaped(pid: i32, broker: &str) {
         let mut status: libc::c_int = 0;
+        // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of this
+        // process.
         let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
         let errno = std::io::Error::last_os_error().raw_os_error();
         assert!(
