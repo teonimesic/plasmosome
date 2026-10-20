@@ -1,5 +1,5 @@
 use plasmosome_cli::json::{
-    Json, MAX_REPLY_BYTES, Reason, ScanError, scan, write_compact, write_human,
+    Json, MAX_REPLY_BYTES, Number, Reason, ScanError, scan, write_compact, write_human,
 };
 
 const BACKSLASH: char = '\\';
@@ -27,7 +27,7 @@ fn terminal_controls() -> Vec<char> {
 }
 
 fn number(text: &str) -> Json {
-    Json::Number(text.to_string())
+    Json::Number(Number::new(text.to_string()).expect("the test names valid number text"))
 }
 
 fn string(text: &str) -> Json {
@@ -131,6 +131,46 @@ fn numbers_keep_their_text() {
         ])
     );
     assert_eq!(write_compact(&value), text);
+}
+
+#[test]
+fn a_number_is_built_only_from_number_text() {
+    for text in [
+        "0",
+        "-0",
+        "18446744073709551616",
+        "1.0e+2",
+        "1E400",
+        "-12.5E-3",
+    ] {
+        let built = Number::new(text.to_string()).expect("RFC 8259's number grammar accepts it");
+        assert_eq!(built.as_str(), text);
+    }
+    let with_control = format!("1{}", character(0x1b));
+    for text in [
+        "",
+        "-",
+        "01",
+        "1.",
+        ".5",
+        "+1",
+        "1e",
+        "1e+",
+        "1 ",
+        " 1",
+        "1,2",
+        "NaN",
+        "Infinity",
+        "0x10",
+        "\"1\"",
+        &with_control,
+    ] {
+        assert_eq!(
+            Number::new(text.to_string()),
+            Err(text.to_string()),
+            "{text:?} is not a JSON number and is handed back"
+        );
+    }
 }
 
 #[test]

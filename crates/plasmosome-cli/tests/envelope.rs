@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use plasmosome_cli::json::{Json, scan};
+use plasmosome_cli::json::{Json, Number, scan};
 use plasmosome_cli::{
     ClientCode, ClientError, EmitError, Envelope, ErrorBody, Form, Instance, KernelError, Stream,
     emit,
@@ -198,7 +198,10 @@ fn a_kernel_error_is_an_object_without_domain() {
     assert_eq!(
         error.members(),
         &[
-            ("code".to_string(), Json::Number("101".to_string())),
+            (
+                "code".to_string(),
+                Json::Number(Number::new("101".to_string()).expect("valid number text"))
+            ),
             ("message".to_string(), Json::String("m".to_string())),
         ]
     );
