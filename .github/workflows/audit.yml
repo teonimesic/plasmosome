@@ -36,7 +36,10 @@ env:
   RUSTUP_AUTO_INSTALL: "0"
 
 # The issue belongs to the repository, not to a branch, so every run waits for the one in
-# progress. Two runs at once could both find no issue and both open one.
+# progress. Two runs at once could both find no issue and both open one. GitHub keeps one pending
+# run per group, and a newer run cancels it. So a push or a dispatch that arrives while a scheduled
+# run is still pending cancels that run, and that week's weekly checks do not run. The cancelled
+# run shows grey; a dispatch runs the weekly checks again.
 concurrency:
   group: audit
   cancel-in-progress: false
