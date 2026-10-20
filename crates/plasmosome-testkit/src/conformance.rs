@@ -485,7 +485,13 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
         proxy_map("routes.plasmosome.test", "audit"),
         proxy_map("routes.plasmosome.test", "deploy"),
     ));
-    pairs.push((broker(5150, "egressd"), broker(5150, "auditd")));
+    let mut relaunched = broker("egressd");
+    if let Capability::Broker { launch, .. } = &mut relaunched {
+        launch.command.push("--audit".to_string());
+        launch.control_socket = "/run/plasmosome/audit.control".to_string();
+        launch.data_socket = "/run/plasmosome/audit.data".to_string();
+    }
+    pairs.push((broker("egressd"), relaunched));
 
     for (first_capability, second_capability) in pairs {
         for drain in drains() {
@@ -533,7 +539,7 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
         }
     }
 
-    let capability = broker(31337, "egressd");
+    let capability = broker("egressd");
     for drain in drains() {
         let mut backend = make();
         let residue = OsObject {
@@ -934,7 +940,7 @@ fn sample_capabilities() -> Vec<Capability> {
     vec![
         uds_socket("/run/conformance/egressd.uds"),
         proxy_map("api.plasmosome.test", "splice"),
-        broker(4242, "egressd"),
+        broker("egressd"),
         mount("/src/conformance", "/workspace"),
         session_file("/var/lib/plasmosome/conformance/skills/pr.md"),
     ]
@@ -1006,24 +1012,44 @@ fn residue_objects_with(mut new_id: impl FnMut() -> GrantId) -> Vec<OsObject> {
 
 fn op_for(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
     match capability {
-        Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
-        Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
-        Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
+        Capability::SessionFile { path, recipe } => UniverseOp::WriteSessionFile {
+            id,
+            path,
+            recipe,
+            owner,
+        },
+        Capability::UdsSocket { path, recipe } => UniverseOp::BindUds {
+            id,
+            path,
+            recipe,
+            owner,
+        },
+        Capability::ProxyMap {
+            host,
+            route,
+            recipe,
+        } => UniverseOp::SetProxyMap {
             id,
             host,
             route,
+            recipe,
             owner,
         },
-        Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
+        Capability::Broker { name, launch } => UniverseOp::SpawnBroker {
             id,
-            pid,
             name,
+            launch,
             owner,
         },
-        Capability::Mount { source, target } => UniverseOp::AddMount {
+        Capability::Mount {
+            source,
+            target,
+            recipe,
+        } => UniverseOp::AddMount {
             id,
             source,
             target,
+            recipe,
             owner,
         },
     }
@@ -1062,6 +1088,11 @@ mod clauses_discriminate;
 
 #[cfg(test)]
 mod tests {
+    use plasmosome_backend::{
+        BrokerLaunch, FileAccess, MountRecipe, ProxyRecipe, ProxyTransport, SessionFileRecipe,
+        UdsRecipe,
+    };
+
     use super::*;
 
     fn assert_op_for_builds(
@@ -1086,76 +1117,107 @@ mod tests {
     }
 
     #[test]
-    fn op_for_writes_a_session_file_with_its_id_owner_and_path() {
+    fn op_for_writes_a_session_file_with_its_id_owner_path_and_recipe() {
+        let recipe = SessionFileRecipe {
+            contents: b"review the PR".to_vec(),
+            mode: FileAccess::ReadWrite,
+            guest_path: "/home/agent/skills/pr.md".to_string(),
+        };
         assert_op_for_builds(
             Capability::SessionFile {
                 path: "/skills/pr.md".to_string(),
+                recipe: recipe.clone(),
             },
             |id, owner| UniverseOp::WriteSessionFile {
                 id,
                 path: "/skills/pr.md".to_string(),
+                recipe,
                 owner,
             },
         );
     }
 
     #[test]
-    fn op_for_binds_a_socket_with_its_id_owner_and_path() {
+    fn op_for_binds_a_socket_with_its_id_owner_path_and_recipe() {
+        let recipe = UdsRecipe {
+            upstream: "/run/egressd/upstream.sock".to_string(),
+            guest_path: "/run/agent/egressd.sock".to_string(),
+        };
         assert_op_for_builds(
             Capability::UdsSocket {
                 path: "/run/plasmosome/egressd.uds".to_string(),
+                recipe: recipe.clone(),
             },
             |id, owner| UniverseOp::BindUds {
                 id,
                 path: "/run/plasmosome/egressd.uds".to_string(),
+                recipe,
                 owner,
             },
         );
     }
 
     #[test]
-    fn op_for_sets_a_proxy_map_with_its_id_owner_host_and_route() {
+    fn op_for_sets_a_proxy_map_with_its_id_owner_host_route_and_recipe() {
+        let recipe = ProxyRecipe {
+            transport: ProxyTransport::Udp,
+            destination: "dns.plasmosome.test".to_string(),
+            port: 53,
+            allow_private: true,
+        };
         assert_op_for_builds(
             Capability::ProxyMap {
                 host: "api.github.com".to_string(),
                 route: "splice".to_string(),
+                recipe: recipe.clone(),
             },
             |id, owner| UniverseOp::SetProxyMap {
                 id,
                 host: "api.github.com".to_string(),
                 route: "splice".to_string(),
+                recipe,
                 owner,
             },
         );
     }
 
     #[test]
-    fn op_for_spawns_a_broker_with_its_id_owner_pid_and_name() {
+    fn op_for_spawns_a_broker_with_its_id_owner_name_and_launch() {
+        let launch = BrokerLaunch {
+            command: vec!["/usr/libexec/egressd".to_string(), "--serve".to_string()],
+            control_socket: "/run/plasmosome/egressd.control".to_string(),
+            data_socket: "/run/plasmosome/egressd.data".to_string(),
+        };
         assert_op_for_builds(
             Capability::Broker {
-                pid: 4242,
                 name: "egressd".to_string(),
+                launch: launch.clone(),
             },
             |id, owner| UniverseOp::SpawnBroker {
                 id,
-                pid: 4242,
                 name: "egressd".to_string(),
+                launch,
                 owner,
             },
         );
     }
 
     #[test]
-    fn op_for_adds_a_mount_with_its_id_owner_source_and_target() {
+    fn op_for_adds_a_mount_with_its_id_owner_source_target_and_recipe() {
+        let recipe = MountRecipe {
+            access: FileAccess::ReadWrite,
+        };
         assert_op_for_builds(
             Capability::Mount {
                 source: "/srv/repo".to_string(),
                 target: "/workspace".to_string(),
+                recipe: recipe.clone(),
             },
             |id, owner| UniverseOp::AddMount {
                 id,
                 source: "/srv/repo".to_string(),
                 target: "/workspace".to_string(),
+                recipe,
                 owner,
             },
         );

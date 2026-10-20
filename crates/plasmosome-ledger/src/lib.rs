@@ -63,7 +63,7 @@ pub struct Outbox {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "Outbox")]
+#[serde(remote = "Outbox", deny_unknown_fields)]
 struct OutboxShape {
     channel: String,
     payload: String,
@@ -76,7 +76,7 @@ pub struct Policy {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "Policy")]
+#[serde(remote = "Policy", deny_unknown_fields)]
 struct PolicyShape {
     assertion: String,
 }
@@ -294,7 +294,7 @@ pub struct DetachReport {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "DetachReport")]
+#[serde(remote = "DetachReport", deny_unknown_fields)]
 struct DetachReportShape {
     plugin: PluginId,
     replayed: Vec<String>,
@@ -564,6 +564,10 @@ fn replay(
     Ok(report)
 }
 
+const FORMAT: u8 = 3;
+
+/// One line of a single-plugin ledger log. `format` must be 3: encoding and decoding refuse any
+/// other number, so a record of an older format is never read with a guessed recipe or launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogRecord {
     pub format: u8,
@@ -571,16 +575,17 @@ pub struct LogRecord {
     pub effect: Effect,
 }
 
+fn unsupported(format: u64) -> String {
+    format!("unsupported ledger format {format}; expected {FORMAT}")
+}
+
 impl Serialize for LogRecord {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        if self.format != 2 {
-            return Err(S::Error::custom(format!(
-                "unsupported ledger format {}; expected 2",
-                self.format
-            )));
+        if self.format != FORMAT {
+            return Err(S::Error::custom(unsupported(self.format.into())));
         }
 
         #[derive(Serialize)]
@@ -613,11 +618,8 @@ impl<'de> Deserialize<'de> for LogRecord {
         }
 
         let wire = Wire::deserialize(ObjectOnly::new(deserializer))?;
-        if wire.format != 2 {
-            return Err(D::Error::custom(format!(
-                "unsupported ledger format {}; expected 2",
-                wire.format
-            )));
+        if wire.format != FORMAT {
+            return Err(D::Error::custom(unsupported(wire.format.into())));
         }
         Ok(LogRecord {
             format: wire.format,
@@ -627,27 +629,40 @@ impl<'de> Deserialize<'de> for LogRecord {
     }
 }
 
+fn decode_record(line: &[u8]) -> serde_json::Result<LogRecord> {
+    #[derive(Deserialize)]
+    struct Version {
+        format: u64,
+    }
+
+    if let Ok(Version { format }) = serde_json::from_slice::<Version>(line)
+        && format != u64::from(FORMAT)
+    {
+        return Err(<serde_json::Error as serde::de::Error>::custom(
+            unsupported(format),
+        ));
+    }
+    serde_json::from_slice::<LogRecord>(line)
+}
+
 fn read_plugin_log(bytes: &[u8]) -> std::io::Result<(Option<PluginId>, Vec<Effect>)> {
     let mut plugin: Option<PluginId> = None;
     let mut effects = Vec::new();
     for (index, framed) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
         let newline_ended = framed.ends_with(b"\n");
         let line = framed.strip_suffix(b"\n").unwrap_or(framed);
-        let parsed = match std::str::from_utf8(line) {
-            Ok(text) => serde_json::from_str::<LogRecord>(text),
-            Err(error) if !newline_ended && error.error_len().is_none() => {
-                serde_json::from_slice::<LogRecord>(line)
-            }
-            Err(error) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "invalid UTF-8 in ledger record on line {}: {error}",
-                        index + 1
-                    ),
-                ));
-            }
-        };
+        if let Err(error) = std::str::from_utf8(line)
+            && (newline_ended || error.error_len().is_some())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid UTF-8 in ledger record on line {}: {error}",
+                    index + 1
+                ),
+            ));
+        }
+        let parsed = decode_record(line);
         let record = match parsed {
             Ok(record) => record,
             Err(error) if !newline_ended && error.is_eof() => break,
@@ -748,7 +763,7 @@ impl Ledger {
         let mut records = Vec::new();
         for (index, effect) in self.effects.iter().enumerate() {
             let record = LogRecord {
-                format: 2,
+                format: FORMAT,
                 plugin: self.plugin.clone(),
                 effect: effect.clone(),
             };
@@ -785,7 +800,8 @@ pub mod artifact;
 mod tests {
     use super::*;
     use plasmosome_backend::{
-        Capability, CellId, CellOwner, Diff, FakeBackend, Grant, GrantId, GrantKind, UniverseOp,
+        Capability, CellId, CellOwner, Diff, FakeBackend, FileAccess, Grant, GrantId, GrantKind,
+        ProxyRecipe, ProxyTransport, SessionFileRecipe, UdsRecipe, UniverseOp,
     };
     use std::time::Duration;
 
@@ -803,12 +819,21 @@ mod tests {
     fn session_file(path: &str) -> Capability {
         Capability::SessionFile {
             path: path.to_string(),
+            recipe: SessionFileRecipe {
+                contents: Vec::new(),
+                mode: FileAccess::ReadOnly,
+                guest_path: "/run/plasmosome/session".to_string(),
+            },
         }
     }
 
     fn uds_socket(path: &str) -> Capability {
         Capability::UdsSocket {
             path: path.to_string(),
+            recipe: UdsRecipe {
+                upstream: "/run/plasmosome/upstream.sock".to_string(),
+                guest_path: "/run/plasmosome/guest.sock".to_string(),
+            },
         }
     }
 
@@ -816,29 +841,55 @@ mod tests {
         Capability::ProxyMap {
             host: host.to_string(),
             route: route.to_string(),
+            recipe: ProxyRecipe {
+                transport: ProxyTransport::Tcp,
+                destination: "upstream.plasmosome.test".to_string(),
+                port: 443,
+                allow_private: false,
+            },
         }
     }
 
     fn op(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
         match capability {
-            Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
-            Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
-            Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
+            Capability::SessionFile { path, recipe } => UniverseOp::WriteSessionFile {
+                id,
+                path,
+                recipe,
+                owner,
+            },
+            Capability::UdsSocket { path, recipe } => UniverseOp::BindUds {
+                id,
+                path,
+                recipe,
+                owner,
+            },
+            Capability::ProxyMap {
+                host,
+                route,
+                recipe,
+            } => UniverseOp::SetProxyMap {
                 id,
                 host,
                 route,
+                recipe,
                 owner,
             },
-            Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
+            Capability::Broker { name, launch } => UniverseOp::SpawnBroker {
                 id,
-                pid,
                 name,
+                launch,
                 owner,
             },
-            Capability::Mount { source, target } => UniverseOp::AddMount {
+            Capability::Mount {
+                source,
+                target,
+                recipe,
+            } => UniverseOp::AddMount {
                 id,
                 source,
                 target,
+                recipe,
                 owner,
             },
         }
@@ -1691,7 +1742,7 @@ mod tests {
         accepted.extend(sequence_accepted(
             "LogRecord",
             &LogRecord {
-                format: 2,
+                format: 3,
                 plugin: PluginId::from("github-pr"),
                 effect: exact,
             },
@@ -1700,12 +1751,8 @@ mod tests {
         ));
         assert_eq!(
             accepted,
-            [
-                "Outbox accepts an unknown field",
-                "Policy accepts an unknown field",
-                "DetachReport accepts an unknown field"
-            ],
-            "only the three records whose unknown fields plasmosome-8pr4 decides may accept one"
+            Vec::<String>::new(),
+            "every record refuses a positional array and an unknown field"
         );
     }
 }

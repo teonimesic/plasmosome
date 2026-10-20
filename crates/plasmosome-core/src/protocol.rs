@@ -406,13 +406,14 @@ impl WireError {
     /// when the refusal names a field, in one of three forms: the TOML to
     /// write in place of that field, a bare entry for the list the field names
     /// (written in place of the entry when the field ends in an index), or
-    /// exactly `remove this entry`. A file that could not be read or is not
-    /// TOML, a syntax error included, carries none.
+    /// exactly `remove this entry`. A file that could not be read, is not
+    /// TOML (a syntax error included) or is over `MAX_MANIFEST_BYTES` carries
+    /// none.
     pub fn manifest_refusal(path: String, error: &ManifestError) -> WireError {
         let mut wire = WireError::manifest_invalid(error.to_string(), path);
         wire.fix = match error {
             ManifestError::Field { fix, .. } => Some(fix.clone()),
-            ManifestError::Io(_) | ManifestError::Parse(_) => None,
+            ManifestError::Io(_) | ManifestError::Parse(_) | ManifestError::TooLarge { .. } => None,
         };
         wire
     }
@@ -556,7 +557,7 @@ pub struct StatusParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{ManifestError, PlasmidManifest};
+    use crate::manifest::{MAX_MANIFEST_BYTES, ManifestError, PlasmidManifest};
     use crate::state::PlasmidRecord;
 
     fn raw_id(token: &str) -> Box<RawValue> {
@@ -602,11 +603,16 @@ mod tests {
         .expect_err("a network section with no hosts is refused")
     }
 
-    fn declaration_refusals() -> [(ManifestError, Option<&'static str>); 3] {
+    fn declaration_refusals() -> [(ManifestError, Option<&'static str>); 4] {
         [
             (author_refusal(), Some("hosts = [\"api.example.com\"]")),
             (
                 PlasmidManifest::parse("id = ").expect_err("a value is missing"),
+                None,
+            ),
+            (
+                PlasmidManifest::parse(&"#".repeat(MAX_MANIFEST_BYTES + 1))
+                    .expect_err("a declaration over 1 MiB is refused"),
                 None,
             ),
             (
