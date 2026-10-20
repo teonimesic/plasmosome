@@ -9,7 +9,7 @@ use serde::de::value::MapAccessDeserializer;
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
-use crate::control::{Controller, serve_connection};
+use crate::control::{Controller, Handler, serve_connection};
 use crate::private_socket::{
     Accepted, PrivateDir, PrivateListener, PrivateSocketError, effective_uid,
 };
@@ -289,17 +289,17 @@ pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonErro
         PrivateListener::bind(directory, name, effective_uid()).map_err(DaemonError::Boundary)?;
 
     let mut controller = Controller::new(config.name, ControllerState::default(), NO_LEDGER_YET);
-    serve(&listener, shutdown, &mut controller)
+    serve(listener, shutdown, &mut controller)
 }
 
 fn serve(
-    listener: &PrivateListener,
+    listener: PrivateListener,
     shutdown: &AtomicBool,
-    controller: &mut Controller,
+    handler: &mut impl Handler,
 ) -> Result<(), DaemonError> {
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept() {
-            Ok(Some(Accepted::Trusted(stream))) => converse(stream, shutdown, controller),
+            Ok(Some(Accepted::Trusted(stream))) => converse(stream, shutdown, handler),
             Ok(Some(Accepted::Refused(_))) => {}
             Ok(None) => std::thread::sleep(ACCEPT_POLL),
             Err(error) => match accept_outcome(&error) {
@@ -312,7 +312,7 @@ fn serve(
     Ok(())
 }
 
-fn converse(stream: UnixStream, shutdown: &AtomicBool, controller: &mut Controller) {
+fn converse(stream: UnixStream, shutdown: &AtomicBool, handler: &mut impl Handler) {
     if stream.set_nonblocking(false).is_err()
         || stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err()
@@ -323,7 +323,7 @@ fn converse(stream: UnixStream, shutdown: &AtomicBool, controller: &mut Controll
         return;
     };
     let reader = BufReader::new(FlaggedReads { stream, shutdown });
-    let _ = serve_connection(reader, writer, controller);
+    let _ = serve_connection(reader, writer, handler);
 }
 
 struct FlaggedReads<'a> {
