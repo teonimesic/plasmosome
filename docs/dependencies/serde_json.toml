@@ -1,0 +1,32 @@
+name = "serde_json"
+range = "1"
+reason = """\
+  Reads and writes the JSON on the control sockets, and in recipes, ledgers, session logs and \
+  paged accounts.\
+  """
+write_it_instead.lines = 3500
+write_it_instead.how = """\
+  git grep finds serde_json in 33 files: from_str 72 times, from_value 35, to_string 31, \
+  to_value 30, from_slice 5, to_vec 4 and to_writer once, the json! macro 323 times, and \
+  Deserializer, Value, Map, Number and value::RawValue. Writing that much here takes a reader \
+  into serde's Deserializer with line and column errors (about 1200 lines), a writer (500), \
+  Value, Map and Number with the Serializer and Deserializer that to_value and from_value need \
+  (1300), RawValue (200), json! (150) and errors (150).\
+  """
+exception = ""
+brings = [
+  "itoa@1",
+  "memchr@2",
+  "proc-macro2@1",
+  "quote@1",
+  "serde@1",
+  "serde_core@1",
+  "serde_derive@1",
+  "syn@3",
+  "unicode-ident@1",
+  "zmij@1",
+]
+build_time_code = ["serde_core@1 build script", "serde_json@1 build script", "zmij@1 build script"]
+expands_unsafe = "none"
+native_code = "none"
+verdict = "kept-pending-owner"

@@ -1,0 +1,31 @@
+name = "libc"
+range = "0.2"
+reason = """\
+  Declares the C library's calls, types and constants that plasmosome-core and \
+  plasmosome-membrane use directly: spawning and reaping processes, signals, Unix sockets, \
+  descriptors and file metadata, on macOS and Linux.\
+  """
+write_it_instead.lines = 600
+write_it_instead.how = """\
+  git grep -o 'libc::<name>' finds 169 distinct names in 20 files under crates/plasmosome-core \
+  and crates/plasmosome-membrane: 60 functions, 10 structs, 15 type aliases and C scalar types, \
+  and 87 constants, where stat, statfs and sigaction each name a struct and a function. \
+  Declaring them for aarch64-apple-darwin and x86_64-unknown-linux-gnu takes about 110 lines of \
+  extern declarations, 240 of struct layouts (stat, statfs, sigaction, siginfo_t, sigset_t and \
+  sockaddr_un differ between the two), 30 of types and 175 of constants, many of whose values \
+  differ by platform. Nothing here would check those layouts against the C headers, as libc's \
+  own test suite does. sha2 reaches libc through cpufeatures on aarch64-apple-darwin, so \
+  dropping the direct use would leave libc locked and linked.\
+  """
+exception = ""
+brings = []
+build_time_code = ["libc@0.2 build script"]
+expands_unsafe = "none"
+native_code = [
+  """\
+  libc@0.2 links the system libiconv on macOS, through #[link(name = "iconv")] in \
+  src/unix/bsd/apple/mod.rs. With its std feature on, as the workspace builds it, it adds no \
+  other library, and it compiles no C.\
+  """,
+]
+verdict = "kept-pending-owner"

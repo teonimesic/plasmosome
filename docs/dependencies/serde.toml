@@ -1,0 +1,29 @@
+name = "serde"
+range = "1"
+reason = """\
+  Derives Serialize and Deserialize for the types that cross the control sockets and live in \
+  recipes, manifests, ledgers and session logs, so that serde_json and toml can read and write \
+  them.\
+  """
+write_it_instead.lines = 5000
+write_it_instead.how = """\
+  git grep over derive attributes finds 65 Deserialize and 59 Serialize derives in 13 files. \
+  They use deny_unknown_fields 29 times, remote 24, default 22, skip_serializing_if 16, \
+  deserialize_with 9, rename_all 7, expecting 5, and rename and untagged once each. About 40 \
+  more impls and visitors are written by hand against these traits. Writing the derived \
+  impls by hand costs about 15 lines for each Serialize, and 60 for each Deserialize with its \
+  unknown-field refusal and missing-field errors: about 4800 lines. The traits cannot be \
+  replaced on their own, because serde_json and toml reach our types only through them.\
+  """
+exception = ""
+brings = ["proc-macro2@1", "quote@1", "serde_core@1", "serde_derive@1", "syn@3", "unicode-ident@1"]
+build_time_code = [
+  "proc-macro2@1 build script",
+  "quote@1 build script",
+  "serde@1 build script",
+  "serde_core@1 build script",
+  "serde_derive@1 proc macro",
+]
+expands_unsafe = "none"
+native_code = "none"
+verdict = "kept-pending-owner"
