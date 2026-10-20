@@ -503,7 +503,7 @@ impl std::error::Error for ArtifactRefError {}
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
 
     use proptest::prelude::*;
     use serde_json::{Value, json};
@@ -562,6 +562,10 @@ mod tests {
             String::new(),
             UUID[1..].to_string(),
             format!("{UUID}0"),
+            format!(" {UUID}"),
+            format!("{UUID} "),
+            format!("\t{UUID}"),
+            format!("{UUID}\n"),
         ];
         for text in refused {
             assert_eq!(
@@ -1003,22 +1007,110 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_ascii_byte_is_accepted_only_where_its_grammar_allows() {
+        let lower = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let alphanumeric = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let mut wrong = Vec::new();
+        for byte in 0u8..=0x7f {
+            let c = char::from(byte);
+            let inner_identifier = lower.contains(c) || c == '-';
+            let inner_version = alphanumeric.contains(c) || "._-".contains(c);
+            for (place, identifier, version, identifier_ok, version_ok) in [
+                (
+                    "first",
+                    format!("{c}a"),
+                    format!("{c}1"),
+                    lower.contains(c),
+                    alphanumeric.contains(c),
+                ),
+                (
+                    "inner",
+                    format!("a{c}a"),
+                    format!("1{c}1"),
+                    inner_identifier,
+                    inner_version,
+                ),
+                (
+                    "last",
+                    format!("a{c}"),
+                    format!("1{c}"),
+                    lower.contains(c),
+                    inner_version,
+                ),
+            ] {
+                if check_identifier("name", &identifier).is_ok() != identifier_ok {
+                    wrong.push(format!("identifier {byte:#04x} {place}: {identifier:?}"));
+                }
+                if check_version(&version).is_ok() != version_ok {
+                    wrong.push(format!("version {byte:#04x} {place}: {version:?}"));
+                }
+            }
+        }
+        for text in ["\u{e9}a", "a\u{e9}a", "a\u{e9}"] {
+            if check_identifier("name", text).is_ok() {
+                wrong.push(format!("identifier {text:?}"));
+            }
+        }
+        for text in ["\u{e9}1", "1\u{e9}1", "1\u{e9}"] {
+            if check_version(text).is_ok() {
+                wrong.push(format!("version {text:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn changing_any_one_field_makes_a_different_value() {
+        let key = |kind, population, publisher, name, version| {
+            ReleaseKey::new(kind, population, publisher, name, version).unwrap()
+        };
+        let base = key(Plasmid, Curated, "acme", "lab", "1");
+        let low = Digest::from_sha256([1; 32]);
+        let pinned = ReleaseRef::new(base.clone(), low);
+        let keys = [
+            key(Genome, Curated, "acme", "lab", "1"),
+            key(Plasmid, User, "acme", "lab", "1"),
+            key(Plasmid, Curated, "acmf", "lab", "1"),
+            key(Plasmid, Curated, "acme", "lac", "1"),
+            key(Plasmid, Curated, "lab", "acme", "1"),
+            key(Plasmid, Curated, "acme", "lab", "2"),
+        ];
+        let mut references: Vec<ReleaseRef> = keys
+            .iter()
+            .map(|other| ReleaseRef::new(other.clone(), low))
+            .collect();
+        references.push(ReleaseRef::new(base.clone(), Digest::from_sha256([2; 32])));
+        for other in &keys {
+            assert_ne!(&base, other);
+            assert_eq!(HashSet::from([&base, other]).len(), 2, "{other:?}");
+        }
+        for other in &references {
+            assert_ne!(&pinned, other);
+            assert_eq!(HashSet::from([&pinned, other]).len(), 2, "{other:?}");
+        }
+        let same = key(Plasmid, Curated, "acme", "lab", "1");
+        assert_eq!(HashSet::from([&base, &same]).len(), 1);
+        let same = ReleaseRef::new(same, low);
+        assert_eq!(HashSet::from([&pinned, &same]).len(), 1);
+    }
+
     proptest! {
         #[test]
         fn generated_identifiers_round_trip(
-            identifier in "[a-z0-9]{1,8}(-[a-z0-9]{1,8}){0,3}",
+            publisher in "[a-z0-9]{1,8}(-[a-z0-9]{1,8}){0,3}",
+            name in "[a-z0-9]{1,8}(-[a-z0-9]{1,8}){0,3}",
         ) {
-            prop_assert_eq!(check_identifier("name", &identifier), Ok(()));
-            let key = ReleaseKey::new(
-                Plasmid,
-                User,
-                &identifier,
-                &identifier,
-                "1.0.0",
-            )
-            .unwrap();
+            prop_assert_eq!(check_identifier("publisher", &publisher), Ok(()));
+            prop_assert_eq!(check_identifier("name", &name), Ok(()));
+            let key = ReleaseKey::new(Plasmid, User, &publisher, &name, "1.0.0").unwrap();
             let text = serde_json::to_string(&key).unwrap();
-            prop_assert_eq!(serde_json::from_str::<ReleaseKey>(&text).unwrap(), key);
+            let decoded = serde_json::from_str::<ReleaseKey>(&text).unwrap();
+            prop_assert_eq!(
+                (decoded.publisher(), decoded.name()),
+                (publisher.as_str(), name.as_str())
+            );
+            prop_assert_eq!(decoded, key);
         }
 
         #[test]
