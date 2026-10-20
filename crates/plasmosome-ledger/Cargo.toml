@@ -23,3 +23,4 @@ bench = false
 [[bench]]
 name = "ledger_replay"
 harness = false
+# Throwaway B1: a comment-only manifest change.
