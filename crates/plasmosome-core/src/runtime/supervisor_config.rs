@@ -42,10 +42,15 @@ pub enum ConfigRecordRefusal {
     /// The record does not end in one newline, holds another newline, or holds
     /// a carriage return.
     NotOneLine,
-    /// The record holds `bytes` bytes, not counting a final newline; at most
-    /// [`MAX_RECORD_BYTES`] are allowed. Checked before anything else, so a
-    /// buffer cut off past the bound refuses this way whether or not it holds
-    /// a newline.
+    /// The record is `bytes` bytes, not counting a final newline, and at most
+    /// [`MAX_RECORD_BYTES`] are allowed. [`SupervisorConfig::decode`] checks
+    /// this first: it refuses a buffer of more than `MAX_RECORD_BYTES + 1`
+    /// bytes this way, with or without a newline. A buffer of
+    /// `MAX_RECORD_BYTES + 1` bytes or fewer goes on to the one-line check, so
+    /// one that does not end in a newline is `NotOneLine`. From `decode`,
+    /// `bytes` counts the buffer it was given: after a capped read, it is the
+    /// number of bytes read, not the record's real size. From
+    /// [`SupervisorConfig::encode`], it is the length of the line it built.
     TooLarge { bytes: usize },
     /// The record is not UTF-8.
     NotUtf8,
@@ -113,14 +118,18 @@ impl SupervisorConfig {
     }
 
     /// Reads a record, refusing it whole at the first rule it breaks, so no
-    /// caller acts on part of one. The rules, in order: at most 1,048,576
-    /// bytes, not counting a final newline, whether or not the record holds
-    /// one; exactly one newline, at the end, and no carriage return; UTF-8;
-    /// one strict JSON value, with no key repeated at any
-    /// depth; an object with exactly the four keys, refusing an unknown key
-    /// before a missing one; then `cell`, `instance_root`, `runtime_recipe`
-    /// (read by [`RuntimeRecipe::from_value`] under `limits`) and
-    /// `boot_deadline_ms`, each on its own, in that order.
+    /// caller acts on part of one. The rules, in order: at most
+    /// `MAX_RECORD_BYTES + 1` bytes in all, which refuses a longer buffer as
+    /// `TooLarge` whether or not it holds a newline; exactly one newline, at
+    /// the end, and no carriage return, so a record that passes both holds at
+    /// most 1,048,576 bytes before its newline; UTF-8; one strict JSON value,
+    /// with no key repeated at any depth; an object with exactly the four
+    /// keys, refusing an unknown key before a missing one; then `cell`,
+    /// `instance_root`, `runtime_recipe` (read under `limits` by every rule
+    /// [`RuntimeRecipe::parse`] applies after its framing and JSON checks) and
+    /// `boot_deadline_ms`, each on its own, in that order. After a capped
+    /// read, a `TooLarge` refusal counts the bytes read, not the record's real
+    /// size.
     pub fn decode(
         record: &[u8],
         limits: &PlatformLimits,

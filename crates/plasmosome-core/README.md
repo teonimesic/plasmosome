@@ -133,10 +133,14 @@ crate and re-exports `runtime::path` and `runtime::recipe`. It is not in `plasmo
 because `PlatformLimits::host` reads the machine's memory through `sysconf`, which is `unsafe`,
 and spec 026 §2 allows `unsafe` only in register packages.
 
-- `RuntimeRecipe::parse` reads a whole recipe line. `RuntimeRecipe::from_value` applies the same
-  rules, after framing and JSON, to a recipe nested in a larger record. Its value must come from
-  `strict_json::parse_value`, which refuses a repeated key at any depth; `serde_json` would keep
-  the last one.
+- `RuntimeRecipe::parse` reads a whole recipe line. It checks the line before the size, so a
+  buffer that does not end in a newline is `NotOneLine` whatever its length, and a reader that
+  stops at a cap must report an oversized recipe itself.
+- `RuntimeRecipe::from_value` applies the same rules, after framing and JSON, to a recipe nested in
+  a larger record. It is crate-private until a caller outside this crate needs it: `decode` and
+  `RuntimeTemplate::complete` read through it. Its value must come from `strict_json::parse_value`,
+  which refuses a repeated key at any depth; `serde_json` would keep the last one. So must the
+  value given to `Artifact::from_value` and `RuntimeTemplate::from_value`.
 - `RuntimeTemplate` is spec 023 §1's template: a recipe without `writable_root`, `control_path`
   and `data_path`. Reading one refuses any of those three by name, then an unknown or missing key.
   Its values are checked only when `complete` adds one cell's three paths and reads the result as
@@ -147,9 +151,11 @@ and spec 026 §2 allows `unsafe` only in register packages.
   recipe is a nested object, not a string holding JSON, so its escapes are not doubled. `decode`
   refuses the whole record at the first broken rule. It checks the size first: a buffer longer
   than `supervisor_config::MAX_RECORD_BYTES` (1,048,576) and one newline is `TooLarge`, whether or
-  not it holds a newline. So a reader that stops after `MAX_RECORD_BYTES + 2` bytes gets
-  `TooLarge` for anything longer than a record can be. `encode` refuses a larger line, and a cell
-  or a zero deadline that `decode` would refuse.
+  not it holds a newline. A buffer of `MAX_RECORD_BYTES + 1` bytes or fewer goes on to the
+  one-line check, so one that does not end in a newline is `NotOneLine`. So a reader that stops
+  after `MAX_RECORD_BYTES + 2` bytes gets `TooLarge` for anything longer than a record can be, and
+  the refusal's `bytes` is then the number of bytes read, not the record's real size. `encode`
+  refuses a larger line, and a cell or a zero deadline that `decode` would refuse.
 - A refusal inside `runtime_recipe` names its field relative to the recipe, such as `vcpus`, and a
   template refusal names it relative to the template. `DuplicateKey` names a repeated key from the
   record's root, such as `runtime_recipe.vcpus`.

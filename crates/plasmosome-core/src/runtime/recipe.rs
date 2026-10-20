@@ -289,8 +289,10 @@ pub enum PathRole {
 /// defines it.
 ///
 /// A value exists only after [`RuntimeRecipe::parse`],
-/// [`RuntimeRecipe::from_value`] or [`RuntimeTemplate::complete`] accepted
-/// every structural rule; there is no other constructor and no setter.
+/// [`RuntimeTemplate::complete`] or
+/// [`SupervisorConfig::decode`](super::supervisor_config::SupervisorConfig::decode)
+/// accepted every structural rule; there is no other constructor and no
+/// setter.
 /// Reading touches no file: whether the artifacts exist and hash to their
 /// digests is for the caller to check before launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,7 +389,10 @@ impl RuntimeRecipe {
     /// Reads one ndjson record: one line of strict JSON ending in a single
     /// newline, at most 1,048,576 bytes before that newline, with no carriage
     /// return. Every field is required, unknown and repeated keys refuse, and
-    /// the recipe must fit `limits`.
+    /// the recipe must fit `limits`. The line is checked before the size, so a
+    /// buffer that does not end in a newline refuses as `NotOneLine` whatever
+    /// its length: a reader that stops at a cap must report an oversized
+    /// recipe itself.
     ///
     /// Rules are checked in a fixed order and the first broken one is
     /// returned: framing, JSON, the recipe's unknown then missing keys, each
@@ -714,7 +719,8 @@ impl RuntimeTemplate {
     }
 
     /// Makes one cell's recipe: the template with the three per-cell paths
-    /// added, read by [`RuntimeRecipe::from_value`] under `limits`. Every
+    /// added, read under `limits` by every rule [`RuntimeRecipe::parse`]
+    /// applies after its framing and JSON checks. Every
     /// value rule and every cross-field rule applies to the result, so a
     /// refusal here may come from the template's own values.
     pub fn complete(
