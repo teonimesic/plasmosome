@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -8,21 +9,29 @@ fn guard(root: &Path) -> PathBuf {
     root.join(".githooks").join("attribution-guard")
 }
 
-fn git(repository: &Path, arguments: &[&str], stdin: Option<&str>) -> Output {
-    let mut command = Command::new("git");
+fn isolated_from_the_callers_git(command: &mut Command, repository: &Path) {
     command
         .current_dir(repository)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_AUTHOR_NAME", "A Person")
-        .env("GIT_AUTHOR_EMAIL", "person@example.com")
-        .env("GIT_COMMITTER_NAME", "A Person")
-        .env("GIT_COMMITTER_EMAIL", "person@example.com")
+        .env_remove("GIT_CONFIG")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_COMMON_DIR");
+}
+
+fn git(repository: &Path, arguments: &[&str], stdin: Option<&str>) -> Output {
+    let mut command = Command::new("git");
+    isolated_from_the_callers_git(&mut command, repository);
+    command
+        .env("GIT_AUTHOR_NAME", "A Person")
+        .env("GIT_AUTHOR_EMAIL", "person@corp.locale.io")
+        .env("GIT_COMMITTER_NAME", "A Person")
+        .env("GIT_COMMITTER_EMAIL", "person@corp.locale.io")
         .args(arguments);
     if let Some(text) = stdin {
         command.stdin(std::process::Stdio::piped());
@@ -43,23 +52,30 @@ fn git(repository: &Path, arguments: &[&str], stdin: Option<&str>) -> Output {
     command.output().expect("git runs")
 }
 
-fn repository_with_commit(message: &str) -> TempDir {
+fn git_succeeds(repository: &Path, arguments: &[&str], stdin: Option<&str>) {
+    let output = git(repository, arguments, stdin);
+    assert!(
+        output.status.success(),
+        "`git {}` failed in the scratch repository: {}",
+        arguments.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn repository_with_commits(messages: &[&str]) -> TempDir {
     let directory = tempfile::tempdir().expect("a scratch directory is created");
     let path = directory.path();
-    for arguments in [
-        vec!["init", "--quiet"],
-        vec!["config", "commit.gpgsign", "false"],
-    ] {
-        let output = git(path, &arguments, None);
-        assert!(
-            output.status.success(),
-            "`git {}` failed in the scratch repository: {}",
-            arguments.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    git_succeeds(path, &["init", "--quiet"], None);
+    git_succeeds(path, &["config", "commit.gpgsign", "false"], None);
+    for message in messages {
+        commit(path, message);
     }
-    let output = git(
-        path,
+    directory
+}
+
+fn commit(repository: &Path, message: &str) {
+    git_succeeds(
+        repository,
         &[
             "commit",
             "--allow-empty",
@@ -69,12 +85,24 @@ fn repository_with_commit(message: &str) -> TempDir {
         ],
         Some(message),
     );
-    assert!(
-        output.status.success(),
-        "the fixture commit was not created: {}",
-        String::from_utf8_lossy(&output.stderr)
+}
+
+fn repository_with_commit(message: &str) -> TempDir {
+    repository_with_commits(&[message])
+}
+
+fn repository_with_a_merge(side: &str, merge: &str) -> TempDir {
+    let repository = repository_with_commit("docs: a change both branches start from\n");
+    let path = repository.path();
+    git_succeeds(path, &["checkout", "--quiet", "-b", "side"], None);
+    commit(path, side);
+    git_succeeds(path, &["checkout", "--quiet", "-"], None);
+    git_succeeds(
+        path,
+        &["merge", "--no-ff", "--quiet", "-m", merge, "side"],
+        None,
     );
-    directory
+    repository
 }
 
 fn run_guard_in(root: &Path, repository: &Path, range: &str) -> Output {
@@ -86,15 +114,7 @@ fn run_guard_in(root: &Path, repository: &Path, range: &str) -> Output {
 
 fn guard_command(root: &Path, repository: &Path) -> Command {
     let mut command = Command::new(guard(root));
-    command
-        .current_dir(repository)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_COMMON_DIR");
+    isolated_from_the_callers_git(&mut command, repository);
     command
 }
 
@@ -103,32 +123,131 @@ fn run_guard_over(root: &Path, message: &str) -> Output {
     run_guard_in(root, repository.path(), "HEAD")
 }
 
-const OFFENCE: &str = "credits a model as an author";
+fn directory_shadowing(tool: &str, script: &str) -> TempDir {
+    directory_shadowing_in(
+        tempfile::tempdir().expect("a scratch directory is created"),
+        tool,
+        script,
+    )
+}
 
-fn assert_refused(root: &Path, message: &str, why: &str) {
-    let output = run_guard_over(root, message);
-    let said = format!(
+fn directory_shadowing_in(shadow: TempDir, tool: &str, script: &str) -> TempDir {
+    let stub = shadow.path().join(tool);
+    std::fs::write(&stub, script).expect("the stub is written");
+    let mut permissions = std::fs::metadata(&stub)
+        .expect("the stub is readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&stub, permissions).expect("the stub is made executable");
+    shadow
+}
+
+fn run_guard_shadowed(root: &Path, repository: &Path, shadow: &Path) -> Output {
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    guard_command(root, repository)
+        .env("PATH", format!("{}:{inherited}", shadow.to_string_lossy()))
+        .arg("HEAD")
+        .output()
+        .expect("the guard runs")
+}
+
+fn real_git() -> PathBuf {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .map(|directory| directory.join("git"))
+        .find(|candidate| {
+            std::fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+        .expect("git is on PATH")
+}
+
+fn shell_quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+fn run_guard_with_git_refusing(root: &Path, repository: &Path, fragment: &str) -> Output {
+    let shadow = tempfile::tempdir().expect("a scratch directory is created");
+    let marker = shadow.path().join("the-stub-refused");
+    let git = real_git();
+    let stub = format!(
+        "#!/bin/sh\ncase \" $* \" in\n  *{}*)\n    : > {}\n    echo \"stub: refusing $*\" >&2\n    exit 128\n    ;;\nesac\nexec {} \"$@\"\n",
+        shell_quoted(fragment),
+        shell_quoted(marker.to_str().expect("the scratch path is UTF-8")),
+        shell_quoted(git.to_str().expect("the path to git is UTF-8"))
+    );
+    let shadow = directory_shadowing_in(shadow, "git", &stub);
+    let output = run_guard_shadowed(root, repository, shadow.path());
+    assert!(
+        marker.exists(),
+        "setup: the git stub never saw a call holding `{fragment}`, so the guard no longer calls git that way and this test no longer reaches the branch it is for. Point the stub at the guard's new call; this alone is not a guard bug.\nguard said:\n{}",
+        said(&output)
+    );
+    output
+}
+
+fn said(output: &Output) -> String {
+    format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    );
+    )
+}
+
+const OFFENCE: &str = "credits a model as an author";
+
+const MODEL_CO_AUTHOR: &str =
+    "docs: a change\n\nSome body prose.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n";
+
+fn assert_refused_saying(output: &Output, reason: &str, what: &str) {
+    let said = said(output);
+    let refused = !output.status.success();
+    let named = said.contains(reason);
     assert!(
-        !output.status.success(),
-        "the guard passed a commit that {why}; its purpose is to stop exactly this from reaching main.\nmessage:\n{message}\nguard said:\n{said}"
+        refused && named,
+        "{}\nAn exit status alone proves nothing: a refusal for another reason satisfies it, and a reason printed over a successful exit still lets the commit through.\nguard said:\n{said}",
+        match (refused, named) {
+            (false, false) =>
+                format!("the guard passed {what}; it must refuse it and say `{reason}`."),
+            (false, true) => format!(
+                "the guard said `{reason}` about {what}, but exited successfully, which lets it through."
+            ),
+            _ => format!(
+                "the guard refused {what} without saying `{reason}`, so nothing shows it refused for that reason."
+            ),
+        }
     );
-    assert!(
-        said.contains(OFFENCE),
-        "the guard refused a commit that {why}, but not by naming the trailer it found; a guard that refuses for some other reason would satisfy an assertion on the exit status alone, so the exit status is not enough to prove it saw anything.\nmessage:\n{message}\nguard said:\n{said}"
+}
+
+fn assert_refused(root: &Path, message: &str, why: &str) {
+    assert_refused_saying(
+        &run_guard_over(root, message),
+        OFFENCE,
+        &format!("a commit that {why} (message {message:?})"),
     );
+}
+
+fn assert_refused_crediting_each(root: &Path, key: &str, values: &[&str], why: &str) {
+    std::thread::scope(|scope| {
+        for value in values {
+            scope.spawn(move || {
+                assert_refused(
+                    root,
+                    &format!("docs: a change\n\nSome body prose.\n\n{key}: {value}\n"),
+                    why,
+                )
+            });
+        }
+    });
 }
 
 fn assert_cleared(root: &Path, message: &str, why: &str) {
     let output = run_guard_over(root, message);
     assert!(
         output.status.success(),
-        "the guard refused a commit that {why}; a guard that flags prose about attribution makes writing about the rule impossible.\nmessage:\n{message}\nguard said:\n{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        "the guard refused a commit that {why}. A guard that refuses what the rule permits, such as prose about attribution or a person's credit, blocks work it has no reason to block.\nmessage:\n{message}\nguard said:\n{}",
+        said(&output)
     );
 }
 
@@ -137,7 +256,7 @@ fn refuses_a_model_trailer_in_the_closing_trailer_block() {
     check_workspace(|root| {
         assert_refused(
             root,
-            "docs: a change\n\nSome body prose.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
+            MODEL_CO_AUTHOR,
             "closes with a trailer block naming a model",
         );
     });
@@ -159,8 +278,52 @@ fn refuses_a_model_trailer_a_squash_merge_left_before_a_human_trailer_block() {
     check_workspace(|root| {
         assert_refused(
             root,
-            "docs: a squashed change (#2)\n\n* docs: the first commit\n\nCo-Authored-By: Claude (Fable 5)\n\n* docs: the second commit\n\nCo-Authored-By: A Colleague <colleague@example.com>\n",
+            "docs: a squashed change (#2)\n\n* docs: the first commit\n\nCo-Authored-By: Claude (Fable 5)\n\n* docs: the second commit\n\nCo-Authored-By: A Colleague <colleague@corp.locale.io>\n",
             "credits a model mid-body and a person at the end, so only the person is visible to a parser that reads the last paragraph",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_between_two_peoples_trailers_in_one_block() {
+    check_workspace(|root| {
+        assert_refused(
+            root,
+            "docs: a change\n\nSome body prose.\n\nReviewed-by: A Colleague <colleague@corp.locale.io>\nCo-Authored-By: Claude <noreply@anthropic.com>\nSigned-off-by: A Colleague <colleague@corp.locale.io>\n",
+            "credits a model in the middle of a trailer block whose first and last lines are people",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_sign_off_in_the_closing_trailer_block() {
+    check_workspace(|root| {
+        assert_refused(
+            root,
+            "docs: a change\n\nSome body prose.\n\nSigned-off-by: Claude <noreply@anthropic.com>\n",
+            "closes with a sign-off naming a model",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_sign_off_a_squash_merge_left_mid_body() {
+    check_workspace(|root| {
+        assert_refused(
+            root,
+            "docs: a squashed change (#2)\n\n* docs: the first commit\n\nSome body prose.\n\nSigned-off-by: Claude <noreply@anthropic.com>\n\n* docs: the second commit\n\nMore body prose.\n",
+            "carries a model's sign-off in a paragraph the body continues past",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_with_whitespace_before_its_colon() {
+    check_workspace(|root| {
+        assert_refused(
+            root,
+            "docs: a change\n\nSome body prose.\n\nCo-Authored-By : Claude <noreply@anthropic.com>\n",
+            "puts a space before a model trailer's colon, which git still reads as a trailer",
         );
     });
 }
@@ -223,17 +386,59 @@ fn clears_a_paragraph_that_mixes_prose_with_a_quoted_trailer() {
 #[test]
 fn refuses_a_trailer_naming_a_vendor_whose_name_no_person_carries() {
     check_workspace(|root| {
-        for value in [
-            "Cursor Agent <cursoragent@cursor.com>",
-            "Devin <devin@cognition.ai>",
-            "Grok <noreply@x.ai>",
-        ] {
-            assert_refused(
-                root,
-                &format!("docs: a change\n\nSome body prose.\n\nCo-Authored-By: {value}\n"),
-                "credits a coding agent this guard did not name before",
-            );
-        }
+        assert_refused_crediting_each(
+            root,
+            "Co-Authored-By",
+            &[
+                "Cursor Agent <cursoragent@cursor.com>",
+                "Devin <devin@cognition.ai>",
+                "Grok <noreply@x.ai>",
+            ],
+            "credits a coding agent this guard did not name before",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_trailer_with_no_address_for_each_model_word() {
+    check_workspace(|root| {
+        assert_refused_crediting_each(
+            root,
+            "Co-authored-by",
+            &[
+                "Claude",
+                "Anthropic",
+                "ChatGPT",
+                "OpenAI",
+                "Copilot",
+                "Codex",
+                "Gemini",
+                "Llama",
+                "Mistral",
+                "Cursor",
+                "Devin (cognition.ai)",
+                "Grok",
+                "Agent (x.ai)",
+            ],
+            "credits a model by a name with no address, holding one word of the guard's vendor list and no other",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_tool_identity_under_a_neutral_name() {
+    check_workspace(|root| {
+        assert_refused_crediting_each(
+            root,
+            "Co-authored-by",
+            &[
+                "Probe <noreply@anthropic.com>",
+                "Probe <198982749+Copilot@users.noreply.github.com>",
+                "Probe <176961590+gemini-code-assist[bot]@users.noreply.github.com>",
+                "Probe <noreply@x.ai>",
+            ],
+            "credits a model's own address under a name that holds no vendor word",
+        );
     });
 }
 
@@ -242,8 +447,30 @@ fn clears_a_body_whose_only_co_authors_are_people() {
     check_workspace(|root| {
         assert_cleared(
             root,
-            "feat: a change\n\n* feat: the first commit\n\nCo-Authored-By: A Colleague <colleague@example.com>\n\n* feat: the second commit\n\nCo-Authored-By: Another Colleague <another@example.com>\n",
+            "feat: a change\n\n* feat: the first commit\n\nCo-Authored-By: A Colleague <colleague@corp.locale.io>\n\n* feat: the second commit\n\nCo-Authored-By: Another Colleague <another@corp.locale.io>\n",
             "credits two people and no model",
+        );
+    });
+}
+
+#[test]
+fn clears_a_persons_sign_off() {
+    check_workspace(|root| {
+        assert_cleared(
+            root,
+            "docs: a change\n\nSome body prose.\n\nSigned-off-by: A Colleague <colleague@corp.locale.io>\n",
+            "carries a person's sign-off, which spec 029 section 6 accepts",
+        );
+    });
+}
+
+#[test]
+fn clears_an_assisted_by_disclosure_beside_a_persons_sign_off() {
+    check_workspace(|root| {
+        assert_cleared(
+            root,
+            "docs: a change\n\nSome body prose.\n\nAssisted-by: Claude <noreply@anthropic.com>\nSigned-off-by: A Colleague <colleague@corp.locale.io>\n",
+            "discloses a model under Assisted-by, a key the guard does not read, in the trailer block that holds a person's sign-off",
         );
     });
 }
@@ -252,19 +479,10 @@ fn clears_a_body_whose_only_co_authors_are_people() {
 fn refuses_a_range_it_cannot_read() {
     check_workspace(|root| {
         let repository = repository_with_commit("docs: a change\n");
-        let output = run_guard_in(root, repository.path(), "no-such-ref..HEAD");
-        let said = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            !output.status.success(),
-            "the guard cleared a range it could not read; a range it cannot read is a range it cannot clear.\nguard said:\n{said}"
-        );
-        assert!(
-            said.contains("cannot read the range"),
-            "the guard refused an unreadable range without saying that is why, so its output does not tell a caller what to fix.\nguard said:\n{said}"
+        assert_refused_saying(
+            &run_guard_in(root, repository.path(), "no-such-ref..HEAD"),
+            "cannot read the range",
+            "a range it cannot read, which is a range it cannot clear",
         );
     });
 }
@@ -272,36 +490,123 @@ fn refuses_a_range_it_cannot_read() {
 #[test]
 fn refuses_when_the_tool_it_matches_with_cannot_answer() {
     check_workspace(|root| {
-        let repository = repository_with_commit(
-            "docs: a change\n\nSome body prose.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
+        let repository = repository_with_commit(MODEL_CO_AUTHOR);
+        let shadow = directory_shadowing("grep", "#!/bin/sh\nexit 2\n");
+        assert_refused_saying(
+            &run_guard_shadowed(root, repository.path(), shadow.path()),
+            "grep exited",
+            "a commit carrying a model trailer while grep fails (`grep -q` exits 1 for no match and 2 or more for an error, and reading an error as either answer is how a guard decides without having looked)",
         );
-        let shadow = tempfile::tempdir().expect("a scratch directory is created");
-        let stub = shadow.path().join("grep");
-        std::fs::write(&stub, "#!/bin/sh\nexit 2\n").expect("the stub is written");
-        let mut permissions = std::fs::metadata(&stub)
-            .expect("the stub is readable")
-            .permissions();
-        use std::os::unix::fs::PermissionsExt;
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&stub, permissions).expect("the stub is made executable");
+    });
+}
 
-        let inherited = std::env::var("PATH").unwrap_or_default();
-        let output = guard_command(root, repository.path())
-            .env(
-                "PATH",
-                format!("{}:{inherited}", shadow.path().to_string_lossy()),
-            )
-            .arg("HEAD")
-            .output()
-            .expect("the guard runs");
-        let said = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+#[test]
+fn refuses_a_model_trailer_in_a_commit_behind_the_tip_of_the_range() {
+    check_workspace(|root| {
+        let repository = repository_with_commits(&[MODEL_CO_AUTHOR, "docs: a later change\n"]);
+        assert_refused_saying(
+            &run_guard_in(root, repository.path(), "HEAD"),
+            OFFENCE,
+            "a range whose model trailer is in a commit behind its tip",
         );
-        assert!(
-            !output.status.success(),
-            "the guard cleared a commit carrying a model trailer while the tool it matches with was failing; `grep -q` exits 1 for no match and 2 or more for an error, and reading an error as no match is how a guard reports clean because its own tooling broke.\nguard said:\n{said}"
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_on_the_tip_of_the_range_above_a_clean_commit() {
+    check_workspace(|root| {
+        let repository = repository_with_commits(&["docs: an earlier change\n", MODEL_CO_AUTHOR]);
+        assert_refused_saying(
+            &run_guard_in(root, repository.path(), "HEAD"),
+            OFFENCE,
+            "a range whose model trailer is on its tip, above a clean commit the guard reads after it",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_in_a_merge_commits_message() {
+    check_workspace(|root| {
+        let repository = repository_with_a_merge(
+            "docs: a change on a side branch\n",
+            "Merge branch 'side'\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
+        );
+        assert_refused_saying(
+            &run_guard_in(root, repository.path(), "HEAD"),
+            OFFENCE,
+            "a range whose merge commit's message credits a model",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_on_a_merged_side_branch() {
+    check_workspace(|root| {
+        let repository = repository_with_a_merge(MODEL_CO_AUTHOR, "Merge branch 'side'\n");
+        assert_refused_saying(
+            &run_guard_in(root, repository.path(), "HEAD"),
+            OFFENCE,
+            "a range whose model trailer is on a side branch that a merge brought in",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_after_origin_main_when_given_no_range() {
+    check_workspace(|root| {
+        let repository =
+            repository_with_commits(&["docs: a change main already has\n", MODEL_CO_AUTHOR]);
+        git_succeeds(
+            repository.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD~1"],
+            None,
+        );
+        assert_refused_saying(
+            &guard_command(root, repository.path())
+                .output()
+                .expect("the guard runs"),
+            OFFENCE,
+            "a model trailer after origin/main when it runs with no range, as the root gate runs it",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_on_head_when_given_no_range_and_there_is_no_origin_main() {
+    check_workspace(|root| {
+        let repository = repository_with_commit(MODEL_CO_AUTHOR);
+        assert_refused_saying(
+            &guard_command(root, repository.path())
+                .output()
+                .expect("the guard runs"),
+            OFFENCE,
+            "a model trailer on HEAD when it runs with no range and there is no origin/main (this pins today's fallback to all of HEAD, which spec 029 does not state; refusing the missing origin/main as an unreadable range would also fail closed)",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_commit_whose_message_it_cannot_read() {
+    check_workspace(|root| {
+        let repository = repository_with_commit("docs: a change\n");
+        assert_refused_saying(
+            &run_guard_with_git_refusing(root, repository.path(), "--format=%B"),
+            "cannot read the message of",
+            "a commit while `git show` cannot read its message, which is a message it cannot clear",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_message_whose_trailers_it_cannot_parse() {
+    check_workspace(|root| {
+        let repository = repository_with_commit(
+            "docs: a change\n\nSome body prose.\n\nCo-Authored-By: A Colleague <colleague@corp.locale.io>\n",
+        );
+        assert_refused_saying(
+            &run_guard_with_git_refusing(root, repository.path(), "interpret-trailers"),
+            "cannot parse the trailers",
+            "a commit crediting a person while `git interpret-trailers` cannot parse its trailers, which are trailers it cannot clear",
         );
     });
 }
@@ -310,7 +615,7 @@ fn refuses_when_the_tool_it_matches_with_cannot_answer() {
 fn clears_a_body_larger_than_a_pipe_buffer_whose_first_line_is_trailer_shaped() {
     check_workspace(|root| {
         let mut message = String::from("ci(guard): a body that outgrows a pipe buffer\n\n");
-        message.push_str("Co-Authored-By: A Person <person@example.com>\n");
+        message.push_str("Co-Authored-By: A Person <person@corp.locale.io>\n");
         for _ in 0..20_000 {
             message.push_str("padding that carries the body past the pipe buffer\n");
         }

@@ -1,8 +1,9 @@
 # plasmosome-backend
 
 The enforcement seam. One interface between *deciding* a capability and *making it real*. The
-crate also holds two pieces of vocabulary that guest, membrane and controller share: the SHA-256
-`Digest` and spec 001's observation pages, in the `digest` and `paging` modules.
+crate also holds vocabulary that guest, membrane and controller share: the SHA-256 `Digest` and
+spec 001's observation pages, in the `digest` and `paging` modules, and spec 028's lifetime
+values and the clock they are read on, in `lifetime` and `clock`.
 
 The controller says "this cell may reach api.example.com". Something must then edit a proxy's
 allowlist, mount a directory, or install a credential — and that something differs by platform
@@ -85,6 +86,8 @@ address or one owner time out.
 | Universe classes | What "system state" means for residue verification: sockets, mounts, processes, proxy entries, session files |
 | `MockMode` | How a plasmid's calls are served: `simulate`, `capture` or `passthrough`, the default. It lives here, beside `CellId`, so the ledger can record a mode without depending on core |
 | `digest` | The SHA-256 `Digest`: exactly 64 lowercase hexadecimal digits, as text and in JSON. The membrane re-exports it |
+| `lifetime` | Spec 028's lifetime values. A `Bound` is two readings: a UTC `WallMs` and a `Continuous` deadline tagged with its `BootSession`. It has passed at a reading when either of its two readings has, and a continuous deadline from another boot session is ignored. It keeps no state, so a caller that must keep it passed keeps a fence. Also the range checks for leases, idle limits and drain budgets, and RFC 3339 UTC text. These are not wire data yet: spec 008's journal record will give them their shape |
+| `clock` | The `Clock` seam every lifetime decision reads time through: wall, continuous and wait readings, taken together. `ManualClock` lets a test move each one alone. The production clock is `SystemClock` in `plasmosome-core` |
 | `paging` | Spec 001's observation pages, shared by guest, membrane and controller. On the responding side, a server keeps one `CaptureSlot` per connection. The slot holds the compact JSON account that the server's `collect` froze with `FrozenAccount::freeze`, and serves it in pages of 1 to 65,536 bytes until its deadline. On the requesting side, a caller's `PageAssembler` yields the account only when every page arrived in order from one capture and the bytes match the stated length and hash. `ObservationPage` decodes only from an object. Both sides pass the clock and own the IO |
 
 Tests: `cargo test -p plasmosome-backend`
