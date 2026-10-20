@@ -315,6 +315,29 @@ mod tests {
     }
 
     #[test]
+    fn a_negative_continuous_value_is_a_refused_read() {
+        assert_eq!(continuous_from(0, 0), Ok(0));
+        assert_eq!(continuous_from(5, 7), Ok(5_000_000_007));
+        assert_eq!(continuous_from(libc::time_t::MAX, 0), Ok(u64::MAX));
+        for (seconds, nanos) in [(-1, 0), (0, -1), (-1, 999_999_999), (libc::time_t::MIN, 0)] {
+            assert_eq!(
+                continuous_from(seconds, nanos),
+                Err(ClockError::ContinuousNegative),
+                "{seconds} s {nanos} ns"
+            );
+        }
+
+        let boot = BootSession::parse(UUID_TEXT).unwrap();
+        let wait = Instant::now();
+        let good = reading_from(boot, Ok(1_792_483_200_000), continuous_from(5, 0), wait);
+        let lease = Bound::after(&good, DEFAULT_LEASE_MS).unwrap();
+        assert!(!lease.passed(&good));
+        let negative = reading_from(boot, Ok(1_792_483_200_000), continuous_from(-5, 0), wait);
+        assert_eq!(negative.continuous.ns, u64::MAX);
+        assert!(lease.passed(&negative));
+    }
+
+    #[test]
     fn a_wall_clock_set_before_1970_reads_as_1970() {
         let boot = BootSession::parse(UUID_TEXT).unwrap();
         let wait = Instant::now();
@@ -366,6 +389,10 @@ mod tests {
         assert_eq!(
             ClockError::Continuous { errno: 22 }.to_string(),
             "the continuous clock could not be read: errno 22"
+        );
+        assert_eq!(
+            ClockError::ContinuousNegative.to_string(),
+            "the continuous clock read a negative time"
         );
         assert_eq!(
             ClockError::BootSession {

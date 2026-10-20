@@ -628,6 +628,90 @@ mod tests {
         assert!(b.wait_deadline(&woke, DEFAULT_DRAIN_MS) < admitted.wait);
     }
 
+    fn fenced(b: Bound, at_fence: &ClockReading) -> Bound {
+        let overdue = at_fence.wait.duration_since(b.wait_deadline(at_fence, 0));
+        Bound {
+            not_after: b.not_after,
+            continuous: Continuous {
+                boot: at_fence.continuous.boot,
+                ns: at_fence
+                    .continuous
+                    .ns
+                    .saturating_sub(u64::try_from(overdue.as_nanos()).unwrap()),
+            },
+        }
+    }
+
+    #[test]
+    fn a_bound_remembers_nothing_and_a_kept_fence_holds_after_a_wall_step_back() {
+        let clock = ManualClock::new(WallMs::from_unix_ms(B_WALL), boot(1), B_CONTINUOUS);
+        let admitted = clock.now();
+        let b = Bound::after(&admitted, 60_000).unwrap();
+        let s = Duration::from_secs;
+        clock.advance_all_ms(59_000);
+        clock.advance_wall_ms(2_000);
+        let at_fence = clock.now();
+        assert!(b.passed(&at_fence));
+        assert_eq!(
+            b.wait_deadline(&at_fence, DEFAULT_DRAIN_MS),
+            admitted.wait + s(63)
+        );
+
+        clock.advance_wall_ms(-2_000);
+        let stepped_back = clock.now();
+        assert!(!b.passed(&stepped_back));
+        assert_eq!(b.remaining_ms(&stepped_back), 1_000);
+        assert_eq!(
+            b.wait_deadline(&stepped_back, DEFAULT_DRAIN_MS),
+            admitted.wait + s(65)
+        );
+
+        let kept = fenced(b, &at_fence);
+        assert!(kept.passed(&stepped_back));
+        assert_eq!(kept.remaining_ms(&stepped_back), 0);
+        assert_eq!(
+            kept.wait_deadline(&stepped_back, DEFAULT_DRAIN_MS),
+            admitted.wait + s(63)
+        );
+
+        let not_enough = b.earlier(Bound::after(&at_fence, 0).unwrap());
+        assert_eq!(
+            not_enough.wait_deadline(&stepped_back, DEFAULT_DRAIN_MS),
+            admitted.wait + s(64)
+        );
+    }
+
+    #[test]
+    fn a_kept_fence_stays_reached_after_an_hour_step_back() {
+        let clock = ManualClock::new(WallMs::from_unix_ms(B_WALL), boot(1), B_CONTINUOUS);
+        let admitted = clock.now();
+        let b = Bound::after(&admitted, 60_000).unwrap();
+        clock.advance_all_ms(30_000);
+        clock.advance_wall_ms(i64::try_from(HOUR_MS).unwrap());
+        let at_fence = clock.now();
+        let kept = fenced(b, &at_fence);
+        assert!(kept.wait_deadline(&at_fence, DEFAULT_DRAIN_MS) <= at_fence.wait);
+
+        clock.advance_all_ms(1_000);
+        clock.advance_wall_ms(-i64::try_from(HOUR_MS).unwrap());
+        let stepped_back = clock.now();
+        assert!(!b.passed(&stepped_back));
+        assert_eq!(b.remaining_ms(&stepped_back), 29_000);
+        assert_eq!(
+            b.wait_deadline(&stepped_back, DEFAULT_DRAIN_MS),
+            stepped_back.wait + Duration::from_secs(34)
+        );
+        assert!(kept.passed(&stepped_back));
+        assert_eq!(kept.remaining_ms(&stepped_back), 0);
+        assert!(kept.wait_deadline(&stepped_back, DEFAULT_DRAIN_MS) <= stepped_back.wait);
+
+        let not_enough = b.earlier(Bound::after(&at_fence, 0).unwrap());
+        assert_eq!(
+            not_enough.wait_deadline(&stepped_back, DEFAULT_DRAIN_MS),
+            stepped_back.wait + Duration::from_secs(4)
+        );
+    }
+
     #[test]
     fn wait_deadline_follows_the_reading_with_less_time_left() {
         let base = Instant::now();
@@ -747,6 +831,7 @@ mod tests {
             ("2026-06-30T00:00:00Z", 1_782_777_600_000),
             ("2026-09-30T00:00:00Z", 1_790_726_400_000),
             ("2026-11-30T00:00:00Z", 1_795_996_800_000),
+            ("2400-02-29T00:00:00Z", 13_574_563_200_000),
         ];
         for (text, ms) in accepted {
             assert_eq!(
@@ -816,6 +901,8 @@ mod tests {
             ("2026-11-31T08:00:00Z", TimeTextError::Field { name: "day" }),
             ("2026-02-29T08:00:00Z", TimeTextError::Field { name: "day" }),
             ("2100-02-29T08:00:00Z", TimeTextError::Field { name: "day" }),
+            ("2200-02-29T00:00:00Z", TimeTextError::Field { name: "day" }),
+            ("2024-02-30T00:00:00Z", TimeTextError::Field { name: "day" }),
             ("1969-12-31T23:59:59Z", TimeTextError::BeforeEpoch),
             ("1969-12-31T23:59:59.999Z", TimeTextError::BeforeEpoch),
             ("0000-01-01T00:00:00Z", TimeTextError::BeforeEpoch),
