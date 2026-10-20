@@ -1,4 +1,10 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+/// The most bytes a declaration may hold: spec 020's limit for one
+/// declaration. `load` and `parse` refuse a longer one with
+/// `ManifestError::TooLarge`.
+pub const MAX_MANIFEST_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlasmidManifest {
@@ -160,6 +166,9 @@ pub enum ManifestError {
         fix: String,
         detail: String,
     },
+    TooLarge {
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for ManifestError {
@@ -184,6 +193,9 @@ impl std::fmt::Display for ManifestError {
                     write!(f, "{field}: {detail}; write {fix}")
                 }
             }
+            ManifestError::TooLarge { limit } => {
+                write!(f, "manifest exceeds the {limit}-byte limit")
+            }
         }
     }
 }
@@ -191,12 +203,37 @@ impl std::fmt::Display for ManifestError {
 impl std::error::Error for ManifestError {}
 
 impl PlasmidManifest {
+    /// Reads the declaration at `path` and parses it. At most
+    /// `MAX_MANIFEST_BYTES` plus one byte is read, so a longer file, a FIFO
+    /// or `/dev/zero` is refused with `TooLarge` at the bound. Time is not
+    /// bounded: a FIFO whose writer stops short of the bound and never closes
+    /// blocks this call. A file that is not UTF-8 is an `Io` error of kind
+    /// `InvalidData`.
     pub fn load(path: &Path) -> Result<PlasmidManifest, ManifestError> {
-        let text = std::fs::read_to_string(path).map_err(ManifestError::Io)?;
+        let file = std::fs::File::open(path).map_err(ManifestError::Io)?;
+        let mut bytes = Vec::new();
+        file.take(MAX_MANIFEST_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(ManifestError::Io)?;
+        if bytes.len() > MAX_MANIFEST_BYTES {
+            return Err(ManifestError::TooLarge {
+                limit: MAX_MANIFEST_BYTES,
+            });
+        }
+        let text = String::from_utf8(bytes).map_err(|error| {
+            ManifestError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })?;
         Self::parse(&text)
     }
 
+    /// Parses a declaration. Text longer than `MAX_MANIFEST_BYTES` is refused
+    /// with `TooLarge` before any of it is parsed.
     pub fn parse(text: &str) -> Result<PlasmidManifest, ManifestError> {
+        if text.len() > MAX_MANIFEST_BYTES {
+            return Err(ManifestError::TooLarge {
+                limit: MAX_MANIFEST_BYTES,
+            });
+        }
         let raw: toml::Value = toml::from_str(text).map_err(ManifestError::Parse)?;
         let id = raw
             .get("id")

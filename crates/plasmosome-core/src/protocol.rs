@@ -406,13 +406,14 @@ impl WireError {
     /// when the refusal names a field, in one of three forms: the TOML to
     /// write in place of that field, a bare entry for the list the field names
     /// (written in place of the entry when the field ends in an index), or
-    /// exactly `remove this entry`. A file that could not be read or is not
-    /// TOML, a syntax error included, carries none.
+    /// exactly `remove this entry`. A file that could not be read, is not
+    /// TOML (a syntax error included) or is over `MAX_MANIFEST_BYTES` carries
+    /// none.
     pub fn manifest_refusal(path: String, error: &ManifestError) -> WireError {
         let mut wire = WireError::manifest_invalid(error.to_string(), path);
         wire.fix = match error {
             ManifestError::Field { fix, .. } => Some(fix.clone()),
-            ManifestError::Io(_) | ManifestError::Parse(_) => None,
+            ManifestError::Io(_) | ManifestError::Parse(_) | ManifestError::TooLarge { .. } => None,
         };
         wire
     }
