@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -23,7 +24,14 @@ int main(int argc, char **argv) {
     if (write(STDOUT_FILENO, "ready\n", 6) != 6) {
         return 74;
     }
+    char byte;
     for (;;) {
-        pause();
+        ssize_t got = read(STDIN_FILENO, &byte, 1);
+        if (got == 0) {
+            return 0;
+        }
+        if (got < 0 && errno != EINTR) {
+            return 75;
+        }
     }
 }

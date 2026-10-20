@@ -2,6 +2,7 @@ use plasmosome_membrane::runtime::confinement::{Confinement, Unverifiable, obser
 use plasmosome_membrane::runtime::digest::Digest;
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 #[path = "support/fixture.rs"]
 mod fixture;
 
@@ -53,33 +54,39 @@ mod darwin {
     use plasmosome_membrane::runtime::confinement::{PolicyBinding, REQUIRED_DENIALS};
     use std::io::{BufRead, BufReader, Read};
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, ChildStdin, Command, Stdio};
     use std::sync::LazyLock;
 
     static SLEEPER: LazyLock<PathBuf> = LazyLock::new(|| {
         let executable = std::env::current_exe().expect("the running test executable has a path");
         fixture::compile_supervision_fixture(
-            &fixture::fixture_cache_root(&executable),
+            &fixture::fixture_cache_root(&executable)
+                .with_file_name("plasmosome-sandboxed-sleeper"),
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/sandboxed_sleeper.c"),
         )
     });
 
     struct Sleeper {
         child: Child,
+        _stdin: ChildStdin,
     }
 
     impl Sleeper {
         fn start(profile: &str) -> Sleeper {
             let mut child = Command::new(&*SLEEPER)
                 .arg(profile)
-                .stdin(Stdio::null())
+                .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
                 .expect("the sandboxed sleeper starts");
+            let stdin = child.stdin.take().expect("the sleeper's stdin is piped");
             let stdout = child.stdout.take().expect("the sleeper's stdout is piped");
             let mut stderr = child.stderr.take().expect("the sleeper's stderr is piped");
-            let sleeper = Sleeper { child };
+            let sleeper = Sleeper {
+                child,
+                _stdin: stdin,
+            };
             let mut line = String::new();
             BufReader::new(stdout)
                 .read_line(&mut line)
