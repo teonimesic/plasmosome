@@ -54,7 +54,12 @@ One file. It carries six kinds of thing:
   the vocabulary of the outside world: `api.github.com`, not a routing rule.
 - **What it offers back** — named tools, each with the sentence a caller reads before choosing it.
 - **What it needs from other plasmids** — capabilities by name.
-- **How long it may take to stop** — a drain budget.
+- **How long it may hold its grants, and how long it may take to stop** — a lifetime and a
+  drain budget. `[lifecycle]` takes optional `lease_ms` and `idle_ms`, each 1,000 ms to 30 days,
+  which only shorten what the operator allows, and `drain_ms`, 1 to 30,000 ms (spec 028); a value
+  outside its range is refused, naming the field. Amended on 2026-10-20, as
+  [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs) requires. Until then
+  this bullet named only a drain budget.
 
 Every section the grammar in `plasmosome-core::manifest` carries today falls into one of the six:
 `[impl]` into the first; `[network]`, `[workspace]`, `[secrets]`, `[commands]`, `[model]` and
@@ -78,7 +83,10 @@ Naming this list is the whole of "without understanding much about it":
   pinning are the kernel's.
 - **How the plasmid is torn down.** A plasmid implements no revocation hook, gets no chance to
   refuse a detach, and cannot make one fail. Its own work may still be finishing inside the drain
-  window its declaration asks for; what it never gets is a say in whether the teardown happens.
+  window its declaration asks for, up to 30 s; what it never gets is a say in whether the
+  teardown happens. Amended on 2026-10-20, as
+  [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs) requires. Until then
+  this bullet set no cap on the drain window.
 - **How the cell is supervised**, what happens if the plasmid crashes, and what the kernel has to
   undo afterwards.
 
@@ -196,16 +204,22 @@ the scaffold writes the declaration now and still refuses the component, saying 
 - **Detach returns when reachability is revoked, and is accountable for a bound after that.**
   Returning means no new reference to anything the plasmid placed can be obtained. It does not
   mean every reference is gone: one taken before the detach keeps its object alive, and detach
-  neither waits for it nor destroys it. What the contract holds instead is the bound — every
-  reference that outlives the detach is named, with the owner holding it, until the last one
-  goes. These are two failures, and they are not observable at the same moment. A surviving
-  reference with no owner is visible while the detach is still running, and it fails that detach:
-  the check runs where it can still change the outcome, because a check that cannot is telemetry
-  and this contract does not rest on one. A reference held past its bound cannot be seen then —
-  the bound expires after the detach has returned — so it is not a detach failure but an
-  obligation the contract keeps afterwards, reported against the owner named at detach. Naming
-  the second as though the detach could have caught it would be claiming a check nothing can
-  run.
+  neither waits for it nor destroys it. What the contract holds instead depends on what the
+  reference holds. A reference into a grant always has an owner, the cell and plugin holding the
+  grant and its `GrantId` (spec 028), and is named against that owner until it goes. Its bound is
+  the removal's deadline under spec 017, or H for an expiry (spec 028). One still effective past
+  its bound is not a detach failure: the removal stays unfinished, named against that owner, until
+  fresh observation proves it gone (spec 008). A reference whose backing has been revoked, so that
+  every use of it fails with an ordinary error, refused by the guest kernel when the grant had its
+  own connection and by the guest file server when a peer shares it, reaches nothing and is not a
+  surviving reference (spec 024). A reference into attached software holds code bytes, not
+  authority: it never fails or delays a detach, and each one the guest's scan finds is reported
+  with its path, holding process, command name and any `exec_id` (spec 027). A descriptor in
+  flight over `SCM_RIGHTS` is in no table, so no scan names it. Amended on 2026-10-20, as
+  [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs) requires. The text
+  carries spec 024's insertion, which is not applied separately. Until then this bullet said that
+  a surviving reference with no owner fails the detach, and that one held past its bound is
+  reported against the owner named at detach.
 - **What a refusal cannot protect.** A detach that would strand an attached requirer is refused,
   and that covers dependence some declaration states. It does not cover dependence nothing
   declared — work the agent did against a tool while it was attached, state it holds that assumes
@@ -366,11 +380,16 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   claim that a detach never refuses. Neither refusal is the plasmid's to make. Revocation is
   enforcement rather than erasure: after detach nothing the plasmid's grants allowed passes the
   boundary, and what a running process already read is not claimed back. Detach returns when no
-  new reference can be obtained; a reference taken before it keeps its object alive, and every
-  such reference is named with its owner until the last one goes. A surviving reference with no
-  owner fails the detach, on a check that runs where it can still fail it. A reference held past
-  that bound is not a detach failure — the bound expires after the detach returns — but an
-  obligation reported against the owner named at detach.
+  new reference can be obtained; a reference taken before it keeps its object alive. A reference
+  into a grant is named against its owner, `{cell, plugin}` and its `GrantId`, until the last one
+  goes; one still effective past its bound is not a detach failure, but keeps the removal
+  unfinished (spec 008, spec 017). A reference whose backing has been revoked reaches nothing and
+  is not a surviving reference (spec 024). A reference into attached software never fails or
+  delays a detach, and is reported while the guest's scan finds it; a descriptor in flight over
+  `SCM_RIGHTS` is not. Amended on 2026-10-20, as
+  [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs) requires. Until then
+  this bullet said that a surviving reference with no owner failed the detach, and that one held
+  past its bound was an obligation reported against the owner named at detach.
 - **`plasmid new <name>` writes exactly one file, the declaration**, grants nothing, attaches
   nothing, and prints the sections the author must add. It writes no component, says that it
   will not until the plasmid interface is frozen, and exits `2` — the code decision 010 fixed
@@ -440,18 +459,22 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   after which a call the provider's grants had allowed is denied.
 - Detaching a provider that an attached plasmid still requires is refused, and the refusal names
   the requirer.
-- A detach whose object outlives it and whose owner is named succeeds, and reports that object
-  with its owner; a detach whose object is gone reports none.
-- A detach whose surviving object has no owner **fails**, and the failure names that object. The
-  same staging with an owner recorded succeeds — the two cases differ only in the owner, so a
-  detach that fails for any other reason does not satisfy this clause, and a failure branch no
-  case ever reaches does not either.
+- A reference into a grant taken before a detach is refused on its next use after the detach,
+  and the same use succeeds before it; the cases differ only in the detach. With an equal
+  grant of another plugin in the cell, one still effective past its bound leaves the removal
+  unfinished, named with `{cell, plugin}` and its own `GrantId`, never the peer's; the same
+  staging with it closed before the bound finishes.
+- A reference into attached software that survives a detach leaves the detach complete while
+  it is still open, in the same time as the staging with it closed, and is reported with its
+  path and holding process; the same staging with it closed reports none. Amended on 2026-10-20,
+  as [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs) requires. Until
+  then these two bullets asked that a detach report a surviving object with its owner, and fail
+  when that object has no owner. A third bullet, after the next one, asked that a reference held
+  past its bound be reported against the owner named at detach; the first bullet's second
+  sentence replaces it.
 - Neither check is satisfied by one that only ever runs after the detach has been reported done,
   nor by one that finds nothing because the name was destroyed while the object it named is
   still alive: the object is identified by what it is, not by what it was called.
-- A reference still held when its bound expires is reported against the owner named at detach.
-  This is asserted after the detach returned successfully, and no case requires the detach to
-  have anticipated it.
 - After a detach, a process that was already running when it happened is denied at the boundary
   on every capability the detached declaration named, and no tool of that plasmid resolves for
   it.
