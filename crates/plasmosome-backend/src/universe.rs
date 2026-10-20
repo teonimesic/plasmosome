@@ -6,8 +6,13 @@ use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::{Uuid, Variant, Version};
 
-use crate::backend::{BackendError, Capability};
-use crate::recipe::RecipeError;
+use crate::backend::{
+    BackendError, Capability, broker_rules, mount_rules, proxy_map_rules, session_file_rules,
+    uds_socket_rules,
+};
+use crate::recipe::{
+    BrokerLaunch, MountRecipe, ProxyRecipe, RecipeError, SessionFileRecipe, UdsRecipe,
+};
 use crate::wire::{ObjectOnly, object_serde, validated_object_serde};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -453,7 +458,8 @@ impl Diff {
     }
 }
 
-/// One recorded operation: an exact address, its owner and the capability it creates.
+/// One recorded operation: an exact address, its owner and the capability it creates, with that
+/// capability's complete recipe or launch. `SpawnBroker` carries no process ID.
 ///
 /// Decoding refuses a missing or unknown field and a positional array, and decoding and encoding
 /// both refuse any operation `validate` refuses. A value built in memory is not checked: call
@@ -463,29 +469,33 @@ pub enum UniverseOp {
     WriteSessionFile {
         id: GrantId,
         path: String,
+        recipe: SessionFileRecipe,
         owner: CellOwner,
     },
     BindUds {
         id: GrantId,
         path: String,
+        recipe: UdsRecipe,
         owner: CellOwner,
     },
     SetProxyMap {
         id: GrantId,
         host: String,
         route: String,
+        recipe: ProxyRecipe,
         owner: CellOwner,
     },
     SpawnBroker {
         id: GrantId,
-        pid: u32,
         name: String,
+        launch: BrokerLaunch,
         owner: CellOwner,
     },
     AddMount {
         id: GrantId,
         source: String,
         target: String,
+        recipe: MountRecipe,
         owner: CellOwner,
     },
 }
@@ -496,29 +506,33 @@ enum UniverseOpShape {
     WriteSessionFile {
         id: GrantId,
         path: String,
+        recipe: SessionFileRecipe,
         owner: CellOwner,
     },
     BindUds {
         id: GrantId,
         path: String,
+        recipe: UdsRecipe,
         owner: CellOwner,
     },
     SetProxyMap {
         id: GrantId,
         host: String,
         route: String,
+        recipe: ProxyRecipe,
         owner: CellOwner,
     },
     SpawnBroker {
         id: GrantId,
-        pid: u32,
         name: String,
+        launch: BrokerLaunch,
         owner: CellOwner,
     },
     AddMount {
         id: GrantId,
         source: String,
         target: String,
+        recipe: MountRecipe,
         owner: CellOwner,
     },
 }
@@ -567,28 +581,60 @@ impl UniverseOp {
     }
 
     /// Returns the first rule the capability this operation creates breaks, as
-    /// `Capability::validate` reports it.
+    /// `Capability::validate` reports it, without building that capability.
     pub fn validate(&self) -> Result<(), RecipeError> {
-        self.capability().validate()
+        match self {
+            UniverseOp::WriteSessionFile { path, recipe, .. } => session_file_rules(path, recipe),
+            UniverseOp::BindUds { path, recipe, .. } => uds_socket_rules(path, recipe),
+            UniverseOp::SetProxyMap {
+                host,
+                route,
+                recipe,
+                ..
+            } => proxy_map_rules(host, route, recipe),
+            UniverseOp::SpawnBroker { name, launch, .. } => broker_rules(name, launch),
+            UniverseOp::AddMount {
+                source,
+                target,
+                recipe,
+                ..
+            } => mount_rules(source, target, recipe),
+        }
     }
 
     fn capability(&self) -> Capability {
         match self {
-            UniverseOp::WriteSessionFile { path, .. } => {
-                Capability::SessionFile { path: path.clone() }
-            }
-            UniverseOp::BindUds { path, .. } => Capability::UdsSocket { path: path.clone() },
-            UniverseOp::SetProxyMap { host, route, .. } => Capability::ProxyMap {
+            UniverseOp::WriteSessionFile { path, recipe, .. } => Capability::SessionFile {
+                path: path.clone(),
+                recipe: recipe.clone(),
+            },
+            UniverseOp::BindUds { path, recipe, .. } => Capability::UdsSocket {
+                path: path.clone(),
+                recipe: recipe.clone(),
+            },
+            UniverseOp::SetProxyMap {
+                host,
+                route,
+                recipe,
+                ..
+            } => Capability::ProxyMap {
                 host: host.clone(),
                 route: route.clone(),
+                recipe: recipe.clone(),
             },
-            UniverseOp::SpawnBroker { pid, name, .. } => Capability::Broker {
-                pid: *pid,
+            UniverseOp::SpawnBroker { name, launch, .. } => Capability::Broker {
                 name: name.clone(),
+                launch: launch.clone(),
             },
-            UniverseOp::AddMount { source, target, .. } => Capability::Mount {
+            UniverseOp::AddMount {
+                source,
+                target,
+                recipe,
+                ..
+            } => Capability::Mount {
                 source: source.clone(),
                 target: target.clone(),
+                recipe: recipe.clone(),
             },
         }
     }
@@ -699,7 +745,7 @@ impl fmt::Display for ResidueReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{broker, mount, proxy_map, session_file};
+    use crate::fixtures::{self, broker, mount, proxy_map, session_file};
 
     fn object(owner: &str, capability: Capability) -> OsObject {
         OsObject {
@@ -711,6 +757,19 @@ mod tests {
 
     fn proxy(owner: &str, route: &str) -> OsObject {
         object(owner, proxy_map("api.github.com", route))
+    }
+
+    fn relaunched_broker(name: &str) -> Capability {
+        Capability::Broker {
+            name: name.to_string(),
+            launch: BrokerLaunch {
+                command: vec![
+                    "/usr/libexec/plasmosome-broker".to_string(),
+                    "--audit".to_string(),
+                ],
+                ..fixtures::launch()
+            },
+        }
     }
 
     #[test]
@@ -745,6 +804,22 @@ mod tests {
             }
         );
         assert_eq!(state.objects().collect::<Vec<_>>(), vec![&original]);
+
+        let mut brokers = OsState::new();
+        let egressd = object("deploy", broker("egressd"));
+        assert!(brokers.insert(egressd.clone()).unwrap());
+        let relaunched = OsObject {
+            capability: relaunched_broker("egressd"),
+            ..egressd.clone()
+        };
+        assert_eq!(
+            brokers.insert(relaunched).unwrap_err(),
+            BackendError::IdentityConflict {
+                class: "broker-pid",
+                id: egressd.id,
+            }
+        );
+        assert_eq!(brokers.objects().collect::<Vec<_>>(), vec![&egressd]);
     }
 
     #[test]
@@ -812,7 +887,7 @@ mod tests {
                 proxy_map("api.github.com", "splice"),
                 proxy_map("api.github.com", "audit"),
             ),
-            (broker(31337, "egressd"), broker(31337, "auditd")),
+            (broker("egressd"), broker("auditd")),
         ] {
             let mut left = OsState::new();
             left.insert(object("network", left_capability)).unwrap();
@@ -882,6 +957,41 @@ mod tests {
         assert!(leaked.describe().contains(&leaked.id.to_string()));
         assert!(lost.is_empty());
         assert!(assertions.is_empty());
+    }
+
+    #[test]
+    fn a_broker_description_names_its_command_and_both_endpoints() {
+        let described = object("network", broker("egressd")).describe();
+        let launch = fixtures::launch();
+        for part in [
+            "broker/egressd",
+            &launch.command[0],
+            &launch.control_socket,
+            &launch.data_socket,
+        ] {
+            assert!(described.contains(part), "{described} does not name {part}");
+        }
+    }
+
+    #[test]
+    fn universe_classes_keep_their_five_names_and_labels() {
+        for (class, name, label) in [
+            (UniverseClass::SessionFile, "SessionFile", "session-file"),
+            (UniverseClass::UdsPath, "UdsPath", "uds-path"),
+            (UniverseClass::ProxyMap, "ProxyMap", "proxy-map"),
+            (UniverseClass::BrokerPid, "BrokerPid", "broker-pid"),
+            (UniverseClass::Mount, "Mount", "mount"),
+        ] {
+            assert_eq!(class.as_str(), label);
+            assert_eq!(
+                serde_json::to_value(class).unwrap(),
+                serde_json::json!(name)
+            );
+            assert_eq!(
+                serde_json::from_value::<UniverseClass>(serde_json::json!(name)).unwrap(),
+                class
+            );
+        }
     }
 
     fn cell_owner(cell: &str, plugin: &str) -> CellOwner {
@@ -1088,16 +1198,28 @@ mod tests {
             capability: mount("/code", "/workspace"),
         };
         state.insert(held.clone()).unwrap();
+        let egressd = OsObject {
+            id: GrantId::new(),
+            owner: cell_owner("cell-1", "workspace"),
+            capability: broker("egressd"),
+        };
+        state.insert(egressd.clone()).unwrap();
         let before = state.clone();
         let other_source = UniverseRemoval {
             id: held.id,
             capability: mount("/secrets", "/workspace"),
+        };
+        let other_launch = UniverseRemoval {
+            id: egressd.id,
+            capability: relaunched_broker("egressd"),
         };
         let other_id = UniverseRemoval {
             id: GrantId::new(),
             capability: held.capability.clone(),
         };
         assert!(!state.selects(&other_source, &held.owner));
+        assert!(!state.selects(&other_launch, &egressd.owner));
+        assert!(state.selects(&egressd.removal(), &egressd.owner));
         assert!(!state.selects(&other_id, &held.owner));
         assert!(!state.selects(&held.removal(), &cell_owner("cell-1", "audit")));
         assert!(state.selects(&held.removal(), &held.owner));
