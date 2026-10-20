@@ -2332,6 +2332,33 @@ fn a_symlink_leaving_the_repository_is_refused() {
                     vec![("crates/a/tests", "(symlink)")],
                 ),
                 (
+                    "two names between the untracked name and the ..",
+                    vec![symlink(
+                        "crates/a/two",
+                        "../../.git/refs/heads/../../../../outside",
+                    )],
+                    vec![("crates/a/two", "(symlink)")],
+                ),
+                (
+                    "three names between the untracked name and the ..",
+                    vec![symlink(
+                        "crates/a/three",
+                        "../../.git/refs/heads/main/../../../../../outside",
+                    )],
+                    vec![("crates/a/three", "(symlink)")],
+                ),
+                (
+                    "a gitlink and back",
+                    vec![
+                        gitlink("vendor/sub"),
+                        symlink("crates/a/through", "../../vendor/sub/../../outside"),
+                    ],
+                    vec![
+                        ("vendor/sub", "(submodule)"),
+                        ("crates/a/through", "(symlink)"),
+                    ],
+                ),
+                (
                     "a build's output directory and back",
                     vec![symlink("crates/a/benches", "../../target/../../outside")],
                     vec![("crates/a/benches", "(symlink)")],
@@ -2351,6 +2378,13 @@ fn a_symlink_leaving_the_repository_is_refused() {
             "a source directory that steps back out of .git",
             &[
                 "crates/a/src: (symlink): a symlink to ../../.git/../../outside; it steps back with .. out of a name this commit does not track as a directory",
+            ],
+        );
+        assert_says(
+            &outputs,
+            "a gitlink and back",
+            &[
+                "crates/a/through: (symlink): a symlink to ../../vendor/sub/../../outside; it steps back with .. out of a name this commit does not track as a directory",
             ],
         );
         assert_says(
@@ -2621,11 +2655,15 @@ fn a_symlink_in_place_of_a_manifest_or_lockfile_is_refused() {
 #[test]
 fn each_symlink_target_is_read_once() {
     check_workspace(|root| {
-        let links = [
-            ("Cargo.lock", "/opt/x.lock"),
-            ("away", "../../outside"),
-            (".gitattributes", "docs/attributes"),
-            ("crates/a/rust-toolchain.toml", "../../rust-toolchain.toml"),
+        let links: Vec<(&str, String)> = vec![
+            ("Cargo.lock", "/opt/x.lock".to_string()),
+            ("away", "../../outside".to_string()),
+            (".gitattributes", "docs/attributes".to_string()),
+            (
+                "crates/a/rust-toolchain.toml",
+                "../../rust-toolchain.toml".to_string(),
+            ),
+            ("over", format!("{}x", "x/".repeat(2_048))),
         ];
         let plants: Vec<Plant> = links
             .iter()
