@@ -415,6 +415,12 @@ def an_executable_or_library_missing_from_the_map_is_refused():
     assert library.code == 1, library
     assert f"plasmid_sdk is in the log, but no step's cargo listing has it; {ARGS_HINT}" in library.stderr, library
 
+    after_a_failure = report(log_of(core_unit=FAILING_CORE_UNIT) + doctests("plasmid_sdk") + tests(),
+                             outcomes=("failure", "success"))
+    assert after_a_failure.code == 1, after_a_failure
+    assert f"plasmid_sdk is in the log, but no step's cargo listing has it; {ARGS_HINT}" in after_a_failure.stderr, \
+        after_a_failure
+
 
 def a_result_count_that_disagrees_with_the_listed_lines_is_refused():
     """Case 11. Catches a libtest format change that would silently drop ignored tests."""
@@ -424,7 +430,7 @@ def a_result_count_that_disagrees_with_the_listed_lines_is_refused():
     assert result.code == 1, result
     assert "daemon_cli-c0e2" in result.stderr, result
     assert "lists 1 ignored tests, but its result lines count 2" in result.stderr, result
-    assert "read that step first" not in result.stderr, result
+    assert "a failing test that prints cargo output" not in result.stderr, result
 
     phantom = log_of(core_cli=running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
                      + tests("test boots ... ignored, needs a hypervisor",
@@ -638,6 +644,12 @@ def a_count_mismatch_in_a_failed_step_is_refused_and_points_at_that_step():
     assert TESTS_FAILED_HINT in result.stderr, result
     assert TESTS_FAILED_HINT in result.summary, result
 
+    cut = tests_log(core_cli=FAILING_CORE_CLI_MISCOUNTED) + GUARDS_UNIT[:3]
+    both = report(cut, outcomes=("failure", "cancelled"))
+    assert both.code == 1, both
+    assert ("`tests` failed and `workspace guards` was cancelled; a failing test that prints cargo output "
+            "can cause this, so read those steps first") in both.stderr, both
+
 
 def a_block_two_listings_share_needs_a_result_line_only_when_both_steps_succeeded():
     """Case 30. The guards listing names plasmosome_core's library too. Catches all() turned into any()."""
@@ -672,7 +684,9 @@ def a_failing_guard_test_that_prints_a_nested_cargo_run_keeps_the_list():
     """Case 32. workspace_roots puts a nested cargo run's output in its panic message.
 
     Its Running line names either the real workspace_guards file again or one rebuilt elsewhere.
-    Catches a red guard test turning the report red too, and losing the list for that run.
+    Catches a red guard test turning the report red too, and losing the list for that run. The
+    last log has the nested run's stdout after its Running line, as a test that merges the two
+    streams prints it; its lines and result line count with the failing block.
     """
     for nested, why in [(f"{NESTED}/workspace_guards-6a72", "appears a second time"),
                         (f"{NESTED}/workspace_guards-9f9f", "is in the log, but no step's cargo listing has it")]:
@@ -687,11 +701,19 @@ def a_failing_guard_test_that_prints_a_nested_cargo_run_keeps_the_list():
         assert "`workspace guards` failed" in result.summary, result
         assert COVERS in result.summary, result
         key = nested.rsplit("/", 1)[-1]
-        assert f"{key} (tests/workspace_guards.rs) {why}" in result.summary, result
+        assert f"The Running block of {key} (tests/workspace_guards.rs) {why}" in result.summary, result
         assert "output from a failing test" in result.summary, result
 
         vouched = report(log)
         assert vouched.code == 1, vouched
+
+    merged = nested_failure(f"{NESTED}/workspace_guards-9f9f")
+    split = merged.index(f"     Running tests/workspace_guards.rs ({NESTED}/workspace_guards-9f9f)") + 1
+    merged[split:split] = ["", "running 1 test", "test nested_only ... ignored, needs a registry", "",
+                           result_line(0, 0, 1)]
+    result = report(log_of(roots=merged), outcomes=("success", "failure"))
+    assert result.code == 0, result
+    assert REFUSED not in result.summary, result
 
 
 CASES = [
