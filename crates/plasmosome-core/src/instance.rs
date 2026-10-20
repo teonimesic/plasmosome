@@ -2213,13 +2213,15 @@ mod tests {
         static BEFORE_NEXT_FILE_SYNC: RefCell<Option<BeforeSync>> = const { RefCell::new(None) };
     }
 
-    const WATCHED: [&CStr; 6] = [
+    const WATCHED: [&CStr; 8] = [
         c"launched",
         c"launched.tmp",
         c"created",
         c"runtime",
         c"cell-1",
         c"retired",
+        c"cells",
+        c"controller.lock",
     ];
 
     #[derive(Debug, Clone)]
@@ -2774,6 +2776,18 @@ mod tests {
     }
 
     #[test]
+    fn lock_syncs_the_root_after_it_names_the_lock_file() {
+        let (_dir, root) = temp_root();
+        let instance = recording_root(&root);
+        let _lock = instance.lock().expect("the lock is taken");
+        assert_eq!(
+            last_seen(&root).named(c"controller.lock"),
+            Some(identity_at(&root.join("controller.lock"))),
+            "the root was synced before it named the lock file"
+        );
+    }
+
+    #[test]
     fn a_lock_retried_after_a_failed_root_sync_syncs_the_root() {
         let (_dir, root) = temp_root();
         let instance = recording_root(&root);
@@ -2803,6 +2817,26 @@ mod tests {
             .create_cell_dir(&lock, &cell("cell-2"))
             .expect("the second cell is created");
         assert_eq!((syncs_of(&root), syncs_of(&root.join("cells"))), (2, 2));
+    }
+
+    #[test]
+    fn create_cell_dir_syncs_each_parent_after_it_names_the_new_directory() {
+        let (_dir, root) = temp_root();
+        let (instance, lock) = recording_locked(&root);
+        instance
+            .create_cell_dir(&lock, &cell("cell-1"))
+            .expect("the cell is created");
+        let cells = root.join("cells");
+        assert_eq!(
+            last_seen(&root).named(c"cells"),
+            Some(identity_at(&cells)),
+            "the root was synced before it named cells"
+        );
+        assert_eq!(
+            last_seen(&cells).named(c"cell-1"),
+            Some(identity_at(&cells.join("cell-1"))),
+            "cells was synced before it named the cell"
+        );
     }
 
     #[test]
@@ -3869,6 +3903,67 @@ mod tests {
             assert_eq!(refused, path)
         });
         assert!(exists(&path), "a directory named launched was removed");
+    }
+
+    #[test]
+    fn remove_launched_syncs_the_directory_after_the_unlink() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        dir.create_launched(boot()).expect("the marker is created");
+        dir.remove_launched().expect("the marker is removed");
+        assert_eq!(
+            last_seen(&root.join("cells/cell-1")).named(c"launched"),
+            None,
+            "the directory was synced before the unlink"
+        );
+    }
+
+    #[test]
+    fn a_failed_sync_after_remove_launched_leaves_no_marker_and_a_retry_syncs() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        let cell_path = root.join("cells/cell-1");
+        dir.create_launched(boot()).expect("the marker is created");
+        reset_syncs();
+        fail_next_sync_of(&cell_path);
+        expect_match!(dir.remove_launched(), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, cell_path);
+            assert_injected(&source);
+        });
+        expect_match!(dir.read_launched(), MarkerRead::Absent => ());
+        dir.remove_launched().expect("a retry syncs the directory");
+        assert_eq!(syncs_of(&cell_path), 2);
+    }
+
+    #[test]
+    fn create_runtime_dir_syncs_the_directory_after_it_names_runtime() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        drop(dir.create_runtime_dir().expect("runtime is created"));
+        let cell_path = root.join("cells/cell-1");
+        assert_eq!(
+            last_seen(&cell_path).named(c"runtime"),
+            Some(identity_at(&cell_path.join("runtime"))),
+            "the directory was synced before it named runtime"
+        );
+    }
+
+    #[test]
+    fn a_failed_sync_after_create_runtime_dir_leaves_runtime_in_place() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        let cell_path = root.join("cells/cell-1");
+        let runtime = cell_path.join("runtime");
+        fail_next_sync_of(&cell_path);
+        expect_match!(dir.create_runtime_dir(), Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, cell_path);
+            assert_injected(&source);
+        });
+        assert_eq!(mode_of(&runtime), 0o700);
+        expect_match!(dir.create_runtime_dir(), Err(CellDirError::AlreadyExists { path }) => {
+            assert_eq!(path, runtime)
+        });
+        dir.sync().expect("a later sync of the directory completes");
     }
 
     #[test]
