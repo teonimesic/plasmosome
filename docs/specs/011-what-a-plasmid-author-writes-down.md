@@ -113,9 +113,10 @@ An author who does not understand the kernel cannot act on a refusal phrased in 
 terms. So every refusal an author can cause names the declaration it read, the field in it that
 is wrong or missing, and the line the author would write, or the entry to remove. This is what
 makes the write-attach-fix loop converge for someone who never learns the rules: they do not have
-to know what is allowed, because the refusal tells them what they did not say. The two refusals
-of the file as a whole, a TOML syntax error and a declaration over 1 MiB, are the only
-exceptions (Contract).
+to know what is allowed, because the refusal tells them what they did not say. The three refusals
+of the file as a whole, a TOML syntax error, a declaration over 1 MiB and a declaration nested more
+than 32 levels deep, are the only exceptions (Contract). Amended on 2026-10-20: this named two,
+before the depth bound.
 
 There are three shapes, and the third is the one that matters most.
 
@@ -352,19 +353,24 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   relative path-scope entry — is refused with the same named error an explicit `inject` gets.
 - **Every refusal an author can cause carries the field path in the declaration and a `fix`
   sentence** holding the line the author would write, or exactly `remove this entry` where the
-  repair is a deletion, and carries the plasmid id wherever the declaration supplies one. Two
+  repair is a deletion, and carries the plasmid id wherever the declaration supplies one. Three
   refusals concern the file as a whole and are the only exceptions: a TOML syntax error, which the
-  parser reports by line and column, and a declaration over 1 MiB, the maximum accepted size
-  spec 020 §2 gives each declaration. They name no field and carry no `fix`. An unknown key is not
-  one of them. Apart from those two, a declaration with no `id` is the single case that cannot name
+  parser reports by line and column; a declaration over 1 MiB, the maximum accepted size
+  spec 020 §2 gives each declaration; and a declaration nested more than 32 levels deep, the depth
+  bound spec 026 §5 requires. Depth is counted from the text before any TOML is parsed. The root
+  table is level 1. Each array, each inline table and each dot in a key adds a level. Each part of
+  a table header's name adds two, enough for an array of tables and its element. Nothing inside a
+  string or a comment counts. They name no field and carry no `fix`. An unknown key is not one of
+  them. Apart from those three, a declaration with no `id` is the single case that cannot name
   a plasmid; it names the missing `id` instead. Where a refusal must name more than one plasmid —
   the requirers a detach would strand — it names them in the message, sorted, not in a new
   structured field: §1's assertion carries a single plasmid, and adding a field to it would be a
   fourth amendment this spec does not make. That refusal is spec 001's 105 and carries no `fix`.
-  It is not a third exception to the rule above: a detach refusal is not one an author causes,
+  It is not another exception to the rule above: a detach refusal is not one an author causes,
   and spec 001's closed table gives `fix` only to 108. Corrected on 2026-10-20: this said the
   requirers are named in the message and the `fix`, and did not say why a detach refusal carries
-  none.
+  none. Amended on 2026-10-20: this named two whole-file refusals, and said a detach refusal is
+  not a third exception, before the depth bound.
 - **A capability denied at the boundary is reported as a missing declaration.** The report names
   what was denied and the declaration field it belongs in, and names nothing that was granted or
   would have been. It is written to the cell's session log, one line per denial, and to the

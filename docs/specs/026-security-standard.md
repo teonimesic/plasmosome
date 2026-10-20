@@ -408,7 +408,7 @@ maximum size and, where it applies, a maximum nesting depth and a time budget.
 | --- | --- | --- | --- | --- |
 | Controller control line | `plasmosome-core` `control.rs`, `protocol.rs` | A control-socket client, including a poisoned agent | 1 MiB (`MAX_LINE_BYTES`), read through a limit; JSON depth 128 | Fuzz target |
 | Broker readiness reply | `plasmosome-membrane` `readiness.rs` | A plasmid's broker | 1 MiB (`MAX_RESPONSE_BYTES`) within spec 001's readiness budget; JSON depth 128 | Fuzz target |
-| Plasmid manifest | `plasmosome-core` `manifest.rs`, `load` and `parse` | A plasmid author | 1 MiB (`MAX_MANIFEST_BYTES`) on both, spec 020's limit for a declaration; `load` reads through a limit. TOML depth 80 within each key or value, which does not bound the depth of the parsed tree | A depth bound on the parsed tree; a fuzz target |
+| Plasmid manifest | `plasmosome-core` `manifest.rs`, `load` and `parse` | A plasmid author | 1 MiB (`MAX_MANIFEST_BYTES`) on both, spec 020's limit for a declaration; `load` reads through a limit. Nesting 32 levels (`MAX_MANIFEST_DEPTH`), counted from the text before TOML parses it, as spec 011 says. TOML's own depth limit of 80 bounds each key or value alone, not the parsed tree, and is not the bound. Amended on 2026-10-20: this named no depth bound, and Needs asked for one | Fuzz target |
 | Membrane control request | `plasmosome-membrane` `control.rs` | The controller, under spec 001's peer-UID check | 1 MiB (`MAX_REQUEST_BYTES`), read through a limit | Bound only |
 | Client reply | `plasmosome-cli` `json.rs`, `scan` | The kernel, on the private control socket under spec 025's peer-UID check. Its strings can come from a plasmid's broker | 16 MiB (`MAX_REPLY_BYTES`): `scan` refuses a longer input before reading it. No depth bound, by design: the scan keeps its own stack, so nesting costs memory, never the call stack. Measured at the bound, release build: 8,388,608 nested arrays peak at 508 MB resident to scan, and 779 MB to scan and write either form. Their human form is 1.1 GB, written in 64 KiB pieces | Bound only. No fuzz target exists for it yet. The reader, through a limit of the bound plus one byte, lands with plasmosome-0t7j |
 | Git-only step | `.githooks/build-input-guard`, its TOML reading | A PR's author, through the commit the step judges | 8 MiB per file (`MAX_BYTES`), read from `git cat-file blob` through a limit; nesting bounded by Python's recursion limit; 60 s per git call. The tree listing from `git ls-tree` has the 60 s bound only. Anything it cannot read, decode or parse is refused | Bound only |
@@ -707,7 +707,10 @@ Each line names the broken implementation it catches.
 21. `PlasmidManifest::load` refuses promptly with the size error for a FIFO that writes 1 MiB plus
     one byte and never closes, and for a symlink to `/dev/zero`. `parse` refuses a string over
     1 MiB, and a 1 MiB file is not refused for size. Catches a `len()` check followed by
-    `read_to_string`, and a check after reading.
+    `read_to_string`, and a check after reading. `parse` refuses a declaration nested 33 levels
+    deep before any TOML is parsed, and parses one 32 deep, on a 2 MiB thread stack in a debug
+    build. Catches a bound checked on the tree toml builds: a tree deep enough overflows the stack
+    before such a check runs. Amended on 2026-10-20: the depth sentences are new.
 22. Fuzz targets exist for the control line, the readiness reply and the manifest. The control-line
     target drives the real request handler, and asserts well-formed replies and a connection that
     keeps answering. Catches a target that fuzzes only framing, or discards the result.
