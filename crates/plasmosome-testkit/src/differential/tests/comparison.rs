@@ -192,6 +192,25 @@ fn a_non_neutral_name_in_one_run_only_is_listed_beside_its_noise() {
 }
 
 #[test]
+fn names_in_an_observation_that_did_not_complete_are_not_checked() {
+    for failed_before_step in [false, true] {
+        let mut runs = runs();
+        let crashed = observation(&mut runs, Lane::Cell, 1, "hint-mounts");
+        crashed.completed = failed_before_step;
+        crashed.failed_before_step = failed_before_step;
+        crashed.fields["/opt"]["source"] = json!("plasmosome");
+        assert_eq!(
+            verdict(&manifest(), &runs),
+            Verdict::NotRun {
+                not_run: vec![finding("hint-mounts", Reason::NotRun { lane: Lane::Cell })],
+                failures: vec![],
+            },
+            "failed before its step: {failed_before_step}"
+        );
+    }
+}
+
+#[test]
 fn a_missing_mount_or_a_non_neutral_cgroup_path_is_not_neutral() {
     let mut runs = runs();
     for run in 0..2 {

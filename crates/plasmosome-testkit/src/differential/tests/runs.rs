@@ -2,8 +2,8 @@ use serde_json::json;
 
 use super::{finding, ids, lane_run, manifest, object, observation, runs, set, verdict};
 use crate::differential::{
-    Channel, Finding, Lane, ManifestRefusal, MountKey, NeutralName, Reason, Rule, RuleKind, Run,
-    RunRefusal, Subject, Verdict, judge,
+    Channel, Finding, Lane, Manifest, ManifestRefusal, MountKey, NeutralName, Reason, Rule,
+    RuleKind, Run, RunRefusal, Subject, Verdict, judge,
 };
 
 fn not_run(probe: &str, lane: Lane) -> Finding {
@@ -28,6 +28,16 @@ fn never_discriminates(runs: &mut [Run], probe: &str) {
         "outcome",
         json!("name does not resolve"),
     );
+}
+
+fn pid_rule(probe: &str, field: &str) -> Manifest {
+    let mut manifest = manifest();
+    manifest.rules.push(Rule {
+        probe: probe.to_string(),
+        field: field.to_string(),
+        kind: RuleKind::Pid,
+    });
+    manifest
 }
 
 fn per_run(runs: &mut [Run], lanes: &[Lane], probe: &str, field: &str) {
@@ -105,12 +115,7 @@ fn a_reach_probe_equal_in_the_open_and_absent_lanes_fails() {
 
 #[test]
 fn a_reach_probe_that_differs_only_in_a_ruled_field_does_not_discriminate() {
-    let mut manifest = manifest();
-    manifest.rules.push(Rule {
-        probe: "refusal-host-1".to_string(),
-        field: "pid".to_string(),
-        kind: RuleKind::Pid,
-    });
+    let manifest = pid_rule("refusal-host-1", "pid");
     let mut runs = runs();
     never_discriminates(&mut runs, "refusal-host-1");
     for (lane, pid) in [(Lane::Cell, 300), (Lane::Open, 310), (Lane::Absent, 300)] {
@@ -119,6 +124,74 @@ fn a_reach_probe_that_differs_only_in_a_ruled_field_does_not_discriminate() {
     assert_eq!(
         verdict(&manifest, &runs),
         Verdict::Fail(vec![finding("refusal-host-1", Reason::NoDiscrimination)])
+    );
+}
+
+#[test]
+fn a_reach_probe_that_reports_only_ruled_fields_does_not_discriminate() {
+    let manifest = pid_rule("refusal-host-1", "pid");
+    let mut runs = runs();
+    for (lane, pid) in [(Lane::Cell, 300), (Lane::Open, 310), (Lane::Absent, 300)] {
+        for run in 0..2 {
+            let fields = &mut observation(&mut runs, lane, run, "refusal-host-1").fields;
+            *fields = object(json!({"pid": pid}));
+        }
+    }
+    assert_eq!(
+        verdict(&manifest, &runs),
+        Verdict::Fail(vec![finding("refusal-host-1", Reason::NoDiscrimination)])
+    );
+}
+
+#[test]
+fn a_field_another_probes_rule_covers_still_discriminates() {
+    let manifest = manifest();
+    assert!(manifest.rules.iter().any(|rule| rule.field == "pid"));
+    let mut runs = runs();
+    never_discriminates(&mut runs, "refusal-host-1");
+    for (lane, pid) in [(Lane::Cell, 300), (Lane::Open, 310), (Lane::Absent, 300)] {
+        set(&mut runs, lane, "refusal-host-1", "pid", json!(pid));
+    }
+    assert_eq!(verdict(&manifest, &runs), Verdict::Pass);
+}
+
+#[test]
+fn a_ruled_field_of_a_reach_probe_is_still_noise_and_still_a_difference() {
+    let manifest = pid_rule("refusal-host-1", "pids");
+    let staged = |cell: [u32; 2], second_open: [u32; 2]| {
+        let mut runs = runs();
+        for (lane, pids) in [
+            (Lane::Cell, cell),
+            (Lane::Open, [310, 311]),
+            (Lane::Absent, [300, 301]),
+        ] {
+            set(&mut runs, lane, "refusal-host-1", "pids", json!(pids));
+        }
+        let open = &mut observation(&mut runs, Lane::Open, 1, "refusal-host-1").fields;
+        open.insert("pids".to_string(), json!(second_open));
+        runs
+    };
+    assert_eq!(
+        verdict(&manifest, &staged([300, 300], [310, 311])),
+        Verdict::Fail(vec![super::differs("refusal-host-1", "pids")])
+    );
+    assert_eq!(
+        verdict(&manifest, &staged([300, 301], [310, 310])),
+        Verdict::Fail(vec![noise("refusal-host-1", Lane::Open, "pids")])
+    );
+}
+
+#[test]
+fn a_reach_probe_equal_in_one_pair_of_boots_does_not_discriminate() {
+    let mut runs = runs();
+    let open = &mut observation(&mut runs, Lane::Open, 0, "refusal-host-1").fields;
+    open.insert("outcome".to_string(), json!("name does not resolve"));
+    assert_eq!(
+        verdict(&manifest(), &runs),
+        Verdict::Fail(vec![
+            noise("refusal-host-1", Lane::Open, "outcome"),
+            finding("refusal-host-1", Reason::NoDiscrimination),
+        ])
     );
 }
 
@@ -352,16 +425,22 @@ fn two_runs_from_one_boot_are_refused_in_one_lane_or_across_two() {
         (1, 4, Lane::Cell, Lane::Absent),
         (3, 5, Lane::Open, Lane::Absent),
     ] {
-        let mut runs = runs();
-        runs[to].boot_id = runs[from].boot_id.clone();
-        assert_eq!(
-            judge(&manifest(), &runs),
-            Err(RunRefusal::SameBoot {
-                boot_id: runs[from].boot_id.clone(),
-                first,
-                second
-            })
-        );
+        for observed_nothing in [false, true] {
+            let mut runs = runs();
+            runs[to].boot_id = runs[from].boot_id.clone();
+            if observed_nothing {
+                runs[to].observations.clear();
+            }
+            assert_eq!(
+                judge(&manifest(), &runs),
+                Err(RunRefusal::SameBoot {
+                    boot_id: runs[from].boot_id.clone(),
+                    first,
+                    second
+                }),
+                "run {to} observed nothing: {observed_nothing}"
+            );
+        }
     }
 }
 
