@@ -1780,6 +1780,53 @@ mod tests {
         }
     }
 
+    fn cells_of(root: &Path) -> OwnedFd {
+        open_at(open_root(root).dir.as_fd(), c"cells", DIRECTORY_FLAGS, 0).expect("cells opens")
+    }
+
+    fn opened_cell(root: &Path) -> (OwnedFd, OwnedFd) {
+        make_cell(root, "cell-1", None);
+        let cells = cells_of(root);
+        let opened = open_at(cells.as_fd(), c"cell-1", DIRECTORY_FLAGS, 0).expect("the cell opens");
+        (cells, opened)
+    }
+
+    #[test]
+    fn an_opened_cell_listed_by_its_own_name_is_named_exactly() {
+        let (_dir, root) = temp_root();
+        let (cells, opened) = opened_cell(&root);
+        let named = naming(cells.as_fd(), c"cell-1", opened.as_fd()).expect("the name is read");
+        assert_eq!(named, Naming::Exact);
+    }
+
+    #[test]
+    fn a_cell_retired_after_its_open_no_longer_names_the_opened_directory() {
+        let (_dir, root) = temp_root();
+        let (cells, opened) = opened_cell(&root);
+        fs::rename(root.join("cells/cell-1"), root.join("retired")).expect("the cell is retired");
+        let named = naming(cells.as_fd(), c"cell-1", opened.as_fd()).expect("the name is read");
+        assert_eq!(named, Naming::Gone);
+    }
+
+    #[test]
+    fn a_cell_replaced_after_its_open_no_longer_names_the_opened_directory() {
+        let (_dir, root) = temp_root();
+        let (cells, opened) = opened_cell(&root);
+        fs::rename(root.join("cells/cell-1"), root.join("retired")).expect("the cell is retired");
+        fs::create_dir(root.join("cells/cell-1")).expect("another directory takes its name");
+        let named = naming(cells.as_fd(), c"cell-1", opened.as_fd()).expect("the name is read");
+        assert_eq!(named, Naming::Gone);
+    }
+
+    #[test]
+    fn another_spelling_of_the_opened_cell_is_an_alias_where_the_filesystem_folds_it() {
+        let (_dir, root) = temp_root();
+        let (cells, opened) = opened_cell(&root);
+        let folded = fs::symlink_metadata(root.join("cells/CELL-1")).is_ok();
+        let named = naming(cells.as_fd(), c"CELL-1", opened.as_fd()).expect("the name is read");
+        assert_eq!(named, if folded { Naming::Alias } else { Naming::Gone });
+    }
+
     #[test]
     fn cell_dir_refuses_a_symlinked_cells_directory() {
         let (_dir, root) = temp_root();
