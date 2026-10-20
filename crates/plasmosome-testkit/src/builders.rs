@@ -189,3 +189,79 @@ impl DesiredStateBuilder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_file_holds_exactly_its_path_unchecked() {
+        for path in ["/skills/pr.md", "skills/../pr.md/", "/skills/pr\0.md", ""] {
+            assert_eq!(
+                session_file(path),
+                Capability::SessionFile {
+                    path: path.to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn uds_socket_holds_exactly_its_path_unchecked() {
+        for path in ["/run/plasmosome/egressd.uds", "run//egressd.uds", ""] {
+            assert_eq!(
+                uds_socket(path),
+                Capability::UdsSocket {
+                    path: path.to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_map_keeps_its_host_and_route_in_place() {
+        for (host, route) in [
+            ("api.github.com", "splice"),
+            ("splice", "api.github.com"),
+            ("api.github\0.com", "../relative/route/"),
+        ] {
+            assert_eq!(
+                proxy_map(host, route),
+                Capability::ProxyMap {
+                    host: host.to_string(),
+                    route: route.to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn broker_holds_exactly_its_pid_and_name() {
+        for (pid, name) in [(4242, "egressd"), (0, "egress\0d"), (u32::MAX, "")] {
+            assert_eq!(
+                broker(pid, name),
+                Capability::Broker {
+                    pid,
+                    name: name.to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn mount_keeps_its_source_and_target_in_place() {
+        for (source, target) in [
+            ("/srv/repo", "/workspace"),
+            ("/workspace", "/srv/repo"),
+            ("srv/repo", "/workspace/"),
+        ] {
+            assert_eq!(
+                mount(source, target),
+                Capability::Mount {
+                    source: source.to_string(),
+                    target: target.to_string(),
+                }
+            );
+        }
+    }
+}
