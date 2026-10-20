@@ -92,6 +92,18 @@ on a whim.
 as one step, `publish = false`. The word "freeze" leaves: nothing here freezes a design, and a
 name promising otherwise invites the rules this spec refuses.
 
+**Three things outside this crate fail builds.** A lint level a package declares in its
+manifest, such as `unsafe_code = "forbid"`, is part of that package's code, not a guard. Crossing
+it takes a visible change: the line itself, or a build setting that weakens lints, which
+[spec 026](026-security-standard.md#2-unsafe-code) refuses in committed Cargo configuration and
+puts before the reviewer in workflows. It does not reach `unsafe` that a dependency's macro
+expands; spec 026's dependency records cover that. Spec 026's git-only step runs before cargo,
+because cargo, rustc and rustup can each run a program a commit names. It is a script in
+`.githooks/`, mutation-tested from this crate. A supply-chain check by a pinned
+third-party tool, such as `cargo-deny`, runs as its own CI step. The last two are held to this
+spec's bar like any guard, and [spec 026](026-security-standard.md#7-how-each-rule-refuses)
+argues each one.
+
 ### Workspace-check validity
 
 A check on the compilation checkout cannot certify the invocation checkout. All repository
