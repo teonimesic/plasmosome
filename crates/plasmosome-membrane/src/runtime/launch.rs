@@ -503,6 +503,13 @@ mod tests {
                 .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
         }
 
+        fn values(&self, key: &str) -> Vec<&str> {
+            self.text
+                .lines()
+                .filter_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+                .collect()
+        }
+
         fn descriptors(&self) -> BTreeMap<i32, &str> {
             self.text
                 .lines()
@@ -708,11 +715,11 @@ mod tests {
     }
 
     #[allow(unsafe_code)]
-    fn this_process_ignores_sigpipe() -> bool {
+    fn this_process_ignores(signal: libc::c_int) -> bool {
         // SAFETY: libc::sigaction is a plain C struct, for which all zeroes is a valid value.
         let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
         // SAFETY: A null new action only reads the disposition into `current`, a local.
-        unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut current) };
+        unsafe { libc::sigaction(signal, std::ptr::null(), &mut current) };
         current.sa_sigaction == libc::SIG_IGN
     }
 
@@ -878,7 +885,7 @@ mod tests {
     #[test]
     fn the_helper_starts_in_root_with_umask_077_default_signals_and_its_own_session() {
         assert!(
-            this_process_ignores_sigpipe(),
+            this_process_ignores(libc::SIGPIPE),
             "the test harness ignores SIGPIPE, which an exec keeps unless the child resets it"
         );
         let recorded = record();
@@ -891,8 +898,43 @@ mod tests {
             Some("1"),
             "the forking thread blocked SIGUSR2"
         );
-        assert_eq!(report.value("sigpipe"), Some("default"));
+        assert_eq!(
+            report.values("ignored"),
+            Vec::<&str>::new(),
+            "the helper ignores no signal"
+        );
         assert_eq!(report.value("sid_is_self"), Some("1"));
+    }
+
+    #[test]
+    fn every_signal_the_parent_ignored_reaches_the_helper_at_its_default() {
+        run_probe("runtime::launch::tests::probe_launch_with_signals_ignored");
+    }
+
+    #[test]
+    #[ignore = "helper process for every_signal_the_parent_ignored_reaches_the_helper_at_its_default"]
+    #[allow(unsafe_code)]
+    fn probe_launch_with_signals_ignored() {
+        if !probing() {
+            return;
+        }
+        for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM] {
+            // SAFETY: signal takes integers and SIG_IGN. This probe process runs only this test,
+            // so ignoring these signals reaches no other test.
+            let previous = unsafe { libc::signal(signal, libc::SIG_IGN) };
+            assert!(
+                previous != libc::SIG_ERR && this_process_ignores(signal),
+                "the probe ignores signal {signal} before it launches"
+            );
+        }
+        let recorded = record();
+        recorded.report.assert_exited_cleanly();
+        assert_eq!(
+            recorded.report.values("ignored"),
+            Vec::<&str>::new(),
+            "{}",
+            recorded.report.text
+        );
     }
 
     #[test]

@@ -165,20 +165,21 @@ static void report_process(FILE *report) {
             empty = 0;
         }
     }
-    struct sigaction pipe_action;
-    memset(&pipe_action, 0, sizeof(pipe_action));
-    sigaction(SIGPIPE, NULL, &pipe_action);
-    const char *sigpipe = pipe_action.sa_handler == SIG_IGN   ? "ignored"
-                          : pipe_action.sa_handler == SIG_DFL ? "default"
-                                                              : "handled";
     mode_t mask = umask(0);
     umask(mask);
     char cwd[4096];
     if (getcwd(cwd, sizeof(cwd)) == NULL) {
         strcpy(cwd, "unreadable");
     }
-    fprintf(report, "cwd=%s\numask=%03o\nsigmask_empty=%d\nsigpipe=%s\nsid_is_self=%d\n", cwd,
-            (unsigned)mask, empty, sigpipe, getsid(0) == getpid());
+    fprintf(report, "cwd=%s\numask=%03o\nsigmask_empty=%d\nsid_is_self=%d\n", cwd, (unsigned)mask,
+            empty, getsid(0) == getpid());
+    for (int number = 1; number < NSIG; number++) {
+        struct sigaction action;
+        memset(&action, 0, sizeof(action));
+        if (sigaction(number, NULL, &action) == 0 && action.sa_handler == SIG_IGN) {
+            fprintf(report, "ignored=%d\n", number);
+        }
+    }
 }
 
 static void report_recipe(FILE *report) {
