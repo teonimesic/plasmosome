@@ -584,10 +584,10 @@ mod tests {
                 events: libc::POLLIN,
                 revents: 0,
             };
-            let slice = libc::c_int::try_from(left.as_millis().min(100)).unwrap_or(100);
+            let wait_ms = libc::c_int::try_from(left.as_millis().min(100)).unwrap_or(100);
             // SAFETY: `watched` is one local pollfd, matching the count of 1, and `fd` keeps its
             // descriptor open.
-            if unsafe { libc::poll(&mut watched, 1, slice) } <= 0 {
+            if unsafe { libc::poll(&mut watched, 1, wait_ms) } <= 0 {
                 continue;
             }
             let mut chunk = [0u8; 4096];
