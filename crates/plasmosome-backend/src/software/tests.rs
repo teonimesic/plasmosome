@@ -313,15 +313,23 @@ fn a_file_whose_bytes_differ_from_its_digest_is_refused_naming_it() {
 
 #[test]
 fn a_path_listed_twice_with_two_digests_is_refused_as_a_mismatch() {
-    let tree = Tree::new()
-        .file("tool", b"tool")
-        .listed_only("tool", b"other bytes");
-    assert_eq!(
-        refusal(tree.pin(&[])),
-        PinRefusal::DigestMismatch {
-            path: "tool".into()
-        }
-    );
+    for tree in [
+        Tree::new()
+            .file("tool", b"tool")
+            .listed_only("tool", b"other bytes"),
+        Tree::new()
+            .listed_only("tool", b"other bytes")
+            .file("tool", b"tool"),
+    ] {
+        assert_eq!(
+            refusal(tree.pin(&[])),
+            PinRefusal::DigestMismatch {
+                path: "tool".into()
+            },
+            "{:?}",
+            tree.listed
+        );
+    }
     let same_twice = Tree::new()
         .file("tool", b"tool")
         .listed_only("tool", b"tool");
@@ -783,6 +791,16 @@ fn a_case_only_collision_is_refused_only_when_the_volume_ignores_case() {
         Err(Conflict {
             target: "/usr/local/bin/gh".into(),
             holder: Holder::Image,
+        })
+    );
+    let accented = commands_tree(&["\u{e9}clair"]);
+    let others = attached(&[("pastry", &["\u{c9}CLAIR"])]);
+    assert_eq!(check_names(&accented, &others, no_image, false), Ok(()));
+    assert_eq!(
+        check_names(&accented, &others, no_image, true),
+        Err(Conflict {
+            target: "/usr/local/bin/\u{e9}clair".into(),
+            holder: Holder::Plasmid("pastry".into()),
         })
     );
 }
