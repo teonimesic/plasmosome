@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use plasmosome_core::{ManifestError, PlasmidManifest};
+use plasmosome_core::{MAX_MANIFEST_BYTES, ManifestError, PlasmidManifest};
 
 const BOUND: usize = 1 << 20;
 
@@ -29,10 +29,15 @@ fn written(dir: &Path, bytes: &[u8]) -> PathBuf {
 
 fn refused_for_size(outcome: Result<PlasmidManifest, ManifestError>, what: &str) {
     match outcome {
-        Err(error) => assert!(
-            error.to_string().contains(&BOUND.to_string()),
-            "{what} is refused for its size, not as {error:?}"
-        ),
+        Err(error @ ManifestError::TooLarge { limit }) => {
+            assert_eq!(limit, BOUND, "{what}: {error:?}");
+            assert_eq!(
+                error.to_string(),
+                "manifest exceeds the 1048576-byte limit",
+                "{what}"
+            );
+        }
+        Err(error) => panic!("{what} is refused for its size, not as {error:?}"),
         Ok(manifest) => panic!("{what} was accepted as {manifest:?}"),
     }
 }
@@ -97,6 +102,7 @@ fn load_refuses_a_symlink_to_dev_zero() {
 
 #[test]
 fn a_declaration_of_exactly_one_mebibyte_parses_and_loads() {
+    assert_eq!(MAX_MANIFEST_BYTES, BOUND);
     let text = padded(BOUND);
     assert_eq!(text.len(), BOUND);
     let parsed = PlasmidManifest::parse(&text).expect("parse accepts exactly 1 MiB");

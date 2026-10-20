@@ -529,7 +529,7 @@ pub struct StatusParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{ManifestError, PlasmidManifest};
+    use crate::manifest::{MAX_MANIFEST_BYTES, ManifestError, PlasmidManifest};
     use crate::state::PlasmidRecord;
 
     fn raw_id(token: &str) -> Box<RawValue> {
@@ -583,7 +583,7 @@ mod tests {
                 None,
             ),
             (
-                PlasmidManifest::parse(&"#".repeat((1 << 20) + 1))
+                PlasmidManifest::parse(&"#".repeat(MAX_MANIFEST_BYTES + 1))
                     .expect_err("a declaration over 1 MiB is refused"),
                 None,
             ),
