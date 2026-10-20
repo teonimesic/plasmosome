@@ -8,7 +8,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use plasmosome_lanes::bundle::verify_bundle;
+use plasmosome_lanes::bundle::{PINNED_BUNDLE_ID, verify_bundle};
 use plasmosome_lanes::config::{
     Confinement, GuestConfig, GuestMount, LaneConfig, Probe, Semantics, Share,
 };
@@ -29,13 +29,75 @@ fn manifest_dir() -> PathBuf {
 
 fn bundle_dir() -> PathBuf {
     let dir = std::env::var_os("LANES_BUNDLE").map_or_else(|| PathBuf::from(BUNDLE), PathBuf::from);
-    verify_bundle(&dir).unwrap_or_else(|error| {
+    verify_bundle(&dir, PINNED_BUNDLE_ID).unwrap_or_else(|error| {
         panic!(
             "this test needs the pinned bundle at {}: {error}",
             dir.display()
         )
     });
     dir
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).expect("the copy's directory is created");
+    for entry in fs::read_dir(from).expect("the bundle is listed") {
+        let entry = entry.expect("a bundle entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("a file type").is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).expect("a bundle file is copied");
+            set_mode(&target, 0o644);
+        }
+    }
+}
+
+fn bundle_copy() -> (TempDir, PathBuf) {
+    let parent = tempfile::tempdir().expect("a directory for the bundle copy");
+    let copy = fs::canonicalize(parent.path())
+        .expect("the copy's parent resolves")
+        .join(PINNED_BUNDLE_ID);
+    copy_tree(&bundle_dir(), &copy);
+    verify_bundle(&copy, PINNED_BUNDLE_ID).expect("an unchanged copy verifies");
+    (parent, copy)
+}
+
+fn refused_copy(copy: &Path) -> LaneRun {
+    let mut lane = lane("copy", vec![probe("uname", 1000, &["uname"])]);
+    lane.lane.bundle = copy.to_path_buf();
+    run_lane(signed_vmm(), &lane.lane, &lane.guest, TIMEOUT).expect("lane-vmm starts")
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn lane_vmm_refuses_a_changed_kernel_in_a_copy_of_the_pinned_bundle() {
+    let (_parent, copy) = bundle_copy();
+    let kernel = copy.join("boot/kernel");
+    let mut bytes = fs::read(&kernel).expect("the copied kernel is readable");
+    bytes[0] ^= 1;
+    fs::write(&kernel, bytes).expect("the copied kernel is changed");
+
+    let run = refused_copy(&copy);
+
+    assert_eq!(run.status.and_then(|status| status.code()), Some(65));
+    assert!(run.stderr.contains("boot/kernel"), "{}", run.stderr);
+    assert!(!run.stderr.contains("images loaded"), "{}", run.stderr);
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn lane_vmm_refuses_an_extra_file_under_lib_in_a_copy_of_the_pinned_bundle() {
+    let (_parent, copy) = bundle_copy();
+    fs::write(copy.join("lib/libkrunfw.5.dylib"), b"unlisted").expect("the extra file is written");
+
+    let run = refused_copy(&copy);
+
+    assert_eq!(run.status.and_then(|status| status.code()), Some(65));
+    assert!(
+        run.stderr.contains("lib/libkrunfw.5.dylib"),
+        "{}",
+        run.stderr
+    );
 }
 
 fn guest_binary(name: &str) -> Vec<u8> {

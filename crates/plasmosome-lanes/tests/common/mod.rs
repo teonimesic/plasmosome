@@ -44,16 +44,75 @@ pub const BUNDLE_FILES: &[(&str, &[u8])] = &[
     ("base/rootfs.raw", b"not really a disk"),
 ];
 
-pub fn bundle_fixture() -> TempDir {
-    let dir = tempfile::tempdir().expect("a bundle fixture directory");
+/// A bundle directory whose name and manifest chain to its `SHA256SUMS`, as a real bundle's do.
+pub struct BundleFixture {
+    _parent: TempDir,
+    root: PathBuf,
+    path: PathBuf,
+    pub id: String,
+}
+
+impl BundleFixture {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn parent(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn write_manifest(&self, manifest: &Value) {
+        fs::write(
+            self.path.join("manifest.json"),
+            serde_json::to_vec(manifest).expect("the manifest serializes"),
+        )
+        .expect("manifest.json is written");
+    }
+
+    pub fn sums_digest(&self) -> String {
+        sha256(&fs::read(self.path.join("SHA256SUMS")).expect("SHA256SUMS is readable"))
+    }
+
+    /// Rewrite the manifest for the current `SHA256SUMS` and rename the directory to match.
+    pub fn reseal(&mut self) {
+        let manifest = json!({
+            "bundle_format": "plasmosome-runtime-bundle/1",
+            "sha256sums_sha256": self.sums_digest(),
+        });
+        self.write_manifest(&manifest);
+        self.rename_to_manifest();
+    }
+
+    /// Rename the directory to the first 16 hex digits of its manifest's SHA-256.
+    pub fn rename_to_manifest(&mut self) {
+        let digest =
+            sha256(&fs::read(self.path.join("manifest.json")).expect("manifest.json is readable"));
+        let id = digest[..16].to_string();
+        let renamed = self.root.join(&id);
+        fs::rename(&self.path, &renamed).expect("the bundle directory is renamed");
+        self.path = renamed;
+        self.id = id;
+    }
+}
+
+pub fn bundle_fixture() -> BundleFixture {
+    let parent = tempfile::tempdir().expect("a bundle fixture directory");
+    let root = fs::canonicalize(parent.path()).expect("the fixture directory resolves");
+    let path = root.join("unsealed");
     let mut lines = Vec::new();
     for (relative, bytes) in BUNDLE_FILES {
-        write_file(dir.path(), relative, bytes);
+        write_file(&path, relative, bytes);
         lines.push((sha256(bytes), *relative));
     }
-    write_file(dir.path(), "manifest.json", b"{}");
-    write_sums(dir.path(), &lines);
-    dir
+    write_sums(&path, &lines);
+    let mut fixture = BundleFixture {
+        _parent: parent,
+        root,
+        path,
+        id: String::new(),
+    };
+    fixture.reseal();
+    fixture
 }
 
 pub fn lane_json(root: &Path) -> Value {

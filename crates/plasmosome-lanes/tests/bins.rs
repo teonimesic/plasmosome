@@ -50,49 +50,17 @@ fn lane_vmm_refuses_a_configuration_it_cannot_parse() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn lane_vmm_refuses_a_changed_libkrun_before_loading_it() {
+fn lane_vmm_refuses_a_bundle_that_is_not_the_pinned_one_before_loading() {
     let bundle = common::bundle_fixture();
-    common::write_file(
-        bundle.path(),
-        common::LIBKRUN,
-        b"garbage that dlopen would refuse",
+
+    let output = vmm_with_bundle(bundle.path());
+
+    assert_refused_naming(&output, 65, "manifest.json");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&bundle.id) && stderr.contains("eed141b574337d99"),
+        "the refusal should name both bundles: {stderr}"
     );
-
-    let output = vmm_with_bundle(bundle.path());
-
-    assert_refused_naming(&output, 65, common::LIBKRUN);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn lane_vmm_refuses_a_changed_kernel_before_loading_libkrun() {
-    let bundle = common::bundle_fixture();
-    common::write_file(bundle.path(), common::KERNEL, b"another kernel");
-
-    let output = vmm_with_bundle(bundle.path());
-
-    assert_refused_naming(&output, 65, common::KERNEL);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn lane_vmm_refuses_an_extra_file_under_lib_before_loading_libkrun() {
-    let bundle = common::bundle_fixture();
-    common::write_file(bundle.path(), "lib/libkrunfw.5.dylib", b"unlisted");
-
-    let output = vmm_with_bundle(bundle.path());
-
-    assert_refused_naming(&output, 65, "lib/libkrunfw.5.dylib");
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn lane_vmm_reports_a_verified_libkrun_that_does_not_load() {
-    let bundle = common::bundle_fixture();
-
-    let output = vmm_with_bundle(bundle.path());
-
-    assert_refused_naming(&output, 69, common::LIBKRUN);
 }
 
 #[cfg(not(target_os = "macos"))]
