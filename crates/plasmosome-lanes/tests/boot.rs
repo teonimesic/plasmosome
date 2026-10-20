@@ -318,6 +318,73 @@ fn the_sbpl_self_check_passes_with_the_profile_and_the_confined_lane_boots() {
     }
 }
 
+fn lane_with_profile(run_id: &str, profile: &str) -> Lane {
+    let mut lane = lane(run_id, vec![probe("uname", 1000, &["uname"])]);
+    let root = lane
+        .lane
+        .console
+        .parent()
+        .expect("a lane directory")
+        .to_path_buf();
+    let allowed = root.join("allowed");
+    let outside = root.join("outside");
+    common::write_file(&allowed, "placed", b"placed\n");
+    common::write_file(&outside, "secret", b"secret\n");
+    let profile_path = root.join("lane.sb");
+    fs::write(&profile_path, profile).expect("the profile is saved");
+    lane.lane.confinement = Some(Confinement {
+        profile: profile_path,
+        allowed,
+        outside,
+    });
+    lane
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("the mode is set");
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn the_control_exits_70_when_file_modes_refuse_without_a_sandbox() {
+    let lane = lane_with_profile("boot-control", "(version 1)\n(allow default)\n");
+    let confinement = lane.lane.confinement.clone().expect("a confinement");
+    set_mode(&confinement.allowed, 0o555);
+    set_mode(&confinement.outside, 0o000);
+
+    let run = boot(&lane);
+
+    set_mode(&confinement.allowed, 0o755);
+    set_mode(&confinement.outside, 0o755);
+    assert_eq!(run.status.and_then(|status| status.code()), Some(70));
+    assert_eq!(run.console, "", "the VM must not have started");
+    assert!(
+        run.stderr
+            .lines()
+            .any(|row| row.contains("control write inside:") && row.ends_with("FAILS")),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("self-check"),
+        "the sandbox must not be applied after a failed control: {}",
+        run.stderr
+    );
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn a_profile_sandbox_init_refuses_exits_71() {
+    let lane = lane_with_profile("boot-71", "(version 1)\n(this is not sbpl\n");
+
+    let run = boot(&lane);
+
+    assert_eq!(run.status.and_then(|status| status.code()), Some(71));
+    assert_eq!(run.console, "", "the VM must not have started");
+    assert!(run.stderr.contains("sandbox_init"), "{}", run.stderr);
+}
+
 #[test]
 #[ignore = "needs the pinned bundle and the hypervisor entitlement"]
 fn the_sbpl_self_check_exits_70_when_the_profile_allows_writes_outside_the_directory() {
