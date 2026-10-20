@@ -36,13 +36,18 @@ run's results come only from the guest console, and anything short of a complete
 
 ## What lane-vmm does
 
+First it starts a thread that checks its parent every 100 ms. Once the parent changes, or is
+launchd's pid 1, `lane-vmm` exits with 75, whatever step it is in. `run_lane` starts it in its
+own process group, so a Ctrl-C never reaches it, and a killed test would otherwise leave it
+running until the guest powers off.
+
 1. Parse the configuration from stdin. Exit 64 if it is refused.
 2. Refuse what would change which libraries load. Exit 69 if any `DYLD_` variable is set, or if
    anything named `libkrunfw.5.dylib`, a dangling symlink included, exists where dyld looks for
    libkrun's leaf-name load of it: the working directory, the libkrun's `LC_RPATH`
    `/opt/homebrew/opt/llvm/lib`, `/usr/local/lib` and `/usr/lib`. Nothing from the bundle has
-   loaded yet. A library named in `DYLD_INSERT_LIBRARIES` has, though: dyld loads it before
-   `main`, so its constructor has run by the time this step refuses it (see Limits).
+   loaded yet. A `DYLD_` variable can already have run code, though: dyld acts on it before
+   `main` (see Limits).
 3. Exit 64 if `root_image` resolves to a file inside the bundle. The root disk is writable, as
    the cell's is, so each lane gives its own copy of the image.
 4. Check the bundle with `verify_bundle`. The directory's name must be the first 16 hex digits
@@ -188,21 +193,35 @@ the bundle's `base/rootfs.raw` as its writable root image.
   stopped. The bundle directory's parent is group-writable on the machine that built it.
 - The bundle's libkrun carries a leftover library search path, `LC_RPATH /opt/homebrew/opt/llvm/lib`,
   and `krun_create_ctx` calls `dlopen("libkrunfw.5.dylib")` by leaf name, which searches it. The
-  lanes load the library as shipped. Step 2 refuses the run when that name exists anywhere dyld
-  would look, before libkrun loads. A process running as the same user can still place the
-  file after step 2 and before `krun_create_ctx`. Step 6 then refuses the run, but the library's
-  initializers have already run.
+  lanes load the library as shipped. This is owner gate O-6. Step 2 refuses the run when that
+  name exists anywhere dyld would look, before libkrun loads. On this Mac,
+  `/opt/homebrew/opt/llvm/lib` and `/usr/local/lib` are owned by the user who installed
+  Homebrew, the same user who runs the lanes. So a process running as that user can still place
+  the file after step 2 and before `krun_create_ctx`. Step 6 then refuses the run, but the
+  library's initializers have already run. That window belongs to owner gate O-4, the same-UID
+  limit.
+  Step 6's call in `lane-vmm` has no test, because no test can plant a library in that window
+  without a race; `unverified_images`, which it calls, is tested directly. No task here will add
+  one.
 - A process that leaves the VMM's process group escapes the kill. `lane-vmm` starts no children,
   so only a launcher other than `lane-vmm` can leave one. Its stderr reader thread then stays
   blocked until that process closes the pipe. So does the stdin writer thread, if the
   configuration is larger than the pipe holds and that process keeps stdin open unread.
   `run_lane` waits for neither.
-- dyld loads a library named in an inherited `DYLD_INSERT_LIBRARIES` before `main`, because
-  `lane-vmm` is ad hoc signed without the hardened runtime, and the boot tests sign it the same
-  way. Its constructor has run by the time step 2 refuses the variable with exit 69. It runs
-  even when step 1 refuses the configuration with exit 64. Both were measured with a library
-  whose constructor writes a file. `DYLD_LIBRARY_PATH` loaded nothing before its refusal.
-  `run_lane` clears the environment, so no lane passes either.
+- dyld acts on an inherited `DYLD_` variable before `main`, because `lane-vmm` is ad hoc signed
+  without the hardened runtime, and the boot tests sign it the same way. A variable that changes
+  where dyld finds `lane-vmm`'s own libraries can run code before step 2 refuses it with exit
+  69, or before step 1 refuses the configuration with exit 64. Two cases were measured, each
+  with a library whose constructor writes a file: a library named in `DYLD_INSERT_LIBRARIES`,
+  and a `libiconv.2.dylib` in a directory `DYLD_LIBRARY_PATH` names, which dyld loaded in place
+  of `/usr/lib/libiconv.2.dylib`. A `DYLD_LIBRARY_PATH` directory with nothing `lane-vmm` links
+  ran nothing. `run_lane` clears the whole environment, so no lane passes any of them; a
+  wrapper that starts `lane-vmm` must clear it too.
+- A `lane-vmm` built before the parent watch keeps running after its test is killed or
+  interrupted, until its guest powers off, or for good if the guest never does. After
+  interrupting a boot run with an older build, check `pgrep -fl lane-vmm` and kill what it
+  lists. With any build, a killed boot run leaves its lane directory behind: a `.tmp…`
+  directory in `TMPDIR`, holding the lane's 64 MiB copy of the root image. Remove it by hand.
 - After a normal exit, `run_lane` reaps the VMM before it kills the group. If the group is empty
   by then, a new process could take its ID in between, but only if the system's process IDs
   wrap around in that moment.

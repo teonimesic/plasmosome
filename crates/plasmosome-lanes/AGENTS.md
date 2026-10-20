@@ -10,7 +10,8 @@ for what each piece does.
 
 - **No product package ships this one.** Another member may reach it only through
   `[dev-dependencies]`. The guard `lanes_are_dev_only` in `plasmosome-guards` refuses a normal or
-  build dependency, because lanes code would then ship inside a product binary. A lane that a
+  build dependency, an optional one behind a feature included, because lanes code would then
+  ship inside a product binary. A lane that a
   product path could launch would be an unreviewed VMM. Today nothing depends on it at all.
 - **Results come only from the guest console.** A probe outcome is what `lane-init` framed on
   `/dev/hvc0`, never something the host inferred. A run with no complete framing is `NotRun`,
@@ -18,9 +19,14 @@ for what each piece does.
 - **Check the bundle before loading it.** `lane-vmm` refuses `DYLD_` variables and any
   `libkrunfw.5.dylib` on dyld's search list, then calls `verify_bundle` with the pinned bundle
   ID, all before `dlopen`. It checks the loaded images after `krun_create_ctx`. Moving any of
-  these later lets unverified code run first. None of them stops a library an inherited
-  `DYLD_INSERT_LIBRARIES` names: dyld runs it before `main`, which is why `run_lane` clears the
-  environment.
+  these later lets unverified code run first. None of them stops code an inherited `DYLD_`
+  variable brings in, because dyld acts on it before `main`. Measured: a library
+  `DYLD_INSERT_LIBRARIES` names, and a `libiconv.2.dylib` that `DYLD_LIBRARY_PATH` finds before
+  `/usr/lib`, each ran its constructor before the refusal. That is why `run_lane` clears the
+  whole environment.
+- **No `lane-vmm` outlives what started it.** Its first act is the parent watch thread, which
+  exits once the parent changes. Keep it first, and keep it the only thread before
+  `krun_start_enter`: the image check's SAFETY comment counts on that.
 - **The bundle is pinned.** `PINNED_BUNDLE_ID` names the one bundle these lanes load, and
   `Libkrun::open` takes only a `VerifiedBundle`. A self-consistent bundle with another ID is
   refused. A symlink or FIFO anywhere in the bundle tree is refused, because each lets a path
