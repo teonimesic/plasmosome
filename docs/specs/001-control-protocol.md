@@ -438,11 +438,11 @@ the directory to `<instance>/retired/<cell>` before replying (spec 023). A step 
 listed in `incomplete`, over the closed set `workload_stop`, `shutdown` and `teardown`; a failed
 workload stop never blocks. `incomplete` is present only when a step fell short (spec 023 §7,
 step 6), as §1 allows for a collection whose text says when it is present, so the clean kill above
-has none. Amended on 2026-10-20: this did not say when `incomplete` is present, so §1 would have
-sent `[]` on a clean kill. Every 106 a kill sends, for a drain or publication timeout, a resumed
-transaction that does not finish without `now`, or a `now` kill whose session log line cannot be
-appended, is `{handle, deadline_ms}` with `handle` the cell ID and `deadline_ms` the kill's
-deadline. An unclean teardown replies `"state": "dead"` with its residue and `teardown` in
+has none. Amended on 2026-10-20: spec 023's text did not say when `incomplete` is present, so §1
+would have sent `[]` on a clean kill. Every 106 a kill sends, for a drain or publication timeout, a
+resumed transaction that does not finish without `now`, or a `now` kill whose session log line
+cannot be appended, is `{handle, deadline_ms}` with `handle` the cell ID and `deadline_ms` the
+kill's deadline. An unclean teardown replies `"state": "dead"` with its residue and `teardown` in
 `incomplete`, and the cell stays listed for a retry. A cell that fails the check before its
 retirement (spec 023 §7, step 5) is decided at once by spec 023 §8's table: unless the table retires
 it, the reply lists `teardown` in `incomplete`, and the cell is set aside or quarantined and leaves
