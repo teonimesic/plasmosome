@@ -9,21 +9,28 @@ fn guard(root: &Path) -> PathBuf {
     root.join(".githooks").join("attribution-guard")
 }
 
-fn git(repository: &Path, arguments: &[&str], stdin: Option<&str>) -> Output {
-    let mut command = Command::new("git");
+fn isolated_from_the_callers_git(command: &mut Command, repository: &Path) {
     command
         .current_dir(repository)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_AUTHOR_NAME", "A Person")
-        .env("GIT_AUTHOR_EMAIL", "person@corp.locale.io")
-        .env("GIT_COMMITTER_NAME", "A Person")
-        .env("GIT_COMMITTER_EMAIL", "person@corp.locale.io")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_COMMON_DIR");
+}
+
+fn git(repository: &Path, arguments: &[&str], stdin: Option<&str>) -> Output {
+    let mut command = Command::new("git");
+    isolated_from_the_callers_git(&mut command, repository);
+    command
+        .env("GIT_AUTHOR_NAME", "A Person")
+        .env("GIT_AUTHOR_EMAIL", "person@corp.locale.io")
+        .env("GIT_COMMITTER_NAME", "A Person")
+        .env("GIT_COMMITTER_EMAIL", "person@corp.locale.io")
         .args(arguments);
     if let Some(text) = stdin {
         command.stdin(std::process::Stdio::piped());
@@ -88,15 +95,7 @@ fn run_guard_in(root: &Path, repository: &Path, range: &str) -> Output {
 
 fn guard_command(root: &Path, repository: &Path) -> Command {
     let mut command = Command::new(guard(root));
-    command
-        .current_dir(repository)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_COMMON_DIR");
+    isolated_from_the_callers_git(&mut command, repository);
     command
 }
 
