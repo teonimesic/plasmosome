@@ -4,23 +4,23 @@ reason = """\
   Generates random inputs for property tests from composable strategies, runs each property over \
   many cases, and shrinks a failing input to a small one before it reports it.\
   """
-write_it_instead.lines = 1840
+write_it_instead.lines = 1145
 write_it_instead.how = """\
-  On 2026-10-20, at main 0d53c22, `git grep -l proptest -- '*.rs' | wc -l` gives 8 files: two \
-  integration tests and six unit-test modules. \
+  On 2026-10-20, at main 5bab0a5, `git grep -l proptest -- '*.rs' | wc -l` gives 10 files: two \
+  integration tests and eight unit-test modules. \
   `git grep -h -o -E '(proptest|prop_assert_eq|prop_assert|prop_oneof)!' -- '*.rs' | sort | \
-  uniq -c` gives prop_assert_eq! 16, prop_assert! 7, prop_oneof! 8 and proptest! 8. \
+  uniq -c` gives prop_assert_eq! 24, prop_assert! 33, prop_oneof! 11 and proptest! 10. \
   `git grep -h -o -E 'prop_(map|flat_map|filter|recursive)' -- '*.rs' | sort | uniq -c` gives \
-  prop_filter 4, prop_flat_map 2, prop_map 12 and prop_recursive 1. \
-  `git grep -h -o -E 'any::<[A-Za-z0-9:]+>' -- '*.rs' | sort | uniq -c` gives any::<char> 3, \
-  any::<i64> 1, any::<prop::sample::Index> 2 and any::<u8> 1. \
+  prop_filter 4, prop_flat_map 3, prop_map 15 and prop_recursive 1. \
+  `git grep -h -o -E 'any::<[A-Za-z0-9:]+>' -- '*.rs' | sort | uniq -c` gives any::<bool> 1, \
+  any::<char> 3, any::<i64> 1, any::<prop::sample::Index> 2 and any::<u8> 1. \
   `git grep -h -o -E '(collection::vec|sample::select|option::of)' -- '*.rs' | sort | uniq -c` \
   gives collection::vec 10, option::of 1 and sample::select 3, and \
-  `git grep -h -o -F 'Just(' -- '*.rs' | wc -l` gives 16. Two regular expressions serve as \
+  `git grep -h -o -F 'Just(' -- '*.rs' | wc -l` gives 20. Two regular expressions serve as \
   string strategies: `git grep -h -o -F '[a-z0-9]{1,8}(-[a-z0-9]{1,8}){0,3}' -- '*.rs' | wc -l` \
-  gives 3, and `git grep -h -o -F '\\PC{0,8}' -- '*.rs' | wc -l` gives 2. Reading the eight \
+  gives 3, and `git grep -h -o -F '\\PC{0,8}' -- '*.rs' | wc -l` gives 2. Reading the ten \
   files adds ProptestConfig::with_cases, a struct update of ProptestConfig::default, integer \
-  ranges of u8, u32, u64 and usize, and tuples of up to four strategies. Both proptest and its \
+  ranges of u8, u32, u64 and usize, and tuples of up to five strategies. Both proptest and its \
   replacement serve tests only, so the replacement would be a module or crate that only test \
   builds link, and the scale counts its lines all the same. It needs: the proptest! macro, with \
   an optional #![proptest_config] and pattern-in-strategy arguments, tuple patterns included \
@@ -31,23 +31,27 @@ write_it_instead.how = """\
   the Strategy and ValueTree traits, with boxing (60); prop_map (30), prop_flat_map (60), \
   prop_filter (40) and prop_recursive (60); Just (15); the weighted union behind prop_oneof!, \
   with the macro (100); integer ranges, half-open and inclusive, with binary-search shrinking \
-  (80); any for u8, i64 and char (60); prop::sample::Index (30), prop::sample::select (30) and \
-  prop::option::of (30); collection::vec with a size range, shrinking by dropping elements and \
-  then shrinking each (100); tuples of up to four strategies (50); the identifier pattern as a \
-  composed strategy (25); and \\PC{0,8} as up to eight characters outside Unicode's category C \
-  (40), with that category as the table of 736 ranges that regex-syntax 0.8.11 holds, one range \
-  per line (740): 1840 lines. The call sites would name the two string strategies instead of \
-  passing the patterns. Drawing any character for which char::is_control is false would take \
-  about 20 lines in place of the table, but it would also draw the format, private-use and \
-  unassigned characters that \\PC leaves out. Not counted, because no test uses them: fork and \
-  timeout, which the default features turn on through rusty-fork but which no config sets; \
-  failure persistence, since no proptest-regressions file is committed; prop_compose! and \
-  prop_assume!. Replacing it removes 17 packages from Cargo.lock: bit-set@0.8, bit-vec@0.8, \
-  fnv@1, getrandom@0.3, ppv-lite86@0.2, proptest@1, quick-error@1, r-efi@5, rand@0.9, \
+  (80); any for u8, i64, bool and char (70); prop::sample::Index (30), prop::sample::select (30) \
+  and prop::option::of (30); collection::vec with a size range, shrinking by dropping elements \
+  and then shrinking each (100); tuples of up to five strategies (55); the identifier pattern as \
+  a composed strategy (25); and \\PC{0,8} as up to eight characters that are not control, \
+  format or private-use characters (40), with those three categories as a table of 26 ranges, \
+  one range per line (30): 1145 lines. The call sites would name the two string strategies \
+  instead of passing the patterns. A char is never a surrogate, so this keeps out all of Unicode's \
+  category C except its unassigned code points, which the replacement may draw and \\PC does \
+  not. regex-syntax 0.8.11 holds category C as one table of 736 ranges because it includes \
+  them: its own table of unassigned code points is 731 ranges, and 713 of the 736 hold nothing \
+  else. Both \\PC{0,8} strategies feed one property, and what it checks holds for any character, \
+  so no test relies on keeping unassigned code points out. A replacement that kept them out as \
+  well would carry all 736 ranges in place of the 26, for about 1855 lines. Not counted, because \
+  no test uses them: fork and timeout, which the default features turn on through rusty-fork but \
+  which no config sets; failure persistence, since no proptest-regressions file is committed; \
+  prop_compose! and prop_assume!. Replacing it removes 17 packages from Cargo.lock: bit-set@0.8, \
+  bit-vec@0.8, fnv@1, getrandom@0.3, ppv-lite86@0.2, proptest@1, quick-error@1, r-efi@5, rand@0.9, \
   rand_chacha@0.9, rand_core@0.9, rand_xorshift@0.4, rusty-fork@0.3, unarray@0.1, \
   wait-timeout@0.2, wasip2@1 and wit-bindgen@0.57. Replacing criterion as well removes six more, \
-  which each of the two keeps for the other: autocfg@1, num-traits@0.2, regex-syntax@0.8, \
-  syn@2, zerocopy@0.8 and zerocopy-derive@0.8.\
+  which each of the two keeps for the other: autocfg@1, num-traits@0.2, regex-syntax@0.8, syn@2, \
+  zerocopy@0.8 and zerocopy-derive@0.8.\
   """
 exception = ""
 brings = [
@@ -92,7 +96,10 @@ brings = [
 ]
 # zerocopy-derive builds because half, which criterion brings, turns on zerocopy's derive feature,
 # and the resolve unifies features across the workspace. proptest's own path, through ppv-lite86,
-# turns on only zerocopy's simd feature.
+# turns on only zerocopy's simd feature. Without criterion, three entries leave this list, the
+# zerocopy-derive proc macro and the proc-macro2 and quote build scripts it pulls in, so 9 become 6.
+# brings keeps all 38, because zerocopy also names zerocopy-derive under cfg(any()), a target that
+# is never true, and brings follows every target.
 build_time_code = [
   "getrandom@0.3 build script",
   "getrandom@0.4 build script",

@@ -127,18 +127,15 @@ build_time_code = [
 ]
 # criterion exports two macros, criterion_group! and criterion_main!, and neither writes unsafe.
 expands_unsafe = "none"
-# Not native code that this closure compiles or links, so not listed: Criterion::default runs
-# `gnuplot --version` from PATH through criterion-plot, and when gnuplot is found, criterion runs
-# it to draw the HTML report's plots.
-native_code = [
-  """\
-  rayon-core@1 declares links = "rayon-core" only so that cargo refuses to build two copies of \
-  rayon-core into one program. Its build.rs prints cargo:rerun-if-changed=build.rs and nothing \
-  else, so it compiles no native code and links no library.\
-  """,
-  """\
-  walkdir@2 ships compare/nftw.c, a C program its authors compare walkdir against. walkdir has \
-  no build script, so nothing compiles that file.\
-  """,
-]
+# No package that criterion builds on a supported host compiles native code or links a native
+# library. Three facts look like native code and are not:
+# - rayon-core@1 declares links = "rayon-core" only so that cargo refuses to build two copies of
+#   rayon-core into one program. Its build.rs prints cargo:rerun-if-changed=build.rs and nothing
+#   else, so it compiles no native code and links no library.
+# - walkdir@2 ships compare/nftw.c, a C program its authors compare walkdir against. walkdir has
+#   no build script, so nothing compiles that file.
+# - Criterion::default runs `gnuplot --version` from PATH through criterion-plot, and when gnuplot
+#   is found, criterion runs it to draw the HTML report's plots. That runs a program; it does not
+#   compile or link one.
+native_code = "none"
 verdict = "kept-pending-owner"
