@@ -22,6 +22,9 @@ const NO_LEDGER_YET: u64 = 0;
 pub struct DaemonConfig {
     pub control_socket: PathBuf,
     pub name: InstanceName,
+    pub instance_root: PathBuf,
+    pub recovery_deadline: Duration,
+    pub registry_root: Option<PathBuf>,
 }
 
 /// Why a config text is not a config.
@@ -60,6 +63,9 @@ pub fn parse_config(text: &str) -> Result<DaemonConfig, ConfigError> {
     Ok(DaemonConfig {
         control_socket: written.control_socket,
         name,
+        instance_root: written.instance_root,
+        recovery_deadline: Duration::from_millis(written.recovery_deadline_ms),
+        registry_root: written.registry_root,
     })
 }
 
@@ -70,6 +76,10 @@ struct Written {
     control_socket: PathBuf,
     #[serde(deserialize_with = "name")]
     name: String,
+    instance_root: PathBuf,
+    recovery_deadline_ms: u64,
+    #[serde(default)]
+    registry_root: Option<PathBuf>,
 }
 
 fn control_socket<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
