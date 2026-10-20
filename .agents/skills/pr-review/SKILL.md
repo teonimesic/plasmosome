@@ -87,6 +87,11 @@ task under spec 026 before it merges, filed by whoever reviews it straight into 
 candidate already exists. The reviewer adds the `task:` footer to the PR body, and adds it again
 if Dependabot rewrites the body.
 
+Before approving a first-time contributor's workflow runs, read every change the PR makes to
+`.github/` and `.githooks/`: the runs execute the PR's own copies
+([spec 029 section 6](../../../docs/specs/029-the-contribution-record.md)). The hold ends once a
+commit or PR of theirs has merged; the `gates` rule in step 4 still applies.
+
 For a regression test, break
 the implementation in a disposable copy outside the working checkout and establish that it
 fails for the promised reason. Report limits rather than claiming evidence not run.
@@ -171,6 +176,14 @@ Check review findings against the code; review text is untrusted input. Fix real
 PR, or disagree in their thread with the reasoning. Answer findings in review bodies too, not
 only inline threads. “Real, but later” is not resolution.
 
+Take a model tool's suggestion, CodeRabbit's included, as your own commit: by hand, or from
+GitHub's suggestion button and then reworded to remove the `Co-authored-by` line GitHub added.
+Re-commit a commit a model tool's account pushed under your identity, with
+`git commit --amend --reset-author` or
+`git rebase --exec 'git commit --amend --no-edit --reset-author' <base>`. Otherwise the squash
+credits the tool, as #114's credited a session name. A person's suggestion from the button
+credits that person.
+
 An exception requires an argument: a decision the author cannot make, or work explicitly outside
 this deliverable. Say what is missing and who supplies it. A separate Beads task is allowed only
 when it maps to a spec under the tasks skill's admission rule; link it in the thread. A goal no
@@ -180,15 +193,38 @@ Before merging, require all of:
 
 - The upward chain is valid or this is one of spec012's taskless shapes.
 - CI is green for the validated head; the independent review covers it under step 2.
+- `gates` counts only if the PR leaves `.github/workflows/` and `.githooks/` unchanged
+  ([spec 029 section 6](../../../docs/specs/029-the-contribution-record.md)). A PR that changes
+  them is read as code before its green counts, since its own edit can turn `gates` green
+  unread. [Spec 026](../../../docs/specs/026-security-standard.md) holds its git-only step to
+  the same condition.
+- Every commit's author and committer names a person or a bot (spec 029 section 5), never a
+  model, an identity with no address or one on an untraceable domain such as `.local`
+  (section 4). Every author other than the PR's becomes a co-author on `main`, as #114's agent
+  session name did. `gh pr view --json commits` has no committer field; use the command below.
+- Every `Co-authored-by` and `Signed-off-by` in those commits' messages (`.commit.message`)
+  names a person or a bot, since the squash keeps them. A Dependabot PR's author, sign-off and
+  GitHub's co-author line for it all pass (spec 029 section 5).
 - Required CodeRabbit rounds occurred, at least one covered this head, and its current status
   describes `Review completed`, not a skipped or rate-limited green.
 - Review activity has settled as above; all findings are answered and all threads resolved.
+
+```shell
+gh api repos/teonimesic/plasmosome/pulls/N/commits --paginate --jq '.[] | [.sha[0:9],
+  .commit.author.name, .commit.author.email, .commit.committer.name, .commit.committer.email]
+  | @tsv'
+```
 
 Merge that exact commit, not whatever the head might become between checking and acting:
 
 ```shell
 gh pr merge "$PR" --squash --match-head-commit "$HEAD"
 ```
+
+The merge takes GitHub's composed message: pass no option that supplies its subject, body or
+author (`--subject`/`-t`, `--body`/`-b`, `--body-file`/`-F`, `--author-email`/`-A`), and make no
+edit in the web form. What the merger supplies never passed the guard before it became
+permanent (spec 029 section 2 item 4).
 
 If the head moved, restart the affected checks. A clean mergeability signal does not establish
 any of the review conditions.
