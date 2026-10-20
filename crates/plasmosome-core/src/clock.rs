@@ -36,11 +36,15 @@ pub enum ClockError {
 impl SystemClock {
     /// Reads the boot session, and checks that the wall clock is not before 1970 and that the
     /// continuous clock can be read. After this, [`Clock::now`] does not fail and does not
-    /// panic: a wall clock later set before 1970 reads as 1970-01-01T00:00:00Z, and a
-    /// continuous clock that refuses a read gives `u64::MAX`, so every bound of this boot
-    /// session reads as passed. The fence is permanent, so one refused read ends every lease
-    /// of the boot session for good. The next good reading is lower than `u64::MAX`, so a
-    /// caller that subtracts two continuous readings must saturate.
+    /// panic. A wall clock later set before 1970 reads as 1970-01-01T00:00:00Z. A continuous
+    /// clock that refuses a read, or gives a negative time, reads as `u64::MAX`, so every bound
+    /// of this boot session checked against that reading reads as passed. That holds only for
+    /// that reading: the next good one is lower, and a bound checked against it reads as it
+    /// did before, so a lease ends for good only where the caller keeps a fence at that
+    /// reading ([`plasmosome_backend::Bound`] gives the rule). Never keep such a reading as a
+    /// start time, such as an idle limit's last use: the time since it would saturate to 0 at
+    /// every later reading, and the limit would never be reached. Check the bound and the idle
+    /// limit at that reading instead, so the caller fences there.
     pub fn new() -> Result<SystemClock, ClockError> {
         wall_ms_at(SystemTime::now())?;
         continuous_ns()?;

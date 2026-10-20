@@ -167,8 +167,24 @@ pub struct Continuous {
     pub ns: u64,
 }
 
-/// The moment B a lifetime ends, as two readings (spec 028 §3). B has passed once either has. A
-/// continuous deadline from another boot session than the current reading's is ignored.
+/// The moment B a lifetime ends, as two readings (spec 028 §3). B has passed at a reading when
+/// either of the two has reached its deadline there. A continuous deadline from another boot
+/// session than the reading's is ignored.
+///
+/// A bound keeps no state, and nothing records that B passed. [`Bound::passed`],
+/// [`Bound::remaining_ms`] and [`Bound::wait_deadline`] each look only at the reading they are
+/// given. So after the wall clock is set back, a bound that had passed only on its wall reading
+/// reads as not passed, with time left, and its wait deadline moves later.
+///
+/// A caller that keeps a fence follows one rule. At the fence, it moves the continuous deadline
+/// to where B fell on that reading: the reading's continuous value less the time overdue,
+/// saturating at 0, in the reading's boot session. The time overdue is `now.wait` less
+/// `wait_deadline(now, 0)`, both from that reading. The bound then reads as passed at every
+/// later reading of that boot session. Unless the subtraction saturated, its wait deadline
+/// stays where it was at the fence while the host is awake, and a sleep only moves it earlier.
+/// `bound.earlier(Bound::after(&now, 0))` is not enough: it moves the continuous deadline to
+/// the reading at the fence, not to B, so after a wall step back the wait deadline is later by
+/// the time overdue at the fence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bound {
     pub not_after: WallMs,
@@ -189,8 +205,10 @@ impl Bound {
         })
     }
 
-    /// True once the wall reading reaches `not_after`, or the continuous reading of the same
-    /// boot session reaches the continuous deadline. At B itself it has passed.
+    /// True when the wall reading is at or past `not_after`, or the continuous reading of the
+    /// same boot session is at or past the continuous deadline. At B itself it has passed. It
+    /// reads only `now`, so after a wall step back a bound that had passed only on its wall
+    /// reading is false again; [`Bound`] gives the rule for keeping a fence.
     pub fn passed(&self, now: &ClockReading) -> bool {
         now.wall >= self.not_after
             || (now.continuous.boot == self.continuous.boot
@@ -198,7 +216,9 @@ impl Bound {
     }
 
     /// Milliseconds left on the reading with less time left, rounded up, so it is 0 exactly
-    /// when [`Bound::passed`] is true. With another boot session it is the wall reading's.
+    /// when [`Bound::passed`] is true. With another boot session it is the wall reading's. It
+    /// reads only `now`, so after a wall step back a bound that had passed only on its wall
+    /// reading has time left again; [`Bound`] gives the rule for keeping a fence.
     pub fn remaining_ms(&self, now: &ClockReading) -> u64 {
         let left = u128::try_from(self.remaining_ns(now)).unwrap_or(0);
         u64::try_from(left.div_ceil(u128::from(NS_PER_MS))).unwrap_or(u64::MAX)
@@ -227,13 +247,18 @@ impl Bound {
     }
 
     /// Where B plus `extra_ms` falls on the wait clock, seen from this one reading: `now.wait`
-    /// plus the time left on the reading with less time left, plus `extra_ms`. Once B has
-    /// passed, the time overdue is taken off instead. So on an awake host the deadline is the
-    /// same instant at every reading, before B and after it, and once B plus `extra_ms` has
-    /// passed it is at or before `now.wait`, already reached. The wait clock can stop while
-    /// the host sleeps, so a caller derives this again at each reading and never stores it. A
-    /// sleep only moves the deadline earlier. Where an `Instant` cannot hold the result,
-    /// which cannot happen on macOS or Linux, the deadline is `now.wait`, already reached.
+    /// plus the time left on the reading with less time left, plus `extra_ms`. After B the
+    /// time left is negative, so the time overdue is taken off. On an awake host with no wall
+    /// step, the deadline is the same instant at every reading, before B and after it. On the
+    /// system clock the wall reading has 1 ms resolution, so where the wall reading has less
+    /// time left, that holds only to within 1 ms. When B plus `extra_ms` has passed, the
+    /// deadline is at or before `now.wait`, already reached. The wait clock stops while the
+    /// host sleeps and the other two run on, so the deadline from a reading after a sleep is
+    /// earlier, by the time asleep, than the one from a reading before it. It reads only
+    /// `now`, so after a wall step back a bound that had passed only on its wall reading gets
+    /// a later deadline; [`Bound`] gives the rule for keeping a fence. Where an `Instant`
+    /// cannot hold the result, which cannot happen on macOS or Linux, the deadline is
+    /// `now.wait`, already reached.
     pub fn wait_deadline(&self, now: &ClockReading, extra_ms: u64) -> Instant {
         let ns = self.remaining_ns(now) + i128::from(extra_ms) * i128::from(NS_PER_MS);
         let shift = duration_from_ns(ns.unsigned_abs());

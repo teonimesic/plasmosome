@@ -12,12 +12,13 @@ pub struct ClockReading {
     /// The continuous clock, with its boot session.
     pub continuous: Continuous,
     /// The clock waits and timeouts use. It can stop while the host sleeps, so a deadline on it
-    /// is derived again at each reading.
+    /// taken before a sleep comes late after it, by the time asleep.
     pub wait: Instant,
 }
 
-/// Where the controller and the supervisor read time. Tests pass a [`ManualClock`]; production
-/// passes the system clock in `plasmosome-core`.
+/// Where the controller and the supervisor read time. Tests pass a [`ManualClock`].
+/// `SystemClock` in `plasmosome-core::clock` is the production clock, for production code to
+/// pass once a caller exists.
 pub trait Clock: Send + Sync {
     /// The three readings, taken together.
     fn now(&self) -> ClockReading;
