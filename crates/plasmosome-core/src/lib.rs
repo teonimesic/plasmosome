@@ -16,6 +16,8 @@ pub mod kill_budget;
 pub mod lifecycle;
 pub mod manifest;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+mod nofollow;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod private_socket;
 pub mod protocol;
 pub mod reconciler;
