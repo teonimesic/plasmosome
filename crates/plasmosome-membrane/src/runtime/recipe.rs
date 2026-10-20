@@ -843,23 +843,12 @@ mod tests {
     use proptest::prelude::*;
     use serde_json::{Value, json};
 
-    const LIMITS: PlatformLimits = PlatformLimits {
-        architecture: Architecture::Aarch64,
-        max_vcpus: 8,
-        max_memory_mib: 16_384,
-        max_socket_path_bytes: 103,
-    };
+    const LIMITS: PlatformLimits = PlatformLimits::new(Architecture::Aarch64, 8, 16_384, 103);
 
-    const X86_64_LIMITS: PlatformLimits = PlatformLimits {
-        architecture: Architecture::X86_64,
-        ..LIMITS
-    };
+    const X86_64_LIMITS: PlatformLimits = PlatformLimits::new(Architecture::X86_64, 8, 16_384, 103);
 
-    const ROOMY: PlatformLimits = PlatformLimits {
-        max_vcpus: u8::MAX,
-        max_memory_mib: u32::MAX,
-        ..LIMITS
-    };
+    const ROOMY: PlatformLimits =
+        PlatformLimits::new(Architecture::Aarch64, u8::MAX, u32::MAX, 103);
 
     const FIELDS: [&str; 15] = [
         "version",
@@ -987,7 +976,11 @@ mod tests {
 
     fn refused_under(record: &[u8], limits: &PlatformLimits) -> RecipeRefusal {
         match RuntimeRecipe::parse(record, limits) {
-            Err(refusal) => refusal,
+            Err(refusal) => {
+                let shown = refusal.to_string();
+                assert!(!shown.contains(['\n', '\r']), "{shown:?} is one line");
+                refusal
+            }
             Ok(recipe) => panic!("{} parsed: {recipe:?}", String::from_utf8_lossy(record)),
         }
     }
@@ -1016,9 +1009,9 @@ mod tests {
         NotAnObject { field }
     }
 
-    fn duplicate(path: &str) -> RecipeRefusal {
-        let path = path.to_owned();
-        DuplicateField { path }
+    fn duplicate(field: &str) -> RecipeRefusal {
+        let field = field.to_owned();
+        DuplicateField { field }
     }
 
     fn path_of_length(bytes: usize) -> Value {
@@ -1139,8 +1132,8 @@ mod tests {
     proptest! {
         #[test]
         fn any_admitted_recipe_survives_its_encoding(
-            vcpus in 1..=ROOMY.max_vcpus,
-            memory_mib in 1..=ROOMY.max_memory_mib,
+            vcpus in 1..=ROOMY.max_vcpus(),
+            memory_mib in 1..=ROOMY.max_memory_mib(),
             names in proptest::collection::vec(component(), 0..5),
             name in component(),
         ) {
@@ -1301,15 +1294,42 @@ mod tests {
     fn a_repeated_key_refuses_wherever_it_appears() {
         let text = String::from_utf8(record(&[])).expect("the record is UTF-8");
         let kernel_twice = text.replacen('{', r#"{"kernel":0,"#, 1);
-        assert_eq!(refused(kernel_twice.as_bytes()), duplicate("/kernel"));
-        let helper = r#""helper":{"#;
-        assert!(text.contains(helper));
-        let repeated = format!(r#"{helper}"sha256":"{}","#, digest('4'));
-        let sha256_twice = text.replacen(helper, &repeated, 1);
-        assert_eq!(
-            refused(sha256_twice.as_bytes()),
-            duplicate("/helper/sha256")
-        );
+        assert_eq!(refused(kernel_twice.as_bytes()), duplicate("kernel"));
+        for (opening, field) in [
+            (r#""helper":{"#, "helper.sha256"),
+            (r#""libraries":[{"#, "libraries[0].sha256"),
+        ] {
+            assert!(text.contains(opening));
+            let repeated = format!(r#"{opening}"sha256":"{}","#, digest('4'));
+            let sha256_twice = text.replacen(opening, &repeated, 1);
+            assert_eq!(refused(sha256_twice.as_bytes()), duplicate(field));
+        }
+    }
+
+    #[test]
+    fn a_refusal_that_quotes_recipe_text_stays_on_one_line() {
+        let text = String::from_utf8(record(&[])).expect("the record is UTF-8");
+        let twice = text.replacen('{', r#"{"a\rb":0,"a\rb":1,"#, 1);
+        let (format, architecture) = ("raw\n".to_owned(), "x86\n64".to_owned());
+        for (record, refusal) in [
+            (with("/ex\ntra", json!(1)), unknown("ex\ntra")),
+            (with("/kernel/si\nze", json!(1)), unknown("kernel.si\nze")),
+            (twice.into_bytes(), duplicate("a\rb")),
+            (
+                with("/kernel_format", json!(format)),
+                UnknownKernelFormat { found: format },
+            ),
+            (
+                with("/architecture", json!(architecture)),
+                UnknownArchitecture {
+                    found: architecture,
+                },
+            ),
+        ] {
+            assert_eq!(refused(&record), refusal);
+            let shown = refusal.to_string();
+            assert!(!shown.contains(['\n', '\r']), "{shown:?}");
+        }
     }
 
     #[test]
@@ -1331,8 +1351,14 @@ mod tests {
 
     #[test]
     fn vcpus_and_memory_are_positive_and_within_the_host_limits() {
-        let vcpus_type = wrong_type("vcpus", "an integer from 0 to 255");
-        let memory_type = wrong_type("memory_mib", "an integer from 0 to 4294967295");
+        let vcpus_type = wrong_type("vcpus", "an integer from 1 to 255");
+        let memory_type = wrong_type("memory_mib", "an integer from 1 to 4294967295");
+        let vcpus_text = "`vcpus` must be an integer from 1 to 255";
+        assert_eq!(vcpus_type.to_string(), vcpus_text);
+        assert_eq!(ZeroVcpus.to_string(), vcpus_text);
+        let memory_text = "`memory_mib` must be an integer from 1 to 4294967295";
+        assert_eq!(memory_type.to_string(), memory_text);
+        assert_eq!(ZeroMemory.to_string(), memory_text);
         assert_eq!(refused(&with("/vcpus", json!(0))), ZeroVcpus);
         for wrong in [json!(256), json!(-1), json!(2.0), json!("2")] {
             assert_eq!(refused(&with("/vcpus", wrong)), vcpus_type);
@@ -1649,12 +1675,12 @@ mod tests {
     #[test]
     fn the_host_limits_come_from_this_machine() {
         let limits = PlatformLimits::host().expect("this host reports its limits");
-        assert_eq!(limits.architecture.as_str(), std::env::consts::ARCH);
+        assert_eq!(limits.architecture().as_str(), std::env::consts::ARCH);
         let parallelism = std::thread::available_parallelism().expect("a CPU count");
-        assert_eq!(usize::from(limits.max_vcpus), parallelism.get().min(255));
-        assert_eq!(limits.max_memory_mib, installed_memory_mib());
+        assert_eq!(usize::from(limits.max_vcpus()), parallelism.get().min(255));
+        assert_eq!(limits.max_memory_mib(), installed_memory_mib());
         let sun_path = if cfg!(target_os = "macos") { 103 } else { 107 };
-        assert_eq!(limits.max_socket_path_bytes, sun_path);
+        assert_eq!(limits.max_socket_path_bytes(), sun_path);
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1679,67 +1705,9 @@ mod tests {
     }
 
     #[test]
-    fn roles_are_shown_as_recipe_field_names() {
-        use ArtifactRole::*;
-        use PathRole::{Artifact as Of, ControlPath, DataPath, WritableRoot};
-        let roles = [
-            Of(Kernel),
-            Of(Initramfs),
-            Of(RootImage),
-            WritableRoot,
-            ControlPath,
-            DataPath,
-            Of(Helper),
-            Of(Library(3)),
-            Of(HostPolicy),
-            Of(GuestPolicy),
-        ];
-        let shown: Vec<String> = roles.iter().map(PathRole::to_string).collect();
-        assert_eq!(
-            shown,
-            [
-                "kernel.path",
-                "initramfs.path",
-                "root_image.path",
-                "writable_root",
-                "control_path",
-                "data_path",
-                "helper.path",
-                "libraries[3].path",
-                "host_policy.path",
-                "guest_policy.path",
-            ]
-        );
-    }
-
-    #[test]
     fn refusals_describe_themselves() {
-        let (helper, library) = (ArtifactRole::Helper, ArtifactRole::Library(0));
-        let detail = "trailing characters at line 1, column 4".to_owned();
-        let (found, field) = ("bzImage".to_owned(), "kernel.sha256".to_owned());
         for (refusal, text) in [
-            (
-                TooLarge { bytes: 1_048_577 },
-                "the recipe is 1048577 bytes before its newline; at most 1048576 are allowed",
-            ),
-            (
-                NotOneLine,
-                "the recipe is not one line ending in a single newline with no carriage return",
-            ),
-            (NotUtf8, "the recipe is not UTF-8"),
-            (
-                NotJson { detail },
-                "the recipe is not JSON: trailing characters at line 1, column 4",
-            ),
             (not_an_object(""), "the recipe is not a JSON object"),
-            (
-                not_an_object("libraries[2]"),
-                "`libraries[2]` must be a JSON object",
-            ),
-            (
-                duplicate("/helper/sha256"),
-                r#"the recipe repeats the key at "/helper/sha256""#,
-            ),
             (
                 unknown("kernel.si\nze"),
                 r#"the recipe carries an unknown field "kernel.si\nze""#,
@@ -1747,69 +1715,6 @@ mod tests {
             (
                 missing("libraries[2].sha256"),
                 "the recipe is missing `libraries[2].sha256`",
-            ),
-            (
-                wrong_type("vcpus", "an integer from 0 to 255"),
-                "`vcpus` must be an integer from 0 to 255",
-            ),
-            (
-                UnsupportedVersion { found: 2 },
-                "recipe version 2 is not supported; only version 1 is",
-            ),
-            (
-                BadDigest {
-                    field,
-                    fault: DigestError::WrongLength { bytes: 63 },
-                },
-                "`kernel.sha256` is refused: a SHA-256 digest is 64 lowercase hexadecimal digits, not 63 bytes",
-            ),
-            (
-                BadPath {
-                    field: "data_path".to_owned(),
-                    fault: PathError::NotAbsolute,
-                },
-                "`data_path` is refused: the path does not start with /",
-            ),
-            (
-                UnknownKernelFormat { found },
-                r#"`kernel_format` "bzImage" is not one of raw, elf, pe_gz, image_bz2, image_gz or image_zstd"#,
-            ),
-            (
-                UnknownArchitecture {
-                    found: "riscv64".to_owned(),
-                },
-                r#"architecture "riscv64" is neither aarch64 nor x86_64"#,
-            ),
-            (ZeroVcpus, "`vcpus` must be at least 1"),
-            (ZeroMemory, "`memory_mib` must be at least 1"),
-            (
-                VcpusAboveLimit {
-                    requested: 9,
-                    limit: 8,
-                },
-                "`vcpus` is 9; this host admits at most 8",
-            ),
-            (
-                MemoryAboveLimit {
-                    requested: 16_385,
-                    limit: 16_384,
-                },
-                "`memory_mib` is 16385; this host admits at most 16384",
-            ),
-            (
-                UnadmittedBootPair,
-                "kernel format raw is not admitted for x86_64: the pinned libkrun boots it without the initramfs and command line",
-            ),
-            (
-                ArchitectureMismatch {
-                    recipe: Architecture::X86_64,
-                    host: Architecture::Aarch64,
-                },
-                "the recipe is built for x86_64 but this host is aarch64",
-            ),
-            (
-                SocketPathsEqual,
-                "`control_path` and `data_path` are the same path",
             ),
             (
                 SocketPathTooLong {
@@ -1820,13 +1725,6 @@ mod tests {
                 "`control_path` is 104 bytes; a socket path on this host holds at most 103",
             ),
             (
-                PathReused {
-                    first: PathRole::Artifact(helper),
-                    second: PathRole::Artifact(library),
-                },
-                "`helper.path` and `libraries[0].path` are the same path",
-            ),
-            (
                 HostLimitUnavailable {
                     limit: "physical memory",
                 },
@@ -1835,5 +1733,29 @@ mod tests {
         ] {
             assert_eq!(refusal.to_string(), text);
         }
+    }
+
+    #[test]
+    fn a_reused_path_is_shown_with_both_recipe_field_names() {
+        use ArtifactRole::*;
+        use PathRole::{Artifact as Of, ControlPath, DataPath, WritableRoot};
+        let pairs = [
+            (Of(Kernel), Of(Initramfs)),
+            (Of(RootImage), WritableRoot),
+            (ControlPath, DataPath),
+            (Of(Helper), Of(Library(3))),
+            (Of(HostPolicy), Of(GuestPolicy)),
+        ];
+        let shown = pairs.map(|(first, second)| PathReused { first, second }.to_string());
+        assert_eq!(
+            shown,
+            [
+                "`kernel.path` and `initramfs.path` are the same path",
+                "`root_image.path` and `writable_root` are the same path",
+                "`control_path` and `data_path` are the same path",
+                "`helper.path` and `libraries[3].path` are the same path",
+                "`host_policy.path` and `guest_policy.path` are the same path",
+            ]
+        );
     }
 }

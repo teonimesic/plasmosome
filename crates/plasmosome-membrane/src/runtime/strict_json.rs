@@ -165,7 +165,14 @@ mod tests {
 
     fn duplicate_at(text: &str) -> String {
         match parse_value(text.as_bytes()) {
-            Err(StrictJsonError::DuplicateKey { path }) => path,
+            Err(StrictJsonError::DuplicateKey { path, .. }) => path,
+            other => panic!("{text} refuses as a duplicate key, got {other:?}"),
+        }
+    }
+
+    fn duplicate_field_at(text: &str) -> String {
+        match parse_value(text.as_bytes()) {
+            Err(StrictJsonError::DuplicateKey { field, .. }) => field,
             other => panic!("{text} refuses as a duplicate key, got {other:?}"),
         }
     }
@@ -265,6 +272,20 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_key_is_also_named_by_its_dotted_field() {
+        for (text, field) in [
+            (r#"{"a":1,"a":2}"#, "a"),
+            (r#"{"k":{"s":1,"s":1}}"#, "k.s"),
+            (r#"{"l":[{"p":1},{"p":1,"p":2}]}"#, "l[1].p"),
+            (r#"{"a/b~c":{"x":1,"x":2}}"#, "a/b~c.x"),
+            (r#"[{"a":1,"a":2}]"#, "[0].a"),
+            (r#"{"":{"x":1,"x":2}}"#, ".x"),
+        ] {
+            assert_eq!(duplicate_field_at(text), field, "{text}");
+        }
+    }
+
+    #[test]
     fn malformed_text_reports_the_position_serde_json_reports() {
         for text in [
             "",
@@ -329,7 +350,8 @@ mod tests {
         );
         assert_eq!(
             StrictJsonError::DuplicateKey {
-                path: "/l/1/p".to_string()
+                path: "/l/1/p".to_string(),
+                field: "l[1].p".to_string(),
             }
             .to_string(),
             "duplicate object key at \"/l/1/p\""
