@@ -379,7 +379,7 @@ mod tests {
         ("control_socket", r#""/tmp/c.uds""#),
         ("name", r#""work""#),
         ("instance_root", r#""/srv/instances/work""#),
-        ("recovery_deadline_ms", "5000"),
+        ("recovery_deadline_ms", "4321"),
         ("registry_root", r#""/srv/imports""#),
     ];
 
@@ -537,7 +537,7 @@ mod tests {
                 control_socket: PathBuf::from("/tmp/c.uds"),
                 name: InstanceName::parse("work").expect("`work` is an instance name"),
                 instance_root: PathBuf::from("/srv/instances/work"),
-                recovery_deadline: Duration::from_millis(5000),
+                recovery_deadline: Duration::from_millis(4321),
                 registry_root: Some(PathBuf::from("/srv/imports")),
             }
         );
