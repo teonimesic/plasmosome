@@ -173,18 +173,19 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn duplicate_at(text: &str) -> String {
+    fn duplicate(text: &str) -> (String, String) {
         match parse_value(text.as_bytes()) {
-            Err(StrictJsonError::DuplicateKey { path, .. }) => path,
+            Err(StrictJsonError::DuplicateKey { path, field }) => (path, field),
             other => panic!("{text} refuses as a duplicate key, got {other:?}"),
         }
     }
 
+    fn duplicate_at(text: &str) -> String {
+        duplicate(text).0
+    }
+
     fn duplicate_field_at(text: &str) -> String {
-        match parse_value(text.as_bytes()) {
-            Err(StrictJsonError::DuplicateKey { field, .. }) => field,
-            other => panic!("{text} refuses as a duplicate key, got {other:?}"),
-        }
+        duplicate(text).1
     }
 
     fn assert_refused_as_serde_json_refuses(text: &str) {

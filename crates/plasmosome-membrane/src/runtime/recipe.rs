@@ -1722,30 +1722,45 @@ mod tests {
         assert_eq!(limits.architecture().as_str(), std::env::consts::ARCH);
         let parallelism = std::thread::available_parallelism().expect("a CPU count");
         assert_eq!(usize::from(limits.max_vcpus()), parallelism.get().min(255));
-        assert_eq!(limits.max_memory_mib(), installed_memory_mib());
+        let installed_mib = u32::try_from(installed_memory_bytes() >> 20).unwrap_or(u32::MAX);
+        assert_eq!(limits.max_memory_mib(), installed_mib);
         let sun_path = if cfg!(target_os = "macos") { 103 } else { 107 };
         assert_eq!(limits.max_socket_path_bytes(), sun_path);
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn installed_memory_mib() -> u32 {
-        let bytes: u64 = if cfg!(target_os = "macos") {
-            let sysctl = std::process::Command::new("/usr/sbin/sysctl")
-                .args(["-n", "hw.memsize"])
-                .output()
-                .expect("sysctl runs");
-            let text = String::from_utf8(sysctl.stdout).expect("sysctl prints UTF-8");
-            text.trim().parse().expect("hw.memsize is a byte count")
-        } else {
-            let info = std::fs::read_to_string("/proc/meminfo").expect("/proc/meminfo reads");
-            let total = info
-                .lines()
-                .find_map(|line| line.strip_prefix("MemTotal:"))
-                .and_then(|value| value.trim().strip_suffix("kB"))
-                .expect("/proc/meminfo has MemTotal in kB");
-            total.trim().parse::<u64>().expect("MemTotal is a number") * 1024
-        };
-        u32::try_from(bytes >> 20).unwrap_or(u32::MAX)
+    #[cfg(target_os = "macos")]
+    fn installed_memory_bytes() -> u64 {
+        let sysctl = std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .expect("sysctl runs");
+        let text = String::from_utf8(sysctl.stdout).expect("sysctl prints UTF-8");
+        text.trim().parse().expect("hw.memsize is a byte count")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installed_memory_bytes() -> u64 {
+        let info = std::fs::read_to_string("/proc/meminfo").expect("/proc/meminfo reads");
+        let total = info
+            .lines()
+            .find_map(|line| line.strip_prefix("MemTotal:"))
+            .and_then(|value| value.trim().strip_suffix("kB"))
+            .expect("/proc/meminfo has MemTotal in kB");
+        total.trim().parse::<u64>().expect("MemTotal is a number") * 1024
+    }
+
+    #[test]
+    fn limits_report_what_they_were_built_with() {
+        let limits = PlatformLimits::new(Architecture::X86_64, 3, 5, 7);
+        assert_eq!(limits.architecture(), Architecture::X86_64);
+        assert_eq!(
+            (
+                limits.max_vcpus(),
+                limits.max_memory_mib(),
+                limits.max_socket_path_bytes()
+            ),
+            (3, 5, 7)
+        );
     }
 
     #[test]
