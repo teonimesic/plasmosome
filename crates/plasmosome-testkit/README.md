@@ -1,7 +1,8 @@
 # plasmosome-testkit
 
 Test support shared by the kernel crates: builders, the backend conformance suite, the
-scenarios that cross crate boundaries, and the membrane differential's probe manifest.
+scenarios that cross crate boundaries, and the membrane differential's probe manifest and
+comparator.
 
 Three things live here. The first is the **conformance suite** — the behavioral clauses of the
 `EnforcementBackend` contract, written once as functions generic over the trait. Every backend
@@ -69,8 +70,8 @@ the seams — the first of them attaches a plasmid's capabilities, replays its l
 and verifies the backend snapshot shows no residue.
 
 The third is the **membrane differential** of spec 027 §6, a test fixture that no product path
-uses. So far it holds the probe manifest. `differential::load` reads it from JSON and refuses it,
-naming what is wrong, before anything is compared:
+uses. It holds the probe manifest and the comparator. `differential::load` reads the manifest
+from JSON and refuses it, naming what is wrong, before anything is compared:
 
 - a channel of spec 027 §5 with fewer than three probes, or a reach kind with fewer than three
   reach probes, none included;
@@ -88,6 +89,32 @@ Refusing unknown keys matters because a misspelt `rules` or `allowances` would o
 an empty table. `Manifest::validate` checks a manifest built by hand the same way. Rules about
 runs, such as two boots per lane, are not the manifest's, and are not checked here.
 
+`differential::judge` compares the runs of the three lanes and gives the verdict. It first checks
+the manifest with `validate`, then refuses runs it cannot judge: a lane with runs, but not exactly
+two, two runs from one boot in one lane or across two, and a run that observes an undeclared probe
+or one probe twice. A probe with no completion marker, or one that failed before the step it
+observes, is not run in that lane, and so is every probe in a lane with no runs. Any not run makes
+the verdict not run. Every completed run is still judged, and compared with every completed run
+of the other lane, so the verdict lists each failure it finds, even in a lane whose other run is
+not run, and does not depend on the order of a lane's runs:
+
+- noise, a field in which a lane's two runs differ;
+- a reach probe that one open run and one absent run show equal, leaving out the fields a rule
+  covers;
+- a lane, any lane, that does not show the manifest's neutral mount source, type, options, FUSE
+  subtype or cgroup path, so a name copied from the cell into the reference lanes still fails;
+- a field in which the cell lane differs from the absent lane, unless an allowance names that
+  probe and field and the cell holds exactly its value.
+
+The harness transcript is compared the same way, with no allowances. The manifest's normalization
+rules are loaded and checked but not applied yet, so every field is compared exactly, and that
+fails closed in all three comparisons. Noise and the cell-against-absent check fail when values
+differ, so a field a rule would have replaced can only add failures. The discrimination check
+fails when values are equal, so such a field could make two lanes look different. It leaves out
+every field a rule covers, and a reach probe must differ in its other fields to pass. `judge`
+takes typed runs and parses no bytes. A reader of the probe output a guest writes belongs with
+the code that runs the lanes.
+
 ## What's inside
 
 | Module | Holds |
@@ -95,7 +122,7 @@ runs, such as two boots per lane, are not the manifest's, and are not checked he
 | `builders` | `PlasmidManifest`, capabilities, `Grant` sequences, `Effect`s and `DesiredState` — a test states only what it is about |
 | `conformance` | Eleven clauses of the backend contract, each generic over `EnforcementBackend` |
 | `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
-| `differential` | Spec 027 §6's probe manifest for the membrane differential, and the refusals that keep a suite from dropping probes |
+| `differential` | Spec 027 §6's probe manifest for the membrane differential, its refusals, and `judge`, which compares the lanes' runs and gives the verdict |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |
 
 Nothing here ships: the crate is `publish = false`, and a guard keeps it out of every other
