@@ -90,23 +90,28 @@ an empty table. `Manifest::validate` checks a manifest built by hand the same wa
 runs, such as two boots per lane, are not the manifest's, and are not checked here.
 
 `differential::judge` compares the runs of the three lanes and gives the verdict. It first checks
-the manifest with `validate`, then refuses runs it cannot judge: a lane with one run or three, two
-runs from one boot in one lane or across two, and a run that observes an undeclared probe or one
-probe twice. A probe with no completion marker, or one that failed before the step it observes,
-is not run, and so is every probe in a lane with no runs. Any not run makes the verdict not run,
-and the verdict still lists the failures:
+the manifest with `validate`, then refuses runs it cannot judge: a lane with runs, but not exactly
+two, two runs from one boot in one lane or across two, and a run that observes an undeclared probe
+or one probe twice. A probe with no completion marker, or one that failed before the step it
+observes, is not run in that lane, and so is every probe in a lane with no runs. Any not run makes
+the verdict not run. Every completed run is still judged, so the verdict lists each failure it
+finds, even in a lane whose other run is not run:
 
 - noise, a field in which a lane's two runs differ;
-- a reach probe equal in the open and absent lanes;
+- a reach probe equal in the open and absent lanes, leaving out the fields a rule covers;
 - a lane, any lane, that does not show the manifest's neutral mount source, type, options, FUSE
   subtype or cgroup path, so a name copied from the cell into the reference lanes still fails;
 - a field in which the cell lane differs from the absent lane, unless an allowance names that
   probe and field and the cell holds exactly its value.
 
-The harness transcript is compared the same way, with no allowances. Every field is compared
-exactly. The manifest's normalization rules are loaded and checked but not applied yet, so a
-rule never loosens a comparison. `judge` takes typed runs and parses no bytes. A reader of the
-probe output a guest writes belongs with the code that runs the lanes.
+The harness transcript is compared the same way, with no allowances. The manifest's normalization
+rules are loaded and checked but not applied yet, so every field is compared exactly, and that
+fails closed in all three comparisons. Noise and the cell-against-absent check fail when values
+differ, so a field a rule would have replaced can only add failures. The discrimination check
+fails when values are equal, so such a field could make two lanes look different. It leaves out
+every field a rule covers, and a reach probe must differ in its other fields to pass. `judge`
+takes typed runs and parses no bytes. A reader of the probe output a guest writes belongs with
+the code that runs the lanes.
 
 ## What's inside
 
