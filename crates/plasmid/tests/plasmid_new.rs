@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use plasmosome_core::{ManifestError, PlasmidManifest};
@@ -36,22 +36,36 @@ fn entries(directory: &Path) -> Vec<String> {
     names
 }
 
+fn working_directory() -> (tempfile::TempDir, PathBuf) {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let work = scratch.path().join("work");
+    std::fs::create_dir(&work).expect("the working directory is made");
+    (scratch, work)
+}
+
 fn text(stream: &[u8]) -> String {
     String::from_utf8(stream.to_vec()).expect("the stream is UTF-8")
 }
 
-fn printed_sections(stdout: &str) -> Vec<String> {
+fn printed(stdout: &str) -> Vec<(String, String)> {
     stdout
         .lines()
         .map(|line| {
-            let (section, _) = line
+            let (section, shown) = line
                 .strip_prefix("add ")
                 .and_then(|rest| rest.split_once(": "))
                 .unwrap_or_else(|| {
                     panic!("each stdout line names one section as `add <section>: ...`: {line:?}")
                 });
-            section.to_string()
+            (section.to_string(), shown.to_string())
         })
+        .collect()
+}
+
+fn printed_sections(stdout: &str) -> Vec<String> {
+    printed(stdout)
+        .into_iter()
+        .map(|(section, _)| section)
         .collect()
 }
 
@@ -86,14 +100,42 @@ fn applied(declaration: &str, field: &str, fix: &str) -> String {
     toml::to_string(&table).expect("the declaration serializes")
 }
 
+fn refusals(declaration: &str) -> Vec<(String, String)> {
+    let mut declaration = declaration.to_string();
+    let mut refused: Vec<(String, String)> = Vec::new();
+    loop {
+        match PlasmidManifest::parse(&declaration) {
+            Ok(manifest) => {
+                assert_eq!(manifest.id, "demo");
+                return refused;
+            }
+            Err(ManifestError::Field {
+                plasmid,
+                field,
+                fix,
+                ..
+            }) => {
+                assert_eq!(plasmid.as_deref(), Some("demo"), "{field}");
+                assert!(
+                    refused.iter().all(|(seen, _)| *seen != field),
+                    "{field} is refused again after its fix was applied:\n{declaration}"
+                );
+                declaration = applied(&declaration, &field, &fix);
+                refused.push((field, fix));
+            }
+            Err(other) => panic!("the scaffold is refused for no missing section: {other}"),
+        }
+    }
+}
+
 #[test]
 fn plasmid_new_writes_one_declaration_and_nothing_else() {
-    let scratch = tempfile::tempdir().expect("a scratch directory");
-    let output = plasmid_in(scratch.path(), &["new", "demo"]);
+    let (scratch, work) = working_directory();
+    let output = plasmid_in(&work, &["new", "demo"]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
-    assert_eq!(entries(scratch.path()), ["demo.toml"]);
-    let written =
-        std::fs::symlink_metadata(scratch.path().join("demo.toml")).expect("demo.toml exists");
+    assert_eq!(entries(&work), ["demo.toml"]);
+    assert_eq!(entries(scratch.path()), ["work"]);
+    let written = std::fs::symlink_metadata(work.join("demo.toml")).expect("demo.toml exists");
     assert!(written.is_file(), "{written:?}");
     let stdout = text(&output.stdout);
     let sections: BTreeSet<String> = printed_sections(&stdout).into_iter().collect();
@@ -111,32 +153,32 @@ fn plasmid_new_writes_one_declaration_and_nothing_else() {
 #[test]
 fn the_sections_printed_are_the_parser_refusals_in_the_order_it_gives_them() {
     let scaffold = scaffold("demo");
-    let mut declaration = scaffold.declaration.clone();
-    let mut refused: Vec<String> = Vec::new();
-    loop {
-        match PlasmidManifest::parse(&declaration) {
-            Ok(manifest) => {
-                assert_eq!(manifest.id, "demo");
-                break;
-            }
-            Err(ManifestError::Field {
-                plasmid,
-                field,
-                fix,
-                ..
-            }) => {
-                assert_eq!(plasmid.as_deref(), Some("demo"), "{field}");
-                assert!(
-                    !refused.contains(&field),
-                    "{field} is refused again after its fix was applied:\n{declaration}"
-                );
-                declaration = applied(&declaration, &field, &fix);
-                refused.push(field);
-            }
-            Err(other) => panic!("the scaffold is refused for no missing section: {other}"),
+    let refused: Vec<String> = refusals(&scaffold.declaration)
+        .into_iter()
+        .map(|(field, _)| field)
+        .collect();
+    assert_eq!(printed_sections(&scaffold.stdout), refused);
+}
+
+#[test]
+fn each_printed_section_shows_the_fix_the_parser_gives_for_it() {
+    let scaffold = scaffold("demo");
+    let shown = printed(&scaffold.stdout);
+    let refused = refusals(&scaffold.declaration);
+    assert_eq!(shown.len(), refused.len(), "{}", scaffold.stdout);
+    for ((section, line), (field, fix)) in shown.iter().zip(&refused) {
+        assert_eq!(section, field);
+        let mut rest = line.as_str();
+        for fix_line in fix.lines() {
+            let at = rest.find(fix_line).unwrap_or_else(|| {
+                panic!(
+                    "the line for {field} shows the parser's fix {fix:?} line by line, in order, \
+                     and {fix_line:?} is missing from what follows in {line:?}"
+                )
+            });
+            rest = &rest[at + fix_line.len()..];
         }
     }
-    assert_eq!(printed_sections(&scaffold.stdout), refused);
 }
 
 #[test]
@@ -237,6 +279,37 @@ fn a_symlink_to_a_file_at_the_declaration_path_is_refused_and_its_target_left_un
 
 #[cfg(unix)]
 #[test]
+fn a_write_that_fails_after_the_create_leaves_no_file_and_a_second_run_succeeds() {
+    let (scratch, work) = working_directory();
+    let output = Command::new("/bin/sh")
+        .current_dir(&work)
+        .args([
+            "-c",
+            "trap '' XFSZ; ulimit -f 0; exec \"$0\" new demo",
+            env!("CARGO_BIN_EXE_plasmid"),
+        ])
+        .output()
+        .expect("sh runs plasmid under a file size limit of zero");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert_eq!(entries(&work), Vec::<String>::new(), "{output:?}");
+    assert_eq!(entries(scratch.path()), ["work"]);
+    let stderr = text(&output.stderr);
+    for named in [
+        "cannot finish writing demo.toml",
+        "File too large",
+        "nothing was written",
+    ] {
+        assert!(stderr.contains(named), "stderr names {named:?}: {stderr}");
+    }
+
+    let second = plasmid_in(&work, &["new", "demo"]);
+    assert_eq!(second.status.code(), Some(2), "{second:?}");
+    assert_eq!(entries(&work), ["demo.toml"]);
+}
+
+#[cfg(unix)]
+#[test]
 fn a_directory_it_cannot_write_into_is_refused_and_nothing_is_written() {
     use std::os::unix::fs::PermissionsExt;
     let scratch = tempfile::tempdir().expect("a scratch directory");
@@ -263,9 +336,7 @@ fn a_directory_it_cannot_write_into_is_refused_and_nothing_is_written() {
 }
 
 fn assert_name_refused<S: AsRef<OsStr> + std::fmt::Debug>(name: S) {
-    let scratch = tempfile::tempdir().expect("a scratch directory");
-    let work = scratch.path().join("work");
-    std::fs::create_dir(&work).expect("the working directory is made");
+    let (scratch, work) = working_directory();
     let output = plasmid_in(&work, &[OsStr::new("new"), name.as_ref()]);
     assert_eq!(output.status.code(), Some(1), "{name:?}: {output:?}");
     assert!(output.stdout.is_empty(), "{name:?}: {output:?}");
@@ -278,6 +349,8 @@ fn assert_name_refused<S: AsRef<OsStr> + std::fmt::Debug>(name: S) {
 #[test]
 fn a_name_outside_the_registry_grammar_is_refused_and_writes_nothing() {
     let long = "a".repeat(65);
+    let long_with_hyphen = format!("{}-{}", "a".repeat(32), "b".repeat(32));
+    assert_eq!(long_with_hyphen.len(), 65);
     for name in [
         "",
         "Demo",
@@ -292,6 +365,7 @@ fn a_name_outside_the_registry_grammar_is_refused_and_writes_nothing() {
         "demo\n",
         "d\u{e9}mo",
         long.as_str(),
+        long_with_hyphen.as_str(),
     ] {
         assert_name_refused(name);
     }
