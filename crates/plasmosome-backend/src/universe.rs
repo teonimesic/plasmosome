@@ -6,8 +6,13 @@ use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::{Uuid, Variant, Version};
 
-use crate::backend::{BackendError, Capability};
-use crate::recipe::RecipeError;
+use crate::backend::{
+    BackendError, Capability, broker_rules, mount_rules, proxy_map_rules, session_file_rules,
+    uds_socket_rules,
+};
+use crate::recipe::{
+    BrokerLaunch, MountRecipe, ProxyRecipe, RecipeError, SessionFileRecipe, UdsRecipe,
+};
 use crate::wire::{ObjectOnly, object_serde, validated_object_serde};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -453,7 +458,8 @@ impl Diff {
     }
 }
 
-/// One recorded operation: an exact address, its owner and the capability it creates.
+/// One recorded operation: an exact address, its owner and the capability it creates, with that
+/// capability's complete recipe or launch. `SpawnBroker` carries no process ID.
 ///
 /// Decoding refuses a missing or unknown field and a positional array, and decoding and encoding
 /// both refuse any operation `validate` refuses. A value built in memory is not checked: call
@@ -463,29 +469,33 @@ pub enum UniverseOp {
     WriteSessionFile {
         id: GrantId,
         path: String,
+        recipe: SessionFileRecipe,
         owner: CellOwner,
     },
     BindUds {
         id: GrantId,
         path: String,
+        recipe: UdsRecipe,
         owner: CellOwner,
     },
     SetProxyMap {
         id: GrantId,
         host: String,
         route: String,
+        recipe: ProxyRecipe,
         owner: CellOwner,
     },
     SpawnBroker {
         id: GrantId,
-        pid: u32,
         name: String,
+        launch: BrokerLaunch,
         owner: CellOwner,
     },
     AddMount {
         id: GrantId,
         source: String,
         target: String,
+        recipe: MountRecipe,
         owner: CellOwner,
     },
 }
@@ -496,29 +506,33 @@ enum UniverseOpShape {
     WriteSessionFile {
         id: GrantId,
         path: String,
+        recipe: SessionFileRecipe,
         owner: CellOwner,
     },
     BindUds {
         id: GrantId,
         path: String,
+        recipe: UdsRecipe,
         owner: CellOwner,
     },
     SetProxyMap {
         id: GrantId,
         host: String,
         route: String,
+        recipe: ProxyRecipe,
         owner: CellOwner,
     },
     SpawnBroker {
         id: GrantId,
-        pid: u32,
         name: String,
+        launch: BrokerLaunch,
         owner: CellOwner,
     },
     AddMount {
         id: GrantId,
         source: String,
         target: String,
+        recipe: MountRecipe,
         owner: CellOwner,
     },
 }
@@ -567,28 +581,60 @@ impl UniverseOp {
     }
 
     /// Returns the first rule the capability this operation creates breaks, as
-    /// `Capability::validate` reports it.
+    /// `Capability::validate` reports it, without building that capability.
     pub fn validate(&self) -> Result<(), RecipeError> {
-        self.capability().validate()
+        match self {
+            UniverseOp::WriteSessionFile { path, recipe, .. } => session_file_rules(path, recipe),
+            UniverseOp::BindUds { path, recipe, .. } => uds_socket_rules(path, recipe),
+            UniverseOp::SetProxyMap {
+                host,
+                route,
+                recipe,
+                ..
+            } => proxy_map_rules(host, route, recipe),
+            UniverseOp::SpawnBroker { name, launch, .. } => broker_rules(name, launch),
+            UniverseOp::AddMount {
+                source,
+                target,
+                recipe,
+                ..
+            } => mount_rules(source, target, recipe),
+        }
     }
 
     fn capability(&self) -> Capability {
         match self {
-            UniverseOp::WriteSessionFile { path, .. } => {
-                Capability::SessionFile { path: path.clone() }
-            }
-            UniverseOp::BindUds { path, .. } => Capability::UdsSocket { path: path.clone() },
-            UniverseOp::SetProxyMap { host, route, .. } => Capability::ProxyMap {
+            UniverseOp::WriteSessionFile { path, recipe, .. } => Capability::SessionFile {
+                path: path.clone(),
+                recipe: recipe.clone(),
+            },
+            UniverseOp::BindUds { path, recipe, .. } => Capability::UdsSocket {
+                path: path.clone(),
+                recipe: recipe.clone(),
+            },
+            UniverseOp::SetProxyMap {
+                host,
+                route,
+                recipe,
+                ..
+            } => Capability::ProxyMap {
                 host: host.clone(),
                 route: route.clone(),
+                recipe: recipe.clone(),
             },
-            UniverseOp::SpawnBroker { pid, name, .. } => Capability::Broker {
-                pid: *pid,
+            UniverseOp::SpawnBroker { name, launch, .. } => Capability::Broker {
                 name: name.clone(),
+                launch: launch.clone(),
             },
-            UniverseOp::AddMount { source, target, .. } => Capability::Mount {
+            UniverseOp::AddMount {
+                source,
+                target,
+                recipe,
+                ..
+            } => Capability::Mount {
                 source: source.clone(),
                 target: target.clone(),
+                recipe: recipe.clone(),
             },
         }
     }

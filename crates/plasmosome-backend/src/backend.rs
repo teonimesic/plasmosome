@@ -5,7 +5,10 @@ use serde::de::Error as _;
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::recipe::{RecipeError, canonical_path, nul_free};
+use crate::recipe::{
+    BrokerLaunch, MountRecipe, ProxyRecipe, RecipeError, SessionFileRecipe, UdsRecipe,
+    canonical_path, nul_free,
+};
 use crate::universe::{
     CellOwner, GrantId, OsObject, OsState, UniverseClass, UniverseOp, UniverseRemoval,
 };
@@ -45,28 +48,63 @@ impl GrantKind {
     }
 }
 
-/// A capability, identified by its class and its exact fields.
+/// A capability: its class, its exact fields, and the complete recipe or launch that creates
+/// it. A broker carries its name and launch, never a process ID.
 ///
-/// Decoding refuses a missing or unknown field and a positional array, and decoding and encoding
-/// both refuse any value `validate` refuses. A value built in memory is not checked: call
-/// `validate` before acting on it.
+/// Decoding refuses a missing or unknown field and a positional array, in the capability and in
+/// its recipe, and decoding and encoding both refuse any value `validate` refuses. No field has
+/// a default. A value built in memory is not checked: call `validate` before acting on it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
-    SessionFile { path: String },
-    UdsSocket { path: String },
-    ProxyMap { host: String, route: String },
-    Broker { pid: u32, name: String },
-    Mount { source: String, target: String },
+    SessionFile {
+        path: String,
+        recipe: SessionFileRecipe,
+    },
+    UdsSocket {
+        path: String,
+        recipe: UdsRecipe,
+    },
+    ProxyMap {
+        host: String,
+        route: String,
+        recipe: ProxyRecipe,
+    },
+    Broker {
+        name: String,
+        launch: BrokerLaunch,
+    },
+    Mount {
+        source: String,
+        target: String,
+        recipe: MountRecipe,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "Capability", deny_unknown_fields)]
 enum CapabilityShape {
-    SessionFile { path: String },
-    UdsSocket { path: String },
-    ProxyMap { host: String, route: String },
-    Broker { pid: u32, name: String },
-    Mount { source: String, target: String },
+    SessionFile {
+        path: String,
+        recipe: SessionFileRecipe,
+    },
+    UdsSocket {
+        path: String,
+        recipe: UdsRecipe,
+    },
+    ProxyMap {
+        host: String,
+        route: String,
+        recipe: ProxyRecipe,
+    },
+    Broker {
+        name: String,
+        launch: BrokerLaunch,
+    },
+    Mount {
+        source: String,
+        target: String,
+        recipe: MountRecipe,
+    },
 }
 
 impl Capability {
@@ -84,36 +122,78 @@ impl Capability {
         self.class().as_str()
     }
 
+    /// The diagnostic key, not an address: `session/{path}`, the socket path, the proxy host,
+    /// `broker/{name}` or the mount target. Two different capabilities can share a key.
     pub fn key(&self) -> String {
         match self {
-            Capability::SessionFile { path } => format!("session/{path}"),
-            Capability::UdsSocket { path } => path.clone(),
+            Capability::SessionFile { path, .. } => format!("session/{path}"),
+            Capability::UdsSocket { path, .. } => path.clone(),
             Capability::ProxyMap { host, .. } => host.clone(),
-            Capability::Broker { pid, .. } => format!("broker/{pid}"),
+            Capability::Broker { name, .. } => format!("broker/{name}"),
             Capability::Mount { target, .. } => target.clone(),
         }
     }
 
-    /// Returns the first rule this capability breaks, in field order. `SessionFile.path`,
-    /// `UdsSocket.path`, `Mount.source` and `Mount.target` are canonical absolute paths as
-    /// `RecipeError` defines them. `host`, `route` and `name` are exact selection names, so they
-    /// only need to be NUL-free.
+    /// Returns the first rule this capability breaks. Its own strings come first, in field
+    /// order: `SessionFile.path`, `UdsSocket.path`, `Mount.source` and `Mount.target` are
+    /// canonical absolute paths as `RecipeError` defines them, and `host`, `route` and `name`
+    /// are exact selection names, so they only need to be NUL-free. Then the recipe's or the
+    /// launch's own `validate` runs.
     pub fn validate(&self) -> Result<(), RecipeError> {
         match self {
-            Capability::SessionFile { path } | Capability::UdsSocket { path } => {
-                canonical_path("path", path)
-            }
-            Capability::ProxyMap { host, route } => {
-                nul_free("host", host)?;
-                nul_free("route", route)
-            }
-            Capability::Broker { name, .. } => nul_free("name", name),
-            Capability::Mount { source, target } => {
-                canonical_path("source", source)?;
-                canonical_path("target", target)
-            }
+            Capability::SessionFile { path, recipe } => session_file_rules(path, recipe),
+            Capability::UdsSocket { path, recipe } => uds_socket_rules(path, recipe),
+            Capability::ProxyMap {
+                host,
+                route,
+                recipe,
+            } => proxy_map_rules(host, route, recipe),
+            Capability::Broker { name, launch } => broker_rules(name, launch),
+            Capability::Mount {
+                source,
+                target,
+                recipe,
+            } => mount_rules(source, target, recipe),
         }
     }
+}
+
+pub(crate) fn session_file_rules(
+    path: &str,
+    recipe: &SessionFileRecipe,
+) -> Result<(), RecipeError> {
+    canonical_path("path", path)?;
+    recipe.validate()
+}
+
+pub(crate) fn uds_socket_rules(path: &str, recipe: &UdsRecipe) -> Result<(), RecipeError> {
+    canonical_path("path", path)?;
+    recipe.validate()
+}
+
+pub(crate) fn proxy_map_rules(
+    host: &str,
+    route: &str,
+    recipe: &ProxyRecipe,
+) -> Result<(), RecipeError> {
+    nul_free("host", host)?;
+    nul_free("route", route)?;
+    recipe.validate()
+}
+
+pub(crate) fn broker_rules(name: &str, launch: &BrokerLaunch) -> Result<(), RecipeError> {
+    nul_free("name", name)?;
+    launch.validate()
+}
+
+pub(crate) fn mount_rules(
+    source: &str,
+    target: &str,
+    recipe: &MountRecipe,
+) -> Result<(), RecipeError> {
+    canonical_path("source", source)?;
+    canonical_path("target", target)?;
+    recipe.validate()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
