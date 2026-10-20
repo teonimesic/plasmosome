@@ -223,6 +223,83 @@ fn a_client_error_refuses_a_repeated_or_reserved_field() {
     assert_eq!(error.fields(), &null_fields(&["path", "errno"])[..]);
 }
 
+fn repeating(key: &str) -> Json {
+    Json::Object(vec![
+        (key.to_string(), Json::Null),
+        (key.to_string(), Json::Null),
+    ])
+}
+
+fn wide_object(repeat: bool) -> Json {
+    let mut members: Vec<(String, Json)> = (0..9)
+        .map(|index| (format!("k{index}"), Json::Null))
+        .collect();
+    if repeat {
+        members.push(("k3".to_string(), Json::Null));
+    }
+    Json::Object(members)
+}
+
+fn code() -> (String, Json) {
+    (
+        "code".to_string(),
+        Json::Number(Number::new("101".to_string()).expect("valid number text")),
+    )
+}
+
+#[test]
+fn a_hand_built_value_that_repeats_a_key_is_refused_at_any_depth() {
+    let repeats: [fn() -> Json; 4] = [
+        || Json::Object(vec![code(), ("code".to_string(), Json::Null)]),
+        || Json::Object(vec![code(), ("fix".to_string(), repeating("a"))]),
+        || {
+            Json::Object(vec![
+                code(),
+                (
+                    "x".to_string(),
+                    Json::Array(vec![Json::Null, repeating("b")]),
+                ),
+            ])
+        },
+        || Json::Object(vec![code(), ("x".to_string(), wide_object(true))]),
+    ];
+    for value in repeats {
+        assert_eq!(KernelError::new(value()), Err(value()));
+        assert_eq!(
+            ClientError::new(
+                ClientCode::BadReply,
+                "m".to_string(),
+                vec![("detail".to_string(), value())]
+            ),
+            Err(vec![("detail".to_string(), value())])
+        );
+    }
+    let distinct = || {
+        Json::Object(vec![
+            code(),
+            (
+                "a".to_string(),
+                Json::Object(vec![("a".to_string(), Json::Null)]),
+            ),
+            ("b".to_string(), Json::Array(vec![single("a"), single("a")])),
+            ("w".to_string(), wide_object(false)),
+        ])
+    };
+    assert!(KernelError::new(distinct()).is_ok());
+    assert!(
+        ClientError::new(
+            ClientCode::BadReply,
+            "m".to_string(),
+            vec![("detail".to_string(), distinct())]
+        )
+        .is_ok()
+    );
+}
+
+fn single(key: &str) -> Json {
+    Json::Object(vec![(key.to_string(), Json::Null)])
+}
+
 #[test]
 fn a_kernel_error_is_an_object_without_domain() {
     let array = parsed("[1]");

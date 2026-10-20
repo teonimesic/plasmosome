@@ -1,4 +1,5 @@
 use plasmosome_cli::json::{Json, Reason, ScanError, scan, write_compact, write_human};
+use plasmosome_cli::{ClientCode, ClientError, KernelError};
 
 const DEPTH: usize = 1_000_000;
 
@@ -85,4 +86,29 @@ fn the_human_form_of_deep_nesting_grows_linearly() {
         whole < 3 * half,
         "twice the depth wrote {whole} bytes against {half}; indentation without a cap grows with the square of the depth"
     );
+}
+
+fn deep(inner: Json) -> Json {
+    let mut value = inner;
+    for _ in 0..200_000 {
+        value = Json::Array(vec![value]);
+    }
+    value
+}
+
+fn repeated_a() -> Json {
+    Json::Object(vec![
+        ("a".to_string(), Json::Null),
+        ("a".to_string(), Json::Null),
+    ])
+}
+
+#[test]
+fn a_deep_hand_built_value_is_checked_without_overflow() {
+    let error = |inner: Json| Json::Object(vec![("fix".to_string(), deep(inner))]);
+    assert!(KernelError::new(error(repeated_a())).is_err());
+    assert!(KernelError::new(error(Json::Null)).is_ok());
+    let field = |inner: Json| vec![("detail".to_string(), deep(inner))];
+    assert!(ClientError::new(ClientCode::BadReply, "m".to_string(), field(repeated_a())).is_err());
+    assert!(ClientError::new(ClientCode::BadReply, "m".to_string(), field(Json::Null)).is_ok());
 }
