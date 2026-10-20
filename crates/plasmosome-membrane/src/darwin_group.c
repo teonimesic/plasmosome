@@ -35,6 +35,7 @@ static int allocation_size_valid(size_t needed) {
 
 int plasmosome_darwin_group_all_zombies(pid_t leader) {
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PGRP, leader};
+    int throwaway_unused = 0;
     struct kinfo_proc entry;
     size_t bytes = sizeof(entry);
 
