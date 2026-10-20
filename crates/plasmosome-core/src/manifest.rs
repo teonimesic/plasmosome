@@ -2379,6 +2379,8 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
 
     const CSI: &str = concat!("\\", "u009B");
 
+    const DELETE: &str = concat!("\\", "u007F");
+
     fn declared(tail: &str) -> String {
         format!("{DECLARED}{tail}\n")
     }
@@ -3026,6 +3028,10 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             (
                 format!("{network}ports = [\"{ESCAPE}\"]"),
                 &format!("\"{ESCAPE}\" is not an integer from 1 to 65535"),
+            ),
+            (
+                format!("{network}ports = [\"\\b\\f\\r{DELETE}\"]"),
+                &format!("\"\\b\\f\\r{DELETE}\" is not an integer from 1 to 65535"),
             ),
             (
                 format!("[network]\nhosts = \"x{ESCAPE}y\""),
