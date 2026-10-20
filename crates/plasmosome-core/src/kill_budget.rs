@@ -405,6 +405,27 @@ mod tests {
     }
 
     #[test]
+    fn a_withdrawal_short_only_in_its_effect_part_has_no_budget() {
+        let arrival = Instant::now();
+        let clock = TestClock::at(arrival);
+        let budget = KillBudget::new(arrival, ms(10), false, || clock.read());
+
+        clock.advance(MS);
+        assert_eq!(
+            budget.withdrawal(),
+            Share::Run(Withdrawal {
+                share: ms(4),
+                drain: ms(2),
+                effect: MS,
+                publication: MS,
+            })
+        );
+        clock.advance(Duration::from_nanos(2));
+        assert_eq!(budget.remaining(), Duration::from_nanos(8_999_998));
+        assert_eq!(budget.withdrawal(), Share::NoBudget);
+    }
+
+    #[test]
     fn small_deadlines_get_exact_shares() {
         let arrival = Instant::now();
         let clock = TestClock::at(arrival);
