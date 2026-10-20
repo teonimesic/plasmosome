@@ -855,6 +855,12 @@ mod tests {
         ..LIMITS
     };
 
+    const ROOMY: PlatformLimits = PlatformLimits {
+        max_vcpus: u8::MAX,
+        max_memory_mib: u32::MAX,
+        ..LIMITS
+    };
+
     const FIELDS: [&str; 15] = [
         "version",
         "vcpus",
@@ -969,10 +975,14 @@ mod tests {
         record(&[(pointer, None)])
     }
 
-    fn parsed(record: &[u8]) -> RuntimeRecipe {
-        RuntimeRecipe::parse(record, &LIMITS).unwrap_or_else(|refusal| {
+    fn parsed_under(record: &[u8], limits: &PlatformLimits) -> RuntimeRecipe {
+        RuntimeRecipe::parse(record, limits).unwrap_or_else(|refusal| {
             panic!("{} refused: {refusal:?}", String::from_utf8_lossy(record))
         })
+    }
+
+    fn parsed(record: &[u8]) -> RuntimeRecipe {
+        parsed_under(record, &LIMITS)
     }
 
     fn refused_under(record: &[u8], limits: &PlatformLimits) -> RecipeRefusal {
@@ -1066,6 +1076,25 @@ mod tests {
     fn the_encoding_is_one_compact_line_with_keys_in_spec_order() {
         let encoded = parsed(&record(&[])).to_ndjson();
         assert_eq!(String::from_utf8(encoded).expect("UTF-8"), GOLDEN);
+        let one = format!(
+            r#""libraries":[{{"path":"/opt/cell/lib/libkrun.1.dylib","sha256":"{}"}}]"#,
+            digest('5')
+        );
+        assert!(GOLDEN.contains(&one));
+        let two = json!([
+            artifact("/opt/cell/lib/a.dylib", 'a'),
+            artifact("/opt/cell/lib/b.dylib", 'b'),
+        ]);
+        let two_listed = format!(
+            r#"[{{"path":"/opt/cell/lib/a.dylib","sha256":"{}"}},{{"path":"/opt/cell/lib/b.dylib","sha256":"{}"}}]"#,
+            digest('a'),
+            digest('b')
+        );
+        for (libraries, listed) in [(json!([]), "[]".to_owned()), (two, two_listed)] {
+            let encoded = parsed(&with("/libraries", libraries)).to_ndjson();
+            let expected = GOLDEN.replace(&one, &format!(r#""libraries":{listed}"#));
+            assert_eq!(String::from_utf8(encoded).expect("UTF-8"), expected);
+        }
     }
 
     #[test]
@@ -1110,8 +1139,8 @@ mod tests {
     proptest! {
         #[test]
         fn any_admitted_recipe_survives_its_encoding(
-            vcpus in 1..=LIMITS.max_vcpus,
-            memory_mib in 1..=LIMITS.max_memory_mib,
+            vcpus in 1..=ROOMY.max_vcpus,
+            memory_mib in 1..=ROOMY.max_memory_mib,
             names in proptest::collection::vec(component(), 0..5),
             name in component(),
         ) {
@@ -1127,8 +1156,8 @@ mod tests {
                 set("/writable_root", json!(format!("/w/{name}"))),
                 set("/data_path", json!(format!("/d/{name}"))),
             ]);
-            let recipe = parsed(&record);
-            prop_assert_eq!(parsed(&recipe.to_ndjson()), recipe);
+            let recipe = parsed_under(&record, &ROOMY);
+            prop_assert_eq!(parsed_under(&recipe.to_ndjson(), &ROOMY), recipe);
         }
     }
 
@@ -1187,6 +1216,8 @@ mod tests {
         assert_eq!(refused(&oversized), NotOneLine);
         oversized.push(b'\n');
         assert_eq!(refused(&oversized), TooLarge { bytes: 1_048_577 });
+        oversized[0] = b'\r';
+        assert_eq!(refused(&oversized), NotOneLine);
     }
 
     #[test]
@@ -1326,16 +1357,11 @@ mod tests {
             parsed(&with("/memory_mib", json!(limit))).memory_mib(),
             limit
         );
-        let roomy = PlatformLimits {
-            max_vcpus: u8::MAX,
-            max_memory_mib: u32::MAX,
-            ..LIMITS
-        };
         let largest = record(&[
             set("/vcpus", json!(255)),
             set("/memory_mib", json!(u32::MAX)),
         ]);
-        let recipe = RuntimeRecipe::parse(&largest, &roomy).expect("the largest values parse");
+        let recipe = parsed_under(&largest, &ROOMY);
         assert_eq!((recipe.vcpus(), recipe.memory_mib()), (255, u32::MAX));
     }
 
@@ -1450,6 +1476,19 @@ mod tests {
                 }
             );
         }
+        let accented =
+            |count: usize, tail: &str| json!(format!("/var/cell/{}{tail}", "\u{e9}".repeat(count)));
+        parsed(&with("/control_path", accented(46, "s")));
+        let refusal = refused(&with("/control_path", accented(47, "")));
+        let field = "control_path";
+        assert_eq!(
+            refusal,
+            SocketPathTooLong {
+                field,
+                bytes: 104,
+                max: 103
+            }
+        );
         let both_long = record(&[
             set("/control_path", path_of_length(105)),
             set("/data_path", path_of_length(104)),
@@ -1610,12 +1649,33 @@ mod tests {
     #[test]
     fn the_host_limits_come_from_this_machine() {
         let limits = PlatformLimits::host().expect("this host reports its limits");
-        assert_eq!(Architecture::host(), Some(limits.architecture));
         assert_eq!(limits.architecture.as_str(), std::env::consts::ARCH);
-        assert!(limits.max_vcpus >= 1, "{limits:?}");
-        assert!(limits.max_memory_mib >= 1, "{limits:?}");
+        let parallelism = std::thread::available_parallelism().expect("a CPU count");
+        assert_eq!(usize::from(limits.max_vcpus), parallelism.get().min(255));
+        assert_eq!(limits.max_memory_mib, installed_memory_mib());
         let sun_path = if cfg!(target_os = "macos") { 103 } else { 107 };
         assert_eq!(limits.max_socket_path_bytes, sun_path);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn installed_memory_mib() -> u32 {
+        let bytes: u64 = if cfg!(target_os = "macos") {
+            let sysctl = std::process::Command::new("/usr/sbin/sysctl")
+                .args(["-n", "hw.memsize"])
+                .output()
+                .expect("sysctl runs");
+            let text = String::from_utf8(sysctl.stdout).expect("sysctl prints UTF-8");
+            text.trim().parse().expect("hw.memsize is a byte count")
+        } else {
+            let info = std::fs::read_to_string("/proc/meminfo").expect("/proc/meminfo reads");
+            let total = info
+                .lines()
+                .find_map(|line| line.strip_prefix("MemTotal:"))
+                .and_then(|value| value.trim().strip_suffix("kB"))
+                .expect("/proc/meminfo has MemTotal in kB");
+            total.trim().parse::<u64>().expect("MemTotal is a number") * 1024
+        };
+        u32::try_from(bytes >> 20).unwrap_or(u32::MAX)
     }
 
     #[test]
