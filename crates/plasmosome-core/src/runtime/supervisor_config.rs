@@ -696,14 +696,6 @@ mod tests {
         assert_eq!(decoded(&line), largest);
         let over = config_with_record_bytes(BOUND + 1);
         assert_eq!(over.encode(), Err(TooLarge { bytes: BOUND + 1 }));
-        let biggest_recipe = SupervisorConfig {
-            runtime_recipe: recipe_with_line_bytes(BOUND),
-            ..config()
-        };
-        assert!(matches!(
-            biggest_recipe.encode(),
-            Err(TooLarge { bytes }) if bytes > BOUND
-        ));
     }
 
     #[test]

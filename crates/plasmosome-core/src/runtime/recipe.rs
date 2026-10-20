@@ -1014,10 +1014,9 @@ impl std::error::Error for TemplateRefusal {}
 mod tests {
     use super::RecipeRefusal::*;
     use super::*;
+    use crate::runtime::fixtures::{LIMITS, artifact, digest, valid_recipe as valid};
     use proptest::prelude::*;
     use serde_json::{Value, json};
-
-    const LIMITS: PlatformLimits = PlatformLimits::new(Architecture::Aarch64, 8, 16_384, 103);
 
     const X86_64_LIMITS: PlatformLimits = PlatformLimits::new(Architecture::X86_64, 8, 16_384, 103);
 
@@ -1081,34 +1080,6 @@ mod tests {
         r#""architecture":"aarch64"}"#,
         "\n",
     );
-
-    fn digest(digit: char) -> String {
-        digit.to_string().repeat(64)
-    }
-
-    fn artifact(path: &str, digit: char) -> Value {
-        json!({"path": path, "sha256": digest(digit)})
-    }
-
-    fn valid() -> Value {
-        json!({
-            "version": 1,
-            "vcpus": 2,
-            "memory_mib": 2048,
-            "kernel": artifact("/opt/cell/kernel", '1'),
-            "kernel_format": "raw",
-            "initramfs": artifact("/opt/cell/initramfs", '2'),
-            "root_image": artifact("/opt/cell/root.raw", '3'),
-            "writable_root": "/var/cell/c1/root.raw",
-            "control_path": "/var/cell/c1/control.sock",
-            "data_path": "/var/cell/c1/data.sock",
-            "helper": artifact("/opt/cell/krun-helper", '4'),
-            "libraries": [artifact("/opt/cell/lib/libkrun.1.dylib", '5')],
-            "host_policy": artifact("/opt/cell/host.sb", '6'),
-            "guest_policy": artifact("/opt/cell/guest.json", '7'),
-            "architecture": "aarch64",
-        })
-    }
 
     fn record(edits: &[(&str, Option<Value>)]) -> Vec<u8> {
         let mut recipe = valid();
