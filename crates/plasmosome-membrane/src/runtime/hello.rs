@@ -74,7 +74,16 @@ impl std::fmt::Debug for BootToken {
 
 impl std::fmt::Display for BootTokenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        match self.0 {
+            DigestError::WrongLength { bytes } => write!(
+                f,
+                "a boot token is 64 lowercase hexadecimal digits, not {bytes} bytes"
+            ),
+            DigestError::NotLowercaseHex { at } => write!(
+                f,
+                "byte {at} of a boot token is not a lowercase hexadecimal digit"
+            ),
+        }
     }
 }
 
@@ -84,7 +93,8 @@ impl std::error::Error for BootTokenError {}
 ///
 /// `field` and `path` are JSON pointers into the reply: `""` is the whole
 /// reply and `"/result/boot"` its boot token. Text the guest chose is cut to
-/// 1024 bytes.
+/// at most 1024 bytes, on a character boundary and never inside a pointer's
+/// `~` escape.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum HelloRefusal {
     /// The frame is not UTF-8.
@@ -154,18 +164,23 @@ impl std::fmt::Display for HelloRefusal {
                 write!(f, "the hello reply answers id {found}, not {expected}")
             }
             HelloRefusal::GuestError {
-                code: Some(code),
+                code,
                 message,
-                ..
-            } => write!(f, "the guest refused hello with code {code}: {message:?}"),
-            HelloRefusal::GuestError {
-                code: None,
-                message,
-                ..
-            } => write!(
-                f,
-                "the guest refused hello without an integer code: {message:?}"
-            ),
+                detail,
+            } => {
+                match code {
+                    Some(code) => write!(f, "the guest refused hello with code {code}")?,
+                    None => write!(
+                        f,
+                        "the guest refused hello with no code that is a signed 64-bit integer"
+                    )?,
+                }
+                write!(f, ": {message:?}")?;
+                match detail {
+                    Some(detail) => write!(f, ", detail {detail}"),
+                    None => Ok(()),
+                }
+            }
             HelloRefusal::BadBoot { fault } => {
                 write!(f, "the hello boot token is refused: {fault}")
             }
@@ -226,7 +241,9 @@ fn judge(
         return Err(HelloRefusal::NotUtf8);
     }
     let reply = parse_value(frame).map_err(|fault| match fault {
-        StrictJsonError::DuplicateKey { path } => HelloRefusal::DuplicateKey { path: cut(&path) },
+        StrictJsonError::DuplicateKey { path } => HelloRefusal::DuplicateKey {
+            path: cut_pointer(&path),
+        },
         StrictJsonError::NotJson { .. } => HelloRefusal::NotJson {
             detail: fault.to_string(),
         },
@@ -240,7 +257,7 @@ fn judge(
                 .and_then(Value::as_str)
                 .map(cut)
                 .unwrap_or_default(),
-            detail: None,
+            detail: error.get("detail").map(|detail| cut(&detail.to_string())),
         });
     }
     closed(reply, "", &["id", "result"])?;
@@ -275,7 +292,7 @@ fn object<'a>(value: &'a Value, at: &str) -> Result<&'a Map<String, Value>, Hell
 fn closed(record: &Map<String, Value>, at: &str, fields: &[&str]) -> Result<(), HelloRefusal> {
     if let Some(unknown) = record.keys().find(|key| !fields.contains(&key.as_str())) {
         return Err(HelloRefusal::UnknownField {
-            field: cut(&pointer(at, unknown)),
+            field: cut_pointer(&pointer(at, unknown)),
         });
     }
     match fields.iter().find(|field| !record.contains_key(**field)) {
@@ -298,6 +315,14 @@ fn pointer(at: &str, key: &str) -> String {
 
 fn cut(text: &str) -> String {
     text[..text.floor_char_boundary(GUEST_TEXT_LIMIT)].to_owned()
+}
+
+fn cut_pointer(pointer: &str) -> String {
+    let kept = cut(pointer);
+    match kept.strip_suffix('~') {
+        Some(whole_escapes) => whole_escapes.to_owned(),
+        None => kept,
+    }
 }
 
 #[cfg(test)]
