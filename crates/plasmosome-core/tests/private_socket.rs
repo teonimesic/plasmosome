@@ -759,11 +759,8 @@ fn set_xattr(path: &Path, name: &std::ffi::CStr, value: &[u8]) -> Result<(), i32
 const ACL_OPT_OUT: &str = "PLASMOSOME_ACL_TESTS_UNSUPPORTED";
 
 #[cfg(target_os = "linux")]
-fn assert_acl_refuses(attribute: &std::ffi::CStr, mask: u16) {
-    let root = private_root();
-    let cell = root.path().join("cell");
-    make_dir(&cell, 0o700);
-    match set_xattr(&cell, attribute, &posix_acl(mask)) {
+fn acl_written(root: &TestRoot, path: &Path, attribute: &std::ffi::CStr, mask: u16) -> bool {
+    match set_xattr(path, attribute, &posix_acl(mask)) {
         Err(errno) if errno == libc::EOPNOTSUPP => {
             assert!(
                 std::env::var_os(ACL_OPT_OUT).is_some_and(|value| value == "1"),
@@ -773,9 +770,22 @@ fn assert_acl_refuses(attribute: &std::ffi::CStr, mask: u16) {
                 root.path().display()
             );
             println!("skipped: the filesystem refused {attribute:?} and {ACL_OPT_OUT}=1 is set");
-            return;
+            false
         }
-        other => other.expect("the ACL is written"),
+        other => {
+            other.expect("the ACL is written");
+            true
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn assert_acl_refuses(attribute: &std::ffi::CStr, mask: u16) {
+    let root = private_root();
+    let cell = root.path().join("cell");
+    make_dir(&cell, 0o700);
+    if !acl_written(&root, &cell, attribute, mask) {
+        return;
     }
     assert_eq!(
         fs::metadata(&cell).expect("stat").mode() & 0o7777,
@@ -1445,6 +1455,53 @@ fn list_trusted_dir_returns_a_name_that_is_not_utf8_as_its_bytes() {
             name: name.to_vec(),
             kind: EntryKind::Other
         }])
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn list_trusted_dir_takes_a_posix_acl_as_its_mode_shows_it() {
+    let root = private_root();
+    let instances = instances_in(&root, 0o755);
+    make_dir(&instances.join("work"), 0o700);
+    let work = vec![listed("work", EntryKind::Directory)];
+    if !acl_written(&root, &instances, c"system.posix_acl_default", 0o5) {
+        return;
+    }
+    assert_eq!(
+        list_trusted_dir(&instances),
+        Ok(work.clone()),
+        "a default ACL that grants read"
+    );
+    assert!(acl_written(
+        &root,
+        &instances,
+        c"system.posix_acl_access",
+        0o5
+    ));
+    assert_eq!(
+        fs::metadata(&instances).expect("stat").mode() & 0o7777,
+        0o750,
+        "the access ACL's mask shows in the group bits"
+    );
+    assert_eq!(
+        list_trusted_dir(&instances),
+        Ok(work),
+        "an access ACL that grants read"
+    );
+    assert!(acl_written(
+        &root,
+        &instances,
+        c"system.posix_acl_access",
+        0o7
+    ));
+    assert_eq!(
+        list_trusted_dir(&instances),
+        Err(PrivateSocketError::Replaceable {
+            path: instances.clone(),
+            mode: 0o770
+        }),
+        "an access ACL that grants write"
     );
 }
 
