@@ -94,12 +94,12 @@ runs, such as two boots per lane, are not the manifest's, and are not checked he
 `differential::judge` compares the runs of the three lanes and gives the verdict. It first checks
 the manifest with `validate`, then refuses runs it cannot judge: a lane with runs, but not exactly
 two, two runs from one boot in one lane or across two, a run that observes an undeclared probe
-or one probe twice, and a ruled field that holds something its rule kind cannot hold. A probe
-with no completion marker, or one that failed before the step it observes, is not run in that
-lane, and so is every probe in a lane with no runs. Any not run makes the verdict not run. Every
-completed run is still judged, and compared with every completed run of the other lane, so the
-verdict lists each failure it finds, even in a lane whose other run is not run, and does not
-depend on the order of a lane's runs:
+or one probe twice, and a ruled field of a completed observation that holds something its rule
+kind cannot hold. A probe with no completion marker, or one that failed before the step it
+observes, is not run in that lane, and so is every probe in a lane with no runs. Any not run makes
+the verdict not run. Every completed run is still judged, and compared with every completed run
+of the other lane, so the verdict lists each failure it finds, even in a lane whose other run is
+not run, and does not depend on the order of a lane's runs:
 
 - noise, a field in which a lane's two runs differ;
 - a reach probe that one open run and one absent run show equal;
@@ -112,8 +112,8 @@ The harness transcript is compared the same way, with no allowances and no rules
 
 All three comparisons see each completed observation after normalization. A rule names a probe,
 a field and a kind. In each run, `judge` replaces every value of that field with a placeholder
-such as `<pid:2>`, numbered within that probe and field: by first appearance, or by order for
-system times and durations. Equal values stay equal, distinct ones stay distinct, times keep
+such as `<pid:2>`, numbered within that probe, field and run: by first appearance, or by order
+for system times and durations. Equal values stay equal, distinct ones stay distinct, times keep
 their order, and an extra value in one field shifts no other. Every field no rule names is
 compared exactly, so nothing is normalized for how it looks, and a field the workload set can
 have no rule. The field must hold one value of the rule's kind or a list of them, or the runs
@@ -121,13 +121,30 @@ are refused, naming the lane, probe, field and kind:
 
 - a process ID, mount ID, parent mount ID, device, inode or memory counter is a whole number;
 - an ephemeral port is a whole number up to 65535;
-- a system time, duration or load counter is any number;
+- a system time, duration or load counter is any number, but a list of system times or of
+  durations must not mix integers with numbers written with a fraction or an exponent, such as
+  `5` and `5.0`, since the two do not compare exactly;
 - a boot ID is a UUID, and a resolved address an IPv4 or IPv6 address.
 
-No kind holds an object, so a value the workload set cannot hide under a ruled field. Because
-placeholders keep relations, a reach probe whose open and absent lanes differ only in a ruled
-field still discriminates when the relation differs, such as two equal process IDs in one lane
-and two distinct ones in the other, and does not when only the numbers differ.
+Integer times and durations rank exactly across the whole `i64` and `u64` range, and the others
+by their total order. No kind holds an object, so no field the workload set lists can sit under a
+ruled field. A number the workload set, such as a time set with `utimensat`, can still sit in a
+ruled list, and keeping it out is the manifest author's job. A rule checks a value's shape, not
+its meaning: a `pid` rule on a numeric `errno` field makes 13 and 2 equal.
+
+Relations hold only within one field of one run. Two fields are numbered apart, so a relation
+between them is not compared: a process list in `pids` and its leader in `leader`, or two files'
+inodes in two fields, can change which values are equal and still pass. Values whose relation
+matters go in one list field. Within a field, placeholders keep relations, so a reach probe whose
+open and absent lanes differ only in a ruled field still discriminates when the relation differs,
+such as two equal process IDs in one lane and two distinct ones in the other, and does not when
+only the numbers differ.
+
+Durations are ranked on purpose, like system times. Spec 027 §6 lists "times and durations the
+system chose" together and says time placeholders keep their order. So a probe's verdict can turn
+on timing order alone: a reach probe whose only difference is `[a, b]` in the open lane and
+`[b, a]` in the absent lane discriminates. And a relation that changes between a lane's two runs,
+such as two durations that swap order, is reported as noise.
 
 `judge` takes typed runs and parses no bytes. A reader of the probe output a guest writes
 belongs with the code that runs the lanes.

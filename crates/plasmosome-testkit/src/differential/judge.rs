@@ -84,7 +84,9 @@ pub enum RunRefusal {
     /// A run observed one probe twice.
     DuplicateObservation { lane: Lane, probe: String },
     /// A completed observation in `lane` holds, in a `field` of `probe` that a rule covers,
-    /// something other than one value of the rule's `kind` or a list of such values.
+    /// something other than one value of the rule's `kind` or a list of such values, or a list
+    /// of system times or durations that mixes integers with numbers written with a fraction or
+    /// an exponent.
     RuleCannotHold {
         lane: Lane,
         probe: String,

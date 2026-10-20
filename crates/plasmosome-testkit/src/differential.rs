@@ -78,10 +78,12 @@ pub struct ProbeSpec {
 }
 
 /// One row of the normalization table. [`judge`] replaces each value of `field` in `probe`
-/// with a placeholder of `kind`, numbered within that field in that run: by first appearance,
-/// or by order for system times and durations. So equal values stay equal and distinct ones
-/// distinct. The field must hold one value of `kind` or a list of them, or `judge` refuses the
-/// runs. No kind holds an object, so no value the workload set can hide inside a ruled field.
+/// with a placeholder of `kind`, numbered within that probe, field and run: by first
+/// appearance, or by order for system times and durations. So equal values stay equal and
+/// distinct ones distinct, within that field only. Two fields are numbered apart, so values
+/// whose relation matters must be in one list field. The field must hold one value of `kind` or
+/// a list of them, or `judge` refuses the runs. No kind holds an object, so no workload-set
+/// field can sit under a ruled field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub probe: String,
@@ -92,7 +94,9 @@ pub struct Rule {
 /// The only normalization rules spec 027 §6 lists. A new one is an edit to that spec. A process
 /// ID, mount ID, parent mount ID, device, inode or memory counter holds a whole number; an
 /// ephemeral port a whole number up to 65535; a system time, duration or load counter any
-/// number; a boot ID a UUID; and a resolved address an IPv4 or IPv6 address.
+/// number; a boot ID a UUID; and a resolved address an IPv4 or IPv6 address. A list of system
+/// times or of durations must not mix integers with numbers written with a fraction or an
+/// exponent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuleKind {
     Pid,
