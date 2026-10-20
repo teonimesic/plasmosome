@@ -368,6 +368,9 @@ def a_malformed_base_member_refuses():
         assert "/etc/passwd" in refusal("stage", API["stage"], base, root / "out.tar", [], EPOCH, LIMIT)
         assert "/usr/bin/zcat" in refusal("stage", stage_with, root, {"usr/bin/zcat": h("usr/bin/absent")})
         assert "/etc/passwd2" in refusal("stage", stage_with, root, {"etc/passwd2": h("etc/passwd")})
+        for target in ("bin", "usr"):
+            detail = refusal("stage", stage_with, root, {"usr/bin/zz": h(target)})
+            assert "/usr/bin/zz" in detail and "not an earlier file" in detail, detail
         base.write_bytes(b"not a tar archive" * 64)
         assert "tar" in refusal("stage", API["stage"], base, root / "out.tar", [], EPOCH, LIMIT)
 
@@ -425,6 +428,10 @@ def add_places_a_root_owned_file_and_refuses_bad_destinations():
         (root / "linked").symlink_to(probe)
         tree, _ = staged(root, adds=[Add(str(root / "linked"), "/usr/bin/x", 0o755)])
         assert tree["usr/bin/x"][:5] == ("file", 0o755, 0, 0, b"\x7fELF probe")
+        marker.write_bytes(b"abc")
+        with patched("MAX_ADD_BYTES", 2):
+            detail = refusal("stage", stage_with, root, adds=[Add(str(marker), "/usr/bin/x", 0o755)])
+        assert "/usr/bin/x" in detail and "larger than 2 bytes" in detail, detail
 
 
 def the_kind_is_test_exactly_when_add_is_given():
@@ -480,6 +487,17 @@ def docker_create_times_do_not_reach_the_stage():
         assert {tree[name].mtime for name in ("dev", "etc", "etc/mtab", "proc", "sys")} == {EPOCH}
         assert tree["etc/mtab"][:6] == ("symlink", 0o777, 0, 0, b"", "/proc/mounts")
         assert tree["usr/bin/bash"].mtime == BASE_MTIME and tree["etc/skel"].mtime == BASE_MTIME
+
+
+@contextmanager
+def oversize(path, size):
+    original = path.read_bytes()
+    with open(path, "r+b") as out:
+        out.truncate(size)
+    try:
+        yield
+    finally:
+        path.write_bytes(original)
 
 
 @contextmanager
@@ -555,6 +573,9 @@ def contract_check_reads_debugfs_output():
             assert "cannot parse" in refusal("check", API["check_image"], check, facts, uuid)
         with patched("MAX_ADD_BYTES", 2):
             assert "larger than 2 bytes" in refusal("check", API["check_image"], check, facts, uuid)
+        with oversize(check / "dumpe2fs", TOOL["MAX_OUTPUT_BYTES"] + 1):
+            detail = refusal("check", API["check_image"], check, facts, uuid)
+        assert "check/dumpe2fs" in detail and f"larger than {TOOL['MAX_OUTPUT_BYTES']} bytes" in detail, detail
         (check / "group").unlink()
         assert "/etc/group" in refusal("check", API["check_image"], check, facts, uuid)
         (check / "group").symlink_to(check / "passwd")
@@ -612,7 +633,9 @@ def build_runs_export_then_filesystem_in_the_pinned_base():
         assert lines[mkfs] == (f"mke2fs -q -t ext4 -b 4096 -d {tree} -U {uuid} -E hash_seed={uuid},root_owner=0:0 "
                                f"/w/rootfs.raw {SIZE_MIB}M"), lines[mkfs]
         [check] = [number for number, line in enumerate(lines) if "e2fsck -fn /w/rootfs.raw" in line]
-        assert lines[check].endswith(">/w/check/e2fsck.code") and extract < mkfs < check
+        assert lines[check] == ("if e2fsck -fn /w/rootfs.raw >/w/check/e2fsck.out 2>&1; then echo 0; else echo $?; fi "
+                                ">/w/check/e2fsck.code"), lines[check]
+        assert extract < mkfs < check
         probes = re.findall(r"^debugfs -R '([^']+)' /w/rootfs.raw >/w/check/(\S+) 2>/w/check/\2\.err$", script, re.M)
         assert sorted(probes) == sorted([
             ("cat /etc/passwd", "passwd"), ("cat /etc/group", "group"), ("stat /home/workload", "home.stat"),
@@ -686,6 +709,15 @@ def e2fsck_failure_refuses():
         code, out, err, work, images = built(root, fake, work_name="unclean")
         assert code == 1 and err.startswith("root-image: refused filesystem: ") and "e2fsck" in err, err
         assert "illegal block" in err and list(images.iterdir()) == [] and work.is_dir()
+        fake = FakeDocker()
+        fake.after = lambda work: (work / "check" / "e2fsck.code").write_text("0" + " " * 64 + "\n")
+        code, out, err, work, images = built(root, fake, work_name="long-code")
+        assert code == 1 and err.startswith("root-image: refused filesystem: ") and "larger than 64 bytes" in err, err
+        fake = FakeDocker()
+        fake.e2fsck = "4"
+        fake.after = lambda work: os.truncate(work / "check" / "e2fsck.out", TOOL["MAX_OUTPUT_BYTES"] + 1)
+        code, out, err, work, images = built(root, fake, work_name="long-out")
+        assert code == 1 and f"larger than {TOOL['MAX_OUTPUT_BYTES']} bytes" in err, err
         fake = FakeDocker()
         fake.unshared = True
         code, out, err, work, images = built(root, fake, work_name="unshared")
@@ -928,6 +960,34 @@ def the_placed_rootfs_keeps_its_holes():
         assert os.stat(copied).st_size == size and os.stat(copied).st_blocks * 512 < 16 << 20, os.stat(copied)
 
 
+def the_rootfs_copy_reads_no_more_than_its_size():
+    with scratch() as root:
+        size = 1 << 20
+        with open(root / "rootfs.raw", "wb") as out:
+            out.truncate(64 << 20)
+        (root / "stage").mkdir()
+        sizes, opened = [], TOOL["open_regular"]
+
+        class Counted:
+            def __init__(self, handle):
+                self.handle = handle
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.handle.close()
+
+            def read(self, wanted=-1):
+                data = self.handle.read(wanted)
+                sizes.append(len(data))
+                return data
+
+        with patched("open_regular", lambda *args: Counted(opened(*args))):
+            detail = refusal("publish", API["copy_rootfs"], root, root / "stage", size)
+        assert str(size) in detail and sum(sizes) == size + 1, (detail, sum(sizes))
+
+
 class Failing:
     """A module whose one named function raises the OSError a full disk or a denied write gives."""
 
@@ -1003,6 +1063,7 @@ TESTS = [
     files_the_container_leaves_in_the_work_root_are_not_trusted,
     failures_of_the_os_print_the_refused_line,
     the_placed_rootfs_keeps_its_holes,
+    the_rootfs_copy_reads_no_more_than_its_size,
 ]
 
 
