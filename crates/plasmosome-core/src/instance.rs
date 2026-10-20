@@ -798,15 +798,13 @@ fn naming(cells: BorrowedFd<'_>, name: &CStr, opened: BorrowedFd<'_>) -> io::Res
         entry => entry?,
     };
     let opened = stat_of(opened)?;
-    Ok(
-        if (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino) {
-            Naming::Gone
-        } else if listed {
-            Naming::Exact
-        } else {
-            Naming::Alias
-        },
-    )
+    if (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino) {
+        Ok(Naming::Gone)
+    } else if listed {
+        Ok(Naming::Exact)
+    } else {
+        Ok(Naming::Alias)
+    }
 }
 
 fn out_of_descriptors(error: &io::Error) -> bool {
