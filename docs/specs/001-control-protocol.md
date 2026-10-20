@@ -1398,13 +1398,21 @@ is a claim that the text above may not be corrected.
    requires actual controller restart and independently surviving supervisor observation,
    separately from portable journal/model evidence. Accepting the contract does not turn the
    existing status-only daemons into recovery-capable daemons.
-8. Spec017's PID-free BrokerLaunch, caller-prepared fallible grant API, complete fallible snapshot,
-   typed incomplete effects, drain-aware exact cleanup and single-plugin format3 cutover are
-   **not yet implemented**. Current exact-ID model code still carries PID-bearing capabilities,
-   infallible backend-minted grants and format2 records. The new contract permits complete
-   prepare/inverse before fork and defines cleanup after partial launch; it does not deliver
-   an independent observer, workload confinement or all five real adapters.
-9. The selected hardware runtime, fully resolved resource recipes and physical guest projection
-   account in §4.2/spec017 are **not yet implemented**. Actual guest artifacts, platform
-   confinement and strict managed-file policy witnesses remain deployment/admission obligations.
-   Accepting their specification neither changes the status-only daemon nor completes spec008.
+8. Spec017's PID-free BrokerLaunch and single-plugin format3 cutover are **delivered** in the
+   exact-ID model and the ledger. Its caller-prepared fallible grant API, complete fallible
+   snapshot, typed incomplete effects and drain-aware exact cleanup are **not yet implemented**.
+   Current exact-ID model code carries recipe-bearing capabilities, a PID-free broker launch and
+   format3 records, and still has infallible backend-minted grants. The new contract permits
+   complete prepare/inverse before fork and defines cleanup after partial launch; it does not
+   deliver an independent observer, workload confinement or all five real adapters.
+   Amended on 2026-10-20, when plasmosome-8pr4 shipped the launch and the format3 cutover. Until
+   then this item listed both as not yet implemented, and said the model code carried
+   PID-bearing capabilities and format2 records.
+9. The selected hardware runtime and physical guest projection account in §4.2/spec017 are
+   **not yet implemented**. The exact-ID model and the ledger carry spec017's complete resource
+   recipes as values, but nothing yet resolves a need into one or materializes one. Actual guest
+   artifacts, platform confinement and strict managed-file policy witnesses remain
+   deployment/admission obligations. Accepting their specification neither changes the
+   status-only daemon nor completes spec008. Amended on 2026-10-20, when plasmosome-8pr4 shipped
+   those recipe values. Until then this item listed fully resolved resource recipes as not yet
+   implemented.

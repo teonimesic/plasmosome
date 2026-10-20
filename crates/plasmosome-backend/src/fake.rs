@@ -171,7 +171,7 @@ mod tests {
     use super::*;
     use crate::backend::{Capability, GrantKind};
     use crate::fixtures::{self, broker, mount, proxy_map, session_file, uds_socket};
-    use crate::recipe::RecipeError;
+    use crate::recipe::{BrokerLaunch, ProxyRecipe, RecipeError};
     use crate::universe::{CellId, CellOwner, PluginId, UniverseClass};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::time::Duration;
@@ -189,7 +189,7 @@ mod tests {
             session_file("/skills/pr.md"),
             uds_socket("/run/ak/egressd.uds"),
             proxy_map("api.github.com", "splice"),
-            broker(4242, "egressd"),
+            broker("egressd"),
             mount("/secrets", "/workspace"),
         ]
     }
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn live_broker_revoke_preserves_equal_planted_residue() {
-        let capability = broker(31337, "egressd");
+        let capability = broker("egressd");
         let residue = OsObject {
             id: GrantId::new(),
             owner: cell_owner("cell-1", "network"),
@@ -392,11 +392,11 @@ mod tests {
     #[test]
     fn identity_source_failure_happens_before_any_backend_mutation() {
         let mut backend = FakeBackend::new();
-        let existing = backend.grant(grant("network", broker(7, "standing")));
+        let existing = backend.grant(grant("network", broker("standing")));
         let before = backend.snapshot_os_state();
         let grants_before = backend.grants_issued().to_vec();
         let result = catch_unwind(AssertUnwindSafe(|| {
-            backend.grant_with(grant("network", broker(8, "new")), || {
+            backend.grant_with(grant("network", broker("new")), || {
                 panic!("deterministic random source failure")
             })
         }));
@@ -747,8 +747,39 @@ mod tests {
                 },
             ),
             (
-                fixtures::op(GrantId::new(), owner.clone(), broker(4242, "egress\0d")),
+                fixtures::op(GrantId::new(), owner.clone(), broker("egress\0d")),
                 RecipeError::ContainsNul { field: "name" },
+            ),
+            (
+                fixtures::op(
+                    GrantId::new(),
+                    owner.clone(),
+                    Capability::ProxyMap {
+                        host: "api.github.com".to_string(),
+                        route: "splice".to_string(),
+                        recipe: ProxyRecipe {
+                            port: 0,
+                            ..fixtures::proxy_recipe()
+                        },
+                    },
+                ),
+                RecipeError::ZeroPort,
+            ),
+            (
+                fixtures::op(
+                    GrantId::new(),
+                    owner.clone(),
+                    Capability::Broker {
+                        name: "egressd".to_string(),
+                        launch: BrokerLaunch {
+                            data_socket: fixtures::launch().control_socket,
+                            ..fixtures::launch()
+                        },
+                    },
+                ),
+                RecipeError::SharedEndpoint {
+                    path: fixtures::launch().control_socket,
+                },
             ),
         ] {
             let rule = error.to_string();

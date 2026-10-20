@@ -25,9 +25,8 @@ vocabulary implements `Serialize`/`Deserialize` and holds no shared memory. In `
 process, and `FrozenAccount` shares its bytes through an `Arc`. Every record decodes
 only from a JSON object. serde's derived decoders also accept a positional array and fill fields
 by position, so two paths of one type could swap unnoticed; `ObjectOnly` refuses that shape for
-each record here and in the ledger. `ObservationPage` refuses it through its own visitor until
-plasmosome-8pr4 moves it onto `ObjectOnly`. Why the crate names no VMM or broker process is
-covered in `AGENTS.md`.
+each record here and in the ledger, `ObservationPage` included. Every record also refuses a field
+it does not name. Why the crate names no VMM or broker process is covered in `AGENTS.md`.
 
 Each successful grant gets a canonical RFC 4122 UUID-v4 identity and an exact handle made from
 its universe class and that identity. Equal capabilities remain separate holdings. Recorded
@@ -53,14 +52,25 @@ for the two paths, never `fstat` on the socket descriptors, and treats a match a
 under spec 017's incomplete-effect rules. Decoding refuses a missing or unknown field and a
 positional array, and decoding JSON text also refuses a repeated field; a `serde_json::Value` or
 `Map` keeps only the last copy of a repeated key. Decoding and encoding both refuse any value
-`validate` refuses; neither reads the filesystem or resolves a name. `Capability` does not carry
-these records yet.
+`validate` refuses; neither reads the filesystem or resolves a name.
 
-A `Capability` checks its own strings with the same rules. `SessionFile.path`, `UdsSocket.path`,
-`Mount.source` and `Mount.target` are canonical absolute paths; `host`, `route` and `name` are
-exact selection names and only need to be NUL-free. A `UniverseOp` checks the capability it
-creates. Both refuse an invalid value on decode and on encode, so every record that carries one
-does too, and an invalid capability can be neither read from nor written to a log.
+Every `Capability` carries its complete recipe, and so does the `UniverseOp` that creates it:
+`SessionFile`, `UdsSocket`, `ProxyMap` and `Mount` carry a `recipe`, and `Broker` carries a
+`name` and a `launch`. A broker carries no process ID: a PID is observed after the broker
+starts, never predicted. Its key is `broker/{name}`, so two brokers with one name and different
+launches share a key and are still two different capabilities. The class keeps its name,
+`BrokerPid`, and its label, `broker-pid`. A missing recipe or launch is refused on decode; no
+code outside tests fills one in.
+
+A `Capability` checks its own strings first, in field order, then its recipe or launch.
+`SessionFile.path`, `UdsSocket.path`, `Mount.source` and `Mount.target` are canonical absolute
+paths; `host`, `route` and `name` are exact selection names and only need to be NUL-free. A
+`UniverseOp` checks the capability it creates, in the same order. Both refuse an invalid value on
+decode and on encode, so every record that carries one does too, and an invalid capability can be
+neither read from nor written to a log. Decoding names the first rule it meets instead. Each recipe
+and launch checks itself while it decodes, so decoding names a broken recipe before a broken path
+or name of the same capability, and a zero port before a NUL in its host. The value is refused on
+every path either way.
 The trait's `apply` and `plant` refuse an invalid value before any change, with
 `BackendError::InvalidOperation` naming the address and the broken rule; `FakeBackend` does.
 `grant` does not check yet.
