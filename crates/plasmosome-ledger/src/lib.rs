@@ -348,9 +348,14 @@ impl DetachReport {
     }
 }
 
+/// Why a detach stopped. Neither case moves the pending cursor, so a later call with the cell the
+/// first detach named resumes where this one stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetachError {
+    /// The backend refused the inverse of the effect the cursor is on.
     Backend(BackendError),
+    /// The call named `requested`, but this ledger's first detach named `began`. Nothing was
+    /// asked of the backend.
     CellChanged { began: CellId, requested: CellId },
 }
 
@@ -384,9 +389,11 @@ impl SealedLedger {
     /// `{cell, plugin}`, and every removal and revoke uses `drain`. The cell is
     /// never read from the log or defaulted. On an error the pending cursor stays
     /// on the failed effect, so a later detach resumes there without replaying
-    /// what already succeeded. Every call for one ledger, including each resume,
-    /// must pass the same `cell`: the log does not record it, so this format
-    /// cannot detect a different one.
+    /// what already succeeded. The first call binds `cell` to this ledger,
+    /// whatever its outcome. A later call naming another cell returns
+    /// `DetachError::CellChanged` before any backend call and moves neither the
+    /// cursor nor the asserted list. To detach under another cell, `unseal` and
+    /// close again.
     pub fn detach(
         &mut self,
         backend: &mut dyn EnforcementBackend,
@@ -404,6 +411,9 @@ impl SealedLedger {
         replay(&owner, effects, pending, asserted, backend, drain, None)
     }
 
+    /// Returns the open ledger with every effect. It drops the pending cursor and the cell the
+    /// first detach bound, so closing it again starts a new detach over every effect, including
+    /// those already replayed, which may name any cell.
     pub fn unseal(self) -> Ledger {
         Ledger {
             plugin: self.plugin,
@@ -432,8 +442,8 @@ impl ForcedLedger {
 
     /// Replays the pending effects like `SealedLedger::detach`, with the same
     /// `cell` and `drain` rules, and records the operator's `force` in the report.
-    /// Every call for one ledger, including each resume, must pass the same `cell`;
-    /// this format cannot detect a different one.
+    /// Its first call binds `cell` as `detach` does, and a later call naming
+    /// another cell returns `DetachError::CellChanged` before any backend call.
     pub fn detach_forced(
         &mut self,
         backend: &mut dyn EnforcementBackend,
@@ -460,6 +470,9 @@ impl ForcedLedger {
         )
     }
 
+    /// Returns the open ledger with every effect. It drops the pending cursor and the cell the
+    /// first detach bound, so closing it again starts a new detach over every effect, including
+    /// those already replayed, which may name any cell.
     pub fn unseal(self) -> Ledger {
         Ledger {
             plugin: self.plugin,
@@ -656,9 +669,14 @@ impl Ledger {
 
     /// Appends one record for every effect this ledger holds to `path`, creating it and its
     /// parent directories when missing. That includes the effects `open_file` read, so appending
-    /// a ledger opened from the same file writes those records a second time. Every record is
-    /// encoded before the file is touched, so an effect that cannot be encoded returns
-    /// `InvalidData` naming it and leaves the file, or its absence, as it was.
+    /// a ledger opened from the same file writes those records a second time.
+    ///
+    /// Every record is encoded first, and a nonempty target is read before anything is written.
+    /// It returns `InvalidData` and leaves the target, or its absence, as it was when an effect
+    /// cannot be encoded, when the target's last byte is not LF, when `open_file` refuses one of
+    /// its records, or when its records name another plugin. A torn final record is refused here,
+    /// not ignored. The check and the write use one handle, but this is no lock: nothing stops
+    /// a second writer.
     pub fn append_to_file(&self, path: &Path) -> std::io::Result<usize> {
         let records = self.encode()?;
         if let Some(parent) = path.parent()
