@@ -608,10 +608,10 @@ fn a_member_that_forwards_the_test_fixture_through_its_own_features_is_reported(
 }
 
 #[test]
-fn a_crate_that_only_depends_on_a_forwarding_member_is_not_named() {
-    let forwarding = consumer(
+fn a_crate_that_only_depends_on_the_enabler_is_not_named() {
+    let enabler = consumer(
         "plasmosome-membrane",
-        "[features]\ndefault = [\"fixtures\"]\nfixtures = [\"plasmosome-backend/test-fixture\"]\n\n[dependencies]\nplasmosome-backend = { path = \"../backend\" }\n",
+        "[dependencies]\nplasmosome-backend = { path = \"../backend\", default-features = false, features = [\"test-fixture\"] }\n",
     );
     let dependent = consumer(
         "plasmosome-controller",
@@ -619,7 +619,7 @@ fn a_crate_that_only_depends_on_a_forwarding_member_is_not_named() {
     );
     let workspace = fixture_feature_workspace_of(
         &[
-            ("crates/membrane", &forwarding),
+            ("crates/membrane", &enabler),
             ("crates/controller", &dependent),
         ],
         "",
