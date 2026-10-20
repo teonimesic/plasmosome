@@ -69,8 +69,9 @@ jobs:
       - name: install cargo-deny
         run: cargo install cargo-deny --version 0.20.2 --locked
 
-      # The findings file is one line of ASCII JSON, so it is one output line. GitHub caps an output
-      # at 1 MB, so a larger file fails this step, and the issue job reports the missing findings.
+      # The findings file is one line of ASCII JSON, so it is one output line. The issue step reads it
+      # from an environment variable, and Linux refuses an environment string over 128 KiB. So a file
+      # over 100000 bytes fails this step, and the issue job reports the missing findings.
       - name: report
         id: report
         env:
@@ -78,7 +79,7 @@ jobs:
         run: |
           python3 tools/cargo-deny-check report --json-out "$RUNNER_TEMP/findings.json" --event "$EVENT"
           size=$(wc -c < "$RUNNER_TEMP/findings.json")
-          if [ "$size" -gt 1000000 ]; then echo "::error::the findings file is $size bytes, over an output's 1 MB"; exit 1; fi
+          if [ "$size" -gt 100000 ]; then echo "::error::the findings file is $size bytes, over the 100000 the issue job can read"; exit 1; fi
           printf 'findings=%s\n' "$(cat "$RUNNER_TEMP/findings.json")" >> "$GITHUB_OUTPUT"
 
   # This job runs only checkout, this repository's standard-library script and gh. It runs after a
