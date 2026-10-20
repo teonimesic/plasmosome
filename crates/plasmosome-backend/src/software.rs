@@ -107,8 +107,8 @@ pub struct PackageFile {
 /// tree, placed as `/usr/local/bin/<name>`.
 ///
 /// Spec 027 leaves the declaration field that names commands blocked on consumers, so only the
-/// test [`fixture`] makes one from text. [`PinnedTree::command_names`] hands back the ones a
-/// tree was pinned with.
+/// test-only `fixture` module makes one from text. [`PinnedTree::command_names`] hands back the
+/// ones a tree was pinned with.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CommandName(String);
 
@@ -538,7 +538,8 @@ pub fn check_names(
 
 /// The test-only route to a command, until spec 027's declaration field exists. It compiles only
 /// in this crate's tests and under the `test-fixture` feature. Enable that feature only from
-/// `[dev-dependencies]`; a reviewer checks this, and nothing else does.
+/// `[dev-dependencies]`. The workspace guard `only_the_testkit_enables_the_backend_test_fixture`
+/// fails when any crate but `plasmosome-testkit` turns it on by a normal or build dependency.
 #[cfg(any(test, feature = "test-fixture"))]
 pub mod fixture {
     use super::{CommandName, follows_path_rule};
