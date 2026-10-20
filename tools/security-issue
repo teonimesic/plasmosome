@@ -125,7 +125,8 @@ class Gh:
     def write(self, args, body):
         if self.dry_run:
             print(f"dry run, not run: gh {' '.join(args)} --repo {self.repository}")
-            print(body)
+            if body is not None:
+                print(body)
             return
         print(self.call(args, stdin=body).strip())
 
@@ -195,7 +196,11 @@ def main(argv=None):
         return 2
     for finding in failures:
         print(f"tool failure, written into the security issue: {finding.get('title')}", file=sys.stderr)
-    print(f"{len(findings)} findings are in the security issue")
+    count = f"{len(findings)} finding{'s' if len(findings) != 1 else ''}"
+    if args.mode == "dry-run":
+        print(f"{count} would be in the security issue; this was a dry run")
+    else:
+        print(f"{count} {'are' if len(findings) != 1 else 'is'} in the security issue")
     return 1 if failures else 0
 
 
