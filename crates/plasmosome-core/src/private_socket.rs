@@ -53,7 +53,7 @@ impl FinalRule {
         }
     }
 
-    fn refuse_acl(self, dir: &OwnedFd, at: &Path) -> Result<(), PrivateSocketError> {
+    fn refuse_final_acl(self, dir: &OwnedFd, at: &Path) -> Result<(), PrivateSocketError> {
         match self {
             FinalRule::Private => refuse_acl(dir, at),
             FinalRule::Ancestor => refuse_replacing_acl(dir, at),
@@ -118,7 +118,7 @@ impl Walk {
         let (dir, facts) = self.run(euid, rule)?;
         refuse_ignored_ownership(&dir, path)?;
         rule.judge(&facts, euid, path)?;
-        rule.refuse_acl(&dir, path)?;
+        rule.refuse_final_acl(&dir, path)?;
         Ok((dir, facts))
     }
 }
