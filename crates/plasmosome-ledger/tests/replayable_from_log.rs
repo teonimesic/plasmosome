@@ -996,3 +996,17 @@ fn append_to_file_creates_a_missing_target_and_extends_an_empty_or_valid_one() {
         assert_eq!(reopened.plugin(), &PluginId::from("github-pr"));
     }
 }
+
+#[test]
+fn open_file_refuses_an_empty_log_or_one_holding_only_a_torn_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+    let line = encoded_line("github-pr", "entry one", "/skills/a.md");
+    for bytes in [&[][..], &line.as_bytes()[..line.len() - 12]] {
+        std::fs::write(&log, bytes).unwrap();
+        let error = Ledger::open_file(&log).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "ledger log holds no record");
+        assert_eq!(std::fs::read(&log).unwrap(), bytes);
+    }
+}
