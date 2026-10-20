@@ -1033,6 +1033,65 @@ mod tests {
     }
 
     #[test]
+    fn a_process_out_of_descriptors_refuses_instead_of_launching() {
+        run_probe("runtime::launch::tests::probe_prepare_out_of_descriptors");
+    }
+
+    #[test]
+    #[ignore = "helper process for a_process_out_of_descriptors_refuses_instead_of_launching"]
+    #[allow(unsafe_code)]
+    fn probe_prepare_out_of_descriptors() {
+        if !probing() {
+            return;
+        }
+        let fitting = record_recipe();
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            // SAFETY: `limit` is a local rlimit that getrlimit may write.
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        for (soft, refused) in [(10, "F_DUPFD_CLOEXEC"), (11, "pipe")] {
+            limit.rlim_cur = soft;
+            assert_eq!(
+                // SAFETY: `limit` is a local rlimit that setrlimit only reads. This probe process
+                // runs only this test, so a lower limit reaches no other test.
+                unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) },
+                0
+            );
+            let outcome = HelperExec::prepare(&fitting).err();
+            let matched = match outcome {
+                Some(LaunchRefusal::Descriptor {
+                    op: "F_DUPFD_CLOEXEC",
+                    ..
+                }) => "F_DUPFD_CLOEXEC",
+                Some(LaunchRefusal::Pipe { .. }) => "pipe",
+                _ => "neither",
+            };
+            assert_eq!(
+                matched, refused,
+                "a soft limit of {soft} descriptors refuses typed, got {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prepared_helper_shows_its_program_and_no_descriptor_numbers() {
+        let fitting = record_recipe();
+        let prepared = HelperExec::prepare(&fitting).expect("the record recipe prepares");
+        let shown = format!("{:?}", prepared.exec);
+        assert!(
+            shown.starts_with("HelperExec { program: ")
+                && shown.contains(fitting.helper().path().as_str())
+                && shown.ends_with(", .. }"),
+            "{shown}"
+        );
+    }
+
+    #[test]
     fn only_the_null_character_device_is_accepted_as_dev_null() {
         let dir = tempfile::tempdir().expect("the test owns a directory");
         let plain = dir.path().join("null");
