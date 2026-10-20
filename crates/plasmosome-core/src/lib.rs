@@ -16,6 +16,7 @@ pub mod private_socket;
 pub mod protocol;
 pub mod reconciler;
 pub mod registry;
+pub mod runtime;
 pub mod session_log;
 pub mod state;
 pub mod version;

@@ -1,6 +1,6 @@
-use super::digest::{Digest, DigestError};
 use super::path::{PathError, RecipePath};
 use super::strict_json::{self, StrictJsonError};
+use plasmosome_backend::digest::{Digest, DigestError};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;

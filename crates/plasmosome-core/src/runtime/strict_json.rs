@@ -3,7 +3,7 @@ use serde_json::{Map, Number, Value};
 use std::cell::RefCell;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StrictJsonError {
+pub enum StrictJsonError {
     NotJson {
         line: usize,
         column: usize,
@@ -35,7 +35,7 @@ impl std::fmt::Display for StrictJsonError {
 
 impl std::error::Error for StrictJsonError {}
 
-pub(crate) fn parse_value(bytes: &[u8]) -> Result<Value, StrictJsonError> {
+pub fn parse_value(bytes: &[u8]) -> Result<Value, StrictJsonError> {
     let duplicate = RefCell::new(None);
     let mut reader = serde_json::Deserializer::from_slice(bytes);
     let read = Strict {
