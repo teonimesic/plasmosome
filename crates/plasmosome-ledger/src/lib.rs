@@ -3,6 +3,8 @@
 //! A caller pushes effects onto a `Ledger`, closes it, and detaches the result.
 //! The `artifact` module holds spec 020's registry IDs, release keys and release references.
 
+#![doc(test(attr(forbid(unsafe_code))))]
+
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::Path;
