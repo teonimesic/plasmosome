@@ -1,0 +1,163 @@
+mod common;
+
+use std::io::Write;
+#[cfg(target_os = "macos")]
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+
+fn run_with_stdin(binary: &str, stdin: &str) -> Output {
+    let mut child = Command::new(binary)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(stdin.as_bytes())
+        .expect("the configuration is written");
+    child.wait_with_output().expect("the binary exits")
+}
+
+#[cfg(target_os = "macos")]
+fn vmm_with_bundle(bundle: &Path) -> Output {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let mut lane = common::lane_config(scratch.path(), "run-1");
+    lane.bundle = bundle.to_path_buf();
+    run_with_stdin(env!("CARGO_BIN_EXE_lane-vmm"), &lane.to_json())
+}
+
+#[cfg(target_os = "macos")]
+fn assert_refused_naming(output: &Output, code: i32, path: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(code), "stderr: {stderr}");
+    assert!(
+        stderr.contains(path),
+        "stderr should name `{path}`: {stderr}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn lane_vmm_refuses_a_configuration_it_cannot_parse() {
+    let output = run_with_stdin(env!("CARGO_BIN_EXE_lane-vmm"), "{\"run_id\": 1}");
+
+    assert_eq!(output.status.code(), Some(64));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn lane_vmm_refuses_a_changed_libkrun_before_loading_it() {
+    let bundle = common::bundle_fixture();
+    common::write_file(
+        bundle.path(),
+        common::LIBKRUN,
+        b"garbage that dlopen would refuse",
+    );
+
+    let output = vmm_with_bundle(bundle.path());
+
+    assert_refused_naming(&output, 65, common::LIBKRUN);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn lane_vmm_refuses_a_changed_kernel_before_loading_libkrun() {
+    let bundle = common::bundle_fixture();
+    common::write_file(bundle.path(), common::KERNEL, b"another kernel");
+
+    let output = vmm_with_bundle(bundle.path());
+
+    assert_refused_naming(&output, 65, common::KERNEL);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn lane_vmm_refuses_an_extra_file_under_lib_before_loading_libkrun() {
+    let bundle = common::bundle_fixture();
+    common::write_file(bundle.path(), "lib/libkrunfw.5.dylib", b"unlisted");
+
+    let output = vmm_with_bundle(bundle.path());
+
+    assert_refused_naming(&output, 65, "lib/libkrunfw.5.dylib");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn lane_vmm_reports_a_verified_libkrun_that_does_not_load() {
+    let bundle = common::bundle_fixture();
+
+    let output = vmm_with_bundle(bundle.path());
+
+    assert_refused_naming(&output, 69, common::LIBKRUN);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn lane_vmm_refuses_to_run_off_macos() {
+    let output = run_with_stdin(env!("CARGO_BIN_EXE_lane-vmm"), "");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).trim(),
+        "lane-vmm: refused: runs only on macOS"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn lane_init_and_lane_probe_refuse_to_run_off_linux() {
+    for binary in [
+        env!("CARGO_BIN_EXE_lane-init"),
+        env!("CARGO_BIN_EXE_lane-probe"),
+    ] {
+        let output = run_with_stdin(binary, "");
+        assert_eq!(output.status.code(), Some(2), "{binary}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lane_init_refuses_to_run_as_any_process_but_1() {
+    let output = run_with_stdin(env!("CARGO_BIN_EXE_lane-init"), "");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("process 1"),
+        "{output:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lane_probe_prints_one_json_line_for_stat() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let path = common::write_file(dir.path(), "placed", b"bytes");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lane-probe"))
+        .args(["stat", path.to_str().expect("UTF-8")])
+        .output()
+        .expect("lane-probe runs");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let line: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON line");
+    assert_eq!(line["probe"], "stat");
+    assert_eq!(line["ok"], true);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn lane_probe_refuses_an_unknown_subcommand_with_a_json_line() {
+    let output = Command::new(env!("CARGO_BIN_EXE_lane-probe"))
+        .arg("teleport")
+        .output()
+        .expect("lane-probe runs");
+
+    assert_eq!(output.status.code(), Some(64));
+    let line: serde_json::Value = serde_json::from_slice(&output.stdout).expect("one JSON line");
+    assert_eq!(line["ok"], false);
+}
