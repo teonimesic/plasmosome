@@ -997,4 +997,19 @@ pub(crate) mod tests {
         assert_eq!(relaunched.class(), UniverseClass::BrokerPid);
         assert_eq!(broker("auditd").key(), "broker/auditd");
     }
+
+    #[test]
+    fn each_capability_is_keyed_as_its_doc_says() {
+        assert_eq!(session_file("/skills/pr.md").key(), "session//skills/pr.md");
+        assert_eq!(
+            uds_socket("/run/plasmosome/egressd.uds").key(),
+            "/run/plasmosome/egressd.uds"
+        );
+        assert_eq!(
+            proxy_map("api.github.com", "splice").key(),
+            "api.github.com"
+        );
+        assert_eq!(broker("egressd").key(), "broker/egressd");
+        assert_eq!(mount("/srv/repo", "/workspace").key(), "/workspace");
+    }
 }
