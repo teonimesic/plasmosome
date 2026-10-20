@@ -242,9 +242,21 @@ reviewer items. Q7 asks the owner whether to enforce the action pin as a reposit
 **Every package forbids it, except the register.** The root manifest's `[workspace.lints]` sets
 `unsafe_code = "forbid"`. It also sets two clippy lints to `deny`: `undocumented_unsafe_blocks` and
 `missing_safety_doc`. Every package outside the register inherits all three with
-`lints.workspace = true`. That covers every target a package compiles: library, binaries, tests,
-benches, examples and build script. A `#![forbid(unsafe_code)]` in `lib.rs` alone does not meet
-this rule, because it leaves tests, benches and binaries open.
+`lints.workspace = true`. That covers every target a package compiles except its doctests:
+library, binaries, tests, benches, examples and build script. A `#![forbid(unsafe_code)]` in
+`lib.rs` alone does not meet this rule, because it leaves tests, benches and binaries open.
+
+**Doctests are reached only through the library root.** Cargo passes the manifest's levels to
+`rustdoc --test`, but rustdoc does not apply them to the doctests it compiles, and clippy never
+sees a doctest. So the library root of every package that forbids `unsafe_code` carries
+`#![doc(test(attr(forbid(unsafe_code))))]`. rustdoc puts that `forbid` into each doctest it
+compiles from the package. `-A unsafe_code` and `--cap-lints=allow` in rustdocflags were measured
+not to lift it. A missing or misspelled attribute is silent, so the reviewer checks it, and
+section 8 reads it as code. In a register package, neither the `deny` nor the clippy lints reach a
+doctest. An `unsafe` block in a doctest there still needs the `allow(unsafe_code)` and the safety
+comment that library code needs, and the reviewer checks both. Corrected on 2026-10-20: this
+section said the manifest's table covers every target a package compiles, and doctests are a
+target it does not reach.
 
 **The register** is the set of packages whose own `[lints]` table sets `unsafe_code = "deny"`.
 Today it holds `plasmosome-membrane`, `plasmosome-core` and `plasmosome-lanes`. Cargo does not let
@@ -273,11 +285,20 @@ carries. That needs the `AGENTS.md` amendment below.
   external macros. So `forbid` lets a dependency's `macro_rules!` or derive put `unsafe` into a
   forbid package, and no safety comment is asked for. The record's `expands_unsafe` field covers
   the range as reviewed; a compatible bump can add such a macro unseen. A PR whose code in a forbid
-  package first calls a macro some record lists there says why.
-- **Build settings that weaken lints.** `--cap-lints` or `-A` in rustflags silences both the forbid
-  and clippy. The git-only step refuses all committed Cargo configuration. A workflow can set the
-  same things, and run anything, through its environment: `RUSTUP_TOOLCHAIN` set to a path was
-  measured to run a committed toolchain. So any change to `.github/` is read as code.
+  package first calls a macro some record lists there says why. A forbid package's own
+  `#[macro_export]` macro is another crate's macro to every target outside its library: doctests,
+  integration tests, binaries, examples and benches, which compile as separate crates. So a macro
+  whose body holds `unsafe` runs there with no refusal and no safety comment, while a call inside
+  the library is refused. The reviewer reads the body of such a macro. Amended on 2026-10-20: this
+  bullet named only a dependency's macro.
+- **Build settings that weaken lints.** `--cap-lints` in rustflags silences both the forbid and
+  clippy. `-A` in rustflags silences the two clippy lints but not the forbid. Cargo places rustflags
+  after the manifest's `--forbid=unsafe_code`, and rustc keeps a forbidden level, so with
+  `-A unsafe_code` or `--force-warn unsafe_code` it still refuses the block. The git-only step
+  refuses all committed Cargo configuration. A workflow can set the same things, and run anything,
+  through its environment: `RUSTUP_TOOLCHAIN` set to a path was measured to run a committed
+  toolchain. So any change to `.github/` is read as code. Corrected on 2026-10-20: this said `-A`
+  silences the forbid too.
 
 **Native code is `unsafe` code.** Only register packages compile or link it. In a forbid package
 the compiler refuses the `unsafe extern` block that calling it needs. A test can also compile and
@@ -428,8 +449,9 @@ when Q1 is answered. It never names a route nobody receives.
 | A vulnerability or unsound advisory, on a PR that changes a manifest or lockfile | `cargo-deny` in `gates` | The merge brings that code onto main, which the owner builds and runs against hostile input, with no release step between. An exploit cannot be undone. |
 | An advisory database or tool failure | The advisory step, as a tool failure | Fails closed: the step cannot vouch for the change |
 | An unlisted licence | Reviewer at PR time; release step at release | Below the bar until something ships (Q8) |
-| `unsafe` in a forbid package or outside an allowed item; a missing `// SAFETY:` comment or `# Safety` section | The compiler and clippy, through declared lint levels | Not a guard. See the spec 013 amendment. |
-| `unsafe` expanded from a dependency's macro | The record's `expands_unsafe` field and the reviewer | Judgement, because no lint sees it |
+| `unsafe` in a forbid package or outside an allowed item; a missing `// SAFETY:` comment or `# Safety` section | The compiler and clippy, through declared lint levels. In doctests, only a forbid package's library-root attribute declares a level, and clippy never runs | Not a guard. See the spec 013 amendment. Corrected on 2026-10-20: this row did not say that doctests are reached only through that attribute. |
+| A forbid package's library root without `#![doc(test(attr(forbid(unsafe_code))))]`; in a register package, an `unsafe` block in a doctest without the `allow(unsafe_code)` and `// SAFETY:` comment that library code needs | Reviewer | Judgement. Each change shows in the diff: the deleted or misspelled attribute, and the `unsafe` block in the example. Section 8 reads the attribute as code. Amended on 2026-10-20: this row is new. |
+| `unsafe` expanded from a dependency's macro, or from a forbid package's own exported macro in any target outside its library: doctests, integration tests, binaries, examples and benches | The record's `expands_unsafe` field and the reviewer; for a package's own macro, the reviewer alone | Judgement, because no lint sees it. Amended on 2026-10-20: this row named only a dependency's macro. |
 | An `allow(unsafe_code)` wider than an item or a named FFI module; an undocumented `unsafe extern` declaration; joining the register without both lints or a reason | Reviewer | Judgement |
 | Native code in a forbid package | The compiler, for linked code; the reviewer, for test-built programs | Judgement for the second |
 | A dependency rule that is a judgement: the thousand-line rule, the narrowest crate, features, record contents, release age, a stale record, an approval link, a copied crate | Reviewer | Judgement |
@@ -448,9 +470,14 @@ when Q1 is answered. It never names a route nobody receives.
 
 This spec governs a PR, whatever task it maps to, when the PR changes any of these: a lockfile; a
 manifest's dependency, `[lints]`, `[patch]` or `[replace]` tables; `.cargo/config*`, `build.rs`,
-`clippy.toml`, `rust-toolchain*` or `deny.toml`; anything under `.github/`, `.githooks/` or
-`docs/dependencies/`; `unsafe` or native code; a parser of less-trusted bytes or a fuzz corpus; or
-`SECURITY.md`. Its reviewer checks the reviewer rows of section 7.
+`clippy.toml`, `rust-toolchain*` or `deny.toml`; a library root's `#![doc(test(...))]`; anything
+under `.github/`, `.githooks/`, `tools/` or `docs/dependencies/`; `unsafe` or native code; a parser
+of less-trusted bytes or a fuzz corpus; or `SECURITY.md`. Its reviewer checks the reviewer rows of
+section 7, and reads any change under `tools/` as a workflow change, whether or not a workflow
+names the file. Workflows run scripts there, and a module added beside a Python script can shadow
+the standard-library module of that name. So a PR that only adds a file under `tools/` can switch a
+check off and still pass its own CI. Amended on 2026-10-20: the doctest attribute and `tools/` were
+not in this list.
 
 ## Changes proposed to accepted specs and documents
 

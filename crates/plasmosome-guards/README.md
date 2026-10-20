@@ -9,9 +9,10 @@ an author, the private research corpus reaching a public tree, and a skill Claud
 find.
 
 Nothing here pins a design. A guard is worth its cost when the thing it prevents is permanent or
-public; a guard over a shape the project has not built yet costs a real change its afternoon and
-teaches nobody anything. Design belongs in `docs/specs/` and in each crate's `AGENTS.md`, where it
-can be argued with.
+public, or when [spec 013](../../docs/specs/013-what-earns-a-guard.md)'s operational carve-out
+admits it, as it admits skill discovery; a guard over a shape the project has not built yet costs
+a real change its afternoon and teaches nobody anything. Design belongs in `docs/specs/` and in
+each crate's `AGENTS.md`, where it can be argued with.
 
 ## The guards
 
