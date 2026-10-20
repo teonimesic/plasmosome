@@ -801,6 +801,13 @@ mod tests {
         }
     }
 
+    fn closed_again(closure: Closure) -> Closure {
+        match closure {
+            Closure::ExternalFree(sealed) => sealed.unseal().close(),
+            Closure::OutstandingExternal(forced) => forced.unseal().close(),
+        }
+    }
+
     fn universe_removal_effects() -> [fn(&str, UniverseRemoval) -> Effect; 2] {
         [
             |description, removal| Effect::exact(description, InverseVia::Universe(removal)),
@@ -1193,29 +1200,161 @@ mod tests {
                 }
                 ledger.push(make_effect("skill file in cell-2", op.removal()));
                 let mut closure = ledger.close();
+                let unknown = DetachError::Backend(BackendError::UnknownObject {
+                    class: "session-file",
+                    key: "session//skills/pr.md".to_string(),
+                    owner: cell_owner("github-pr"),
+                    id: op.id(),
+                });
                 for drain in [
                     DrainSpec::graceful(Duration::from_millis(1)),
                     DrainSpec::forcing(),
                 ] {
                     assert_eq!(
                         detach_either(&mut closure, &mut backend, &cell(), drain).unwrap_err(),
-                        DetachError::Backend(BackendError::UnknownObject {
-                            class: "session-file",
-                            key: "session//skills/pr.md".to_string(),
-                            owner: cell_owner("github-pr"),
-                            id: op.id(),
-                        })
+                        unknown
                     );
                     assert_eq!(
                         backend.snapshot_os_state().objects().collect::<Vec<_>>(),
                         vec![&op.object()]
                     );
                 }
-                let report =
+                assert_eq!(
                     detach_either(&mut closure, &mut backend, &elsewhere, DrainSpec::forcing())
-                        .unwrap();
+                        .unwrap_err(),
+                    DetachError::CellChanged {
+                        began: cell(),
+                        requested: elsewhere.clone(),
+                    }
+                );
+                assert_eq!(
+                    backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                    vec![&op.object()]
+                );
+                assert_eq!(
+                    detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
+                        .unwrap_err(),
+                    unknown
+                );
+                let mut reopened = closed_again(closure);
+                let report = detach_either(
+                    &mut reopened,
+                    &mut backend,
+                    &elsewhere,
+                    DrainSpec::forcing(),
+                )
+                .unwrap();
                 assert_eq!(report.replayed, vec!["skill file in cell-2"]);
                 assert!(backend.snapshot_os_state().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_resume_naming_another_cell_is_refused_before_it_reaches_a_stuck_inverse() {
+        for make_effect in universe_removal_effects() {
+            for with_external in [false, true] {
+                let elsewhere = CellId::from("cell-2");
+                let stuck = op(
+                    GrantId::new(),
+                    cell_owner("github-pr"),
+                    session_file("/skills/pr.md"),
+                );
+                let address = Handle {
+                    class: stuck.class(),
+                    id: stuck.id(),
+                };
+                let mut backend = FakeBackend::new();
+                backend.apply(stuck.clone()).unwrap();
+                backend.mark_stuck(address);
+                let mut ledger = Ledger::new("github-pr");
+                ledger.push(make_effect("stuck skill file", stuck.removal()));
+                let mut asserted = Vec::new();
+                if with_external {
+                    ledger.push(Effect::external("the PR comment already left the host"));
+                    asserted.push("the PR comment already left the host".to_string());
+                }
+                let mut closure = ledger.close();
+                assert_eq!(
+                    detach_either(
+                        &mut closure,
+                        &mut backend,
+                        &cell(),
+                        DrainSpec::graceful(Duration::from_millis(4))
+                    )
+                    .unwrap_err(),
+                    DetachError::Backend(BackendError::DrainTimedOut {
+                        handle: address,
+                        deadline_ms: 4,
+                    })
+                );
+                let stalled = backend.snapshot_os_state();
+                assert_eq!(
+                    detach_either(&mut closure, &mut backend, &elsewhere, DrainSpec::forcing())
+                        .unwrap_err(),
+                    DetachError::CellChanged {
+                        began: cell(),
+                        requested: elsewhere,
+                    }
+                );
+                assert_eq!(backend.snapshot_os_state(), stalled);
+                let resumed =
+                    detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
+                        .unwrap();
+                assert_eq!(resumed.replayed, vec!["stuck skill file"]);
+                assert_eq!(resumed.asserted, asserted);
+                assert!(backend.snapshot_os_state().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_detach_binds_its_cell_when_it_replays_everything_or_nothing() {
+        for with_effect in [false, true] {
+            for with_external in [false, true] {
+                let elsewhere = CellId::from("cell-2");
+                let mut backend = FakeBackend::new();
+                let mut ledger = Ledger::new("github-pr");
+                if with_external {
+                    ledger.push(Effect::external("the PR comment already left the host"));
+                }
+                if with_effect {
+                    let file = op(
+                        GrantId::new(),
+                        cell_owner("github-pr"),
+                        session_file("/skills/pr.md"),
+                    );
+                    backend.apply(file.clone()).unwrap();
+                    ledger.push(Effect::exact(
+                        "skill file",
+                        InverseVia::Universe(file.removal()),
+                    ));
+                }
+                let mut closure = ledger.close();
+                let first =
+                    detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
+                        .unwrap();
+                assert_eq!(first.replayed.len(), usize::from(with_effect));
+                assert!(backend.snapshot_os_state().is_empty());
+                let error =
+                    detach_either(&mut closure, &mut backend, &elsewhere, DrainSpec::forcing())
+                        .unwrap_err();
+                assert_eq!(
+                    error,
+                    DetachError::CellChanged {
+                        began: cell(),
+                        requested: elsewhere,
+                    }
+                );
+                assert_eq!(
+                    error.to_string(),
+                    "ledger detach began in cell cell-1 and cannot resume in cell cell-2"
+                );
+                let again =
+                    detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
+                        .unwrap();
+                assert!(again.replayed.is_empty());
+                assert_eq!(again.asserted, first.asserted);
             }
         }
     }
