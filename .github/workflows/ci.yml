@@ -30,6 +30,9 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      - name: install the pinned toolchain
+        run: rustup toolchain install --no-self-update
+
       - name: toolchain in use
         run: rustup show active-toolchain --verbose
 
