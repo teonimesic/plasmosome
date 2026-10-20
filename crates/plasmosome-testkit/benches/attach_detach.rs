@@ -1,25 +1,19 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use plasmosome_backend::{
-    Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, Grant,
-    GrantKind, PluginId, ResidueReport,
+    CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, Grant, GrantKind,
+    PluginId, ResidueReport,
 };
 use plasmosome_ledger::{Closure, DetachReport, Effect, InverseVia, Ledger, SealedLedger};
+use plasmosome_testkit::builders::{proxy_map, session_file, uds_socket};
 
 fn attach_detach(
     (mut ledger, mut backend): (Ledger, FakeBackend),
 ) -> (SealedLedger, FakeBackend, DetachReport) {
     let before = backend.snapshot_os_state();
     for (index, capability) in [
-        Capability::SessionFile {
-            path: "/session".into(),
-        },
-        Capability::UdsSocket {
-            path: "/run/egressd.uds".into(),
-        },
-        Capability::ProxyMap {
-            host: "api.example.test".into(),
-            route: "proxy".into(),
-        },
+        session_file("/session"),
+        uds_socket("/run/egressd.uds"),
+        proxy_map("api.example.test", "proxy"),
     ]
     .into_iter()
     .enumerate()
