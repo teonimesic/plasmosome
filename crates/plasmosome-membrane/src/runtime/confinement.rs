@@ -153,18 +153,12 @@ pub fn observe(_pid: libc::pid_t) -> Confinement {
     }
 }
 
-/// One answer from `sandbox_check`: the value it returned, or the errno it set when it returned
-/// -1.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) type Answer = Result<libc::c_int, i32>;
 
-/// The size of XNU's `struct proc_uniqidentifierinfo`, the record `proc_pidinfo` fills for
-/// PROC_PIDUNIQIDENTIFIERINFO.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) const UNIQUE_IDENTIFIERS_SIZE: libc::c_int = 56;
 
-/// What one `proc_pidinfo` read of a process's unique identifier record returned: its byte count,
-/// the unique id in the record, and errno as it was right after the call.
 #[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PidInfo {
@@ -173,22 +167,16 @@ pub(crate) struct PidInfo {
     pub(crate) errno: i32,
 }
 
-/// One read of the observed process's unique id, or why it could not be read.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) type Identity = Result<u64, Unverifiable>;
 
-/// The two kernel calls an observation makes.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) trait Kernel {
-    /// `sandbox_check` of `pid` with no filter: whether it is sandboxed when `operation` is
-    /// `None`, else whether its sandbox denies `operation`.
     fn sandbox_check(&mut self, pid: libc::pid_t, operation: Option<&str>) -> Answer;
 
-    /// `proc_pidinfo` of `pid`'s unique identifier record.
     fn unique_identifiers(&mut self, pid: libc::pid_t) -> PidInfo;
 }
 
-/// Everything one observation read, in the order it was read.
 #[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Readings {
@@ -199,9 +187,6 @@ pub(crate) struct Readings {
     pub(crate) after: Identity,
 }
 
-/// Asks `kernel` whether the observer `own` is sandboxed, reads `pid`'s unique id, asks whether
-/// `pid` is sandboxed and whether it denies each of `REQUIRED_DENIALS`, then reads its unique id
-/// again.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn read(pid: libc::pid_t, own: libc::pid_t, kernel: &mut impl Kernel) -> Readings {
     let own = kernel.sandbox_check(own, None);
@@ -221,8 +206,6 @@ pub(crate) fn read(pid: libc::pid_t, own: libc::pid_t, kernel: &mut impl Kernel)
     }
 }
 
-/// The unique id in a record of the full size. A count of zero or less is a failure with its
-/// errno, and any other count is a record of the wrong size, for which errno says nothing.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn identity(info: PidInfo) -> Identity {
     match info.written {
@@ -306,13 +289,8 @@ mod darwin {
     use super::{Answer, Kernel, PidInfo, UNIQUE_IDENTIFIERS_SIZE};
     use std::ffi::{c_char, c_int};
 
-    /// The `proc_pidinfo` flavor PROC_PIDUNIQIDENTIFIERINFO, from XNU's private
-    /// `proc_info_private.h`.
     const PROC_PIDUNIQIDENTIFIERINFO: c_int = 17;
 
-    /// XNU's `struct proc_uniqidentifierinfo`, declared in its private `proc_info_private.h` and
-    /// in no SDK header. `proc_pidinfo` fills it only for a running process when asked with
-    /// argument 0, and answers a buffer of any other size with ENOMEM.
     #[repr(C)]
     struct UniqueIdentifiers {
         _executable_uuid: [u8; 16],
@@ -343,7 +321,6 @@ mod darwin {
         ) -> c_int;
     }
 
-    /// The running kernel.
     pub(super) struct Darwin;
 
     impl Kernel for Darwin {
@@ -374,15 +351,15 @@ mod darwin {
         }
     }
 
-    /// `proc_pidinfo`'s unique identifier record of `pid`, with the byte count it returned and
-    /// errno right after the call.
     #[allow(unsafe_code)]
     fn unique_identifier_record(pid: libc::pid_t) -> (c_int, UniqueIdentifiers, i32) {
         // SAFETY: UniqueIdentifiers is a plain C struct of integers, for which all zeroes is a
         // valid value.
         let mut record: UniqueIdentifiers = unsafe { std::mem::zeroed() };
-        // SAFETY: `record` is a local UniqueIdentifiers and UNIQUE_IDENTIFIERS_SIZE is its exact
-        // size, so proc_pidinfo writes at most that many bytes into it, and it keeps no pointer.
+        // SAFETY: `record` is a local UniqueIdentifiers, laid out as XNU's struct
+        // proc_uniqidentifierinfo from its private proc_info_private.h, which no SDK header
+        // declares, and UNIQUE_IDENTIFIERS_SIZE is its exact size. For PROC_PIDUNIQIDENTIFIERINFO
+        // proc_pidinfo writes at most that many bytes into it, and it keeps no pointer.
         let written = unsafe {
             libc::proc_pidinfo(
                 pid,
