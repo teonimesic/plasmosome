@@ -82,6 +82,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # Spec 026's git-only step. Nothing from the commit may run before it: a program run by an
+      # earlier step can rewrite PATH for every later one through $GITHUB_PATH. Only gates runs it,
+      # as spec 026 section 1 asks; macos, bench and coverage do not. What a pull request's run
+      # leaves in a cache is plasmosome-ofaf's.
+      - name: git-only step
+        run: ./.githooks/build-input-guard HEAD
+
       - name: install the pinned toolchain
         run: rustup toolchain install --no-self-update
 
