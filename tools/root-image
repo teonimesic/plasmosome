@@ -36,7 +36,8 @@ EMPTIED_DIRS = ("dev", "proc", "sys")
 SKEL = "etc/skel/"
 CREATE_TIMED = ("dev", "proc", "sys", "etc", "etc/mtab")
 PROTECTED = ("opt", "usr/local/bin", "proc", "dev", "sys", "tmp", "home/workload")
-ACCOUNT_FILES = (("etc/passwd", 2), ("etc/group", 2), ("etc/shadow", None), ("etc/gshadow", None))
+ACCOUNT_FILES = (("etc/passwd", (2, 3), ()), ("etc/group", (2,), (3,)), ("etc/shadow", (), ()),
+                 ("etc/gshadow", (), (2, 3)))
 NETWORK_FILES = {
     "etc/hostname": b"localhost\n",
     "etc/hosts": b"127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n",
@@ -46,6 +47,8 @@ HINTS = ("plasmosome", "plasmid")
 MAX_ACCOUNT_FILE_BYTES = 1 << 20
 MAX_ADD_BYTES = 256 << 20
 MAX_OUTPUT_BYTES = 16 << 20
+MAX_OWN_FILE_BYTES = 1 << 20
+HOLE = 64 << 10
 COMMAND_TIMEOUT = 1800
 BLOCK_SIZE = 4096
 TREE = "/tree"
@@ -58,7 +61,10 @@ FORMS = {"application/vnd.oci.image.index.v1+json": "index",
          "application/vnd.oci.image.manifest.v1+json": "manifest",
          "application/vnd.docker.distribution.manifest.v2+json": "manifest"}
 LIMITS = ["The base is spec 027 Q3's default, debian:bookworm-slim pinned by digest. "
-          "The owner may change it, and a change is a new build with a new pin."]
+          "The owner may change it, and a change is a new build with a new pin.",
+          "The base checks itself: mke2fs, e2fsck, dumpe2fs and debugfs come from the base image, "
+          "so the read-back reports only what that base chooses to report.",
+          "content.jsonl lists the stage tar the image was made from. It is not a listing read back from rootfs.raw."]
 REFERENCE = re.compile(r"(?P<name>[^@\s]+)@(?P<digest>sha256:[0-9a-f]{64})\Z")
 PLATFORM = re.compile(r"[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?\Z")
 DEST = re.compile(r"(/[A-Za-z0-9._+-]+)+\Z")
@@ -183,7 +189,7 @@ def inspect(run, env, argv, base):
                                 f"run `docker pull {base.reference}` first, since the build never pulls")
     try:
         record = json.loads(result.out)[0]
-    except (ValueError, IndexError, KeyError, TypeError):
+    except (ValueError, IndexError, KeyError, TypeError, RecursionError):
         record = None
     if not isinstance(record, dict):
         raise Refused("export", f"`{' '.join(argv)}` printed no image record")
@@ -298,12 +304,17 @@ def base_members(source):
     members = {}
     for member in source.getmembers():
         name = member.name
-        if not name or name.startswith("/") or ".." in name.split("/") or posixpath.normpath(name) != name:
+        if name in ("", ".") or name.startswith("/") or ".." in name.split("/") or \
+                posixpath.normpath(name) != name:
             raise Refused("stage", f"the base holds a member named {name!r}, not a normalised relative path")
         if name in members:
             raise Refused("stage", f"the base holds /{name} twice")
         if name == ".dockerenv" or any(name.startswith(d + "/") for d in EMPTIED_DIRS):
             continue
+        parent = posixpath.dirname(name)
+        if parent and (parent not in members or kind_of(members[parent]) != "dir"):
+            raise Refused("stage", f"/{name} has no earlier directory /{parent} in the base, so GNU tar would put it "
+                                   f"wherever /{parent} leads")
         kind = kind_of(member)
         if kind is None:
             raise Refused("stage", f"/{name} is not a regular file, directory or link")
@@ -325,7 +336,7 @@ def check_layout(members, adds):
             raise Refused("stage", f"the base already holds /{name}")
         if name.startswith(SKEL) and ("/" in name.removeprefix(SKEL) or kind_of(member) != "file"):
             raise Refused("stage", f"/{name} in /etc/skel is not a regular file, which is all the tool copies")
-        if member.islnk() and member.linkname in (*NETWORK_FILES, *(n for n, _ in ACCOUNT_FILES)):
+        if member.islnk() and member.linkname in (*NETWORK_FILES, *(n for n, *_ in ACCOUNT_FILES)):
             raise Refused("stage", f"/{name} is a hard link to /{member.linkname}, which the tool rewrites")
     for name in ("opt", "usr", "usr/local", "usr/local/bin", "tmp", "home", *EMPTIED_DIRS, *NETWORK_FILES):
         member = members.get(name)
@@ -351,7 +362,7 @@ def accounts(source, members, epoch):
     lines = {"etc/passwd": PASSWD_LINE + b"\n", "etc/group": GROUP_LINE + b"\n",
              "etc/shadow": b"workload:!:%d:0:99999:7:::\n" % days, "etc/gshadow": b"workload:!::\n"}
     rewritten = {}
-    for name, id_index in ACCOUNT_FILES:
+    for name, id_fields, list_fields in ACCOUNT_FILES:
         member = members.get(name)
         if member is None or kind_of(member) != "file":
             raise Refused("stage", f"the base has no regular /{name}")
@@ -360,9 +371,10 @@ def accounts(source, members, epoch):
             fields = line.split(b":")
             if fields[0] == b"workload":
                 raise Refused("stage", f"/{name} line {number} already names workload")
-            if id_index is not None and len(fields) > id_index and fields[id_index].isdigit() \
-                    and int(fields[id_index]) == 1000:
+            if any(len(fields) > i and fields[i].isdigit() and int(fields[i]) == 1000 for i in id_fields):
                 raise Refused("stage", f"/{name} line {number} already has id 1000")
+            if any(len(fields) > i and b"workload" in fields[i].split(b",") for i in list_fields):
+                raise Refused("stage", f"/{name} line {number} already lists workload as a member")
         rewritten[name] = data + (b"\n" if data and not data.endswith(b"\n") else b"") + lines[name]
     judge_accounts(rewritten["etc/passwd"], rewritten["etc/group"], step="stage")
     return rewritten
@@ -489,6 +501,12 @@ def filesystem(run, env, base, platform, work, uuid, size_mib, adds):
                   build_script(uuid, size_mib, adds)], env)
     if result.code != 0:
         raise Refused("filesystem", f"the build container exited {result.code}: {result.err.strip()[-2000:]}")
+    try:
+        is_directory = stat.S_ISDIR(os.lstat(work / "check").st_mode)
+    except OSError:
+        is_directory = False
+    if not is_directory:
+        raise Refused("filesystem", f"{work / 'check'} is no longer a directory after the build container ran")
     code = read_bounded(work / "check" / "e2fsck.code", "filesystem", 64).decode(errors="replace").strip()
     if code != "0":
         output = read_bounded(work / "check" / "e2fsck.out", "filesystem", MAX_OUTPUT_BYTES)
@@ -606,14 +624,36 @@ def check_image(check, facts, uuid):
     return {"mke2fs_version": version.group(1), "features": (dump_field(dump, "Filesystem features") or "").split()}
 
 
-def write_stage(images_root, work, fields):
-    """Lay out the image under images_root/.stage-*; return the stage path and the manifest."""
-    stage_dir = Path(tempfile.mkdtemp(prefix=".stage-", dir=images_root))
+def copy_rootfs(work, stage_dir, size):
+    """Copy work/rootfs.raw into the stage through exactly `size` bytes, zero runs left as holes; return its sha256."""
+    digest, total = hashlib.sha256(), 0
+    with open_regular(work / "rootfs.raw", "publish", "rootfs.raw") as source, \
+            open(stage_dir / "rootfs.raw", "xb") as out:
+        for chunk in iter(lambda: source.read(min(HOLE, size + 1 - total)), b""):
+            total += len(chunk)
+            digest.update(chunk)
+            if chunk.count(0) == len(chunk):
+                out.seek(len(chunk), os.SEEK_CUR)
+            else:
+                out.write(chunk)
+        out.truncate(total)
+    if total != size:
+        raise Refused("publish", f"rootfs.raw is not exactly {size} bytes, the --size-mib the filesystem was made with")
+    return digest.hexdigest()
+
+
+def write_stage(images_root, work, listing, size, fields):
+    """Lay out the image under images_root/.stage-*; return the stage path and the manifest.
+
+    `listing` is content.jsonl as the tool hashed it. Nothing the build container wrote is read but rootfs.raw.
+    """
     try:
-        for name in ("rootfs.raw", "content.jsonl"):
-            shutil.copyfile(work / name, stage_dir / name)
-        files = {name: hash_bounded(stage_dir / name, "publish", 1 << 40, name)
-                 for name in ("content.jsonl", "rootfs.raw")}
+        stage_dir = Path(tempfile.mkdtemp(prefix=".stage-", dir=images_root))
+    except OSError as error:
+        raise Refused("publish", f"cannot make a stage directory in {images_root}: {error.strerror}") from None
+    try:
+        files = {"rootfs.raw": copy_rootfs(work, stage_dir, size), "content.jsonl": sha256(listing)}
+        (stage_dir / "content.jsonl").write_bytes(listing)
         sums = "".join(f"{digest}  {name}\n" for name, digest in sorted(files.items())).encode()
         (stage_dir / "SHA256SUMS").write_bytes(sums)
         manifest = {**fields, "files": files, "sha256sums_sha256": sha256(sums)}
@@ -630,13 +670,23 @@ def write_stage(images_root, work, fields):
 
 
 def place(run, env, images_root, stage_dir):
-    """Rename the stage to images_root/<id16>, read-only and uchg; return (image_dir, id16, manifest sha256)."""
-    digest = sha256((stage_dir / "manifest.json").read_bytes())
+    """Rename the stage to images_root/<id16>, read-only and uchg; return (image_dir, id16, manifest sha256).
+
+    rename(2) replaces an empty directory made at the target after the lexists check. It held nothing, so
+    nothing is lost.
+    """
+    digest = sha256(read_bounded(stage_dir / "manifest.json", "place", MAX_OWN_FILE_BYTES, "manifest.json"))
     target = images_root / digest[:16]
     if os.path.lexists(target):
         raise Refused("place", f"{target} exists; a published image is never replaced or deleted")
-    os.rename(stage_dir, target)
-    os.chmod(target, 0o555)
+    try:
+        os.rename(stage_dir, target)
+    except OSError as error:
+        raise Refused("place", f"cannot rename the stage to {target}: {error.strerror}") from None
+    try:
+        os.chmod(target, 0o555)
+    except OSError as error:
+        raise Refused("place", f"{target} is in place but chmod 0555 failed: {error.strerror}") from None
     result = run(["chflags", "-R", "uchg", str(target)], env)
     if result.code != 0:
         raise Refused("place", f"{target} is in place but chflags -R uchg exited {result.code}: {result.err.strip()}")
@@ -654,6 +704,9 @@ def build(args, run, now, environ):
     images_root = Path(args.images_root)
     if not images_root.is_dir():
         raise Refused("images root", f"{images_root} is not a directory; create it first")
+    if not os.access(images_root, os.W_OK | os.X_OK):
+        raise Refused("images root", f"{images_root} is not writable by this user; the image is staged inside it")
+    tool_sha256 = sha256(read_bounded(Path(__file__), "tool", MAX_OWN_FILE_BYTES, "tools/root-image"))
     created = int(now())
     epoch = created if args.source_date_epoch is None else args.source_date_epoch
     if epoch < 0:
@@ -669,8 +722,8 @@ def build(args, run, now, environ):
     filesystem(run, env, base, args.platform, work, uuid, args.size_mib, adds)
     fs = check_image(work / "check", facts, uuid)
     kind = "test" if adds else "product"
-    stage_dir, manifest = write_stage(images_root, work, {
-        "image_format": IMAGE_FORMAT, "task": TASK, "kind": kind, "created_unix": created,
+    stage_dir, manifest = write_stage(images_root, work, listing, args.size_mib << 20, {
+        "image_format": IMAGE_FORMAT, "task": TASK, "tool_sha256": tool_sha256, "kind": kind, "created_unix": created,
         "source_date_epoch": epoch, "base": {**record, "debian_version": facts["debian_version"]},
         "workload": WORKLOAD, "added": facts["added"], "content_sha256": content_sha256, "limits": LIMITS,
         "fs": {"type": "ext4", "block_size": BLOCK_SIZE, "size_mib": args.size_mib, "uuid": uuid,
