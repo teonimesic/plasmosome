@@ -1313,18 +1313,22 @@ mod tests {
                         .unwrap_err(),
                     unknown_in_cell_one(&op)
                 );
-                assert_eq!(
-                    detach_either(&mut closure, &mut backend, &elsewhere, DrainSpec::forcing())
-                        .unwrap_err(),
-                    DetachError::CellChanged {
-                        began: cell(),
-                        requested: elsewhere.clone(),
-                    }
-                );
-                assert_eq!(
-                    backend.snapshot_os_state().objects().collect::<Vec<_>>(),
-                    vec![&op.object()]
-                );
+                for drain in [
+                    DrainSpec::graceful(Duration::from_millis(1)),
+                    DrainSpec::forcing(),
+                ] {
+                    assert_eq!(
+                        detach_either(&mut closure, &mut backend, &elsewhere, drain).unwrap_err(),
+                        DetachError::CellChanged {
+                            began: cell(),
+                            requested: elsewhere.clone(),
+                        }
+                    );
+                    assert_eq!(
+                        backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                        vec![&op.object()]
+                    );
+                }
                 assert_eq!(
                     detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
                         .unwrap_err(),

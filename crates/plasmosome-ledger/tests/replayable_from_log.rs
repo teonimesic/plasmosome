@@ -979,9 +979,9 @@ fn append_to_file_refuses_another_plugins_log_and_names_both_plugins() {
         .append_to_file(&log)
         .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-    assert!(
-        error.to_string().contains("`audit`") && error.to_string().contains("`github-pr`"),
-        "{error}"
+    assert_eq!(
+        error.to_string(),
+        "ledger log belongs to plugin `audit`; refusing to append plugin `github-pr`"
     );
     assert_eq!(std::fs::read_to_string(&log).unwrap(), existing);
 }
