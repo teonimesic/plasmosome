@@ -3,8 +3,9 @@
 ## What this crate is
 
 The trait between capability decisions and capability enforcement, plus the fake backend that
-makes the kernel testable without a VM. It also holds the SHA-256 `Digest` and spec 001's
-observation paging (`paging`), which guest, membrane and controller share.
+makes the kernel testable without a VM. It also holds the SHA-256 `Digest`, spec 001's
+observation paging (`paging`) and spec 027's pinned software trees (`software`), which guest,
+membrane and controller share.
 
 ## Hard rules
 

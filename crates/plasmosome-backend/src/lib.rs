@@ -2,8 +2,9 @@
 //! controller and whatever enforces capabilities (`Handle`, `Capability`,
 //! `GrantKind::{Hot, GenerationBound}`, `DrainSpec`, `OsState`/`Diff`).
 //!
-//! It also holds two pieces of vocabulary that guest, membrane and controller
-//! share: the SHA-256 [`Digest`] and spec 001's observation pages in [`paging`].
+//! It also holds vocabulary that guest, membrane and controller share: the
+//! SHA-256 [`Digest`], spec 001's observation pages in [`paging`], and spec
+//! 027's pinned software trees in [`software`].
 
 pub mod backend;
 pub mod composite;

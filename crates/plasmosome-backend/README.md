@@ -1,8 +1,9 @@
 # plasmosome-backend
 
 The enforcement seam. One interface between *deciding* a capability and *making it real*. The
-crate also holds two pieces of vocabulary that guest, membrane and controller share: the SHA-256
-`Digest` and spec 001's observation pages, in the `digest` and `paging` modules.
+crate also holds vocabulary that guest, membrane and controller share: the SHA-256 `Digest`, spec
+001's observation pages and spec 027's pinned software trees, in the `digest`, `paging` and
+`software` modules.
 
 The controller says "this cell may reach api.example.com". Something must then edit a proxy's
 allowlist, mount a directory, or install a credential — and that something differs by platform
@@ -63,6 +64,24 @@ The trait's `apply` and `plant` refuse an invalid value before any change, with
 `BackendError::InvalidOperation` naming the address and the broken rule; `FakeBackend` does.
 `grant` does not check yet.
 
+A software tree is a plasmid's files, pinned before attach has any effect. `software::pin`
+reads a directory against the path and SHA-256 of every file the verified package lists. It
+refuses, naming the path, an entry it cannot read, a FIFO, socket or device, any symbolic link, a
+listed path that is absolute or holds `..` or a NUL, a digest mismatch, a listed file that is
+missing, a file or empty directory the listing does not imply, and a command that names no file
+at the top of the tree. Each file is opened once with `O_NOFOLLOW | O_NONBLOCK`, checked to be
+regular through that descriptor, and hashed from it, and nothing is written. The tree digest is
+the SHA-256 of every file sorted by path bytes, each as its path, a NUL, its digest's 64 lowercase
+hexadecimal digits, a NUL, and a byte that is 1 for a command and 0 otherwise. That encoding is
+this crate's, not spec 027's; plasmosome-tbru specifies the journal record and may adopt it.
+`software::check_names` refuses a command name another attached plasmid provides, or one the root
+image has in `/usr/local/bin`, `/usr/bin` or `/bin`, and names the plasmid when both apply. The
+caller says whether the volume holding the names ignores case. Spec 027 leaves the declaration
+field for commands blocked on consumers, so a `CommandName` comes only from
+`software::fixture::declare_commands`, which compiles for this crate's tests and under the
+`test-fixture` feature, for dev-dependencies only. Core maps a `Conflict` to code 102 and a
+`PinRefusal` to code 108.
+
 Every holding is owned by a `CellOwner { cell, plugin }`: the same plugin attached to two cells is
 two owners, and no comparison looks at the plugin alone. It decodes only from a JSON object with
 exactly those two fields. `CellId` lives here, and core uses this one type. An exact removal takes
@@ -86,5 +105,6 @@ address or one owner time out.
 | `MockMode` | How a plasmid's calls are served: `simulate`, `capture` or `passthrough`, the default. It lives here, beside `CellId`, so the ledger can record a mode without depending on core |
 | `digest` | The SHA-256 `Digest`: exactly 64 lowercase hexadecimal digits, as text and in JSON. The membrane re-exports it |
 | `paging` | Spec 001's observation pages, shared by guest, membrane and controller. On the responding side, a server keeps one `CaptureSlot` per connection. The slot holds the compact JSON account that the server's `collect` froze with `FrozenAccount::freeze`, and serves it in pages of 1 to 65,536 bytes until its deadline. On the requesting side, a caller's `PageAssembler` yields the account only when every page arrived in order from one capture and the bytes match the stated length and hash. `ObservationPage` decodes only from an object. Both sides pass the clock and own the IO |
+| `software` | Spec 027's software tree before attach: `pin` checks a directory against the verified package's digests, and `check_names` decides the 102 name conflicts. Nothing is placed here |
 
 Tests: `cargo test -p plasmosome-backend`
