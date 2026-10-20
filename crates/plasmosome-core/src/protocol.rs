@@ -574,11 +574,16 @@ mod tests {
         .expect_err("a network section with no hosts is refused")
     }
 
-    fn declaration_refusals() -> [(ManifestError, Option<&'static str>); 3] {
+    fn declaration_refusals() -> [(ManifestError, Option<&'static str>); 4] {
         [
             (author_refusal(), Some("hosts = [\"api.example.com\"]")),
             (
                 PlasmidManifest::parse("id = ").expect_err("a value is missing"),
+                None,
+            ),
+            (
+                PlasmidManifest::parse(&"#".repeat((1 << 20) + 1))
+                    .expect_err("a declaration over 1 MiB is refused"),
                 None,
             ),
             (
