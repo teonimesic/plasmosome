@@ -598,6 +598,53 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_refusal_names_its_key_and_path_and_has_no_underlying_cause() {
+        use std::error::Error as _;
+
+        for (key, text) in [
+            ("instance_root", replacing("instance_root", r#""cells""#)),
+            ("registry_root", replacing("registry_root", r#""cells""#)),
+        ] {
+            let refusal = parse_config(&text).expect_err("a relative path is refused");
+            assert!(
+                matches!(
+                    &refusal,
+                    ConfigError::NotAbsolute { key: named, path }
+                        if *named == key && path == Path::new("cells")
+                ),
+                "the refusal carries the key and the path as written: {refusal:?}"
+            );
+            assert!(refusal.source().is_none(), "{refusal:?}");
+        }
+
+        let zero = parse_config(&replacing("recovery_deadline_ms", "0"))
+            .expect_err("a zero deadline is refused");
+        assert!(
+            matches!(zero, ConfigError::ZeroRecoveryDeadline),
+            "{zero:?}"
+        );
+        assert!(zero.source().is_none(), "{zero:?}");
+
+        let not_json = parse_config("not json").expect_err("text that is not JSON is refused");
+        assert!(
+            not_json
+                .source()
+                .and_then(|source| source.downcast_ref::<serde_json::Error>())
+                .is_some(),
+            "a JSON refusal keeps the parser's error: {not_json:?}"
+        );
+        let bad_name = parse_config(&replacing("name", r#""a/b""#))
+            .expect_err("a path-shaped name is refused");
+        assert!(
+            bad_name
+                .source()
+                .and_then(|source| source.downcast_ref::<InstanceNameError>())
+                .is_some(),
+            "a name refusal keeps the name's error: {bad_name:?}"
+        );
+    }
+
+    #[test]
     fn registry_root_is_optional_and_omission_means_local_operation() {
         let local = parse_config(&omitting("registry_root"))
             .expect("a config without registry_root parses");
