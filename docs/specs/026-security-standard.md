@@ -249,13 +249,14 @@ library, binaries, tests, benches, examples and build script. A `#![forbid(unsaf
 **Doctests are reached only through the library root.** Cargo passes the manifest's levels to
 `rustdoc --test`, but rustdoc does not apply them to the doctests it compiles, and clippy never
 sees a doctest. So the library root of every package that forbids `unsafe_code` carries
-`#![doc(test(attr(forbid(unsafe_code))))]` as its first line after its comments. rustdoc puts that
-`forbid` into each doctest it compiles from the package. `-A unsafe_code` and `--cap-lints=allow`
-in rustdocflags were measured not to lift it. A missing or misspelled attribute is silent, so a
-test in `plasmosome-guards` refuses a forbid package whose library root lacks it. In a register
-package, an `unsafe` block in a doctest still needs its safety comment, but no lint checks it
-there; the reviewer does. Corrected on 2026-10-20: this section said the manifest's table covers
-every target a package compiles, and doctests are a target it does not reach.
+`#![doc(test(attr(forbid(unsafe_code))))]`. rustdoc puts that `forbid` into each doctest it
+compiles from the package. `-A unsafe_code` and `--cap-lints=allow` in rustdocflags were measured
+not to lift it. A missing or misspelled attribute is silent, so the reviewer checks it, and
+section 8 reads it as code. In a register package, neither the `deny` nor the clippy lints reach a
+doctest. An `unsafe` block in a doctest there still needs the `allow(unsafe_code)` and the safety
+comment that library code needs, and the reviewer checks both. Corrected on 2026-10-20: this
+section said the manifest's table covers every target a package compiles, and doctests are a
+target it does not reach.
 
 **The register** is the set of packages whose own `[lints]` table sets `unsafe_code = "deny"`.
 Today it holds `plasmosome-membrane` and `plasmosome-core`. Cargo does not let a package mix
@@ -442,8 +443,8 @@ when Q1 is answered. It never names a route nobody receives.
 | A vulnerability or unsound advisory, on a PR that changes a manifest or lockfile | `cargo-deny` in `gates` | The merge brings that code onto main, which the owner builds and runs against hostile input, with no release step between. An exploit cannot be undone. |
 | An advisory database or tool failure | The advisory step, as a tool failure | Fails closed: the step cannot vouch for the change |
 | An unlisted licence | Reviewer at PR time; release step at release | Below the bar until something ships (Q8) |
-| `unsafe` in a forbid package or outside an allowed item; a missing `// SAFETY:` comment or `# Safety` section | The compiler and clippy, through declared lint levels | Not a guard. See the spec 013 amendment. |
-| A forbid package's library root without `#![doc(test(attr(forbid(unsafe_code))))]` | A test in `plasmosome-guards` | Spec 013's carve-out for a local property that costs nothing to check and silently degrades a tool. rustdoc drops the manifest's level for doctests without a word, and so does a misspelled attribute. The omission a diff shows least is a new forbid package that never had the line. |
+| `unsafe` in a forbid package or outside an allowed item; a missing `// SAFETY:` comment or `# Safety` section | The compiler and clippy, through declared lint levels. In doctests, only a forbid package's library-root attribute declares a level, and clippy never runs | Not a guard. See the spec 013 amendment. Corrected on 2026-10-20: this row did not say that doctests are reached only through that attribute. |
+| A forbid package's library root without `#![doc(test(attr(forbid(unsafe_code))))]`; in a register package, an `unsafe` block in a doctest without the `allow(unsafe_code)` and `// SAFETY:` comment that library code needs | Reviewer | Judgement. Each change shows in the diff: the deleted or misspelled attribute, and the `unsafe` block in the example. Section 8 reads the attribute as code. Amended on 2026-10-20: this row is new. |
 | `unsafe` expanded from a dependency's macro | The record's `expands_unsafe` field and the reviewer | Judgement, because no lint sees it |
 | An `allow(unsafe_code)` wider than an item or a named FFI module; an undocumented `unsafe extern` declaration; joining the register without both lints or a reason | Reviewer | Judgement |
 | Native code in a forbid package | The compiler, for linked code; the reviewer, for test-built programs | Judgement for the second |
