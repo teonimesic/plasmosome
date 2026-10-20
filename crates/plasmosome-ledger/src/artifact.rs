@@ -1,9 +1,10 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use serde::de::{Error as _, Visitor};
+use plasmosome_backend::ObjectOnly;
+use serde::de::Error as _;
 use serde::ser::SerializeStruct;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, forward_to_deserialize_any};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A registry's identity: a non-nil UUID written in canonical lower-case hyphenated form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -297,7 +298,7 @@ impl Serialize for ReleaseKey {
 }
 
 #[derive(Deserialize)]
-#[serde(rename = "ReleaseKey", deny_unknown_fields)]
+#[serde(expecting = "a ReleaseKey object", deny_unknown_fields)]
 struct ReleaseKeyWire {
     kind: ArtifactKind,
     population: Population,
@@ -308,7 +309,7 @@ struct ReleaseKeyWire {
 
 impl<'de> Deserialize<'de> for ReleaseKey {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let wire = ReleaseKeyWire::deserialize(ObjectOnly(deserializer))?;
+        let wire = ReleaseKeyWire::deserialize(ObjectOnly::new(deserializer))?;
         ReleaseKey::checked(
             wire.kind,
             wire.population,
@@ -355,7 +356,7 @@ impl Serialize for ReleaseRef {
 }
 
 #[derive(Deserialize)]
-#[serde(rename = "ReleaseRef", deny_unknown_fields)]
+#[serde(expecting = "a ReleaseRef object", deny_unknown_fields)]
 struct ReleaseRefWire {
     kind: ArtifactKind,
     population: Population,
@@ -367,7 +368,7 @@ struct ReleaseRefWire {
 
 impl<'de> Deserialize<'de> for ReleaseRef {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let wire = ReleaseRefWire::deserialize(ObjectOnly(deserializer))?;
+        let wire = ReleaseRefWire::deserialize(ObjectOnly::new(deserializer))?;
         let key = ReleaseKey::checked(
             wire.kind,
             wire.population,
@@ -377,22 +378,6 @@ impl<'de> Deserialize<'de> for ReleaseRef {
         )
         .map_err(D::Error::custom)?;
         Ok(ReleaseRef::new(key, wire.digest))
-    }
-}
-
-struct ObjectOnly<D>(D);
-
-impl<'de, D: Deserializer<'de>> Deserializer<'de> for ObjectOnly<D> {
-    type Error = D::Error;
-
-    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, D::Error> {
-        self.0.deserialize_map(visitor)
-    }
-
-    forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
-        option unit unit_struct newtype_struct seq tuple tuple_struct map struct enum identifier
-        ignored_any
     }
 }
 
