@@ -547,7 +547,10 @@ mod tests {
                 assert!(accepted < bytes, "the pipe took {accepted} of {bytes} bytes");
             }
             Ok(other) => panic!("a line the pipe cannot take refuses, got {other:?}"),
-            Err(_) => panic!("prepare blocked writing a line the pipe cannot take"),
+            Err(RecvTimeoutError::Timeout) => {
+                panic!("prepare blocked writing a line the pipe cannot take")
+            }
+            Err(RecvTimeoutError::Disconnected) => panic!("prepare panicked"),
         }
     }
 
