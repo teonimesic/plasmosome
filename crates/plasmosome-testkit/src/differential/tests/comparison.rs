@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use super::{differs, finding, manifest, observation, runs, set, verdict};
-use crate::differential::{Finding, Lane, MountKey, NeutralName, Reason, Verdict};
+use crate::differential::{Finding, Lane, MountKey, NeutralName, Reason, Subject, Verdict};
 
 fn not_neutral(lane: Lane, path: &str, key: MountKey) -> Finding {
     let path = path.to_string();
@@ -66,6 +66,41 @@ fn an_allowance_admits_its_value_only_in_the_cell_lane() {
 }
 
 #[test]
+fn an_allowance_admits_its_value_only_in_its_own_probe() {
+    let mut runs = runs();
+    for lane in Lane::ALL {
+        let mode = if lane == Lane::Cell { "0600" } else { "0644" };
+        set(&mut runs, lane, "hint-self", "mode", json!(mode));
+    }
+    assert_eq!(
+        verdict(&manifest(), &runs),
+        Verdict::Fail(vec![differs("hint-self", "mode")])
+    );
+}
+
+#[test]
+fn the_transcript_admits_no_allowance() {
+    let mut runs = runs();
+    for run in &mut runs {
+        let mode = if run.lane == Lane::Cell {
+            "0600"
+        } else {
+            "0644"
+        };
+        let transcript = run.transcript.as_mut().expect("a transcript");
+        transcript.insert("mode".to_string(), json!(mode));
+    }
+    let field = "mode".to_string();
+    assert_eq!(
+        verdict(&manifest(), &runs),
+        Verdict::Fail(vec![Finding {
+            subject: Subject::Transcript,
+            reason: Reason::Differs { field },
+        }])
+    );
+}
+
+#[test]
 fn a_cell_and_an_absent_lane_sharing_a_non_neutral_opt_source_both_fail() {
     let mut runs = runs();
     let copied = json!({"source": "plasmosome-software", "fstype": "virtiofs", "options": "ro"});
@@ -81,26 +116,79 @@ fn a_cell_and_an_absent_lane_sharing_a_non_neutral_opt_source_both_fail() {
 }
 
 #[test]
-fn every_neutral_mount_name_is_checked_in_every_lane() {
-    for (path, key, name) in [
-        ("/usr/local/bin", "fstype", MountKey::Fstype),
-        ("/opt", "options", MountKey::Options),
-        ("/workspace", "subtype", MountKey::Subtype),
-        ("/workspace", "source", MountKey::Source),
+fn every_neutral_mount_name_is_checked_exactly_in_every_lane() {
+    for (path, key, name, neutral) in [
+        ("/usr/local/bin", "fstype", MountKey::Fstype, "virtiofs"),
+        ("/opt", "options", MountKey::Options, "ro"),
+        ("/opt", "source", MountKey::Source, "none"),
+        ("/workspace", "subtype", MountKey::Subtype, "passthrough"),
+        ("/workspace", "source", MountKey::Source, "workspace"),
     ] {
+        let extended = format!("{neutral},plasmosome");
+        for shown in [Some("plasmosome"), Some(extended.as_str()), None] {
+            let mut runs = runs();
+            for lane in Lane::ALL {
+                for run in 0..2 {
+                    let fields = &mut observation(&mut runs, lane, run, "hint-mounts").fields;
+                    let mount = fields[path].as_object_mut().expect("a mount");
+                    match shown {
+                        Some(value) => mount.insert(key.to_string(), json!(value)),
+                        None => mount.remove(key),
+                    };
+                }
+            }
+            assert_eq!(
+                verdict(&manifest(), &runs),
+                Verdict::Fail(Lane::ALL.map(|lane| not_neutral(lane, path, name)).to_vec()),
+                "{path} {key} {shown:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_lane_shows_the_neutral_cgroup_path_exactly() {
+    for shown in [Some("/workload/plasmosome-cell-7"), None] {
         let mut runs = runs();
         for lane in Lane::ALL {
             for run in 0..2 {
-                let fields = &mut observation(&mut runs, lane, run, "hint-mounts").fields;
-                fields[path][key] = json!("plasmosome");
+                let cgroup = &mut observation(&mut runs, lane, run, "hint-cgroup").fields;
+                cgroup.remove("path");
+                match shown {
+                    Some(path) => cgroup.insert("path".to_string(), json!(path)),
+                    None => cgroup.insert("cgroup".to_string(), json!("/plasmosome/cell-7")),
+                };
             }
         }
+        let not_neutral = |lane| {
+            let name = NeutralName::CgroupPath;
+            finding("hint-cgroup", Reason::NotNeutral { lane, name })
+        };
         assert_eq!(
             verdict(&manifest(), &runs),
-            Verdict::Fail(Lane::ALL.map(|lane| not_neutral(lane, path, name)).to_vec()),
-            "{path} {key}"
+            Verdict::Fail(Lane::ALL.map(not_neutral).to_vec()),
+            "{shown:?}"
         );
     }
+}
+
+#[test]
+fn a_non_neutral_name_in_one_run_only_is_listed_beside_its_noise() {
+    let mut runs = runs();
+    let fields = &mut observation(&mut runs, Lane::Absent, 1, "hint-mounts").fields;
+    fields["/opt"]["options"] = json!("rw");
+    let noise = Reason::Noise {
+        lane: Lane::Absent,
+        field: "/opt".to_string(),
+    };
+    assert_eq!(
+        verdict(&manifest(), &runs),
+        Verdict::Fail(vec![
+            not_neutral(Lane::Absent, "/opt", MountKey::Options),
+            finding("hint-mounts", noise),
+            differs("hint-mounts", "/opt"),
+        ])
+    );
 }
 
 #[test]

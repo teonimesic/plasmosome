@@ -170,29 +170,80 @@ fn a_failure_in_a_completed_run_is_listed_when_the_lanes_other_run_is_not_run() 
 
 #[test]
 fn a_probe_whose_two_runs_differ_is_noise_in_that_lane() {
+    for lane in Lane::ALL {
+        let mut runs = runs();
+        observation(&mut runs, lane, 1, "hint-cgroup")
+            .fields
+            .insert("controllers".to_string(), json!("cpu memory"));
+        let mut expected = vec![noise("hint-cgroup", lane, "controllers")];
+        if lane != Lane::Open {
+            expected.push(super::differs("hint-cgroup", "controllers"));
+        }
+        assert_eq!(
+            verdict(&manifest(), &runs),
+            Verdict::Fail(expected),
+            "{lane:?}"
+        );
+    }
+}
+
+#[test]
+fn a_step_failure_in_one_run_is_not_run_even_when_it_looks_like_absence() {
     let mut runs = runs();
-    observation(&mut runs, Lane::Open, 1, "hint-cgroup")
-        .fields
-        .insert("controllers".to_string(), json!("cpu memory"));
+    observation(&mut runs, Lane::Absent, 1, "refusal-host-1").failed_before_step = true;
     assert_eq!(
         verdict(&manifest(), &runs),
-        Verdict::Fail(vec![noise("hint-cgroup", Lane::Open, "controllers")])
+        Verdict::NotRun {
+            not_run: vec![not_run("refusal-host-1", Lane::Absent)],
+            failures: vec![],
+        }
     );
 }
 
 #[test]
+fn a_plain_probe_that_failed_before_its_step_or_left_no_marker_is_not_run() {
+    for no_marker in [false, true] {
+        let mut runs = runs();
+        for lane in Lane::ALL {
+            for run in 0..2 {
+                let seen = observation(&mut runs, lane, run, "hint-env");
+                seen.completed = !no_marker;
+                seen.failed_before_step = !no_marker;
+            }
+        }
+        assert_eq!(
+            verdict(&manifest(), &runs),
+            Verdict::NotRun {
+                not_run: Lane::ALL.map(|lane| not_run("hint-env", lane)).to_vec(),
+                failures: vec![],
+            },
+            "no marker: {no_marker}"
+        );
+    }
+}
+
+#[test]
 fn a_rule_in_the_manifest_loosens_no_comparison() {
-    let mut runs = runs();
-    set(&mut runs, Lane::Cell, "hint-self", "pid", json!(201));
-    let times = &mut observation(&mut runs, Lane::Open, 1, "op-times").fields;
-    times.insert("times".to_string(), json!([10_001, 20_001]));
-    assert_eq!(
-        verdict(&manifest(), &runs),
-        Verdict::Fail(vec![
-            super::differs("hint-self", "pid"),
-            noise("op-times", Lane::Open, "times"),
-        ])
-    );
+    let manifest = manifest();
+    assert_eq!(manifest.rules.len(), 7);
+    for rule in &manifest.rules {
+        let (probe, field) = (rule.probe.as_str(), rule.field.as_str());
+        let mut cell = runs();
+        set(&mut cell, Lane::Cell, probe, field, json!(99_999));
+        assert_eq!(
+            verdict(&manifest, &cell),
+            Verdict::Fail(vec![super::differs(probe, field)]),
+            "{probe} {field} in the cell lane"
+        );
+        let mut open = runs();
+        let fields = &mut observation(&mut open, Lane::Open, 1, probe).fields;
+        fields.insert(field.to_string(), json!(99_999));
+        assert_eq!(
+            verdict(&manifest, &open),
+            Verdict::Fail(vec![noise(probe, Lane::Open, field)]),
+            "{probe} {field} in one open run"
+        );
+    }
 }
 
 #[test]
@@ -263,7 +314,9 @@ fn the_transcript_is_compared_exactly_and_is_not_run_without_one() {
 fn two_runs_from_one_boot_are_refused_in_one_lane_or_across_two() {
     for (from, to, first, second) in [
         (2, 3, Lane::Open, Lane::Open),
+        (0, 3, Lane::Cell, Lane::Open),
         (1, 4, Lane::Cell, Lane::Absent),
+        (3, 5, Lane::Open, Lane::Absent),
     ] {
         let mut runs = runs();
         runs[to].boot_id = runs[from].boot_id.clone();
