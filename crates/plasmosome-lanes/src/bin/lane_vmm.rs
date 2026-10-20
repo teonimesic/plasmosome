@@ -25,7 +25,7 @@ mod macos {
     use plasmosome_lanes::bundle::{KERNEL, LIBKRUN, unverified_images, verify_bundle};
     use plasmosome_lanes::config::{Confinement, LaneConfig};
     use plasmosome_lanes::krun::{self, Libkrun};
-    use plasmosome_lanes::selfcheck::{passed, self_check};
+    use plasmosome_lanes::selfcheck::{Phase, passed, self_check};
 
     const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
@@ -60,7 +60,7 @@ mod macos {
             )
         })?;
         krun::confine(&profile).or_else(|error| fail(CONFINEMENT_FAILED, error))?;
-        let checks = self_check(&confinement.allowed, &confinement.outside);
+        let checks = self_check(Phase::Confined, &confinement.allowed, &confinement.outside);
         for check in &checks {
             eprintln!(
                 "lane-vmm: self-check {}: expected {}, observed {}, {}",
@@ -77,7 +77,7 @@ mod macos {
                 if check.holds() { "holds" } else { "FAILS" }
             );
         }
-        if !passed(&checks) {
+        if !passed(Phase::Confined, &checks) {
             return fail(
                 SELF_CHECK_FAILED,
                 "self-check failed; the VM was not started",

@@ -13,6 +13,15 @@ const EXPECTED: [(&str, bool); 4] = [
     ("write outside", false),
 ];
 
+/// Which side of `sandbox_init` the four checks run on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Before the profile is applied, as a control.
+    Unconfined,
+    /// After the profile is applied.
+    Confined,
+}
+
 /// One of the four confinement checks and what the process observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Check {
@@ -56,7 +65,7 @@ fn write(dir: &Path) -> io::Result<()> {
 
 /// Read inside `allowed` (expected to succeed), then write inside it, read `outside` and write
 /// inside `outside` (each expected to be refused). A write that succeeds is removed again.
-pub fn self_check(allowed: &Path, outside: &Path) -> Vec<Check> {
+pub fn self_check(_phase: Phase, allowed: &Path, outside: &Path) -> Vec<Check> {
     let results = [read(allowed), write(allowed), read(outside), write(outside)];
     EXPECTED
         .into_iter()
@@ -70,7 +79,7 @@ pub fn self_check(allowed: &Path, outside: &Path) -> Vec<Check> {
 }
 
 /// True when every check holds and all four ran.
-pub fn passed(checks: &[Check]) -> bool {
+pub fn passed(_phase: Phase, checks: &[Check]) -> bool {
     checks.len() == EXPECTED.len()
         && checks.iter().zip(EXPECTED).all(|(check, (name, allowed))| {
             check.name == name && check.expected_allowed == allowed && check.holds()
