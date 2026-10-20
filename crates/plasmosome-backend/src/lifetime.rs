@@ -738,6 +738,76 @@ mod tests {
     }
 
     #[test]
+    fn applying_the_fence_rule_again_keeps_a_reached_cap_reached() {
+        let clock = ManualClock::new(WallMs::from_unix_ms(B_WALL), boot(1), 2 * HOUR_MS * MS);
+        let admitted = clock.now();
+        let b = Bound::after(&admitted, 60_000).unwrap();
+        let hour = i64::try_from(HOUR_MS).unwrap();
+        clock.advance_all_ms(59_000);
+        clock.advance_wall_ms(2_000);
+        let at_fence = clock.now();
+        let kept = fenced(b, &at_fence);
+        assert_eq!(
+            kept.wait_deadline(&at_fence, DEFAULT_DRAIN_MS),
+            at_fence.wait + Duration::from_secs(4)
+        );
+
+        clock.advance_all_ms(1_000);
+        clock.advance_wall_ms(hour);
+        let ahead = clock.now();
+        assert!(kept.wait_deadline(&ahead, DEFAULT_DRAIN_MS) <= ahead.wait);
+        let again = fenced(kept, &ahead);
+        assert!(again.continuous.ns < kept.continuous.ns);
+
+        clock.advance_wall_ms(-hour);
+        let back = clock.now();
+        assert!(kept.passed(&back));
+        assert_eq!(
+            kept.wait_deadline(&back, DEFAULT_DRAIN_MS),
+            back.wait + Duration::from_secs(3)
+        );
+        assert!(again.passed(&back));
+        assert!(again.wait_deadline(&back, DEFAULT_DRAIN_MS) <= back.wait);
+    }
+
+    #[test]
+    fn at_a_refused_reading_the_fence_rule_does_nothing_and_a_deadline_of_0_fences() {
+        let clock = ManualClock::new(WallMs::from_unix_ms(B_WALL), boot(1), B_CONTINUOUS);
+        let admitted = clock.now();
+        let b = Bound::after(&admitted, DEFAULT_LEASE_MS).unwrap();
+        clock.advance_all_ms(10_000);
+        let good = clock.now();
+        let refused = ClockReading {
+            continuous: Continuous {
+                boot: good.continuous.boot,
+                ns: u64::MAX,
+            },
+            ..good
+        };
+        assert!(b.passed(&refused));
+        assert_eq!(fenced(b, &refused), b);
+        let zero = Bound {
+            not_after: b.not_after,
+            continuous: Continuous {
+                boot: refused.continuous.boot,
+                ns: 0,
+            },
+        };
+
+        clock.advance_all_ms(1_000);
+        let next = clock.now();
+        assert!(!b.passed(&next));
+        assert_eq!(b.remaining_ms(&next), 889_000);
+        assert_eq!(
+            b.wait_deadline(&next, DEFAULT_DRAIN_MS),
+            next.wait + Duration::from_secs(894)
+        );
+        assert!(zero.passed(&next));
+        assert_eq!(zero.remaining_ms(&next), 0);
+        assert!(zero.wait_deadline(&next, DEFAULT_DRAIN_MS) <= next.wait);
+    }
+
+    #[test]
     fn wait_deadline_follows_the_reading_with_less_time_left() {
         let base = Instant::now();
         let start = reading(B_WALL, boot(1), B_CONTINUOUS, base);
