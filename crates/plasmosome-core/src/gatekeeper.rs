@@ -66,11 +66,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn throwaway_fails_before_an_ignored_test() {
-        assert_eq!(1, 2, "throwaway failure");
-    }
-
-    #[test]
     fn installed_handles_resolve_to_their_values() {
         let keeper = Gatekeeper::new();
         keeper.install("github-pr/token", "tok-1".to_string());
