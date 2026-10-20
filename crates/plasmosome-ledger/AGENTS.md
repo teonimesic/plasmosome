@@ -18,9 +18,10 @@ as values that only parse, print and compare.
 - **The log is the truth, not the in-memory state.** The ledger is replayable from its written
   record — that property is what lets a controller restart and still finish a teardown. A closed
   ledger's pending cursor and the cell its first detach bound are the deliberate exception: they
-  live only in memory, because spec 017 limits the cursor to one ledger instance (line 321) and
-  keeps the cell out of single-plugin logs (lines 583-584). Durable cell identity belongs to the
-  per-cell journal of spec 008.
+  live only in memory, because spec 017 limits the cursor to one ledger instance ("Incomplete
+  effects and their terminal transition") and keeps the cell out of single-plugin logs
+  ("Serialization and ledger interoperability"). Durable cell identity belongs to the per-cell
+  journal of spec 008.
 
 ## Conventions
 
