@@ -590,6 +590,36 @@ fn a_large_envelope_is_written_in_pieces() {
     assert!(shown.ends_with("\"\n]\n(kernel 101)\n"));
 }
 
+#[test]
+fn a_long_number_is_written_in_pieces_too() {
+    let digits = format!("1{}", "0".repeat(3 * PIECE));
+    let number = || Json::Number(Number::new(digits.clone()).expect("valid number text"));
+    let success = Envelope {
+        command: "plasmosome.status".to_string(),
+        instance: None,
+        outcome: Ok(Json::Object(vec![("n".to_string(), number())])),
+    };
+    assert_eq!(
+        emitted_in_pieces(&success, Form::Json),
+        format!(r#"{{"schema":1,"command":"plasmosome.status","result":{{"n":{digits}}}}}"#) + "\n"
+    );
+    let failure = Envelope {
+        command: "plasmosome.status".to_string(),
+        instance: None,
+        outcome: Err(ErrorBody::Kernel(
+            KernelError::new(Json::Object(vec![
+                ("code".to_string(), number()),
+                ("message".to_string(), Json::String("m".to_string())),
+            ]))
+            .expect("an object without domain"),
+        )),
+    };
+    assert_eq!(
+        emitted_in_pieces(&failure, Form::Human),
+        format!("m\n(kernel {digits})\n")
+    );
+}
+
 #[derive(Default)]
 struct FailsOnce {
     calls: usize,
