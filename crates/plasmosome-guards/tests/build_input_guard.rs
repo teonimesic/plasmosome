@@ -1865,6 +1865,11 @@ fn refuses_patch_replace_and_cargo_features() {
                     vec![package("crates/c/CARGO.TOML", "c", patch)],
                     vec![("crates/c/CARGO.TOML", "patch")],
                 ),
+                (
+                    "a manifest that is not TOML",
+                    vec![file("crates/a/Cargo.toml", "[package\nname = \n")],
+                    vec![("crates/a/Cargo.toml", "(file)")],
+                ),
             ],
         );
         assert_says(
@@ -1881,6 +1886,11 @@ fn refuses_patch_replace_and_cargo_features() {
             &outputs,
             "cargo-features",
             &["crates/a/Cargo.toml: cargo-features: unstable cargo features are refused"],
+        );
+        assert_says(
+            &outputs,
+            "a manifest that is not TOML",
+            &["crates/a/Cargo.toml: (file): cannot be parsed as TOML: "],
         );
     });
 }
@@ -2531,6 +2541,11 @@ fn every_tracked_lockfile_names_only_crates_io() {
                 vec![file("Cargo.lock", &format!("root = 1\n{LOCKFILE}"))],
                 vec![("Cargo.lock", "root")],
             ),
+            (
+                "a lockfile that is not TOML",
+                vec![file("Cargo.lock", "[[package]\nname = \n")],
+                vec![("Cargo.lock", "(file)")],
+            ),
         ];
         let loosened: Vec<String> = cases
             .iter()
@@ -2562,6 +2577,11 @@ fn every_tracked_lockfile_names_only_crates_io() {
             &outputs,
             "a package list that is not an array of tables",
             &["Cargo.lock: package: must be an array of tables"],
+        );
+        assert_says(
+            &outputs,
+            "a lockfile that is not TOML",
+            &["Cargo.lock: (file): cannot be parsed as TOML: "],
         );
 
         assert_passes(root, &[file("fuzz/Cargo.lock", LOCKFILE)]);
