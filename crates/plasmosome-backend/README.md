@@ -65,22 +65,55 @@ The trait's `apply` and `plant` refuse an invalid value before any change, with
 `grant` does not check yet.
 
 A software tree is a plasmid's files, pinned before attach has any effect. `software::pin`
-reads a directory against the path and SHA-256 of every file the verified package lists. It
-refuses, naming the path, an entry it cannot read, a FIFO, socket or device, any symbolic link, a
-listed path that is absolute or holds `..` or a NUL, a digest mismatch, a listed file that is
-missing, a file or empty directory the listing does not imply, and a command that names no file
-at the top of the tree. Each file is opened once with `O_NOFOLLOW | O_NONBLOCK`, checked to be
-regular through that descriptor, and hashed from it, and nothing is written. The tree digest is
-the SHA-256 of every file sorted by path bytes, each as its path, a NUL, its digest's 64 lowercase
-hexadecimal digits, a NUL, and a byte that is 1 for a command and 0 otherwise. That encoding is
-this crate's, not spec 027's; plasmosome-tbru specifies the journal record and may adopt it.
-`software::check_names` refuses a command name another attached plasmid provides, or one the root
-image has in `/usr/local/bin`, `/usr/bin` or `/bin`, and names the plasmid when both apply. The
-caller says whether the volume holding the names ignores case. Spec 027 leaves the declaration
-field for commands blocked on consumers, so a `CommandName` comes only from
-`software::fixture::declare_commands`, which compiles for this crate's tests and under the
-`test-fixture` feature, for dev-dependencies only. Core maps a `Conflict` to code 102 and a
-`PinRefusal` to code 108.
+reads a directory against every file the verified package lists, as spec 020's
+`{path, digest, size}`. Each listed path must pass spec 020 §2's file path rule: relative, with
+nonempty components that are neither `.` nor `..`, and no backslash, ASCII control character or
+drive prefix such as `C:`. So `foo..bar` is a legal name and `../foo` is not. Paths must also be
+unique, under ASCII case folding too, and none may be another's ancestor. `pin` then refuses,
+naming the path, an entry it cannot read, a FIFO, socket or device, a symbolic link, a size or
+digest mismatch, a listed file that is missing, a file or empty directory the listing does not
+imply, and a command that names no file at the top of the tree. A size that differs is refused
+before any byte is read. Each file is opened once, checked to be regular through that
+descriptor, and hashed from it, and nothing is written. A refusal's path is relative to the
+tree's root, and core's 108 carries that path and names the plasmid in its `detail`. A name that
+is not UTF-8 is refused as unlisted. On an APFS volume that refusal cannot happen, because APFS
+refuses such a name when the file is created (`EILSEQ`).
+
+What `pin` guarantees about links differs by system. A root that is itself a link is refused
+on both, and the root is resolved once to its canonical path. Every directory is opened before
+it is listed, and every file before it is read.
+
+- **macOS.** The open uses `O_NOFOLLOW_ANY`, which refuses a link in any component. No file is
+  read, and no directory opened, through a link, even one swapped in while `pin` runs. A
+  directory is listed by path after that check, so a link swapped in between is listed through,
+  but nothing under it is opened.
+- **Linux.** The open uses `O_NOFOLLOW`, which refuses a link only as the last component. A
+  directory swapped for a link while `pin` runs is followed, so a file outside the root can be
+  read. It is pinned only when its bytes match the listing. plasmosome-0v4o walks by directory
+  descriptors instead.
+
+The tree digest is the SHA-256 of every file sorted by path bytes, each as its path, a NUL, its
+digest's 64 lowercase hexadecimal digits, a NUL, and a byte that is 1 for a command and 0
+otherwise. That encoding is this crate's, not spec 027's; plasmosome-tbru specifies the journal
+record and may adopt it.
+
+`software::check_names` refuses a command name another attached plasmid's pinned tree provides,
+or one the root image has in `/usr/local/bin`, `/usr/bin` or `/bin`. It checks the tree's own
+names first, then other plasmids', then the image's. The caller says whether the volume holding
+the names ignores case. If it does, two commands of the same tree that fold together are refused
+too. The fold is Unicode lowercase only. It misses names that differ only in normalization, such
+as NFC and NFD `café`, and names that only full case folding joins, such as `ß` and `SS` or `ﬁ`
+and `fi`. Default APFS treats each of those pairs as one name.
+
+Spec 027 leaves the declaration field for commands blocked on consumers, so a `CommandName` comes
+only from `software::fixture::declare_commands`, or back from `PinnedTree::command_names`. The
+fixture compiles for this crate's tests and under the `test-fixture` feature. Enable that
+feature only from `[dev-dependencies]`. Nothing in the build enforces this; a reviewer checks it.
+Core maps a `Conflict` to code 102 and a `PinRefusal` to code 108. The 102 does not carry spec
+027's `fix` yet, and neither does the 108 for `CommandNotInTree`, because the declaration field
+they would name does not exist. plasmosome-tbru adds both. No product path reaches
+`CommandNotInTree` today, since no product tree declares a command. The other 108s are faults in
+the files, not in a declaration, so under spec 001 they carry no `fix`.
 
 Every holding is owned by a `CellOwner { cell, plugin }`: the same plugin attached to two cells is
 two owners, and no comparison looks at the plugin alone. It decodes only from a JSON object with
@@ -105,6 +138,6 @@ address or one owner time out.
 | `MockMode` | How a plasmid's calls are served: `simulate`, `capture` or `passthrough`, the default. It lives here, beside `CellId`, so the ledger can record a mode without depending on core |
 | `digest` | The SHA-256 `Digest`: exactly 64 lowercase hexadecimal digits, as text and in JSON. The membrane re-exports it |
 | `paging` | Spec 001's observation pages, shared by guest, membrane and controller. On the responding side, a server keeps one `CaptureSlot` per connection. The slot holds the compact JSON account that the server's `collect` froze with `FrozenAccount::freeze`, and serves it in pages of 1 to 65,536 bytes until its deadline. On the requesting side, a caller's `PageAssembler` yields the account only when every page arrived in order from one capture and the bytes match the stated length and hash. `ObservationPage` decodes only from an object. Both sides pass the clock and own the IO |
-| `software` | Spec 027's software tree before attach: `pin` checks a directory against the verified package's digests, and `check_names` decides the 102 name conflicts. Nothing is placed here |
+| `software` | Spec 027's software tree before attach: `pin` checks a directory against the verified package's paths, sizes and digests, and `check_names` decides the 102 name conflicts. Nothing is placed here |
 
 Tests: `cargo test -p plasmosome-backend`

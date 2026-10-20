@@ -133,7 +133,8 @@ pub enum PinRefusal {
     DigestMismatch { path: String },
     /// The package lists the file and the tree does not have it.
     Missing { path: String },
-    /// The tree has a file, or an empty directory, that the package does not list.
+    /// The tree has a file, or an empty directory, that the package does not list. A name that is
+    /// not UTF-8 is never listed; its path here is the name's lossy text.
     Unexpected { path: String },
     /// A command names no file at the top of the tree. No product path reaches it today, because
     /// no product tree declares a command; plasmosome-tbru gives it a field and a `fix`.
