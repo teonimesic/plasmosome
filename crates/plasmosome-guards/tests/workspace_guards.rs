@@ -288,6 +288,7 @@ fn shipping_graph(root: &Path, member: &str) -> String {
             member,
             "--edges",
             "normal,build",
+            "--all-features",
             "--prefix",
             "none",
             "--target",
