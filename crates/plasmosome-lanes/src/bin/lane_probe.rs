@@ -547,13 +547,21 @@ mod linux {
         writeln!(stdin, "go")?;
         let reply = read_line_json(&mut stdout)?;
         let _ = child.wait();
-        let (mount, placed_by, pid1_path) = match mount {
-            Some(result) => (done("mount", result), "pid1", base.join("opt/p/bin/x")),
-            None => (reply["bind"].clone(), "workload", source.join("p/bin/x")),
+        let (mount, placed_by, initial_path) = match mount {
+            Some(result) => (
+                done("mount", result),
+                "initial namespace",
+                base.join("opt/p/bin/x"),
+            ),
+            None => (
+                reply["bind"].clone(),
+                "workload namespace",
+                source.join("p/bin/x"),
+            ),
         };
         Ok(
             json!({"probe": "stage", "ok": true, "config": config, "placed_by": placed_by,
-                  "mount": mount, "pid1_stat": probe::stat(&pid1_path),
+                  "mount": mount, "initial_stat": probe::stat(&initial_path),
                   "workload_stat": reply["workload_stat"]}),
         )
     }
