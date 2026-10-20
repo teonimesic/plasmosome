@@ -1,3 +1,64 @@
+use crate::backend::Capability;
+use crate::universe::{CellOwner, GrantId, UniverseOp};
+
+pub(crate) fn session_file(path: &str) -> Capability {
+    Capability::SessionFile {
+        path: path.to_string(),
+    }
+}
+
+pub(crate) fn uds_socket(path: &str) -> Capability {
+    Capability::UdsSocket {
+        path: path.to_string(),
+    }
+}
+
+pub(crate) fn proxy_map(host: &str, route: &str) -> Capability {
+    Capability::ProxyMap {
+        host: host.to_string(),
+        route: route.to_string(),
+    }
+}
+
+pub(crate) fn broker(pid: u32, name: &str) -> Capability {
+    Capability::Broker {
+        pid,
+        name: name.to_string(),
+    }
+}
+
+pub(crate) fn mount(source: &str, target: &str) -> Capability {
+    Capability::Mount {
+        source: source.to_string(),
+        target: target.to_string(),
+    }
+}
+
+pub(crate) fn op(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
+    match capability {
+        Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
+        Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
+        Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
+            id,
+            host,
+            route,
+            owner,
+        },
+        Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
+            id,
+            pid,
+            name,
+            owner,
+        },
+        Capability::Mount { source, target } => UniverseOp::AddMount {
+            id,
+            source,
+            target,
+            owner,
+        },
+    }
+}
+
 mod tests {
     use super::*;
     use crate::backend::Capability;
