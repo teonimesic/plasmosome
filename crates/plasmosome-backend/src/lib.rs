@@ -6,6 +6,8 @@
 //! SHA-256 [`Digest`], spec 001's observation pages in [`paging`], and spec 028's
 //! lifetime values in [`lifetime`] with the [`Clock`] they are read on.
 
+#![doc(test(attr(forbid(unsafe_code))))]
+
 pub mod backend;
 pub mod clock;
 pub mod composite;

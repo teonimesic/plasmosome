@@ -6,13 +6,16 @@ The repository's own guards, as tests. It contains no product code; it inspects 
 
 ## What earns a guard here
 
-**Only harm that is permanent or public.** A published crate version cannot be unpublished, a
-commit crediting a model is in the history of a public repository, and the research corpus cannot
-be un-leaked. Those are the shape. A guard that would merely keep a design as it is today does not
-go here: write the design down where it can be argued with, and let the argument happen in review.
+**Only harm that is permanent or public, or a case that
+[spec 013](../../docs/specs/013-what-earns-a-guard.md)'s operational carve-out admits, such as skill
+discovery.** A published crate version cannot be unpublished, a commit crediting a model is in the
+history of a public repository, and the research corpus cannot be un-leaked. Those are the shape.
+A guard that would merely keep a design as it is today does not go here: write the design down
+where it can be argued with, and let the argument happen in review.
 
 The test to apply before adding one: name what it prevents, and say whether that thing could be
-undone by the next commit. If it could, this is not the place for it.
+undone by the next commit. If it could, this is not the place for it, unless spec 013's operational
+carve-out admits it.
 
 ## Hard rules
 

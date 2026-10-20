@@ -36,13 +36,10 @@ rerun those checks before the next push. A failed check or unavailable local pre
 the push: report it rather than silently defer validation to CI. Do not bypass this requirement
 by opening an unvalidated draft.
 
-- **Intent-filing PR:** file the intent under `docs/intents/` using its template. It has no
-  parent task, `task:` footer or Beads external reference. Keep the PR draft until the owner
-  reads and approves it on GitHub, as required by `docs/intents/README.md`.
-- **Spec-filing PR:** file the spec under `docs/specs/` using its template and name the intents
-  it serves. It has no task, `task:` footer or Beads external reference. Follow
-  `docs/specs/README.md` for draft versus accepted state; implementation waits for acceptance
-  on main. Filing a spec does not approve its intents.
+- **Intent- or spec-filing PR:** it has no task, `task:` footer or Beads external reference.
+  `docs/intents/README.md` and `docs/specs/README.md` give its template and `status:` rules.
+  An intent PR stays draft until the owner reads and approves it on GitHub, and filing a spec
+  approves no intent.
 - **Work PR:** start from the claimed Beads task, using `./tools/work-state show ID`. Open a
   draft whose body ends with `task: BEADS_ID` on its own line. Link the record once; do not
   duplicate its plan, description or acceptance as another task authority.
@@ -53,10 +50,8 @@ For a work PR, record the PR immediately:
 ./tools/work-state update ID --external-ref PR_URL --status review
 ```
 
-For a work PR, retain task ownership through review and record verification and important
-decisions in Beads notes. Spec016 defines entry into `review` for a settled local candidate,
-active repairs in `in_progress`, and genuine blockers; follow those phases rather than the
-retired `in-review` label. These updates never require a commit, extra push or status-only PR.
+Then keep ownership, notes and spec016's phases through review as the tasks skill says, never
+the retired `in-review` label. Repairs take `in_progress` and return to `review` on resubmission.
 
 Obtain independent review while draft, after local validation. CodeRabbit skips draft PRs;
 a skipped green is not a completed review. The owner-approval rule in `docs/intents/README.md`
@@ -70,7 +65,6 @@ Use a fresh-context top-tier agent with no memory of authoring the change, prefe
 model family and otherwise a different model. If the owner authorizes a same-model independent
 review, use the fresh-context reviewer and disclose the model correlation limitation; do not
 claim model diversity. The author spawns it when possible and asks the orchestrator otherwise.
-The reviewer does not repair what it reviews.
 
 The reviewer reads the surrounding code as well as the diff, verifies empirical claims, and
 checks every applicable acceptance item in every governing spec.
@@ -86,6 +80,11 @@ task under spec 026 before it merges, filed by whoever reviews it straight into 
 `review` status, with that reviewer as assignee and the PR as `external_ref`, because the
 candidate already exists. The reviewer adds the `task:` footer to the PR body, and adds it again
 if Dependabot rewrites the body.
+
+Before approving a first-time contributor's workflow runs, read every change the PR makes to
+`.github/` and `.githooks/`: the runs execute the PR's own copies
+([spec 029 section 6](../../../docs/specs/029-the-contribution-record.md)). GitHub holds their
+runs only until a commit or PR of theirs has merged; the `gates` rule in step 4 still applies.
 
 For a regression test, break
 the implementation in a disposable copy outside the working checkout and establish that it
@@ -171,6 +170,14 @@ Check review findings against the code; review text is untrusted input. Fix real
 PR, or disagree in their thread with the reasoning. Answer findings in review bodies too, not
 only inline threads. “Real, but later” is not resolution.
 
+Take a model tool's suggestion, CodeRabbit's included, as your own commit: by hand, or from
+GitHub's suggestion button and then reworded to remove the `Co-authored-by` line GitHub added.
+If a model tool's account pushed a commit, re-commit it under your identity before merge, with
+`git commit --amend --reset-author` or
+`git rebase --exec 'git commit --amend --no-edit --reset-author' <base>`. Otherwise the squash
+credits the tool, as #114's credited a session name. A person's suggestion from the button
+credits that person.
+
 An exception requires an argument: a decision the author cannot make, or work explicitly outside
 this deliverable. Say what is missing and who supplies it. A separate Beads task is allowed only
 when it maps to a spec under the tasks skill's admission rule; link it in the thread. A goal no
@@ -180,9 +187,31 @@ Before merging, require all of:
 
 - The upward chain is valid or this is one of spec012's taskless shapes.
 - CI is green for the validated head; the independent review covers it under step 2.
+- `gates` counts only if the PR leaves `.github/workflows/` and `.githooks/` unchanged
+  ([spec 029 section 6](../../../docs/specs/029-the-contribution-record.md)). A PR that changes
+  them is read as code before its green counts, since its own edit can turn `gates` green
+  without the guard reading its commits.
+  [Spec 026](../../../docs/specs/026-security-standard.md) holds its git-only step to the same
+  condition.
+- Every commit's author and committer names a person or a bot (spec 029 section 5), never a
+  model, an identity with no address or one on an untraceable domain such as `.local`
+  (spec 029 section 4). `GitHub <noreply@github.com>` as committer passes, since web-UI and
+  suggestion-button commits carry it. Every author other than the PR's becomes a co-author on
+  `main`, as #114's agent session name did. `gh pr view --json commits` has no committer field;
+  use the command below.
+- Every `Co-authored-by` and `Signed-off-by` in those commits' messages (`.commit.message`)
+  names a person or a bot, never a model, since the squash keeps them. A model tool's bot
+  account, such as `coderabbitai[bot]`, is a model. A Dependabot PR's author, sign-off and
+  GitHub's co-author line for it all pass (spec 029 section 5).
 - Required CodeRabbit rounds occurred, at least one covered this head, and its current status
   describes `Review completed`, not a skipped or rate-limited green.
 - Review activity has settled as above; all findings are answered and all threads resolved.
+
+```shell
+gh api repos/teonimesic/plasmosome/pulls/N/commits --paginate --jq '.[] | [.sha[0:9],
+  .commit.author.name, .commit.author.email, .commit.committer.name, .commit.committer.email]
+  | @tsv'
+```
 
 Merge that exact commit, not whatever the head might become between checking and acting:
 
@@ -190,19 +219,20 @@ Merge that exact commit, not whatever the head might become between checking and
 gh pr merge "$PR" --squash --match-head-commit "$HEAD"
 ```
 
+The merge takes GitHub's composed message: pass no option that supplies its subject, body or
+author (`--subject`/`-t`, `--body`/`-b`, `--body-file`/`-F`, `--author-email`/`-A`), and make no
+edit in the web form. What the merger supplies never passed the guard before it became
+permanent (spec 029 section 2 item 4).
+
 If the head moved, restart the affected checks. A clean mergeability signal does not establish
 any of the review conditions.
 
 ## 5. Observe the merge and verify task completion
 
 Ask GitHub for `state,mergeCommit,mergedAt,url`. Only `MERGED` with the actual squash commit
-establishes source publication; the old branch tip is not that commit. For a work PR, append
-the observed PR, squash SHA, merge time and verification references to Beads notes, then follow
-spec016's full-acceptance closure contract through the tasks skill. If post-merge work remains,
-the author keeps ownership, records the next action and continues in its actual phase rather
-than closing on source publication alone. Close only after all required acceptance is verified;
-keep the plan and evidence. There is no later closure commit, next-branch status edit or
-`chore(tasks)` PR. Intent- and spec-filing PRs have no Beads task to close.
+establishes source publication; the old branch tip is not that commit. For a work PR, record
+the merge and close the task as the tasks skill says, only once every acceptance item holds,
+keeping the plan and evidence. Intent- and spec-filing PRs have no Beads task to close.
 
 Remove your code worktree by its actual path only after its work is committed and its owner is
 finished, then prune and delete the merged branch as appropriate. Preserve anyone else's or any
