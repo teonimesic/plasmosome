@@ -375,9 +375,11 @@ fn waiting(error: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::private_socket::{PrivateDir, PrivateListener, PrivateSocketError, effective_uid};
     use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, ErrorKind, Write};
-    use std::os::unix::net::UnixStream;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -387,6 +389,70 @@ mod tests {
 
     const STATUS_REQUEST: &str = r#"{"id":1,"method":"plasmosome.status","params":{}}"#;
     const PATIENCE: Duration = Duration::from_secs(10);
+
+    #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
+    fn root_bases() -> Vec<PathBuf> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+        // SAFETY: `buffer` is a live Vec of buffer.len() bytes, and confstr writes at most that
+        // many.
+        let length = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        assert!(
+            length > 1 && length <= buffer.len(),
+            "confstr(_CS_DARWIN_USER_TEMP_DIR) returned {length}"
+        );
+        buffer.truncate(length - 1);
+        let base = PathBuf::from(OsStr::from_bytes(&buffer));
+        vec![
+            base.canonicalize()
+                .unwrap_or_else(|error| panic!("{} does not resolve: {error}", base.display())),
+        ]
+    }
+
+    #[cfg(target_os = "linux")]
+    fn root_bases() -> Vec<PathBuf> {
+        let mut bases: Vec<PathBuf> = std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|base| !base.is_empty())
+            .map(PathBuf::from)
+            .into_iter()
+            .collect();
+        let binary = std::env::current_exe().expect("the test binary knows its own path");
+        bases.extend(binary.parent().map(Path::to_path_buf));
+        bases
+    }
+
+    fn private_root() -> tempfile::TempDir {
+        let mut refusals = Vec::new();
+        for base in root_bases() {
+            let root = match tempfile::Builder::new().prefix("pd").tempdir_in(&base) {
+                Ok(root) => root,
+                Err(error) => {
+                    refusals.push(format!("{}: {error}", base.display()));
+                    continue;
+                }
+            };
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("the test root is made private");
+            match PrivateDir::open(root.path()) {
+                Ok(_) => return root,
+                Err(refusal) => refusals.push(format!("{}: {refusal}", base.display())),
+            }
+        }
+        panic!(
+            "no base can hold a private test root; on macOS the base is the canonical per-user \
+             temp directory, on Linux XDG_RUNTIME_DIR, else the test binary's directory:\n{}",
+            refusals.join("\n")
+        );
+    }
 
     fn config(directory: &Path, control_socket: &Path, name: &str) -> DaemonConfig {
         DaemonConfig {
@@ -487,12 +553,14 @@ mod tests {
         }
     }
 
-    fn start(config: DaemonConfig) -> Running {
+    fn spawned(
+        work: impl FnOnce(&AtomicBool) -> Result<(), DaemonError> + Send + 'static,
+    ) -> Running {
         let shutdown = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&shutdown);
         let (done, finished) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let outcome = run(config, &flag);
+            let outcome = work(&flag);
             let _ = done.send(());
             outcome
         });
@@ -501,6 +569,18 @@ mod tests {
             finished,
             handle: Some(handle),
         }
+    }
+
+    fn start(config: DaemonConfig) -> Running {
+        spawned(move |flag| run(config, flag))
+    }
+
+    fn serving(listener: PrivateListener, name: &str) -> Running {
+        let name = InstanceName::parse(name).expect("the test names a valid instance");
+        spawned(move |flag| {
+            let mut controller = Controller::new(name, ControllerState::default(), NO_LEDGER_YET);
+            serve(&listener, flag, &mut controller)
+        })
     }
 
     fn refuses(config: DaemonConfig) -> DaemonError {
@@ -744,7 +824,7 @@ mod tests {
 
     #[test]
     fn the_daemon_serves_without_creating_its_instance_root() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let configured = config(directory.path(), &control, "work");
         let root = configured.instance_root.clone();
@@ -767,7 +847,7 @@ mod tests {
 
     #[test]
     fn the_daemon_answers_status_with_an_empty_cell_registry() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let daemon = start(config(directory.path(), &control, "work"));
 
@@ -819,7 +899,7 @@ mod tests {
 
     #[test]
     fn a_status_for_a_name_this_daemon_is_not_is_refused_on_the_wire() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let _daemon = start(config(directory.path(), &control, "work"));
 
@@ -853,15 +933,17 @@ mod tests {
 
     #[test]
     fn an_existing_control_socket_path_is_refused_and_the_path_is_not_unlinked() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         std::fs::write(&control, b"someone else's socket").expect("the test occupies the path");
 
         let refusal = refuses(config(directory.path(), &control, "work"));
 
         match &refusal {
-            DaemonError::Bind { path, .. } => assert_eq!(path, &control),
-            other => panic!("an occupied path is a bind failure, got {other:?}"),
+            DaemonError::Boundary(PrivateSocketError::AddressInUse { path }) => {
+                assert_eq!(path, &control)
+            }
+            other => panic!("an occupied path is refused as in use, got {other:?}"),
         }
         assert!(
             control.exists(),
@@ -872,7 +954,7 @@ mod tests {
 
     #[test]
     fn shutdown_stops_serve_even_with_an_idle_connection_open() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let daemon = start(config(directory.path(), &control, "work"));
 
@@ -890,7 +972,7 @@ mod tests {
 
     #[test]
     fn shutdown_stops_serve_even_with_a_client_that_never_reads_its_replies() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let daemon = start(config(directory.path(), &control, "work"));
 
@@ -918,7 +1000,7 @@ mod tests {
 
     #[test]
     fn a_connection_survives_a_parse_error_and_a_second_connection_is_served() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let _daemon = start(config(directory.path(), &control, "work"));
 
@@ -966,7 +1048,7 @@ mod tests {
 
     #[test]
     fn shutdown_leaves_a_later_socket_settled_at_the_pathname_alone() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let daemon = start(config(directory.path(), &control, "work"));
 
@@ -1036,109 +1118,119 @@ mod tests {
     }
 
     #[test]
-    fn an_unwinding_guard_removes_its_own_socket_and_leaves_a_settled_replacement_alone() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+    fn another_uid_is_closed_unread() {
+        let root = private_root();
+        let euid = effective_uid();
+        let foreign = PrivateListener::bind(
+            PrivateDir::open(root.path()).expect("the test root is private"),
+            "foreign.uds",
+            euid.wrapping_add(1),
+        )
+        .expect("a listener trusting another UID binds");
+        let path = foreign.entry().path.clone();
+        let daemon = serving(foreign, "work");
 
-        let control = directory.path().join("control.uds");
-        let bound = UnixListener::bind(&control).expect("the fixture binds a real socket");
-        let guard = BoundSocket::capture(control.clone()).expect("the guard captures its socket");
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _guard = guard;
-            let _still_bound = bound;
-            panic!("the daemon unwinds through the guard");
-        }));
-        assert!(
-            !control.exists(),
-            "an unchanged socket the guard owns is removed even on an unwinding exit"
-        );
+        for attempt in ["first", "second"] {
+            let mut client = UnixStream::connect(&path).expect("the listener takes connections");
+            client
+                .set_read_timeout(Some(PATIENCE))
+                .expect("the test client bounds its own reads");
+            let _ = writeln!(client, "{STATUS_REQUEST}");
+            let mut reply = Vec::new();
+            let end = client.read_to_end(&mut reply);
+            assert!(
+                reply.is_empty(),
+                "the {attempt} connection from an untrusted UID got a reply: {:?}",
+                String::from_utf8_lossy(&reply)
+            );
+            assert!(
+                matches!(&end, Ok(0))
+                    || matches!(&end, Err(error) if error.kind() == ErrorKind::ConnectionReset),
+                "the {attempt} untrusted connection is closed, by end of file or by a reset for \
+                 the request it left unread, not held open: {end:?}"
+            );
+        }
+        daemon
+            .stop()
+            .expect("refusing a peer is not a listener failure: the loop keeps serving");
 
-        let control = directory.path().join("control.uds");
-        let bound = UnixListener::bind(&control).expect("the fixture binds a real socket");
-        let guard = BoundSocket::capture(control.clone()).expect("the guard captures its socket");
-        let saved = directory.path().join("saved.uds");
-        std::fs::rename(&control, &saved).expect("the original socket is renamed");
-        std::fs::write(&control, b"a settled replacement").expect("the sentinel is written");
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _guard = guard;
-            let _still_bound = bound;
-            panic!("the daemon unwinds through the guard");
-        }));
-        let left = std::fs::symlink_metadata(&control).expect("the sentinel survives the unwind");
-        assert!(
-            left.file_type().is_file(),
-            "a replacement settled after capture is not the guard's socket, so an unwinding \
-             teardown leaves it standing"
-        );
-        assert!(
-            std::fs::symlink_metadata(&saved)
-                .expect("the renamed original is retained")
-                .file_type()
-                .is_socket(),
-            "the renamed original socket stays allocated at its new name"
+        let trusted = PrivateListener::bind(
+            PrivateDir::open(root.path()).expect("the test root is private"),
+            "trusted.uds",
+            euid,
+        )
+        .expect("a listener trusting this UID binds");
+        let path = trusted.entry().path.clone();
+        let _daemon = serving(trusted, "work");
+        let mut client = addressable(&path);
+        assert_eq!(
+            ask(&mut client, STATUS_REQUEST).pointer("/result/name"),
+            Some(&json!("work")),
+            "the same loop answers a peer whose UID it trusts"
         );
     }
 
     #[test]
-    fn capture_refuses_a_non_socket_or_missing_entry_and_leaves_it_alone() {
+    fn a_control_socket_path_that_is_not_absolute_and_normal_is_refused_as_written() {
+        for written in [
+            "",
+            "control.uds",
+            "relative/control.uds",
+            "/",
+            "/a/b/",
+            "/a//b",
+            "/a/./b",
+            "/a/../b",
+            "/a/b/.",
+            "/a/b/..",
+        ] {
+            assert_eq!(
+                split_socket_path(Path::new(written)),
+                Err(PrivateSocketError::BadPath {
+                    path: PathBuf::from(written)
+                }),
+                "{written:?} is refused before any directory is opened"
+            );
+        }
+        assert_eq!(
+            split_socket_path(Path::new("/a/b/control.uds")),
+            Ok((Path::new("/a/b"), "control.uds"))
+        );
+        assert_eq!(
+            split_socket_path(Path::new("/control.uds")),
+            Ok((Path::new("/"), "control.uds"))
+        );
+
+        use std::os::unix::ffi::OsStrExt;
+        let raw = Path::new(std::ffi::OsStr::from_bytes(b"/a/\xffcontrol.uds"));
+        assert_eq!(
+            split_socket_path(raw),
+            Err(PrivateSocketError::BadName {
+                name: "\u{fffd}control.uds".to_string()
+            }),
+            "a socket name that is not UTF-8 cannot be bound by name"
+        );
+    }
+
+    #[test]
+    fn a_boundary_refusal_reads_as_the_refusal_itself() {
         use std::error::Error as _;
 
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
-
-        let control = directory.path().join("control.uds");
-        std::fs::write(&control, b"someone else's socket").expect("the test occupies the path");
-        let refusal =
-            BoundSocket::capture(control.clone()).expect_err("a regular file is not a socket");
-        match &refusal {
-            DaemonError::SocketIdentity { path, .. } => assert_eq!(path, &control),
-            other => panic!("a non-socket entry is an identity failure, got {other:?}"),
-        }
-        let source = refusal
-            .source()
-            .and_then(|source| source.downcast_ref::<std::io::Error>())
-            .expect("the identity refusal carries the actual I/O error");
+        let refusal = PrivateSocketError::SymlinkInPath {
+            path: PathBuf::from("/var"),
+        };
+        let error = DaemonError::Boundary(refusal.clone());
         assert_eq!(
-            source.kind(),
-            std::io::ErrorKind::InvalidData,
-            "a non-socket entry is invalid data, not a missing one: {source}"
+            error.to_string(),
+            refusal.to_string(),
+            "the operator reads the failing component and the rule it broke"
         );
         assert_eq!(
-            std::fs::read(&control)
-                .expect("the occupied file is readable")
-                .as_slice(),
-            b"someone else's socket".as_slice(),
-            "capture inspects the namespace, it never clears it: the entry is left for its owner"
-        );
-
-        let link = directory.path().join("link.uds");
-        std::os::unix::fs::symlink("nowhere.uds", &link)
-            .expect("the test plants a dangling leaf symlink");
-        let refusal = BoundSocket::capture(link.clone())
-            .expect_err("a leaf symlink is not a socket, even dangling");
-        assert!(
-            matches!(&refusal, DaemonError::SocketIdentity { path, .. } if path == &link),
-            "the refusal names the symlink, not its target: {refusal:?}"
-        );
-        assert_eq!(
-            std::fs::read_link(&link).expect("the symlink target is readable"),
-            PathBuf::from("nowhere.uds"),
-            "the no-follow inspection preserves the symlink and its exact target"
-        );
-
-        let missing = directory.path().join("absent.uds");
-        let refusal = BoundSocket::capture(missing.clone())
-            .expect_err("a missing path has no identity to capture");
-        let source = refusal
-            .source()
-            .and_then(|source| source.downcast_ref::<std::io::Error>())
-            .expect("the identity refusal carries the actual I/O error");
-        assert_eq!(
-            source.kind(),
-            std::io::ErrorKind::NotFound,
-            "a missing path is a not-found inspection error: {source}"
-        );
-        assert!(
-            !missing.exists(),
-            "a failed capture creates nothing and removes nothing"
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<PrivateSocketError>()),
+            Some(&refusal),
+            "the refusal is kept as the cause"
         );
     }
 }

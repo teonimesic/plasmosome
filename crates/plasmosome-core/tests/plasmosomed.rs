@@ -1,16 +1,21 @@
-use plasmosome_core::MAX_LINE_BYTES;
+use plasmosome_core::{MAX_LINE_BYTES, PrivateSocketError};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "support/private_root.rs"]
+mod private_root;
 #[path = "support/warm_up.rs"]
 mod warm_up;
+
+use private_root::private_root;
 
 const STATUS_REQUEST: &str = r#"{"id":1,"method":"plasmosome.status","params":{}}"#;
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -88,6 +93,53 @@ fn start(config: &Path) -> Daemon {
             .spawn()
             .expect("plasmosomed starts as a process"),
     }
+}
+
+#[allow(unsafe_code)]
+fn with_open_umask(mut command: Command) -> Command {
+    // SAFETY: The closure runs in the child between fork and exec. It only calls umask, which is
+    // async-signal-safe, takes no pointer and cannot fail.
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0);
+            Ok(())
+        })
+    };
+    command
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .expect("the test sets a mode");
+}
+
+fn make_dir(path: &Path, mode: u32) {
+    std::fs::create_dir(path).expect("the test makes a directory");
+    set_mode(path, mode);
+}
+
+#[track_caller]
+fn refused_naming(root: &Path, control: &Path, refusal: PrivateSocketError) {
+    let config = root.join("refused.json");
+    write_config(&config, &one_instance(root, control, "work"));
+    let output = output_within(plasmosomed(&[&config]), PATIENCE);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a control socket path that fails the private-socket boundary refuses the start: \
+         {output:?}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!("plasmosomed: {refusal}\n"),
+        "the refusal names the failing component and the rule it broke"
+    );
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(
+        std::fs::symlink_metadata(control).is_err(),
+        "nothing is bound at {}",
+        control.display()
+    );
 }
 
 fn output_within(mut command: Command, budget: Duration) -> Output {
@@ -208,7 +260,7 @@ fn one_instance(directory: &Path, control: &Path, name: &str) -> Value {
 
 #[test]
 fn the_envelope_edges_hold_on_the_wire() {
-    let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+    let directory = private_root();
     let control = directory.path().join("control.uds");
     let config = directory.path().join("config.json");
     write_config(&config, &one_instance(directory.path(), &control, "work"));
@@ -295,7 +347,7 @@ fn the_envelope_edges_hold_on_the_wire() {
 
 #[test]
 fn plasmosomed_serves_status_and_dies_cleanly_on_sigterm() {
-    let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+    let directory = private_root();
     let control = directory.path().join("control.uds");
     let config = directory.path().join("config.json");
     write_config(&config, &one_instance(directory.path(), &control, "work"));
@@ -330,7 +382,7 @@ fn plasmosomed_serves_status_and_dies_cleanly_on_sigterm() {
 
 #[test]
 fn plasmosomed_exits_nonzero_naming_the_failure() {
-    let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+    let directory = private_root();
 
     let no_arguments = output_within(plasmosomed(&[]), PATIENCE);
     assert_eq!(
@@ -465,7 +517,7 @@ fn plasmosomed_exits_nonzero_naming_the_failure() {
 
 #[test]
 fn plasmosomed_leaves_a_replacement_settled_at_its_socket_path_alone() {
-    let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+    let directory = private_root();
     let control = directory.path().join("control.uds");
     let config = directory.path().join("config.json");
     write_config(&config, &one_instance(directory.path(), &control, "work"));
@@ -518,7 +570,7 @@ fn plasmosomed_leaves_a_replacement_settled_at_its_socket_path_alone() {
 
 #[test]
 fn plasmosomed_leaves_a_symlink_settled_at_its_socket_path_alone() {
-    let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+    let directory = private_root();
     let control = directory.path().join("control.uds");
     let config = directory.path().join("config.json");
     write_config(&config, &one_instance(directory.path(), &control, "work"));
@@ -565,7 +617,7 @@ fn plasmosomed_leaves_a_symlink_settled_at_its_socket_path_alone() {
 
 #[test]
 fn plasmosomed_leaves_a_dangling_symlink_settled_at_its_socket_path_alone() {
-    let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+    let directory = private_root();
     let control = directory.path().join("control.uds");
     let config = directory.path().join("config.json");
     write_config(&config, &one_instance(directory.path(), &control, "work"));
@@ -609,5 +661,116 @@ fn plasmosomed_leaves_a_dangling_symlink_settled_at_its_socket_path_alone() {
             .file_type()
             .is_socket(),
         "the original socket stays allocated under the caller's new name"
+    );
+}
+
+#[test]
+fn the_socket_is_0600_in_a_0700_directory() {
+    let root = private_root();
+    let control = root.path().join("control.uds");
+    let config = root.path().join("config.json");
+    write_config(&config, &one_instance(root.path(), &control, "work"));
+
+    let _daemon = Daemon {
+        child: with_open_umask(plasmosomed(&[&config]))
+            .spawn()
+            .expect("plasmosomed starts as a process"),
+    };
+    let mut client = addressable(&control);
+    let socket = std::fs::symlink_metadata(&control).expect("the socket is on disk");
+    assert!(socket.file_type().is_socket(), "{socket:?}");
+    assert_eq!(
+        format!("{:04o}", socket.mode() & 0o7777),
+        "0600",
+        "a socket a client can already reach is 0600, though the daemon runs with umask 0"
+    );
+    let directory = std::fs::symlink_metadata(root.path()).expect("the root is on disk");
+    assert_eq!(format!("{:04o}", directory.mode() & 0o7777), "0700");
+
+    let reply = ask(&mut client, STATUS_REQUEST);
+    assert_eq!(
+        reply.pointer("/result/name"),
+        Some(&json!("work")),
+        "{reply}"
+    );
+    assert_eq!(
+        reply.pointer("/result/ready"),
+        Some(&json!(true)),
+        "{reply}"
+    );
+}
+
+#[test]
+fn a_symlinked_path_is_refused() {
+    let root = private_root();
+
+    #[cfg(target_os = "macos")]
+    {
+        let spelled = Path::new("/").join(
+            root.path()
+                .strip_prefix("/private")
+                .expect("the canonical per-user temp directory is under /private"),
+        );
+        assert_eq!(
+            std::fs::read_link("/var").expect("/var is a symlink on macOS"),
+            Path::new("private/var")
+        );
+        refused_naming(
+            root.path(),
+            &spelled.join("control.uds"),
+            PrivateSocketError::SymlinkInPath {
+                path: PathBuf::from("/var"),
+            },
+        );
+        assert!(
+            std::fs::symlink_metadata(root.path().join("control.uds")).is_err(),
+            "nothing is bound at the canonical path either"
+        );
+    }
+
+    let real = root.path().join("real");
+    make_dir(&real, 0o700);
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("the test links to the directory");
+    refused_naming(
+        root.path(),
+        &link.join("control.uds"),
+        PrivateSocketError::SymlinkInPath { path: link.clone() },
+    );
+    assert!(
+        std::fs::symlink_metadata(real.join("control.uds")).is_err(),
+        "nothing is bound behind the link"
+    );
+}
+
+#[test]
+fn a_0750_directory_is_refused() {
+    let root = private_root();
+    let open = root.path().join("open");
+    make_dir(&open, 0o750);
+    refused_naming(
+        root.path(),
+        &open.join("control.uds"),
+        PrivateSocketError::NotPrivate {
+            path: open.clone(),
+            mode: 0o750,
+        },
+    );
+}
+
+#[test]
+fn a_group_writable_ancestor_is_refused() {
+    let root = private_root();
+    let shared = root.path().join("shared");
+    make_dir(&shared, 0o770);
+    let inner = shared.join("inner");
+    make_dir(&inner, 0o700);
+    refused_naming(
+        root.path(),
+        &inner.join("control.uds"),
+        PrivateSocketError::Replaceable {
+            path: shared.clone(),
+            mode: 0o770,
+        },
     );
 }
