@@ -288,11 +288,71 @@ mod tests {
     const STATUS_REQUEST: &str = r#"{"id":1,"method":"plasmosome.status","params":{}}"#;
     const PATIENCE: Duration = Duration::from_secs(10);
 
-    fn config(control_socket: &Path, name: &str) -> DaemonConfig {
+    fn config(directory: &Path, control_socket: &Path, name: &str) -> DaemonConfig {
         DaemonConfig {
             control_socket: control_socket.to_path_buf(),
             name: InstanceName::parse(name).expect("the test names a valid instance"),
+            instance_root: directory.join("instance"),
+            recovery_deadline: Duration::from_secs(5),
+            registry_root: None,
         }
+    }
+
+    const FULL_CONFIG: [(&str, &str); 5] = [
+        ("control_socket", r#""/tmp/c.uds""#),
+        ("name", r#""work""#),
+        ("instance_root", r#""/srv/instances/work""#),
+        ("recovery_deadline_ms", "5000"),
+        ("registry_root", r#""/srv/imports""#),
+    ];
+
+    fn written(pairs: &[(&str, &str)]) -> String {
+        let body: Vec<String> = pairs
+            .iter()
+            .map(|(key, value)| format!("\"{key}\": {value}"))
+            .collect();
+        format!("{{{}}}", body.join(", "))
+    }
+
+    fn replacing(key: &str, value: &str) -> String {
+        let pairs: Vec<(&str, &str)> = FULL_CONFIG
+            .iter()
+            .map(|&(name, old)| (name, if name == key { value } else { old }))
+            .collect();
+        written(&pairs)
+    }
+
+    fn omitting(key: &str) -> String {
+        let pairs: Vec<(&str, &str)> = FULL_CONFIG
+            .iter()
+            .copied()
+            .filter(|&(name, _)| name != key)
+            .collect();
+        written(&pairs)
+    }
+
+    fn adding(key: &str, value: &str) -> String {
+        let mut pairs = FULL_CONFIG.to_vec();
+        pairs.push((key, value));
+        written(&pairs)
+    }
+
+    fn refused_naming(rows: Vec<(String, &str)>) {
+        let failures: Vec<String> = rows
+            .iter()
+            .filter_map(|(text, offender)| match parse_config(text) {
+                Ok(parsed) => Some(format!("{text} parsed as {parsed:?}")),
+                Err(refusal) if !refusal.to_string().contains(offender) => Some(format!(
+                    "the refusal of {text} does not name {offender}: {refusal}"
+                )),
+                Err(_) => None,
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "every malformed config is refused by name:\n{}",
+            failures.join("\n")
+        );
     }
 
     struct Running {
@@ -393,45 +453,78 @@ mod tests {
 
     #[test]
     fn a_full_config_parses_and_each_malformed_config_is_refused_by_name() {
-        let parsed = parse_config(r#"{"control_socket": "/tmp/c.uds", "name": "work"}"#)
-            .expect("a full config parses");
+        let parsed = parse_config(&written(&FULL_CONFIG)).expect("a full config parses");
         assert_eq!(
             parsed,
             DaemonConfig {
                 control_socket: PathBuf::from("/tmp/c.uds"),
                 name: InstanceName::parse("work").expect("`work` is an instance name"),
+                instance_root: PathBuf::from("/srv/instances/work"),
+                recovery_deadline: Duration::from_millis(5000),
+                registry_root: Some(PathBuf::from("/srv/imports")),
             }
         );
 
-        for (text, offender) in [
-            (r#"not json"#, "JSON"),
-            (r#"{"name": "work"}"#, "control_socket"),
-            (r#"{"control_socket": "/tmp/c.uds"}"#, "name"),
-            (r#"{"control_socket": 7, "name": "work"}"#, "control_socket"),
-            (r#"{"control_socket": "/tmp/c.uds", "name": 7}"#, "name"),
-            (
-                r#"{"control_socket": "/tmp/c.uds", "name": "work", "socket": "/tmp/x.uds"}"#,
-                "socket",
-            ),
-            (r#"{"control_socket": "/tmp/c.uds", "name": ""}"#, "empty"),
-            (r#"{"control_socket": "/tmp/c.uds", "name": "a/b"}"#, "a/b"),
-            (r#"{"control_socket": "/tmp/c.uds", "name": ".."}"#, ".."),
-        ] {
-            let refusal = parse_config(text)
-                .err()
-                .unwrap_or_else(|| panic!("{text} is refused"));
-            assert!(
-                refusal.to_string().contains(offender),
-                "the refusal of {text} names {offender}, got: {refusal}"
-            );
-        }
+        refused_naming(vec![
+            ("not json".to_string(), "JSON"),
+            (omitting("control_socket"), "`control_socket`"),
+            (omitting("name"), "`name`"),
+            (omitting("instance_root"), "`instance_root`"),
+            (omitting("recovery_deadline_ms"), "`recovery_deadline_ms`"),
+            (replacing("control_socket", "7"), "`control_socket`"),
+            (replacing("name", "7"), "`name`"),
+            (adding("socket", r#""/tmp/x.uds""#), "`socket`"),
+            (replacing("name", r#""""#), "empty"),
+            (replacing("name", r#""a/b""#), "a/b"),
+            (replacing("name", r#""..""#), ".."),
+        ]);
+    }
+
+    #[test]
+    fn registry_root_is_optional_and_omission_means_local_operation() {
+        let local = parse_config(&omitting("registry_root"))
+            .expect("a config without registry_root parses");
+        assert_eq!(
+            local.registry_root, None,
+            "no registry root is supplied by HOME, the instance root or any other path"
+        );
+
+        let imports = parse_config(&written(&FULL_CONFIG)).expect("a full config parses");
+        assert_eq!(
+            imports.registry_root,
+            Some(PathBuf::from("/srv/imports")),
+            "a configured registry root is carried exactly as written"
+        );
+    }
+
+    #[test]
+    fn instance_root_is_never_derived_from_the_control_socket() {
+        let here = parse_config(&replacing("control_socket", r#""/a/control.uds""#))
+            .expect("the config parses");
+        let there = parse_config(&replacing("control_socket", r#""/b/elsewhere.uds""#))
+            .expect("the config parses");
+        assert_eq!(here.instance_root, PathBuf::from("/srv/instances/work"));
+        assert_eq!(
+            there.instance_root, here.instance_root,
+            "moving the control socket does not move the instance root"
+        );
+
+        let laid_out =
+            omitting("instance_root").replace("/tmp/c.uds", "/x/instances/work/control.uds");
+        let refusal = parse_config(&laid_out).expect_err(
+            "a socket inside the usual instance layout does not stand in for a missing root",
+        );
+        assert!(
+            refusal.to_string().contains("`instance_root`"),
+            "the refusal names the missing key: {refusal}"
+        );
     }
 
     #[test]
     fn the_daemon_answers_status_with_an_empty_cell_registry() {
         let directory = tempfile::tempdir().expect("the test owns a temporary directory");
         let control = directory.path().join("control.uds");
-        let daemon = start(config(&control, "work"));
+        let daemon = start(config(directory.path(), &control, "work"));
 
         let mut client = addressable(&control);
         let reply = ask(&mut client, STATUS_REQUEST);
@@ -483,7 +576,7 @@ mod tests {
     fn a_status_for_a_name_this_daemon_is_not_is_refused_on_the_wire() {
         let directory = tempfile::tempdir().expect("the test owns a temporary directory");
         let control = directory.path().join("control.uds");
-        let _daemon = start(config(&control, "work"));
+        let _daemon = start(config(directory.path(), &control, "work"));
 
         let mut client = addressable(&control);
         let elsewhere = ask(
@@ -519,7 +612,7 @@ mod tests {
         let control = directory.path().join("control.uds");
         std::fs::write(&control, b"someone else's socket").expect("the test occupies the path");
 
-        let refusal = refuses(config(&control, "work"));
+        let refusal = refuses(config(directory.path(), &control, "work"));
 
         match &refusal {
             DaemonError::Bind { path, .. } => assert_eq!(path, &control),
@@ -536,7 +629,7 @@ mod tests {
     fn shutdown_stops_serve_even_with_an_idle_connection_open() {
         let directory = tempfile::tempdir().expect("the test owns a temporary directory");
         let control = directory.path().join("control.uds");
-        let daemon = start(config(&control, "work"));
+        let daemon = start(config(directory.path(), &control, "work"));
 
         let mut client = addressable(&control);
         assert_eq!(
@@ -554,7 +647,7 @@ mod tests {
     fn shutdown_stops_serve_even_with_a_client_that_never_reads_its_replies() {
         let directory = tempfile::tempdir().expect("the test owns a temporary directory");
         let control = directory.path().join("control.uds");
-        let daemon = start(config(&control, "work"));
+        let daemon = start(config(directory.path(), &control, "work"));
 
         let client = addressable(&control);
         let mut writer = client
@@ -582,7 +675,7 @@ mod tests {
     fn a_connection_survives_a_parse_error_and_a_second_connection_is_served() {
         let directory = tempfile::tempdir().expect("the test owns a temporary directory");
         let control = directory.path().join("control.uds");
-        let _daemon = start(config(&control, "work"));
+        let _daemon = start(config(directory.path(), &control, "work"));
 
         let mut client = addressable(&control);
         let refused = ask(&mut client, "not json at all");
@@ -630,7 +723,7 @@ mod tests {
     fn shutdown_leaves_a_later_socket_settled_at_the_pathname_alone() {
         let directory = tempfile::tempdir().expect("the test owns a temporary directory");
         let control = directory.path().join("control.uds");
-        let daemon = start(config(&control, "work"));
+        let daemon = start(config(directory.path(), &control, "work"));
 
         let mut client = addressable(&control);
         assert_eq!(

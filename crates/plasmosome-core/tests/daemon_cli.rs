@@ -43,7 +43,12 @@ fn output_within(mut command: Command) -> Output {
 }
 
 fn write_config(directory: &Path, filename: &OsStr, occupied: &Path) {
-    let body = json!({"control_socket": occupied, "name": "cli-test"});
+    let body = json!({
+        "control_socket": occupied,
+        "name": "cli-test",
+        "instance_root": directory.join("instance"),
+        "recovery_deadline_ms": 5000,
+    });
     std::fs::write(
         directory.join(filename),
         serde_json::to_vec(&body).expect("the config is JSON"),
