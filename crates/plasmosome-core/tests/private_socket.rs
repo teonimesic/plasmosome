@@ -374,6 +374,15 @@ fn a_root_owned_directory_this_user_cannot_open_is_judged_by_its_owner() {
         }),
         "a root-owned 0700 ancestor is safe, only unreachable"
     );
+    assert_eq!(
+        list_trusted_dir(locked),
+        Err(PrivateSocketError::Io {
+            op: "openat",
+            path: locked.to_path_buf(),
+            errno: libc::EACCES
+        }),
+        "a root-owned 0700 directory passes the ancestor rule, so only its open fails"
+    );
 }
 
 #[test]
@@ -1246,6 +1255,28 @@ fn list_trusted_dir_takes_an_ancestor_mode_as_enough() {
     assert!(
         usr.contains(&listed("bin", EntryKind::Directory)),
         "{usr:?}"
+    );
+}
+
+#[test]
+fn list_trusted_dir_judges_a_directory_it_cannot_open_by_the_ancestor_rule() {
+    if effective_uid() == 0 {
+        println!("skipped: root opens every directory");
+        return;
+    }
+    let root = private_root();
+    let instances = instances_in(&root, 0o755);
+    set_mode(&instances, 0o055);
+    let outcome = list_trusted_dir(&instances);
+    set_mode(&instances, 0o755);
+    assert_eq!(
+        outcome,
+        Err(PrivateSocketError::Io {
+            op: "openat",
+            path: instances,
+            errno: libc::EACCES
+        }),
+        "a 0055 directory passes the ancestor rule, so only its open fails"
     );
 }
 
