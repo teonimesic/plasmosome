@@ -324,7 +324,7 @@ removal's deadline; the expected value is `ECONNABORTED`, measured and recorded 
 `close()` succeeds. The process keeps running.
 After the last holding at a target goes, a lookup by path there fails with `ENOENT`. All of this
 rests on spec 017's direct IO, zero cache timeouts and refusal of file-backed mappings
-(`017:429-437`), which need O-7 (§8); without them, cached pages and mappings outlive the grant.
+(`017:433-441`), which need O-7 (§8); without them, cached pages and mappings outlive the grant.
 
 **A revoked binding.** Observation reports the binding as `revoked` while references to it
 remain. It counts as absent, so `plasmid.remove` completes while a process sits in the target. It
@@ -335,8 +335,8 @@ removal has completed, the binding is exempt only from host-authority associatio
 drift and readiness: no host authority remains to match it, and it never blocks readiness or a
 later attach at the same target. The host side is checked against the supervisor's own inventory
 keyed by GrantId (gates, source roots, handles, listeners and flows), as spec 001 §4.2's absence
-check requires (`001:1198-1199`). It must hold nothing for that grant; a holding found there has
-no journal record and is an unknown holding (`008:470-472`). The amendments to spec 001 and spec
+check requires (`001:1212-1213`). It must hold nothing for that grant; a holding found there has
+no journal record and is an unknown holding (`008:476-478`). The amendments to spec 001 and spec
 008 below say the same.
 
 **A binding that stands while the host refuses it.** A grant can stop serving while its guest
@@ -351,7 +351,7 @@ the pinned runtime and records it here, as for Mount above.
 | --- | --- | --- |
 | Mount | An operation through a reference bound to the grant: `ENOTCONN`, as above. A fresh lookup when the only grant at the target is refused: `ENOENT`. | Each operation, a fresh lookup included, fails at once with `ENOTCONN`, so a file that still stands never looks deleted. A failed operation destroys nothing, so after a restore new operations succeed. |
 | UdsSocket or Broker stream | The stream is closed: a read returns end-of-file, and a write fails with `EPIPE`. A new connection is closed the same way as soon as it is accepted. | Nothing is closed, since the pause may be undone. Data waits, and a blocked read or write returns when the pause is restored, or gets the outcome on the left when the removal goes ahead. |
-| ProxyMap flow | An established TCP flow is reset, so its next call fails with `ECONNRESET`. A new TCP connect fails with `ECONNREFUSED` when no other eligible grant covers its host, port and transport, never a silent drop. A UDP datagram on a refused flow gets an ICMP port unreachable, so a connected socket's next call fails with `ECONNREFUSED`. DNS answers NXDOMAIN when no grant of that host, on any port or transport, is eligible (`001:1228-1230`). Corrected on 2026-10-20: this refused every new connect and DNS lookup, even one that another eligible grant still serves under spec 001 §4.2. | As for a stream. |
+| ProxyMap flow | An established TCP flow is reset, so its next call fails with `ECONNRESET`. A new TCP connect fails with `ECONNREFUSED` when no other eligible grant covers its host, port and transport, never a silent drop. A UDP datagram on a refused flow gets an ICMP port unreachable, so a connected socket's next call fails with `ECONNREFUSED`. DNS answers NXDOMAIN when no grant of that host, on any port or transport, is eligible (`001:1242-1244`). Corrected on 2026-10-20: this refused every new connect and DNS lookup, even one that another eligible grant still serves under spec 001 §4.2. | As for a stream. |
 
 Two outcomes have kernel caveats. A Unix stream read can fail with `ECONNRESET` instead of
 returning end-of-file, when PID1 closes its end while the workload's bytes sit unread. An
@@ -371,7 +371,7 @@ within a bound:
 - one that starts after the gate closed fails at once, except on a paused stream or flow;
 - one on a paused stream or flow waits, and returns by the pause's deadline at the latest, when
   the pause is restored or the removal goes ahead. A pause expires at its original host deadline
-  (`001:1148-1150`), so the guest needs no deadline of its own;
+  (`001:1162-1164`), so the guest needs no deadline of its own;
 - one already in progress when its grant is revoked or refused returns by that removal's
   deadline.
 
