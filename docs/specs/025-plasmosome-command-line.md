@@ -78,7 +78,8 @@ commands are spec 020 §5's, under `plasmosome registry`.
 
 Each wire parameter is a long flag of the same name, with `_` written as `-`: `--cell`,
 `--genome`, `--exec-id`, `--request-key`. A bare `--mock` means `simulate`, as spec 001 §3.5
-says; a mode is written `--mock=MODE`. These are the exceptions:
+says; a mode is written `--mock=MODE`. A boolean parameter is a bare flag, such as
+`--until-revoked`. These are the exceptions:
 
 - The instance (`name` on `plasmosome.*` verbs, `kernel` on the others) comes from socket
   selection (section 5).
@@ -126,6 +127,7 @@ accepted.
 | `plasmid add` | `plasmid.add` | yes | no |
 | `plasmid remove` | `plasmid.remove` | yes | no |
 | `plasmid reload` | `plasmid.reload` | yes | no |
+| `plasmid renew` | `plasmid.renew` | yes | no |
 | `plasmosome registry source add`, `source list`, `source remove`, `search`, `show`, `inspect`, `fetch`, `register`, `yank`, `import` | none | `register` and `yank` | no |
 
 `--cell` is optional where spec 001 §2 makes it optional: the client leaves `cell` out, and the

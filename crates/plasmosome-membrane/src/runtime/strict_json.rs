@@ -11,6 +11,7 @@ pub(crate) enum StrictJsonError {
     },
     DuplicateKey {
         path: String,
+        field: String,
     },
 }
 
@@ -25,7 +26,7 @@ impl std::fmt::Display for StrictJsonError {
                 f,
                 "refused as JSON at line {line}, column {column}: {reason}"
             ),
-            StrictJsonError::DuplicateKey { path } => {
+            StrictJsonError::DuplicateKey { path, .. } => {
                 write!(f, "duplicate object key at {path:?}")
             }
         }
@@ -44,7 +45,7 @@ pub(crate) fn parse_value(bytes: &[u8]) -> Result<Value, StrictJsonError> {
     .deserialize(&mut reader)
     .and_then(|value| reader.end().map(|()| value));
     read.map_err(|error| match duplicate.into_inner() {
-        Some(path) => StrictJsonError::DuplicateKey { path },
+        Some((path, field)) => StrictJsonError::DuplicateKey { path, field },
         None => StrictJsonError::NotJson {
             line: error.line(),
             column: error.column(),
@@ -81,11 +82,20 @@ impl Location<'_> {
             Location::Index(parent, index) => format!("{}/{index}", parent.pointer()),
         }
     }
+
+    fn dotted(&self) -> String {
+        match self {
+            Location::Root => String::new(),
+            Location::Key(Location::Root, key) => (*key).to_owned(),
+            Location::Key(parent, key) => format!("{}.{key}", parent.dotted()),
+            Location::Index(parent, index) => format!("{}[{index}]", parent.dotted()),
+        }
+    }
 }
 
 struct Strict<'a> {
     at: Location<'a>,
-    duplicate: &'a RefCell<Option<String>>,
+    duplicate: &'a RefCell<Option<(String, String)>>,
 }
 
 impl<'de> DeserializeSeed<'de> for Strict<'_> {
@@ -145,7 +155,7 @@ impl<'de> Visitor<'de> for Strict<'_> {
         while let Some(key) = entries.next_key::<String>()? {
             let at = Location::Key(&self.at, &key);
             if read.contains_key(&key) {
-                self.duplicate.replace(Some(at.pointer()));
+                self.duplicate.replace(Some((at.pointer(), at.dotted())));
                 return Err(de::Error::custom("duplicate object key"));
             }
             let value = entries.next_value_seed(Strict {
@@ -163,11 +173,19 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn duplicate_at(text: &str) -> String {
+    fn duplicate(text: &str) -> (String, String) {
         match parse_value(text.as_bytes()) {
-            Err(StrictJsonError::DuplicateKey { path }) => path,
+            Err(StrictJsonError::DuplicateKey { path, field }) => (path, field),
             other => panic!("{text} refuses as a duplicate key, got {other:?}"),
         }
+    }
+
+    fn duplicate_at(text: &str) -> String {
+        duplicate(text).0
+    }
+
+    fn duplicate_field_at(text: &str) -> String {
+        duplicate(text).1
     }
 
     fn assert_refused_as_serde_json_refuses(text: &str) {
@@ -265,6 +283,20 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_key_is_also_named_by_its_dotted_field() {
+        for (text, field) in [
+            (r#"{"a":1,"a":2}"#, "a"),
+            (r#"{"k":{"s":1,"s":1}}"#, "k.s"),
+            (r#"{"l":[{"p":1},{"p":1,"p":2}]}"#, "l[1].p"),
+            (r#"{"a/b~c":{"x":1,"x":2}}"#, "a/b~c.x"),
+            (r#"[{"a":1,"a":2}]"#, "[0].a"),
+            (r#"{"":{"x":1,"x":2}}"#, ".x"),
+        ] {
+            assert_eq!(duplicate_field_at(text), field, "{text}");
+        }
+    }
+
+    #[test]
     fn malformed_text_reports_the_position_serde_json_reports() {
         for text in [
             "",
@@ -329,7 +361,8 @@ mod tests {
         );
         assert_eq!(
             StrictJsonError::DuplicateKey {
-                path: "/l/1/p".to_string()
+                path: "/l/1/p".to_string(),
+                field: "l[1].p".to_string(),
             }
             .to_string(),
             "duplicate object key at \"/l/1/p\""
