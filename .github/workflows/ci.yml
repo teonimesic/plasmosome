@@ -13,8 +13,7 @@ permissions:
 # `rust-toolchain.toml` names the compiler. Each job that builds Rust installs it with
 # `rustup toolchain install`, which reads that file; `--no-self-update` stops rustup replacing
 # itself with whatever release is newest. With auto-install off, a job that skips the install
-# fails at its first rustup, rustc or cargo command instead of downloading a toolchain no step
-# names.
+# fails before it builds anything, instead of downloading a toolchain no step names.
 env:
   RUSTUP_AUTO_INSTALL: "0"
 
