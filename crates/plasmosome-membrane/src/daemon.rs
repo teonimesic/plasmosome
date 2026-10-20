@@ -344,6 +344,12 @@ impl Drop for BoundSocket {
 /// leaders and do not die with their parent, and a killed process runs no destructor, so brokers
 /// can keep running and the socket path stays. No residue observation or recovery verb is
 /// implemented.
+/// On macOS, std makes a socket close-on-exec in a second call, outside the spawn lock. So the
+/// control socket is bound before the first broker is forked, and connections are accepted only
+/// after the last, all on the calling thread: that order keeps them out of every broker. A caller
+/// must not fork through `VmmChild::spawn` on another thread while `run` runs. Two daemons on
+/// two threads of one process, as the tests run them, can leak one's connection into the other's
+/// broker.
 pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonError> {
     run_with(config, shutdown, VmmChild::spawn)
 }
@@ -536,8 +542,11 @@ mod tests {
         }
     }
 
+    #[allow(unsafe_code)]
     fn is_reaped(pid: i32) -> bool {
         let mut status: libc::c_int = 0;
+        // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of this
+        // process.
         let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
         observed == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
     }

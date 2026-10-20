@@ -114,6 +114,7 @@ fn search_path(program: &str, search: &std::ffi::OsStr) -> Option<CString> {
     CString::new(found.into_os_string().into_vec()).ok()
 }
 
+#[allow(unsafe_code)]
 fn is_executable_file(candidate: &Path) -> bool {
     if !candidate.is_file() {
         return false;
@@ -121,6 +122,8 @@ fn is_executable_file(candidate: &Path) -> bool {
     let Ok(path) = CString::new(candidate.as_os_str().as_bytes()) else {
         return false;
     };
+    // SAFETY: `path` is a CString that lives until this function returns, and faccessat keeps no
+    // pointer to it.
     unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
 }
 
@@ -135,7 +138,11 @@ impl std::fmt::Debug for ExecCommand {
 }
 
 impl Launch for ExecCommand {
+    #[allow(unsafe_code)]
     fn launch(self) -> ! {
+        // SAFETY: `program`, `argv` and `envp` point into CStrings this command owns, and both
+        // arrays end with a null pointer, so execve reads only live, terminated memory. execve and
+        // _exit are async-signal-safe, so the forked child allocates nothing.
         unsafe {
             libc::execve(
                 self.program.as_ptr(),
