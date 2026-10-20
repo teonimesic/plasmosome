@@ -67,23 +67,41 @@ fn repository_with_commits(messages: &[&str]) -> TempDir {
     git_succeeds(path, &["init", "--quiet"], None);
     git_succeeds(path, &["config", "commit.gpgsign", "false"], None);
     for message in messages {
-        git_succeeds(
-            path,
-            &[
-                "commit",
-                "--allow-empty",
-                "--cleanup=verbatim",
-                "--file",
-                "-",
-            ],
-            Some(message),
-        );
+        commit(path, message);
     }
     directory
 }
 
+fn commit(repository: &Path, message: &str) {
+    git_succeeds(
+        repository,
+        &[
+            "commit",
+            "--allow-empty",
+            "--cleanup=verbatim",
+            "--file",
+            "-",
+        ],
+        Some(message),
+    );
+}
+
 fn repository_with_commit(message: &str) -> TempDir {
     repository_with_commits(&[message])
+}
+
+fn repository_with_a_merge(side: &str, merge: &str) -> TempDir {
+    let repository = repository_with_commit("docs: a change both branches start from\n");
+    let path = repository.path();
+    git_succeeds(path, &["checkout", "--quiet", "-b", "side"], None);
+    commit(path, side);
+    git_succeeds(path, &["checkout", "--quiet", "-"], None);
+    git_succeeds(
+        path,
+        &["merge", "--no-ff", "--quiet", "-m", merge, "side"],
+        None,
+    );
+    repository
 }
 
 fn run_guard_in(root: &Path, repository: &Path, range: &str) -> Output {
@@ -453,6 +471,45 @@ fn refuses_a_model_trailer_in_a_commit_behind_the_tip_of_the_range() {
             &run_guard_in(root, repository.path(), "HEAD"),
             OFFENCE,
             "a range whose model trailer is in a commit behind its tip",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_on_the_tip_of_the_range_above_a_clean_commit() {
+    check_workspace(|root| {
+        let repository = repository_with_commits(&["docs: an earlier change\n", MODEL_CO_AUTHOR]);
+        assert_refused_saying(
+            &run_guard_in(root, repository.path(), "HEAD"),
+            OFFENCE,
+            "a range whose model trailer is on its tip, above a clean commit the guard reads after it",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_in_a_merge_commits_message() {
+    check_workspace(|root| {
+        let repository = repository_with_a_merge(
+            "docs: a change on a side branch\n",
+            "Merge branch 'side'\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
+        );
+        assert_refused_saying(
+            &run_guard_in(root, repository.path(), "HEAD"),
+            OFFENCE,
+            "a range whose merge commit's message credits a model",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_on_a_merged_side_branch() {
+    check_workspace(|root| {
+        let repository = repository_with_a_merge(MODEL_CO_AUTHOR, "Merge branch 'side'\n");
+        assert_refused_saying(
+            &run_guard_in(root, repository.path(), "HEAD"),
+            OFFENCE,
+            "a range whose model trailer is on a side branch that a merge brought in",
         );
     });
 }
