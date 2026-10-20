@@ -117,5 +117,5 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           MODE: ${{ inputs.dry-run && 'dry-run' || 'write' }}
         run: |
-          if [ -n "$FINDINGS" ]; then printf '%s\n' "$FINDINGS" > "$RUNNER_TEMP/findings.json"; fi
+          printf '%s\n' "$FINDINGS" > "$RUNNER_TEMP/findings.json"
           python3 tools/security-issue --findings "$RUNNER_TEMP/findings.json" --handover "$HANDOVER" --repo "$REPOSITORY" --run-url "$RUN_URL" --mode "$MODE"
