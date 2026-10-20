@@ -110,11 +110,8 @@ pub fn judge(manifest: &Manifest, runs: &[Run]) -> Result<Verdict, RunRefusal> {
             let Some(observations) = observations else {
                 continue;
             };
-            for name in observations
-                .iter()
-                .flatten()
-                .flat_map(|seen| not_neutral(manifest, seen))
-            {
+            let shown: Vec<&Observation> = observations.iter().flatten().copied().collect();
+            for name in not_neutral(manifest, &probe.id, &shown) {
                 let reason = Reason::NotNeutral { lane: *lane, name };
                 push(&mut findings, &subject, reason);
             }
@@ -226,10 +223,10 @@ fn not_run(subject: &Subject, lane: Lane, findings: &mut Vec<Finding>) {
     push(findings, subject, Reason::NotRun { lane });
 }
 
-fn not_neutral(manifest: &Manifest, observation: &Observation) -> Vec<NeutralName> {
+fn not_neutral(manifest: &Manifest, probe: &str, shown: &[&Observation]) -> Vec<NeutralName> {
     let neutral = &manifest.neutral;
     let mut names = Vec::new();
-    if observation.probe == neutral.mounts_probe {
+    if probe == neutral.mounts_probe {
         for mount in &neutral.mounts {
             let mut expected = vec![
                 (MountKey::Source, &mount.source),
@@ -239,18 +236,22 @@ fn not_neutral(manifest: &Manifest, observation: &Observation) -> Vec<NeutralNam
             if mount.fstype == FUSE {
                 expected.push((MountKey::Subtype, &neutral.fuse_subtype));
             }
-            let shown = observation.fields.get(&mount.path);
             for (key, value) in expected {
-                let name = shown.and_then(|shown| shown.get(key.name()));
-                if name.and_then(Value::as_str) != Some(value.as_str()) {
+                let differs = |seen: &&Observation| {
+                    let reported = seen.fields.get(&mount.path);
+                    let name = reported.and_then(|reported| reported.get(key.name()));
+                    name.and_then(Value::as_str) != Some(value.as_str())
+                };
+                if shown.iter().any(differs) {
                     let path = mount.path.clone();
                     names.push(NeutralName::Mount { path, key });
                 }
             }
         }
     }
-    let cgroup = observation.fields.get("path").and_then(Value::as_str);
-    if observation.probe == neutral.cgroup_probe && cgroup != Some(neutral.cgroup_path.as_str()) {
+    let expected = Some(neutral.cgroup_path.as_str());
+    let differs = |seen: &&Observation| seen.fields.get("path").and_then(Value::as_str) != expected;
+    if probe == neutral.cgroup_probe && shown.iter().any(differs) {
         names.push(NeutralName::CgroupPath);
     }
     names
