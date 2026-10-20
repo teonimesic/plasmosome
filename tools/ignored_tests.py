@@ -20,7 +20,8 @@ system Python.
 The report vouches for its list only when each step that succeeded left every test executable it
 lists in the log, and each block's ignored lines match its result lines. A failing test can print
 a nested cargo run, Running line and all. So a block that no listing has, or that repeats, right
-after a block of a step that did not succeed is read as that block's output and named in a note.
+after a block with its own `test ... FAILED` line, from a step that did not succeed, is read as
+that failing test's output and named in a note. Anywhere else such a block refuses.
 """
 
 import json
@@ -38,11 +39,13 @@ METADATA = ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1
 LIBRARY_KINDS = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
 ARGS_HINT = "check that the `ignored tests` step passes the same package arguments as that test step"
 TEE_HINT = "check the step's `tee -a` path"
+COUNT_HINT = "libtest's line format may have changed; see IGNORED and RESULT in tools/ignored_tests.py"
 
 ANSI = re.compile("\x1b\\[[0-9;]*[A-Za-z]")
 RUNNING = re.compile(r"^\s*Running (.+?) \((.+)\)$")
 DOCTESTS = re.compile(r"^\s*Doc-tests (\S+)$")
 IGNORED = re.compile(r"^test (.+?) \.\.\. ignored(?:, (.*))?$")
+FAILED = re.compile(r"^test .+? \.\.\. FAILED$")
 RESULT = re.compile(r"^test result: \S+\. \d+ passed; \d+ failed; (\d+) ignored;")
 
 
@@ -72,6 +75,7 @@ class Block:
         self.counted = None
         self.package = None
         self.steps = []
+        self.failed = False
 
     def absorb(self, other):
         """Take OTHER's lines as this block's own: they came from a failing test in it."""
@@ -127,6 +131,8 @@ def parse_log(text):
             problems.append(f"an ignored test comes before any Running line: {line!r}")
         elif ignored:
             block.ignored.append((ignored.group(1), ignored.group(2)))
+        elif block is not None and FAILED.match(line):
+            block.failed = True
         elif result and block is not None:
             block.counted = (block.counted or 0) + int(result.group(1))
     return blocks, problems
@@ -203,7 +209,7 @@ def unfinished(steps):
 
 
 def check_blocks(steps, blocks):
-    """Give each block its package, and fold a failing test's printed cargo run into its block.
+    """Give each block its package, and fold a failing test's printed cargo run into that test's block.
 
     Return the blocks the list reads, what stops the report vouching for it, and notes.
     """
@@ -218,7 +224,7 @@ def check_blocks(steps, blocks):
         found = owners.get((block.kind, block.key), [])
         repeated = (block.kind, block.key) in seen
         previous = kept[-1] if kept else None
-        failing = unfinished(previous.steps) if previous is not None else []
+        failing = unfinished(previous.steps) if previous is not None and previous.failed else []
         if failing and (repeated or not found):
             why = "appears a second time" if repeated else "is in the log, but no step's cargo listing has it"
             notes.append(f"{capitalized(block.describe())} {why}. It comes after {previous.describe()}, "
@@ -242,7 +248,7 @@ def check_blocks(steps, blocks):
                 problems.append(f"{block.describe()} has no `test result:` line, though its step succeeded")
         elif block.counted != len(block.ignored):
             problems.append(f"{block.describe()} lists {len(block.ignored)} ignored tests, "
-                            f"but its result lines count {block.counted}")
+                            f"but its result lines count {block.counted}; {COUNT_HINT}")
     return kept, problems, notes
 
 
