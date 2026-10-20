@@ -5,6 +5,10 @@ const MAX_INDENT: usize = 32;
 
 const LINEAR_KEYS: usize = 8;
 
+/// The longest reply line spec 025 lets the client read, its newline left out: 16 MiB.
+/// [`scan`] refuses longer input, and a reader reads through a limit of this plus one byte.
+pub const MAX_REPLY_BYTES: usize = 16 * 1024 * 1024;
+
 /// One JSON value as a reply carried it.
 ///
 /// Dropping, comparing and printing a value never recurse, so no depth of nesting overflows the
@@ -125,6 +129,8 @@ pub enum Reason {
     LoneSurrogate,
     /// Bytes other than whitespace follow the value.
     Trailing,
+    /// The input is longer than [`MAX_REPLY_BYTES`]. The offset is the first byte past the bound.
+    TooLarge,
     /// An object repeats a key, compared after decoding. `path` is the RFC 6901 pointer to the
     /// repeat, as decoded. `Display` shows each terminal control in it as `<U+XXXX>`.
     DuplicateKey { path: String },
@@ -141,6 +147,7 @@ impl fmt::Display for Reason {
             Reason::Escape => f.write_str("a string holds an invalid escape"),
             Reason::LoneSurrogate => f.write_str("a string escapes a lone surrogate"),
             Reason::Trailing => f.write_str("more text follows the value"),
+            Reason::TooLarge => write!(f, "the text is longer than {MAX_REPLY_BYTES} bytes"),
             Reason::DuplicateKey { path } => write!(f, "the key {} repeats", show(path)),
         }
     }
@@ -157,9 +164,15 @@ impl std::error::Error for ScanError {}
 /// Reads one JSON value, with optional whitespace around it, from `bytes`.
 ///
 /// Numbers keep their text, strings are decoded, and an object that repeats a key is refused.
-/// The scan keeps its own stack, so nesting costs memory and never the call stack. The caller
-/// bounds the input's length.
+/// Input longer than [`MAX_REPLY_BYTES`] is refused before any of it is read. Nesting depth has
+/// no limit: the scan keeps its own stack, so nesting costs memory and never the call stack.
 pub fn scan(bytes: &[u8]) -> Result<Json, ScanError> {
+    if bytes.len() > MAX_REPLY_BYTES {
+        return Err(ScanError {
+            offset: MAX_REPLY_BYTES,
+            reason: Reason::TooLarge,
+        });
+    }
     let text = std::str::from_utf8(bytes).map_err(|error| ScanError {
         offset: error.valid_up_to(),
         reason: Reason::NotUtf8,
