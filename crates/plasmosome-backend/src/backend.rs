@@ -784,6 +784,17 @@ pub(crate) mod tests {
                 RecipeError::ContainsNul { field: "host" },
             ),
             (
+                Capability::ProxyMap {
+                    host: "api.github.com".to_string(),
+                    route: "spl\0ice".to_string(),
+                    recipe: ProxyRecipe {
+                        port: 0,
+                        ..fixtures::proxy_recipe()
+                    },
+                },
+                RecipeError::ContainsNul { field: "route" },
+            ),
+            (
                 Capability::Broker {
                     name: "egress\0d".to_string(),
                     launch: BrokerLaunch {
