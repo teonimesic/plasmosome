@@ -3778,28 +3778,33 @@ mod tests {
     }
 
     fn read_while(reader: CellDir, accepted: fn(&MarkerRead) -> bool, work: impl FnOnce()) {
+        let started = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
         let reading = {
+            let started = Arc::clone(&started);
             let done = Arc::clone(&done);
             thread::spawn(move || {
-                let mut reads = 0_u64;
-                while !done.load(Ordering::SeqCst) {
+                loop {
                     let read = reader.read_launched();
+                    started.store(true, Ordering::SeqCst);
                     if !accepted(&read) {
                         return Err(format!("{read:?}"));
                     }
-                    reads += 1;
+                    if done.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
                 }
-                Ok(reads)
             })
         };
+        while !started.load(Ordering::SeqCst) && !reading.is_finished() {
+            thread::yield_now();
+        }
         work();
         done.store(true, Ordering::SeqCst);
-        let reads = reading
+        reading
             .join()
             .expect("the reader did not panic")
             .unwrap_or_else(|seen| panic!("a reader saw {seen}"));
-        assert!(reads > 0, "the reader never read the marker");
     }
 
     fn writer_and_reader(root: &Path) -> (CellDir, CellDir) {
