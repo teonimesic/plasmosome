@@ -1,5 +1,5 @@
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -475,6 +475,29 @@ fn refuses_a_model_ref_between_a_delete_and_a_clean_ref() {
 }
 
 #[test]
+fn refuses_a_tag_on_a_commit_crediting_a_model() {
+    check_workspace(|root| {
+        let scratch = Scratch::new(root);
+        let credited = scratch.branch_from_a_clean_root("model", CREDITS_A_MODEL);
+        set_up(&scratch.work, &["tag", "v0.0.1"]);
+        scratch.check_out("main");
+
+        let push = scratch.push(&["v0.0.1"]);
+
+        assert_refused(
+            &push,
+            &credited,
+            "creates a tag on a commit crediting a model, which a hook reading only branches clears",
+        );
+        assert_eq!(
+            scratch.remote_ref("refs/tags/v0.0.1"),
+            None,
+            "the hook refused the push, yet the remote now holds the tag on the commit that credits a model"
+        );
+    });
+}
+
+#[test]
 fn lets_a_branch_be_deleted() {
     check_workspace(|root| {
         let scratch = Scratch::new(root);
@@ -498,4 +521,83 @@ fn lets_a_branch_be_deleted() {
             "the delete reported success, yet the remote still holds the branch"
         );
     });
+}
+
+#[test]
+fn scratch_git_ignores_the_callers_git_environment() {
+    let caller = tempfile::tempdir().expect("setup: a scratch directory is created");
+    let fired = caller.path().join("fired");
+    let markers = caller.path().join("hooks");
+    fs::create_dir(&markers).expect("setup: the marker hooks directory is created");
+    for name in [
+        "pre-push",
+        "pre-receive",
+        "update",
+        "post-receive",
+        "reference-transaction",
+    ] {
+        let marker = markers.join(name);
+        fs::write(
+            &marker,
+            format!("#!/bin/sh\necho {name} >> '{}'\nexit 1\n", fired.display()),
+        )
+        .expect("setup: a marker hook is written");
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o755))
+            .expect("setup: the marker hook is made executable");
+    }
+    let markers = markers.to_str().expect("setup: the scratch path is UTF-8");
+    let config = caller.path().join("hooks.gitconfig");
+    fs::write(&config, format!("[core]\n\thooksPath = {markers}\n"))
+        .expect("setup: the caller's config is written");
+    let template = caller.path().join("template");
+    fs::create_dir(&template).expect("setup: the template directory is created");
+    fs::copy(&config, template.join("config")).expect("setup: the template config is written");
+    let decoy = caller.path().join("decoy.gitconfig");
+    fs::write(&decoy, "").expect("setup: the decoy config is written");
+    let elsewhere = caller.path().join("elsewhere");
+    fs::create_dir(&elsewhere).expect("setup: the decoy repository directory is created");
+
+    let child = Command::new(std::env::current_exe().expect("setup: the test binary has a path"))
+        .args(["--exact", "pushes_the_clean_twin", "--test-threads=1"])
+        .env("GIT_CONFIG", &decoy)
+        .env("GIT_CONFIG_GLOBAL", &config)
+        .env("GIT_CONFIG_SYSTEM", &config)
+        .env(
+            "GIT_CONFIG_PARAMETERS",
+            format!("'core.hookspath'='{markers}'"),
+        )
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", markers)
+        .env("GIT_TEMPLATE_DIR", &template)
+        .env("GIT_DIR", elsewhere.join("git-dir"))
+        .env("GIT_WORK_TREE", elsewhere.join("work-tree"))
+        .env("GIT_INDEX_FILE", elsewhere.join("index"))
+        .env("GIT_OBJECT_DIRECTORY", elsewhere.join("objects"))
+        .env("GIT_COMMON_DIR", elsewhere.join("common"))
+        .output()
+        .expect("setup: the test binary runs again");
+    let said = said(&child);
+
+    assert!(
+        child.status.success() && said.contains("test pushes_the_clean_twin ... ok"),
+        "the clean twin did not push while the caller's environment carried git config and repository variables; a scratch git command that inherits them runs other hooks, or none, and the tests then report on something other than the pre-push hook.\nthe rerun said:\n{said}"
+    );
+    assert!(
+        !fired.exists(),
+        "a hook named by the caller's git config ran inside a scratch repository: {}",
+        fs::read_to_string(&fired).unwrap_or_default()
+    );
+    assert_eq!(
+        fs::read_to_string(&decoy).expect("the decoy config is readable"),
+        "",
+        "a scratch git command wrote its setup into the file the caller's GIT_CONFIG names, which is outside the tempdir"
+    );
+    assert_eq!(
+        fs::read_dir(&elsewhere)
+            .expect("the decoy repository directory is readable")
+            .count(),
+        0,
+        "a scratch git command wrote into the repository the caller's GIT_DIR family names, which is outside the tempdir"
+    );
 }
