@@ -308,9 +308,14 @@ relies on it.
   (spec 027)". In spec 017, after "No host descriptor or uncontrolled host-directory export is
   passed to the workload.", add "Spec 027's software share is a controlled export: it holds
   immutable trees, never a managed inode." In spec 023 §9, replace "with no virtiofs export" with
-  "with no virtiofs export but spec 027's read-only software share". In spec 028 §1, after
-  "**H = B + 2 s + D** bounds grant references." (`028:60`), add "For a plasmid with a spec 027
-  software tree, H is B + 2 s + D + 5 s, the 5 s being spec 027 §4's cache window."
+  "with no virtiofs export but spec 027's read-only software share". In spec 028 §6, after "While
+  any expiry is unfinished past its H, `plasmosome.status` reports `ready: false`."
+  (`028:216-217`), add "For a plasmid with a spec 027 software tree under spec 027 Q1(a), the
+  expiry is reported overdue only once H + 5 s has passed, the 5 s being spec 027 §4's cache
+  window." In the text spec 028 gives spec 001 §3.3 (`028:281-284`), replace "or while a spec 028
+  expiry is unfinished past its H." with "or while a spec 028 expiry is unfinished past its H
+  (past H + 5 s for a plasmid with a spec 027 software tree under spec 027 Q1(a))." H itself, which
+  bounds grant references, is unchanged.
 - **Only once the owner answers Q1 with (b), including after item 17 fails.** In spec 011's
   out-of-scope bullet, replace "A plasmid's software is not copied into a running cell:" with "A
   plasmid's software is not installed into a running cell, though its bytes may be copied there
@@ -346,7 +351,7 @@ These need the owner. Each has the default this spec works to until answered.
      change time back without root, and a mismatch fails observation, naming the file. Costs: each
      detach and reload keeps the old tree on the host until the cell stops; each attach, detach
      and reload waits out §4's 5 s; and an expiry of a plasmid with software is reported overdue
-     5 s later (spec 028). It changes specs 001, 017, 023 §9 and 028 §1 ("Amendments"), and the
+     5 s later (spec 028). It changes specs 001, 017, 023 §9 and 028 §6 ("Amendments"), and the
      helper's policy must give read-only access to exactly the cell's software directory (§4),
      which needs per-cell parameters (O-2): the qualified policy allows writes anywhere under the
      work directory, and `read_only` is enforced inside the process the guest drives.
