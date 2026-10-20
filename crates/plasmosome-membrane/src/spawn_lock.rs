@@ -297,6 +297,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn creating_several_descriptors_runs_holding_the_write_side_and_returns_them_all() {
+        let mut write_side_held = false;
+        let created = with_each_descriptor_held(|_held| {
+            write_side_held = matches!(SPAWN_LOCK.try_read(), Err(TryLockError::WouldBlock));
+            Ok([close_on_exec_null()?, close_on_exec_null()?])
+        });
+        let created = created.expect("two close-on-exec descriptors are returned");
+        assert!(
+            created.iter().all(|fd| fd.as_raw_fd() >= 0),
+            "both descriptors came back"
+        );
+        assert!(
+            write_side_held,
+            "creation ran holding the write side of the spawn lock"
+        );
+    }
+
+    #[test]
+    fn several_descriptors_are_refused_when_any_one_is_still_inheritable() {
+        for inheritable_at in [0, 1] {
+            let created = with_each_descriptor_held(|_held| {
+                let mut pair = [close_on_exec_null()?, close_on_exec_null()?];
+                pair[inheritable_at] = inheritable_null();
+                Ok(pair)
+            });
+            let refusal = created.err().map(|error| error.to_string());
+            assert_eq!(
+                refusal.as_deref(),
+                Some(
+                    "a descriptor created under the spawn lock was not close-on-exec, so it was closed"
+                ),
+                "an inheritable descriptor at index {inheritable_at} refuses the creation"
+            );
+        }
+    }
+
     struct ForkDuringCreation {
         reached_the_lock_while_held: bool,
         forked_while_held: bool,
