@@ -1,7 +1,7 @@
 use std::ffi::{CStr, CString, OsStr};
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
 use plasmosome_backend::{BootSession, CellId};
+use serde_json::Value;
 
+use crate::runtime::cell_id::parse_cell_id;
+use crate::runtime::line::{LineFault, read_line};
 use crate::state::{
     CELL_JOURNAL_FILE, CELLS_DIR, CellPathError, cell_ledger_path, validate_cell_id,
 };
@@ -20,7 +23,16 @@ const PRIVATE_FILE: libc::mode_t = 0o600;
 const PRIVATE_DIRECTORY: libc::mode_t = 0o700;
 const DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-const JOURNAL_FLAGS: libc::c_int = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+const FILE_FLAGS: libc::c_int = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+const NEW_FILE_FLAGS: libc::c_int =
+    libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+const LAUNCHED_FILE: &CStr = c"launched";
+const LAUNCHED_TEMPORARY: &CStr = c"launched.tmp";
+const CREATED_FILE: &CStr = c"created";
+const RUNTIME_DIR: &CStr = c"runtime";
+const RETIRED_DIR: &CStr = c"retired";
+const MARKER_KEYS: [&str; 3] = ["cell", "boot_session", "stopped"];
+const MARKER_READ_LIMIT: u64 = MAX_MARKER_BYTES as u64 + 1;
 
 /// The most bytes a `launched` record may hold, its newline included.
 pub const MAX_MARKER_BYTES: usize = 4096;
@@ -296,8 +308,63 @@ impl InstanceRoot {
     /// failed. The identity check and the rename are two steps, so this relies on the controller
     /// being the only writer of `cells`.
     pub fn retire(&self, lock: &WriterLock, cell: CellDir) -> Result<(), RetireError> {
-        let _ = (lock, cell);
-        unimplemented!()
+        if lock.root != self.identity {
+            return Err(RetireError::ForeignLock {
+                path: lock.path.clone(),
+            });
+        }
+        let cells_path = self.path.join(CELLS_DIR);
+        let cell_path = cells_path.join(cell.cell.as_str());
+        let retired_path = self.path.join(name_of(RETIRED_DIR));
+        let cells = self.open_cells().map_err(|refusal| match refusal {
+            DirectoryRefusal::Io(source) => retire_io(&cells_path)(source),
+            DirectoryRefusal::Missing
+            | DirectoryRefusal::Symlink
+            | DirectoryRefusal::NotADirectory => RetireError::Moved {
+                path: cell_path.clone(),
+            },
+        })?;
+        let retired = self.open_retired(&retired_path)?;
+        let name = c_name(cell.cell.as_str().as_bytes()).map_err(retire_io(&cell_path))?;
+        match naming(cells.as_fd(), &name, cell.dir.as_fd()).map_err(retire_io(&cells_path))? {
+            Naming::Exact => {}
+            Naming::Alias | Naming::Gone => return Err(RetireError::Moved { path: cell_path }),
+        }
+        rename_no_replace(cells.as_fd(), &name, retired.as_fd()).map_err(|source| {
+            if source.raw_os_error() == Some(libc::EEXIST) {
+                RetireError::AlreadyRetired {
+                    path: retired_path.join(cell.cell.as_str()),
+                }
+            } else {
+                retire_io(&cell_path)(source)
+            }
+        })?;
+        (self.sync)(cells.as_fd()).map_err(retire_io(&cells_path))?;
+        (self.sync)(retired.as_fd()).map_err(retire_io(&retired_path))
+    }
+
+    fn open_retired(&self, retired_path: &Path) -> Result<OwnedFd, RetireError> {
+        match make_directory_at(self.dir.as_fd(), RETIRED_DIR) {
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {}
+            made => made.map_err(retire_io(retired_path))?,
+        }
+        let retired =
+            open_at(self.dir.as_fd(), RETIRED_DIR, DIRECTORY_FLAGS, 0).map_err(|error| {
+                match directory_refusal(self.dir.as_fd(), RETIRED_DIR, error) {
+                    DirectoryRefusal::Symlink | DirectoryRefusal::NotADirectory => {
+                        RetireError::RetiredNotADirectory {
+                            path: retired_path.to_path_buf(),
+                        }
+                    }
+                    DirectoryRefusal::Missing => {
+                        retire_io(retired_path)(io::Error::from_raw_os_error(libc::ENOENT))
+                    }
+                    DirectoryRefusal::Io(source) => retire_io(retired_path)(source),
+                }
+            })?;
+        change_mode(retired.as_fd(), PRIVATE_DIRECTORY).map_err(retire_io(retired_path))?;
+        (self.sync)(self.dir.as_fd()).map_err(retire_io(&self.path))?;
+        Ok(retired)
     }
 
     fn create_cells(&self, cells_path: &Path) -> Result<OwnedFd, CellDirError> {
@@ -508,8 +575,18 @@ impl CellDir {
     /// [`LaunchedMarker::decode`] would refuse its record. A failure after the create leaves
     /// the file, which [`CellDir::read_launched`] then reports as `Unreadable`.
     pub fn create_launched(&self, boot_session: BootSession) -> Result<(), CellDirError> {
-        let _ = boot_session;
-        unimplemented!()
+        if parse_cell_id(self.cell.as_str()).is_none() {
+            return Err(CellDirError::InvalidCell(CellPathError::NotACellName(
+                self.cell.as_str().to_owned(),
+            )));
+        }
+        let marker = LaunchedMarker {
+            cell: self.cell.clone(),
+            boot_session,
+            stopped: false,
+        };
+        self.write_new_file(LAUNCHED_FILE, &marker.encode())?;
+        self.sync_dir()
     }
 
     /// Reads the `launched` marker without following a symlink and without blocking on a FIFO.
@@ -517,7 +594,39 @@ impl CellDir {
     /// other entry that is not a regular file, a record [`LaunchedMarker::decode`] refuses, a
     /// marker naming another cell, and any error opening or reading it are `Unreadable`.
     pub fn read_launched(&self) -> MarkerRead {
-        unimplemented!()
+        let fd = match open_at(
+            self.dir.as_fd(),
+            LAUNCHED_FILE,
+            libc::O_RDONLY | FILE_FLAGS,
+            0,
+        ) {
+            Ok(fd) => fd,
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return MarkerRead::Absent,
+            Err(error) => {
+                return MarkerRead::Unreadable(
+                    match file_refusal(self.dir.as_fd(), LAUNCHED_FILE, error) {
+                        FileRefusal::Symlink => MarkerFault::Symlink,
+                        FileRefusal::NotRegular => MarkerFault::NotRegular,
+                        FileRefusal::Io(error) => MarkerFault::Io(error),
+                    },
+                );
+            }
+        };
+        let file = File::from(fd);
+        match file.metadata() {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return MarkerRead::Unreadable(MarkerFault::NotRegular),
+            Err(error) => return MarkerRead::Unreadable(MarkerFault::Io(error)),
+        }
+        let mut bytes = Vec::new();
+        if let Err(error) = file.take(MARKER_READ_LIMIT).read_to_end(&mut bytes) {
+            return MarkerRead::Unreadable(MarkerFault::Io(error));
+        }
+        match LaunchedMarker::decode(&bytes) {
+            Ok(marker) if marker.cell == self.cell => MarkerRead::Present(marker),
+            Ok(marker) => MarkerRead::Unreadable(MarkerFault::WrongCell { found: marker.cell }),
+            Err(fault) => MarkerRead::Unreadable(fault),
+        }
     }
 
     /// Replaces the marker with the same record and `"stopped": true` (spec 023 §5, step 9).
@@ -528,14 +637,37 @@ impl CellDir {
     /// unreadable one is `MarkerUnreadable`; either way nothing is written. A stopped marker is
     /// written again unchanged.
     pub fn mark_launched_stopped(&self) -> Result<(), CellDirError> {
-        unimplemented!()
+        let path = self.entry_path(LAUNCHED_FILE);
+        let marker = match self.read_launched() {
+            MarkerRead::Present(marker) => marker,
+            MarkerRead::Absent => return Err(CellDirError::Missing { path }),
+            MarkerRead::Unreadable(fault) => {
+                return Err(CellDirError::MarkerUnreadable { path, fault });
+            }
+        };
+        let stopped = LaunchedMarker {
+            stopped: true,
+            ..marker
+        };
+        match remove_at(self.dir.as_fd(), LAUNCHED_TEMPORARY) {
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+            removed => removed.map_err(cell_dir_io(&self.entry_path(LAUNCHED_TEMPORARY)))?,
+        }
+        self.write_new_file(LAUNCHED_TEMPORARY, &stopped.encode())?;
+        rename_at(self.dir.as_fd(), LAUNCHED_TEMPORARY, LAUNCHED_FILE)
+            .map_err(cell_dir_io(&path))?;
+        self.sync_dir()
     }
 
     /// Removes the entry named `launched` and syncs this directory. A missing entry is not an
     /// error, and the directory is still synced, so a retry after a failed sync completes. A
     /// directory named `launched` is not removed and is an `Io` error.
     pub fn remove_launched(&self) -> Result<(), CellDirError> {
-        unimplemented!()
+        match remove_at(self.dir.as_fd(), LAUNCHED_FILE) {
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+            removed => removed.map_err(cell_dir_io(&self.entry_path(LAUNCHED_FILE)))?,
+        }
+        self.sync_dir()
     }
 
     /// Creates `runtime/` exclusively with mode 0700 whatever the umask, opens it without
@@ -543,13 +675,33 @@ impl CellDir {
     /// Any existing entry named `runtime` is `AlreadyExists`: a runtime directory is never
     /// reused.
     pub fn create_runtime_dir(&self) -> Result<OwnedFd, CellDirError> {
-        unimplemented!()
+        let path = self.entry_path(RUNTIME_DIR);
+        match make_directory_at(self.dir.as_fd(), RUNTIME_DIR) {
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+                return Err(CellDirError::AlreadyExists { path });
+            }
+            made => made.map_err(cell_dir_io(&path))?,
+        }
+        let runtime =
+            open_at(self.dir.as_fd(), RUNTIME_DIR, DIRECTORY_FLAGS, 0).map_err(|error| {
+                directory_refusal(self.dir.as_fd(), RUNTIME_DIR, error)
+                    .into_cell_dir_error(path.clone())
+            })?;
+        change_mode(runtime.as_fd(), PRIVATE_DIRECTORY).map_err(cell_dir_io(&path))?;
+        self.sync_dir()?;
+        Ok(runtime)
     }
 
     /// Whether the empty `created` file exists, read without following a symlink. An entry that
     /// is not a regular file is `NotARegularFile`, never `true`.
     pub fn has_created(&self) -> Result<bool, CellDirError> {
-        unimplemented!()
+        let path = self.entry_path(CREATED_FILE);
+        match kind_at(self.dir.as_fd(), CREATED_FILE) {
+            Ok(Kind::Regular) => Ok(true),
+            Ok(_) => Err(CellDirError::NotARegularFile { path }),
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(false),
+            Err(error) => Err(cell_dir_io(&path)(error)),
+        }
     }
 
     /// Creates the empty `created` file once `cell.new` has completed (spec 023 §4, step 8): it
@@ -558,8 +710,39 @@ impl CellDir {
     /// this directory was opened from; another root's lock is `ForeignLock` and nothing is
     /// created. Any existing entry named `created` is `AlreadyExists`.
     pub fn create_created(&self, lock: &WriterLock) -> Result<(), CellDirError> {
-        let _ = lock;
-        unimplemented!()
+        if lock.root != self.root {
+            return Err(CellDirError::ForeignLock {
+                path: lock.path.clone(),
+            });
+        }
+        self.write_new_file(CREATED_FILE, b"")?;
+        self.sync_dir()
+    }
+
+    fn entry_path(&self, name: &CStr) -> PathBuf {
+        self.journal_path.with_file_name(name_of(name))
+    }
+
+    fn sync_dir(&self) -> Result<(), CellDirError> {
+        let path = self
+            .journal_path
+            .parent()
+            .map_or_else(PathBuf::new, Path::to_path_buf);
+        self.sync().map_err(cell_dir_io(&path))
+    }
+
+    fn write_new_file(&self, name: &CStr, contents: &[u8]) -> Result<(), CellDirError> {
+        let path = self.entry_path(name);
+        let fd = match open_at(self.dir.as_fd(), name, NEW_FILE_FLAGS, PRIVATE_FILE) {
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+                return Err(CellDirError::AlreadyExists { path });
+            }
+            created => created.map_err(cell_dir_io(&path))?,
+        };
+        change_mode(fd.as_fd(), PRIVATE_FILE).map_err(cell_dir_io(&path))?;
+        let mut file = File::from(fd);
+        file.write_all(contents).map_err(cell_dir_io(&path))?;
+        (self.sync)(file.as_fd()).map_err(cell_dir_io(&path))
     }
 }
 
@@ -577,7 +760,17 @@ impl LaunchedMarker {
     /// `,"stopped":true` before the closing brace when `stopped` is true. The boot session is
     /// written as a lowercase hyphenated UUID.
     pub fn encode(&self) -> Vec<u8> {
-        unimplemented!()
+        let cell = Value::from(self.cell.as_str());
+        let stopped = if self.stopped {
+            ",\"stopped\":true"
+        } else {
+            ""
+        };
+        format!(
+            "{{\"cell\":{cell},\"boot_session\":\"{}\"{stopped}}}\n",
+            self.boot_session
+        )
+        .into_bytes()
     }
 
     /// Reads one record: one JSON object and a newline, at most [`MAX_MARKER_BYTES`] bytes in
@@ -586,8 +779,52 @@ impl LaunchedMarker {
     /// optional and, when present, is `true`. A repeated or unknown key is refused. A record
     /// over the size is `TooLarge`; every other refusal is `Malformed`.
     pub fn decode(bytes: &[u8]) -> Result<LaunchedMarker, MarkerFault> {
-        let _ = bytes;
-        unimplemented!()
+        if bytes.len() > MAX_MARKER_BYTES {
+            return Err(MarkerFault::TooLarge);
+        }
+        let malformed = |reason: &str| MarkerFault::Malformed(reason.to_owned());
+        let value = read_line(bytes).map_err(|fault| match fault {
+            LineFault::NotOneLine => malformed("the record is not one line ending in a newline"),
+            LineFault::TooLarge { .. } => MarkerFault::TooLarge,
+            LineFault::NotUtf8 => malformed("the record is not UTF-8"),
+            LineFault::NotJson { detail } => MarkerFault::Malformed(format!("not JSON: {detail}")),
+            LineFault::DuplicateKey { field } => {
+                MarkerFault::Malformed(format!("the key {field:?} is repeated"))
+            }
+        })?;
+        let Value::Object(entries) = value else {
+            return Err(malformed("the record is not a JSON object"));
+        };
+        if let Some(key) = entries
+            .keys()
+            .find(|key| !MARKER_KEYS.contains(&key.as_str()))
+        {
+            return Err(MarkerFault::Malformed(format!("an unknown key {key:?}")));
+        }
+        let cell = match entries.get("cell") {
+            Some(Value::String(text)) if parse_cell_id(text).is_some() => {
+                CellId::from(text.as_str())
+            }
+            Some(_) => return Err(malformed("`cell` is not a cell ID")),
+            None => return Err(malformed("`cell` is missing")),
+        };
+        let boot_session = match entries.get("boot_session") {
+            Some(Value::String(text)) => BootSession::parse(text)
+                .filter(|session| session.to_string() == *text)
+                .ok_or_else(|| malformed("`boot_session` is not a lowercase hyphenated UUID"))?,
+            Some(_) => return Err(malformed("`boot_session` is not a string")),
+            None => return Err(malformed("`boot_session` is missing")),
+        };
+        let stopped = match entries.get("stopped") {
+            None => false,
+            Some(Value::Bool(true)) => true,
+            Some(_) => return Err(malformed("`stopped` is present but not true")),
+        };
+        Ok(LaunchedMarker {
+            cell,
+            boot_session,
+            stopped,
+        })
     }
 }
 
@@ -825,8 +1062,11 @@ impl fmt::Display for CellDirError {
                 write!(f, "I/O failed at {}: {source}", path.display())
             }
             CellDirError::ForeignLock { path } => f.write_str(&foreign_lock_text(path)),
-            CellDirError::NotARegularFile { .. } | CellDirError::MarkerUnreadable { .. } => {
-                unimplemented!()
+            CellDirError::NotARegularFile { path } => {
+                write!(f, "{} is not a regular file", path.display())
+            }
+            CellDirError::MarkerUnreadable { path, fault } => {
+                write!(f, "{} cannot be read: {fault}", path.display())
             }
         }
     }
@@ -837,40 +1077,79 @@ impl std::error::Error for CellDirError {
         match self {
             CellDirError::InvalidCell(error) => Some(error),
             CellDirError::Io { source, .. } => Some(source),
-            CellDirError::NotARegularFile { .. } | CellDirError::MarkerUnreadable { .. } => {
-                unimplemented!()
-            }
+            CellDirError::MarkerUnreadable { fault, .. } => Some(fault),
             CellDirError::Missing { .. }
             | CellDirError::Alias { .. }
             | CellDirError::Symlink { .. }
             | CellDirError::NotADirectory { .. }
             | CellDirError::AlreadyExists { .. }
-            | CellDirError::ForeignLock { .. } => None,
+            | CellDirError::ForeignLock { .. }
+            | CellDirError::NotARegularFile { .. } => None,
         }
     }
 }
 
 impl fmt::Display for MarkerFault {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!()
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MarkerFault::Symlink => f.write_str("the marker is a symlink and was not followed"),
+            MarkerFault::NotRegular => f.write_str("the marker is not a regular file"),
+            MarkerFault::TooLarge => {
+                write!(f, "the marker is larger than {MAX_MARKER_BYTES} bytes")
+            }
+            MarkerFault::Io(source) => write!(f, "I/O failed on the marker: {source}"),
+            MarkerFault::Malformed(reason) => write!(f, "the marker is malformed: {reason}"),
+            MarkerFault::WrongCell { found } => write!(f, "the marker names cell {found}"),
+        }
     }
 }
 
 impl std::error::Error for MarkerFault {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        unimplemented!()
+        match self {
+            MarkerFault::Io(source) => Some(source),
+            MarkerFault::Symlink
+            | MarkerFault::NotRegular
+            | MarkerFault::TooLarge
+            | MarkerFault::Malformed(_)
+            | MarkerFault::WrongCell { .. } => None,
+        }
     }
 }
 
 impl fmt::Display for RetireError {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!()
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RetireError::ForeignLock { path } => f.write_str(&foreign_lock_text(path)),
+            RetireError::RetiredNotADirectory { path } => write!(
+                f,
+                "{} is a symlink or not a directory, so nothing was retired",
+                path.display()
+            ),
+            RetireError::AlreadyRetired { path } => {
+                write!(f, "{} already exists and was not replaced", path.display())
+            }
+            RetireError::Moved { path } => write!(
+                f,
+                "{} no longer names the cell directory that was opened",
+                path.display()
+            ),
+            RetireError::Io { path, source } => {
+                write!(f, "retirement failed at {}: {source}", path.display())
+            }
+        }
     }
 }
 
 impl std::error::Error for RetireError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        unimplemented!()
+        match self {
+            RetireError::Io { source, .. } => Some(source),
+            RetireError::ForeignLock { .. }
+            | RetireError::RetiredNotADirectory { .. }
+            | RetireError::AlreadyRetired { .. }
+            | RetireError::Moved { .. } => None,
+        }
     }
 }
 
@@ -926,6 +1205,24 @@ impl std::error::Error for LockError {
 
 fn c_name(name: &[u8]) -> io::Result<CString> {
     CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+}
+
+fn name_of(name: &CStr) -> &OsStr {
+    OsStr::from_bytes(name.to_bytes())
+}
+
+fn cell_dir_io(path: &Path) -> impl FnOnce(io::Error) -> CellDirError + '_ {
+    move |source| CellDirError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+fn retire_io(path: &Path) -> impl FnOnce(io::Error) -> RetireError + '_ {
+    move |source| RetireError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 #[allow(unsafe_code)]
@@ -1033,7 +1330,7 @@ fn open_journal_at(
 ) -> Result<File, JournalRefusal> {
     let name = c_name(CELL_JOURNAL_FILE.as_bytes()).map_err(JournalRefusal::Io)?;
     let fd =
-        open_at(cell, &name, access | JOURNAL_FLAGS, mode).map_err(|error| {
+        open_at(cell, &name, access | FILE_FLAGS, mode).map_err(|error| {
             match file_refusal(cell, &name, error) {
                 FileRefusal::Symlink => JournalRefusal::Symlink,
                 FileRefusal::NotRegular => JournalRefusal::NotRegular,
@@ -1203,6 +1500,71 @@ fn make_directory_at(parent: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
     // it. mkdirat keeps no pointer to the name.
     let made = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), PRIVATE_DIRECTORY) };
     if made != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn remove_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
+    // SAFETY: `name` is a CStr that outlives the call, and the BorrowedFd keeps `dir` open for
+    // it. unlinkat keeps no pointer to the name.
+    let removed = unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) };
+    if removed != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn rename_at(dir: BorrowedFd<'_>, from: &CStr, to: &CStr) -> io::Result<()> {
+    // SAFETY: both names are CStrs that outlive the call, and the BorrowedFd keeps `dir` open
+    // for it. renameat keeps no pointer to either name.
+    let renamed =
+        unsafe { libc::renameat(dir.as_raw_fd(), from.as_ptr(), dir.as_raw_fd(), to.as_ptr()) };
+    if renamed != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn rename_no_replace(from: BorrowedFd<'_>, name: &CStr, to: BorrowedFd<'_>) -> io::Result<()> {
+    // SAFETY: `name` is a CStr that outlives the call, and the two BorrowedFds keep both
+    // directories open for it. renameatx_np keeps no pointer to the name, and RENAME_EXCL makes
+    // it fail with EEXIST rather than replace an existing entry.
+    let renamed = unsafe {
+        libc::renameatx_np(
+            from.as_raw_fd(),
+            name.as_ptr(),
+            to.as_raw_fd(),
+            name.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if renamed != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn rename_no_replace(from: BorrowedFd<'_>, name: &CStr, to: BorrowedFd<'_>) -> io::Result<()> {
+    // SAFETY: `name` is a CStr that outlives the call, and the two BorrowedFds keep both
+    // directories open for it. renameat2 keeps no pointer to the name, and RENAME_NOREPLACE
+    // makes it fail with EEXIST rather than replace an existing entry.
+    let renamed = unsafe {
+        libc::renameat2(
+            from.as_raw_fd(),
+            name.as_ptr(),
+            to.as_raw_fd(),
+            name.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if renamed != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
