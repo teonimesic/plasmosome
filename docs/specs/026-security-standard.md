@@ -285,10 +285,14 @@ carries. That needs the `AGENTS.md` amendment below.
   forbid package, and no safety comment is asked for. The record's `expands_unsafe` field covers
   the range as reviewed; a compatible bump can add such a macro unseen. A PR whose code in a forbid
   package first calls a macro some record lists there says why.
-- **Build settings that weaken lints.** `--cap-lints` or `-A` in rustflags silences both the forbid
-  and clippy. The git-only step refuses all committed Cargo configuration. A workflow can set the
-  same things, and run anything, through its environment: `RUSTUP_TOOLCHAIN` set to a path was
-  measured to run a committed toolchain. So any change to `.github/` is read as code.
+- **Build settings that weaken lints.** `--cap-lints` in rustflags silences both the forbid and
+  clippy. `-A` in rustflags silences the two clippy lints but not the forbid. Cargo places rustflags
+  after the manifest's `--forbid=unsafe_code`, and rustc keeps a forbidden level, so with
+  `-A unsafe_code` or `--force-warn unsafe_code` it still refuses the block. The git-only step
+  refuses all committed Cargo configuration. A workflow can set the same things, and run anything,
+  through its environment: `RUSTUP_TOOLCHAIN` set to a path was measured to run a committed
+  toolchain. So any change to `.github/` is read as code. Corrected on 2026-10-20: this said `-A`
+  silences the forbid too.
 
 **Native code is `unsafe` code.** Only register packages compile or link it. In a forbid package
 the compiler refuses the `unsafe extern` block that calling it needs. A test can also compile and
