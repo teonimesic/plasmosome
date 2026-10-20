@@ -1,6 +1,4 @@
-use plasmosome_membrane::runtime::confinement::{
-    Confinement, PolicyBinding, REQUIRED_DENIALS, Unverifiable, observe,
-};
+use plasmosome_membrane::runtime::confinement::{Confinement, Unverifiable, observe};
 use plasmosome_membrane::runtime::digest::Digest;
 
 #[cfg(target_os = "macos")]
@@ -52,6 +50,7 @@ fn off_darwin_every_pid_is_unverifiable() {
 #[cfg(target_os = "macos")]
 mod darwin {
     use super::*;
+    use plasmosome_membrane::runtime::confinement::{PolicyBinding, REQUIRED_DENIALS};
     use std::io::{BufRead, BufReader, Read};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
