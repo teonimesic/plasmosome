@@ -29,6 +29,11 @@ No accepted spec can stop the upward walk with an empty list. A task's `metadata
 copies the first-seen ordered union of its specs' intent lists; a missing copy is repairable
 metadata, not a second approval gate where the chain already closes through its specs.
 
+An outside PR, as [spec 030](030-outside-contributions.md) defines it, arrives with no task,
+because its author cannot reach the store. Its steward files the task and names it on the PR
+before anything from the PR runs on a maintainer's machine. This is not a third taskless shape:
+the PR merges only with its task.
+
 Exactly two shapes carry no task:
 
 - A PR filing an intent, which is the top of the chain and has no parent.
@@ -265,7 +270,8 @@ an intent. These remain agent checks and the recorded human decision where appli
 A rule in this layer names what can refuse it: a mechanical check over the appropriate records,
 a person's judgement visibly recorded, or a concrete failure somebody can count. An agent's own
 statement that it followed the rule is none of those. For example, an open work PR with no task
-surviving Main's work check is an observable failure; green review status that also means “skipped” is
+surviving Main's work check is an observable failure, and an outside PR that no steward has taken
+up is reported as waiting for one (spec 030); green review status that also means “skipped” is
 not evidence of review.
 
 Write an operational rule and each closed set once; other agent-facing mentions point there.
