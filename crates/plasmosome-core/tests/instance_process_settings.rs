@@ -167,6 +167,16 @@ fn running_out_of_descriptors_aborts_discovery_instead_of_refusing_cells() {
     }
 }
 
+struct RestoreUmask(libc::mode_t);
+
+impl Drop for RestoreUmask {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: umask takes no pointer and cannot fail.
+        unsafe { libc::umask(self.0) };
+    }
+}
+
 #[test]
 #[ignore = "helper process for the umask test"]
 #[allow(unsafe_code)]
@@ -177,7 +187,7 @@ fn instance_under_a_restrictive_umask_child() {
     let umask = std::env::var(UMASK_VARIABLE).expect("the umask is set");
     let umask = libc::mode_t::from_str_radix(&umask, 8).expect("the umask is octal");
     // SAFETY: umask takes no pointer and cannot fail.
-    unsafe { libc::umask(umask) };
+    let _restore = RestoreUmask(unsafe { libc::umask(umask) });
     let instance = InstanceRoot::open(&root).expect("the instance root opens");
     let lock = instance.lock().expect("the child takes the writer lock");
     let created = instance
