@@ -77,7 +77,7 @@ the lifetime first moves B earlier. D, the drain budget, is the declaration's `d
 
 The operator's lifetime is the **ceiling**. When the operator names none, an attachment holding a
 capability grant gets the **default ceiling, a 900,000 ms (15-minute) lease**, and one that only
-carries software (draft 027) gets none. The lease is the smallest of the ceiling and any author or
+carries software (spec 027) gets none. The lease is the smallest of the ceiling and any author or
 request lease; under `until_revoked` there is no ceiling, but such a lease still applies. The idle
 limit is the smallest any source names. Nothing defaults to `until_revoked`. Resolution happens in
 spec 022's single read of the operator file, and the journal records the ceiling. A reload does not
@@ -180,10 +180,10 @@ unfinished until it ends, `timed_out` or an `IncompleteEffect`, named with its o
 record names it, the journal keeps the removal unfinished until fresh observation proves it absent
 (spec 008), and the cell's observation names it until it goes.
 
-**Software-tree references** (draft 027) hold code bytes, not authority. The tree's detach is
-complete when its names are gone. Surviving references are reported in draft 027's shape, a list of
+**Software-tree references** (spec 027) hold code bytes, not authority. The tree's detach is
+complete when its names are gone. Surviving references are reported in spec 027's shape, a list of
 `{path, pid, comm, exec_id?}`, in the expiry event and then in the cell's observation while the
-guest's scan finds any, stopping when it finds none or the cell stops (draft 027 §4). A descriptor
+guest's scan finds any, stopping when it finds none or the cell stops (spec 027 §4). A descriptor
 in flight over `SCM_RIGHTS` is in no table and is not named. These references are not residue, hold
 nothing unfinished, and leave readiness alone.
 
@@ -204,7 +204,7 @@ what is fixed is that none reads as success, and every `GrantId` that did not dr
 | `external_pending` | an operator assertion is outstanding; nothing is prepared until Force |
 | `draining` | graceful withdrawal is in progress |
 | `timed_out` | the named holdings' drain timed out; they stay standing and fenced until a retry drains them (question 2) |
-| `incomplete` | a withdrawal left an `IncompleteEffect`, a reference survives H, or a software name could not be removed (draft 027); each is named, a name by its path |
+| `incomplete` | a withdrawal left an `IncompleteEffect`, a reference survives H, or a software name could not be removed (spec 027); each is named, a name by its path |
 | `failed` | the transaction was refused (spec 008); the refusal is named |
 
 The plasmid's state is `draining`. Failure never restores a grant's access, and its gates stay
@@ -349,7 +349,7 @@ are this spec's.
   to 30 days, which only shorten what the operator allows, and `drain_ms`, 1 to 30,000 ms (spec
   028); a value outside its range is refused, naming the field." After "the drain window its
   declaration asks for" (`011:80-81`), add ", up to 30 s".
-- **Spec 011, detach.** This is the one text for these lines, and draft 027 cites it. It includes
+- **Spec 011, detach.** This is the one text for these lines, and spec 027 cites it. It includes
   spec 024's proposed insertion (`024:504-509`) verbatim. Its anchor sentence does not survive this
   replacement, so the change that applies this item applies both, and 024's is not applied
   separately. In the Behavior bullet (`011:195-207`), replace everything from "What the contract
@@ -583,7 +583,7 @@ injected clock, and none sleeps for the duration it tests.
 15. **Held references (model, then pinned runtime).** In the model, a grant reference effective
     after H keeps the removal unfinished, is named with `{cell, plugin}` and `GrantId`, and makes
     readiness false; closed before H, the expiry finishes. A surviving software-tree reference is
-    reported in draft 027's shape until the scan finds none, and the expiry finishes with readiness
+    reported in spec 027's shape until the scan finds none, and the expiry finishes with readiness
     true. On the pinned runtime, controller stopped, with a Mount and a ProxyMap: a descriptor and a
     working directory opened before B, and a TCP flow moving bytes both ways, succeed at B − 1 s.
     After B an operation started fails at once, and one in flight ends by B + D, each with spec 024
