@@ -903,4 +903,22 @@ mod tests {
             result
         );
     }
+
+    #[test]
+    fn status_params_refuse_a_key_the_verb_does_not_define() {
+        assert_eq!(
+            serde_json::from_str::<StatusParams>("{\"name\":\"x\"}")
+                .expect("params holding only the keys the verb defines read"),
+            StatusParams {
+                name: Some("x".to_string())
+            },
+        );
+        for params in ["{\"name\":\"x\",\"extra\":1}", "{\"extra\":1}"] {
+            let outcome = serde_json::from_str::<StatusParams>(params);
+            assert!(
+                outcome.is_err(),
+                "a key plasmosome.status does not define is refused, not ignored: {params} read as {outcome:?}"
+            );
+        }
+    }
 }
