@@ -309,6 +309,7 @@ mod tests {
 
     const BOOT: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     const OTHER_BOOT: &str = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
+    const LANES: [ControlLane; 2] = [ControlLane::Normal, ControlLane::Withdrawal];
 
     fn guest_policy() -> Digest {
         Digest::of(b"guest policy bytes")
@@ -322,35 +323,44 @@ mod tests {
         BootToken::parse_hex(text).expect("a 64-digit lowercase token parses")
     }
 
-    fn reply(id: u64, boot: &str, policy: &str) -> String {
-        format!(r#"{{"id":{id},"result":{{"boot":"{boot}","policy":"{policy}"}}}}"#)
-    }
-
-    fn valid(lane: ControlLane) -> String {
-        reply(request_id(lane), BOOT, &guest_policy().hex())
-    }
-
-    fn judge(lane: ControlLane, frame: &str) -> Result<HelloAnswer, HelloRefusal> {
-        judge_reply(lane, frame.as_bytes(), &guest_policy(), None)
+    fn judge_on(lane: ControlLane, frame: &str) -> Result<BootToken, HelloRefusal> {
+        match lane {
+            ControlLane::Normal => judge_normal(frame.as_bytes(), &guest_policy()),
+            ControlLane::Withdrawal => {
+                judge_withdrawal(frame.as_bytes(), &guest_policy(), &boot(BOOT))
+                    .map(|()| boot(BOOT))
+            }
+        }
     }
 
     fn refusal(lane: ControlLane, frame: &str) -> HelloRefusal {
-        judge(lane, frame).expect_err(frame)
+        judge_on(lane, frame).expect_err(frame)
+    }
+
+    fn reply(lane: ControlLane, boot: &str, policy: &str) -> String {
+        json!({"id": request_id(lane), "result": {"boot": boot, "policy": policy}}).to_string()
     }
 
     fn owned(text: &str) -> String {
         text.to_string()
     }
 
-    fn keys(value: &Value) -> Vec<&str> {
-        let mut keys: Vec<&str> = value
-            .as_object()
-            .expect("an object")
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        keys
+    fn guest_text(refusal: HelloRefusal) -> String {
+        match refusal {
+            HelloRefusal::GuestError {
+                message,
+                detail: None,
+                ..
+            } => message,
+            HelloRefusal::GuestError {
+                detail: Some(detail),
+                ..
+            } => detail,
+            HelloRefusal::UnknownField { field }
+            | HelloRefusal::DuplicateKey { path: field }
+            | HelloRefusal::WrongId { found: field, .. } => field,
+            other => panic!("{other:?} carries no guest text"),
+        }
     }
 
     #[test]
@@ -366,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn each_request_is_one_line_of_only_id_method_and_params_lane() {
+    fn no_request_carries_a_field_or_a_line_break_the_shim_would_die_on() {
         for (lane, name) in [
             (ControlLane::Normal, "normal"),
             (ControlLane::Withdrawal, "withdrawal"),
@@ -375,12 +385,9 @@ mod tests {
             let (body, newline) = line.split_at(line.len() - 1);
             assert_eq!(newline, b"\n");
             assert!(!body.contains(&b'\n'), "{lane:?} is one line");
-            let request = parse_value(body).expect("the request is strict JSON");
-            assert_eq!(keys(&request), ["id", "method", "params"]);
-            assert_eq!(keys(&request["params"]), ["lane"]);
             assert_eq!(
-                request,
-                json!({"id": request_id(lane), "method": "hello", "params": {"lane": name}})
+                parse_value(body),
+                Ok(json!({"id": request_id(lane), "method": "hello", "params": {"lane": name}}))
             );
         }
         assert_eq!(request_id(ControlLane::Normal), 1);
@@ -388,360 +395,387 @@ mod tests {
     }
 
     #[test]
-    fn a_valid_reply_yields_its_lane_boot_and_policy() {
+    fn a_valid_reply_yields_the_boot_token_on_either_lane() {
+        let policy = guest_policy().hex();
+        let normal = reply(ControlLane::Normal, BOOT, &policy);
         assert_eq!(
-            judge(ControlLane::Normal, &valid(ControlLane::Normal)),
-            Ok(HelloAnswer {
-                lane: ControlLane::Normal,
-                boot: boot(BOOT),
-                policy: guest_policy(),
-            })
+            judge_normal(normal.as_bytes(), &guest_policy()),
+            Ok(boot(BOOT))
         );
+        let withdrawal = reply(ControlLane::Withdrawal, BOOT, &policy);
         assert_eq!(
-            judge_reply(
-                ControlLane::Withdrawal,
-                valid(ControlLane::Withdrawal).as_bytes(),
-                &guest_policy(),
-                Some(&boot(BOOT)),
-            ),
-            Ok(HelloAnswer {
-                lane: ControlLane::Withdrawal,
-                boot: boot(BOOT),
-                policy: guest_policy(),
-            })
+            judge_withdrawal(withdrawal.as_bytes(), &guest_policy(), &boot(BOOT)),
+            Ok(())
         );
     }
 
     #[test]
     fn a_reply_under_any_id_but_the_lanes_integer_refuses() {
         let policy = guest_policy().hex();
-        assert_eq!(
-            refusal(ControlLane::Normal, &reply(2, BOOT, &policy)),
-            HelloRefusal::WrongId {
-                expected: 1,
-                found: owned("2")
-            }
-        );
-        assert_eq!(
-            refusal(ControlLane::Withdrawal, &reply(1, BOOT, &policy)),
-            HelloRefusal::WrongId {
-                expected: 2,
-                found: owned("1")
-            }
-        );
-        for (id, found) in [
-            (json!("1"), "\"1\""),
-            (json!(1.0), "1.0"),
-            (json!(-1), "-1"),
-            (Value::Null, "null"),
+        for (lane, other) in [
+            (ControlLane::Normal, ControlLane::Withdrawal),
+            (ControlLane::Withdrawal, ControlLane::Normal),
         ] {
-            let frame = json!({"id": id, "result": {"boot": BOOT, "policy": policy}});
-            assert_eq!(
-                refusal(ControlLane::Normal, &frame.to_string()),
-                HelloRefusal::WrongId {
-                    expected: 1,
-                    found: owned(found)
-                }
-            );
+            let id = request_id(lane);
+            for (sent, found) in [
+                (json!(request_id(other)), request_id(other).to_string()),
+                (json!(id.to_string()), format!("\"{id}\"")),
+                (json!(id as f64), format!("{id}.0")),
+                (json!(-1), owned("-1")),
+                (Value::Null, owned("null")),
+            ] {
+                let frame = json!({"id": sent, "result": {"boot": BOOT, "policy": policy}});
+                assert_eq!(
+                    refusal(lane, &frame.to_string()),
+                    HelloRefusal::WrongId {
+                        expected: id,
+                        found
+                    }
+                );
+            }
         }
     }
 
     #[test]
-    fn a_reply_without_an_id_refuses_as_missing() {
-        let frame = json!({"result": {"boot": BOOT, "policy": guest_policy().hex()}});
-        assert_eq!(
-            refusal(ControlLane::Normal, &frame.to_string()),
-            HelloRefusal::MissingField {
-                field: owned("/id")
-            }
-        );
-    }
-
-    #[test]
-    fn a_field_hello_does_not_define_refuses() {
+    fn a_field_hello_does_not_define_refuses_even_when_it_resembles_one() {
         let policy = guest_policy().hex();
-        let top = json!({"id": 1, "result": {"boot": BOOT, "policy": policy}, "deadline_ms": 5});
-        assert_eq!(
-            refusal(ControlLane::Normal, &top.to_string()),
-            HelloRefusal::UnknownField {
-                field: owned("/deadline_ms")
+        for lane in LANES {
+            for (key, field) in [
+                ("deadline_ms", "/deadline_ms"),
+                ("ids", "/ids"),
+                ("results", "/results"),
+                ("a/b~", "/a~1b~0"),
+            ] {
+                let mut frame =
+                    json!({"id": request_id(lane), "result": {"boot": BOOT, "policy": policy}});
+                frame[key] = json!(0);
+                assert_eq!(
+                    refusal(lane, &frame.to_string()),
+                    HelloRefusal::UnknownField {
+                        field: owned(field)
+                    }
+                );
             }
-        );
-        let inner = json!({"id": 1, "result": {"boot": BOOT, "policy": policy, "grant": "g"}});
-        assert_eq!(
-            refusal(ControlLane::Normal, &inner.to_string()),
-            HelloRefusal::UnknownField {
-                field: owned("/result/grant")
+            for (key, field) in [
+                ("grant", "/result/grant"),
+                ("boots", "/result/boots"),
+                ("policy2", "/result/policy2"),
+            ] {
+                let mut frame =
+                    json!({"id": request_id(lane), "result": {"boot": BOOT, "policy": policy}});
+                frame["result"][key] = json!(0);
+                assert_eq!(
+                    refusal(lane, &frame.to_string()),
+                    HelloRefusal::UnknownField {
+                        field: owned(field)
+                    }
+                );
             }
-        );
-        let slashed = json!({"id": 1, "result": {"boot": BOOT, "policy": policy, "a/b~": 0}});
-        assert_eq!(
-            refusal(ControlLane::Normal, &slashed.to_string()),
-            HelloRefusal::UnknownField {
-                field: owned("/result/a~1b~0")
-            }
-        );
+        }
     }
 
     #[test]
     fn a_field_hello_requires_refuses_when_absent() {
         let policy = guest_policy().hex();
-        for (frame, missing) in [
-            (json!({"id": 1}), "/result"),
-            (
-                json!({"id": 1, "result": {"policy": policy}}),
-                "/result/boot",
-            ),
-            (json!({"id": 1, "result": {"boot": BOOT}}), "/result/policy"),
-        ] {
-            assert_eq!(
-                refusal(ControlLane::Normal, &frame.to_string()),
-                HelloRefusal::MissingField {
-                    field: owned(missing)
-                }
-            );
+        for lane in LANES {
+            let id = request_id(lane);
+            for (frame, missing) in [
+                (json!({"result": {"boot": BOOT, "policy": policy}}), "/id"),
+                (json!({"id": id}), "/result"),
+                (
+                    json!({"id": id, "result": {"policy": policy}}),
+                    "/result/boot",
+                ),
+                (
+                    json!({"id": id, "result": {"boot": BOOT}}),
+                    "/result/policy",
+                ),
+            ] {
+                assert_eq!(
+                    refusal(lane, &frame.to_string()),
+                    HelloRefusal::MissingField {
+                        field: owned(missing)
+                    }
+                );
+            }
         }
     }
 
     #[test]
     fn a_value_of_the_wrong_shape_refuses_naming_where() {
         let policy = guest_policy().hex();
-        for (frame, expected) in [
-            (json!([1]), HelloRefusal::NotAnObject { field: owned("") }),
-            (
-                json!({"id": 1, "result": "ok"}),
-                HelloRefusal::NotAnObject {
-                    field: owned("/result"),
-                },
-            ),
-            (
-                json!({"id": 1, "result": {"boot": 7, "policy": policy}}),
-                HelloRefusal::WrongType {
-                    field: owned("/result/boot"),
-                },
-            ),
-            (
-                json!({"id": 1, "result": {"boot": BOOT, "policy": null}}),
-                HelloRefusal::WrongType {
-                    field: owned("/result/policy"),
-                },
-            ),
-        ] {
-            assert_eq!(refusal(ControlLane::Normal, &frame.to_string()), expected);
+        for lane in LANES {
+            let id = request_id(lane);
+            for (frame, expected) in [
+                (json!([1]), HelloRefusal::NotAnObject { field: owned("") }),
+                (
+                    json!({"id": id, "result": "ok"}),
+                    HelloRefusal::NotAnObject {
+                        field: owned("/result"),
+                    },
+                ),
+                (
+                    json!({"id": id, "result": {"boot": 7, "policy": policy}}),
+                    HelloRefusal::WrongType {
+                        field: owned("/result/boot"),
+                    },
+                ),
+                (
+                    json!({"id": id, "result": {"boot": BOOT, "policy": null}}),
+                    HelloRefusal::WrongType {
+                        field: owned("/result/policy"),
+                    },
+                ),
+            ] {
+                assert_eq!(refusal(lane, &frame.to_string()), expected);
+            }
         }
     }
 
     #[test]
     fn a_repeated_key_refuses_even_with_the_right_value_last() {
-        let frame = format!(
-            r#"{{"id":1,"result":{{"boot":"{BOOT}","policy":"{}","policy":"{}"}}}}"#,
-            host_policy().hex(),
-            guest_policy().hex()
-        );
-        assert_eq!(
-            refusal(ControlLane::Normal, &frame),
-            HelloRefusal::DuplicateKey {
-                path: owned("/result/policy")
-            }
-        );
-        assert_eq!(
-            refusal(ControlLane::Normal, r#"{"id":2,"id":1}"#),
-            HelloRefusal::DuplicateKey { path: owned("/id") }
-        );
+        for lane in LANES {
+            let id = request_id(lane);
+            let frame = format!(
+                r#"{{"id":{id},"result":{{"boot":"{BOOT}","policy":"{}","policy":"{}"}}}}"#,
+                host_policy().hex(),
+                guest_policy().hex()
+            );
+            assert_eq!(
+                refusal(lane, &frame),
+                HelloRefusal::DuplicateKey {
+                    path: owned("/result/policy")
+                }
+            );
+            assert_eq!(
+                refusal(lane, &format!(r#"{{"id":7,"id":{id}}}"#)),
+                HelloRefusal::DuplicateKey { path: owned("/id") }
+            );
+        }
     }
 
     #[test]
     fn a_boot_token_not_64_lowercase_hex_digits_refuses() {
         let policy = guest_policy().hex();
-        for (token, fault) in [
-            (BOOT.to_uppercase(), DigestError::NotLowercaseHex { at: 20 }),
-            (
-                BOOT[..63].to_string(),
-                DigestError::WrongLength { bytes: 63 },
-            ),
-            (format!("{BOOT}0"), DigestError::WrongLength { bytes: 65 }),
-            (String::new(), DigestError::WrongLength { bytes: 0 }),
-        ] {
-            assert_eq!(
-                refusal(ControlLane::Normal, &reply(1, &token, &policy)),
-                HelloRefusal::BadBoot { fault },
-                "{token:?}"
-            );
+        for lane in LANES {
+            for (token, fault) in [
+                (BOOT.to_uppercase(), DigestError::NotLowercaseHex { at: 20 }),
+                (
+                    BOOT[..63].to_string(),
+                    DigestError::WrongLength { bytes: 63 },
+                ),
+                (format!("{BOOT}0"), DigestError::WrongLength { bytes: 65 }),
+                (format!(" {BOOT}"), DigestError::WrongLength { bytes: 65 }),
+                (format!("{BOOT}\n"), DigestError::WrongLength { bytes: 65 }),
+                (String::new(), DigestError::WrongLength { bytes: 0 }),
+            ] {
+                assert_eq!(
+                    refusal(lane, &reply(lane, &token, &policy)),
+                    HelloRefusal::BadBoot {
+                        fault: BootTokenError(fault)
+                    },
+                    "{token:?}"
+                );
+            }
         }
     }
 
     #[test]
     fn a_policy_other_than_the_expected_refuses_naming_both() {
-        let reported = Digest::of(b"some other policy");
-        assert_eq!(
-            refusal(ControlLane::Normal, &reply(1, BOOT, &reported.hex())),
-            HelloRefusal::PolicyMismatch {
-                expected: guest_policy(),
-                reported,
+        for lane in LANES {
+            for found in [Digest::of(b"some other policy"), host_policy()] {
+                assert_eq!(
+                    refusal(lane, &reply(lane, BOOT, &found.hex())),
+                    HelloRefusal::PolicyMismatch {
+                        expected: guest_policy(),
+                        found,
+                    }
+                );
             }
-        );
-        assert_eq!(
-            refusal(ControlLane::Normal, &reply(1, BOOT, &host_policy().hex())),
-            HelloRefusal::PolicyMismatch {
-                expected: guest_policy(),
-                reported: host_policy(),
-            }
-        );
+        }
     }
 
     #[test]
     fn a_policy_not_64_lowercase_hex_digits_refuses() {
-        let upper = guest_policy().hex().to_uppercase();
+        let policy = guest_policy().hex();
+        let upper = policy.to_uppercase();
         let first_letter = upper
             .bytes()
             .position(|digit| digit.is_ascii_uppercase())
             .expect("a SHA-256 in hex has a letter");
-        assert_eq!(
-            refusal(ControlLane::Normal, &reply(1, BOOT, &upper)),
-            HelloRefusal::BadPolicy {
-                fault: DigestError::NotLowercaseHex { at: first_letter }
+        for lane in LANES {
+            for (text, fault) in [
+                (
+                    upper.clone(),
+                    DigestError::NotLowercaseHex { at: first_letter },
+                ),
+                (
+                    format!("{policy}\n"),
+                    DigestError::WrongLength { bytes: 65 },
+                ),
+                (format!(" {policy}"), DigestError::WrongLength { bytes: 65 }),
+                (String::new(), DigestError::WrongLength { bytes: 0 }),
+            ] {
+                assert_eq!(
+                    refusal(lane, &reply(lane, BOOT, &text)),
+                    HelloRefusal::BadPolicy { fault },
+                    "{text:?}"
+                );
             }
-        );
-        assert_eq!(
-            refusal(ControlLane::Normal, &reply(1, BOOT, "")),
-            HelloRefusal::BadPolicy {
-                fault: DigestError::WrongLength { bytes: 0 }
-            }
-        );
+        }
     }
 
     #[test]
     fn a_withdrawal_boot_other_than_the_normal_boot_refuses() {
-        let normal = judge(ControlLane::Normal, &valid(ControlLane::Normal))
-            .expect("the normal lane answers");
-        let changed = reply(2, OTHER_BOOT, &guest_policy().hex());
+        let policy = guest_policy().hex();
+        let normal = judge_normal(
+            reply(ControlLane::Normal, BOOT, &policy).as_bytes(),
+            &guest_policy(),
+        )
+        .expect("the normal lane answers");
+        let changed = reply(ControlLane::Withdrawal, OTHER_BOOT, &policy);
         assert_eq!(
-            judge_reply(
-                ControlLane::Withdrawal,
-                changed.as_bytes(),
-                &guest_policy(),
-                Some(&normal.boot),
-            ),
+            judge_withdrawal(changed.as_bytes(), &guest_policy(), &normal),
             Err(HelloRefusal::BootChanged {
-                first: boot(BOOT),
-                second: boot(OTHER_BOOT),
+                expected: boot(BOOT),
+                found: boot(OTHER_BOOT),
             })
         );
     }
 
     #[test]
-    fn an_error_reply_refuses_with_its_code_whatever_the_id() {
-        assert_eq!(
-            refusal(
-                ControlLane::Normal,
-                r#"{"id":1,"error":{"code":105,"message":"refused"}}"#
-            ),
-            HelloRefusal::GuestError {
-                code: Some(105),
-                message: owned("refused")
+    fn an_error_reply_refuses_with_its_code_and_detail_whatever_the_id() {
+        let refused = json!({
+            "code": 105, "message": "refused", "from": "guest_request", "to": "refused",
+            "detail": {"stage": "policy_effect"}
+        });
+        for lane in LANES {
+            for id in [json!(request_id(lane)), Value::Null, json!(7), json!("x")] {
+                assert_eq!(
+                    refusal(lane, &json!({"id": id, "error": refused}).to_string()),
+                    HelloRefusal::GuestError {
+                        code: Some(105),
+                        message: owned("refused"),
+                        detail: Some(owned(r#"{"stage":"policy_effect"}"#)),
+                    },
+                    "{id}"
+                );
             }
-        );
-        assert_eq!(
-            refusal(
-                ControlLane::Normal,
-                r#"{"id":null,"error":{"code":-32600,"message":"x"}}"#
-            ),
-            HelloRefusal::GuestError {
-                code: Some(-32600),
-                message: owned("x")
-            }
-        );
-        let both = format!(
-            r#"{{"id":1,"result":{{"boot":"{BOOT}","policy":"{}"}},"error":{{"code":105,"message":"m"}}}}"#,
-            guest_policy().hex()
-        );
-        assert_eq!(
-            refusal(ControlLane::Normal, &both),
-            HelloRefusal::GuestError {
-                code: Some(105),
-                message: owned("m")
-            }
-        );
-    }
-
-    #[test]
-    fn an_error_without_an_integer_code_or_a_string_message_still_refuses() {
-        for error in [
-            json!({"code": 1.5, "message": 7}),
-            json!({"message": null}),
-            json!("refused"),
-            Value::Null,
-        ] {
-            let frame = json!({"id": 1, "error": error});
+            let protocol = json!({"id": null, "error": {"code": -32600, "message": "x"}});
             assert_eq!(
-                refusal(ControlLane::Normal, &frame.to_string()),
+                refusal(lane, &protocol.to_string()),
                 HelloRefusal::GuestError {
-                    code: None,
-                    message: String::new()
-                },
-                "{frame}"
+                    code: Some(-32600),
+                    message: owned("x"),
+                    detail: None,
+                }
             );
+            let both = json!({
+                "id": request_id(lane),
+                "result": {"boot": BOOT, "policy": guest_policy().hex()},
+                "error": {"code": 105, "message": "m"}
+            });
+            assert!(matches!(
+                refusal(lane, &both.to_string()),
+                HelloRefusal::GuestError {
+                    code: Some(105),
+                    ..
+                }
+            ));
         }
     }
 
     #[test]
-    fn text_the_guest_chose_is_cut_to_1024_bytes() {
+    fn an_error_without_a_signed_64_bit_code_or_a_string_message_still_refuses() {
+        for lane in LANES {
+            for error in [
+                json!({"code": 1.5, "message": 7}),
+                json!({"code": 9_223_372_036_854_775_808_u64}),
+                json!({"message": null}),
+                json!("refused"),
+                Value::Null,
+            ] {
+                let frame = json!({"id": 1, "error": error});
+                assert_eq!(
+                    refusal(lane, &frame.to_string()),
+                    HelloRefusal::GuestError {
+                        code: None,
+                        message: String::new(),
+                        detail: None,
+                    },
+                    "{frame}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_the_guest_chose_is_cut_to_1024_bytes_without_splitting_an_escape() {
         let long = "k".repeat(2000);
-        let message = json!({"id": 1, "error": {"code": 105, "message": long}});
-        assert_eq!(
-            refusal(ControlLane::Normal, &message.to_string()),
-            HelloRefusal::GuestError {
-                code: Some(105),
-                message: "k".repeat(1024)
+        let tildes = "~".repeat(600);
+        let escapes = format!("/{}", "~0".repeat(511));
+        for lane in LANES {
+            let id = request_id(lane);
+            for (frame, kept) in [
+                (
+                    json!({"id": id, "error": {"code": 105, "message": long}}).to_string(),
+                    long[..1024].to_string(),
+                ),
+                (
+                    json!({"id": id, "error": {"detail": long}}).to_string(),
+                    format!("\"{}", &long[..1023]),
+                ),
+                (
+                    json!({"id": id, "result": {}, &long: 0}).to_string(),
+                    format!("/{}", &long[..1023]),
+                ),
+                (
+                    json!({"id": long, "result": {}}).to_string(),
+                    format!("\"{}", &long[..1023]),
+                ),
+                (
+                    format!(r#"{{"{long}":0,"{long}":0}}"#),
+                    format!("/{}", &long[..1023]),
+                ),
+                (
+                    json!({"id": id, "result": {}, &tildes: 0}).to_string(),
+                    escapes.clone(),
+                ),
+                (format!(r#"{{"{tildes}":0,"{tildes}":0}}"#), escapes.clone()),
+            ] {
+                assert_eq!(guest_text(refusal(lane, &frame)), kept, "{lane:?}");
             }
-        );
-        let key = json!({"id": 1, "result": {}, &long: 0});
-        assert_eq!(
-            refusal(ControlLane::Normal, &key.to_string()),
-            HelloRefusal::UnknownField {
-                field: format!("/{}", &long[..1023])
-            }
-        );
-        let id = json!({"id": long, "result": {}});
-        assert_eq!(
-            refusal(ControlLane::Normal, &id.to_string()),
-            HelloRefusal::WrongId {
-                expected: 1,
-                found: format!("\"{}", &long[..1023])
-            }
-        );
-        let repeated = format!(r#"{{"{long}":0,"{long}":0}}"#);
-        assert_eq!(
-            refusal(ControlLane::Normal, &repeated),
-            HelloRefusal::DuplicateKey {
-                path: format!("/{}", &long[..1023])
-            }
-        );
+        }
     }
 
     #[test]
     fn bytes_that_are_not_utf8_refuse() {
-        let mut frame = valid(ControlLane::Normal).into_bytes();
-        frame[30] = 0xff;
-        assert_eq!(
-            judge_reply(ControlLane::Normal, &frame, &guest_policy(), None),
-            Err(HelloRefusal::NotUtf8)
-        );
+        for lane in LANES {
+            let mut frame = reply(lane, BOOT, &guest_policy().hex()).into_bytes();
+            frame[30] = 0xff;
+            let judged = match lane {
+                ControlLane::Normal => judge_normal(&frame, &guest_policy()).map(|_| ()),
+                ControlLane::Withdrawal => judge_withdrawal(&frame, &guest_policy(), &boot(BOOT)),
+            };
+            assert_eq!(judged, Err(HelloRefusal::NotUtf8));
+        }
     }
 
     #[test]
     fn text_after_the_reply_refuses() {
-        assert_eq!(
-            refusal(ControlLane::Normal, "{}x"),
-            HelloRefusal::NotJson {
-                detail: owned("refused as JSON at line 1, column 3: trailing characters")
-            }
-        );
-        let twice = format!("{0}{0}", valid(ControlLane::Normal));
-        assert!(matches!(
-            refusal(ControlLane::Normal, &twice),
-            HelloRefusal::NotJson { .. }
-        ));
+        for lane in LANES {
+            assert_eq!(
+                refusal(lane, "{}x"),
+                HelloRefusal::NotJson {
+                    detail: owned("refused as JSON at line 1, column 3: trailing characters")
+                }
+            );
+            let valid = reply(lane, BOOT, &guest_policy().hex());
+            assert!(matches!(
+                refusal(lane, &format!("{valid}{valid}")),
+                HelloRefusal::NotJson { .. }
+            ));
+        }
     }
 
     #[test]
@@ -753,90 +787,25 @@ mod tests {
     }
 
     #[test]
-    fn refusals_describe_themselves() {
+    fn refusal_messages_put_expected_before_found_and_never_call_a_token_a_digest() {
+        assert_eq!(
+            BootToken::parse_hex("abc")
+                .expect_err("three digits refuse")
+                .to_string(),
+            "a boot token is 64 lowercase hexadecimal digits, not 3 bytes"
+        );
         for (refusal, shown) in [
-            (HelloRefusal::NotUtf8, "the hello reply is not UTF-8".to_string()),
-            (
-                HelloRefusal::NotJson {
-                    detail: owned("d"),
-                },
-                "the hello reply is not one JSON value: d".to_string(),
-            ),
-            (
-                HelloRefusal::DuplicateKey {
-                    path: owned("/id"),
-                },
-                "the hello reply repeats the key at \"/id\"".to_string(),
-            ),
-            (
-                HelloRefusal::NotAnObject {
-                    field: owned("/result"),
-                },
-                "the hello reply value at \"/result\" is not a JSON object".to_string(),
-            ),
-            (
-                HelloRefusal::UnknownField {
-                    field: owned("/x"),
-                },
-                "the hello reply has a field hello does not define at \"/x\"".to_string(),
-            ),
-            (
-                HelloRefusal::MissingField {
-                    field: owned("/id"),
-                },
-                "the hello reply has no \"/id\"".to_string(),
-            ),
-            (
-                HelloRefusal::WrongType {
-                    field: owned("/result/boot"),
-                },
-                "the hello reply value at \"/result/boot\" is not a string".to_string(),
-            ),
             (
                 HelloRefusal::WrongId {
                     expected: 1,
                     found: owned("\"1\""),
                 },
-                "the hello reply answers id \"1\", not 1".to_string(),
-            ),
-            (
-                HelloRefusal::GuestError {
-                    code: Some(105),
-                    message: owned("no"),
-                },
-                "the guest refused hello with code 105: \"no\"".to_string(),
-            ),
-            (
-                HelloRefusal::GuestError {
-                    code: None,
-                    message: owned("no"),
-                },
-                "the guest refused hello without an integer code: \"no\"".to_string(),
-            ),
-            (
-                HelloRefusal::BadBoot {
-                    fault: DigestError::WrongLength { bytes: 3 },
-                },
-                "the hello boot token is 3 bytes long, not 64 lowercase hexadecimal digits"
-                    .to_string(),
-            ),
-            (
-                HelloRefusal::BadBoot {
-                    fault: DigestError::NotLowercaseHex { at: 9 },
-                },
-                "byte 9 of the hello boot token is not a lowercase hexadecimal digit".to_string(),
-            ),
-            (
-                HelloRefusal::BadPolicy {
-                    fault: DigestError::WrongLength { bytes: 3 },
-                },
-                "the hello policy is refused: a SHA-256 digest is 64 lowercase hexadecimal digits, not 3 bytes"
-                    .to_string(),
+                owned("the hello reply answers id \"1\", not 1"),
             ),
             (
                 HelloRefusal::PolicyMismatch {
                     expected: guest_policy(),
-                    reported: host_policy(),
+                    found: host_policy(),
                 },
                 format!(
                     "the guest verified policy {}, not the expected {}",
@@ -846,38 +815,155 @@ mod tests {
             ),
             (
                 HelloRefusal::BootChanged {
-                    first: boot(BOOT),
-                    second: boot(OTHER_BOOT),
+                    expected: boot(BOOT),
+                    found: boot(OTHER_BOOT),
                 },
-                format!("the guest boot token changed from {BOOT} to {OTHER_BOOT}"),
+                format!(
+                    "the withdrawal lane's boot token is {OTHER_BOOT}, not the normal lane's {BOOT}"
+                ),
+            ),
+            (
+                HelloRefusal::BadBoot {
+                    fault: BootTokenError(DigestError::NotLowercaseHex { at: 9 }),
+                },
+                owned(
+                    "the hello boot token is refused: byte 9 of a boot token is not a lowercase hexadecimal digit",
+                ),
+            ),
+            (
+                HelloRefusal::GuestError {
+                    code: Some(105),
+                    message: owned("refused"),
+                    detail: Some(owned(r#"{"stage":"policy_effect"}"#)),
+                },
+                owned(
+                    r#"the guest refused hello with code 105: "refused", detail {"stage":"policy_effect"}"#,
+                ),
+            ),
+            (
+                HelloRefusal::GuestError {
+                    code: None,
+                    message: owned("no"),
+                    detail: None,
+                },
+                owned(
+                    "the guest refused hello with no code that is a signed 64-bit integer: \"no\"",
+                ),
             ),
         ] {
             assert_eq!(refusal.to_string(), shown);
         }
     }
 
+    fn long_text() -> impl Strategy<Value = String> {
+        (
+            1000usize..1030,
+            prop::sample::select(vec!["é", "漢", "😀"]),
+            1usize..8,
+        )
+            .prop_map(|(ascii, tail, count)| format!("{}{}", "a".repeat(ascii), tail.repeat(count)))
+    }
+
+    fn guest_key() -> impl Strategy<Value = String> {
+        prop_oneof![
+            prop::sample::select(vec![
+                "id", "result", "error", "boot", "policy", "code", "message", "detail"
+            ])
+            .prop_map(str::to_owned),
+            "\\PC{0,8}",
+            long_text(),
+        ]
+    }
+
+    fn guest_value() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            prop::sample::select(vec![
+                Value::Null,
+                json!(1),
+                json!(2),
+                json!(105),
+                json!(1.5),
+                json!(u64::MAX),
+                json!(BOOT),
+                json!(guest_policy().hex()),
+            ]),
+            any::<i64>().prop_map(Value::from),
+            "\\PC{0,8}".prop_map(Value::from),
+            long_text().prop_map(Value::from),
+        ];
+        leaf.prop_recursive(3, 16, 4, |inner| {
+            prop::collection::vec((guest_key(), inner), 0..4)
+                .prop_map(|entries| Value::Object(entries.into_iter().collect()))
+        })
+    }
+
+    fn reply_like() -> impl Strategy<Value = Value> {
+        let field = |valid: Value| {
+            prop_oneof![
+                2 => Just(Some(valid)),
+                1 => guest_value().prop_map(Some),
+                1 => Just(None),
+            ]
+        };
+        let extra = || prop::collection::vec((guest_key(), guest_value()), 0..2);
+        (
+            prop_oneof![Just(json!(1)), Just(json!(2)), guest_value()],
+            field(json!(BOOT)),
+            field(json!(guest_policy().hex())),
+            prop_oneof![3 => Just(None), 1 => guest_value().prop_map(Some)],
+            extra(),
+            extra(),
+        )
+            .prop_map(|(id, boot, policy, error, top, inner)| {
+                let mut result: Map<String, Value> = inner.into_iter().collect();
+                result.extend(boot.map(|boot| (owned("boot"), boot)));
+                result.extend(policy.map(|policy| (owned("policy"), policy)));
+                let mut reply: Map<String, Value> = top.into_iter().collect();
+                reply.insert(owned("id"), id);
+                reply.insert(owned("result"), Value::Object(result));
+                reply.extend(error.map(|error| (owned("error"), error)));
+                Value::Object(reply)
+            })
+    }
+
     proptest! {
         #[test]
-        fn arbitrary_bytes_never_panic(
-            frame in proptest::collection::vec(any::<u8>(), 0..256),
-            withdrawal in any::<bool>(),
+        fn no_guest_bytes_or_json_panic_either_judge(
+            bytes in proptest::collection::vec(any::<u8>(), 0..64),
+            reply in reply_like(),
+            other in guest_value(),
         ) {
-            let lane = if withdrawal { ControlLane::Withdrawal } else { ControlLane::Normal };
-            let _ = judge_reply(lane, &frame, &guest_policy(), Some(&boot(BOOT)));
+            for frame in [bytes, reply.to_string().into_bytes(), other.to_string().into_bytes()] {
+                let _ = judge_normal(&frame, &guest_policy());
+                let _ = judge_withdrawal(&frame, &guest_policy(), &boot(BOOT));
+            }
         }
 
         #[test]
-        fn a_guest_message_is_cut_on_a_character_boundary(message in "\\PC{0,700}") {
-            let frame = json!({"id": null, "error": {"code": 105, "message": message}});
-            let HelloRefusal::GuestError { message: kept, .. } =
-                refusal(ControlLane::Normal, &frame.to_string())
-            else {
-                panic!("an error reply refuses as a guest error");
-            };
-            prop_assert!(message.starts_with(&kept));
-            prop_assert!(kept.len() <= 1024);
-            prop_assert!(message.len() <= 1024 || kept.len() > 1020);
-            prop_assert!(message.len() > 1024 || kept == message);
+        fn guest_text_is_cut_on_a_character_boundary_wherever_a_refusal_carries_it(
+            text in long_text(),
+        ) {
+            let policy = guest_policy().hex();
+            for lane in LANES {
+                let id = request_id(lane);
+                for (frame, whole) in [
+                    (json!({"id": id, "error": {"message": &text}}).to_string(), text.clone()),
+                    (json!({"id": id, "error": {"detail": &text}}).to_string(), format!("\"{text}\"")),
+                    (json!({"id": id, "result": {}, &text: 0}).to_string(), format!("/{text}")),
+                    (
+                        json!({"id": id, "result": {"boot": BOOT, "policy": policy, &text: 0}}).to_string(),
+                        format!("/result/{text}"),
+                    ),
+                    (json!({"id": &text, "result": {}}).to_string(), format!("\"{text}\"")),
+                    (format!(r#"{{"{text}":0,"{text}":0}}"#), format!("/{text}")),
+                ] {
+                    let kept = guest_text(refusal(lane, &frame));
+                    prop_assert!(whole.starts_with(&kept));
+                    prop_assert!(kept.len() <= 1024);
+                    prop_assert!(whole.len() <= 1024 || kept.len() > 1020);
+                    prop_assert!(whole.len() > 1024 || kept == whole);
+                }
+            }
         }
     }
 }
