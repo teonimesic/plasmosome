@@ -5,6 +5,7 @@
 //! the frozen control protocol on an ndjson connection, which its binary
 //! `plasmosomed` serves on the control socket its config names.
 
+pub mod closure;
 pub mod control;
 pub mod daemon;
 pub mod gatekeeper;
