@@ -956,11 +956,17 @@ fn clear_nonblocking(file: BorrowedFd<'_>) -> io::Result<()> {
     Ok(())
 }
 
-struct DirectoryStream(NonNull<libc::DIR>);
+pub(crate) struct DirectoryStream(NonNull<libc::DIR>);
 
 impl DirectoryStream {
+    /// Yields every name in `dir` from the start, without `.` and `..`, however much of `dir`
+    /// an earlier stream read.
+    ///
+    /// The stream reads a duplicate of `dir` and rewinds it when it opens. The duplicate shares
+    /// the descriptor's offset, so two streams on one descriptor must not be alive at the same
+    /// time.
     #[allow(unsafe_code)]
-    fn open(dir: BorrowedFd<'_>) -> io::Result<DirectoryStream> {
+    pub(crate) fn open(dir: BorrowedFd<'_>) -> io::Result<DirectoryStream> {
         let owned = dir.try_clone_to_owned()?;
         // SAFETY: `owned` is a descriptor this function owns. On success fdopendir takes it over,
         // and into_raw_fd below gives up the OwnedFd, so only closedir closes it. On failure the
@@ -968,6 +974,9 @@ impl DirectoryStream {
         let stream = unsafe { libc::fdopendir(owned.as_raw_fd()) };
         let stream = NonNull::new(stream).ok_or_else(io::Error::last_os_error)?;
         let _owned_by_stream = owned.into_raw_fd();
+        // SAFETY: `stream` is the non-null stream fdopendir just returned. Only closedir in Drop
+        // closes it, so it is still open here.
+        unsafe { libc::rewinddir(stream.as_ptr()) };
         Ok(DirectoryStream(stream))
     }
 }
@@ -1436,6 +1445,53 @@ mod tests {
             collect_names(vec![Ok(b"b".to_vec()), Ok(b"a".to_vec())].into_iter())
                 .expect("a complete listing"),
             vec![b"b".to_vec(), b"a".to_vec()]
+        );
+    }
+
+    fn names_in(dir: BorrowedFd<'_>) -> Vec<Vec<u8>> {
+        let mut names = DirectoryStream::open(dir)
+            .and_then(collect_names)
+            .expect("the directory lists");
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_second_stream_on_one_descriptor_lists_every_name_again() {
+        let (_dir, root) = temp_root();
+        for name in ["a", "b", "c"] {
+            fs::write(root.join(name), b"").expect("write");
+        }
+        let held = File::open(&root).expect("open");
+        let every = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
+        assert_eq!(names_in(held.as_fd()), every, "the first stream");
+        assert_eq!(names_in(held.as_fd()), every, "the second stream");
+    }
+
+    #[test]
+    fn a_stream_dropped_after_one_name_leaves_the_next_stream_every_name() {
+        let (_dir, root) = temp_root();
+        let long = "n".repeat(200);
+        let mut every: Vec<Vec<u8>> = (0..400)
+            .map(|index| format!("{index:03}{long}").into_bytes())
+            .collect();
+        for name in &every {
+            fs::write(root.join(OsStr::from_bytes(name)), b"").expect("write");
+        }
+        every.sort();
+        let held = File::open(&root).expect("open");
+        let mut first = DirectoryStream::open(held.as_fd()).expect("the first stream opens");
+        assert!(
+            matches!(first.next(), Some(Ok(_))),
+            "the first stream yields a name"
+        );
+        drop(first);
+        let listed = names_in(held.as_fd());
+        assert!(
+            listed == every,
+            "the next stream listed {} of {} names",
+            listed.len(),
+            every.len()
         );
     }
 
