@@ -470,3 +470,122 @@ fn a_member_whose_manifest_is_not_valid_toml_is_refused_not_skipped() {
         "an invalid member manifest must not be skipped"
     );
 }
+
+#[test]
+fn only_the_testkit_enables_the_backend_test_fixture() {
+    check_workspace(|root| {
+        let outside = test_fixture_enablers_outside_the_testkit(root);
+        assert!(
+            outside.is_empty(),
+            "{outside:?} enable `{BACKEND}/{TEST_FIXTURE}` outside `[dev-dependencies]`. That feature lets code build a `CommandName` from text, so test scaffolding would ship to a consumer, which spec 013 puts in a guard's scope as \"test scaffolding leaving `[dev-dependencies]`\". Only `{TESTKIT}`, which `testkit_is_dev_only` keeps dev-only, may enable it"
+        );
+    });
+}
+
+fn fixture_feature_workspace(consumer: &str, workspace_dependencies: &str) -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("a scratch directory is created");
+    let root = directory.path();
+    write_workspace_manifest(root, &["crates/backend", "crates/consumer"]);
+    if !workspace_dependencies.is_empty() {
+        let mut manifest =
+            std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest reads back");
+        manifest.push_str(workspace_dependencies);
+        std::fs::write(root.join("Cargo.toml"), manifest).expect("the manifest is rewritten");
+    }
+    write_member(
+        root,
+        "crates/backend",
+        &format!(
+            "{}\n[features]\n{TEST_FIXTURE} = []\n",
+            member_manifest(BACKEND)
+        ),
+    );
+    write_member(root, "crates/consumer", consumer);
+    let locked = cargo_in(root)
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .expect("cargo generate-lockfile runs");
+    assert!(
+        locked.status.success(),
+        "the fixture workspace cannot be locked: {}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
+    directory
+}
+
+fn consumer(name: &str, sections: &str) -> String {
+    format!("{}\n{sections}", member_manifest(name))
+}
+
+#[test]
+fn a_member_that_forwards_the_test_fixture_through_its_own_features_is_reported() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            "plasmosome-membrane",
+            "[features]\ndefault = [\"fixtures\"]\nfixtures = [\"plasmosome-backend/test-fixture\"]\n\n[dependencies]\nplasmosome-backend = { path = \"../backend\" }\n",
+        ),
+        "",
+    );
+    assert_eq!(
+        test_fixture_enablers_outside_the_testkit(workspace.path()),
+        ["plasmosome-membrane"]
+    );
+}
+
+#[test]
+fn a_workspace_dependency_that_enables_the_test_fixture_is_reported() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            "plasmosome-core",
+            "[dependencies]\nplasmosome-backend = { workspace = true }\n",
+        ),
+        "\n[workspace.dependencies]\nplasmosome-backend = { path = \"crates/backend\", features = [\"test-fixture\"] }\n",
+    );
+    assert_eq!(
+        test_fixture_enablers_outside_the_testkit(workspace.path()),
+        ["plasmosome-core"]
+    );
+}
+
+#[test]
+fn a_dependency_for_one_target_that_enables_the_test_fixture_is_reported() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            "plasmosome-ledger",
+            "[target.'cfg(target_os = \"linux\")'.dependencies]\nplasmosome-backend = { path = \"../backend\", features = [\"test-fixture\"] }\n",
+        ),
+        "",
+    );
+    assert_eq!(
+        test_fixture_enablers_outside_the_testkit(workspace.path()),
+        ["plasmosome-ledger"]
+    );
+}
+
+#[test]
+fn a_dev_dependency_that_enables_the_test_fixture_is_not_reported() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            "plasmosome-core",
+            "[dependencies]\nplasmosome-backend = { path = \"../backend\" }\n\n[dev-dependencies]\nplasmosome-backend = { path = \"../backend\", features = [\"test-fixture\"] }\n",
+        ),
+        "",
+    );
+    assert_eq!(
+        test_fixture_enablers(workspace.path()),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn the_testkit_enabling_the_test_fixture_is_not_reported() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            TESTKIT,
+            "[dependencies]\nplasmosome-backend = { path = \"../backend\", features = [\"test-fixture\"] }\n",
+        ),
+        "",
+    );
+    assert_eq!(test_fixture_enablers(workspace.path()), [TESTKIT]);
+    assert!(test_fixture_enablers_outside_the_testkit(workspace.path()).is_empty());
+}
