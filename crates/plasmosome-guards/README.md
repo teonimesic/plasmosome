@@ -21,6 +21,7 @@ each crate's `AGENTS.md`, where it can be argued with.
 | `only_the_held_names_are_publishable_to_a_registry` | A crate reaching crates.io under a name this project has not claimed — a publish is permanent |
 | `no_binary_target_takes_a_name_another_package_owns` | Two packages offering the same binary, which collides in `target/` and breaks `cargo install` for anyone with both |
 | `testkit_is_dev_only` | A kernel crate depending on `plasmosome-testkit` outside `[dev-dependencies]`, which ships test scaffolding |
+| `only_the_testkit_enables_the_backend_test_fixture` | A crate other than `plasmosome-testkit` turning on the backend's `test-fixture` feature by a normal or build dependency, for any target and by any route: its own dependency, its `[features]`, or a root `[workspace.dependencies]` entry. That would ship the test scaffolding that builds a `CommandName` from text to a consumer |
 | `attribution_guard` | A model co-author trailer at any position in a commit message, including the middle of a body a squash merge composed |
 | `provenance_guard` | The private research corpus reaching this public tree — and it refuses when the search it depends on cannot run |
 | `skill_discovery` | A skill under `.agents/skills/` with no committed symlink under `.claude/skills/`, which no tool then lists |

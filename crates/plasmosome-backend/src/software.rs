@@ -454,7 +454,9 @@ pub enum Holder {
     /// The root image resolves the name in a directory on `PATH`.
     Image,
     /// An earlier command of the same tree, by its name, folds to the same name on a volume that
-    /// ignores case.
+    /// ignores case. A pair that ASCII folding joins is already refused by `pin` as
+    /// [`PinRefusal::Collides`], so only a pair it does not join, such as `Éclair` and `éclair`,
+    /// reaches this.
     Command(String),
 }
 

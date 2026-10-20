@@ -79,18 +79,21 @@ tree's root, and core's 108 carries that path and names the plasmid in its `deta
 is not UTF-8 is refused as unlisted. On an APFS volume that refusal cannot happen, because APFS
 refuses such a name when the file is created (`EILSEQ`).
 
-What `pin` guarantees about links differs by system. A root that is itself a link is refused
-on both, and the root is resolved once to its canonical path. Every directory is opened before
-it is listed, and every file before it is read.
+What `pin` guarantees about links differs by system. On both, a root that is itself a link is
+refused. The root's own path may pass through a link, as macOS's `/var` does, so the root is
+resolved once to its canonical path. That path is then opened without following a link, and it
+must be the directory the first check saw, by device and inode. So a root swapped for a link
+between the check and the open is refused as `Link { path: "." }`. Every directory is opened
+before it is listed, and every file before it is read.
 
-- **macOS.** The open uses `O_NOFOLLOW_ANY`, which refuses a link in any component. No file is
-  read, and no directory opened, through a link, even one swapped in while `pin` runs. A
-  directory is listed by path after that check, so a link swapped in between is listed through,
-  but nothing under it is opened.
-- **Linux.** The open uses `O_NOFOLLOW`, which refuses a link only as the last component. A
-  directory swapped for a link while `pin` runs is followed, so a file outside the root can be
-  read. It is pinned only when its bytes match the listing. plasmosome-0v4o walks by directory
-  descriptors instead.
+- **macOS.** Every open uses `O_NOFOLLOW_ANY`, which refuses a link in any component of the
+  canonical path. So no file is read, and no directory opened, through a link, even one swapped
+  in while `pin` runs, at the root or below it. A directory is listed by path after its open, so
+  a directory swapped for a link in between is listed through, but nothing under it is opened.
+- **Linux.** Every open uses `O_NOFOLLOW`, which refuses a link only as the last component. A
+  directory, the root included, swapped for a link after its open is followed by later opens, so
+  a file outside the root can be read. It is pinned only when its bytes match the listing.
+  plasmosome-0v4o walks by directory descriptors instead.
 
 The tree digest is the SHA-256 of every file sorted by path bytes, each as its path, a NUL, its
 digest's 64 lowercase hexadecimal digits, a NUL, and a byte that is 1 for a command and 0
@@ -101,14 +104,20 @@ record and may adopt it.
 or one the root image has in `/usr/local/bin`, `/usr/bin` or `/bin`. It checks the tree's own
 names first, then other plasmids', then the image's. The caller says whether the volume holding
 the names ignores case. If it does, two commands of the same tree that fold together are refused
-too. The fold is Unicode lowercase only. It misses names that differ only in normalization, such
+too. A pair that ASCII folding joins, such as `Foo` and `foo`, never gets that far: `pin` refuses
+it first as `Collides`. So this 102 is reached only by a pair that ASCII folding does not join,
+such as `Éclair` and `éclair`.
+The fold is Unicode lowercase only. It misses names that differ only in normalization, such
 as NFC and NFD `café`, and names that only full case folding joins, such as `ß` and `SS` or `ﬁ`
 and `fi`. Default APFS treats each of those pairs as one name.
 
 Spec 027 leaves the declaration field for commands blocked on consumers, so a `CommandName` comes
 only from `software::fixture::declare_commands`, or back from `PinnedTree::command_names`. The
 fixture compiles for this crate's tests and under the `test-fixture` feature. Enable that
-feature only from `[dev-dependencies]`. Nothing in the build enforces this; a reviewer checks it.
+feature only from `[dev-dependencies]`. The workspace guard
+`only_the_testkit_enables_the_backend_test_fixture` fails the build when any other crate turns it
+on by a normal or build dependency, for any target, unless the edge comes through
+`plasmosome-testkit`, which is itself dev-only.
 Core maps a `Conflict` to code 102 and a `PinRefusal` to code 108. The 102 does not carry spec
 027's `fix` yet, and neither does the 108 for `CommandNotInTree`, because the declaration field
 they would name does not exist. plasmosome-tbru adds both. No product path reaches
