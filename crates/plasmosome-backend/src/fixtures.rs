@@ -131,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_map_keeps_its_host_and_route_in_place() {
+    fn proxy_map_holds_exactly_its_host_and_route_in_place() {
         for (host, route) in [
             ("api.github.com", "splice"),
             ("splice", "api.github.com"),
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_keeps_its_source_and_target_in_place() {
+    fn mount_holds_exactly_its_source_and_target_in_place() {
         for (source, target) in [
             ("/srv/repo", "/workspace"),
             ("/workspace", "/srv/repo"),
