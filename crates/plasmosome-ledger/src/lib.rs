@@ -3,7 +3,7 @@
 //! A caller pushes effects onto a `Ledger`, closes it, and detaches the result.
 
 use std::fmt;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use serde::de::Error as _;
@@ -646,10 +646,36 @@ impl Ledger {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .read(true)
             .open(path)?;
+        let mut existing = Vec::new();
+        file.read_to_end(&mut existing)?;
+        self.accepts_target(&existing)?;
         file.write_all(&records)?;
         file.flush()?;
         Ok(self.effects.len())
+    }
+
+    fn accepts_target(&self, existing: &[u8]) -> std::io::Result<()> {
+        let Some(last) = existing.last() else {
+            return Ok(());
+        };
+        if *last != b'\n' {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "ledger log does not end with a newline; refusing to append",
+            ));
+        }
+        match read_records(existing)? {
+            (Some(found), _) if found != self.plugin => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "ledger log belongs to plugin `{found}`; refusing to append plugin `{}`",
+                    self.plugin
+                ),
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// Writes one record per effect. Every record is encoded first, so an effect that cannot
