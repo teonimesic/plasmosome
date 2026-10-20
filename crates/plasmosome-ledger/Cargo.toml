@@ -10,6 +10,7 @@ publish = false
 plasmosome-backend = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+smallvec = { git = "https://github.com/servo/rust-smallvec", tag = "v1.13.2" }
 
 [dev-dependencies]
 criterion = { workspace = true }

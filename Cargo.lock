@@ -481,6 +481,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "smallvec",
  "tempfile",
 ]
 
@@ -800,6 +801,11 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "smallvec"
+version = "1.13.2"
+source = "git+https://github.com/servo/rust-smallvec?tag=v1.13.2#0089d0a15bee4792a575b9c51e9d7ace39b3957c"
 
 [[package]]
 name = "syn"
