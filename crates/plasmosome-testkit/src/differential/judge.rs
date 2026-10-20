@@ -319,8 +319,8 @@ fn completed_pairs(ran: &Ran, left: Lane, right: Lane) -> Vec<(&Fields, &Fields)
         return Vec::new();
     };
     left.iter()
-        .zip(right)
-        .filter_map(|(left, right)| left.as_ref().zip(right.as_ref()))
+        .flatten()
+        .flat_map(|left| right.iter().flatten().map(move |right| (left, right)))
         .collect()
 }
 
