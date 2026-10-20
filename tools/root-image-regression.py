@@ -914,15 +914,17 @@ def files_the_container_leaves_in_the_work_root_are_not_trusted():
 
 def the_placed_rootfs_keeps_its_holes():
     with scratch() as root:
-        size, data = 256 << 20, b"superblock".ljust(4096, b"\1")
+        size, data = 128 << 20, b"superblock".ljust(4096, b"\1")
         with open(root / "rootfs.raw", "wb") as out:
             out.truncate(size)
-            for offset in (0, 129 << 20, size - 4096):
+            for offset in (0, 65 << 20, size - 4096):
                 os.pwrite(out.fileno(), data, offset)
         (root / "stage").mkdir()
         digest = API["copy_rootfs"](root, root / "stage", size)
         copied = root / "stage" / "rootfs.raw"
-        assert digest == sha((root / "rootfs.raw").read_bytes()) == sha(copied.read_bytes())
+        with open(root / "rootfs.raw", "rb") as source, open(copied, "rb") as placed:
+            hashes = [hashlib.file_digest(f, "sha256").hexdigest() for f in (source, placed)]
+        assert hashes == [digest, digest], (hashes, digest)
         assert os.stat(copied).st_size == size and os.stat(copied).st_blocks * 512 < 16 << 20, os.stat(copied)
 
 
