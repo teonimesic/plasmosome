@@ -209,9 +209,11 @@ impl<'de> Deserialize<'de> for Digest {
     }
 }
 
-/// A release address without its digest: kind, population, publisher, name and version.
+/// A release's kind, population, publisher, name and version, with neither the registry ID
+/// nor a digest: the `release` object a spec 020 descriptor carries.
 ///
-/// Ordering compares those fields in that order, matching spec 020's catalog order.
+/// Ordering compares those fields in that order as text, which is the order spec 020 gives
+/// catalog search results.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ReleaseKey {
     kind: ArtifactKind,
@@ -324,10 +326,12 @@ impl<'de> Deserialize<'de> for ReleaseKey {
     }
 }
 
-/// A release address pinned to its descriptor digest: exactly spec 020's six fields. The
-/// registry ID belongs to the enclosing record, never to the reference.
+/// A release key with its descriptor digest: exactly the six fields of spec 020's `ReleaseRef`.
+/// The registry ID belongs to the enclosing record, never to the reference.
 ///
-/// Ordering compares the key, then the digest bytes.
+/// Ordering compares the key, then the digest bytes. Spec 020 sorts its lists of references
+/// (show's packages, graph lists and a lock's `releases`) by digest instead, so such a list
+/// sorts by `digest()` rather than by this order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ReleaseRef {
     key: ReleaseKey,

@@ -471,7 +471,7 @@ that its complete runtime role is delivered.
 | --- | --- |
 | `plasmosome-core` | Controller decisions: registry, reconciler, manifest grammar, session log and credential gatekeeper |
 | `plasmosome-membrane` | Per-cell host supervisor for the VMM, network path and broker processes |
-| `plasmosome-ledger` | Typed reversibility: effects and their inverses |
+| `plasmosome-ledger` | Typed reversibility: effects and their inverses; spec 020's registry IDs and release references |
 | `plasmosome-backend` | Enforcement interface, currently including a fake in-memory backend for tests |
 | `plasmid` | Reserved plasmid-author command line |
 | `plasmid-sdk` | Reserved stability boundary for plasmid authors |
