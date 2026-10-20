@@ -123,7 +123,14 @@ fn run_guard_over(root: &Path, message: &str) -> Output {
 }
 
 fn directory_shadowing(tool: &str, script: &str) -> TempDir {
-    let shadow = tempfile::tempdir().expect("a scratch directory is created");
+    directory_shadowing_in(
+        tempfile::tempdir().expect("a scratch directory is created"),
+        tool,
+        script,
+    )
+}
+
+fn directory_shadowing_in(shadow: TempDir, tool: &str, script: &str) -> TempDir {
     let stub = shadow.path().join(tool);
     std::fs::write(&stub, script).expect("the stub is written");
     let mut permissions = std::fs::metadata(&stub)
@@ -159,17 +166,24 @@ fn shell_quoted(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-fn git_refusing(fragment: &str) -> TempDir {
+fn run_guard_with_git_refusing(root: &Path, repository: &Path, fragment: &str) -> Output {
+    let shadow = tempfile::tempdir().expect("a scratch directory is created");
+    let marker = shadow.path().join("the-stub-refused");
     let git = real_git();
-    let git = git.to_str().expect("the path to git is UTF-8");
-    directory_shadowing(
-        "git",
-        &format!(
-            "#!/bin/sh\ncase \" $* \" in\n  *{}*)\n    echo \"stub: refusing $*\" >&2\n    exit 128\n    ;;\nesac\nexec {} \"$@\"\n",
-            shell_quoted(fragment),
-            shell_quoted(git)
-        ),
-    )
+    let stub = format!(
+        "#!/bin/sh\ncase \" $* \" in\n  *{}*)\n    : > {}\n    echo \"stub: refusing $*\" >&2\n    exit 128\n    ;;\nesac\nexec {} \"$@\"\n",
+        shell_quoted(fragment),
+        shell_quoted(marker.to_str().expect("the scratch path is UTF-8")),
+        shell_quoted(git.to_str().expect("the path to git is UTF-8"))
+    );
+    let shadow = directory_shadowing_in(shadow, "git", &stub);
+    let output = run_guard_shadowed(root, repository, shadow.path());
+    assert!(
+        marker.exists(),
+        "setup: the git stub never saw a call holding `{fragment}`, so the guard no longer calls git that way and this test no longer reaches the branch it is for. Point the stub at the guard's new call; this alone is not a guard bug.\nguard said:\n{}",
+        said(&output)
+    );
+    output
 }
 
 fn said(output: &Output) -> String {
@@ -543,7 +557,7 @@ fn refuses_a_model_trailer_on_head_when_given_no_range_and_there_is_no_origin_ma
                 .output()
                 .expect("the guard runs"),
             OFFENCE,
-            "a model trailer on HEAD when it runs with no range in a repository with no origin/main",
+            "a model trailer on HEAD when it runs with no range and there is no origin/main (this pins today's fallback to all of HEAD, which spec 029 does not state; refusing the missing origin/main as an unreadable range would also fail closed)",
         );
     });
 }
@@ -552,9 +566,8 @@ fn refuses_a_model_trailer_on_head_when_given_no_range_and_there_is_no_origin_ma
 fn refuses_a_commit_whose_message_it_cannot_read() {
     check_workspace(|root| {
         let repository = repository_with_commit("docs: a change\n");
-        let shadow = git_refusing("--format=%B");
         assert_refused_saying(
-            &run_guard_shadowed(root, repository.path(), shadow.path()),
+            &run_guard_with_git_refusing(root, repository.path(), "--format=%B"),
             "cannot read the message of",
             "a commit while `git show` cannot read its message, which is a message it cannot clear",
         );
@@ -567,9 +580,8 @@ fn refuses_a_message_whose_trailers_it_cannot_parse() {
         let repository = repository_with_commit(
             "docs: a change\n\nSome body prose.\n\nCo-Authored-By: A Colleague <colleague@corp.locale.io>\n",
         );
-        let shadow = git_refusing("interpret-trailers");
         assert_refused_saying(
-            &run_guard_shadowed(root, repository.path(), shadow.path()),
+            &run_guard_with_git_refusing(root, repository.path(), "interpret-trailers"),
             "cannot parse the trailers",
             "a commit crediting a person while `git interpret-trailers` cannot parse its trailers, which are trailers it cannot clear",
         );
