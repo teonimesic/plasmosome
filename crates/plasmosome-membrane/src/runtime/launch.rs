@@ -1287,6 +1287,29 @@ mod tests {
                 "a soft limit of {soft} descriptors refuses typed, got {outcome:?}"
             );
         }
+        limit.rlim_cur = 12;
+        assert_eq!(
+            // SAFETY: `limit` is a local rlimit that setrlimit only reads. This probe process runs
+            // only this test, so a lower limit reaches no other test.
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) },
+            0
+        );
+        let mut below_first_kept = Vec::new();
+        loop {
+            let taken = std::fs::File::open("/dev/null").expect("a descriptor below 12 is free");
+            if taken.as_raw_fd() >= FIRST_KEPT {
+                break;
+            }
+            below_first_kept.push(taken);
+        }
+        assert_eq!(
+            HelperExec::prepare(&fitting).err(),
+            Some(LaunchRefusal::Pipe {
+                errno: libc::EMFILE
+            }),
+            "with every descriptor below 10 taken and /dev/null moved to 11, pipe() has one free slot for its two ends"
+        );
+        drop(below_first_kept);
     }
 
     #[test]
