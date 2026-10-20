@@ -1,7 +1,7 @@
 ---
 id: 029
 title: The contribution record — who it names, what it refuses, and which check refuses it
-status: draft
+status: accepted
 intents: [005]
 ---
 
@@ -178,15 +178,16 @@ Each identity it reads, in all four positions alike (author, committer, `Co-auth
 3. **Tool identities.** An address is a model's when, compared whole and ignoring ASCII case, it
    equals a listed tool address. It is also a model's when it is a GitHub noreply address,
    `<login>@users.noreply.github.com` with or without an `<id>+` prefix, whose login equals a
-   listed login, ignoring ASCII case. Nothing else is folded. A look-alike address resolves to no
-   account, which section 2's accepted cost covers. A vendor's domain alone never makes an
-   address a model's.
+   listed login, ignoring ASCII case in the login and the domain. Nothing else is folded. A
+   look-alike address resolves to no account, which section 2's accepted cost covers. A vendor's
+   domain alone never makes an address a model's.
 4. **Untraceable domains.** The domain is the text after the address's last `@`. It is on the
    list when, ignoring ASCII case and one trailing dot, it equals a listed name or ends in `.`
    followed by one. The list: `local` (RFC 6762); `localhost`, `invalid`, `test`, `example`,
    `example.com`, `example.net` and `example.org` (RFC 6761); `home.arpa` (RFC 8375); `internal`,
    which ICANN reserved for private use in 2024; and `localdomain`, a common host suffix that no
-   registry holds. A GitHub noreply address is on no list, so a person's is cleared.
+   registry holds. The list grows on evidence, like the tool list. A GitHub noreply address is on
+   no list, so a person's is cleared.
 5. **Anything else** is a person's or a bot's, and is cleared.
 
 Today's guard breaks this rule for people: it looks for a vendor's name anywhere in a trailer's
@@ -212,9 +213,10 @@ first observed one joins the list with its probe. The list lives in the guard an
 evidence. An entry found to be a person's leaves the list in its own change.
 
 **What a refusal says.** It names the commit, the position, the value and the harm, which is what
-GitHub will show on `main` (spec 013). For an untraceable identity, it also says how to fix the
-commits: set `user.email`, then run
-`git rebase --exec 'git commit --amend --no-edit --reset-author' <base>`.
+GitHub will show on `main` (spec 013). For an untraceable author or committer, it also says how
+to fix the commits: set `user.email`, then run
+`git rebase --exec 'git commit --amend --no-edit --reset-author' <base>`. For an untraceable
+trailer, it says to reword the commit and correct or remove the line.
 
 **Fails closed.** A range, message or identity it cannot read, a parse failure, and a matcher
 that exits above 1 are each a refusal. Identity matching goes through the same exit-checked
@@ -405,30 +407,37 @@ the twin cleared. An exit status alone proves nothing. People in these probes us
 domain such as `corp.locale.io`, because `example.com` is on section 4's list.
 
 1. **One verdict in every position.** Each identity below is run as author, as committer, as
-   `Co-authored-by` and as `Signed-off-by`, and gets the same verdict in all four. Catches a
-   guard that reads messages only, one that skips the committer, and one that skips the domain
-   check on either trailer. Measured with a scratch reference of this rule: all 45 rows below get
-   one verdict in all four positions. Today's guard gives different verdicts by position in 22 of
-   them, and clears `coderabbitai[bot]`, `google-labs-jules[bot]` and `devin-ai-integration[bot]`
-   in all four.
+   `Co-authored-by` and as `Signed-off-by`, and gets the same verdict, for the same stated
+   reason, in all four. Catches a guard that reads messages only, one that skips the committer,
+   and one that skips the domain check on either trailer. Measured with a scratch reference of
+   this rule: each of the 49 identities below, and the trailer with no `<…>` in its two
+   positions, gets one verdict for one stated reason. Today's guard gives different verdicts by
+   position for 25 of the 49, and clears `coderabbitai[bot]`, `google-labs-jules[bot]` and
+   `devin-ai-integration[bot]` in all four.
    - Refused as a model, each by its address alone: every entry of the starting list, under the
-     neutral name `Probe`. Also `Claude <NOREPLY@ANTHROPIC.COM>` (ASCII case) and
-     `Probe <claude[bot]@users.noreply.github.com>` (no `<id>+` prefix). Catches a list missing an
-     entry today's guard reaches, such as Copilot, `claude[bot]` or `Codex <codex@openai.com>`,
-     and one missing `coderabbitai[bot]`, which today's guard clears.
+     neutral name `Probe`. Also `Claude <NOREPLY@ANTHROPIC.COM>` (ASCII case),
+     `Probe <claude[bot]@users.noreply.github.com>` (no `<id>+` prefix) and
+     `Probe <209825114+CLAUDE[BOT]@USERS.NOREPLY.GITHUB.COM>` (ASCII case in the login and the
+     domain). Catches a list missing an entry today's guard reaches, such as Copilot,
+     `claude[bot]` or `Codex <codex@openai.com>`, and one missing `coderabbitai[bot]`, which
+     today's guard clears.
    - Cleared as people: `Jane Doe <jane@anthropic.com>` and `Sam Roe <sam@cursor.com>`, which
      catch a model recognized by its domain. `Claude Monet <claude.monet@corp.locale.io>`,
      `Alex Aitken <alex.aitken@corp.locale.io>` and `Ana Gemini <ana@corp.locale.io>` catch a name
      or substring search; today's trailer check refuses all three. `QA <qa@ci.tests.org>` and
      `Jane Doe <jane@corp.locale.io>` catch a domain matched as a substring.
      `Jane Doe <4242+janedoe@users.noreply.github.com>` catches a list grown to `noreply`.
+     `Kevin Devin <kevin.devin@cognition.ai>` and
+     `Claude Monet <81848+claudemonet@users.noreply.github.com>` catch a tool address or login
+     matched by substring or prefix.
    - Cleared as a bot: `dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>` and
      `dependabot[bot] <support@github.com>`. Catches a list grown to `github` or `bot`.
    - Refused as untraceable: an address on each listed domain, and `me@laptop.local.`,
      `me@LAPTOP.LOCAL` and `exec025@localhost`. Catches a check that knows only `.local`, one that
      needs a dot before the name, and one that misses case or a trailing dot.
-   - No address: `Claude (Fable 5) <>` is refused as a model, and `Jane Doe <>` as untraceable.
-     Catches a no-address rule written for trailers only.
+   - No address: `Claude (Fable 5) <>` is refused as a model. `Jane Doe <>`, `Jane Doe <jane>`
+     and, as a trailer, `Jane Doe` with no `<…>` are refused as untraceable. Catches a no-address
+     rule written for trailers only, and one that knows only `<>`.
 2. **Raw identities.** A commit authored by `Claude <noreply@anthropic.com>`, whose tree holds a
    `.mailmap` mapping that identity to a person, is refused, and the refusal names the raw author.
    Catches a guard that reads `%aN`, `%aE` or `git log`'s default output.
@@ -479,9 +488,10 @@ domain such as `corp.locale.io`, because `example.com` is on section 4's list.
    rewrite, the list changes with it.
 10. **CI reads every push.** On a push to `main`, the attribution read runs even when an earlier
     step fails. The implementing pull request shows it on a throwaway commit whose test fails: the
-    attribution step still concludes on that run. When the task closes, run history shows a
-    concluded attribution step for every push run on `main` since the change. Catches today's
-    `gates`, where a failed `tests` step skipped the read of 707972e and c5aa18d.
+    attribution step still concludes on that run. The step's condition does not depend on the
+    event, so that pull request run shows what a push run does. When the task closes, run history
+    shows a concluded attribution step for every push run on `main` since the change. Catches
+    today's `gates`, where a failed `tests` step skipped the read of 707972e and c5aa18d.
 11. **The pr-review skill.** It carries the checks of section 6: the workflow-approval rule, the
     pre-merge checks with their `gh api` command, the clearing of Dependabot, and how a model
     tool's suggestion is taken. It also carries the merge rule of section 2, item 4. #114 is the
