@@ -43,9 +43,12 @@ type Identity = (u64, u64);
 /// without following a symlink.
 ///
 /// Private modes (0700 for directories, 0600 for files) are set with `fchmod`, whatever the
-/// umask. On macOS they do not restrict access when the root or `cells` carries an inheritable
-/// ACL: the new entry inherits it and the mode does not show it. Nothing here removes or checks
-/// ACLs.
+/// umask. A directory this user cannot read, such as one a umask of 0477 left at 0300, is first
+/// set to 0700 by name with `fchmodat` and `AT_SYMLINK_NOFOLLOW`, then opened. On Linux the C
+/// library needs `/proc` or the `fchmodat2` call for that flag; with neither, such a directory
+/// is an `Io` error. On macOS private modes do not restrict access when the root or `cells`
+/// carries an inheritable ACL: the new entry inherits it and the mode does not show it. Nothing
+/// here removes or checks ACLs.
 #[derive(Debug)]
 pub struct InstanceRoot {
     dir: OwnedFd,

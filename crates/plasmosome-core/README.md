@@ -180,7 +180,10 @@ non-ASCII ID on HFS+ at creation.
 Spec 023 §3 puts two marker files and a runtime directory in a cell directory, beside the
 journal, and §7 moves an ended cell out of `cells/`. `CellDir` and `InstanceRoot` create, read
 and move them through opened directories (the cell directory, `cells/` and `retired/`), never by
-path and never through a symlink. Nothing calls them yet.
+path and never through a symlink. Nothing calls them yet. Every directory they make is set to
+mode 0700 whatever the umask. One the umask leaves unreadable, such as 0300 under a umask of
+0477, is set to 0700 by name, without following a symlink, before it is opened; `cells/` and the
+cell directory get the same treatment.
 
 - `launched` is written as one line, `{"cell":"cell-3","boot_session":"<uuid>"}` and a newline,
   with `,"stopped":true` before the closing brace after a clean stop. The boot session is
