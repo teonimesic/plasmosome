@@ -45,7 +45,12 @@ except ImportError:
     sys.exit(2)
 
 MAX_BYTES = 8 * 1024 * 1024
+SYMLINK_TARGET_BYTES = 4096
 GIT_TIMEOUT_SECONDS = 60
+
+# Spec 026 section 1 names no key that tracked Cargo configuration may hold. A key is added here
+# only after the spec names it.
+CONFIG_KEYS = frozenset()
 
 HARM = (
     "A program nobody reviewed runs at the first cargo command on every machine that builds main, "
@@ -54,6 +59,9 @@ HARM = (
 
 COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 RECORD = re.compile(r"([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40}|[0-9a-f]{64})")
+BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
+SYMLINK = "120000"
+KIND_LABELS = {"blob": "(file)", "tree": "(directory)", "commit": "(submodule)"}
 
 
 class CannotRead(Exception):
@@ -139,7 +147,84 @@ def entries(sha):
     return listed
 
 
+def key_path(parts):
+    return ".".join(
+        part if BARE_KEY.fullmatch(part) else '"' + printable(part).replace('"', '\\"') + '"'
+        for part in parts
+    )
+
+
+def leaf_keys(document):
+    found = []
+    pending = [(None, document)]
+    while pending:
+        node, table = pending.pop()
+        for key, value in table.items():
+            child = (node, key)
+            if isinstance(value, dict) and value:
+                pending.append((child, value))
+                continue
+            parts = []
+            while child is not None:
+                child, part = child
+                parts.append(part)
+            found.append(key_path(reversed(parts)))
+    return sorted(found)
+
+
+def blob_what(entry):
+    return f"{printable(entry.path)} (blob {entry.oid})"
+
+
+def read_toml(entry):
+    data = git(["cat-file", "blob", entry.oid], blob_what(entry), limit=MAX_BYTES)
+    if data is None:
+        return None, f"larger than {MAX_BYTES // (1024 * 1024)} MiB, the most this step reads"
+    try:
+        return tomllib.loads(data.decode("utf-8")), None
+    except Exception as error:
+        return None, f"cannot be parsed as TOML: {printable(str(error))}"
+
+
+def whole(entry, rule):
+    if entry.mode != SYMLINK:
+        return (entry.path, KIND_LABELS[entry.kind], rule)
+    target = git(["cat-file", "blob", entry.oid], blob_what(entry), limit=SYMLINK_TARGET_BYTES)
+    shown = (
+        printable(target.decode("utf-8", "surrogateescape"))
+        if target is not None
+        else f"a target longer than {SYMLINK_TARGET_BYTES} bytes"
+    )
+    return (entry.path, "(symlink)", f"a symlink to {shown}; {rule}")
+
+
+def configuration(entry):
+    if entry.kind != "blob" or entry.mode == SYMLINK:
+        return [whole(entry, "any tracked Cargo configuration is refused")]
+    document, problem = read_toml(entry)
+    if problem:
+        return [(entry.path, "(file)", problem)]
+    if not document:
+        return [(entry.path, "(no keys)", "any tracked Cargo configuration is refused, an empty file included")]
+    return [
+        (entry.path, key, "not a key spec 026 allows in Cargo configuration")
+        for key in leaf_keys(document)
+        if key not in CONFIG_KEYS
+    ]
+
+
+def cargo_directory(entry):
+    if entry.mode == SYMLINK or entry.kind == "commit":
+        return [whole(entry, "cargo reads .cargo/config.toml through it")]
+    return []
+
+
 def check(entry):
+    parts = entry.path.casefold().split("/")
+    if parts[-1] in ("config", "config.toml") and parts[-2:-1] == [".cargo"]:
+        return configuration(entry)
+    if parts[-1] == ".cargo":
+        return cargo_directory(entry)
     return []
 
 
