@@ -1,24 +1,41 @@
 #!/usr/bin/env -S python3 -I
-"""Spec 026's git-only step: refuse a commit whose files would swap or wrap what cargo builds.
+"""Spec 026's git-only step: refuse a commit whose Cargo configuration or toolchain files would
+swap or wrap what cargo builds.
 
 Usage: build-input-guard [COMMIT]    (COMMIT defaults to HEAD)
 
 The step reads COMMIT from git's object store with `git rev-parse`, `git ls-tree` and
-`git cat-file blob`. It never checks out, never reads the working tree, and never runs cargo, rustc
-or rustup, because any of them can run a program the commit names.
+`git cat-file blob`, ignoring replace refs. It never checks out, never reads the working tree, and
+never runs cargo, rustc or rustup, because any of them can run a program the commit names.
+
+It refuses any tracked `.cargo/config` or `.cargo/config.toml` at any depth, and a symlink named
+`.cargo`. It refuses an extensionless `rust-toolchain`, and a `rust-toolchain.toml` holding
+anything beyond a [toolchain] table with channel, components, targets and profile. It refuses
+every submodule, since the commit does not hold a submodule's files. Names are compared as a
+case-insensitive filesystem compares them.
+
+Clean does not yet cover `[patch]`, `[replace]`, path dependencies outside the repository,
+symlinks that leave it, or lockfile sources other than crates.io. A reviewer reads those by hand
+until plasmosome-jfm2 adds them to this step.
 
 Exit 0: clean. Exit 1: refused. Each finding is one line, `build-input-guard: <path>: <key>:
 <reason>`, and the harm follows once. Exit 2: the step could not read the commit, or was run the
 wrong way. It refuses rather than passing: a commit it cannot read is a commit it cannot clear.
 
-A reviewer runs main's copy against a contributor's PR before checking anything out:
+A steward or reviewer runs main's copy against a contributor's PR before checking anything out.
+This works from any branch:
 
+    git fetch origin main
     git fetch origin pull/N/head
-    ./.githooks/build-input-guard FETCH_HEAD
+    git --no-replace-objects cat-file blob origin/main:.githooks/build-input-guard |
+        python3 -I - FETCH_HEAD
 
-A CI verdict counts only when the PR leaves `.github/`, `.githooks/` and the `tools/` files a
-workflow runs unchanged. The script runs as `python3 -I`, so a module planted beside it cannot
-shadow the standard library. It is one file and imports nothing from this repository.
+The clean line names the commit it judged. Check out that exact SHA in the separate clone, not
+whatever `pull/N/head` names by then: the head can move between the two fetches.
+
+A CI verdict counts only when the PR leaves `.github/`, `.githooks/` and `tools/` unchanged. The
+script runs as `python3 -I`, so a module planted beside it cannot shadow the standard library. It
+needs Python 3.11 or later, for tomllib. It is one file and imports nothing from this repository.
 """
 
 import sys
