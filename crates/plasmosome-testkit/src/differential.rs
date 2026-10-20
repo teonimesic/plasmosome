@@ -3,11 +3,11 @@ mod tests;
 
 use std::collections::BTreeSet;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 /// One of spec 027 §5's five ways a workload can observe the membrane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Channel {
     Refusal,
@@ -29,7 +29,7 @@ impl Channel {
 }
 
 /// What a reach probe reaches outside the granted set: a host, a path or a kernel facility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReachKind {
     Host,
@@ -43,9 +43,11 @@ impl ReachKind {
 }
 
 /// One probe as the manifest declares it. `reach` is set only on a reach probe.
-/// `workload_set` names the fields whose values the workload itself set, such as a time set
-/// with `utimensat`; those are always compared exactly.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `workload_set` is required, even when empty: it names the fields whose values the workload
+/// itself set, such as a time set with `utimensat`, and no rule may cover them. Fields are the
+/// top-level keys of the probe's observation, and a rule covers a field's whole value, so a
+/// value the workload set needs a top-level field of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProbeSpec {
     pub id: String,
@@ -116,17 +118,11 @@ impl RuleKind {
             RuleKind::LoadCounter => "load_counter",
         }
     }
-
-    /// Whether placeholders of this kind keep the order of the values they replace. Only
-    /// the system's times and durations do.
-    pub fn keeps_order(self) -> bool {
-        matches!(self, RuleKind::SystemTime | RuleKind::Duration)
-    }
 }
 
 /// A difference the cell lane may show: in `field` of `probe`, the cell lane may hold exactly
 /// `cell_value` where the absent lane holds something else.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Allowance {
     pub probe: String,
@@ -137,7 +133,7 @@ pub struct Allowance {
 /// The fixed neutral names every lane must show. `mounts_probe` reports one field per mount
 /// path, an object with `source`, `fstype` and `options`, plus `subtype` on a mount whose
 /// type is `fuse`. `cgroup_probe` reports the workload's cgroup path in its field `path`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Neutral {
     pub mounts_probe: String,
@@ -148,7 +144,7 @@ pub struct Neutral {
 }
 
 /// The neutral source, type and options of the mount at `path`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NeutralMount {
     pub path: String,
@@ -157,8 +153,9 @@ pub struct NeutralMount {
     pub options: String,
 }
 
-/// The probe manifest, fixed before the run. Build it with [`load`], which refuses one that
-/// breaks spec 027 §6's measurement rules.
+/// The probe manifest, fixed before the run. Build it with [`load`]. It checks only the
+/// manifest's own tables, the cases [`ManifestRefusal`] lists; the rules about runs are not
+/// checked here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     pub probes: Vec<ProbeSpec>,
@@ -191,7 +188,7 @@ pub enum ManifestRefusal {
     },
     UnknownProbe {
         probe: String,
-        named_by: &'static str,
+        named_by: NamedBy,
     },
     RuleOnWorkloadSetField {
         probe: String,
@@ -213,12 +210,37 @@ pub enum ManifestRefusal {
         path: String,
     },
     NeutralMountMissing {
-        mount: &'static str,
+        mount: RequiredMount,
     },
 }
 
-/// Parses a manifest from JSON and refuses it before any comparison if spec 027 §6's
-/// measurement rules do not hold.
+/// The manifest key that named an undeclared probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedBy {
+    /// `rules[].probe`
+    Rule,
+    /// `allowances[].probe`
+    Allowance,
+    /// `neutral.mounts_probe`
+    MountsProbe,
+    /// `neutral.cgroup_probe`
+    CgroupProbe,
+}
+
+/// A neutral mount the manifest must declare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequiredMount {
+    /// A mount at `/opt`.
+    Opt,
+    /// A mount at `/usr/local/bin`.
+    UsrLocalBin,
+    /// A mount of type `fuse` at a path other than `/opt` and `/usr/local/bin`.
+    FuseWorkspace,
+}
+
+/// Parses a manifest from JSON and refuses it, before any comparison, if its own tables break
+/// spec 027 §6. Every key is required except `reach`, `rules` and `allowances`, and an unknown
+/// key at any level is refused.
 pub fn load(json: &str) -> Result<Manifest, ManifestRefusal> {
     let raw: RawManifest =
         serde_json::from_str(json).map_err(|error| ManifestRefusal::Malformed {
@@ -314,7 +336,7 @@ impl Manifest {
         };
         let mut ruled = BTreeSet::new();
         for rule in &self.rules {
-            known(&rule.probe, "rule")?;
+            known(&rule.probe, NamedBy::Rule)?;
             let set_by_workload = self
                 .probes
                 .iter()
@@ -334,7 +356,7 @@ impl Manifest {
         }
         let mut allowed = BTreeSet::new();
         for allowance in &self.allowances {
-            known(&allowance.probe, "allowance")?;
+            known(&allowance.probe, NamedBy::Allowance)?;
             if !allowed.insert((&allowance.probe, &allowance.field)) {
                 return Err(ManifestRefusal::DuplicateAllowance {
                     probe: allowance.probe.clone(),
@@ -348,8 +370,8 @@ impl Manifest {
                 });
             }
         }
-        known(&self.neutral.mounts_probe, "neutral")?;
-        known(&self.neutral.cgroup_probe, "neutral")?;
+        known(&self.neutral.mounts_probe, NamedBy::MountsProbe)?;
+        known(&self.neutral.cgroup_probe, NamedBy::CgroupProbe)?;
         let mounts = &self.neutral.mounts;
         let mut paths = BTreeSet::new();
         for mount in mounts {
@@ -359,18 +381,21 @@ impl Manifest {
                 });
             }
         }
-        let software = ["/opt", "/usr/local/bin"];
-        for mount in software {
-            if !paths.contains(mount) {
+        let software = [
+            (RequiredMount::Opt, "/opt"),
+            (RequiredMount::UsrLocalBin, "/usr/local/bin"),
+        ];
+        for (mount, path) in software {
+            if !paths.contains(path) {
                 return Err(ManifestRefusal::NeutralMountMissing { mount });
             }
         }
-        let workspace = mounts
-            .iter()
-            .any(|neutral| neutral.fstype == FUSE && !software.contains(&neutral.path.as_str()));
+        let workspace = mounts.iter().any(|neutral| {
+            neutral.fstype == FUSE && software.iter().all(|(_, path)| neutral.path != *path)
+        });
         if !workspace {
             return Err(ManifestRefusal::NeutralMountMissing {
-                mount: "a FUSE workspace",
+                mount: RequiredMount::FuseWorkspace,
             });
         }
         Ok(())
