@@ -12,6 +12,7 @@ pub mod control;
 pub mod daemon;
 pub mod gatekeeper;
 pub mod instance;
+pub mod kill_budget;
 pub mod lifecycle;
 pub mod manifest;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -37,6 +38,9 @@ pub use gatekeeper::Gatekeeper;
 pub use instance::{
     CellDir, CellDirError, DiscoveredEntry, Discovery, DiscoveryError, EntryClass, InstanceRoot,
     InstanceRootError, JournalAppend, JournalOpen, JournalRefusal, LockError, NotACell, WriterLock,
+};
+pub use kill_budget::{
+    GuestStop, Incomplete, KillBudget, Share, Shortfall, Withdrawal, WorkloadStop,
 };
 pub use lifecycle::{PluginState, StateError};
 pub use manifest::{ManifestError, PlasmidManifest};
