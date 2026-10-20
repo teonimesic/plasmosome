@@ -17,6 +17,12 @@ pub const PINNED_BUNDLE_ID: &str = "eed141b574337d99";
 
 const SUMS: &str = "SHA256SUMS";
 
+const MANIFEST: &str = "manifest.json";
+
+const ROOT: &str = ".";
+
+const ID_DIGITS: usize = 16;
+
 const LOADABLE: &str = "lib";
 
 /// A bundle directory whose files matched its `SHA256SUMS` when it was checked.
@@ -80,9 +86,113 @@ fn inside(relative: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn read_sums(dir: &Path) -> Result<BTreeMap<String, String>, BundleError> {
-    let text = fs::read_to_string(dir.join(SUMS))
+fn no_links_under(dir: &Path, relative: &str) -> Result<(), BundleError> {
+    let here = if relative == ROOT {
+        dir.to_path_buf()
+    } else {
+        dir.join(relative)
+    };
+    let mut names = Vec::new();
+    for entry in fs::read_dir(&here)
+        .or_else(|error| refuse(relative, format!("cannot be listed: {error}")))?
+    {
+        let entry =
+            entry.or_else(|error| refuse(relative, format!("cannot be listed: {error}")))?;
+        names.push(entry.file_name().to_string_lossy().to_string());
+    }
+    names.sort();
+    for name in names {
+        let child = if relative == ROOT {
+            name
+        } else {
+            format!("{relative}/{name}")
+        };
+        let kind = fs::symlink_metadata(dir.join(&child))
+            .or_else(|error| refuse(&child, format!("cannot be read: {error}")))?
+            .file_type();
+        if kind.is_symlink() {
+            return refuse(&child, "is a symlink inside the bundle");
+        }
+        if kind.is_dir() {
+            no_links_under(dir, &child)?;
+        } else if !kind.is_file() {
+            return refuse(&child, "is neither a regular file nor a directory");
+        }
+    }
+    Ok(())
+}
+
+fn check_root(dir: &Path) -> Result<String, BundleError> {
+    if !dir.is_absolute() {
+        return refuse(
+            ROOT,
+            format!("the bundle path {} is not absolute", dir.display()),
+        );
+    }
+    let kind = fs::symlink_metadata(dir)
+        .or_else(|error| refuse(ROOT, format!("the bundle cannot be read: {error}")))?
+        .file_type();
+    if kind.is_symlink() {
+        return refuse(
+            ROOT,
+            format!("the bundle path {} is a symlink", dir.display()),
+        );
+    }
+    if !kind.is_dir() {
+        return refuse(
+            ROOT,
+            format!("the bundle path {} is not a directory", dir.display()),
+        );
+    }
+    dir.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| BundleError {
+            path: ROOT.to_string(),
+            reason: format!("the bundle path {} has no name", dir.display()),
+        })
+}
+
+fn check_chain(dir: &Path, id: &str, pinned_id: &str) -> Result<Vec<u8>, BundleError> {
+    let manifest = fs::read(dir.join(MANIFEST))
+        .or_else(|error| refuse(MANIFEST, format!("cannot be read: {error}")))?;
+    let manifest_digest = sha256_hex(&manifest);
+    if id.len() != ID_DIGITS || !manifest_digest.starts_with(id) {
+        return refuse(
+            MANIFEST,
+            format!(
+                "has SHA-256 {manifest_digest}, which does not begin with the bundle's name `{id}`"
+            ),
+        );
+    }
+    if id != pinned_id {
+        return refuse(
+            MANIFEST,
+            format!("names bundle `{id}`, but these lanes are pinned to bundle `{pinned_id}`"),
+        );
+    }
+    let listed = serde_json::from_slice::<serde_json::Value>(&manifest)
+        .ok()
+        .and_then(|value| value.get("sha256sums_sha256")?.as_str().map(str::to_string))
+        .filter(|digest| is_digest(digest));
+    let Some(listed) = listed else {
+        return refuse(MANIFEST, "has no lowercase SHA-256 in `sha256sums_sha256`");
+    };
+    let sums = fs::read(dir.join(SUMS))
         .or_else(|error| refuse(SUMS, format!("cannot be read: {error}")))?;
+    let sums_digest = sha256_hex(&sums);
+    if sums_digest != listed {
+        return refuse(
+            SUMS,
+            format!("has SHA-256 {sums_digest}, but {MANIFEST} lists {listed}"),
+        );
+    }
+    Ok(sums)
+}
+
+fn read_sums(sums: &[u8]) -> Result<BTreeMap<String, String>, BundleError> {
+    let text = std::str::from_utf8(sums)
+        .or_else(|error| refuse(SUMS, format!("is not UTF-8: {error}")))?;
     let mut files = BTreeMap::new();
     for (index, line) in text.lines().enumerate() {
         let Some((digest, relative)) = line.split_once("  ") else {
@@ -163,10 +273,17 @@ fn unlisted_under(
     Ok(())
 }
 
-/// Check every file `dir/SHA256SUMS` lists against its digest, and refuse a file under `lib/`
-/// that it does not list. Nothing is loaded; the caller loads only after this returns `Ok`.
-pub fn verify_bundle(dir: &Path, _pinned_id: &str) -> Result<VerifiedBundle, BundleError> {
-    let files = read_sums(dir)?;
+/// Check the bundle at the absolute path `dir` and refuse it, naming the path at fault, unless:
+/// no symlink and nothing but regular files and directories sit anywhere in its tree; the
+/// SHA-256 of `manifest.json` begins with the directory's name, and that name is `pinned_id`;
+/// the manifest's `sha256sums_sha256` is the SHA-256 of `SHA256SUMS`; every file `SHA256SUMS`
+/// lists matches its digest; and every file under `lib/` is listed. Nothing is loaded; the
+/// caller loads only after this returns `Ok`.
+pub fn verify_bundle(dir: &Path, pinned_id: &str) -> Result<VerifiedBundle, BundleError> {
+    let id = check_root(dir)?;
+    no_links_under(dir, ROOT)?;
+    let sums = check_chain(dir, &id, pinned_id)?;
+    let files = read_sums(&sums)?;
     for required in [LIBKRUN, KERNEL] {
         if !files.contains_key(required) {
             return refuse(required, "is not listed in SHA256SUMS");
@@ -178,10 +295,7 @@ pub fn verify_bundle(dir: &Path, _pinned_id: &str) -> Result<VerifiedBundle, Bun
     unlisted_under(dir, LOADABLE, &files)?;
     Ok(VerifiedBundle {
         dir: dir.to_path_buf(),
-        id: dir
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_default(),
+        id,
         files,
     })
 }

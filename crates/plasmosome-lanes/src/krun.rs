@@ -3,7 +3,7 @@ use std::fmt;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use crate::bundle::{LIBKRUN, VerifiedBundle};
+use crate::bundle::{LIBKRUN, PINNED_BUNDLE_ID, VerifiedBundle};
 
 /// The command line spec 001 §4.2 fixes for the guest kernel.
 pub const CMDLINE: &str = "rdinit=/init panic=-1";
@@ -115,15 +115,24 @@ fn checked(call: &str, rc: i32) -> Result<(), KrunError> {
 }
 
 impl Libkrun {
-    /// Load the libkrun at the absolute `path` and resolve every function `lane-vmm` calls.
-    /// The library's initializers run here, so verify its bytes first.
+    /// Load the libkrun of `bundle`, which must be the pinned bundle, and resolve every function
+    /// `lane-vmm` calls. The library's initializers run here.
     pub fn open(bundle: &VerifiedBundle) -> Result<Libkrun, KrunError> {
+        if bundle.id() != PINNED_BUNDLE_ID {
+            return Err(KrunError(format!(
+                "bundle `{}` is not the pinned bundle `{PINNED_BUNDLE_ID}`",
+                bundle.id()
+            )));
+        }
         let path = &bundle
             .path(LIBKRUN)
             .ok_or_else(|| KrunError(format!("{LIBKRUN} is not listed")))?;
         let c_name = c_path("the libkrun path", path)?;
-        // SAFETY: `c_name` is a NUL-terminated absolute path. Loading runs the library's
-        // initializers; the caller verified the file against the bundle's SHA256SUMS first.
+        // SAFETY: `bundle` is a VerifiedBundle, which only verify_bundle makes: its directory is
+        // absolute, and when it was checked the file at this path was a regular file, with no
+        // symlink on the way, whose bytes matched the pinned bundle's SHA256SUMS, checked above.
+        // An absolute path makes dlopen search nothing. Loading runs that file's initializers;
+        // a writer that replaces it after the check is the limit the crate README names.
         let handle = unsafe { libc::dlopen(c_name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
         if handle.is_null() {
             return Err(KrunError(format!(
@@ -132,8 +141,9 @@ impl Libkrun {
                 last_dlerror()
             )));
         }
-        // SAFETY: `handle` was just returned by dlopen and is never closed. Each type alias
-        // matches the declaration of the same name in libkrun v1.19.4's include/libkrun.h.
+        // SAFETY: `handle` was just returned by dlopen and is never closed. The pinned bundle's
+        // libkrun is v1.19.4, and each type alias matches the declaration of the same name in
+        // that version's include/libkrun.h.
         let symbols = unsafe {
             Symbols {
                 init_log: symbol(handle, c"krun_init_log")?,
