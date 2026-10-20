@@ -49,11 +49,13 @@ reviews:
         House style: no inline `//` comments, with one exception: a `// SAFETY:` comment
         directly above an `unsafe` block or `unsafe impl`, or above the statement that holds
         it, saying why it is sound there. Clippy requires it (spec 026 section 2), so do not
-        flag one. Documentation is `///` contract docs on public items only, stating what a
-        caller must pass, what it gets back, and what it must not do. `//!` is allowed at the
-        root of a library crate, saying in a sentence or two what the crate is for; background
-        belongs in its README. Flag any other added inline comment; do not ask for comments to
-        be added.
+        flag one. Documentation is `///` contract docs on public items, stating what a caller
+        must pass, what it gets back, and what it must not do. Spec 026 section 2 also asks
+        for two docs on private items: a `///` on each `unsafe extern` declaration, saying
+        what it assumes about the foreign side, and a `# Safety` section on every `unsafe fn`,
+        private ones included. `//!` is allowed at the root of a library crate, saying in a
+        sentence or two what the crate is for; background belongs in its README. Flag any
+        other added inline comment; do not ask for comments to be added beyond these.
 
   auto_review:
     enabled: true
