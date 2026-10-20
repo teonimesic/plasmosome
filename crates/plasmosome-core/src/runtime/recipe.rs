@@ -42,6 +42,20 @@ pub struct Artifact {
 }
 
 impl Artifact {
+    /// Reads an artifact from a JSON object with exactly the keys `path` and
+    /// `sha256`. Every refusal names its key under `field`, such as
+    /// `cell_runtime.membraned.path`; a value that is not an object refuses as
+    /// `NotAnObject` naming `field` itself. `value` must come from
+    /// [`strict_json::parse_value`], which refuses repeated keys.
+    pub fn from_value(value: &Value, field: &str) -> Result<Artifact, RecipeRefusal> {
+        let [path_value, sha256_value] = fields(value, ARTIFACT_FIELDS, field)?;
+        let path = path(path_value, format!("{field}.path"))?;
+        let field = format!("{field}.sha256");
+        let sha256 = Digest::parse_hex(text(sha256_value, &field)?)
+            .map_err(|fault| RecipeRefusal::BadDigest { field, fault })?;
+        Ok(Artifact { path, sha256 })
+    }
+
     /// Where the file is. The path is canonical in spelling only.
     pub fn path(&self) -> &RecipePath {
         &self.path
@@ -368,6 +382,18 @@ impl RuntimeRecipe {
     /// keys are checked when the value pass reaches its field.
     pub fn parse(record: &[u8], limits: &PlatformLimits) -> Result<RuntimeRecipe, RecipeRefusal> {
         let value = strict_json::parse_value(one_line(record)?).map_err(refused_json)?;
+        RuntimeRecipe::from_value(&value, limits)
+    }
+
+    /// Reads a recipe from a JSON value, applying every rule of
+    /// [`RuntimeRecipe::parse`] after its framing and JSON checks, in the same
+    /// order. A recipe nested in a larger record is read this way. `value`
+    /// must come from [`strict_json::parse_value`]: a value read any other way
+    /// may have dropped a repeated key, which this cannot see.
+    pub fn from_value(
+        value: &Value,
+        limits: &PlatformLimits,
+    ) -> Result<RuntimeRecipe, RecipeRefusal> {
         let [
             version,
             vcpus,
@@ -384,12 +410,12 @@ impl RuntimeRecipe {
             host_policy,
             guest_policy,
             architecture,
-        ] = fields(&value, RECIPE_FIELDS, "")?;
+        ] = fields(value, RECIPE_FIELDS, "")?;
         check_version(version)?;
         let recipe = RuntimeRecipe {
             vcpus: whole(vcpus, "vcpus", VCPUS_RANGE)?,
             memory_mib: whole(memory_mib, "memory_mib", MEMORY_RANGE)?,
-            kernel: artifact(kernel, "kernel")?,
+            kernel: Artifact::from_value(kernel, "kernel")?,
             kernel_format: spelled(
                 kernel_format,
                 "kernel_format",
@@ -397,15 +423,15 @@ impl RuntimeRecipe {
                 KernelFormat::as_str,
                 |found| RecipeRefusal::UnknownKernelFormat { found },
             )?,
-            initramfs: artifact(initramfs, "initramfs")?,
-            root_image: artifact(root_image, "root_image")?,
+            initramfs: Artifact::from_value(initramfs, "initramfs")?,
+            root_image: Artifact::from_value(root_image, "root_image")?,
             writable_root: path(writable_root, "writable_root".to_owned())?,
             control_path: path(control_path, "control_path".to_owned())?,
             data_path: path(data_path, "data_path".to_owned())?,
-            helper: artifact(helper, "helper")?,
+            helper: Artifact::from_value(helper, "helper")?,
             libraries: library_list(libraries)?,
-            host_policy: artifact(host_policy, "host_policy")?,
-            guest_policy: artifact(guest_policy, "guest_policy")?,
+            host_policy: Artifact::from_value(host_policy, "host_policy")?,
+            guest_policy: Artifact::from_value(guest_policy, "guest_policy")?,
             architecture: spelled(
                 architecture,
                 "architecture",
@@ -738,15 +764,6 @@ fn path(value: &Value, field: String) -> Result<RecipePath, RecipeRefusal> {
     RecipePath::parse(text(value, &field)?).map_err(|fault| RecipeRefusal::BadPath { field, fault })
 }
 
-fn artifact(value: &Value, at: &str) -> Result<Artifact, RecipeRefusal> {
-    let [path_value, sha256_value] = fields(value, ARTIFACT_FIELDS, at)?;
-    let path = path(path_value, format!("{at}.path"))?;
-    let field = format!("{at}.sha256");
-    let sha256 = Digest::parse_hex(text(sha256_value, &field)?)
-        .map_err(|fault| RecipeRefusal::BadDigest { field, fault })?;
-    Ok(Artifact { path, sha256 })
-}
-
 fn library_list(value: &Value) -> Result<Vec<Artifact>, RecipeRefusal> {
     let Value::Array(entries) = value else {
         return Err(wrong_type("libraries", "an array"));
@@ -754,7 +771,7 @@ fn library_list(value: &Value) -> Result<Vec<Artifact>, RecipeRefusal> {
     entries
         .iter()
         .enumerate()
-        .map(|(index, entry)| artifact(entry, &format!("libraries[{index}]")))
+        .map(|(index, entry)| Artifact::from_value(entry, &format!("libraries[{index}]")))
         .collect()
 }
 
