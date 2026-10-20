@@ -126,7 +126,7 @@ pub enum Reason {
     /// Bytes other than whitespace follow the value.
     Trailing,
     /// An object repeats a key, compared after decoding. `path` is the RFC 6901 pointer to the
-    /// repeat.
+    /// repeat, as decoded. `Display` shows each terminal control in it as `<U+XXXX>`.
     DuplicateKey { path: String },
 }
 
@@ -141,7 +141,7 @@ impl fmt::Display for Reason {
             Reason::Escape => f.write_str("a string holds an invalid escape"),
             Reason::LoneSurrogate => f.write_str("a string escapes a lone surrogate"),
             Reason::Trailing => f.write_str("more text follows the value"),
-            Reason::DuplicateKey { path } => write!(f, "the key {path} repeats"),
+            Reason::DuplicateKey { path } => write!(f, "the key {} repeats", show(path)),
         }
     }
 }
