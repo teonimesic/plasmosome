@@ -581,6 +581,10 @@ impl CellDir {
     /// may leave `launched.tmp`, which the next call removes. If the directory sync fails, the
     /// marker is already in place: `read_launched` reports it as `Present`, a retry is
     /// `AlreadyExists`, and [`CellDir::sync`] completes the sync.
+    ///
+    /// The caller must be the only writer of this cell's `launched`, as `membraned` is while it
+    /// holds the cell's `supervisor.lock`; this call does not check it. A second writer can
+    /// replace the temporary before the rename, and a reader can then see an empty marker.
     pub fn create_launched(&self, boot_session: BootSession) -> Result<(), CellDirError> {
         if parse_cell_id(self.cell.as_str()).is_none() {
             return Err(CellDirError::InvalidCell(CellPathError::NotACellName(
@@ -663,6 +667,10 @@ impl CellDir {
     /// A failure before the rename leaves the old record, and may leave `launched.tmp`, which the
     /// next call removes. If the directory sync fails, the new record is already in place, and a
     /// retry writes it again and syncs.
+    ///
+    /// The caller must be the only writer of this cell's `launched`, as `membraned` is while it
+    /// holds the cell's `supervisor.lock`; this call does not check it. A second writer can
+    /// replace the temporary before the rename, and a reader can then see an empty marker.
     pub fn mark_launched_stopped(&self) -> Result<(), CellDirError> {
         let path = self.entry_path(LAUNCHED_FILE);
         let marker = match self.read_launched() {
@@ -683,8 +691,9 @@ impl CellDir {
     }
 
     /// Removes the entry named `launched` and syncs this directory. A missing entry is not an
-    /// error, and the directory is still synced, so a retry after a failed sync completes. A
-    /// directory named `launched` is not removed and is an `Io` error.
+    /// error, and the directory is still synced, so a retry after a failed sync completes. If the
+    /// sync fails, the marker is already gone and the error names this directory. A directory
+    /// named `launched` is not removed and is an `Io` error.
     pub fn remove_launched(&self) -> Result<(), CellDirError> {
         match remove_at(self.dir.as_fd(), LAUNCHED_FILE) {
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
@@ -696,7 +705,8 @@ impl CellDir {
     /// Creates `runtime/` exclusively with mode 0700 whatever the umask, opens it without
     /// following a symlink, syncs this directory and returns the opened directory, close-on-exec.
     /// Any existing entry named `runtime` is `AlreadyExists`: a runtime directory is never
-    /// reused.
+    /// reused. If the sync fails, `runtime/` is already in place with mode 0700 and the error
+    /// names this directory; a retry is `AlreadyExists`, and [`CellDir::sync`] completes the sync.
     pub fn create_runtime_dir(&self) -> Result<OwnedFd, CellDirError> {
         let path = self.entry_path(RUNTIME_DIR);
         match make_directory_at(self.dir.as_fd(), RUNTIME_DIR) {

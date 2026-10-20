@@ -196,8 +196,10 @@ path and never through a symlink. Nothing calls them yet.
   `mark_launched_stopped` writes the stopped record the same way, but its rename replaces
   `launched`. A reader sees no marker or one whole record, never part of one. A failure before a
   rename leaves what was there and maybe a `launched.tmp`, which the next write removes. A failed
-  directory sync after a rename leaves the new record in place. `remove_launched` removes the
-  marker, and a missing marker is not an error.
+  directory sync after a rename leaves the new record in place. Both assume one writer of
+  `launched`, as `membraned` is while it holds `supervisor.lock`: a second writer can replace the
+  temporary before the rename, and a reader can then see an empty marker. `remove_launched`
+  removes the marker and syncs the directory, and a missing marker is not an error.
 - `read_launched` is `Absent` only when no entry named `launched` exists. A symlink, a
   directory, a FIFO or a socket, a record that reading refuses, a marker naming another cell, and
   an error opening or reading it are `Unreadable`. An error never reads as absence, because an
@@ -205,7 +207,9 @@ path and never through a symlink. Nothing calls them yet.
 - `create_created` needs the writer lock. It creates the empty `created` file exclusively with
   mode 0600, and syncs it and then the directory; if a sync fails, the file is already there.
   `has_created` refuses an entry that is not a regular file rather than reading it as true.
-  `create_runtime_dir` creates `runtime/` exclusively with mode 0700 and returns it opened.
+  `create_runtime_dir` creates `runtime/` exclusively with mode 0700, syncs the directory and
+  returns `runtime/` opened; if the sync fails, `runtime/` is already there and a retry is
+  `AlreadyExists`.
 - `InstanceRoot::retire` takes the writer lock and consumes the `CellDir`. Its caller must also
   hold the cell's `supervisor.lock`, which `retire` does not check. It creates `retired/` with
   mode 0700 when it is missing, checks that `cells/<cell>` is still the opened directory by
