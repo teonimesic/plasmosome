@@ -34,9 +34,10 @@ pub enum JournalFact {
     Corrupt,
     /// Nothing settled and nothing pending. A missing journal is empty.
     Empty,
-    /// A settled attachment or a pending operation. `external_obligation` is true when any of
-    /// them is a published delayed effect or an external assertion, which only an operator's
-    /// Force discharges.
+    /// A settled attachment or a pending operation. `external_obligation` is true when the
+    /// journal holds an outstanding external obligation: spec 008's published delayed effect or
+    /// external assertion, whether it is settled or a pending change retires it. Only an
+    /// operator's Force discharges it, and retiring never does.
     Holdings { external_obligation: bool },
 }
 
@@ -106,16 +107,17 @@ pub const fn decide(lock: LockFact, marker: MarkerFact, journal: JournalFact) ->
 /// One query to a held lock's supervisor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryResult {
-    /// The supervisor answered with this lifecycle.
+    /// The supervisor answered with this lifecycle, within the answer cap.
     Answered { lifecycle: CellStatus },
-    /// No answer. A caller maps a malformed answer here too.
+    /// No answer within the cap. A caller maps a malformed answer here too.
     NoAnswer,
 }
 
 /// What the controller does after one query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryOutcome {
-    /// The supervisor is live: adopt the cell.
+    /// The supervisor is live: attach it to the cell. This does not promise the cell is served:
+    /// spec 008's journal replay can still quarantine it.
     Adopt,
     /// Query again before the cap.
     KeepWaiting,
@@ -125,6 +127,11 @@ pub enum QueryOutcome {
 
 /// Decides what one query's result means. `cap_reached` is true once the answer cap has passed.
 /// A supervisor that answers any lifecycle but `germinating` is adopted, `dead` included.
+///
+/// Pass only an answer that arrived within the cap. Once the cap has passed, send no new query:
+/// call this once more with the last result that arrived within the cap, or `NoAnswer` if there
+/// was none, and `cap_reached` true. A germinating cell whose cap passes between two queries is
+/// then set aside as `germinating`, not `unresponsive`.
 pub const fn after_query(result: QueryResult, cap_reached: bool) -> QueryOutcome {
     match (result, cap_reached) {
         (
