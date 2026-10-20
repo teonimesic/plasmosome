@@ -77,9 +77,11 @@ pub struct ProbeSpec {
     pub workload_set: Vec<String>,
 }
 
-/// One row of the normalization table: the values of `field` in `probe` are to be replaced by
-/// placeholders of `kind`. [`judge`] does not apply rules yet, so it compares every field
-/// exactly, and its discrimination check leaves out the fields a rule covers.
+/// One row of the normalization table. [`judge`] replaces each value of `field` in `probe`
+/// with a placeholder of `kind`, numbered within that field in that run: by first appearance,
+/// or by order for system times and durations. So equal values stay equal and distinct ones
+/// distinct. The field must hold one value of `kind` or a list of them, or `judge` refuses the
+/// runs. No kind holds an object, so no value the workload set can hide inside a ruled field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub probe: String,
@@ -87,7 +89,10 @@ pub struct Rule {
     pub kind: RuleKind,
 }
 
-/// The only normalization rules spec 027 §6 lists. A new one is an edit to that spec.
+/// The only normalization rules spec 027 §6 lists. A new one is an edit to that spec. A process
+/// ID, mount ID, parent mount ID, device, inode or memory counter holds a whole number; an
+/// ephemeral port a whole number up to 65535; a system time, duration or load counter any
+/// number; a boot ID a UUID; and a resolved address an IPv4 or IPv6 address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuleKind {
     Pid,
@@ -141,7 +146,8 @@ impl RuleKind {
 }
 
 /// A difference the cell lane may show: in `field` of `probe`, the cell lane may hold exactly
-/// `cell_value` where the absent lane holds something else.
+/// `cell_value` where the absent lane holds something else. [`load`] refuses a key repeated
+/// inside `cell_value` at any depth, so the value a reader sees is the value compared.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Allowance {
@@ -263,8 +269,8 @@ pub enum RequiredMount {
 }
 
 /// Parses a manifest from JSON and refuses it, before any comparison, if its own tables break
-/// spec 027 §6. Every key is required except `reach`, `rules` and `allowances`, and an unknown
-/// key at any level is refused.
+/// spec 027 §6. Every key is required except `reach`, `rules` and `allowances`. An unknown key
+/// at any level is refused, and so is a key repeated in one object at any depth.
 pub fn load(json: &str) -> Result<Manifest, ManifestRefusal> {
     let raw: RawManifest =
         serde_json::from_str(json).map_err(|error| ManifestRefusal::Malformed {
@@ -463,8 +469,8 @@ impl Manifest {
 
 /// What one probe reported in one run. `completed` is its completion marker, and
 /// `failed_before_step` says it failed before the step it observes. Each field is compared
-/// whole and exactly, except that the discrimination check leaves out the fields a rule covers.
-/// The manifest's normalization rules are not applied yet, so a rule never loosens a comparison.
+/// whole. A field a rule covers is compared after its values are replaced by placeholders, and
+/// every other field exactly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
     pub probe: String,

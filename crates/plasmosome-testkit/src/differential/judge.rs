@@ -18,13 +18,13 @@ pub enum Reason {
     /// `lane` has no runs, or one of its runs has no completion marker for the subject, or the
     /// subject failed there before the step it observes.
     NotRun { lane: Lane },
-    /// The two runs of `lane` differ in `field`.
+    /// The two runs of `lane` differ in `field` after normalization.
     Noise { lane: Lane, field: String },
-    /// A completed open run and a completed absent run of a reach probe are equal, leaving out
-    /// the fields a rule covers.
+    /// A completed open run and a completed absent run of a reach probe are equal after
+    /// normalization.
     NoDiscrimination,
-    /// The cell lane differs from the absent lane in `field`, and no allowance admits the
-    /// cell's value there.
+    /// The cell lane differs from the absent lane in `field` after normalization, and no
+    /// allowance admits the cell's value there.
     Differs { field: String },
     /// `lane` does not show the manifest's neutral value for `name`.
     NotNeutral { lane: Lane, name: NeutralName },
@@ -100,10 +100,11 @@ pub enum RunRefusal {
 /// lane equals the absent lane except where an allowance admits the cell's exact value.
 /// Neutral names are checked on every completed run, and every completed run of one lane is
 /// compared with every completed run of the other. So a failure is listed even when a lane's
-/// other run is not run, and the verdict does not depend on the order of a lane's runs. Every
-/// field is compared exactly, because the manifest's rules are not applied yet. That can only
-/// find more noise and more differences. Discrimination leaves out the fields a rule covers, so
-/// a value a rule would replace cannot make a reach probe look as if it discriminated.
+/// other run is not run, and the verdict does not depend on the order of a lane's runs. All
+/// three comparisons, noise, discrimination and the cell against the absent lane, see each
+/// completed observation after normalization: every value a [`super::Rule`] covers is replaced
+/// by a placeholder, and every other field is compared exactly. A ruled value its kind cannot
+/// hold refuses the runs, naming the lane, probe, field and kind.
 pub fn judge(manifest: &Manifest, runs: &[Run]) -> Result<Verdict, RunRefusal> {
     manifest.validate().map_err(RunRefusal::Manifest)?;
     let lanes = pair(manifest, runs)?;
