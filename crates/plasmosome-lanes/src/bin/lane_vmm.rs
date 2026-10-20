@@ -25,7 +25,7 @@ mod macos {
     use plasmosome_lanes::bundle::{KERNEL, LIBKRUN, unverified_images, verify_bundle};
     use plasmosome_lanes::config::{Confinement, LaneConfig};
     use plasmosome_lanes::krun::{self, Libkrun};
-    use plasmosome_lanes::selfcheck::{Phase, passed, self_check};
+    use plasmosome_lanes::selfcheck::{Check, Phase, passed, self_check};
 
     const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
@@ -52,18 +52,10 @@ mod macos {
             .or_else(|error| fail(CONFIG_REFUSED, format!("refused: {error}")))
     }
 
-    fn confine(confinement: &Confinement) -> Result<(), Refusal> {
-        let profile = std::fs::read_to_string(&confinement.profile).or_else(|error| {
-            fail(
-                CONFINEMENT_FAILED,
-                format!("{}: {error}", confinement.profile.display()),
-            )
-        })?;
-        krun::confine(&profile).or_else(|error| fail(CONFINEMENT_FAILED, error))?;
-        let checks = self_check(Phase::Confined, &confinement.allowed, &confinement.outside);
-        for check in &checks {
+    fn report(label: &str, checks: &[Check]) {
+        for check in checks {
             eprintln!(
-                "lane-vmm: self-check {}: expected {}, observed {}, {}",
+                "lane-vmm: {label} {}: expected {}, observed {}, {}",
                 check.name,
                 if check.expected_allowed {
                     "allowed"
@@ -77,6 +69,30 @@ mod macos {
                 if check.holds() { "holds" } else { "FAILS" }
             );
         }
+    }
+
+    fn confine(confinement: &Confinement) -> Result<(), Refusal> {
+        let profile = std::fs::read_to_string(&confinement.profile).or_else(|error| {
+            fail(
+                CONFINEMENT_FAILED,
+                format!("{}: {error}", confinement.profile.display()),
+            )
+        })?;
+        let control = self_check(
+            Phase::Unconfined,
+            &confinement.allowed,
+            &confinement.outside,
+        );
+        report("control", &control);
+        if !passed(Phase::Unconfined, &control) {
+            return fail(
+                SELF_CHECK_FAILED,
+                "control failed: the directories refuse without a sandbox; the VM was not started",
+            );
+        }
+        krun::confine(&profile).or_else(|error| fail(CONFINEMENT_FAILED, error))?;
+        let checks = self_check(Phase::Confined, &confinement.allowed, &confinement.outside);
+        report("self-check", &checks);
         if !passed(Phase::Confined, &checks) {
             return fail(
                 SELF_CHECK_FAILED,

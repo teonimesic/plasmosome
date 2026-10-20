@@ -6,12 +6,23 @@ use crate::probe::errno_name;
 
 const PROBE_FILE: &str = ".lane-selfcheck";
 
-const EXPECTED: [(&str, bool); 4] = [
-    ("read inside", true),
-    ("write inside", false),
-    ("read outside", false),
-    ("write outside", false),
+const NAMES: [&str; 4] = [
+    "read inside",
+    "write inside",
+    "read outside",
+    "write outside",
 ];
+
+const CONFINED: [bool; 4] = [true, false, false, false];
+
+const UNCONFINED: [bool; 4] = [true, true, true, true];
+
+fn expected(phase: Phase) -> [bool; 4] {
+    match phase {
+        Phase::Unconfined => UNCONFINED,
+        Phase::Confined => CONFINED,
+    }
+}
 
 /// Which side of `sandbox_init` the four checks run on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,12 +42,12 @@ pub struct Check {
 }
 
 impl Check {
-    /// True when the observation is the expected one. A refusal counts only as `EPERM` or
-    /// `EACCES`; a missing directory is not a refusal.
+    /// True when the observation is the expected one. A refusal counts only as `EPERM`, which
+    /// is what the sandbox returns; `EACCES` from file modes and `ENOENT` are not refusals.
     pub fn holds(&self) -> bool {
         match (&self.observed, self.expected_allowed) {
             (Ok(()), allowed) => allowed,
-            (Err(errno), false) => errno == "EPERM" || errno == "EACCES",
+            (Err(errno), false) => errno == "EPERM",
             (Err(_), true) => false,
         }
     }
@@ -63,12 +74,14 @@ fn write(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Read inside `allowed` (expected to succeed), then write inside it, read `outside` and write
-/// inside `outside` (each expected to be refused). A write that succeeds is removed again.
-pub fn self_check(_phase: Phase, allowed: &Path, outside: &Path) -> Vec<Check> {
+/// Read inside `allowed`, write inside it, read `outside` and write inside `outside`. Unconfined,
+/// all four are expected to succeed, which shows the directories refuse nothing by themselves.
+/// Confined, only the first is. A write that succeeds is removed again.
+pub fn self_check(phase: Phase, allowed: &Path, outside: &Path) -> Vec<Check> {
     let results = [read(allowed), write(allowed), read(outside), write(outside)];
-    EXPECTED
+    NAMES
         .into_iter()
+        .zip(expected(phase))
         .zip(results)
         .map(|((name, expected_allowed), result)| Check {
             name,
@@ -78,10 +91,13 @@ pub fn self_check(_phase: Phase, allowed: &Path, outside: &Path) -> Vec<Check> {
         .collect()
 }
 
-/// True when every check holds and all four ran.
-pub fn passed(_phase: Phase, checks: &[Check]) -> bool {
-    checks.len() == EXPECTED.len()
-        && checks.iter().zip(EXPECTED).all(|(check, (name, allowed))| {
-            check.name == name && check.expected_allowed == allowed && check.holds()
-        })
+/// True when all four checks ran in order with `phase`'s expectations and each holds.
+pub fn passed(phase: Phase, checks: &[Check]) -> bool {
+    checks.len() == NAMES.len()
+        && checks
+            .iter()
+            .zip(NAMES.into_iter().zip(expected(phase)))
+            .all(|(check, (name, allowed))| {
+                check.name == name && check.expected_allowed == allowed && check.holds()
+            })
 }
