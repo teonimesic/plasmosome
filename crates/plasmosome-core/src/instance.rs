@@ -3241,6 +3241,39 @@ mod tests {
     }
 
     #[test]
+    fn a_launched_marker_reads_any_spelling_of_one_record() {
+        let backslash = char::from(0x5c);
+        let escaped_hyphen = format!("cell{backslash}u002d1");
+        for (what, text) in [
+            (
+                "keys in reverse order",
+                format!(
+                    "{{\"stopped\":true,\"boot_session\":\"{BOOT_TEXT}\",\"cell\":\"cell-1\"}}\n"
+                ),
+            ),
+            (
+                "tabs and spaces around the tokens",
+                format!(
+                    " {{\t\"cell\" :\t\"cell-1\" , \"boot_session\":\"{BOOT_TEXT}\",\"stopped\": true }}\t\n"
+                ),
+            ),
+            (
+                "an escaped hyphen",
+                format!(
+                    "{{\"cell\":\"{escaped_hyphen}\",\"boot_session\":\"{BOOT_TEXT}\",\"stopped\":true}}\n"
+                ),
+            ),
+        ] {
+            assert_eq!(
+                LaunchedMarker::decode(text.as_bytes())
+                    .unwrap_or_else(|fault| panic!("{what}: {fault}")),
+                marker("cell-1", true),
+                "{what}"
+            );
+        }
+    }
+
+    #[test]
     fn a_launched_marker_holds_at_most_4096_bytes() {
         let padded = |total: usize| {
             let record = running_bytes();
