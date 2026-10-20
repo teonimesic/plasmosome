@@ -18,11 +18,14 @@ decoded. A repeated key in any object is refused, compared after decoding, so `"
 key spelled with an escape count as one. Every refusal is a `ScanError` with the byte offset and
 a `Reason`; for a repeated key the reason carries the RFC 6901 pointer to the repeat, such as
 `/x/y/0/a`. Its text, such as `expected ',' or ']' at byte 3`, is what `bad_reply`'s `detail`
-will say.
+will say, and it shows each terminal control in a key as `<U+XXXX>`.
 
-The scan keeps its own stack, so nesting costs memory and never the call stack: a million nested
-arrays scan, write, compare and drop. The caller bounds the input. Spec 025 sets the bound at
-16,777,216 bytes, and the reader that enforces it is a later task.
+`scan` refuses input longer than `json::MAX_REPLY_BYTES`, spec 025's bound of 16,777,216 bytes,
+before reading any of it. The reader that reads a reply through that limit is a later task and
+uses the same constant. Nesting depth has no limit, by design. The scan keeps its own stack, so
+nesting costs memory and never the call stack: a million nested arrays scan, write, compare and
+drop. At the bound, in a release build, 8,388,608 nested arrays peak at 508 MB resident to scan
+and drop, and 779 MB to scan and write either form.
 
 ## Writing output
 
@@ -35,7 +38,14 @@ output parses back to the same values.
 
 `json::write_human` indents a value for a person, one member or item per line, and shows each
 terminal control as `<U+XXXX>`. Indentation stops growing past 32 levels, so a deep reply cannot
-make it write the square of its depth. Nothing may parse the human form.
+make it write the square of its depth. A deep level still costs two lines of up to 64 spaces,
+about 132 bytes: at the bound, 8,388,608 nested arrays write 1,107,294,270 bytes, about 1.1 GB,
+in the human form. Nothing may parse the human form.
+
+A value built by hand is checked as a reply is. `json::Number::new` takes only text that RFC
+8259's number grammar accepts. `ClientError::new` refuses a field that repeats or is named
+`domain`, `code` or `message`, and `KernelError::new` refuses an error that is not an object or
+already has `domain`. Each hands back what it refused.
 
 `emit` writes an `Envelope` in either form and ends it with a newline. A success goes to stdout:
 `schema` 1, `command`, `instance` when a socket was chosen, with `name` when one was known, and
@@ -43,7 +53,8 @@ make it write the square of its depth. Nothing may parse the human form.
 stdout receives nothing. A client error writes `domain` `client`, its string `code`, `message` and
 its structured fields. A kernel error writes `domain` `kernel` and then every member the daemon
 sent, in order. The human failure form is the message, a `fix:` line when the error has `fix`,
-and the domain and code in parentheses, such as `(kernel 101)`. A failed write returns the
+and the domain and code in parentheses, such as `(kernel 101)`. `emit` writes in pieces of about
+64 KiB and then flushes, so it never holds the whole text. A failed write or flush returns the
 stream it failed on; the caller picks the exit.
 
 ## What's inside
@@ -51,7 +62,9 @@ stream it failed on; the caller picks the exit.
 | Item | Meaning |
 | --- | --- |
 | `json::Json` | A value as it arrived: numbers as text, members in order |
+| `json::Number` | A number's text, checked against RFC 8259's number grammar |
 | `json::scan` | One reply line to a `Json`, or a `ScanError` with its offset |
+| `json::MAX_REPLY_BYTES` | Spec 025's bound on one reply line, 16,777,216 bytes |
 | `json::write_compact` | The JSON form, with every terminal control escaped |
 | `json::write_human` | The human form, with every terminal control shown as `<U+XXXX>` |
 | `Envelope`, `Instance` | Spec 025's success and failure envelopes |

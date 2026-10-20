@@ -21,8 +21,13 @@ It is `publish = false` and never ships on its own.
   one. `Json` implements `Drop`, so code takes children out with `std::mem::take`.
 - **A repeated key is refused after decoding.** `"a"` and the same key spelled with an escape are
   one key. Keeping whichever copy a parser keeps would change what the daemon sent.
+- **A value built by hand is checked.** `Number::new`, `ClientError::new` and `KernelError::new`
+  refuse what would write invalid JSON or a repeated key. Their fields stay private.
+- **`emit` writes in pieces.** It never builds the whole output, which for a deep reply in the
+  human form is about 66 times the reply's size.
 - **The client codes are a closed list.** A new code lands in spec 025 first, then in
-  `ClientCode::ALL` and the table test.
+  `ClientCode::ALL`. The table test reads spec 025's table.
+- **Spec 026 §5 lists `scan`.** A change to its bound or its depth handling updates that row.
 - **No `unsafe` and no third-party dependency.** The package keeps `lints.workspace = true`.
   `serde_json` is a dev-dependency only: the independent parser the escaping test checks against.
 

@@ -37,7 +37,7 @@ Every place the kernel touches the world outside the process, and the seam that 
 | Durable appends that can fail (session log) | `LogStore` and `LogFile` (`plasmosome-core::session_log`) | `FaultLogStore` in core's unit tests |
 | Directory syncs that can fail (instance root) | the private `SyncDirectory` function that `InstanceRoot` and `CellDir` carry (`plasmosome-core::instance`) | `recording_sync` in core's unit tests |
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
-| Standard output and error (the command line's envelopes) | writers injected as arguments to `plasmosome_cli::emit` | a `Vec<u8>`, and a writer that refuses every write, in plasmosome-cli's tests |
+| Standard output and error (the command line's envelopes) | writers injected as arguments to `plasmosome_cli::emit` | a `Vec<u8>`; a writer that refuses every write; one that fails only on flush; one that records the largest piece; all in plasmosome-cli's tests |
 
 **The seam rule.** Both forms in that table are seams. Which one a contact gets is decided by
 what varies between the real thing and the test. When the *behavior* varies — enforcement that
