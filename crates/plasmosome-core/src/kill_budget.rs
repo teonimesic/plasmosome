@@ -73,8 +73,9 @@ impl<C: Fn() -> Instant> KillBudget<C> {
         (self.total / 10).clamp(MS, MOST_LOCK_RESERVE)
     }
 
-    /// Step 1's share. `NoBudget` with `now`, when the caller skips the step without listing
-    /// it, and when less than 1 ms is left for it, when the caller lists `workload_stop`.
+    /// Step 1's share. With `now` it is `NoBudget`, and the caller skips the step without
+    /// listing it. Without `now`, `NoBudget` means under 1 ms was left, and the caller lists
+    /// `workload_stop`.
     pub fn workload_stop(&self) -> Share {
         if self.now {
             return Share::NoBudget;
