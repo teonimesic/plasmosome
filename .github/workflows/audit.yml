@@ -5,9 +5,10 @@
 # advisories and licences over every git-tracked Cargo.lock, warnings included. The weekly and
 # dispatched runs also flag ignores past their date or with a reason that does not parse, and a
 # stable Rust newer than rust-toolchain.toml. Any finding opens or updates one issue labelled
-# `security`, and Main answers it within seven days. Findings leave the run green. A tool failure
-# is written into the issue and turns the run red, so a run that could not check main never reads
-# as a clean one.
+# `security`, and Main answers it within seven days. A run rewrites only the issue's sections for
+# the checks it ran, and comments only when their findings changed. Findings leave the run green. A
+# tool failure is written into the issue and turns the run red, so a run that could not check main
+# never reads as a clean one.
 #
 # A dispatch can set dry-run: every read runs, and each issue write is printed instead of made.
 #
@@ -41,12 +42,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  security-report:
+  # cargo-deny's install compiles its dependencies, build scripts included, and the report runs the
+  # binary. Both are third-party code, so this job holds no write token. Its findings reach the
+  # issue job as a job output.
+  report:
     runs-on: ubuntu-latest
-    # Labels and issues are both under the issues permission. Nothing else is written.
     permissions:
       contents: read
-      issues: write
+    outputs:
+      findings: ${{ steps.report.outputs.findings }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -65,18 +69,41 @@ jobs:
       - name: install cargo-deny
         run: cargo install cargo-deny --version 0.20.2 --locked
 
+      # The findings file is one line of ASCII JSON, so it is one output line. GitHub caps an output
+      # at 1 MB, so a larger file fails this step, and the issue job reports the missing findings.
       - name: report
+        id: report
         env:
           EVENT: ${{ github.event_name }}
-        run: python3 tools/cargo-deny-check report --json-out "$RUNNER_TEMP/findings.json" --event "$EVENT"
+        run: |
+          python3 tools/cargo-deny-check report --json-out "$RUNNER_TEMP/findings.json" --event "$EVENT"
+          size=$(wc -c < "$RUNNER_TEMP/findings.json")
+          if [ "$size" -gt 1000000 ]; then echo "::error::the findings file is $size bytes, over an output's 1 MB"; exit 1; fi
+          printf 'findings=%s\n' "$(cat "$RUNNER_TEMP/findings.json")" >> "$GITHUB_OUTPUT"
 
-      # This runs after an earlier step failed too, so a broken install reaches the issue as a tool
-      # failure instead of leaving the issue silent.
+  # This job runs only checkout, this repository's standard-library script and gh. It runs after a
+  # failed report job too, so a broken install reaches the issue as a tool failure instead of
+  # leaving the issue silent.
+  issue:
+    needs: report
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    # Labels and issues are both under the issues permission. Nothing else is written.
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: security issue
-        if: ${{ !cancelled() }}
         env:
+          FINDINGS: ${{ needs.report.outputs.findings }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           MODE: ${{ inputs.dry-run && 'dry-run' || 'write' }}
-        run: python3 tools/security-issue --findings "$RUNNER_TEMP/findings.json" --repo "$REPOSITORY" --run-url "$RUN_URL" --mode "$MODE"
+        run: |
+          if [ -n "$FINDINGS" ]; then printf '%s\n' "$FINDINGS" > "$RUNNER_TEMP/findings.json"; fi
+          python3 tools/security-issue --findings "$RUNNER_TEMP/findings.json" --repo "$REPOSITORY" --run-url "$RUN_URL" --mode "$MODE"
