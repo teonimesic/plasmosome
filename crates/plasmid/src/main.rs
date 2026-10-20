@@ -8,9 +8,10 @@ const NAME_LIMIT: usize = 64;
 const VERSION: &str = "0.1.0";
 
 const MISSING_SECTIONS: [&str; 2] = [
-    "add description: one or two plain sentences saying what the plasmid is for",
-    "add impl: the component that implements it, as wasm = \"component.wasm\" under [impl]; \
-     a capability section such as [network] also satisfies this",
+    "add description: one or two plain sentences saying what the plasmid is for; write \
+     description = \"Describe what this plasmid is for.\"",
+    "add impl: the component that implements it; write [impl] followed by \
+     wasm = \"component.wasm\"; a capability section such as [network] also satisfies this",
 ];
 
 const HELP: &str = "\
@@ -80,7 +81,17 @@ fn new(arguments: Vec<OsString>) -> ExitCode {
     };
     let declaration = format!("id = \"{name}\"\nversion = \"{VERSION}\"\ndescription = \"\"\n");
     if let Err(error) = file.write_all(declaration.as_bytes()) {
-        eprintln!("plasmid new: cannot finish writing {path}: {error}");
+        drop(file);
+        match std::fs::remove_file(&path) {
+            Ok(()) => eprintln!(
+                "plasmid new: cannot finish writing {path}: {error}; it is removed and nothing \
+                 was written"
+            ),
+            Err(removal) => eprintln!(
+                "plasmid new: cannot finish writing {path}: {error}; it is left behind because \
+                 it cannot be removed: {removal}"
+            ),
+        }
         return ExitCode::from(1);
     }
     for section in MISSING_SECTIONS {
