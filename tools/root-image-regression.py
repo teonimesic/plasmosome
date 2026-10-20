@@ -196,7 +196,9 @@ class FakeDocker:
         self.repo_digests = [f"debian@sha256:{DIGEST}"]
         self.platform = {"Os": "linux", "Architecture": "arm64"}
         self.descriptor = {"mediaType": "application/vnd.oci.image.index.v1+json", "digest": f"sha256:{DIGEST}"}
-        self.create_out, self.after = CONTAINER + "\n", None
+        self.create_out, self.after, self.exported = CONTAINER + "\n", None, None
+        self.platform_descriptor = {"mediaType": "application/vnd.oci.image.manifest.v1+json",
+                                    "digest": f"sha256:{PLATFORM_DIGEST}"}
 
     def __call__(self, argv, env):
         self.calls.append(list(argv))
@@ -205,9 +207,7 @@ class FakeDocker:
             if self.missing:
                 return Result(1, "[]\n", f"Error response from daemon: No such image: {argv[-1]}\n")
             if "--platform" in argv:
-                return Result(0, json.dumps([{**self.platform, "Descriptor": {
-                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                    "digest": f"sha256:{PLATFORM_DIGEST}"}}]), "")
+                return Result(0, json.dumps([{**self.platform, "Descriptor": self.platform_descriptor}]), "")
             if self.inspect_out is not None:
                 return Result(0, self.inspect_out, "")
             record = {"Id": f"sha256:{DIGEST}", "RepoDigests": self.repo_digests}
@@ -216,6 +216,8 @@ class FakeDocker:
             return Result(self.create_code, self.create_out if self.create_code == 0 else "", "no create\n")
         if argv[:2] == ["docker", "export"]:
             write_tar(Path(argv[3]), self.base)
+            if self.exported is not None:
+                self.exported(Path(argv[3]).parent)
             return Result(self.export_code, "", "no export\n")
         if argv[:2] == ["docker", "rm"]:
             return Result(self.rm_code, CONTAINER + "\n", "")
@@ -819,6 +821,7 @@ def manifest_has_sorted_keys_and_files_equal_sha256sums():
         assert any("mke2fs, e2fsck, dumpe2fs and debugfs" in line and "checks itself" in line
                    for line in manifest["limits"]), manifest["limits"]
         assert any("content.jsonl" in line and "stage tar" in line for line in manifest["limits"]), manifest["limits"]
+        assert any("tar and sh" in line and "checks itself" in line for line in manifest["limits"]), manifest["limits"]
         assert manifest["tool_sha256"] == sha(SOURCE.read_bytes())
         assert sorted(os.listdir(image)) == ["SHA256SUMS", "content.jsonl", "manifest.json", "rootfs.raw"]
         assert {stat.S_IMODE(os.stat(image / name).st_mode) for name in os.listdir(image)} == {0o444}
@@ -927,6 +930,17 @@ def reads_from_the_base_are_bounded():
         assert "longer than" in detail
         reader = API["LimitedReader"](io.BytesIO(b"abc"), 2, "the export")
         assert "the export is larger than 2 bytes" in refusal("stage", reader.read)
+
+        class Recorded(io.BytesIO):
+            def read(self, size=-1):
+                asked.append(size)
+                return super().read(size)
+
+        asked = []
+        assert API["LimitedReader"](Recorded(b"ab"), 2, "the export").read(1 << 29) == b"ab"
+        assert "larger than 2 bytes" in refusal("stage", API["LimitedReader"](Recorded(b"x" * 10), 2, "the export").read,
+                                                1 << 29)
+        assert max(asked) <= 3, asked
 
 
 def work_and_images_roots_are_checked_before_docker():
@@ -1057,6 +1071,92 @@ class Failing:
         return getattr(self.module, attribute)
 
 
+class FullDisk(io.RawIOBase):
+    def writable(self):
+        return True
+
+    def tell(self):
+        return 0
+
+    def write(self, data):
+        raise OSError(28, "No space left on device")
+
+
+class Unreadable:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, size=-1):
+        raise OSError(5, "Input/output error")
+
+
+def tool_through(link, fake, root, work_name):
+    linked = runpy.run_path(str(link))
+    argv = ["build", "--base", REF, "--work-root", str(root / work_name), "--images-root", str(root / "images"),
+            "--source-date-epoch", str(EPOCH), "--size-mib", str(SIZE_MIB)]
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = linked["main"](argv, run=fake, now=lambda: NOW, environ=ENVIRON)
+    return code, out.getvalue(), err.getvalue()
+
+
+def every_other_failure_prints_the_refused_line():
+    with scratch() as root:
+        real_tarfile = tarfile
+
+        class FullTarfile:
+            def __getattr__(self, attribute):
+                return getattr(real_tarfile, attribute)
+
+            def open(self, name=None, mode="r", fileobj=None, **kwargs):
+                if mode == "w":
+                    return real_tarfile.open(fileobj=FullDisk(), mode="w", **kwargs)
+                return real_tarfile.open(name, mode, fileobj, **kwargs)
+
+        with patched("tarfile", FullTarfile()):
+            code, out, err, work, images = built(root, FakeDocker(), work_name="full-stage")
+        assert code == 1 and err.startswith("root-image: refused stage: ") and "No space left" in err, err
+        fake = FakeDocker()
+        fake.exported = lambda work: (work / "content.jsonl").mkdir()
+        code, out, err, work, images = built(root, fake, work_name="content-in-the-way")
+        assert code == 1 and err.startswith("root-image: refused stage: ") and "content.jsonl" in err, err
+        docker = root / "docker"
+        docker.write_bytes(b"#!/bin/sh\n")
+        docker.chmod(0o644)
+        assert "cannot run" in refusal("command", API["run_command"], [str(docker), "version"], {})
+        for attribute, value in [("inspect_out", json.dumps([{"Id": "x", "RepoDigests": 5}])),
+                                 ("inspect_out", json.dumps([{"RepoDigests": [f"debian@sha256:{DIGEST}"],
+                                                              "Descriptor": "sha256"}])),
+                                 ("descriptor", {"mediaType": ["index"], "digest": f"sha256:{DIGEST}"}),
+                                 ("platform_descriptor", "sha256")]:
+            fake = FakeDocker()
+            setattr(fake, attribute, value)
+            code, out, err, work, images = built(root, fake, work_name=f"shape-{len(os.listdir(root))}")
+            assert code == 1 and err.startswith("root-image: refused export: ") and "record" in err, (attribute, err)
+        for mtime in ("1e400", "nan"):
+            base = root / f"base-{mtime}.tar"
+            write_tar(base, DEBIAN)
+            with tarfile.open(base, "a", format=tarfile.PAX_FORMAT) as out:
+                info = tarfile.TarInfo("etc/far-future")
+                info.pax_headers = {"mtime": mtime}
+                out.addfile(info, io.BytesIO(b""))
+            detail = refusal("stage", API["stage"], base, root / f"stage-{mtime}.tar", [], EPOCH, LIMIT)
+            assert "/etc/far-future" in detail and "mtime" in detail, detail
+        with patched("open_regular", lambda *args: Unreadable()):
+            assert "Input/output error" in refusal("check", API["read_bounded"], root / "x", "check", 8, "x")
+            assert "Input/output error" in refusal("check", API["hash_bounded"], root / "x", "check", 8, "x")
+        link = root / "bin" / "root-image"
+        link.parent.mkdir()
+        link.symlink_to(SOURCE)
+        code, out, err = tool_through(link, FakeDocker(), root, "through-a-link")
+        assert code == 0, err
+        manifest = json.loads((Path(json.loads(out)["image_dir"]) / "manifest.json").read_text())
+        assert manifest["tool_sha256"] == sha(SOURCE.read_bytes())
+
+
 def failures_of_the_os_print_the_refused_line():
     with scratch() as root:
         fake = FakeDocker()
@@ -1118,6 +1218,7 @@ TESTS = [
     a_member_under_a_link_or_a_file_refuses,
     files_the_container_leaves_in_the_work_root_are_not_trusted,
     failures_of_the_os_print_the_refused_line,
+    every_other_failure_prints_the_refused_line,
     the_placed_rootfs_keeps_its_holes,
     the_rootfs_copy_reads_no_more_than_its_size,
 ]
