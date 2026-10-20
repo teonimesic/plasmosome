@@ -51,7 +51,8 @@ For a work PR, record the PR immediately:
 ```
 
 Then keep ownership, notes and spec016's phases through review as the tasks skill says, never
-the retired `in-review` label. Repairs take `in_progress` and return to `review` on resubmission.
+the retired `in-review` label. Repairs take `in_progress` and return to `review` on resubmission,
+except that an outside PR's task stays in `review` while its contributor repairs (spec 030 §2).
 
 Obtain independent review while draft, after local validation. CodeRabbit skips draft PRs;
 a skipped green is not a completed review. The owner-approval rule in `docs/intents/README.md`
