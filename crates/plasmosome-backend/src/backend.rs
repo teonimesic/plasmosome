@@ -362,7 +362,7 @@ pub(crate) mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::fixtures::{self, mount, proxy_map};
+    use crate::fixtures::{self, broker, mount, proxy_map, session_file, uds_socket};
     use crate::recipe::RecipeError;
     use crate::universe::{CellId, PluginId};
 
@@ -406,42 +406,19 @@ pub(crate) mod tests {
     fn invalid_capabilities() -> Vec<(Capability, RecipeError)> {
         let mut cases = Vec::new();
         for (path, error) in path_faults("path") {
-            cases.push((
-                Capability::SessionFile { path: path.clone() },
-                error.clone(),
-            ));
-            cases.push((Capability::UdsSocket { path }, error));
+            cases.push((session_file(&path), error.clone()));
+            cases.push((uds_socket(&path), error));
         }
         for (source, error) in path_faults("source") {
-            let target = "/workspace".to_string();
-            cases.push((Capability::Mount { source, target }, error));
+            cases.push((mount(&source, "/workspace"), error));
         }
         for (target, error) in path_faults("target") {
-            let source = "/srv/repo".to_string();
-            cases.push((Capability::Mount { source, target }, error));
+            cases.push((mount("/srv/repo", &target), error));
         }
         let nul = |field| RecipeError::ContainsNul { field };
-        cases.push((
-            Capability::ProxyMap {
-                host: "api.github\0.com".to_string(),
-                route: "splice".to_string(),
-            },
-            nul("host"),
-        ));
-        cases.push((
-            Capability::ProxyMap {
-                host: "api.github.com".to_string(),
-                route: "spl\0ice".to_string(),
-            },
-            nul("route"),
-        ));
-        cases.push((
-            Capability::Broker {
-                pid: 4242,
-                name: "egress\0d".to_string(),
-            },
-            nul("name"),
-        ));
+        cases.push((proxy_map("api.github\0.com", "splice"), nul("host")));
+        cases.push((proxy_map("api.github.com", "spl\0ice"), nul("route")));
+        cases.push((broker(4242, "egress\0d"), nul("name")));
         cases
     }
 
@@ -552,24 +529,11 @@ pub(crate) mod tests {
     #[test]
     fn selection_names_need_only_be_nul_free_and_valid_values_round_trip() {
         for capability in [
-            Capability::SessionFile {
-                path: "/skills/.pr..md".to_string(),
-            },
-            Capability::UdsSocket {
-                path: "/run/plasmosome/egressd.uds".to_string(),
-            },
-            Capability::ProxyMap {
-                host: "not a dns name".to_string(),
-                route: "../relative/route/".to_string(),
-            },
-            Capability::Broker {
-                pid: 4242,
-                name: "./egressd".to_string(),
-            },
-            Capability::Mount {
-                source: "/srv/repo".to_string(),
-                target: "/workspace".to_string(),
-            },
+            session_file("/skills/.pr..md"),
+            uds_socket("/run/plasmosome/egressd.uds"),
+            proxy_map("not a dns name", "../relative/route/"),
+            broker(4242, "./egressd"),
+            mount("/srv/repo", "/workspace"),
         ] {
             assert_eq!(capability.validate(), Ok(()), "{capability:?}");
             let encoded = serde_json::to_value(&capability).unwrap();

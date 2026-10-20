@@ -181,6 +181,7 @@ mod tests {
 
     use super::ObjectOnly;
     use crate::backend::tests::{operation, owner};
+    use crate::fixtures;
     use crate::{
         BrokerLaunch, Capability, Diff, DrainSpec, FileAccess, Grant, GrantId, GrantKind, Handle,
         LedgerEntry, MountRecipe, OsObject, OsState, ProxyRecipe, ProxyTransport, ResidueReport,
@@ -188,10 +189,7 @@ mod tests {
     };
 
     fn mount() -> Capability {
-        Capability::Mount {
-            source: "/srv/repo".to_string(),
-            target: "/workspace".to_string(),
-        }
+        fixtures::mount("/srv/repo", "/workspace")
     }
 
     fn object() -> OsObject {
@@ -309,35 +307,25 @@ mod tests {
         ));
         for (capability, at, operation_at, fields) in [
             (
-                Capability::SessionFile {
-                    path: "/skills/pr.md".to_string(),
-                },
+                fixtures::session_file("/skills/pr.md"),
                 "/SessionFile",
                 "/WriteSessionFile",
                 &["path"][..],
             ),
             (
-                Capability::UdsSocket {
-                    path: "/run/plasmosome/egressd.uds".to_string(),
-                },
+                fixtures::uds_socket("/run/plasmosome/egressd.uds"),
                 "/UdsSocket",
                 "/BindUds",
                 &["path"][..],
             ),
             (
-                Capability::ProxyMap {
-                    host: "api.github.com".to_string(),
-                    route: "splice".to_string(),
-                },
+                fixtures::proxy_map("api.github.com", "splice"),
                 "/ProxyMap",
                 "/SetProxyMap",
                 &["host", "route"][..],
             ),
             (
-                Capability::Broker {
-                    pid: 4242,
-                    name: "egressd".to_string(),
-                },
+                fixtures::broker(4242, "egressd"),
                 "/Broker",
                 "/SpawnBroker",
                 &["pid", "name"][..],
