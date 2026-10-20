@@ -724,3 +724,299 @@ fn a_record_with_a_repeated_key_at_any_depth_is_refused() {
         assert_eq!(std::fs::read_to_string(&log).unwrap(), doubled);
     }
 }
+
+struct RefusedTarget {
+    name: &'static str,
+    bytes: Vec<u8>,
+    open_refuses_on_line: Option<usize>,
+}
+
+fn one_effect_ledger(plugin: &str, description: &str, path: &str) -> Ledger {
+    let mut ledger = Ledger::new(plugin);
+    ledger.push(Effect::exact(
+        description,
+        InverseVia::Universe(file_removal(path)),
+    ));
+    ledger
+}
+
+fn encoded_line(plugin: &str, description: &str, path: &str) -> String {
+    let mut encoded = Vec::new();
+    one_effect_ledger(plugin, description, path)
+        .write_to(&mut encoded)
+        .unwrap();
+    String::from_utf8(encoded).unwrap()
+}
+
+fn changed(line: &str, change: impl FnOnce(&mut serde_json::Value)) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+    change(&mut value);
+    serde_json::to_string(&value).unwrap() + "\n"
+}
+
+fn current_format(line: &str) -> u64 {
+    let value: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+    value["format"].as_u64().expect("a record names its format")
+}
+
+fn refused_targets() -> Vec<RefusedTarget> {
+    let first = encoded_line("github-pr", "entry one", "/skills/a.md");
+    let second = encoded_line("github-pr", "entry two", "/skills/b.md");
+    let format = current_format(&first);
+    let universe = "/effect/reversibility/Exact/via/Universe";
+    let unsupported_later = changed(&first, |record| {
+        record["format"] = serde_json::json!(format + 1)
+    });
+    let path_once = r#""path":"/skills/a.md""#;
+    assert_eq!(first.matches(path_once).count(), 1, "{first}");
+    let (before_description, after_description) = first.split_once("entry one").unwrap();
+    let mut invalid_utf8 = first.as_bytes().to_vec();
+    invalid_utf8.extend_from_slice(before_description.as_bytes());
+    invalid_utf8.extend_from_slice(b"entry \xff");
+    invalid_utf8.extend_from_slice(after_description.as_bytes());
+    let row = |name, text: String, line| RefusedTarget {
+        name,
+        bytes: text.into_bytes(),
+        open_refuses_on_line: line,
+    };
+    vec![
+        row(
+            "an unversioned record",
+            changed(&first, |record| {
+                record.as_object_mut().unwrap().remove("format");
+            }),
+            Some(1),
+        ),
+        row(
+            "the format before the current one",
+            changed(&first, |record| {
+                record["format"] = serde_json::json!(format - 1)
+            }),
+            Some(1),
+        ),
+        row(
+            "the format after the current one",
+            unsupported_later.clone(),
+            Some(1),
+        ),
+        row(
+            "a numeric backend handle",
+            changed(&first, |record| {
+                record["effect"]["reversibility"]["Exact"]["via"] =
+                    serde_json::json!({"Backend": 7})
+            }),
+            Some(1),
+        ),
+        row(
+            "a universe inverse without its id",
+            changed(&first, |record| {
+                record
+                    .pointer_mut(universe)
+                    .and_then(serde_json::Value::as_object_mut)
+                    .unwrap()
+                    .remove("id");
+            }),
+            Some(1),
+        ),
+        row(
+            "an unknown field nested in a capability",
+            changed(&first, |record| {
+                record
+                    .pointer_mut(&format!("{universe}/capability"))
+                    .and_then(serde_json::Value::as_object_mut)
+                    .and_then(|variants| variants.values_mut().next())
+                    .and_then(serde_json::Value::as_object_mut)
+                    .unwrap()
+                    .insert("obsolete".to_string(), serde_json::json!("discarded"));
+            }),
+            Some(1),
+        ),
+        row(
+            "a key repeated with its own value",
+            first.replacen(path_once, &format!("{path_once},{path_once}"), 1),
+            Some(1),
+        ),
+        RefusedTarget {
+            name: "invalid UTF-8 in a complete line",
+            bytes: invalid_utf8,
+            open_refuses_on_line: Some(2),
+        },
+        row(
+            "a malformed line between two valid records",
+            format!("{first}{}\n{second}", &first[..first.len() / 2]),
+            Some(2),
+        ),
+        row(
+            "an empty line between two valid records",
+            format!("{first}\n{second}"),
+            Some(2),
+        ),
+        row(
+            "a complete final record of an unsupported format without LF",
+            format!("{first}{}", unsupported_later.trim_end()),
+            Some(2),
+        ),
+        row(
+            "two valid records naming different plugins",
+            format!(
+                "{first}{}",
+                encoded_line("audit", "entry two", "/skills/b.md")
+            ),
+            Some(2),
+        ),
+        row(
+            "a valid record followed by a torn final fragment",
+            format!("{first}{}", &second[..second.len() - 12]),
+            None,
+        ),
+        row(
+            "one complete valid record without LF",
+            first.trim_end().to_string(),
+            None,
+        ),
+    ]
+}
+
+#[test]
+fn open_file_refuses_each_refused_target_on_its_line_and_keeps_its_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+    for target in refused_targets() {
+        std::fs::write(&log, &target.bytes).unwrap();
+        let outcome = Ledger::open_file(&log);
+        match target.open_refuses_on_line {
+            Some(line) => {
+                let error = outcome.expect_err(target.name);
+                assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::InvalidData,
+                    "{}",
+                    target.name
+                );
+                assert!(
+                    error.to_string().contains(&format!("on line {line}:")),
+                    "{}: {error}",
+                    target.name
+                );
+            }
+            None => assert_eq!(
+                outcome
+                    .expect(target.name)
+                    .effects()
+                    .iter()
+                    .map(|effect| effect.description.as_str())
+                    .collect::<Vec<_>>(),
+                ["entry one"],
+                "{} is refused only by append",
+                target.name
+            ),
+        }
+        assert_eq!(
+            std::fs::read(&log).unwrap(),
+            target.bytes,
+            "{}",
+            target.name
+        );
+    }
+}
+
+#[test]
+fn append_to_file_refuses_each_refused_target_and_keeps_its_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+    let appended = one_effect_ledger("github-pr", "appended", "/skills/c.md");
+    for target in refused_targets() {
+        std::fs::write(&log, &target.bytes).unwrap();
+        let error = appended.append_to_file(&log).expect_err(target.name);
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidData,
+            "{}",
+            target.name
+        );
+        if target.bytes.ends_with(b"\n") {
+            let refused_by_open = Ledger::open_file(&log).expect_err(target.name);
+            assert_eq!(
+                error.to_string(),
+                refused_by_open.to_string(),
+                "{}",
+                target.name
+            );
+        } else {
+            assert_eq!(
+                error.to_string(),
+                "ledger log does not end with a newline; refusing to append",
+                "{}",
+                target.name
+            );
+        }
+        assert_eq!(
+            std::fs::read(&log).unwrap(),
+            target.bytes,
+            "{}",
+            target.name
+        );
+    }
+}
+
+#[test]
+fn append_to_file_refuses_another_plugins_log_and_names_both_plugins() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+    let existing = encoded_line("audit", "entry one", "/skills/a.md");
+    std::fs::write(&log, &existing).unwrap();
+    assert_eq!(
+        Ledger::open_file(&log).unwrap().plugin(),
+        &PluginId::from("audit")
+    );
+
+    let error = one_effect_ledger("github-pr", "appended", "/skills/c.md")
+        .append_to_file(&log)
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        error.to_string().contains("`audit`") && error.to_string().contains("`github-pr`"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), existing);
+}
+
+#[test]
+fn append_to_file_creates_a_missing_target_and_extends_an_empty_or_valid_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut new = one_effect_ledger("github-pr", "new one", "/skills/c.md");
+    new.push(Effect::exact(
+        "new two",
+        InverseVia::Universe(file_removal("/skills/d.md")),
+    ));
+    let mut old = one_effect_ledger("github-pr", "old one", "/skills/a.md");
+    old.push(Effect::exact(
+        "old two",
+        InverseVia::Universe(file_removal("/skills/b.md")),
+    ));
+    let mut old_bytes = Vec::new();
+    old.write_to(&mut old_bytes).unwrap();
+
+    let missing = dir.path().join("cell").join("plugin").join("ledger.ndjson");
+    let empty = dir.path().join("empty.ndjson");
+    std::fs::write(&empty, b"").unwrap();
+    let valid = dir.path().join("valid.ndjson");
+    std::fs::write(&valid, &old_bytes).unwrap();
+
+    for (target, before) in [
+        (&missing, &[][..]),
+        (&empty, &[][..]),
+        (&valid, old.effects()),
+    ] {
+        assert_eq!(
+            new.append_to_file(target).unwrap(),
+            2,
+            "{}",
+            target.display()
+        );
+        let reopened = Ledger::open_file(target).unwrap();
+        let expected: Vec<Effect> = before.iter().chain(new.effects()).cloned().collect();
+        assert_eq!(reopened.effects(), expected, "{}", target.display());
+        assert_eq!(reopened.plugin(), &PluginId::from("github-pr"));
+    }
+}
