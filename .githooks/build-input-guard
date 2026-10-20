@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I
-"""Spec 026's git-only step: refuse a commit whose tracked files would swap or wrap what cargo builds.
+"""Spec 026's git-only step: refuse a commit whose files would swap or wrap what cargo builds.
 
 Usage: build-input-guard [COMMIT]    (COMMIT defaults to HEAD)
 
@@ -9,7 +9,7 @@ or rustup, because any of them can run a program the commit names.
 
 Exit 0: clean. Exit 1: refused. Each finding is one line, `build-input-guard: <path>: <key>:
 <reason>`, and the harm follows once. Exit 2: the step could not read the commit, or was run the
-wrong way. It refuses rather than passing, since a commit it cannot read is a commit it cannot clear.
+wrong way. It refuses rather than passing: a commit it cannot read is a commit it cannot clear.
 
 A reviewer runs main's copy against a contributor's PR before checking anything out:
 
@@ -51,6 +51,14 @@ GIT_TIMEOUT_SECONDS = 60
 # Spec 026 section 1 names no key that tracked Cargo configuration may hold. A key is added here
 # only after the spec names it.
 CONFIG_KEYS = frozenset()
+TOOLCHAIN_KEYS = ("channel", "components", "targets", "profile")
+FOUR_KEYS = "channel, components, targets and profile"
+
+CONFIGURATION_REFUSED = "any tracked Cargo configuration is refused"
+EXTENSIONLESS_REFUSED = (
+    "an extensionless rust-toolchain is refused; rustup reads a toolchain name or path from it"
+)
+UNREADABLE = "a commit this step cannot read is a commit it cannot clear"
 
 HARM = (
     "A program nobody reviewed runs at the first cargo command on every machine that builds main, "
@@ -123,7 +131,9 @@ def git(arguments, what, limit=None):
 
 def resolve(argument):
     what = f"{printable(argument)} as a commit"
-    output = git(["rev-parse", "--verify", "--quiet", "--end-of-options", argument + "^{commit}"], what)
+    output = git(
+        ["rev-parse", "--verify", "--quiet", "--end-of-options", argument + "^{commit}"], what
+    )
     sha = output.decode("utf-8", "replace").strip()
     if not COMMIT_ID.fullmatch(sha):
         raise CannotRead(what, f"git rev-parse printed {printable(sha)}, not a commit id")
@@ -200,12 +210,12 @@ def whole(entry, rule):
 
 def configuration(entry):
     if entry.kind != "blob" or entry.mode == SYMLINK:
-        return [whole(entry, "any tracked Cargo configuration is refused")]
+        return [whole(entry, CONFIGURATION_REFUSED)]
     document, problem = read_toml(entry)
     if problem:
         return [(entry.path, "(file)", problem)]
     if not document:
-        return [(entry.path, "(no keys)", "any tracked Cargo configuration is refused, an empty file included")]
+        return [(entry.path, "(no keys)", f"{CONFIGURATION_REFUSED}, an empty file included")]
     return [
         (entry.path, key, "not a key spec 026 allows in Cargo configuration")
         for key in leaf_keys(document)
@@ -219,12 +229,39 @@ def cargo_directory(entry):
     return []
 
 
+def toolchain(entry):
+    if entry.kind != "blob" or entry.mode == SYMLINK:
+        return [whole(entry, "a toolchain file must be a regular file")]
+    document, problem = read_toml(entry)
+    if problem:
+        return [(entry.path, "(file)", problem)]
+    found = [
+        (entry.path, key_path([key]), "a toolchain file holds only a [toolchain] table")
+        for key in document
+        if key != "toolchain"
+    ]
+    table = document.get("toolchain", {})
+    if not isinstance(table, dict):
+        found.append((entry.path, "toolchain", f"must be a table holding only {FOUR_KEYS}"))
+        return found
+    found.extend(
+        (entry.path, key_path(["toolchain", key]), f"a [toolchain] table holds only {FOUR_KEYS}")
+        for key in table
+        if key not in TOOLCHAIN_KEYS
+    )
+    return found
+
+
 def check(entry):
     parts = entry.path.casefold().split("/")
     if parts[-1] in ("config", "config.toml") and parts[-2:-1] == [".cargo"]:
         return configuration(entry)
     if parts[-1] == ".cargo":
         return cargo_directory(entry)
+    if parts[-1] == "rust-toolchain":
+        return [whole(entry, EXTENSIONLESS_REFUSED)]
+    if parts[-1] == "rust-toolchain.toml":
+        return toolchain(entry)
     return []
 
 
@@ -237,10 +274,7 @@ def main(arguments):
         findings = [finding for entry in entries(sha) for finding in check(entry)]
     except CannotRead as error:
         print(f"build-input-guard: cannot read {error.what}: {error.detail}", file=sys.stderr)
-        print(
-            "Refusing rather than passing: a commit this step cannot read is a commit it cannot clear.",
-            file=sys.stderr,
-        )
+        print(f"Refusing rather than passing: {UNREADABLE}.", file=sys.stderr)
         return 2
     if not findings:
         print(f"build-input-guard: clean ({sha})")
