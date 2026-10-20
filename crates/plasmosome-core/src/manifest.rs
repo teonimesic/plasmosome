@@ -1656,7 +1656,7 @@ subject = "git"
         (
             "[commands.commands.'say \"hi\"']\nexec = [\"say\"]\n\
              [commands.commands.'say \"hi\"'.network]\nhosts = [\"api.example.com\"]\n",
-            "commands.commands.'say \"hi\"'.network",
+            "commands.commands.\"say \\\"hi\\\"\".network",
         ),
         (
             "[commands.commands.git]\nexec = [\"git\"]\n\
@@ -2167,11 +2167,15 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
 
     const DECLARED: &str = "id = \"github-pr\"\ndescription = \"Reach the declared API.\"\n";
 
-    const COMMAND_KEYS: [(&str, &str); 3] = [
-        ("git", "git"),
-        ("git ops", "\"git ops\""),
-        ("say \"hi\"", "'say \"hi\"'"),
+    const COMMAND_KEYS: [(&str, &str, &str); 3] = [
+        ("git", "git", "\"git\""),
+        ("git ops", "\"git ops\"", "\"git ops\""),
+        ("say \"hi\"", "\"say \\\"hi\\\"\"", "\"say \\\"hi\\\"\""),
     ];
+
+    const ESCAPE: &str = concat!("\\", "u001B");
+
+    const CSI: &str = concat!("\\", "u009B");
 
     fn declared(tail: &str) -> String {
         format!("{DECLARED}{tail}\n")
@@ -2212,21 +2216,25 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
         (keys, index)
     }
 
-    fn merged_section(document: &mut toml::Value, section: toml::Value) {
-        match (document, section) {
-            (toml::Value::Table(document), toml::Value::Table(section)) => {
-                for (key, value) in section {
-                    match document.get_mut(&key) {
-                        Some(existing) if existing.is_table() && value.is_table() => {
-                            merged_section(existing, value)
-                        }
-                        _ => {
-                            document.insert(key, value);
-                        }
-                    }
+    fn merged_section(document: &mut toml::Table, section: toml::Table, field: &[String]) {
+        for (key, value) in section {
+            let inside = field.first() == Some(&key);
+            if inside && field.len() == 1 {
+                document.insert(key, value);
+                continue;
+            }
+            let below = if inside { &field[1..] } else { &[] };
+            match (document.get_mut(&key), value) {
+                (None, value) => {
+                    document.insert(key, value);
+                }
+                (Some(toml::Value::Table(existing)), toml::Value::Table(value)) => {
+                    merged_section(existing, value, below)
+                }
+                (Some(existing), _) => {
+                    panic!("the section would overwrite {key} = {existing}, which is not the field")
                 }
             }
-            (document, section) => *document = section,
         }
     }
 
@@ -2239,13 +2247,14 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
     fn with_fix(declaration: &str, field: &str, fix: &str) -> String {
         let mut document: toml::Value = toml::from_str(declaration).unwrap();
         let line = fix.parse::<toml::Table>();
+        let (keys, index) = field_keys(field);
         if fix.starts_with('[') {
             let section =
                 line.unwrap_or_else(|error| panic!("{fix:?} is not a TOML section: {error}"));
-            merged_section(&mut document, toml::Value::Table(section));
+            assert_eq!(index, None, "a section fix for the entry {field}");
+            merged_section(document.as_table_mut().unwrap(), section, &keys);
             return toml::to_string(&document).unwrap();
         }
-        let (keys, index) = field_keys(field);
         let (last, parents) = keys.split_last().unwrap();
         let mut parent = &mut document;
         for key in parents {
@@ -2285,6 +2294,12 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
         let mut rows: Vec<(String, Option<&'static str>, String, String)> = [
             (
                 "id = \"\"\ndescription = \"Reach the declared API.\"\nimpl.wasm = \"pr.wasm\"\n".to_string(),
+                None,
+                "id",
+                "id = \"choose-a-stable-id\"",
+            ),
+            (
+                "id = \"\"\nimpl.wasm = \"pr.wasm\"\n".to_string(),
                 None,
                 "id",
                 "id = \"choose-a-stable-id\"",
@@ -2357,6 +2372,152 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 REMOVAL,
             ),
             (
+                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20]"),
+                github,
+                "network.pin_cidrs[0]",
+                "\"192.0.2.0/24\"",
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20, 24]"),
+                github,
+                "network.pin_cidrs[0]",
+                "\"192.0.2.0/24\"",
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = 5"),
+                github,
+                "mock.hosts",
+                REMOVAL,
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = \" \""),
+                github,
+                "mock.hosts",
+                REMOVAL,
+            ),
+            (
+                declared("network = 443\n[mock]\nhosts = [\"api.github.com\"]"),
+                github,
+                "network",
+                "[network]\nhosts = [\"api.github.com\"]",
+            ),
+            (
+                declared("network = [\"api.github.com\", \"uploads.github.com\"]"),
+                github,
+                "network",
+                "[network]\nhosts = [\"api.github.com\", \"uploads.github.com\"]",
+            ),
+            (
+                declared("[network]\nhosts = 443\n[mock]\nhosts = [\"api.github.com\"]"),
+                github,
+                "network.hosts",
+                "hosts = [\"api.github.com\"]",
+            ),
+            (
+                declared("[network]\nhosts = []\n[mock]\nhosts = [\"api.github.com\"]"),
+                github,
+                "network.hosts",
+                "hosts = [\"api.github.com\"]",
+            ),
+            (
+                declared(
+                    "[network]\nports = [443]\n[mock]\nhosts = [\"api.github.com\", \"uploads.github.com\"]",
+                ),
+                github,
+                "network.hosts",
+                "hosts = [\"api.github.com\", \"uploads.github.com\"]",
+            ),
+            (
+                declared("[mock]\nhosts = [\"a.example\", \"b.example\"]"),
+                github,
+                "network",
+                "[network]\nhosts = [\"a.example\", \"b.example\"]",
+            ),
+            (
+                declared("[network]\nhosts = \"a\\\"b\\\\c\""),
+                github,
+                "network.hosts",
+                "hosts = [\"a\\\"b\\\\c\"]",
+            ),
+            (
+                declared("[network]\nhosts = \"x\\ny\""),
+                github,
+                "network.hosts",
+                "hosts = [\"x\\ny\"]",
+            ),
+            (
+                declared("commands = 5"),
+                github,
+                "commands",
+                "[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("commands = \"gh\""),
+                github,
+                "commands",
+                "[commands.commands.gh]\nexec = [\"gh\"]",
+            ),
+            (
+                declared("[commands]\ncommands = 5"),
+                github,
+                "commands.commands",
+                "[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("[commands]\ncommands = \"gh\""),
+                github,
+                "commands.commands",
+                "[commands.commands.gh]\nexec = [\"gh\"]",
+            ),
+            (
+                declared("[commands.commands]\ngit = \"/usr/bin/git\""),
+                github,
+                "commands.commands.git",
+                "[commands.commands.git]\nexec = [\"/usr/bin/git\"]",
+            ),
+            (
+                declared("[commands.commands]\ngit = 5"),
+                github,
+                "commands.commands.git",
+                "[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("[commands]\n[commands.commands]"),
+                github,
+                "commands.commands",
+                "[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("[commands.commands.git]\nexec = []"),
+                github,
+                "commands.commands.git.exec",
+                "exec = [\"git\"]",
+            ),
+            (
+                declared("[commands.commands.git]\nexec = [5]"),
+                github,
+                "commands.commands.git.exec",
+                "exec = [\"git\"]",
+            ),
+            (
+                declared("[commands.commands.gh]\nexec = \"/opt/bin/gh\""),
+                github,
+                "commands.commands.gh.exec",
+                "exec = [\"/opt/bin/gh\"]",
+            ),
+            (
+                declared("[commands.commands.\"\"]\nsubject = \"git\""),
+                github,
+                "commands.commands.\"\".exec",
+                "exec = [\"command-name\"]",
+            ),
+            (
+                declared("[commands.commands.\" \"]\nsubject = \"git\""),
+                github,
+                "commands.commands.\" \".exec",
+                "exec = [\"command-name\"]",
+            ),
+            (
                 declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = \"api.github.com\""),
                 github,
                 "mock.hosts",
@@ -2380,11 +2541,19 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "network",
                 "[network]\nhosts = [\"api.github.com\"]",
             ),
+            (declared("[mock]\nhosts = []"), github, "mock", REMOVAL),
+            (declared("mock = 5"), github, "mock", REMOVAL),
             (
-                declared("[mock]\nhosts = []"),
+                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"b\\nc\"]"),
                 github,
-                "network",
-                "[network]\nhosts = [\"api.example.com\"]",
+                "network.hosts",
+                "\"b\\nc\"",
+            ),
+            (
+                declared("[commands.commands.\"a\\nb\"]\nsubject = \"git\""),
+                github,
+                "commands.commands.\"a\\nb\".exec",
+                "exec = [\"a\\nb\"]",
             ),
             (
                 declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"api.github.example\"]"),
@@ -2407,7 +2576,29 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             (declaration, plasmid, field.to_string(), fix.to_string())
         })
         .collect();
-        for (key, quoted) in COMMAND_KEYS {
+        rows.push((
+            declared(&format!(
+                "[commands.commands.\"a{ESCAPE}b\"]\nsubject = \"git\""
+            )),
+            github,
+            format!("commands.commands.\"a{ESCAPE}b\".exec"),
+            format!("exec = [\"a{ESCAPE}b\"]"),
+        ));
+        rows.push((
+            declared(&format!(
+                "[commands.commands.\"a{CSI}b\"]\nsubject = \"git\""
+            )),
+            github,
+            format!("commands.commands.\"a{CSI}b\".exec"),
+            format!("exec = [\"a{CSI}b\"]"),
+        ));
+        rows.push((
+            declared(&format!("[network]\nhosts = \"x{ESCAPE}y\"")),
+            github,
+            "network.hosts".to_string(),
+            format!("hosts = [\"x{ESCAPE}y\"]"),
+        ));
+        for (_, quoted, program) in COMMAND_KEYS {
             let command = format!("[commands.commands.{quoted}]\nexec = [\"git\"]\n");
             let path = format!("commands.commands.{quoted}");
             let network = format!("{command}[{path}.network]\n");
@@ -2415,7 +2606,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 (
                     format!("[{path}]\nsubject = \"git\""),
                     format!("{path}.exec"),
-                    format!("exec = [{}]", toml::Value::String(key.into())),
+                    format!("exec = [{program}]"),
                 ),
                 (
                     format!("{command}network = \"alpha.ak.local\""),
@@ -2449,6 +2640,16 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                     format!("{path}.network.pin_cidrs[1]"),
                     REMOVAL.to_string(),
                 ),
+                (
+                    format!("{network}hosts = [\"alpha.ak.local\"]\npin_cidrs = [24]"),
+                    format!("{path}.network.pin_cidrs[0]"),
+                    "\"192.0.2.0/24\"".to_string(),
+                ),
+                (
+                    format!("[commands.commands]\n{quoted} = 5"),
+                    path.clone(),
+                    format!("[{path}]\nexec = [{program}]"),
+                ),
             ] {
                 rows.push((declared(&tail), github, field, fix));
             }
@@ -2469,7 +2670,7 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
 
     #[test]
     fn command_refusals_name_the_command_by_its_whole_toml_path() {
-        for (key, quoted) in COMMAND_KEYS {
+        for (key, quoted, _) in COMMAND_KEYS {
             for tail in [
                 format!(
                     "[commands.commands.{quoted}]\nexec = [\"git\"]\nnetwork = \"alpha.ak.local\""
@@ -2490,12 +2691,18 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
     }
 
     #[test]
-    fn following_each_author_refusal_fix_parses() {
-        for (declaration, ..) in author_refusals() {
-            let (_, field, fix) = field_refusal(&declaration);
-            let repaired = with_fix(&declaration, &field, &fix);
-            if let Err(error) = PlasmidManifest::parse(&repaired) {
-                panic!("{declaration}\nwith {field} = {fix:?} applied is refused: {error}");
+    fn following_the_fixes_from_each_author_refusal_ends_in_a_declaration_that_parses() {
+        for (start, ..) in author_refusals() {
+            let mut declaration = start.clone();
+            let mut followed: Vec<(String, String)> = Vec::new();
+            while let Err(error) = PlasmidManifest::parse(&declaration) {
+                let (_, field, fix) = field_refusal(&declaration);
+                assert!(
+                    followed.len() < 4 && !followed.contains(&(field.clone(), fix.clone())),
+                    "{start}\nafter {followed:?} is refused again: {error}"
+                );
+                declaration = with_fix(&declaration, &field, &fix);
+                followed.push((field, fix));
             }
         }
     }
@@ -2614,6 +2821,60 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "{ \"two words\" = 1.5 } is not a string",
             ),
             ("network = 07:32:00".to_string(), "07:32:00 is not a table"),
+            (
+                format!("{network}ports = [\"{ESCAPE}\"]"),
+                &format!("\"{ESCAPE}\" is not an integer from 1 to 65535"),
+            ),
+            (
+                format!("[network]\nhosts = \"x{ESCAPE}y\""),
+                &format!("\"x{ESCAPE}y\" is not a list of strings"),
+            ),
+            ("commands = 5".to_string(), "5 is not a table"),
+            (
+                "[commands.commands]\ngit = \"x\"".to_string(),
+                "\"x\" is not a table",
+            ),
+            (
+                format!("[provides.x]\ntools = [\"a{ESCAPE}b\"]"),
+                &format!(
+                    "tool \"a{ESCAPE}b\" needs a description; replace the names list with a table"
+                ),
+            ),
+            (
+                format!(
+                    "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"x{ESCAPE}y\"]"
+                ),
+                &format!("[mock] stands in for \"x{ESCAPE}y\", which [network] does not declare"),
+            ),
+            (
+                "[commands.commands.git]\nexec = []".to_string(),
+                "[] names no program to run",
+            ),
+            (
+                "[commands.commands.gh]\nexec = \"/opt/bin/gh\"".to_string(),
+                "\"/opt/bin/gh\" is not a list of strings",
+            ),
+            (
+                "[commands.commands.git]\nsubject = \"git\"".to_string(),
+                "the command declares no exec",
+            ),
+            (
+                "[commands]\n[commands.commands]".to_string(),
+                "the commands table declares no command",
+            ),
+            (
+                "[mock]\nhosts = []".to_string(),
+                "[mock] names no host, and there is no [network]",
+            ),
+            (
+                format!(
+                    "[secrets]\nrefs = [{{ id = \"c\", consumer = \"wasm\", delivery = [\"x{ESCAPE}\"] }}]"
+                ),
+                &format!(
+                    "invalid credential reference: unknown variant `x{ESCAPE}`, \
+                     expected one of `handle`, `helper`, `inject`, `mint`"
+                ),
+            ),
         ];
         let details: Vec<String> = rows
             .iter()
@@ -2621,5 +2882,78 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             .collect();
         let expected: Vec<&str> = rows.iter().map(|(_, detail)| *detail).collect();
         assert_eq!(details, expected);
+    }
+
+    fn control_character_declarations() -> Vec<String> {
+        vec![
+            format!(
+                "id = \"a\\nb{ESCAPE}c{CSI}\"\ndescription = \"Reach the declared API.\"\n\
+                 [network]\nports = [443]\n"
+            ),
+            declared(&format!(
+                "[provides.\"x{CSI}\\ny\"]\ntools = [\"a{ESCAPE}b\"]"
+            )),
+            declared(&format!(
+                "[secrets]\nrefs = [{{ id = \"c\", consumer = \"wasm\", delivery = [\"x{ESCAPE}\\ny\"] }}]"
+            )),
+            declared(&format!(
+                "[commands.commands.\"a\\nb{CSI}\"]\nexec = [\"git\"]\n\
+                 secrets.refs = [{{ id = \"c\", consumer = \"git\" }}]"
+            )),
+            declared(&format!(
+                "[commands.commands.\"a\\nb\"]\nexec = [\"git\"]\n\
+                 [commands.commands.\"a\\nb\".network]\nhosts = [\"h{ESCAPE}\", 5]"
+            )),
+        ]
+    }
+
+    #[test]
+    fn a_refusal_holds_no_control_character_but_the_line_breaks_of_a_section_fix() {
+        let declarations = author_refusals()
+            .into_iter()
+            .map(|(declaration, ..)| declaration)
+            .chain(control_character_declarations());
+        for declaration in declarations {
+            let error = PlasmidManifest::parse(&declaration).unwrap_err();
+            let ManifestError::Field { fix, .. } = &error else {
+                panic!("{declaration} was not refused with its field: {error:?}");
+            };
+            let breaks = if fix.starts_with('[') {
+                fix.matches('\n').count()
+            } else {
+                0
+            };
+            let controls: String = error
+                .to_string()
+                .chars()
+                .filter(|character| character.is_control())
+                .collect();
+            assert_eq!(controls, "\n".repeat(breaks), "{declaration}\n{error}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_writes_the_plasmid_id_as_a_toml_key() {
+        for (id, written) in [
+            ("github-pr".to_string(), "github-pr".to_string()),
+            ("two words".to_string(), "\"two words\"".to_string()),
+            (
+                format!("a\\nb{ESCAPE}c{CSI}"),
+                format!("\"a\\nb{ESCAPE}c{CSI}\""),
+            ),
+        ] {
+            let declaration = format!(
+                "id = \"{id}\"\ndescription = \"Reach the declared API.\"\n[network]\nports = [443]\n"
+            );
+            assert_eq!(
+                PlasmidManifest::parse(&declaration)
+                    .unwrap_err()
+                    .to_string(),
+                format!(
+                    "plasmid {written}: network.hosts: a network section must name at least one \
+                     host; write hosts = [\"api.example.com\"]"
+                )
+            );
+        }
     }
 }

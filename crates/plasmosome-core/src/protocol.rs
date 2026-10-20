@@ -618,6 +618,26 @@ mod tests {
     }
 
     #[test]
+    fn a_manifest_refusal_detail_writes_the_plasmid_id_with_its_control_characters_escaped() {
+        let escape = concat!("\\", "u001B");
+        let error = PlasmidManifest::parse(&format!(
+            "id = \"a\\nb{escape}c\"\ndescription = \"Reach the declared API.\"\n\
+             [network]\nports = [443]"
+        ))
+        .expect_err("a network section with no hosts is refused");
+        let wire = WireError::manifest_refusal(DECLARATION_PATH.to_string(), &error);
+        let value = serde_json::to_value(&wire).expect("a wire error serializes");
+        assert_eq!(
+            value["detail"],
+            Value::from(format!(
+                "plasmid \"a\\nb{escape}c\": network.hosts: a network section must name at \
+                 least one host; write hosts = [\"api.example.com\"]"
+            )),
+            "{value}"
+        );
+    }
+
+    #[test]
     fn every_application_error_serializes_its_code_and_structured_fields() {
         expect_code_and_fields(
             WireError::ambiguous_target(vec!["cell-1".to_string(), "cell-2".to_string()]),
