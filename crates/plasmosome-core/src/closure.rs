@@ -292,6 +292,22 @@ mod tests {
     }
 
     #[test]
+    fn an_unnamed_requirer_counts_like_a_named_one() {
+        let graph = graph(&[
+            ("Q", &[], NAMED),
+            ("T", &[], UNNAMED),
+            ("P", &["Q"], UNNAMED),
+            ("U", &["T"], UNNAMED),
+            ("R", &["P", "T"], NAMED),
+            ("V", &["U"], NAMED),
+        ]);
+
+        assert_eq!(graph.stranded_by(&id("Q")), Ok(ids(&["P"])));
+        assert_eq!(graph.stranded_by(&id("T")), Ok(ids(&["R", "U"])));
+        assert_eq!(closure(&graph, "Q"), ids(&["P", "Q", "R"]));
+    }
+
+    #[test]
     fn refusals() {
         let mut graph = graph(&[("P", &[], UNNAMED), ("R", &["P"], NAMED)]);
 
