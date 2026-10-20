@@ -85,6 +85,15 @@ and their descriptions. `list()` still returns sorted names.
 
 Tests: `cargo test -p plasmosome-core`
 
+## Cell IDs on a normalizing filesystem
+
+`InstanceRoot::cell_dir` opens a cell only when its ID is the exact bytes of the name on disk, and
+refuses another spelling as `Alias`. HFS+ stores names in decomposed Unicode, so a cell created
+there with a composed non-ASCII ID such as `café` is stored as other bytes, and `cell_dir` refuses
+that ID every time. APFS and ext4 keep the bytes a name was created with. Spec 023
+allocates ASCII `cell-<n>` IDs, which are stored as given everywhere; nothing here refuses a
+non-ASCII ID on HFS+ at creation.
+
 ## Socket ownership
 
 `plasmosomed` refuses a control-socket path that already exists — a live socket, a stale socket,

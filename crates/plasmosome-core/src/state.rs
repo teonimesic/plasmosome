@@ -75,7 +75,9 @@ pub(crate) const CELL_SUPERVISOR_SOCKET: &str = "membrane.uds";
 /// is refused with its text unchanged; nothing is trimmed, lower-cased or replaced. On a
 /// filesystem that folds case or Unicode normalization, two valid IDs can reach one directory;
 /// [`InstanceRoot::cell_dir`](crate::InstanceRoot::cell_dir) refuses the spelling that is not
-/// the name on disk.
+/// the name on disk. HFS+ stores a name decomposed, so a composed non-ASCII ID such as `café`
+/// is stored as other bytes there and `cell_dir` refuses its own ID as `Alias`. Spec 023
+/// allocates ASCII `cell-<n>` IDs, which every filesystem stores as given.
 pub fn validate_cell_id(cell: &CellId) -> Result<(), CellPathError> {
     let text = cell.as_str();
     if text.is_empty() {
