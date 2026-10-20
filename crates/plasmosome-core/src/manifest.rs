@@ -160,14 +160,15 @@ pub enum ManifestError {
         fix: String,
         detail: String,
     },
-    Invalid(String),
 }
 
 impl std::fmt::Display for ManifestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ManifestError::Io(e) => write!(f, "manifest io error: {e}"),
-            ManifestError::Parse(e) => write!(f, "manifest toml error: {e}"),
+            ManifestError::Parse(e) => {
+                write!(f, "manifest toml error: {}", visible_lines(&e.to_string()))
+            }
             ManifestError::Field {
                 plasmid,
                 field,
@@ -175,7 +176,7 @@ impl std::fmt::Display for ManifestError {
                 detail,
             } => {
                 if let Some(id) = plasmid {
-                    write!(f, "plasmid {id}: ")?;
+                    write!(f, "plasmid {}: ", diagnostic_key(id))?;
                 }
                 if fix == REMOVE_ENTRY {
                     write!(f, "{field}: {detail}; {fix}")
@@ -183,7 +184,6 @@ impl std::fmt::Display for ManifestError {
                     write!(f, "{field}: {detail}; write {fix}")
                 }
             }
-            ManifestError::Invalid(d) => write!(f, "invalid manifest: {d}"),
         }
     }
 }
@@ -201,15 +201,10 @@ impl PlasmidManifest {
         let id = raw
             .get("id")
             .and_then(toml::Value::as_str)
-            .ok_or_else(|| ManifestError::Field {
-                plasmid: None,
-                field: "id".into(),
-                fix: "id = \"choose-a-stable-id\"".into(),
-                detail: "a string id is required".into(),
-            })?
+            .ok_or_else(|| id_error("a string id is required"))?
             .to_string();
         if id.is_empty() {
-            return Err(ManifestError::Invalid("id must not be empty".into()));
+            return Err(id_error("the id must not be empty"));
         }
         let description = raw
             .get("description")
@@ -234,10 +229,6 @@ impl PlasmidManifest {
             .and_then(|impl_table| impl_table.get("wasm"))
             .and_then(toml::Value::as_str)
             .map(PathBuf::from);
-        let network = raw
-            .get("network")
-            .map(|n| parse_network(&id, "network", "network", n))
-            .transpose()?;
         let requires = raw
             .get("requires")
             .map(|r| string_list(r.get("capabilities")))
@@ -291,12 +282,25 @@ impl PlasmidManifest {
                     .unwrap_or("github")
                     .to_string();
                 Ok(MockSpec {
-                    hosts: declared_string_list(&id, "mock", "hosts", m.get("hosts"))?,
+                    hosts: declared_string_list(
+                        &id,
+                        "mock",
+                        m.get("hosts"),
+                        ListRepair::MockHosts,
+                    )?,
                     kind,
                     api,
                     source,
                 })
             })
+            .transpose()?;
+        let mock_hosts = mock
+            .as_ref()
+            .map(|mock| mock.hosts.as_slice())
+            .unwrap_or_default();
+        let network = raw
+            .get("network")
+            .map(|n| parse_network(&id, "network", n, mock_hosts))
             .transpose()?;
         let model = raw.get("model").map(|m| ModelSpec {
             endpoint: m
@@ -320,21 +324,37 @@ impl PlasmidManifest {
             && workspace.is_none()
             && mock.is_none()
             && model.is_none()
-            && commands.is_none()
+            && commands
+                .as_ref()
+                .is_none_or(|commands| commands.commands.is_empty())
         {
-            return Err(ManifestError::Invalid(format!(
-                "plasmid {id} declares no capability and no implementation"
-            )));
+            if commands.is_some() {
+                return Err(field_error(
+                    &id,
+                    "commands.commands".into(),
+                    command_sections(&[EXAMPLE_COMMAND.into()]),
+                    "the commands table declares no command",
+                ));
+            }
+            return Err(field_error(
+                &id,
+                "impl".into(),
+                "[impl]\nwasm = \"component.wasm\"".into(),
+                "the declaration names no capability and no implementation",
+            ));
+        }
+        if let Some(spec) = &mock {
+            validate_mock(&id, spec, network.as_ref())?;
         }
         if let Some(spec) = &network
             && spec.hosts.is_empty()
         {
-            return Err(ManifestError::Invalid(format!(
-                "plasmid {id} declares [network] without hosts"
-            )));
-        }
-        if let Some(spec) = &mock {
-            validate_mock(&id, spec, network.as_ref())?;
+            return Err(field_error(
+                &id,
+                "network.hosts".into(),
+                strings_line("hosts", &[EXAMPLE_HOST.into()]),
+                "a network section must name at least one host",
+            ));
         }
         if let Some(commands) = &commands {
             validate_commands(&id, commands)?;
@@ -363,6 +383,15 @@ impl PlasmidManifest {
     }
 }
 
+fn id_error(detail: &str) -> ManifestError {
+    ManifestError::Field {
+        plasmid: None,
+        field: "id".into(),
+        fix: "id = \"choose-a-stable-id\"".into(),
+        detail: detail.to_string(),
+    }
+}
+
 fn field_error(id: &str, field: String, fix: String, detail: &str) -> ManifestError {
     ManifestError::Field {
         plasmid: Some(id.to_string()),
@@ -373,7 +402,71 @@ fn field_error(id: &str, field: String, fix: String, detail: &str) -> ManifestEr
 }
 
 fn diagnostic_key(name: &str) -> String {
-    toml_edit::Key::new(name).display_repr().into_owned()
+    let bare = !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
+    if bare {
+        name.to_string()
+    } else {
+        toml_string(name)
+    }
+}
+
+fn toml_string(text: &str) -> String {
+    let mut quoted = String::from('"');
+    for character in text.chars() {
+        if matches!(character, '"' | '\\') {
+            quoted.push('\\');
+            quoted.push(character);
+        } else {
+            push_visible(&mut quoted, character);
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn without_controls(text: &str) -> String {
+    let mut visible = String::with_capacity(text.len());
+    for character in text.chars() {
+        push_visible(&mut visible, character);
+    }
+    visible
+}
+
+fn visible_lines(text: &str) -> String {
+    let lines: Vec<String> = text.split('\n').map(without_controls).collect();
+    lines.join("\n")
+}
+
+fn acted_on(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
+fn push_visible(text: &mut String, character: char) {
+    let escape = match character {
+        '\x08' => 'b',
+        '\t' => 't',
+        '\n' => 'n',
+        '\x0C' => 'f',
+        '\r' => 'r',
+        control if acted_on(control) => {
+            text.push('\\');
+            text.push_str(&format!("u{:04X}", u32::from(control)));
+            return;
+        }
+        visible => {
+            text.push(visible);
+            return;
+        }
+    };
+    text.push('\\');
+    text.push(escape);
 }
 
 fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>, ManifestError> {
@@ -406,7 +499,10 @@ fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>,
                         "[{field}]\n{} = \"Describe what this tool does.\"",
                         diagnostic_key(tool)
                     ),
-                    format!("tool {tool:?} needs a description; replace the names list with a table"),
+                    format!(
+                        "tool {} needs a description; replace the names list with a table",
+                        toml_string(tool)
+                    ),
                 )
             } else {
                 (
@@ -440,18 +536,27 @@ fn parse_tools(id: &str, provides: &toml::Value) -> Result<Vec<ToolDeclaration>,
 
 fn parse_network(
     id: &str,
-    message_section: &str,
     field_path: &str,
     n: &toml::Value,
+    mock_hosts: &[String],
 ) -> Result<NetworkSpec, ManifestError> {
     if !n.is_table() {
-        return Err(ManifestError::Invalid(format!(
-            "plasmid {id}: [{message_section}] must be a table"
-        )));
+        let hosts = evident_or(n, mock_hosts, EXAMPLE_HOST);
+        return Err(field_error(
+            id,
+            field_path.to_string(),
+            format!("[{field_path}]\n{}", strings_line("hosts", &hosts)),
+            &format!("{} is not a table", shown(n)),
+        ));
     }
-    let hosts = declared_string_list(id, message_section, "hosts", n.get("hosts"))?;
+    let hosts = declared_string_list(
+        id,
+        field_path,
+        n.get("hosts"),
+        ListRepair::Hosts(mock_hosts),
+    )?;
     let ports = declared_ports(id, &format!("{field_path}.ports"), n.get("ports"))?;
-    let pin_cidrs = declared_string_list(id, message_section, "pin_cidrs", n.get("pin_cidrs"))?;
+    let pin_cidrs = declared_string_list(id, field_path, n.get("pin_cidrs"), ListRepair::Pins)?;
     Ok(NetworkSpec {
         hosts,
         ports,
@@ -531,7 +636,10 @@ fn parse_secret_refs(
                 id,
                 field(name),
                 fix,
-                &format!("invalid credential reference: {error}"),
+                &format!(
+                    "invalid credential reference: {}",
+                    without_controls(error.message())
+                ),
             )
         })?;
         validate_secret_ref(id, section, index, &secret, delivery_omitted)?;
@@ -555,22 +663,68 @@ fn normalize_scope(item: &mut toml::Value) {
 }
 
 fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, ManifestError> {
+    if !raw.is_table() {
+        return Err(field_error(
+            plasmid_id,
+            "commands".into(),
+            command_sections(&evident_or(raw, &[], EXAMPLE_COMMAND)),
+            &format!("{} is not a table", shown(raw)),
+        ));
+    }
     let address_plan = raw
         .get("address_plan")
         .and_then(toml::Value::as_str)
         .unwrap_or("10.29.0.0/24")
         .to_string();
-    let table = raw
-        .get("commands")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| ManifestError::Invalid("[commands] must hold a commands table".into()))?;
+    let table = match raw.get("commands") {
+        Some(toml::Value::Table(table)) => table,
+        Some(other) => {
+            return Err(field_error(
+                plasmid_id,
+                "commands.commands".into(),
+                command_sections(&evident_or(other, &[], EXAMPLE_COMMAND)),
+                &format!("{} is not a table", shown(other)),
+            ));
+        }
+        None => {
+            return Err(field_error(
+                plasmid_id,
+                "commands.commands".into(),
+                command_sections(&[EXAMPLE_COMMAND.into()]),
+                "[commands] holds no commands table",
+            ));
+        }
+    };
     let mut commands = Vec::new();
     for (id, decl) in table {
-        let exec = string_list(decl.get("exec"));
+        let path = format!("commands.commands.{}", diagnostic_key(id));
+        if !decl.is_table() {
+            return Err(field_error(
+                plasmid_id,
+                path.clone(),
+                format!(
+                    "[{path}]\nexec = [{}]",
+                    toml_string(&program(Some(decl), id))
+                ),
+                &format!("{} is not a table", shown(decl)),
+            ));
+        }
+        let declared = decl.get("exec");
+        let exec = string_list(declared);
         if exec.is_empty() {
-            return Err(ManifestError::Invalid(format!(
-                "[commands.{id}] declares no exec"
-            )));
+            let detail = match declared {
+                None => "the command declares no exec".to_string(),
+                Some(value) if value.is_array() => {
+                    format!("{} names no program to run", shown(value))
+                }
+                Some(value) => format!("{} is not a list of strings", shown(value)),
+            };
+            return Err(field_error(
+                plasmid_id,
+                format!("{path}.exec"),
+                format!("exec = [{}]", toml_string(&program(declared, id))),
+                &detail,
+            ));
         }
         commands.push(CommandDecl {
             id: id.clone(),
@@ -581,24 +735,11 @@ fn parse_commands(plasmid_id: &str, raw: &toml::Value) -> Result<CommandsSpec, M
                 .map(String::from),
             network: decl
                 .get("network")
-                .map(|n| {
-                    parse_network(
-                        plasmid_id,
-                        &format!("commands.{id}.network"),
-                        &format!("commands.commands.{}.network", diagnostic_key(id)),
-                        n,
-                    )
-                })
+                .map(|n| parse_network(plasmid_id, &format!("{path}.network"), n, &[]))
                 .transpose()?,
             secrets: decl
                 .get("secrets")
-                .map(|secrets| {
-                    parse_secret_refs(
-                        plasmid_id,
-                        &format!("commands.commands.{}.secrets", diagnostic_key(id)),
-                        secrets,
-                    )
-                })
+                .map(|secrets| parse_secret_refs(plasmid_id, &format!("{path}.secrets"), secrets))
                 .transpose()?
                 .unwrap_or_default(),
         });
@@ -692,18 +833,45 @@ fn validate_mock(
     network: Option<&NetworkSpec>,
 ) -> Result<(), ManifestError> {
     let Some(network) = network else {
-        return Err(ManifestError::Invalid(format!(
-            "plasmid {id} declares [mock] without the [network] hosts it stands in for"
-        )));
-    };
-    for host in &mock.hosts {
-        if !network.hosts.iter().any(|declared| declared == host) {
-            return Err(ManifestError::Invalid(format!(
-                "plasmid {id}: [mock] names host `{host}`, which its [network] does not declare"
-            )));
+        if mock.hosts.is_empty() {
+            return Err(field_error(
+                id,
+                "mock".into(),
+                REMOVE_ENTRY.into(),
+                "[mock] names no host, and there is no [network]",
+            ));
         }
-    }
-    Ok(())
+        return Err(field_error(
+            id,
+            "network".into(),
+            format!(
+                "[network]\n{}",
+                strings_line("hosts", &distinct(&mock.hosts))
+            ),
+            "a mock stands in for hosts that [network] declares, and there is no [network]",
+        ));
+    };
+    let undeclared: Vec<String> = distinct(&mock.hosts)
+        .into_iter()
+        .filter(|host| !network.hosts.contains(host))
+        .collect();
+    let Some(host) = undeclared.first() else {
+        return Ok(());
+    };
+    let fix = if network.hosts.is_empty() {
+        strings_line("hosts", &undeclared)
+    } else {
+        toml_string(host)
+    };
+    Err(field_error(
+        id,
+        "network.hosts".into(),
+        fix,
+        &format!(
+            "[mock] stands in for {}, which [network] does not declare",
+            toml_string(host)
+        ),
+    ))
 }
 
 fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestError> {
@@ -718,18 +886,13 @@ fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestEr
                     .as_deref()
                     .is_none_or(|subject| subject.trim().is_empty())
             {
-                let suggestion = if decl.id.trim().is_empty() {
-                    "command-name"
-                } else {
-                    &decl.id
-                };
                 return Err(field_error(
                     id,
                     format!(
                         "commands.commands.{}.secrets.refs[{index}].subject",
                         diagnostic_key(&decl.id)
                     ),
-                    format!("subject = {}", toml::Value::String(suggestion.into())),
+                    format!("subject = {}", toml_string(&program(None, &decl.id))),
                     "a command credential requires a nonblank ref or command subject",
                 ));
             }
@@ -738,27 +901,143 @@ fn validate_commands(id: &str, commands: &CommandsSpec) -> Result<(), ManifestEr
     Ok(())
 }
 
+const EXAMPLE_HOST: &str = "api.example.com";
+
+const EXAMPLE_PIN: &str = "192.0.2.0/24";
+
+const EXAMPLE_COMMAND: &str = "git";
+
+fn strings_line(field: &str, entries: &[String]) -> String {
+    let entries: Vec<String> = entries.iter().map(|entry| toml_string(entry)).collect();
+    format!("{field} = [{}]", entries.join(", "))
+}
+
+fn evident_strings(value: &toml::Value) -> Vec<String> {
+    let nonblank = |item: &toml::Value| {
+        item.as_str()
+            .filter(|text| !text.trim().is_empty())
+            .map(String::from)
+    };
+    match value {
+        toml::Value::Array(items) => items
+            .iter()
+            .map(nonblank)
+            .collect::<Option<Vec<String>>>()
+            .map(|names| distinct(&names))
+            .unwrap_or_default(),
+        value => nonblank(value).into_iter().collect(),
+    }
+}
+
+fn distinct(names: &[String]) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for name in names {
+        if !kept.contains(name) {
+            kept.push(name.clone());
+        }
+    }
+    kept
+}
+
+fn evident_or(value: &toml::Value, fallback: &[String], example: &str) -> Vec<String> {
+    let evident = evident_strings(value);
+    if !evident.is_empty() {
+        evident
+    } else if !fallback.is_empty() {
+        distinct(fallback)
+    } else {
+        vec![example.to_string()]
+    }
+}
+
+fn command_sections(names: &[String]) -> String {
+    let sections: Vec<String> = names
+        .iter()
+        .map(|name| {
+            format!(
+                "[commands.commands.{}]\nexec = [{}]",
+                diagnostic_key(name),
+                toml_string(name)
+            )
+        })
+        .collect();
+    sections.join("\n")
+}
+
+fn program(evident: Option<&toml::Value>, key: &str) -> String {
+    evident
+        .and_then(toml::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .or(Some(key).filter(|key| !key.trim().is_empty()))
+        .unwrap_or("command-name")
+        .to_string()
+}
+
+#[derive(Clone, Copy)]
+enum ListRepair<'a> {
+    Hosts(&'a [String]),
+    Pins,
+    MockHosts,
+}
+
+impl ListRepair<'_> {
+    fn field(self) -> &'static str {
+        match self {
+            ListRepair::Hosts(_) | ListRepair::MockHosts => "hosts",
+            ListRepair::Pins => "pin_cidrs",
+        }
+    }
+
+    fn whole(self, value: &toml::Value) -> String {
+        match self {
+            ListRepair::Hosts(fallback) => {
+                strings_line("hosts", &evident_or(value, fallback, EXAMPLE_HOST))
+            }
+            ListRepair::Pins => strings_line("pin_cidrs", &evident_or(value, &[], EXAMPLE_PIN)),
+            ListRepair::MockHosts => match evident_strings(value) {
+                hosts if hosts.is_empty() => REMOVE_ENTRY.into(),
+                hosts => strings_line("hosts", &hosts),
+            },
+        }
+    }
+
+    fn entry(self, items: &[toml::Value]) -> String {
+        match self {
+            ListRepair::Pins if !items.iter().any(toml::Value::is_str) => toml_string(EXAMPLE_PIN),
+            _ => REMOVE_ENTRY.into(),
+        }
+    }
+}
+
 fn declared_string_list(
     id: &str,
     section: &str,
-    field: &str,
     value: Option<&toml::Value>,
+    repair: ListRepair,
 ) -> Result<Vec<String>, ManifestError> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
+    let path = format!("{section}.{}", repair.field());
     let Some(items) = value.as_array() else {
-        return Err(ManifestError::Invalid(format!(
-            "plasmid {id}: [{section}] `{field}` must be an array of strings"
-        )));
+        return Err(field_error(
+            id,
+            path,
+            repair.whole(value),
+            &format!("{} is not a list of strings", shown(value)),
+        ));
     };
     items
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(index, item)| {
             item.as_str().map(String::from).ok_or_else(|| {
-                ManifestError::Invalid(format!(
-                    "plasmid {id}: [{section}] `{field}` holds `{item}`, which is not a string"
-                ))
+                field_error(
+                    id,
+                    format!("{path}[{index}]"),
+                    repair.entry(items),
+                    &format!("{} is not a string", shown(item)),
+                )
             })
         })
         .collect()
@@ -783,7 +1062,7 @@ fn declared_ports(
             id,
             field.to_string(),
             fix,
-            &format!("{value} is not a list of integers from 1 to 65535"),
+            &format!("{} is not a list of integers from 1 to 65535", shown(value)),
         ));
     };
     let ports: Vec<Option<u16>> = items
@@ -801,8 +1080,30 @@ fn declared_ports(
         id,
         format!("{field}[{index}]"),
         fix,
-        &format!("{item} is not an integer from 1 to 65535"),
+        &format!("{} is not an integer from 1 to 65535", shown(item)),
     ))
+}
+
+fn shown(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(text) => toml_string(text),
+        toml::Value::Float(number) if number.is_nan() => "nan".into(),
+        toml::Value::Float(number) => format!("{number:?}"),
+        toml::Value::Datetime(datetime) => datetime.to_string(),
+        toml::Value::Array(items) => {
+            let items: Vec<String> = items.iter().map(shown).collect();
+            format!("[{}]", items.join(", "))
+        }
+        toml::Value::Table(table) if table.is_empty() => "{}".into(),
+        toml::Value::Table(table) => {
+            let entries: Vec<String> = table
+                .iter()
+                .map(|(key, value)| format!("{} = {}", diagnostic_key(key), shown(value)))
+                .collect();
+            format!("{{ {} }}", entries.join(", "))
+        }
+        toml::Value::Integer(_) | toml::Value::Boolean(_) => value.to_string(),
+    }
 }
 
 fn evident_port(value: &toml::Value) -> Option<u16> {
@@ -1447,109 +1748,124 @@ subject = "git"
         );
     }
 
+    fn refused_at(declaration: &str) -> (Option<String>, String) {
+        let (plasmid, field, _) = field_refusal(declaration);
+        (plasmid, field)
+    }
+
     #[test]
     fn a_manifest_whose_whole_content_is_a_mock_is_refused() {
-        let err = PlasmidManifest::parse(MOCK_WITHOUT_NETWORK).unwrap_err();
-        assert!(
-            matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("[network]")),
-            "a mock stands in for hosts a plasmid declares, so it is never a plasmid of its own: {err:?}"
+        assert_eq!(
+            refused_at(MOCK_WITHOUT_NETWORK),
+            (Some("mock-github".into()), "network".into()),
+            "a mock stands in for hosts a plasmid declares, so it is never a plasmid of its own"
         );
     }
 
     #[test]
     fn a_mock_naming_a_host_its_own_manifest_does_not_declare_is_refused() {
-        let err = PlasmidManifest::parse(MOCK_HOSTS_DRIFTED_FROM_NETWORK).unwrap_err();
-        assert!(
-            matches!(&err, ManifestError::Invalid(m) if m.contains("api.github.example")),
-            "the refusal names the host that drifted: {err:?}"
+        let (plasmid, field, fix) = field_refusal(MOCK_HOSTS_DRIFTED_FROM_NETWORK);
+        assert_eq!(
+            (plasmid.as_deref(), field.as_str(), fix.as_str()),
+            (Some("github-pr"), "network.hosts", "\"api.github.example\""),
+            "the refusal names the host that drifted"
         );
     }
 
     #[test]
     fn a_mock_whose_hosts_is_a_bare_string_is_refused() {
-        let err = PlasmidManifest::parse(MOCK_HOSTS_AS_SCALAR).unwrap_err();
-        assert!(
-            matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("hosts")),
+        assert_eq!(
+            refused_at(MOCK_HOSTS_AS_SCALAR),
+            (Some("github-pr".into()), "mock.hosts".into()),
             "a scalar `hosts` declares no host at all, and silently standing in for nothing is \
-             the failure a mock exists to prevent: {err:?}"
+             the failure a mock exists to prevent"
         );
     }
 
     #[test]
     fn a_mock_whose_hosts_holds_a_non_string_is_refused() {
-        let err = PlasmidManifest::parse(MOCK_HOSTS_MIXED_TYPES).unwrap_err();
-        assert!(
-            matches!(&err, ManifestError::Invalid(m) if m.contains("[mock]") && m.contains("hosts")),
-            "dropping the entry that is not a string would narrow the mock without saying so: {err:?}"
+        assert_eq!(
+            refused_at(MOCK_HOSTS_MIXED_TYPES),
+            (Some("github-pr".into()), "mock.hosts[1]".into()),
+            "dropping the entry that is not a string would narrow the mock without saying so"
         );
     }
 
     #[test]
     fn a_pin_declared_as_a_bare_string_must_not_parse_to_no_pins_at_all() {
-        let err = PlasmidManifest::parse(NETWORK_PIN_CIDRS_AS_SCALAR).unwrap_err();
-        assert!(
-            matches!(&err, ManifestError::Invalid(m) if m.contains("[network]") && m.contains("pin_cidrs")),
+        assert_eq!(
+            refused_at(NETWORK_PIN_CIDRS_AS_SCALAR),
+            (Some("github-pr".into()), "network.pin_cidrs".into()),
             "a scalar pin_cidrs read as an empty list is an egress restriction that fails open \
-             — the author declared a pin and nothing was pinned: {err:?}"
+             — the author declared a pin and nothing was pinned"
         );
     }
 
     #[test]
     fn a_pin_cidrs_holding_a_non_string_is_refused() {
-        let err = PlasmidManifest::parse(NETWORK_PIN_CIDRS_MIXED_TYPES).unwrap_err();
-        assert!(
-            matches!(&err, ManifestError::Invalid(m) if m.contains("pin_cidrs") && m.contains("not a string")),
-            "dropping the entry that is not a string would widen egress without saying so: {err:?}"
+        assert_eq!(
+            refused_at(NETWORK_PIN_CIDRS_MIXED_TYPES),
+            (Some("github-pr".into()), "network.pin_cidrs[1]".into()),
+            "dropping the entry that is not a string would widen egress without saying so"
         );
     }
 
     #[test]
     fn a_network_hosts_declared_as_a_bare_string_is_refused_as_a_type_error_naming_the_field() {
-        let err = PlasmidManifest::parse(NETWORK_HOSTS_AS_SCALAR).unwrap_err();
-        assert!(
-            matches!(&err, ManifestError::Invalid(m) if m.contains("hosts") && m.contains("must be an array of strings")),
+        assert_eq!(
+            refused_at(NETWORK_HOSTS_AS_SCALAR),
+            (Some("github-pr".into()), "network.hosts".into()),
             "a hosts-shaped typo is a type error, not an absence, and reporting it as absence \
-             sends the author looking for a line that is already there: {err:?}"
+             sends the author looking for a line that is already there"
         );
     }
 
     #[test]
     fn a_command_network_hosts_declared_as_a_bare_string_is_refused() {
-        let err = PlasmidManifest::parse(COMMAND_NETWORK_HOSTS_AS_SCALAR).unwrap_err();
-        assert!(
-            matches!(&err, ManifestError::Invalid(m) if m.contains("[commands.git.network]") && m.contains("hosts")),
+        assert_eq!(
+            refused_at(COMMAND_NETWORK_HOSTS_AS_SCALAR),
+            (
+                Some("e13-commands-fixture".into()),
+                "commands.commands.git.network.hosts".into()
+            ),
             "a command whose network hosts read as an empty list carries no host restriction \
-             at all, and nothing behind the parser notices: {err:?}"
+             at all, and nothing behind the parser notices"
         );
     }
 
     #[test]
     fn a_command_network_section_declared_as_a_scalar_is_refused() {
-        let err = PlasmidManifest::parse(COMMAND_NETWORK_SECTION_AS_SCALAR).unwrap_err();
-        assert!(
-            matches!(&err, ManifestError::Invalid(m) if m.contains("[commands.git.network]") && m.contains("must be a table")),
+        assert_eq!(
+            refused_at(COMMAND_NETWORK_SECTION_AS_SCALAR),
+            (
+                Some("e13-commands-fixture".into()),
+                "commands.commands.git.network".into()
+            ),
             "a network section that is not a table reads every field as absent, so the command \
-             carries a network declaration that restricts nothing: {err:?}"
+             carries a network declaration that restricts nothing"
         );
     }
 
     #[test]
     fn a_network_section_declared_as_a_scalar_is_refused_as_a_type_error_not_an_absence() {
-        let err = PlasmidManifest::parse(NETWORK_SECTION_AS_SCALAR).unwrap_err();
-        assert!(
-            matches!(&err, ManifestError::Invalid(m) if m.contains("[network]") && m.contains("must be a table")),
+        assert_eq!(
+            refused_at(NETWORK_SECTION_AS_SCALAR),
+            (Some("probe".into()), "network".into()),
             "reporting a section-shaped typo as missing hosts sends the author looking for a \
-             line that is already there: {err:?}"
+             line that is already there"
         );
     }
 
     #[test]
     fn a_command_pin_cidrs_declared_as_a_bare_string_is_refused() {
-        let err = PlasmidManifest::parse(COMMAND_NETWORK_PIN_CIDRS_AS_SCALAR).unwrap_err();
-        assert!(
-            matches!(&err, ManifestError::Invalid(m) if m.contains("[commands.git.network]") && m.contains("pin_cidrs")),
+        assert_eq!(
+            refused_at(COMMAND_NETWORK_PIN_CIDRS_AS_SCALAR),
+            (
+                Some("e13-commands-fixture".into()),
+                "commands.commands.git.network.pin_cidrs".into()
+            ),
             "the fourth cell the criterion claims: a command-level pin that parses to no pins \
-             at all must be refused by a test, not only by a shared helper: {err:?}"
+             at all must be refused by a test, not only by a shared helper"
         );
     }
 
@@ -1569,7 +1885,7 @@ subject = "git"
         (
             "[commands.commands.'say \"hi\"']\nexec = [\"say\"]\n\
              [commands.commands.'say \"hi\"'.network]\nhosts = [\"api.example.com\"]\n",
-            "commands.commands.'say \"hi\"'.network",
+            "commands.commands.\"say \\\"hi\\\"\".network",
         ),
         (
             "[commands.commands.git]\nexec = [\"git\"]\n\
@@ -2024,21 +2340,38 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
     }
 
     #[test]
-    fn manifest_with_no_capability_section_is_rejected() {
-        let err = PlasmidManifest::parse(
-            "id = \"empty\"\ndescription = \"A declaration with no capability.\"",
-        )
-        .unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid(_)));
+    fn a_declaration_with_no_capability_and_no_implementation_is_refused_at_impl() {
+        let (plasmid, field, fix) =
+            field_refusal("id = \"empty\"\ndescription = \"A declaration with no capability.\"");
+        assert_eq!(plasmid.as_deref(), Some("empty"));
+        assert_eq!(field, "impl");
+        assert_eq!(fix, "[impl]\nwasm = \"component.wasm\"");
     }
 
     #[test]
-    fn network_section_without_hosts_is_rejected() {
-        let err = PlasmidManifest::parse(
-            "id = \"netless\"\ndescription = \"Reach a network host.\"\n\n[network]\nports = [443]",
-        )
-        .unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid(_)));
+    fn a_network_section_with_no_hosts_is_refused_at_network_hosts() {
+        for hosts in ["", "hosts = []"] {
+            let (plasmid, field, fix) = field_refusal(&format!(
+                "id = \"netless\"\ndescription = \"Reach a network host.\"\n\n[network]\n\
+                 ports = [443]\n{hosts}"
+            ));
+            assert_eq!(plasmid.as_deref(), Some("netless"), "{hosts}");
+            assert_eq!(field, "network.hosts", "{hosts}");
+            assert_eq!(fix, "hosts = [\"api.example.com\"]", "{hosts}");
+        }
+    }
+
+    #[test]
+    fn an_empty_id_is_refused_naming_id_and_no_plasmid() {
+        for declaration in [
+            "id = \"\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"",
+            "id = \"\"\nimpl.wasm = \"pr.wasm\"",
+        ] {
+            let (plasmid, field, fix) = field_refusal(declaration);
+            assert_eq!(plasmid, None, "{declaration}");
+            assert_eq!(field, "id", "{declaration}");
+            assert_eq!(fix, "id = \"choose-a-stable-id\"", "{declaration}");
+        }
     }
 
     #[test]
@@ -2062,5 +2395,947 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
         let manifest = PlasmidManifest::parse(GITHUB_PR).unwrap();
         assert!(manifest.declares_any_host("api.github.com"));
         assert!(!manifest.declares_any_host("api.openai.com"));
+    }
+
+    const DECLARED: &str = "id = \"github-pr\"\ndescription = \"Reach the declared API.\"\n";
+
+    const COMMAND_KEYS: [(&str, &str, &str); 3] = [
+        ("git", "git", "\"git\""),
+        ("git ops", "\"git ops\"", "\"git ops\""),
+        ("say \"hi\"", "\"say \\\"hi\\\"\"", "\"say \\\"hi\\\"\""),
+    ];
+
+    const ESCAPE: &str = concat!("\\", "u001B");
+
+    const CSI: &str = concat!("\\", "u009B");
+
+    const DELETE: &str = concat!("\\", "u007F");
+
+    const BELL: &str = concat!("\\", "u0007");
+
+    const LINE_SEPARATOR: &str = concat!("\\", "u2028");
+
+    const RIGHT_TO_LEFT: &str = concat!("\\", "u202E");
+
+    const ACTED_ON: [u32; 13] = [
+        0x2028, 0x2029, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067,
+        0x2068, 0x2069,
+    ];
+
+    fn raw(code: u32) -> char {
+        char::from_u32(code).unwrap()
+    }
+
+    fn acted_on(character: char) -> bool {
+        character.is_control() || ACTED_ON.contains(&u32::from(character))
+    }
+
+    fn line_and_bidi_characters() -> String {
+        ACTED_ON.iter().map(|code| raw(*code)).collect()
+    }
+
+    fn declared(tail: &str) -> String {
+        format!("{DECLARED}{tail}\n")
+    }
+
+    fn field_refusal(declaration: &str) -> (Option<String>, String, String) {
+        let error = PlasmidManifest::parse(declaration)
+            .expect_err(&format!("{declaration} must be refused"));
+        let ManifestError::Field {
+            plasmid,
+            field,
+            fix,
+            detail,
+        } = error
+        else {
+            panic!("{declaration} was not refused with its field: {error:?}");
+        };
+        assert!(!fix.trim().is_empty(), "{declaration} has no fix");
+        assert!(!detail.trim().is_empty(), "{declaration} has no detail");
+        (plasmid, field, fix)
+    }
+
+    fn field_keys(field: &str) -> (Vec<String>, Option<usize>) {
+        let (path, index) = match field
+            .strip_suffix(']')
+            .and_then(|rest| rest.rsplit_once('['))
+        {
+            Some((path, index)) => (path, Some(index.parse().unwrap())),
+            None => (field, None),
+        };
+        let mut value: toml::Value = format!("{path} = true").parse().unwrap();
+        let mut keys = Vec::new();
+        while let toml::Value::Table(table) = value {
+            let (key, inner) = table.into_iter().next().unwrap();
+            keys.push(key);
+            value = inner;
+        }
+        (keys, index)
+    }
+
+    fn merged_section(document: &mut toml::Table, section: toml::Table, field: &[String]) {
+        for (key, value) in section {
+            let inside = field.first() == Some(&key);
+            if inside && field.len() == 1 {
+                document.insert(key, value);
+                continue;
+            }
+            let below = if inside { &field[1..] } else { &[] };
+            match (document.get_mut(&key), value) {
+                (None, value) => {
+                    document.insert(key, value);
+                }
+                (Some(toml::Value::Table(existing)), toml::Value::Table(value)) => {
+                    merged_section(existing, value, below)
+                }
+                (Some(existing), _) => {
+                    panic!("the section would overwrite {key} = {existing}, which is not the field")
+                }
+            }
+        }
+    }
+
+    fn parsed_entry(entry: &str) -> toml::Value {
+        let table: toml::Table = toml::from_str(&format!("entry = {entry}"))
+            .unwrap_or_else(|error| panic!("{entry:?} is not a TOML value: {error}"));
+        table["entry"].clone()
+    }
+
+    fn with_fix(declaration: &str, field: &str, fix: &str) -> String {
+        let mut document: toml::Value = toml::from_str(declaration).unwrap();
+        let line = fix.parse::<toml::Table>();
+        let (keys, index) = field_keys(field);
+        if fix.starts_with('[') {
+            let section =
+                line.unwrap_or_else(|error| panic!("{fix:?} is not a TOML section: {error}"));
+            assert_eq!(index, None, "a section fix for the entry {field}");
+            merged_section(document.as_table_mut().unwrap(), section, &keys);
+            return toml::to_string(&document).unwrap();
+        }
+        let (last, parents) = keys.split_last().unwrap();
+        let mut parent = &mut document;
+        for key in parents {
+            parent = &mut parent[key.as_str()];
+        }
+        let parent = parent.as_table_mut().unwrap();
+        match (index, fix, line) {
+            (Some(index), REMOVAL, _) => {
+                parent[last.as_str()].as_array_mut().unwrap().remove(index);
+            }
+            (Some(index), entry, _) => {
+                parent[last.as_str()][index] = parsed_entry(entry);
+            }
+            (None, REMOVAL, _) => {
+                parent.remove(last.as_str());
+            }
+            (None, _, Ok(line)) => {
+                assert_eq!(
+                    line.keys().collect::<Vec<_>>(),
+                    vec![last],
+                    "{fix:?} must write exactly {field}"
+                );
+                parent.insert(last.clone(), line[last.as_str()].clone());
+            }
+            (None, entry, Err(_)) => {
+                parent[last.as_str()]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(parsed_entry(entry));
+            }
+        }
+        toml::to_string(&document).unwrap()
+    }
+
+    fn author_refusals() -> Vec<(String, Option<&'static str>, String, String)> {
+        let github = Some("github-pr");
+        let mut rows: Vec<(String, Option<&'static str>, String, String)> = [
+            (
+                "id = \"\"\ndescription = \"Reach the declared API.\"\nimpl.wasm = \"pr.wasm\"\n".to_string(),
+                None,
+                "id",
+                "id = \"choose-a-stable-id\"",
+            ),
+            (
+                "id = \"\"\nimpl.wasm = \"pr.wasm\"\n".to_string(),
+                None,
+                "id",
+                "id = \"choose-a-stable-id\"",
+            ),
+            (declared(""), github, "impl", "[impl]\nwasm = \"component.wasm\""),
+            (
+                declared("[network]\nports = [443]"),
+                github,
+                "network.hosts",
+                "hosts = [\"api.example.com\"]",
+            ),
+            (
+                declared("[network]\nhosts = []"),
+                github,
+                "network.hosts",
+                "hosts = [\"api.example.com\"]",
+            ),
+            (
+                declared("network = \"api.github.com\""),
+                github,
+                "network",
+                "[network]\nhosts = [\"api.github.com\"]",
+            ),
+            (
+                declared("network = 443"),
+                github,
+                "network",
+                "[network]\nhosts = [\"api.example.com\"]",
+            ),
+            (
+                declared("[network]\nhosts = \"api.github.com\""),
+                github,
+                "network.hosts",
+                "hosts = [\"api.github.com\"]",
+            ),
+            (
+                declared("[network]\nhosts = 443"),
+                github,
+                "network.hosts",
+                "hosts = [\"api.example.com\"]",
+            ),
+            (
+                declared("[network]\nhosts = \" \""),
+                github,
+                "network.hosts",
+                "hosts = [\"api.example.com\"]",
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\", 443]"),
+                github,
+                "network.hosts[1]",
+                REMOVAL,
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = \"140.82.112.0/20\""),
+                github,
+                "network.pin_cidrs",
+                "pin_cidrs = [\"140.82.112.0/20\"]",
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = 20"),
+                github,
+                "network.pin_cidrs",
+                "pin_cidrs = [\"192.0.2.0/24\"]",
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [\"140.82.112.0/20\", 20]"),
+                github,
+                "network.pin_cidrs[1]",
+                REMOVAL,
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20]"),
+                github,
+                "network.pin_cidrs[0]",
+                "\"192.0.2.0/24\"",
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20, 24]"),
+                github,
+                "network.pin_cidrs[0]",
+                "\"192.0.2.0/24\"",
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = 5"),
+                github,
+                "mock.hosts",
+                REMOVAL,
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = \" \""),
+                github,
+                "mock.hosts",
+                REMOVAL,
+            ),
+            (
+                declared("network = 443\n[mock]\nhosts = [\"api.github.com\"]"),
+                github,
+                "network",
+                "[network]\nhosts = [\"api.github.com\"]",
+            ),
+            (
+                declared("network = [\"api.github.com\", \"uploads.github.com\"]"),
+                github,
+                "network",
+                "[network]\nhosts = [\"api.github.com\", \"uploads.github.com\"]",
+            ),
+            (
+                declared("[network]\nhosts = 443\n[mock]\nhosts = [\"api.github.com\"]"),
+                github,
+                "network.hosts",
+                "hosts = [\"api.github.com\"]",
+            ),
+            (
+                declared("[network]\nhosts = []\n[mock]\nhosts = [\"api.github.com\"]"),
+                github,
+                "network.hosts",
+                "hosts = [\"api.github.com\"]",
+            ),
+            (
+                declared(
+                    "[network]\nports = [443]\n[mock]\nhosts = [\"api.github.com\", \"uploads.github.com\"]",
+                ),
+                github,
+                "network.hosts",
+                "hosts = [\"api.github.com\", \"uploads.github.com\"]",
+            ),
+            (
+                declared("commands = [\"gh\", \"gh\"]"),
+                github,
+                "commands",
+                "[commands.commands.gh]\nexec = [\"gh\"]",
+            ),
+            (
+                declared("[commands]\ncommands = [\"gh\", \"gh\"]"),
+                github,
+                "commands.commands",
+                "[commands.commands.gh]\nexec = [\"gh\"]",
+            ),
+            (
+                declared("commands = [\"gh\", \"git\"]"),
+                github,
+                "commands",
+                "[commands.commands.gh]\nexec = [\"gh\"]\n[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("network = [\"a.example\", \"a.example\"]"),
+                github,
+                "network",
+                "[network]\nhosts = [\"a.example\"]",
+            ),
+            (
+                declared("[network]\nhosts = 443\n[mock]\nhosts = [\"a.example\", \"a.example\"]"),
+                github,
+                "network.hosts",
+                "hosts = [\"a.example\"]",
+            ),
+            (
+                declared("[mock]\nhosts = [\"a.example\", \"a.example\"]"),
+                github,
+                "network",
+                "[network]\nhosts = [\"a.example\"]",
+            ),
+            (
+                declared("[network]\nhosts = []\n[mock]\nhosts = [\"a.example\", \"a.example\"]"),
+                github,
+                "network.hosts",
+                "hosts = [\"a.example\"]",
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20, \"10.0.0.0/8\"]"),
+                github,
+                "network.pin_cidrs[0]",
+                REMOVAL,
+            ),
+            (
+                declared("[commands.commands]\ngit = \" \""),
+                github,
+                "commands.commands.git",
+                "[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("[commands.commands.git]\nexec = \" \""),
+                github,
+                "commands.commands.git.exec",
+                "exec = [\"git\"]",
+            ),
+            (
+                declared("[commands.commands.\"café\"]\nsubject = \"git\""),
+                github,
+                "commands.commands.\"café\".exec",
+                "exec = [\"café\"]",
+            ),
+            (
+                declared("[mock]\nhosts = [\"a.example\", \"b.example\"]"),
+                github,
+                "network",
+                "[network]\nhosts = [\"a.example\", \"b.example\"]",
+            ),
+            (
+                declared("[network]\nhosts = \"a\\\"b\\\\c\""),
+                github,
+                "network.hosts",
+                "hosts = [\"a\\\"b\\\\c\"]",
+            ),
+            (
+                declared("[network]\nhosts = \"x\\ny\""),
+                github,
+                "network.hosts",
+                "hosts = [\"x\\ny\"]",
+            ),
+            (
+                declared("commands = 5"),
+                github,
+                "commands",
+                "[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("commands = \"gh\""),
+                github,
+                "commands",
+                "[commands.commands.gh]\nexec = [\"gh\"]",
+            ),
+            (
+                declared("[commands]\ncommands = 5"),
+                github,
+                "commands.commands",
+                "[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("[commands]\ncommands = \"gh\""),
+                github,
+                "commands.commands",
+                "[commands.commands.gh]\nexec = [\"gh\"]",
+            ),
+            (
+                declared("[commands.commands]\ngit = \"/usr/bin/git\""),
+                github,
+                "commands.commands.git",
+                "[commands.commands.git]\nexec = [\"/usr/bin/git\"]",
+            ),
+            (
+                declared("[commands.commands]\ngit = 5"),
+                github,
+                "commands.commands.git",
+                "[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("[commands]\n[commands.commands]"),
+                github,
+                "commands.commands",
+                "[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("[commands.commands.git]\nexec = []"),
+                github,
+                "commands.commands.git.exec",
+                "exec = [\"git\"]",
+            ),
+            (
+                declared("[commands.commands.git]\nexec = [5]"),
+                github,
+                "commands.commands.git.exec",
+                "exec = [\"git\"]",
+            ),
+            (
+                declared("[commands.commands.gh]\nexec = \"/opt/bin/gh\""),
+                github,
+                "commands.commands.gh.exec",
+                "exec = [\"/opt/bin/gh\"]",
+            ),
+            (
+                declared("[commands.commands.\"\"]\nsubject = \"git\""),
+                github,
+                "commands.commands.\"\".exec",
+                "exec = [\"command-name\"]",
+            ),
+            (
+                declared("[commands.commands.\" \"]\nsubject = \"git\""),
+                github,
+                "commands.commands.\" \".exec",
+                "exec = [\"command-name\"]",
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = \"api.github.com\""),
+                github,
+                "mock.hosts",
+                "hosts = [\"api.github.com\"]",
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"api.github.com\", 443]"),
+                github,
+                "mock.hosts[1]",
+                REMOVAL,
+            ),
+            (
+                declared("[commands]\naddress_plan = \"10.29.0.0/24\""),
+                github,
+                "commands.commands",
+                "[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("[mock]\nhosts = [\"api.github.com\"]"),
+                github,
+                "network",
+                "[network]\nhosts = [\"api.github.com\"]",
+            ),
+            (declared("[mock]\nhosts = []"), github, "mock", REMOVAL),
+            (declared("mock = 5"), github, "mock", REMOVAL),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"b\\nc\"]"),
+                github,
+                "network.hosts",
+                "\"b\\nc\"",
+            ),
+            (
+                declared("[commands.commands.\"a\\nb\"]\nsubject = \"git\""),
+                github,
+                "commands.commands.\"a\\nb\".exec",
+                "exec = [\"a\\nb\"]",
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"api.github.example\"]"),
+                github,
+                "network.hosts",
+                "\"api.github.example\"",
+            ),
+            (
+                declared(
+                    "[network]\nhosts = [\"api.github.com\"]\n\
+                     [mock]\nhosts = [\"api.github.com\", \"uploads.github.example\"]",
+                ),
+                github,
+                "network.hosts",
+                "\"uploads.github.example\"",
+            ),
+        ]
+        .into_iter()
+        .map(|(declaration, plasmid, field, fix)| {
+            (declaration, plasmid, field.to_string(), fix.to_string())
+        })
+        .collect();
+        rows.push((
+            declared(&format!(
+                "[commands.commands.\"a{ESCAPE}b\"]\nsubject = \"git\""
+            )),
+            github,
+            format!("commands.commands.\"a{ESCAPE}b\".exec"),
+            format!("exec = [\"a{ESCAPE}b\"]"),
+        ));
+        rows.push((
+            declared(&format!(
+                "[commands.commands.\"a{CSI}b\"]\nsubject = \"git\""
+            )),
+            github,
+            format!("commands.commands.\"a{CSI}b\".exec"),
+            format!("exec = [\"a{CSI}b\"]"),
+        ));
+        rows.push((
+            declared(&format!("[network]\nhosts = \"x{}y\"", raw(0x2028))),
+            github,
+            "network.hosts".to_string(),
+            format!("hosts = [\"x{LINE_SEPARATOR}y\"]"),
+        ));
+        rows.push((
+            declared(&format!(
+                "[commands.commands.\"a{}b\"]\nsubject = \"git\"",
+                raw(0x202E)
+            )),
+            github,
+            format!("commands.commands.\"a{RIGHT_TO_LEFT}b\".exec"),
+            format!("exec = [\"a{RIGHT_TO_LEFT}b\"]"),
+        ));
+        rows.push((
+            declared(&format!("[network]\nhosts = \"x{ESCAPE}y\"")),
+            github,
+            "network.hosts".to_string(),
+            format!("hosts = [\"x{ESCAPE}y\"]"),
+        ));
+        for (_, quoted, program) in COMMAND_KEYS {
+            let command = format!("[commands.commands.{quoted}]\nexec = [\"git\"]\n");
+            let path = format!("commands.commands.{quoted}");
+            let network = format!("{command}[{path}.network]\n");
+            for (tail, field, fix) in [
+                (
+                    format!("[{path}]\nsubject = \"git\""),
+                    format!("{path}.exec"),
+                    format!("exec = [{program}]"),
+                ),
+                (
+                    format!("{command}network = \"alpha.ak.local\""),
+                    format!("{path}.network"),
+                    format!("[{path}.network]\nhosts = [\"alpha.ak.local\"]"),
+                ),
+                (
+                    format!("{command}network = 443"),
+                    format!("{path}.network"),
+                    format!("[{path}.network]\nhosts = [\"api.example.com\"]"),
+                ),
+                (
+                    format!("{network}hosts = \"alpha.ak.local\""),
+                    format!("{path}.network.hosts"),
+                    "hosts = [\"alpha.ak.local\"]".to_string(),
+                ),
+                (
+                    format!("{network}hosts = [\"alpha.ak.local\", 443]"),
+                    format!("{path}.network.hosts[1]"),
+                    REMOVAL.to_string(),
+                ),
+                (
+                    format!("{network}hosts = [\"alpha.ak.local\"]\npin_cidrs = \"10.29.0.0/24\""),
+                    format!("{path}.network.pin_cidrs"),
+                    "pin_cidrs = [\"10.29.0.0/24\"]".to_string(),
+                ),
+                (
+                    format!(
+                        "{network}hosts = [\"alpha.ak.local\"]\npin_cidrs = [\"10.29.0.0/24\", 24]"
+                    ),
+                    format!("{path}.network.pin_cidrs[1]"),
+                    REMOVAL.to_string(),
+                ),
+                (
+                    format!("{network}hosts = [\"alpha.ak.local\"]\npin_cidrs = [24]"),
+                    format!("{path}.network.pin_cidrs[0]"),
+                    "\"192.0.2.0/24\"".to_string(),
+                ),
+                (
+                    format!("[commands.commands]\n{quoted} = 5"),
+                    path.clone(),
+                    format!("[{path}]\nexec = [{program}]"),
+                ),
+            ] {
+                rows.push((declared(&tail), github, field, fix));
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn every_author_refusal_names_its_exact_field_fix_and_plasmid() {
+        for (declaration, plasmid, field, fix) in author_refusals() {
+            assert_eq!(
+                field_refusal(&declaration),
+                (plasmid.map(String::from), field, fix),
+                "{declaration}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_refusals_name_the_command_by_its_whole_toml_path() {
+        for (key, quoted, _) in COMMAND_KEYS {
+            for tail in [
+                format!(
+                    "[commands.commands.{quoted}]\nexec = [\"git\"]\nnetwork = \"alpha.ak.local\""
+                ),
+                format!("[commands.commands.{quoted}]\nsubject = \"git\""),
+                format!(
+                    "[commands.commands.{quoted}]\nexec = [\"git\"]\n\
+                     [commands.commands.{quoted}.network]\nhosts = [\"alpha.ak.local\", 443]"
+                ),
+            ] {
+                let (_, field, _) = field_refusal(&declared(&tail));
+                assert!(
+                    field.starts_with(&format!("commands.commands.{quoted}.")),
+                    "{key}: {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn following_the_fixes_from_each_author_refusal_ends_in_a_declaration_that_parses() {
+        for (start, ..) in author_refusals() {
+            let mut declaration = start.clone();
+            let mut followed: Vec<(String, String)> = Vec::new();
+            while let Err(error) = PlasmidManifest::parse(&declaration) {
+                let (_, field, fix) = field_refusal(&declaration);
+                assert!(
+                    followed.len() < 4 && !followed.contains(&(field.clone(), fix.clone())),
+                    "{start}\nafter {followed:?} is refused again: {error}"
+                );
+                declaration = with_fix(&declaration, &field, &fix);
+                followed.push((field, fix));
+            }
+        }
+    }
+
+    #[test]
+    fn a_mock_host_fix_adds_only_the_host_its_network_does_not_declare() {
+        let declaration = declared(
+            "[network]\nhosts = [\"api.github.com\"]\n\
+             [mock]\nhosts = [\"api.github.com\", \"uploads.github.example\"]",
+        );
+        let (_, field, fix) = field_refusal(&declaration);
+        let repaired = PlasmidManifest::parse(&with_fix(&declaration, &field, &fix)).unwrap();
+        assert_eq!(
+            repaired.network.unwrap().hosts,
+            vec![
+                "api.github.com".to_string(),
+                "uploads.github.example".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_list_entry_that_is_not_a_string_is_removed_by_its_index_and_no_other_entry_is() {
+        let declaration = declared(
+            "[network]\nhosts = [\"api.github.com\", 443, \"uploads.github.com\"]\n\
+             pin_cidrs = [\"140.82.112.0/20\", true, \"192.30.252.0/22\"]",
+        );
+        let (_, field, fix) = field_refusal(&declaration);
+        assert_eq!(
+            (field.as_str(), fix.as_str()),
+            ("network.hosts[1]", REMOVAL)
+        );
+        let declaration = with_fix(&declaration, &field, &fix);
+        let (_, field, fix) = field_refusal(&declaration);
+        assert_eq!(
+            (field.as_str(), fix.as_str()),
+            ("network.pin_cidrs[1]", REMOVAL)
+        );
+        let network = PlasmidManifest::parse(&with_fix(&declaration, &field, &fix))
+            .unwrap()
+            .network
+            .unwrap();
+        assert_eq!(
+            network.hosts,
+            vec![
+                "api.github.com".to_string(),
+                "uploads.github.com".to_string()
+            ]
+        );
+        assert_eq!(
+            network.pin_cidrs,
+            vec!["140.82.112.0/20".to_string(), "192.30.252.0/22".to_string()]
+        );
+    }
+
+    fn refusal_detail(declaration: &str) -> String {
+        let error = PlasmidManifest::parse(declaration)
+            .expect_err(&format!("{declaration} must be refused"));
+        let ManifestError::Field { detail, .. } = error else {
+            panic!("{declaration} was not refused with its field: {error:?}");
+        };
+        detail
+    }
+
+    #[test]
+    fn a_refused_value_reads_on_one_line_as_the_author_wrote_it() {
+        let network = "[network]\nhosts = [\"api.github.com\"]\n";
+        let rows = [
+            (
+                format!("{network}ports = [1979-05-27]"),
+                "1979-05-27 is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [1e300]"),
+                "1e300 is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = 1e300"),
+                "1e300 is not a list of integers from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [nan]"),
+                "nan is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [-inf]"),
+                "-inf is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [\"\\t8080\\n\"]"),
+                "\"\\t8080\\n\" is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [[443, 8080]]"),
+                "[443, 8080] is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [{{ port = 443, scheme = \"https\" }}]"),
+                "{ port = 443, scheme = \"https\" } is not an integer from 1 to 65535",
+            ),
+            (
+                format!("{network}ports = [{{}}]"),
+                "{} is not an integer from 1 to 65535",
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\", 1979-05-27T07:32:00Z]".to_string(),
+                "1979-05-27T07:32:00Z is not a string",
+            ),
+            (
+                "[network]\nhosts = \"\\tapi.github.com\\n\"".to_string(),
+                "\"\\tapi.github.com\\n\" is not a list of strings",
+            ),
+            (
+                "[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [{ \"two words\" = 1.5 }]"
+                    .to_string(),
+                "{ \"two words\" = 1.5 } is not a string",
+            ),
+            ("network = 07:32:00".to_string(), "07:32:00 is not a table"),
+            (
+                format!("{network}ports = [\"{ESCAPE}\"]"),
+                &format!("\"{ESCAPE}\" is not an integer from 1 to 65535"),
+            ),
+            (
+                format!("{network}ports = [\"\\b\\f\\r{DELETE}\"]"),
+                &format!("\"\\b\\f\\r{DELETE}\" is not an integer from 1 to 65535"),
+            ),
+            (
+                format!("[network]\nhosts = \"x{ESCAPE}y\""),
+                &format!("\"x{ESCAPE}y\" is not a list of strings"),
+            ),
+            ("commands = 5".to_string(), "5 is not a table"),
+            (
+                "[commands.commands]\ngit = \"x\"".to_string(),
+                "\"x\" is not a table",
+            ),
+            (
+                format!("[provides.x]\ntools = [\"a{ESCAPE}b\"]"),
+                &format!(
+                    "tool \"a{ESCAPE}b\" needs a description; replace the names list with a table"
+                ),
+            ),
+            (
+                format!(
+                    "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"x{ESCAPE}y\"]"
+                ),
+                &format!("[mock] stands in for \"x{ESCAPE}y\", which [network] does not declare"),
+            ),
+            (
+                "[commands.commands.git]\nexec = []".to_string(),
+                "[] names no program to run",
+            ),
+            (
+                "[commands.commands.gh]\nexec = \"/opt/bin/gh\"".to_string(),
+                "\"/opt/bin/gh\" is not a list of strings",
+            ),
+            (
+                "[commands.commands.git]\nsubject = \"git\"".to_string(),
+                "the command declares no exec",
+            ),
+            (
+                "[commands]\n[commands.commands]".to_string(),
+                "the commands table declares no command",
+            ),
+            (
+                "[mock]\nhosts = []".to_string(),
+                "[mock] names no host, and there is no [network]",
+            ),
+            (
+                format!(
+                    "[secrets]\nrefs = [{{ id = \"c\", consumer = \"wasm\", delivery = [\"x{ESCAPE}\"] }}]"
+                ),
+                &format!(
+                    "invalid credential reference: unknown variant `x{ESCAPE}`, \
+                     expected one of `handle`, `helper`, `inject`, `mint`"
+                ),
+            ),
+        ];
+        let details: Vec<String> = rows
+            .iter()
+            .map(|(tail, _)| refusal_detail(&declared(tail)))
+            .collect();
+        let expected: Vec<&str> = rows.iter().map(|(_, detail)| *detail).collect();
+        assert_eq!(details, expected);
+    }
+
+    fn control_character_declarations() -> Vec<String> {
+        vec![
+            format!(
+                "id = \"a\\nb{ESCAPE}c{CSI}\"\ndescription = \"Reach the declared API.\"\n\
+                 [network]\nports = [443]\n"
+            ),
+            declared(&format!(
+                "[provides.\"x{CSI}\\ny\"]\ntools = [\"a{ESCAPE}b\"]"
+            )),
+            declared(&format!(
+                "[secrets]\nrefs = [{{ id = \"c\", consumer = \"wasm\", delivery = [\"x{ESCAPE}\\ny\"] }}]"
+            )),
+            declared(&format!(
+                "[commands.commands.\"a\\nb{CSI}\"]\nexec = [\"git\"]\n\
+                 secrets.refs = [{{ id = \"c\", consumer = \"git\" }}]"
+            )),
+            declared(&format!(
+                "[commands.commands.\"a\\nb\"]\nexec = [\"git\"]\n\
+                 [commands.commands.\"a\\nb\".network]\nhosts = [\"h{ESCAPE}\", 5]"
+            )),
+            format!(
+                "id = \"a{}b\"\ndescription = \"Reach the declared API.\"\n[network]\nports = [443]\n",
+                line_and_bidi_characters()
+            ),
+            declared(&format!(
+                "[network]\nhosts = \"x{}y\"",
+                line_and_bidi_characters()
+            )),
+            declared(&format!(
+                "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"m{}\"]",
+                line_and_bidi_characters()
+            )),
+            declared(&format!(
+                "[commands.commands.\"k{}\"]\nexec = [\"git\"]\nnetwork = 443",
+                line_and_bidi_characters()
+            )),
+        ]
+    }
+
+    #[test]
+    fn a_refusal_writes_no_raw_control_line_or_bidi_character_but_a_section_fix_line_break() {
+        let declarations = author_refusals()
+            .into_iter()
+            .map(|(declaration, ..)| declaration)
+            .chain(control_character_declarations());
+        for declaration in declarations {
+            let error = PlasmidManifest::parse(&declaration).unwrap_err();
+            let ManifestError::Field { fix, .. } = &error else {
+                panic!("{declaration} was not refused with its field: {error:?}");
+            };
+            let breaks = if fix.starts_with('[') {
+                fix.matches('\n').count()
+            } else {
+                0
+            };
+            let controls: String = error
+                .to_string()
+                .chars()
+                .filter(|character| acted_on(*character))
+                .collect();
+            assert_eq!(controls, "\n".repeat(breaks), "{declaration}\n{error}");
+        }
+    }
+
+    #[test]
+    fn a_toml_syntax_error_writes_no_raw_control_line_or_bidi_character_but_its_line_breaks() {
+        for (code, escaped) in [
+            (0x1B, ESCAPE),
+            (0x9B, CSI),
+            (0x07, BELL),
+            (0x2028, LINE_SEPARATOR),
+            (0x202E, RIGHT_TO_LEFT),
+        ] {
+            let declaration = format!("id = \"github-pr\"\nx = {}\n", raw(code));
+            let error = PlasmidManifest::parse(&declaration).unwrap_err();
+            assert!(matches!(error, ManifestError::Parse(_)), "{error:?}");
+            let text = error.to_string();
+            assert!(
+                !text
+                    .chars()
+                    .any(|character| character != '\n' && acted_on(character)),
+                "{code:#x}: {text:?}"
+            );
+            assert!(text.contains(escaped), "{code:#x}: {text:?}");
+            assert!(text.contains('\n'), "{code:#x} keeps its layout: {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_writes_the_plasmid_id_as_a_toml_key() {
+        for (id, written) in [
+            ("github-pr".to_string(), "github-pr".to_string()),
+            ("two words".to_string(), "\"two words\"".to_string()),
+            (
+                format!("a\\nb{ESCAPE}c{CSI}"),
+                format!("\"a\\nb{ESCAPE}c{CSI}\""),
+            ),
+        ] {
+            let declaration = format!(
+                "id = \"{id}\"\ndescription = \"Reach the declared API.\"\n[network]\nports = [443]\n"
+            );
+            assert_eq!(
+                PlasmidManifest::parse(&declaration)
+                    .unwrap_err()
+                    .to_string(),
+                format!(
+                    "plasmid {written}: network.hosts: a network section must name at least one \
+                     host; write hosts = [\"api.example.com\"]"
+                )
+            );
+        }
     }
 }
