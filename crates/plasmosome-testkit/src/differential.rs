@@ -75,8 +75,9 @@ pub struct ProbeSpec {
     pub workload_set: Vec<String>,
 }
 
-/// One row of the normalization table: the values of `field` in `probe` are replaced by
-/// placeholders of `kind`.
+/// One row of the normalization table: the values of `field` in `probe` are to be replaced by
+/// placeholders of `kind`. [`judge`] does not apply rules yet, so it compares every field
+/// exactly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub probe: String,
