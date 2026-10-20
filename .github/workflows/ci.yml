@@ -105,6 +105,9 @@ jobs:
       - name: cargo-deny check regression
         run: python3 tools/cargo-deny-check-regression.py
 
+      - name: security issue regression
+        run: python3 tools/security-issue-regression.py
+
       # Bump with the steps in tools/cargo-deny-check's docstring; the rust-cache key must match.
       - name: install cargo-deny
         run: cargo install cargo-deny --version 0.20.2 --locked

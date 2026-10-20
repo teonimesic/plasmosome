@@ -162,8 +162,20 @@ records spec 008's `{"kind": "local"}` source.
   else is searched: not the working directory, not `.plasmosome/`, not the registry.
 - A declaration that fails §3, or whose `id` differs: 108 with `path` the declaration.
 
-**Its providers.** A local plasmid's `requires` names capability keys, not plasmid IDs. For each
-key, in order:
+**Its providers.** A local plasmid's `requires` names capability keys, not plasmid IDs. A plasmid
+is never its own provider. When its `[requires].capabilities` names a key that its own `[provides]`
+binds, the request refuses with 108 under spec 011's author-refusal rule: `path` the declaration,
+`detail` naming the key and the plasmid ID, field `requires.capabilities[i]` for that key's entry,
+and `fix` exactly `remove this entry`. This holds for the named plasmid and for each candidate that
+joins the closure, even when an attached plasmid also provides the key. Refusing the attached case
+keeps a local add independent of what the cell holds, and the same declaration can still attach
+through the registry, where spec 020 binds each required key to a pinned provider release. Amended
+on 2026-10-20: this did not refuse such a key. When the plasmid was the key's only listed provider,
+step 2 made it its own candidate, and the add wrote a record spec 008 refuses as a requirer naming
+itself. With a second listed provider the add was 100. When an attached plasmid provided the key,
+the add attached, with a record spec 008 accepts, so the attached case is a new refusal.
+
+For each key the plasmid does not provide itself, in order:
 
 1. If one or more plasmids already attached to the cell provide the key, it is satisfied. None of
    them is read or resolved again, and nothing joins the closure; D2b propagation still reaches
@@ -508,8 +520,14 @@ ProxyMap (O-11) or Mount (O-7).
    operations name only R's hosts, P's only P's; with P's entry moved under R's ID, 103 naming P.
    Two listed providers of `k`: 100. None: 103 `k`. An unrelated group-writable listing: 108
    naming it. Two attached providers whose files are then deleted: R attaches and their holdings
-   are unchanged. Catches: borrowing another member's entries, an undefined candidate set,
-   skipping an unsafe listing, and re-reading an attached provider.
+   are unchanged. R that also provides `k` is 108 with `path` R's declaration, field
+   `requires.capabilities[0]`, `fix` `remove this entry` and a `detail` naming `k` and R, and
+   leaves no journal record, whether P is unlisted, listed or attached. A P that R's search selects
+   and that requires a key `j` it provides is 108 with `path` P's declaration and a `detail` naming
+   `j` and P, and leaves no journal record. Catches: borrowing another member's entries, an
+   undefined candidate set, skipping an unsafe listing, re-reading an attached provider, a plasmid
+   made its own provider or only left out of its own candidates, and a refusal that names R's
+   declaration for P's fault. Amended on 2026-10-20: this item had no self-provider case.
 5. Local selection. An unlisted ID is 101 `plasmid <id>`, even with a valid declaration at the
    project root and under `.plasmosome/plasmids/`; so is an entry with no `declaration`. An unsafe
    or mismatched declaration is 108 with `path` the declaration. A listed, matching one attaches
