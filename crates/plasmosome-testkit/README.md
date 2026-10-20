@@ -108,10 +108,20 @@ test data directly; it is not a second TOML validator. The description scenario 
 descriptions through `ToolRegistry::lookup`, then verifies withdrawal removes them.
 
 `session_file`, `uds_socket`, `proxy_map`, `broker` and `mount` return the capability of their
-class with exactly the values given, and neither check nor normalize them. The suite's fixtures
-build every capability through them, and every universe operation through the private `op_for`,
-so adding a recipe changes these five bodies and `op_for`, not every fixture. Changing
-`broker(pid, name)` to `broker(name)` also changes each call that passes a pid.
+class with exactly the values given, neither checked nor normalized, and a fixed recipe that
+passes `validate`:
+
+| Factory | Default recipe |
+| --- | --- |
+| `session_file(path)` | empty contents, read-only, guest path `/run/plasmosome/session` |
+| `uds_socket(path)` | upstream `/run/plasmosome/upstream.sock`, guest path `/run/plasmosome/guest.sock` |
+| `proxy_map(host, route)` | TCP to `upstream.plasmosome.test` port 443, private addresses not allowed |
+| `broker(name)` | command `/usr/libexec/plasmosome-broker`, control socket `/run/plasmosome/broker.control`, data socket `/run/plasmosome/broker.data` |
+| `mount(source, target)` | read-only |
+
+A test that needs another recipe or launch builds the capability itself. The suite's fixtures
+build every capability through these five, and every universe operation through the private
+`op_for`, so changing a recipe changes these bodies and `op_for`, not every fixture.
 
 `plasmosome-backend`'s unit tests cannot use these. A dev-dependency on this crate links a second
 build of the backend, and its `Capability` is a different type from the one those tests see
