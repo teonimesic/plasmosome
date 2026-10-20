@@ -973,7 +973,16 @@ mod tests {
         if !probing() {
             return;
         }
-        for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM] {
+        let mut ignored = vec![
+            libc::SIGHUP,
+            libc::SIGINT,
+            libc::SIGQUIT,
+            libc::SIGTERM,
+            libc::SIGTTOU,
+        ];
+        #[cfg(target_os = "linux")]
+        ignored.extend([libc::SIGRTMIN(), libc::SIGRTMAX()]);
+        for signal in ignored {
             // SAFETY: signal takes integers and SIG_IGN. This probe process runs only this test,
             // so ignoring these signals reaches no other test.
             let previous = unsafe { libc::signal(signal, libc::SIG_IGN) };
