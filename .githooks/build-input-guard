@@ -139,6 +139,12 @@ SYMLINK_PROBLEMS = {
     AMBIGUOUS: "it reaches tracked paths that a case-insensitive filesystem treats as one",
     UNREADABLE_TARGET: "this step cannot read its target as a path",
 }
+LOCKFILE_REFUSED = "a lockfile must be a regular file"
+CRATES_IO = (
+    "registry+https://github.com/rust-lang/crates.io-index",
+    "sparse+https://index.crates.io/",
+)
+SOURCE_REFUSED = f"a lockfile source must be {CRATES_IO[0]} or {CRATES_IO[1]}"
 LEADS_TO_A_MANIFEST = (
     "it leads to a directory holding a Cargo.toml, and cargo reads a manifest reached through "
     "a symlink as if it sat at the symlink's path"
@@ -508,6 +514,42 @@ def manifest(entry, tree):
     return found
 
 
+def locked_source(keys, package):
+    if not isinstance(package, dict):
+        return (key_name(keys), "must be a table")
+    if "source" not in package or package["source"] in CRATES_IO:
+        return None
+    name, version, source = (package.get(key) for key in ("name", "version", "source"))
+    named = " ".join(
+        printable(value) if isinstance(value, str) else f"(no {key})"
+        for key, value in (("name", name), ("version", version))
+    )
+    origin = f'"{printable(source)}"' if isinstance(source, str) else "a source that is not a string"
+    return (key_name([*keys, "source"]), f"{named} is locked from {origin}; {SOURCE_REFUSED}")
+
+
+def lockfile(entry):
+    if entry.kind != "blob" or entry.mode == SYMLINK:
+        return [whole(entry, LOCKFILE_REFUSED)]
+    document, problem = read_toml(entry)
+    if problem:
+        return [(entry.path, "(file)", problem)]
+    patch = document.get("patch", {})
+    groups = [
+        (["package"], document.get("package", [])),
+        (["patch", "unused"], patch.get("unused", []) if isinstance(patch, dict) else patch),
+    ]
+    found = []
+    for keys, packages in groups:
+        if not isinstance(packages, list):
+            found.append((key_name(keys), "must be an array of tables"))
+            continue
+        found.extend(locked_source([*keys, index], package) for index, package in enumerate(packages))
+    if "root" in document:
+        found.append(locked_source(["root"], document["root"]))
+    return [(entry.path, key, reason) for key, reason in filter(None, found)]
+
+
 def symlink(entry, tree):
     kind, reached = tree.walk(entry.path.split("/"))
     if kind in SYMLINK_PROBLEMS:
@@ -537,6 +579,8 @@ def named(entry, tree):
         return toolchain(entry)
     if parts[-1] == "cargo.toml":
         return manifest(entry, tree)
+    if parts[-1] == "cargo.lock":
+        return lockfile(entry)
     return []
 
 
