@@ -523,13 +523,14 @@ The images root must exist and be writable by you. The work root must not exist 
 sit where Docker Desktop shares files with its VM, such as under your home directory. Docker
 Desktop does not share `/usr/local` by default, so a work root there reaches the container empty
 and the tool refuses. Intermediate files stay in the work root, so you can read them after a
-failure. Nothing the build container leaves there is trusted afterwards, except `rootfs.raw`, which
-is opened without following a link and must be exactly `--size-mib` MiB.
+failure. After the build container runs, the tool reads only two things it left there:
+`rootfs.raw`, which is opened without following a link and must be exactly `--size-mib` MiB, and
+the read-back in `check/`, which must still be a directory and is read through a bound.
 
 The images root above is the lab location, next to the runtime bundles. It is gated. Spec 001
-refuses an artifact with a replaceable parent (001:893), and owner gate O-1 has the product check
-refuse an instance root under the admin-writable `/usr/local/var` (spec 027). So product
-verification cannot accept an image from there until O-1 is answered.
+refuses an artifact with a replaceable parent (001:893), and `/usr/local/var` is admin-writable,
+so product verification cannot accept an image from there. Owner gate O-1 (spec 027) is about the
+instance root, not the image, so answering O-1 alone does not admit an image there.
 
 The tool prints one JSON line: `image_dir`, `image_id16`, `manifest_sha256`, `rootfs_sha256`,
 `content_sha256` and `kind`. The image directory is `<images-root>/<image_id16>`, the first 16 hex
@@ -538,26 +539,36 @@ image), `SHA256SUMS` and `manifest.json`, all read-only and `uchg`. `rootfs.raw`
 runs of the filesystem as holes, so a 1024 MiB image takes about 95 MiB on disk. An existing
 directory is never replaced. Pin an image by `manifest_sha256`. The manifest's `tool_sha256` is the
 sha256 of the tool that built the image, so images from different versions of the tool can be told
-apart.
+apart. You may run the tool through a symlink; `tool_sha256` is then the sha256 of the file the link
+resolves to.
 
 `uchg` guards against accidents, not against the user who owns the directory. To remove a placed
-image, run `chflags -R nouchg <image_dir>`, then `rm -r <image_dir>`. Whether an image stays is the
-owner's decision.
+image, run these three commands. The directory is 0555 and its files 0444, so `rm` fails without
+the `chmod`. Whether an image stays is the owner's decision.
+
+```shell
+chflags -R nouchg <image_dir>
+chmod -R u+w <image_dir>
+rm -r <image_dir>
+```
 
 The image is the base with these changes: the `workload` account (uid and gid 1000, home
 `/home/workload` with mode 0700 and the skel files), `/tmp` with mode 01777, empty `/dev`, `/proc`
 and `/sys`, and fixed `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf`. The tool refuses a base
 with anything under `/opt` or `/usr/local/bin`, or with a path that names plasmosome or plasmid
-(spec 027). `--add SRC:DEST:MODE` adds a root-owned file and makes the kind `test`, never
-`product`. Two builds with the same base and `--source-date-epoch` give the same `content_sha256`.
-The ext4 bytes can differ, so compare rebuilds by `content_sha256`.
+(spec 027). It also refuses a base whose account files already name `workload` or use id 1000. It
+reads those files as glibc does, so a name or member with leading blanks still counts.
+`--add SRC:DEST:MODE` adds a root-owned file and makes the kind `test`, never `product`. Two builds
+with the same base and `--source-date-epoch` give the same `content_sha256`. The ext4 bytes can
+differ, so compare rebuilds by `content_sha256`.
 
 The base's own setuid and setgid programs, such as `su`, `passwd` and `mount`, keep their modes.
 They give the workload nothing, because it runs with no-new-privs (spec 024 §4). `--add` refuses
 those modes.
 
-The checks have limits. The base checks itself: `mke2fs`, `e2fsck`, `dumpe2fs` and `debugfs` all
-come from the base image, so the read-back reports only what that base chooses to report. A
+The checks have limits. The base checks itself: its own `tar` and `sh` unpack the stage, and its
+`mke2fs`, `e2fsck`, `dumpe2fs` and `debugfs` make and read back the filesystem, so the read-back
+reports only what that base chooses to report. A
 separate, pinned builder image is a planner question, not something the tool does. `content.jsonl`
 lists the stage tar the image was made from. It is not a listing read back from `rootfs.raw`. The
 manifest's `limits` say the same.
