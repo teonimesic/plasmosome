@@ -221,7 +221,10 @@ impl PlasmidManifest {
             });
         }
         let text = String::from_utf8(bytes).map_err(|error| {
-            ManifestError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            ManifestError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                error.utf8_error(),
+            ))
         })?;
         Self::parse(&text)
     }
