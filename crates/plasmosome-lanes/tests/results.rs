@@ -195,3 +195,44 @@ fn observations_are_written_under_their_run() {
 
     assert!(text.contains("cafe NFC / NFD: one name"), "{text}");
 }
+
+#[test]
+fn each_observation_row_is_tabled_after_the_verdicts_with_not_run_for_a_missing_record() {
+    let names = row(
+        "Names",
+        vec![run("real", Expect::Observe), run("absent", Expect::Observe)],
+    );
+    let mut observed = record("real", &[("M1", Verdict::Pass)]);
+    observed.observations.insert(
+        "Names".to_string(),
+        vec!["cafe NFC / NFD: one name".to_string(), "a | b".to_string()],
+    );
+    let records = [
+        observed,
+        record("simplified", &[("M1", Verdict::Fail("c".to_string()))]),
+    ];
+
+    let text = render("", &[m1(), names], &records);
+
+    let verdicts = text.find("## Verdicts").expect("a verdict table");
+    let observations = text.find("## Observations").expect("an observation table");
+    let each_run = text.find("## Each run by row").expect("a run table");
+    assert!(verdicts < observations && observations < each_run, "{text}");
+    let table: Vec<&str> = text[observations..each_run]
+        .lines()
+        .filter(|line| line.starts_with("| Names |"))
+        .collect();
+    assert_eq!(
+        table,
+        [
+            "| Names | real | cafe NFC / NFD: one name |",
+            "| Names | real | a \\| b |",
+            "| Names | absent | not run: no record |",
+        ],
+        "{text}"
+    );
+    assert!(
+        !text[observations..each_run].contains("| M1 |"),
+        "a judged row is not an observation: {text}"
+    );
+}
