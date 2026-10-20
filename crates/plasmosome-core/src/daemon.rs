@@ -355,7 +355,9 @@ fn waiting(error: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::Handler;
     use crate::private_socket::{PrivateDir, PrivateListener, PrivateSocketError, effective_uid};
+    use crate::protocol::WireError;
     use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, ErrorKind, Write};
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -571,8 +573,20 @@ mod tests {
         let name = InstanceName::parse(name).expect("the test names a valid instance");
         spawned(move |flag| {
             let mut controller = Controller::new(name, ControllerState::default(), NO_LEDGER_YET);
-            serve(&listener, flag, &mut controller)
+            serve(listener, flag, &mut controller)
         })
+    }
+
+    struct Panicking;
+
+    impl Handler for Panicking {
+        fn handle(
+            &mut self,
+            _method: &str,
+            _params: &serde_json::Map<String, Value>,
+        ) -> Result<Value, WireError> {
+            panic!("the handler fails while answering");
+        }
     }
 
     fn refuses(config: DaemonConfig) -> DaemonError {
@@ -1178,6 +1192,68 @@ mod tests {
             ask(&mut client, STATUS_REQUEST).pointer("/result/name"),
             Some(&json!("work")),
             "a loop serving this UID answers it"
+        );
+    }
+
+    #[test]
+    fn an_unwinding_panic_removes_the_socket_and_leaves_a_settled_replacement_alone() {
+        let root = private_root();
+        let own = |name: &str| {
+            PrivateListener::bind(
+                PrivateDir::open(root.path()).expect("the test root is private"),
+                name,
+                effective_uid(),
+            )
+            .expect("a listener trusting this UID binds")
+        };
+        let unwinding = |listener: PrivateListener| {
+            let flag = AtomicBool::new(false);
+            thread::spawn(move || serve(listener, &flag, &mut Panicking))
+        };
+
+        let listener = own("control.uds");
+        let control = listener.entry().path.clone();
+        let serving = unwinding(listener);
+        let mut client = addressable(&control);
+        assert_eq!(
+            ask(&mut client, STATUS_REQUEST)
+                .pointer("/error/code")
+                .and_then(Value::as_i64),
+            Some(-32603),
+            "a handler panic is answered before it unwinds"
+        );
+        assert!(
+            serving.join().is_err(),
+            "the panic unwinds out of the accept loop"
+        );
+        assert!(
+            std::fs::symlink_metadata(&control).is_err(),
+            "the socket is removed on the unwinding route out"
+        );
+
+        let listener = own("settled.uds");
+        let settled = listener.entry().path.clone();
+        let saved = root.path().join("saved.uds");
+        let serving = unwinding(listener);
+        let mut client = addressable(&settled);
+        std::fs::rename(&settled, &saved).expect("the socket is renamed away");
+        std::fs::write(&settled, b"a settled replacement").expect("the sentinel is written");
+        let _ = ask(&mut client, STATUS_REQUEST);
+        assert!(
+            serving.join().is_err(),
+            "the panic unwinds out of the accept loop"
+        );
+        assert_eq!(
+            std::fs::read(&settled).expect("the replacement survives the unwind"),
+            b"a settled replacement",
+            "an unwinding teardown leaves a replacement at the name alone"
+        );
+        assert!(
+            std::fs::symlink_metadata(&saved)
+                .expect("the renamed original survives")
+                .file_type()
+                .is_socket(),
+            "the renamed original stays at its new name"
         );
     }
 
