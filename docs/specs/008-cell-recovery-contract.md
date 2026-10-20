@@ -80,7 +80,9 @@ advisory locks are the filesystem seam, not a virtual-machine dependency in core
 ### Journal records and generations
 
 The new per-cell format is version1 of `CellJournalRecord`, distinct from spec017's version3
-single-plugin `LogRecord` cutover from the implemented version2. The former draft's unversioned
+single-plugin `LogRecord`, which replaced version2 and is the format the baseline writes and
+reads. Amended on 2026-10-20, when plasmosome-8pr4 shipped spec017's first version3 writer. Until
+then this sentence called version2 the implemented format. The former draft's unversioned
 grant/revoke lines were never a production per-cell format and are refused, not inferred or
 rewritten. Every record is one UTF-8
 JSON object followed by LF. Required fields have no defaults; unknown fields, enum variants and
@@ -127,8 +129,10 @@ For brokers the capability is `{name, launch:BrokerLaunch}`, never a PID. Missin
 unknown fields or any operation/inverse mismatch are strict-reader faults. Never infer a recipe
 from the supervisor's current configuration, substitute a hash for its contents, or patch prepare
 after creating a resource. The unimplemented per-cell format1 incorporates these required fields
-before its first writer ships; implemented version2 single-plugin logs are not cell histories
-and acquire neither a cell nor a recipe by being placed at the cell path.
+before its first writer ships; single-plugin logs, the implemented version3 and the refused
+version2, are not cell histories and acquire neither a cell nor a recipe by being placed at the
+cell path. Amended on 2026-10-20, when plasmosome-8pr4 shipped spec017's first version3 writer.
+Until then this sentence named version2 as the implemented single-plugin log.
 
 `AttachmentSource` is a required strict tagged record. `{ "kind": "local" }` preserves the
 existing unregistered selection semantics; it asserts no registry provenance or content pin.
