@@ -137,10 +137,16 @@ for executable in ("cargo", "rustc"):
     require(shutil.which(executable), f"required executable is not on PATH: {executable}")
 
 BASE_RULE = (
-    "choose a base whose directories are each owned by you or by root and writable by neither "
-    "group nor other, such as a 0700 directory under your home, and name it in "
-    "PLASMOSOME_QUICKSTART_DIR"
+    "choose a base you can write whose directories are each owned by you or by root and "
+    "writable by neither group nor other, such as a 0700 directory under your home, and name "
+    "it in PLASMOSOME_QUICKSTART_DIR"
 )
+
+
+def refuse_base(reason):
+    sys.exit(f"quickstart: {reason}; {BASE_RULE}")
+
+
 private_base = Path(
     os.path.realpath(os.environ.get("PLASMOSOME_QUICKSTART_DIR") or tempfile.gettempdir())
 )
@@ -148,17 +154,18 @@ for directory in [*reversed(private_base.parents), private_base]:
     try:
         info = os.lstat(directory)
     except OSError as error:
-        raise RuntimeError(f"cannot inspect {directory}: {error}; {BASE_RULE}") from error
-    require(stat.S_ISDIR(info.st_mode), f"{directory} is not a directory; {BASE_RULE}")
-    require(
-        info.st_uid in (0, os.geteuid()),
-        f"{directory} is owned by uid {info.st_uid}, not by you or root; {BASE_RULE}",
-    )
-    require(
-        info.st_mode & 0o022 == 0,
-        f"{directory} has mode {stat.S_IMODE(info.st_mode):04o}: group or other can replace "
-        f"entries in it; {BASE_RULE}",
-    )
+        refuse_base(f"cannot inspect {directory}: {error.strerror}")
+    if not stat.S_ISDIR(info.st_mode):
+        refuse_base(f"{directory} is not a directory")
+    if info.st_uid not in (0, os.geteuid()):
+        refuse_base(f"{directory} is owned by uid {info.st_uid}, not by you or root")
+    if info.st_mode & 0o022:
+        refuse_base(
+            f"{directory} has mode {stat.S_IMODE(info.st_mode):04o}: group or other can replace "
+            "entries in it"
+        )
+if not os.access(private_base, os.W_OK | os.X_OK):
+    refuse_base(f"you cannot create entries in {private_base}")
 print(f"private base: {private_base}")
 
 failure = None
