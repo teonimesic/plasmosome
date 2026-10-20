@@ -236,9 +236,14 @@ impl PlatformLimits {
     }
 }
 
+#[allow(unsafe_code)]
 fn physical_memory_mib() -> Result<u32, RecipeRefusal> {
     let positive = |value: libc::c_long| u64::try_from(value).ok().filter(|value| *value > 0);
+    // SAFETY: sysconf takes no pointer and has no memory precondition. A result of -1 or 0 is
+    // refused below as HostLimitUnavailable.
     let pages = positive(unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) });
+    // SAFETY: sysconf takes no pointer and has no memory precondition. A result of -1 or 0 is
+    // refused below as HostLimitUnavailable.
     let page_bytes = positive(unsafe { libc::sysconf(libc::_SC_PAGESIZE) });
     let (Some(pages), Some(page_bytes)) = (pages, page_bytes) else {
         return Err(RecipeRefusal::HostLimitUnavailable {

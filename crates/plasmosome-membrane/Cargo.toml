@@ -28,3 +28,10 @@ bench = false
 name = "membraned"
 path = "src/main.rs"
 bench = false
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"

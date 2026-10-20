@@ -45,8 +45,12 @@ impl Daemon {
         self.child.id() as i32
     }
 
+    #[allow(unsafe_code)]
     fn signal(&self, signal: libc::c_int) {
         assert_eq!(
+            // SAFETY: kill takes no pointer. The caller must not have waited `self.child` to an
+            // exit, and every caller signals before wait_for_exit, so its pid still names the
+            // daemon.
             unsafe { libc::kill(self.pid(), signal) },
             0,
             "the daemon is still running and can be signalled"
@@ -73,10 +77,13 @@ impl Daemon {
 }
 
 impl Drop for Daemon {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(Some(_))) {
             return;
         }
+        // SAFETY: kill takes no pointer. try_wait above found no exit, so the daemon is not reaped
+        // and its pid still names it.
         unsafe { libc::kill(self.pid(), libc::SIGTERM) };
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
@@ -154,7 +161,10 @@ fn recorded_pid(pidfile: &Path) -> i32 {
     }
 }
 
+#[allow(unsafe_code)]
 fn is_gone(pid: i32) -> bool {
+    // SAFETY: Signal 0 sends nothing: kill only reports whether `pid` exists, so even a reused pid
+    // is not signalled.
     let probed = unsafe { libc::kill(pid, 0) };
     probed == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
@@ -177,11 +187,14 @@ struct NamedWorker {
 }
 
 impl NamedWorker {
+    #[allow(unsafe_code)]
     fn new(liveness: &Path, control: &Path) -> Self {
         for path in [liveness, control] {
             let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
                 .expect("the FIFO path has no zero byte");
             assert_eq!(
+                // SAFETY: `name` is a CString that lives through the call, and mkfifo keeps no
+                // pointer to it.
                 unsafe { libc::mkfifo(name.as_ptr(), 0o600) },
                 0,
                 "the private worker FIFO is created"
