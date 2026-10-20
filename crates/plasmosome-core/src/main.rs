@@ -13,8 +13,11 @@ usage: plasmosomed <config.json>
        plasmosomed -h | --help
 
 Runs in the foreground with required JSON configuration:
-  {\"control_socket\":\"/private/path/control.uds\",\"name\":\"quickstart\"}
+  {\"control_socket\":\"/private/path/control.uds\",\"name\":\"quickstart\",\"instance_root\":\"/private/path/instance\",\"recovery_deadline_ms\":5000}
 
+instance_root and recovery_deadline_ms are required and validated, but
+this build does not recover cells yet. An optional absolute registry_root
+names trusted registry imports; without it the daemon is purely local.
 The configured Unix socket currently serves only plasmosome.status.
 SIGINT or SIGTERM requests a clean shutdown.
 See the repository README for a bounded status-only demonstration.
