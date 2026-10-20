@@ -7,6 +7,7 @@ fn main() {
             .flag_if_supported("-std=c11")
             .warnings(true)
             .extra_warnings(true)
+            .warnings_into_errors(true)
             .compile("plasmosome_darwin_group");
     }
 }

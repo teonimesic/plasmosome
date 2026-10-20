@@ -1,11 +1,9 @@
-use super::digest::{Digest, DigestError};
+use super::line::{LineFault, MAX_RECORD_BYTES, read_line};
 use super::path::{PathError, RecipePath};
-use super::strict_json::{self, StrictJsonError};
-use serde_json::Value;
+use plasmosome_backend::digest::{Digest, DigestError};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-
-const MAX_RECORD_BYTES: usize = 1_048_576;
 
 const VCPUS_RANGE: &str = "an integer from 1 to 255";
 
@@ -31,6 +29,23 @@ const RECIPE_FIELDS: [&str; 15] = [
 
 const ARTIFACT_FIELDS: [&str; 2] = ["path", "sha256"];
 
+const PER_CELL_FIELDS: [&str; 3] = ["writable_root", "control_path", "data_path"];
+
+const TEMPLATE_FIELDS: [&str; 12] = [
+    "version",
+    "vcpus",
+    "memory_mib",
+    "kernel",
+    "kernel_format",
+    "initramfs",
+    "root_image",
+    "helper",
+    "libraries",
+    "host_policy",
+    "guest_policy",
+    "architecture",
+];
+
 static ABSENT: Value = Value::Null;
 
 /// One pinned file of a recipe: its canonical absolute path and the SHA-256
@@ -42,6 +57,20 @@ pub struct Artifact {
 }
 
 impl Artifact {
+    /// Reads an artifact from a JSON object with exactly the keys `path` and
+    /// `sha256`. Every refusal names its key under `field`, such as
+    /// `cell_runtime.membraned.path`; a value that is not an object refuses as
+    /// `NotAnObject` naming `field` itself. `value` must come from
+    /// [`strict_json::parse_value`](super::strict_json::parse_value), which refuses repeated keys.
+    pub fn from_value(value: &Value, field: &str) -> Result<Artifact, RecipeRefusal> {
+        let [path_value, sha256_value] = fields(value, ARTIFACT_FIELDS, field)?;
+        let path = path(path_value, format!("{field}.path"))?;
+        let field = format!("{field}.sha256");
+        let sha256 = Digest::parse_hex(text(sha256_value, &field)?)
+            .map_err(|fault| RecipeRefusal::BadDigest { field, fault })?;
+        Ok(Artifact { path, sha256 })
+    }
+
     /// Where the file is. The path is canonical in spelling only.
     pub fn path(&self) -> &RecipePath {
         &self.path
@@ -207,9 +236,14 @@ impl PlatformLimits {
     }
 }
 
+#[allow(unsafe_code)]
 fn physical_memory_mib() -> Result<u32, RecipeRefusal> {
     let positive = |value: libc::c_long| u64::try_from(value).ok().filter(|value| *value > 0);
+    // SAFETY: sysconf takes no pointer and has no memory precondition. A result of -1 or 0 is
+    // refused below as HostLimitUnavailable.
     let pages = positive(unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) });
+    // SAFETY: sysconf takes no pointer and has no memory precondition. A result of -1 or 0 is
+    // refused below as HostLimitUnavailable.
     let page_bytes = positive(unsafe { libc::sysconf(libc::_SC_PAGESIZE) });
     let (Some(pages), Some(page_bytes)) = (pages, page_bytes) else {
         return Err(RecipeRefusal::HostLimitUnavailable {
@@ -259,10 +293,13 @@ pub enum PathRole {
 /// The deployment input that launches one hardware cell, as spec 001 §4.2
 /// defines it.
 ///
-/// A value exists only after [`RuntimeRecipe::parse`] accepted every
-/// structural rule; there is no other constructor and no setter. Parsing
-/// touches no file: whether the artifacts exist and hash to their digests is
-/// for the caller to check before launch.
+/// A value exists only after [`RuntimeRecipe::parse`],
+/// [`RuntimeTemplate::complete`] or
+/// [`SupervisorConfig::decode`](super::supervisor_config::SupervisorConfig::decode)
+/// accepted every structural rule; there is no other constructor and no
+/// setter.
+/// Reading touches no file: whether the artifacts exist and hash to their
+/// digests is for the caller to check before launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeRecipe {
     vcpus: u8,
@@ -357,7 +394,10 @@ impl RuntimeRecipe {
     /// Reads one ndjson record: one line of strict JSON ending in a single
     /// newline, at most 1,048,576 bytes before that newline, with no carriage
     /// return. Every field is required, unknown and repeated keys refuse, and
-    /// the recipe must fit `limits`.
+    /// the recipe must fit `limits`. The line is checked before the size, so a
+    /// buffer that does not end in a newline refuses as `NotOneLine` whatever
+    /// its length: a reader that stops at a cap must report an oversized
+    /// recipe itself.
     ///
     /// Rules are checked in a fixed order and the first broken one is
     /// returned: framing, JSON, the recipe's unknown then missing keys, each
@@ -367,7 +407,19 @@ impl RuntimeRecipe {
     /// refuses as the unknown format. An artifact's own unknown and missing
     /// keys are checked when the value pass reaches its field.
     pub fn parse(record: &[u8], limits: &PlatformLimits) -> Result<RuntimeRecipe, RecipeRefusal> {
-        let value = strict_json::parse_value(one_line(record)?).map_err(refused_json)?;
+        let value = read_line(record).map_err(refused_line)?;
+        RuntimeRecipe::from_value(&value, limits)
+    }
+
+    /// Reads a recipe from a JSON value, applying every rule of
+    /// [`RuntimeRecipe::parse`] after its framing and JSON checks, in the same
+    /// order. A recipe nested in a larger record is read this way. `value`
+    /// must come from [`strict_json::parse_value`](super::strict_json::parse_value): a value read any other way
+    /// may have dropped a repeated key, which this cannot see.
+    pub(crate) fn from_value(
+        value: &Value,
+        limits: &PlatformLimits,
+    ) -> Result<RuntimeRecipe, RecipeRefusal> {
         let [
             version,
             vcpus,
@@ -384,12 +436,12 @@ impl RuntimeRecipe {
             host_policy,
             guest_policy,
             architecture,
-        ] = fields(&value, RECIPE_FIELDS, "")?;
+        ] = fields(value, RECIPE_FIELDS, "")?;
         check_version(version)?;
         let recipe = RuntimeRecipe {
             vcpus: whole(vcpus, "vcpus", VCPUS_RANGE)?,
             memory_mib: whole(memory_mib, "memory_mib", MEMORY_RANGE)?,
-            kernel: artifact(kernel, "kernel")?,
+            kernel: Artifact::from_value(kernel, "kernel")?,
             kernel_format: spelled(
                 kernel_format,
                 "kernel_format",
@@ -397,15 +449,15 @@ impl RuntimeRecipe {
                 KernelFormat::as_str,
                 |found| RecipeRefusal::UnknownKernelFormat { found },
             )?,
-            initramfs: artifact(initramfs, "initramfs")?,
-            root_image: artifact(root_image, "root_image")?,
+            initramfs: Artifact::from_value(initramfs, "initramfs")?,
+            root_image: Artifact::from_value(root_image, "root_image")?,
             writable_root: path(writable_root, "writable_root".to_owned())?,
             control_path: path(control_path, "control_path".to_owned())?,
             data_path: path(data_path, "data_path".to_owned())?,
-            helper: artifact(helper, "helper")?,
+            helper: Artifact::from_value(helper, "helper")?,
             libraries: library_list(libraries)?,
-            host_policy: artifact(host_policy, "host_policy")?,
-            guest_policy: artifact(guest_policy, "guest_policy")?,
+            host_policy: Artifact::from_value(host_policy, "host_policy")?,
+            guest_policy: Artifact::from_value(guest_policy, "guest_policy")?,
             architecture: spelled(
                 architecture,
                 "architecture",
@@ -618,34 +670,93 @@ impl RuntimeRecipe {
     }
 }
 
+/// Spec 023 §1's deployment template: a recipe object without the three
+/// per-cell paths `writable_root`, `control_path` and `data_path`.
+///
+/// Reading a template checks only which keys it holds. The value of every key
+/// is checked when [`RuntimeTemplate::complete`] makes a recipe from it, so a
+/// caller that must refuse a bad template before any cell exists completes it
+/// once with the paths it would use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTemplate {
+    fields: Map<String, Value>,
+}
+
+/// Why a value is not a runtime template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateRefusal {
+    /// The template carries `field`, one of the three paths the controller
+    /// sets for each cell. Checked before any other key.
+    PerCellField { field: &'static str },
+    /// A recipe refusal, whose field names are relative to the template, such
+    /// as `kernel.path`. [`RuntimeTemplate::from_value`] gives only key
+    /// refusals here: the template is not a JSON object, or holds an unknown
+    /// key, or lacks one of the other twelve recipe keys. A caller that wraps a
+    /// refusal from [`RuntimeTemplate::complete`] in it carries any recipe
+    /// refusal, value refusals included, and some of those come from the three
+    /// per-cell paths rather than the template, such as `PathReused` naming
+    /// `writable_root` or `SocketPathTooLong`.
+    Recipe(RecipeRefusal),
+}
+
+impl RuntimeTemplate {
+    /// Reads a template from a JSON object. Refuses a value that is not an
+    /// object, then any of the three per-cell keys in that order, then an
+    /// unknown key (the smallest by bytes), then a missing key in spec order.
+    /// `value` must come from [`strict_json::parse_value`](super::strict_json::parse_value), which refuses
+    /// repeated keys.
+    pub fn from_value(value: &Value) -> Result<RuntimeTemplate, TemplateRefusal> {
+        let Value::Object(entries) = value else {
+            return Err(TemplateRefusal::Recipe(RecipeRefusal::NotAnObject {
+                field: String::new(),
+            }));
+        };
+        if let Some(field) = PER_CELL_FIELDS
+            .into_iter()
+            .find(|field| entries.contains_key(*field))
+        {
+            return Err(TemplateRefusal::PerCellField { field });
+        }
+        fields(value, TEMPLATE_FIELDS, "").map_err(TemplateRefusal::Recipe)?;
+        Ok(RuntimeTemplate {
+            fields: entries.clone(),
+        })
+    }
+
+    /// Makes one cell's recipe: the template with the three per-cell paths
+    /// added, read under `limits` by every rule [`RuntimeRecipe::parse`]
+    /// applies after its framing and JSON checks. Every
+    /// value rule and every cross-field rule applies to the result, so a
+    /// refusal here may come from the template's own values.
+    pub fn complete(
+        &self,
+        writable_root: &RecipePath,
+        control_path: &RecipePath,
+        data_path: &RecipePath,
+        limits: &PlatformLimits,
+    ) -> Result<RuntimeRecipe, RecipeRefusal> {
+        let mut fields = self.fields.clone();
+        for (key, path) in PER_CELL_FIELDS
+            .into_iter()
+            .zip([writable_root, control_path, data_path])
+        {
+            fields.insert(key.to_owned(), Value::from(path.as_str()));
+        }
+        RuntimeRecipe::from_value(&Value::Object(fields), limits)
+    }
+}
+
 fn artifact_path((role, artifact): (ArtifactRole, &Artifact)) -> (PathRole, &RecipePath) {
     (PathRole::Artifact(role), &artifact.path)
 }
 
-fn one_line(record: &[u8]) -> Result<&[u8], RecipeRefusal> {
-    let Some(body) = record.strip_suffix(b"\n") else {
-        return Err(RecipeRefusal::NotOneLine);
-    };
-    if body.iter().any(|byte| matches!(byte, b'\n' | b'\r')) {
-        return Err(RecipeRefusal::NotOneLine);
-    }
-    if body.len() > MAX_RECORD_BYTES {
-        return Err(RecipeRefusal::TooLarge { bytes: body.len() });
-    }
-    std::str::from_utf8(body).map_err(|_| RecipeRefusal::NotUtf8)?;
-    Ok(body)
-}
-
-fn refused_json(error: StrictJsonError) -> RecipeRefusal {
-    match error {
-        StrictJsonError::DuplicateKey { field, .. } => RecipeRefusal::DuplicateField { field },
-        StrictJsonError::NotJson {
-            line,
-            column,
-            reason,
-        } => RecipeRefusal::NotJson {
-            detail: format!("{reason} at line {line}, column {column}"),
-        },
+fn refused_line(fault: LineFault) -> RecipeRefusal {
+    match fault {
+        LineFault::NotOneLine => RecipeRefusal::NotOneLine,
+        LineFault::TooLarge { bytes } => RecipeRefusal::TooLarge { bytes },
+        LineFault::NotUtf8 => RecipeRefusal::NotUtf8,
+        LineFault::NotJson { detail } => RecipeRefusal::NotJson { detail },
+        LineFault::DuplicateKey { field } => RecipeRefusal::DuplicateField { field },
     }
 }
 
@@ -738,15 +849,6 @@ fn path(value: &Value, field: String) -> Result<RecipePath, RecipeRefusal> {
     RecipePath::parse(text(value, &field)?).map_err(|fault| RecipeRefusal::BadPath { field, fault })
 }
 
-fn artifact(value: &Value, at: &str) -> Result<Artifact, RecipeRefusal> {
-    let [path_value, sha256_value] = fields(value, ARTIFACT_FIELDS, at)?;
-    let path = path(path_value, format!("{at}.path"))?;
-    let field = format!("{at}.sha256");
-    let sha256 = Digest::parse_hex(text(sha256_value, &field)?)
-        .map_err(|fault| RecipeRefusal::BadDigest { field, fault })?;
-    Ok(Artifact { path, sha256 })
-}
-
 fn library_list(value: &Value) -> Result<Vec<Artifact>, RecipeRefusal> {
     let Value::Array(entries) = value else {
         return Err(wrong_type("libraries", "an array"));
@@ -754,7 +856,7 @@ fn library_list(value: &Value) -> Result<Vec<Artifact>, RecipeRefusal> {
     entries
         .iter()
         .enumerate()
-        .map(|(index, entry)| artifact(entry, &format!("libraries[{index}]")))
+        .map(|(index, entry)| Artifact::from_value(entry, &format!("libraries[{index}]")))
         .collect()
 }
 
@@ -891,14 +993,28 @@ impl std::fmt::Display for RecipeRefusal {
 
 impl std::error::Error for RecipeRefusal {}
 
+impl std::fmt::Display for TemplateRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TemplateRefusal::PerCellField { field } => write!(
+                f,
+                "the template carries `{field}`, which the controller sets for each cell"
+            ),
+            TemplateRefusal::Recipe(refusal) => refusal.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for TemplateRefusal {}
+
 #[cfg(test)]
 mod tests {
     use super::RecipeRefusal::*;
     use super::*;
+    use crate::runtime::fixtures::{LIMITS, artifact, digest, valid_recipe as valid};
+    use crate::runtime::strict_json;
     use proptest::prelude::*;
     use serde_json::{Value, json};
-
-    const LIMITS: PlatformLimits = PlatformLimits::new(Architecture::Aarch64, 8, 16_384, 103);
 
     const X86_64_LIMITS: PlatformLimits = PlatformLimits::new(Architecture::X86_64, 8, 16_384, 103);
 
@@ -963,34 +1079,6 @@ mod tests {
         "\n",
     );
 
-    fn digest(digit: char) -> String {
-        digit.to_string().repeat(64)
-    }
-
-    fn artifact(path: &str, digit: char) -> Value {
-        json!({"path": path, "sha256": digest(digit)})
-    }
-
-    fn valid() -> Value {
-        json!({
-            "version": 1,
-            "vcpus": 2,
-            "memory_mib": 2048,
-            "kernel": artifact("/opt/cell/kernel", '1'),
-            "kernel_format": "raw",
-            "initramfs": artifact("/opt/cell/initramfs", '2'),
-            "root_image": artifact("/opt/cell/root.raw", '3'),
-            "writable_root": "/var/cell/c1/root.raw",
-            "control_path": "/var/cell/c1/control.sock",
-            "data_path": "/var/cell/c1/data.sock",
-            "helper": artifact("/opt/cell/krun-helper", '4'),
-            "libraries": [artifact("/opt/cell/lib/libkrun.1.dylib", '5')],
-            "host_policy": artifact("/opt/cell/host.sb", '6'),
-            "guest_policy": artifact("/opt/cell/guest.json", '7'),
-            "architecture": "aarch64",
-        })
-    }
-
     fn record(edits: &[(&str, Option<Value>)]) -> Vec<u8> {
         let mut recipe = valid();
         for (pointer, replacement) in edits {
@@ -1019,8 +1107,30 @@ mod tests {
         record(&[(pointer, None)])
     }
 
+    fn body_value(record: &[u8]) -> Option<Value> {
+        let body = record.strip_suffix(b"\n")?;
+        strict_json::parse_value(body).ok()
+    }
+
+    fn parse_checked(
+        record: &[u8],
+        limits: &PlatformLimits,
+    ) -> Result<RuntimeRecipe, RecipeRefusal> {
+        let parsed = RuntimeRecipe::parse(record, limits);
+        let framing = matches!(parsed, Err(NotOneLine | TooLarge { .. } | NotUtf8));
+        if let (false, Some(value)) = (framing, body_value(record)) {
+            assert_eq!(
+                RuntimeRecipe::from_value(&value, limits),
+                parsed,
+                "from_value and parse disagree on {}",
+                String::from_utf8_lossy(record)
+            );
+        }
+        parsed
+    }
+
     fn parsed_under(record: &[u8], limits: &PlatformLimits) -> RuntimeRecipe {
-        RuntimeRecipe::parse(record, limits).unwrap_or_else(|refusal| {
+        parse_checked(record, limits).unwrap_or_else(|refusal| {
             panic!("{} refused: {refusal:?}", String::from_utf8_lossy(record))
         })
     }
@@ -1030,7 +1140,7 @@ mod tests {
     }
 
     fn refused_under(record: &[u8], limits: &PlatformLimits) -> RecipeRefusal {
-        match RuntimeRecipe::parse(record, limits) {
+        match parse_checked(record, limits) {
             Err(refusal) => {
                 let shown = refusal.to_string();
                 assert!(!shown.contains(['\n', '\r']), "{shown:?} is one line");
@@ -1304,6 +1414,9 @@ mod tests {
 
     #[test]
     fn framing_is_checked_line_then_size_then_encoding() {
+        for length in [0, 1_048_576, 1_048_577, 1_048_578, 1_048_579, 8 * 1_048_576] {
+            assert_eq!(refused(&vec![b' '; length]), NotOneLine, "{length} bytes");
+        }
         let mut oversized = vec![b' '; 1_048_577];
         oversized[0] = 0xff;
         assert_eq!(refused(&oversized), NotOneLine);
@@ -1890,6 +2003,324 @@ mod tests {
                 "`helper.path` and `libraries[3].path` are the same path",
                 "`host_policy.path` and `guest_policy.path` are the same path",
             ]
+        );
+    }
+
+    #[test]
+    fn from_value_matches_parse() {
+        let control = json!("/var/cell/c1/control.sock");
+        let records = [
+            record(&[]),
+            with("/libraries", json!([])),
+            with("/vcpus", json!(9)),
+            with("/vcpus", json!(0)),
+            with("/memory_mib", json!(16_385)),
+            with("/version", json!(2)),
+            with("/kernel_format", json!("bzImage")),
+            with("/architecture", json!("x86_64")),
+            with("/data_path", control),
+            with("/control_path", path_of_length(104)),
+            with("/writable_root", json!("/opt/cell/root.raw")),
+            with("/helper/sha256", json!("A".repeat(64))),
+            with("/kernel/path", json!("relative/path")),
+            with("/libraries/0/size", json!(1)),
+            with("/extra", json!(1)),
+            without("/guest_policy"),
+            with("/libraries", json!({})),
+            with("/kernel", json!("/opt/cell/kernel")),
+            b"[]\n".to_vec(),
+        ];
+        for record in records {
+            let shown = String::from_utf8_lossy(&record).into_owned();
+            let value = body_value(&record).expect("the record is one strict JSON value");
+            assert_eq!(
+                RuntimeRecipe::from_value(&value, &LIMITS),
+                RuntimeRecipe::parse(&record, &LIMITS),
+                "{shown}"
+            );
+        }
+        let recipe = parsed(&record(&[]));
+        let value = body_value(&recipe.to_ndjson()).expect("the encoding is strict JSON");
+        assert_eq!(RuntimeRecipe::from_value(&value, &LIMITS), Ok(recipe));
+    }
+
+    #[test]
+    fn from_value_sees_no_framing() {
+        let padded = format!("{}{}", valid(), " ".repeat(1_048_577));
+        let value = strict_json::parse_value(padded.as_bytes()).expect("strict JSON");
+        assert_eq!(
+            RuntimeRecipe::from_value(&value, &LIMITS),
+            Ok(parsed(&record(&[])))
+        );
+    }
+
+    fn artifact_refused(value: &Value, field: &str) -> RecipeRefusal {
+        match Artifact::from_value(value, field) {
+            Err(refusal) => {
+                let shown = refusal.to_string();
+                assert!(!shown.contains(['\n', '\r']), "{shown:?} is one line");
+                for name in names_shown_by(&refusal) {
+                    assert!(shown.contains(&name), "{shown:?} names {name}");
+                }
+                refusal
+            }
+            Ok(read) => panic!("{value} read as {read:?}"),
+        }
+    }
+
+    #[test]
+    fn artifact_from_value_reads_exactly_path_and_sha256_naming_the_given_field() {
+        let field = "cell_runtime.membraned";
+        let membraned = "/usr/local/lib/plasmosome/membraned";
+        let read = Artifact::from_value(&artifact(membraned, '8'), field)
+            .expect("an object with exactly path and sha256 reads");
+        assert_eq!(read.path().as_str(), membraned);
+        assert_eq!(read.sha256().hex(), digest('8'));
+        let sha256 = digest('8');
+        let cases = [
+            (
+                json!({"path": membraned}),
+                missing("cell_runtime.membraned.sha256"),
+            ),
+            (
+                json!({"sha256": sha256}),
+                missing("cell_runtime.membraned.path"),
+            ),
+            (
+                json!({"path": membraned, "sha256": sha256, "size": 1}),
+                unknown("cell_runtime.membraned.size"),
+            ),
+            (
+                json!({"path": "relative/membraned", "sha256": sha256}),
+                BadPath {
+                    field: "cell_runtime.membraned.path".to_owned(),
+                    fault: PathError::NotAbsolute,
+                },
+            ),
+            (
+                json!({"path": membraned, "sha256": "A".repeat(64)}),
+                BadDigest {
+                    field: "cell_runtime.membraned.sha256".to_owned(),
+                    fault: DigestError::NotLowercaseHex { at: 0 },
+                },
+            ),
+            (
+                json!({"path": 1, "sha256": sha256}),
+                wrong_type("cell_runtime.membraned.path", "a string"),
+            ),
+            (json!(membraned), not_an_object("cell_runtime.membraned")),
+        ];
+        for (value, refusal) in cases {
+            assert_eq!(artifact_refused(&value, field), refusal, "{value}");
+        }
+        let elsewhere = json!({"path": "relative", "sha256": digest('8')});
+        assert_eq!(
+            artifact_refused(&elsewhere, "helper"),
+            BadPath {
+                field: "helper.path".to_owned(),
+                fault: PathError::NotAbsolute,
+            }
+        );
+    }
+
+    const PER_CELL: [&str; 3] = ["writable_root", "control_path", "data_path"];
+
+    const CONTROL: &str = "/var/cell/c1/control.sock";
+
+    const DATA: &str = "/var/cell/c1/data.sock";
+
+    fn template_with(edits: &[(&str, Option<Value>)]) -> Value {
+        let mut template = valid();
+        let fields = template
+            .as_object_mut()
+            .expect("the valid recipe is an object");
+        for key in PER_CELL {
+            fields.remove(key);
+        }
+        for (key, replacement) in edits {
+            match replacement {
+                Some(value) => fields.insert((*key).to_owned(), value.clone()),
+                None => fields.remove(*key),
+            };
+        }
+        template
+    }
+
+    fn template_read(value: &Value) -> RuntimeTemplate {
+        RuntimeTemplate::from_value(value)
+            .unwrap_or_else(|refusal| panic!("{value} refused as a template: {refusal:?}"))
+    }
+
+    fn template_refused(value: &Value) -> TemplateRefusal {
+        match RuntimeTemplate::from_value(value) {
+            Err(refusal) => {
+                let shown = refusal.to_string();
+                assert!(!shown.contains(['\n', '\r']), "{shown:?} is one line");
+                let names = match &refusal {
+                    TemplateRefusal::PerCellField { field } => vec![format!("`{field}`")],
+                    TemplateRefusal::Recipe(inner) => names_shown_by(inner),
+                };
+                for name in names {
+                    assert!(shown.contains(&name), "{shown:?} names {name}");
+                }
+                refusal
+            }
+            Ok(template) => panic!("{value} read as a template: {template:?}"),
+        }
+    }
+
+    fn per_cell(field: &'static str) -> TemplateRefusal {
+        TemplateRefusal::PerCellField { field }
+    }
+
+    fn recipe_path(text: &str) -> RecipePath {
+        RecipePath::parse(text).unwrap_or_else(|fault| panic!("{text:?} parses, got {fault:?}"))
+    }
+
+    fn completed(
+        template: &RuntimeTemplate,
+        writable_root: &str,
+        control_path: &str,
+        data_path: &str,
+    ) -> Result<RuntimeRecipe, RecipeRefusal> {
+        template.complete(
+            &recipe_path(writable_root),
+            &recipe_path(control_path),
+            &recipe_path(data_path),
+            &LIMITS,
+        )
+    }
+
+    #[test]
+    fn template_refuses_each_per_cell_key() {
+        for field in PER_CELL {
+            let path = json!("/var/cell/c1/elsewhere");
+            let carrying = template_with(&[(field, Some(path.clone()))]);
+            assert_eq!(template_refused(&carrying), per_cell(field));
+            let also_missing = template_with(&[(field, Some(path.clone())), ("vcpus", None)]);
+            assert_eq!(template_refused(&also_missing), per_cell(field));
+            let also_unknown = template_with(&[(field, Some(path)), ("extra", Some(json!(1)))]);
+            assert_eq!(template_refused(&also_unknown), per_cell(field));
+            let not_a_path = template_with(&[(field, Some(json!(null)))]);
+            assert_eq!(template_refused(&not_a_path), per_cell(field));
+        }
+        let two = template_with(&[
+            ("data_path", Some(json!("/var/cell/d"))),
+            ("control_path", Some(json!("/var/cell/c"))),
+        ]);
+        assert_eq!(template_refused(&two), per_cell("control_path"));
+        assert_eq!(template_refused(&valid()), per_cell("writable_root"));
+    }
+
+    #[test]
+    fn template_refuses_a_missing_or_unknown_key() {
+        let kept: Vec<&str> = FIELDS
+            .into_iter()
+            .filter(|field| !PER_CELL.contains(field))
+            .collect();
+        assert_eq!(kept.len(), 12);
+        for field in kept {
+            let refusal = template_refused(&template_with(&[(field, None)]));
+            assert_eq!(refusal, TemplateRefusal::Recipe(missing(field)), "{field}");
+        }
+        let extra = template_with(&[("extra", Some(json!(1)))]);
+        assert_eq!(
+            template_refused(&extra),
+            TemplateRefusal::Recipe(unknown("extra"))
+        );
+        let missing_and_unknown = template_with(&[("vcpus", None), ("extra", Some(json!(1)))]);
+        assert_eq!(
+            template_refused(&missing_and_unknown),
+            TemplateRefusal::Recipe(unknown("extra"))
+        );
+        let two_missing = template_with(&[("architecture", None), ("memory_mib", None)]);
+        assert_eq!(
+            template_refused(&two_missing),
+            TemplateRefusal::Recipe(missing("memory_mib"))
+        );
+        for value in [json!([]), json!("template"), json!(null)] {
+            assert_eq!(
+                template_refused(&value),
+                TemplateRefusal::Recipe(not_an_object("")),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_applies_admit() {
+        let template = template_read(&template_with(&[]));
+        assert_eq!(
+            completed(&template, "/var/cell/c1/root.raw", CONTROL, DATA),
+            Ok(parsed(&record(&[])))
+        );
+        let over = template_read(&template_with(&[("vcpus", Some(json!(9)))]));
+        assert_eq!(
+            completed(&over, "/var/cell/c1/root.raw", CONTROL, DATA),
+            Err(VcpusAboveLimit {
+                requested: 9,
+                limit: 8
+            })
+        );
+        assert_eq!(
+            completed(&template, "/var/cell/c1/root.raw", CONTROL, CONTROL),
+            Err(SocketPathsEqual)
+        );
+        let long = path_of_length(104);
+        let long = long.as_str().expect("a path is a string");
+        assert_eq!(
+            completed(&template, "/var/cell/c1/root.raw", long, DATA),
+            Err(SocketPathTooLong {
+                field: "control_path",
+                bytes: 104,
+                max: 103
+            })
+        );
+        assert_eq!(
+            completed(&template, "/opt/cell/root.raw", CONTROL, DATA),
+            Err(PathReused {
+                first: PathRole::Artifact(ArtifactRole::RootImage),
+                second: PathRole::WritableRoot
+            })
+        );
+    }
+
+    #[test]
+    fn complete_applies_every_value_rule_the_template_deferred() {
+        for (key, value, refusal) in [
+            ("vcpus", json!("2"), wrong_type("vcpus", VCPUS_RANGE)),
+            ("version", json!(2), UnsupportedVersion { found: 2 }),
+            (
+                "kernel_format",
+                json!("bzImage"),
+                UnknownKernelFormat {
+                    found: "bzImage".to_owned(),
+                },
+            ),
+            (
+                "helper",
+                json!({"path": "/opt/cell/krun-helper"}),
+                missing("helper.sha256"),
+            ),
+        ] {
+            let template = template_read(&template_with(&[(key, Some(value))]));
+            assert_eq!(
+                completed(&template, "/var/cell/c1/root.raw", CONTROL, DATA),
+                Err(refusal),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn template_refusals_describe_themselves() {
+        assert_eq!(
+            per_cell("control_path").to_string(),
+            "the template carries `control_path`, which the controller sets for each cell"
+        );
+        assert_eq!(
+            TemplateRefusal::Recipe(missing("vcpus")).to_string(),
+            "the recipe is missing `vcpus`"
         );
     }
 }

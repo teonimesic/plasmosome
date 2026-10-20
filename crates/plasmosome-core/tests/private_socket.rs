@@ -30,37 +30,53 @@ struct ErrnoClobberingAllocator;
 
 const CLOBBERED_ERRNO: i32 = libc::EDOM;
 
+#[allow(unsafe_code)]
 fn clobber_errno() {
     #[cfg(target_os = "macos")]
+    // SAFETY: __error returns a valid pointer to this thread's errno, which the thread may write.
     unsafe {
         *libc::__error() = CLOBBERED_ERRNO
     };
     #[cfg(target_os = "linux")]
+    // SAFETY: __errno_location returns a valid pointer to this thread's errno, which the thread may
+    // write.
     unsafe {
         *libc::__errno_location() = CLOBBERED_ERRNO
     };
 }
 
+#[allow(unsafe_code)]
+// SAFETY: Every method forwards its arguments unchanged to System, so the caller's obligations
+// under GlobalAlloc pass straight through and every guarantee System gives holds here.
+// clobber_errno only writes this thread's errno; it neither allocates nor panics.
 unsafe impl GlobalAlloc for ErrnoClobberingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: The caller meets GlobalAlloc::alloc's contract, and `layout` reaches System
+        // unchanged.
         let pointer = unsafe { System.alloc(layout) };
         clobber_errno();
         pointer
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: The caller meets GlobalAlloc::alloc_zeroed's contract, and `layout` reaches
+        // System unchanged.
         let pointer = unsafe { System.alloc_zeroed(layout) };
         clobber_errno();
         pointer
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        // SAFETY: The caller meets GlobalAlloc::realloc's contract: `pointer` came from this
+        // allocator, which got it from System, with this `layout`.
         let moved = unsafe { System.realloc(pointer, layout, size) };
         clobber_errno();
         moved
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        // SAFETY: The caller meets GlobalAlloc::dealloc's contract: `pointer` came from this
+        // allocator, which got it from System, with this `layout`.
         unsafe { System.dealloc(pointer, layout) };
         clobber_errno();
     }
@@ -70,8 +86,10 @@ unsafe impl GlobalAlloc for ErrnoClobberingAllocator {
 static ALLOCATOR: ErrnoClobberingAllocator = ErrnoClobberingAllocator;
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 fn root_bases() -> Vec<PathBuf> {
     let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: `buffer` is a live Vec of buffer.len() bytes, and confstr writes at most that many.
     let length = unsafe {
         libc::confstr(
             libc::_CS_DARWIN_USER_TEMP_DIR,
@@ -219,7 +237,10 @@ fn accept_one(listener: &PrivateListener) -> Accepted {
     }
 }
 
+#[allow(unsafe_code)]
 fn is_nonblocking(stream: &UnixStream) -> bool {
+    // SAFETY: fcntl with F_GETFL takes no pointer, and `stream` keeps its descriptor open for the
+    // call.
     let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
     assert!(flags >= 0, "fcntl: {}", std::io::Error::last_os_error());
     flags & libc::O_NONBLOCK != 0
@@ -511,11 +532,15 @@ const KAUTH_ACE_GENERIC_ALL: u32 = 1 << 21;
 const KAUTH_ACE_GENERIC_WRITE: u32 = 1 << 23;
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 unsafe extern "C" {
+    /// Writes 16 bytes to `uuid`, which must point to at least that many writable bytes, and keeps
+    /// no pointer. Returns 0 on success.
     fn mbr_gid_to_uuid(gid: libc::gid_t, uuid: *mut u8) -> libc::c_int;
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 fn add_raw_allow_for_everyone(path: &Path, rights: u32) {
     const SYS_CHMOD_EXTENDED: libc::c_int = 282;
     const KAUTH_FILESEC_MAGIC: u32 = 0x012c_c16d;
@@ -524,6 +549,7 @@ fn add_raw_allow_for_everyone(path: &Path, rights: u32) {
     const EVERYONE_GID: libc::gid_t = 12;
     let mut everyone = [0u8; 16];
     assert_eq!(
+        // SAFETY: `everyone` is a local 16-byte array, the size of the UUID mbr_gid_to_uuid writes.
         unsafe { mbr_gid_to_uuid(EVERYONE_GID, everyone.as_mut_ptr()) },
         0,
         "the everyone group has a UUID"
@@ -538,6 +564,8 @@ fn add_raw_allow_for_everyone(path: &Path, rights: u32) {
     filesec.extend(rights.to_ne_bytes());
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("no NUL");
     #[allow(deprecated)]
+    // SAFETY: `c_path` is a CString and `filesec` holds one kauth_filesec with a single entry, laid
+    // out field by field above. Both outlive the call, and the kernel only reads them.
     let outcome = unsafe {
         libc::syscall(
             SYS_CHMOD_EXTENDED,
@@ -682,8 +710,11 @@ fn posix_acl(mask: u16) -> Vec<u8> {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
 fn set_xattr(path: &Path, name: &std::ffi::CStr, value: &[u8]) -> Result<(), i32> {
     let dir = fs::File::open(path).expect("open the directory");
+    // SAFETY: `name` is a CStr and `value` a byte slice, both borrowed for the call, and `dir`
+    // keeps its descriptor open. fsetxattr reads `value.len()` bytes and keeps no pointer.
     let outcome = unsafe {
         libc::fsetxattr(
             dir.as_raw_fd(),
@@ -916,9 +947,14 @@ fn accept_refuses_a_peer_whose_uid_is_not_trusted_before_reading() {
     );
 }
 
+/// The caller keeps `fd` open for the call.
+#[allow(unsafe_code)]
 fn set_blocking(fd: RawFd) {
+    // SAFETY: fcntl with F_GETFL takes no pointer, and the caller keeps `fd` open for the call.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     assert!(flags >= 0, "fcntl: {}", std::io::Error::last_os_error());
+    // SAFETY: fcntl with F_SETFL takes an integer flag set, not a pointer, and the caller keeps
+    // `fd` open for the call.
     let outcome = unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
     assert!(outcome == 0, "fcntl: {}", std::io::Error::last_os_error());
 }
@@ -953,12 +989,15 @@ fn accept_judges_a_silent_peer_without_waiting_to_read_from_it() {
     );
 }
 
+#[allow(unsafe_code)]
 fn poll_readable(listener: &PrivateListener) -> bool {
     let mut descriptor = libc::pollfd {
         fd: listener.as_raw_fd(),
         events: libc::POLLIN,
         revents: 0,
     };
+    // SAFETY: `descriptor` is one local libc::pollfd, matching the count of 1, and `listener` keeps
+    // its descriptor open.
     let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
     assert!(ready >= 0, "poll: {}", std::io::Error::last_os_error());
     ready == 1 && descriptor.revents & libc::POLLIN != 0
