@@ -308,6 +308,71 @@ fn a_reused_fixture_is_run_once_before_it_is_returned() {
 }
 
 #[test]
+fn a_stale_fixture_that_cannot_run_fails_setup_naming_it() {
+    let cache = tempfile::tempdir().unwrap();
+    let key = cache.path().join(key_of(&fixture::supervision_fixture()));
+    std::fs::create_dir(&key).expect("the key directory is created");
+    let stale = key.join("supervision-worker");
+    std::fs::write(&stale, "").expect("a stale file that cannot run is left at the real key");
+
+    let refused = std::panic::catch_unwind(|| {
+        fixture::compile_supervision_fixture(cache.path(), &fixture::supervision_worker_source())
+    })
+    .expect_err("a reused file that cannot run fails setup");
+    let message = panic_message(refused);
+    assert!(
+        message.starts_with(&format!(
+            "the compiled supervision worker fixture {} runs: ",
+            stale.display()
+        )) && message.contains("remove it or run `cargo clean`"),
+        "setup names the file that would not run and how to clear it: {message}"
+    );
+}
+
+#[test]
+fn a_fixture_source_that_cannot_be_read_fails_setup_naming_it() {
+    let cache = tempfile::tempdir().unwrap();
+    let missing = cache.path().join("missing.c");
+
+    let refused =
+        std::panic::catch_unwind(|| fixture::compile_supervision_fixture(cache.path(), &missing))
+            .expect_err("a source that cannot be read fails setup");
+    let message = panic_message(refused);
+    assert!(
+        message.starts_with(&format!(
+            "the supervision worker source {} is readable: ",
+            missing.display()
+        )),
+        "setup names the source it could not read: {message}"
+    );
+    assert_eq!(
+        entries(cache.path()),
+        Vec::<String>::new(),
+        "an unreadable source creates no key directory"
+    );
+}
+
+#[test]
+fn a_cache_root_that_is_not_a_directory_fails_setup_naming_it() {
+    let cache = tempfile::tempdir().unwrap();
+    let blocked = cache.path().join("blocked");
+    std::fs::write(&blocked, "").expect("a file stands where the cache root would be");
+
+    let refused = std::panic::catch_unwind(|| {
+        fixture::compile_supervision_fixture(&blocked, &fixture::supervision_worker_source())
+    })
+    .expect_err("a cache root that cannot hold a key directory fails setup");
+    let message = panic_message(refused);
+    assert!(
+        message.starts_with(&format!(
+            "the fixture cache directory {}/",
+            blocked.display()
+        )) && message.contains("is created, readable only by its owner: "),
+        "setup names the key directory it could not create: {message}"
+    );
+}
+
+#[test]
 fn the_fixture_cache_sits_in_the_nearest_directory_cargo_tagged_whatever_the_layout_below() {
     let target = tempfile::tempdir().unwrap();
     std::fs::write(
