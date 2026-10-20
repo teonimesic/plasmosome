@@ -522,3 +522,5 @@ MIT — see [LICENSE](LICENSE).
 ## Author
 
 Written by Stefano Benatti ([@teonimesic](https://github.com/teonimesic)).
+
+Throwaway D: a Markdown-only change on a base that locks a git source.
