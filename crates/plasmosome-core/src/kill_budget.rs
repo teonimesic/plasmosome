@@ -1,4 +1,5 @@
 use plasmosome_backend::{DrainSpec, RevokePolicy};
+use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -188,9 +189,10 @@ pub enum Shortfall {
 pub struct Incomplete(BTreeSet<Shortfall>);
 
 impl Incomplete {
-    /// Records a shortfall. `Shutdown` is dropped when `now` is set.
+    /// Records a shortfall. With `now` only `Teardown` is recorded: the kill runs no workload
+    /// stop and sends no `shutdown`, so neither step can fall short.
     pub fn add(&mut self, shortfall: Shortfall, now: bool) {
-        if !(now && shortfall == Shortfall::Shutdown) {
+        if !now || shortfall == Shortfall::Teardown {
             self.0.insert(shortfall);
         }
     }
@@ -214,7 +216,13 @@ impl Serialize for Incomplete {
 
 impl<'de> Deserialize<'de> for Incomplete {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        BTreeSet::deserialize(deserializer).map(Incomplete)
+        let mut read = BTreeSet::new();
+        for shortfall in Vec::<Shortfall>::deserialize(deserializer)? {
+            if !read.insert(shortfall) {
+                return Err(D::Error::custom("incomplete lists an entry twice"));
+            }
+        }
+        Ok(Incomplete(read))
     }
 }
 
