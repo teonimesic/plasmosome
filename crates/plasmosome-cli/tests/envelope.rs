@@ -296,6 +296,46 @@ fn a_hand_built_value_that_repeats_a_key_is_refused_at_any_depth() {
     );
 }
 
+fn null_object(keys: &[String]) -> Json {
+    Json::Object(keys.iter().map(|key| (key.clone(), Json::Null)).collect())
+}
+
+fn two_fields(detail: Json) -> Vec<(String, Json)> {
+    vec![("first".to_string(), Json::Null), ("detail".to_string(), detail)]
+}
+
+#[test]
+fn a_repeat_of_the_first_middle_or_last_key_is_refused_at_every_width() {
+    for width in [2, 7, 8, 9, 20] {
+        let keys: Vec<String> = (0..width).map(|index| format!("k{index}")).collect();
+        assert!(KernelError::new(null_object(&keys)).is_ok(), "{width} keys");
+        assert!(
+            ClientError::new(
+                ClientCode::BadReply,
+                "m".to_string(),
+                two_fields(null_object(&keys))
+            )
+            .is_ok(),
+            "{width} keys"
+        );
+        for repeat in [0, width / 2, width - 1] {
+            let mut repeated = keys.clone();
+            repeated.push(format!("k{repeat}"));
+            let value = || null_object(&repeated);
+            assert_eq!(
+                KernelError::new(value()),
+                Err(value()),
+                "{width} keys, k{repeat} twice"
+            );
+            assert_eq!(
+                ClientError::new(ClientCode::BadReply, "m".to_string(), two_fields(value())),
+                Err(two_fields(value())),
+                "{width} keys, k{repeat} twice in the second field"
+            );
+        }
+    }
+}
+
 fn single(key: &str) -> Json {
     Json::Object(vec![(key.to_string(), Json::Null)])
 }
