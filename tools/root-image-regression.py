@@ -286,7 +286,7 @@ def an_existing_workload_name_or_id_1000_refuses():
         ]:
             _, mode, uid, gid, _, _ = DEBIAN[path]
             detail = refusal("stage", stage_with, root, {path: f(data, mode, uid, gid)})
-            assert f"/{path}" in detail, detail
+            assert f"/{path}" in detail and "already" in detail, detail
 
 
 def entries_under_opt_or_usr_local_bin_refuse():
