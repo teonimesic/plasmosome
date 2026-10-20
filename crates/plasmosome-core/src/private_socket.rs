@@ -1989,6 +1989,22 @@ mod tests {
     }
 
     #[test]
+    fn listing_reads_the_held_directory_not_the_one_its_path_now_names() {
+        let root = test_root();
+        let held = root.path().join("held");
+        make_dir(&held, 0o700);
+        make_dir(&held.join("x"), 0o700);
+        let named = root.path().join("named");
+        make_dir(&named, 0o700);
+        fs::write(named.join("y"), b"").expect("write");
+        let dir = OwnedFd::from(fs::File::open(&held).expect("open"));
+        assert_eq!(
+            list_entries(&dir, &named),
+            Ok(vec![listed("x", EntryKind::Directory)])
+        );
+    }
+
+    #[test]
     fn listing_a_descriptor_that_is_not_a_directory_is_io() {
         let root = test_root();
         let file = root.path().join("file");
