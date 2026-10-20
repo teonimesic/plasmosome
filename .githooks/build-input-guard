@@ -1,0 +1,326 @@
+#!/usr/bin/env -S python3 -I
+"""Spec 026's git-only step: refuse a commit whose Cargo configuration or toolchain files would
+swap or wrap what cargo builds.
+
+Usage: build-input-guard [COMMIT]    (COMMIT defaults to HEAD)
+
+The step reads COMMIT from git's object store with `git rev-parse`, `git ls-tree` and
+`git cat-file blob`, ignoring replace refs. It never checks out, never reads the working tree, and
+never runs cargo, rustc or rustup, because any of them can run a program the commit names.
+
+It refuses any tracked `.cargo/config` or `.cargo/config.toml` at any depth, and a symlink named
+`.cargo`. It refuses an extensionless `rust-toolchain`, and a `rust-toolchain.toml` holding
+anything beyond a [toolchain] table with channel, components, targets and profile. It refuses
+every submodule, since the commit does not hold a submodule's files. It refuses every tracked
+`.gitattributes`, since through one checkout can write a file other than the blob this step
+judged; a maintainer lifts that by changing this step. Names are compared as a case-insensitive
+filesystem compares them.
+
+Clean does not yet cover `[patch]`, `[replace]`, path dependencies outside the repository,
+symlinks that leave it, or lockfile sources other than crates.io. A reviewer reads those by hand
+until plasmosome-jfm2 adds them to this step.
+
+Exit 0: clean. Exit 1: refused. Each finding is one line, `build-input-guard: <path>: <key>:
+<reason>`, and the harm follows once. Exit 2: the step could not read the commit, or was run the
+wrong way. It refuses rather than passing: a commit it cannot read is a commit it cannot clear.
+
+A steward or reviewer runs main's copy against a contributor's PR before checking anything out.
+This works from any branch:
+
+    set -o pipefail
+    git fetch origin main
+    git fetch origin pull/N/head
+    git --no-replace-objects cat-file blob origin/main:.githooks/build-input-guard |
+        python3 -I - FETCH_HEAD
+
+Only a line `build-input-guard: clean (<sha>)` counts as a pass. If main's copy cannot be read,
+python3 gets an empty script and exits 0 with no line at all, which pipefail turns into a failure.
+Check out that exact SHA in the separate clone, not whatever `pull/N/head` names by then: the
+head can move between the two fetches.
+
+A CI verdict counts only when the PR leaves `.github/`, `.githooks/` and `tools/` unchanged. The
+script runs as `python3 -I`, so a module planted beside it cannot shadow the standard library. It
+needs Python 3.11 or later, for tomllib. It is one file and imports nothing from this repository.
+"""
+
+import sys
+
+if not sys.flags.isolated:
+    print(
+        "build-input-guard: run it as ./.githooks/build-input-guard or with python3 -I; "
+        "without isolation a module beside it shadows the standard library",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+import re
+import subprocess
+import threading
+
+try:
+    import tomllib
+except ImportError:
+    running = ".".join(str(part) for part in sys.version_info[:3])
+    print(
+        "build-input-guard: cannot read TOML: this step needs Python 3.11 or later, for tomllib, "
+        f"and this is Python {running}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+MAX_BYTES = 8 * 1024 * 1024
+SYMLINK_TARGET_BYTES = 4096
+GIT_TIMEOUT_SECONDS = 60
+
+# Spec 026 section 1 names no key that tracked Cargo configuration may hold. A key is added here
+# only after the spec names it.
+CONFIG_KEYS = frozenset()
+TOOLCHAIN_KEYS = ("channel", "components", "targets", "profile")
+FOUR_KEYS = "channel, components, targets and profile"
+
+CONFIGURATION_REFUSED = "any tracked Cargo configuration is refused"
+EXTENSIONLESS_REFUSED = (
+    "an extensionless rust-toolchain is refused; rustup reads a toolchain name or path from it"
+)
+UNREADABLE = "a commit this step cannot read is a commit it cannot clear"
+GITATTRIBUTES_REFUSED = (
+    "every tracked .gitattributes is refused, because through it checkout can write a file other "
+    "than the blob this step judged; a maintainer lifts this by changing this step"
+)
+SUBMODULE_REFUSED = (
+    "every submodule is refused; this commit does not hold its files, "
+    "so this step cannot judge them"
+)
+
+HARM = (
+    "A program nobody reviewed runs at the first cargo command on every machine that builds main, "
+    "including ones that hold publish credentials. Nothing from this commit was built or run."
+)
+
+COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+RECORD = re.compile(r"([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40}|[0-9a-f]{64})")
+BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
+SYMLINK = "120000"
+KIND_LABELS = {"blob": "(file)", "tree": "(directory)"}
+
+
+class CannotRead(Exception):
+    def __init__(self, what, detail):
+        super().__init__(what, detail)
+        self.what = what
+        self.detail = detail
+
+
+class Entry:
+    def __init__(self, path, mode, kind, oid):
+        self.path = path
+        self.mode = mode
+        self.kind = kind
+        self.oid = oid
+
+
+def printable(text):
+    shown = text.encode("unicode_escape").decode("ascii").replace("#", "\\x23")
+    return "\\x3a" + shown[1:] if shown.startswith("::") else shown
+
+
+def git(arguments, what, limit=None):
+    try:
+        process = subprocess.Popen(
+            ["git", "--no-replace-objects", *arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise CannotRead(what, f"git cannot run: {printable(str(error))}") from None
+    expired = threading.Event()
+
+    def expire():
+        expired.set()
+        process.kill()
+
+    timer = threading.Timer(GIT_TIMEOUT_SECONDS, expire)
+    timer.start()
+    try:
+        output = process.stdout.read(-1 if limit is None else limit + 1)
+        if limit is not None and len(output) > limit:
+            process.kill()
+            process.wait()
+            return None
+        errors = process.stderr.read()
+        process.wait()
+    finally:
+        timer.cancel()
+        process.stdout.close()
+        process.stderr.close()
+    if expired.is_set():
+        raise CannotRead(what, f"git {arguments[0]} did not finish within {GIT_TIMEOUT_SECONDS} s")
+    if process.returncode != 0:
+        detail = printable(" ".join(errors.decode("utf-8", "replace").split())) or "no message"
+        raise CannotRead(what, f"git {arguments[0]} exited {process.returncode}: {detail}")
+    return output
+
+
+def resolve(argument):
+    what = f"{printable(argument)} as a commit"
+    output = git(
+        ["rev-parse", "--verify", "--quiet", "--end-of-options", argument + "^{commit}"], what
+    )
+    sha = output.decode("utf-8", "replace").strip()
+    if not COMMIT_ID.fullmatch(sha):
+        raise CannotRead(what, f"git rev-parse printed {printable(sha)}, not a commit id")
+    return sha
+
+
+def entries(sha):
+    what = f"the tree of {sha}"
+    output = git(["ls-tree", "-r", "-t", "-z", "--full-tree", sha], what)
+    listed = []
+    for record in output.split(b"\0"):
+        if not record:
+            continue
+        meta, tab, path = record.partition(b"\t")
+        match = RECORD.fullmatch(meta.decode("utf-8", "replace"))
+        if not (tab and path and match):
+            shown = printable(record.decode("utf-8", "replace"))
+            raise CannotRead(what, f"git ls-tree printed a record this step cannot parse: {shown}")
+        mode, kind, oid = match.groups()
+        listed.append(Entry(path.decode("utf-8", "surrogateescape"), mode, kind, oid))
+    return listed
+
+
+def key_path(parts):
+    return ".".join(
+        part if BARE_KEY.fullmatch(part) else '"' + printable(part).replace('"', '\\"') + '"'
+        for part in parts
+    )
+
+
+def leaf_keys(document):
+    found = []
+    pending = [(None, document)]
+    while pending:
+        node, table = pending.pop()
+        for key, value in table.items():
+            child = (node, key)
+            if isinstance(value, dict) and value:
+                pending.append((child, value))
+                continue
+            parts = []
+            while child is not None:
+                child, part = child
+                parts.append(part)
+            found.append(key_path(reversed(parts)))
+    return sorted(found)
+
+
+def blob_what(entry):
+    return f"{printable(entry.path)} (blob {entry.oid})"
+
+
+def read_toml(entry):
+    data = git(["cat-file", "blob", entry.oid], blob_what(entry), limit=MAX_BYTES)
+    if data is None:
+        return None, f"larger than {MAX_BYTES // (1024 * 1024)} MiB, the most this step reads"
+    try:
+        return tomllib.loads(data.decode("utf-8")), None
+    except Exception as error:
+        return None, f"cannot be parsed as TOML: {printable(str(error))}"
+
+
+def whole(entry, rule):
+    if entry.mode != SYMLINK:
+        return (entry.path, KIND_LABELS[entry.kind], rule)
+    target = git(["cat-file", "blob", entry.oid], blob_what(entry), limit=SYMLINK_TARGET_BYTES)
+    shown = (
+        printable(target.decode("utf-8", "surrogateescape"))
+        if target is not None
+        else f"a target longer than {SYMLINK_TARGET_BYTES} bytes"
+    )
+    return (entry.path, "(symlink)", f"a symlink to {shown}; {rule}")
+
+
+def configuration(entry):
+    if entry.kind != "blob" or entry.mode == SYMLINK:
+        return [whole(entry, CONFIGURATION_REFUSED)]
+    document, problem = read_toml(entry)
+    if problem:
+        return [(entry.path, "(file)", problem)]
+    if not document:
+        return [(entry.path, "(no keys)", f"{CONFIGURATION_REFUSED}, an empty file included")]
+    return [
+        (entry.path, key, "not a key spec 026 allows in Cargo configuration")
+        for key in leaf_keys(document)
+        if key not in CONFIG_KEYS
+    ]
+
+
+def cargo_directory(entry):
+    if entry.mode == SYMLINK:
+        return [whole(entry, "cargo reads .cargo/config.toml through it")]
+    return []
+
+
+def toolchain(entry):
+    if entry.kind != "blob" or entry.mode == SYMLINK:
+        return [whole(entry, "a toolchain file must be a regular file")]
+    document, problem = read_toml(entry)
+    if problem:
+        return [(entry.path, "(file)", problem)]
+    found = [
+        (entry.path, key_path([key]), "a toolchain file holds only a [toolchain] table")
+        for key in document
+        if key != "toolchain"
+    ]
+    table = document.get("toolchain", {})
+    if not isinstance(table, dict):
+        found.append((entry.path, "toolchain", f"must be a table holding only {FOUR_KEYS}"))
+        return found
+    found.extend(
+        (entry.path, key_path(["toolchain", key]), f"a [toolchain] table holds only {FOUR_KEYS}")
+        for key in table
+        if key not in TOOLCHAIN_KEYS
+    )
+    return found
+
+
+def check(entry):
+    if entry.kind == "commit":
+        return [(entry.path, "(submodule)", SUBMODULE_REFUSED)]
+    parts = entry.path.casefold().split("/")
+    if parts[-1] == ".gitattributes":
+        return [whole(entry, GITATTRIBUTES_REFUSED)]
+    if parts[-1] in ("config", "config.toml") and parts[-2:-1] == [".cargo"]:
+        return configuration(entry)
+    if parts[-1] == ".cargo":
+        return cargo_directory(entry)
+    if parts[-1] == "rust-toolchain":
+        return [whole(entry, EXTENSIONLESS_REFUSED)]
+    if parts[-1] == "rust-toolchain.toml":
+        return toolchain(entry)
+    return []
+
+
+def main(arguments):
+    if len(arguments) > 1:
+        print("usage: build-input-guard [COMMIT]", file=sys.stderr)
+        return 2
+    try:
+        sha = resolve(arguments[0] if arguments else "HEAD")
+        findings = [finding for entry in entries(sha) for finding in check(entry)]
+    except CannotRead as error:
+        print(f"build-input-guard: cannot read {error.what}: {error.detail}", file=sys.stderr)
+        print(f"Refusing rather than passing: {UNREADABLE}.", file=sys.stderr)
+        return 2
+    if not findings:
+        print(f"build-input-guard: clean ({sha})")
+        return 0
+    for path, key, reason in findings:
+        print(f"build-input-guard: {printable(path)}: {key}: {reason}")
+    print(HARM)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

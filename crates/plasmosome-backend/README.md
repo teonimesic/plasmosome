@@ -76,6 +76,12 @@ released, an undrained one times out, and zero never forces. `revoke` follows th
 `FakeBackend::mark_stuck` and `stall_graceful_drains_for_owner` make graceful withdrawals of one
 address or one owner time out.
 
+`DrainSpec::shutdown_deadline` is the deadline `membraned` sends with the 4090 `shutdown` when it
+stops a guest under that drain (spec 023 §7). It is a tenth of the drain deadline, and at least
+1 ms, below that deadline, in whole milliseconds. It is none with `Force`, or when under 1 ms
+would be left: then no `shutdown` is sent and the helper is killed at the drain deadline. It
+lives here, beside `DrainSpec`, because it reads only the drain's deadline and policy.
+
 ## What's inside
 
 | Piece | Responsibility |
