@@ -443,6 +443,7 @@ def report_covers_every_lockfile_with_warnings():
         assert sorted((call["manifest"], call["argv"][call["argv"].index("check") + 1]) for call in calls) == sorted(
             (manifest, check) for manifest in ("Cargo.toml", "fuzz/Cargo.toml") for check in API["CHECKS"]), calls
         assert document["event"] == "push" and document["weekly"] is False, document
+        assert document["schema"] == 2 and document["sections"] == ["lockfiles"], document
         assert document["commit"] == head and document["date"] == today, document
 
         result, calls, summary, document = report(repository, "push", same, {
@@ -462,6 +463,7 @@ def report_covers_every_lockfile_with_warnings():
         ):
             assert expected in found, (expected, found)
         assert "tool-failure" not in kinds(document), document
+        assert {item["section"] for item in document["findings"]} == {"lockfiles"}, document
         notice = next(item for item in document["findings"] if item["kind"] == "notice")
         assert notice["check"] == "advisories" and notice["severity"] == "warning", notice
         assert notice["url"] == "https://crates.io/crates/inconceivable" and notice["title"], notice
@@ -476,6 +478,7 @@ def report_covers_every_lockfile_with_warnings():
             "kind": "vulnerability", "check": "advisories", "lockfile": "fuzz/Cargo.lock", "severity": "error",
             "package": "smallvec 1.6.0", "advisory": "RUSTSEC-2021-0003",
             "title": "Buffer overflow in SmallVec::insert_many", "url": "https://github.com/servo/rust-smallvec/issues/252",
+            "section": "lockfiles",
         }, vulnerability
         stale = next(item for item in document["findings"] if item["kind"] == "stale-lockfile")
         assert stale["lockfile"] == "Cargo.lock" and "--locked was passed to prevent this" in stale["title"], stale
@@ -515,39 +518,43 @@ def report_tool_failures():
         result, calls, summary, document = report(repository, "push", channel(directory, "1.99.1"))
         assert result.returncode == 0 and calls == [], (result.stdout, result.stderr)
         assert kinds(document) == ["tool-failure"] and "deny.toml" in document["findings"][0]["title"], document
+        assert document["sections"] == ["lockfiles"] and document["findings"][0]["section"] == "lockfiles", document
 
 
 def report_weekly_checks():
+    """The CLI wiring of the weekly checks; ignore_expiry and stable_comparison cover their logic."""
     with tempfile.TemporaryDirectory(prefix="cargo-deny-check-report-weekly-") as directory:
         repository = Repository(directory, {**BASE, "rust-toolchain.toml": PIN, "deny.toml": ignores(
             ignore("RUSTSEC-2000-0001", "until 2000-01-01; https://example.invalid/a; long past"),
             ignore("RUSTSEC-2000-0002", "until 2999-12-31; https://example.invalid/b; still valid"),
-            ignore("RUSTSEC-2000-0003", "until 2026-9-30; https://example.invalid/c; not zero-padded"),
+            ignore("RUSTSEC-2000-0003", "until 2026-9-30; https://example.invalid/c; not zero-padded, naïve"),
         )})
-        newer, same, older = channel(directory, "1.100.0"), channel(directory, "1.99.1"), channel(directory, "1.98.0")
+        newer = channel(directory, "1.100.0")
         missing = (Path(directory) / "no-such-channel.toml").as_uri()
 
-        for event in ("schedule", "workflow_dispatch"):
-            result, calls, summary, document = report(repository, event, newer)
-            assert result.returncode == 0 and document["weekly"] is True, (result.stdout, result.stderr)
-            found = {(item["kind"], item["advisory"]) for item in document["findings"]}
-            assert found == {("expired-ignore", "RUSTSEC-2000-0001"), ("unparsable-ignore", "RUSTSEC-2000-0003"),
-                             ("newer-stable", None)}, document
-            stable = next(item for item in document["findings"] if item["kind"] == "newer-stable")
-            assert stable["package"] == "rust 1.100.0" and "1.99.1" in stable["title"] and stable["url"], stable
-            assert "RUSTSEC-2000-0001" in result.stdout and "RUSTSEC-2000-0001" in summary, (result.stdout, summary)
+        result, calls, summary, document = report(repository, "schedule", newer, {"Cargo.toml advisories": "notice-warned"})
+        assert result.returncode == 0 and document["weekly"] is True, (result.stdout, result.stderr)
+        assert document["sections"] == ["lockfiles", "weekly"], document
+        found = {(item["kind"], item["advisory"], item["section"]) for item in document["findings"]}
+        assert found == {("notice", "RUSTSEC-2022-0058", "lockfiles"), ("expired-ignore", "RUSTSEC-2000-0001", "weekly"),
+                         ("unparsable-ignore", "RUSTSEC-2000-0003", "weekly"), ("newer-stable", None, "weekly")}, document
+        stable = next(item for item in document["findings"] if item["kind"] == "newer-stable")
+        assert stable["package"] == "rust 1.100.0" and "1.99.1" in stable["title"] and stable["url"], stable
+        assert "naïve" in next(item["title"] for item in document["findings"] if item["kind"] == "unparsable-ignore")
+        assert "RUSTSEC-2000-0001" in result.stdout and "RUSTSEC-2000-0001" in summary, (result.stdout, summary)
 
-        for stable in (same, older):
-            result, calls, summary, document = report(repository, "schedule", stable)
-            assert "newer-stable" not in kinds(document) and "tool-failure" not in kinds(document), document
-
-        result, calls, summary, document = report(repository, "schedule", missing)
-        failure = [item for item in document["findings"] if item["kind"] == "tool-failure"]
-        assert len(failure) == 1 and "channel" in failure[0]["title"], document
+        result, calls, summary, document = report(repository, "workflow_dispatch", missing)
+        assert result.returncode == 0 and document["weekly"] is True, (result.stdout, result.stderr)
+        assert document["sections"] == ["lockfiles", "weekly"], document
+        found = {(item["kind"], item["advisory"], item["section"]) for item in document["findings"]}
+        assert found == {("expired-ignore", "RUSTSEC-2000-0001", "weekly"), ("unparsable-ignore", "RUSTSEC-2000-0003", "weekly"),
+                         ("tool-failure", None, "weekly")}, document
+        failure = next(item for item in document["findings"] if item["kind"] == "tool-failure")
+        assert "no-such-channel.toml" in failure["title"], failure
 
         result, calls, summary, document = report(repository, "push", missing)
         assert result.returncode == 0 and document["weekly"] is False, (result.stdout, result.stderr)
-        assert document["findings"] == [], document
+        assert document["sections"] == ["lockfiles"] and document["findings"] == [], document
 
 
 def ignore_expiry():

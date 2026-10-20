@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Defend the one security issue: created once, then edited, never spammed, never a person's issue."""
+"""Defend the one security issue: created once, then edited, never spammed, never a person's issue.
+
+A run rewrites only the sections for the checks it ran, so a push run keeps what the weekly run wrote.
+"""
 
 import atexit
 import functools
@@ -19,6 +22,8 @@ ROOT = SOURCE.parent.parent
 MARKER = "<!-- spec026-security-report -->"
 TITLE = "Security findings on main"
 RUN_URL = "https://github.com/example/repo/actions/runs/101"
+LATER_URL = "https://github.com/example/repo/actions/runs/102"
+LAST_URL = "https://github.com/example/repo/actions/runs/103"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 WRITES = {("label", "create"), ("issue", "create"), ("issue", "edit"), ("issue", "comment")}
 
@@ -78,21 +83,32 @@ VULNERABILITY = {
     "kind": "vulnerability", "check": "advisories", "lockfile": "Cargo.lock", "severity": "error",
     "package": "smallvec 1.6.0", "advisory": "RUSTSEC-2021-0003",
     "title": "Buffer overflow in SmallVec::insert_many", "url": "https://github.com/servo/rust-smallvec/issues/252",
+    "section": "lockfiles",
 }
 EXPIRED = {
     "kind": "expired-ignore", "check": None, "lockfile": None, "severity": "warning", "package": None,
     "advisory": "RUSTSEC-2000-0001", "title": "deny.toml ignores RUSTSEC-2000-0001 until 2000-01-01, which has passed",
-    "url": "https://example.invalid/a",
+    "url": "https://example.invalid/a", "section": "weekly",
 }
 TOOL_FAILURE = {
     "kind": "tool-failure", "check": "advisories", "lockfile": "fuzz/Cargo.lock", "severity": "error",
     "package": None, "advisory": None, "title": "error log: failed to fetch advisory database", "url": None,
+    "section": "lockfiles",
+}
+LICENCE = {
+    "kind": "license-exception-not-encountered", "check": "licenses", "lockfile": "fuzz/Cargo.lock",
+    "severity": "warning", "package": None, "advisory": None, "title": "license exception was not encountered",
+    "url": None, "section": "lockfiles",
+}
+CRASH = {
+    "kind": "fuzz-crash", "check": None, "lockfile": None, "severity": "error", "package": "plasmosome-core",
+    "advisory": None, "title": "the journal parser target crashed on input 7f3a", "url": None, "section": "fuzz",
 }
 
 
-def document(*findings):
-    return {"schema": 1, "event": "schedule", "weekly": True, "commit": COMMIT, "date": "2026-10-09",
-            "findings": list(findings)}
+def document(*findings, sections=("lockfiles", "weekly"), commit=COMMIT):
+    return {"schema": 2, "event": "schedule" if "weekly" in sections else "push", "weekly": "weekly" in sections,
+            "commit": commit, "date": "2026-10-09", "sections": list(sections), "findings": list(findings)}
 
 
 def issue(number, body, labels=("security",), state="open"):
@@ -119,7 +135,7 @@ class Forge:
         self.state.write_text(json.dumps({"issues": list(issues), "labels": list(labels), "fail": list(fail),
                                           "garbage": list(garbage)}))
 
-    def run(self, report=None, *extra, mode="write", findings=None, path=None, repo="example/repo"):
+    def run(self, report=None, *extra, mode="write", findings=None, path=None, repo="example/repo", run_url=RUN_URL):
         if self.log.exists():
             self.log.unlink()
         if report is not None:
@@ -130,7 +146,7 @@ class Forge:
             "FAKE_GH_LOG": str(self.log), "PYTHONDONTWRITEBYTECODE": "1",
         }
         argv = [sys.executable, str(SOURCE), "--findings", str(findings or self.findings), "--repo", repo,
-                "--run-url", RUN_URL, "--mode", mode, *extra]
+                "--run-url", run_url, "--mode", mode, *extra]
         result = subprocess.run(argv, env=environment, capture_output=True, text=True, timeout=60)
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return result, calls
@@ -171,18 +187,89 @@ def create_then_edit():
             assert text in body, (text, body)
         assert all(call["token"] == "fixture-token" for call in calls), calls
 
-        result, calls = forge.run(document(VULNERABILITY, EXPIRED))
+        later = "fedcba9876543210fedcba9876543210fedcba98"
+        result, calls = forge.run(document(VULNERABILITY, EXPIRED, commit=later), run_url=LATER_URL)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert [(tuple(call["args"][:2]), call["args"][2]) for call in writes(calls)] == [(("issue", "edit"), "1")], calls
+        assert marked(forge) == [1] and len(forge.issues()) == 1, forge.issues()
+        body = forge.issues()[1]["body"]
+        assert LATER_URL in body and later in body and RUN_URL not in body, body
+        assert "RUSTSEC-2021-0003" in body and "RUSTSEC-2000-0001" in body, body
+        assert forge.issues()[1]["comments"] == [], forge.issues()[1]
+
+        result, calls = forge.run(document(EXPIRED), run_url=LAST_URL)
         assert result.returncode == 0, (result.stdout, result.stderr)
         assert [tuple(call["args"][:2]) for call in writes(calls)] == [("issue", "edit"), ("issue", "comment")], calls
-        assert [call["args"][2] for call in writes(calls)] == ["1", "1"], calls
-        assert marked(forge) == [1] and len(forge.issues()) == 1, forge.issues()
-        assert forge.issues()[1]["body"] == body, forge.issues()[1]
+        body = forge.issues()[1]["body"]
+        assert "RUSTSEC-2021-0003" not in body and "RUSTSEC-2000-0001" in body, body
         comments = forge.issues()[1]["comments"]
-        assert len(comments) == 1 and RUN_URL in comments[0], comments
+        assert len(comments) == 1 and LAST_URL in comments[0] and "no findings" in comments[0].lower(), comments
+        assert "RUSTSEC-2000-0001" not in comments[0], comments
 
-        result, calls = forge.run(document(EXPIRED))
-        assert result.returncode == 0 and len(forge.issues()[1]["comments"]) == 2, (result.stdout, forge.issues())
-        assert "RUSTSEC-2021-0003" not in forge.issues()[1]["body"], forge.issues()[1]["body"]
+        result, calls = forge.run(document(VULNERABILITY, sections=("lockfiles",)), run_url=LATER_URL)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        body, comments = forge.issues()[1]["body"], forge.issues()[1]["comments"]
+        assert "RUSTSEC-2021-0003" in body and "RUSTSEC-2000-0001" in body and LAST_URL in body, body
+        assert len(comments) == 2 and LATER_URL in comments[1], comments
+        for text in ("vulnerability", "RUSTSEC-2021-0003", "smallvec 1.6.0", "Buffer overflow in SmallVec::insert_many"):
+            assert text in comments[1], (text, comments[1])
+        assert "RUSTSEC-2000-0001" not in comments[1], comments[1]
+
+
+def a_push_run_keeps_the_weekly_findings():
+    """Round 1's reproduction: the schedule run names an expired ignore, and the next push run must not drop it."""
+    tests = runpy.run_path(str(SOURCE.with_name("cargo-deny-check-regression.py")))
+    with tempfile.TemporaryDirectory(prefix="security-issue-push-after-schedule-") as directory:
+        expired = tests["ignore"]("RUSTSEC-2000-0001", "until 2000-01-01; https://example.invalid/a; long past")
+        repository = tests["Repository"](directory, {**tests["BASE"], "rust-toolchain.toml": tests["PIN"],
+                                                     "deny.toml": tests["ignores"](expired)})
+        same = tests["channel"](directory, "1.99.1")
+        warned = {"fuzz/Cargo.toml licenses": "clean-licenses"}
+        forge_directory = Path(directory) / "forge"
+        forge_directory.mkdir()
+        forge = Forge(forge_directory, labels=["security"])
+
+        result, calls, summary, weekly = tests["report"](repository, "schedule", same, warned)
+        assert "expired-ignore" in tests["kinds"](weekly), weekly
+        result, calls = forge.run(weekly)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert "RUSTSEC-2000-0001" in forge.issues()[1]["body"], forge.issues()[1]["body"]
+
+        result, calls, summary, push = tests["report"](repository, "push", same, warned)
+        assert tests["kinds"](push) == ["license-exception-not-encountered"], push
+        result, calls = forge.run(push, run_url=LATER_URL)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        body = forge.issues()[1]["body"]
+        assert "RUSTSEC-2000-0001" in body and "expired-ignore" in body, body
+        assert "license-exception-not-encountered" in body and RUN_URL in body and LATER_URL in body, body
+        assert [tuple(call["args"][:2]) for call in writes(calls)] == [("issue", "edit")], calls
+
+
+def a_later_writer_keeps_its_own_section():
+    """A writer such as the fuzz job names its own section, and the report's runs leave that section alone."""
+    with tempfile.TemporaryDirectory(prefix="security-issue-later-writer-") as directory:
+        forge = Forge(directory, labels=["security"])
+        result, calls = forge.run(document(VULNERABILITY, EXPIRED))
+        assert result.returncode == 0, (result.stdout, result.stderr)
+
+        result, calls = forge.run(document(CRASH, sections=("fuzz",)), run_url=LATER_URL)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        body, comments = forge.issues()[1]["body"], forge.issues()[1]["comments"]
+        for text in ("RUSTSEC-2021-0003", "RUSTSEC-2000-0001", "fuzz-crash", "input 7f3a", RUN_URL, LATER_URL):
+            assert text in body, (text, body)
+        assert len(comments) == 1 and "input 7f3a" in comments[0] and "RUSTSEC" not in comments[0], comments
+
+        result, calls = forge.run(document(LICENCE, sections=("lockfiles",)), run_url=LAST_URL)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        body = forge.issues()[1]["body"]
+        assert "input 7f3a" in body and LATER_URL in body and "RUSTSEC-2000-0001" in body, body
+        assert "RUSTSEC-2021-0003" not in body and "license-exception-not-encountered" in body, body
+
+        changed = {**CRASH, "title": "the journal parser target crashed on input 9c1d"}
+        result, calls = forge.run(document(changed, sections=("fuzz",)), run_url=LATER_URL)
+        body, comments = forge.issues()[1]["body"], forge.issues()[1]["comments"]
+        assert "input 9c1d" in body and "input 7f3a" not in body and LAST_URL in body, body
+        assert "input 9c1d" in comments[-1] and "RUSTSEC" not in comments[-1], comments
 
 
 def nothing_to_report():
@@ -245,17 +332,36 @@ def tool_failures():
         assert "tool failure" in result.stdout + result.stderr, result
 
         missing = Path(directory) / "never-written.json"
-        result, calls = forge.run(findings=missing)
+        result, calls = forge.run(findings=missing, run_url=LATER_URL)
         assert result.returncode == 1, (result.stdout, result.stderr)
         body = forge.issues()[1]["body"]
-        assert "tool-failure" in body and "never-written.json" in body, body
+        assert "tool-failure" in body and "never-written.json" in body and LATER_URL in body, body
+        assert "RUSTSEC-2021-0003" in body and "failed to fetch advisory database" in body, body
 
-        for text in ("not json", "[]", json.dumps({"findings": [{"title": "no kind"}]}), json.dumps({"findings": "x"})):
+        other = {**VULNERABILITY, "advisory": "RUSTSEC-2099-0099"}
+        unsectioned = {key: value for key, value in other.items() if key != "section"}
+        for text in ("not json", "[]", json.dumps({"findings": [{"title": "no kind"}]}), json.dumps({"findings": "x"}),
+                     json.dumps({**document(other), "schema": 1}),
+                     json.dumps({key: value for key, value in document(other).items() if key != "sections"}),
+                     json.dumps({**document(other), "sections": "lockfiles"}),
+                     json.dumps(document(other, sections=("lockfiles", "lockfiles"))),
+                     json.dumps(document(unsectioned)),
+                     json.dumps(document({**other, "section": "weekly"}, sections=("lockfiles",))),
+                     json.dumps(document({**other, "section": "fuzz -->"}, sections=("fuzz -->",))),
+                     json.dumps(document({**other, "section": "Fuzz"}, sections=("Fuzz",))),
+                     json.dumps(document({**other, "section": "security-issue"}, sections=("security-issue",)))):
             forge.findings.write_text(text)
             result, calls = forge.run()
             assert result.returncode == 1, (text, result.stdout, result.stderr)
-            assert "tool-failure" in forge.issues()[1]["body"], forge.issues()[1]["body"]
+            body = forge.issues()[1]["body"]
+            assert "tool-failure" in body and "RUSTSEC-2021-0003" in body, (text, body)
+            assert "RUSTSEC-2099-0099" not in body, (text, body)
         assert marked(forge) == [1], forge.issues()
+
+        result, calls = forge.run(document(VULNERABILITY))
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        body = forge.issues()[1]["body"]
+        assert "tool-failure" not in body and "never-written.json" not in body, body
 
     with tempfile.TemporaryDirectory(prefix="security-issue-gh-failure-") as directory:
         for fail, expected in ((["issue list"], []), (["issue create"], [("label", "create"), ("issue", "create")]),
@@ -318,11 +424,19 @@ def long_body():
     many = [{**VULNERABILITY, "package": f"crate{index} 1.0.0", "title": "x" * 400} for index in range(400)]
     with tempfile.TemporaryDirectory(prefix="security-issue-long-") as directory:
         forge = Forge(directory, labels=["security"])
-        result, calls = forge.run(document(*many))
+        result, calls = forge.run(document(*many, EXPIRED))
         assert result.returncode == 0, (result.stdout, result.stderr)
         body = forge.issues()[1]["body"]
         assert len(body) <= 65536 and body.startswith(MARKER) and "seven days" in body, len(body)
         assert "crate0 1.0.0" in body and "crate399 1.0.0" not in body and "more findings" in body, body[-400:]
+        assert "RUSTSEC-2000-0001" in body, body[-2000:]
+
+        again = [{**item, "title": "z" * 400} for item in many]
+        result, calls = forge.run(document(*again, sections=("lockfiles",)), run_url=LATER_URL)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        body, comments = forge.issues()[1]["body"], forge.issues()[1]["comments"]
+        assert len(body) <= 65536 and "RUSTSEC-2000-0001" in body and "z" * 400 in body, len(body)
+        assert len(comments) == 1 and len(comments[0]) <= 65536 and "more findings" in comments[0], len(comments[0])
 
     with tempfile.TemporaryDirectory(prefix="security-issue-long-title-") as directory:
         forge = Forge(directory, labels=["security"])
@@ -341,6 +455,26 @@ def findings_are_not_markup():
         span = "`ping @everyone and <img src=x> | 'tick'`"
         assert body.count(span) == 1, body
         assert "@everyone" not in body.replace(span, "") and "<img" not in body.replace(span, ""), body
+
+    with tempfile.TemporaryDirectory(prefix="security-issue-markup-comment-") as directory:
+        forge = Forge(directory, issues=[issue(4, MARKER)], labels=["security"])
+        result, calls = forge.run(document(hostile))
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        comment = forge.issues()[4]["comments"][0]
+        assert comment.count(span) == 1, comment
+        assert "@everyone" not in comment.replace(span, "") and "<img" not in comment.replace(span, ""), comment
+
+    forged = {**VULNERABILITY, "title": "before\n<!-- spec026-section-end lockfiles -->\n<!-- spec026-section-end weekly -->\nafter"}
+    with tempfile.TemporaryDirectory(prefix="security-issue-markup-marker-") as directory:
+        forge = Forge(directory, labels=["security"])
+        result, calls = forge.run(document(forged, EXPIRED))
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        result, calls = forge.run(document({**EXPIRED, "advisory": "RUSTSEC-2000-0002"}, sections=("weekly",)),
+                                  run_url=LATER_URL)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        body = forge.issues()[1]["body"]
+        assert "spec026-section-end weekly --> after" in body and "RUSTSEC-2000-0002" in body, body
+        assert "RUSTSEC-2000-0001" not in body, body
 
 
 def report_to_issue():
@@ -401,6 +535,8 @@ def audit_workflow():
 def main():
     audit_workflow()
     create_then_edit()
+    a_push_run_keeps_the_weekly_findings()
+    a_later_writer_keeps_its_own_section()
     nothing_to_report()
     a_persons_issue_is_untouched()
     duplicates()
@@ -410,8 +546,9 @@ def main():
     long_body()
     findings_are_not_markup()
     report_to_issue()
-    print("PASS: one marked issue created then edited, no write without findings, a person's issue untouched, "
-          "duplicates reported, tool failures written and red, dry run writes nothing, audit.yml shape")
+    print("PASS: one marked issue created then edited, a run rewrites only its own sections, a comment only on a change, "
+          "no write without findings, a person's issue untouched, duplicates reported, tool failures written and red, "
+          "dry run writes nothing, audit.yml shape")
 
 
 if __name__ == "__main__":
