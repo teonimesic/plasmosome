@@ -122,10 +122,13 @@ there it is a hint rather than proof.
 
 Closing every descriptor above 3 is one `close_range` call on Linux; `prepare` refuses when the
 kernel does not offer it. Darwin has no such call, so the child closes each number below the larger
-of `getdtablesize()` and `kern.maxfilesperproc`. On an Apple Silicon Mac with a limit of 245,760,
-measured on 2026-10-20, that loop took about 31 ms with the machine lightly loaded and up to about
-680 ms under heavy load. The kernel creates no descriptor at or above both limits, but one made
-before either limit was lowered would survive.
+of `getdtablesize()` and `kern.maxfilesperproc`. `getdtablesize()` is the smaller of the soft
+`RLIMIT_NOFILE` and `kern.maxfilesperproc`, so the loop always runs to `kern.maxfilesperproc`, and a
+soft limit lowered below a descriptor the process still holds does not let that descriptor through;
+a test holds one above a soft limit lowered to 1,024. Only a descriptor made before root lowered
+`kern.maxfilesperproc` can survive. On an Apple Silicon Mac with `kern.maxfilesperproc` at
+245,760, measured on 2026-10-20, the loop took about 31 ms with the machine lightly loaded and up to
+about 680 ms under heavy load.
 
 An empty environment and the working directory `/` mean no `DYLD_*` or `LD_*` variable and no
 relative path can add to where the helper's loader looks for libraries. They do not remove a search
