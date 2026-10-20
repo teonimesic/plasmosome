@@ -779,10 +779,15 @@ def failure_before_placement_removes_the_stage_and_keeps_the_work_root():
         assert code == 1 and err == "root-image: refused place: injected\n", err
         assert list(images.iterdir()) == []
         assert {"base.tar", "stage.tar", "content.jsonl", "rootfs.raw"} <= set(os.listdir(work))
-        def interrupted(*args):
-            raise KeyboardInterrupt
+        class Interrupted:
+            def __getattr__(self, attribute):
+                if attribute == "dumps":
+                    def dumps(*args, **kwargs):
+                        raise KeyboardInterrupt
+                    return dumps
+                return getattr(json, attribute)
 
-        with patched("hash_bounded", interrupted):
+        with patched("json", Interrupted()):
             try:
                 built(root, FakeDocker(), work_name="interrupted")
                 raise AssertionError("the interrupt did not propagate")
@@ -880,7 +885,20 @@ def files_the_container_leaves_in_the_work_root_are_not_trusted():
         assert sha(placed) == result["content_sha256"] == manifest["content_sha256"] == manifest["files"]["content.jsonl"]
         assert b"/forged" not in placed and b'"/etc/hostname"' in placed
         assert (image / "rootfs.raw").read_bytes() == ROOTFS and manifest["files"]["rootfs.raw"] == sha(ROOTFS)
-        assert os.stat(image / "rootfs.raw").st_blocks * 512 < len(ROOTFS) // 2, os.stat(image / "rootfs.raw")
+
+
+def the_placed_rootfs_keeps_its_holes():
+    with scratch() as root:
+        size, data = 256 << 20, b"superblock".ljust(4096, b"\1")
+        with open(root / "rootfs.raw", "wb") as out:
+            out.truncate(size)
+            for offset in (0, 129 << 20, size - 4096):
+                os.pwrite(out.fileno(), data, offset)
+        (root / "stage").mkdir()
+        digest = API["copy_rootfs"](root, root / "stage", size)
+        copied = root / "stage" / "rootfs.raw"
+        assert digest == sha((root / "rootfs.raw").read_bytes()) == sha(copied.read_bytes())
+        assert os.stat(copied).st_size == size and os.stat(copied).st_blocks * 512 < 16 << 20, os.stat(copied)
 
 
 class Failing:
@@ -951,6 +969,7 @@ TESTS = [
     a_member_under_a_link_or_a_file_refuses,
     files_the_container_leaves_in_the_work_root_are_not_trusted,
     failures_of_the_os_print_the_refused_line,
+    the_placed_rootfs_keeps_its_holes,
 ]
 
 
