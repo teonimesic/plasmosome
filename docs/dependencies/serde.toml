@@ -5,13 +5,13 @@ reason = """\
   recipes, manifests, ledgers and session logs, so that serde_json and toml can read and write \
   them.\
   """
-write_it_instead.lines = 5000
+write_it_instead.lines = 4800
 write_it_instead.how = """\
-  git grep over derive attributes finds 65 Deserialize and 59 Serialize derives in 13 files. \
-  They use deny_unknown_fields 29 times, remote 24, default 22, skip_serializing_if 16, \
-  deserialize_with 9, rename_all 7, expecting 5, and rename and untagged once each. About 40 \
-  more impls and visitors are written by hand against these traits. Writing the derived \
-  impls by hand costs about 15 lines for each Serialize, and 60 for each Deserialize with its \
+  On 2026-10-20, git grep over derive attributes finds 65 Deserialize and 59 Serialize derives \
+  in 13 files. They use deny_unknown_fields 29 times, remote 24, default 22, skip_serializing_if \
+  16, deserialize_with 9, rename_all 7, expecting 5, and rename and untagged once each. About 40 \
+  more impls and visitors are written by hand against these traits. Writing the derived impls by \
+  hand costs about 15 lines for each Serialize, and 60 for each Deserialize with its \
   unknown-field refusal and missing-field errors: about 4800 lines. The traits cannot be \
   replaced on their own, because serde_json and toml reach our types only through them.\
   """

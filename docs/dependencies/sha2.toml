@@ -1,16 +1,16 @@
 name = "sha2"
 range = "0.11"
 reason = """\
-  Computes SHA-256 for plasmosome-backend's Digest type, which lets a paged reader check that \
-  it reassembled exactly the bytes a frozen account holds.\
+  Computes SHA-256 for plasmosome-backend's Digest type, which lets a paged reader check that it \
+  reassembled exactly the bytes a frozen account holds.\
   """
 write_it_instead.lines = 150
 write_it_instead.how = """\
-  git grep -n 'sha2::' finds one file, crates/plasmosome-backend/src/digest.rs, which calls \
-  Sha256::digest, Sha256::new, update and finalize. A portable SHA-256 from FIPS 180-4 is \
-  about 100 lines with its constants, padding and streaming buffer, and 50 more for the NIST \
-  test vectors. It would lack the ARMv8 and x86 SHA instructions that sha2 uses where the CPU \
-  has them.\
+  On 2026-10-20, git grep -n 'sha2::' finds one file, crates/plasmosome-backend/src/digest.rs, \
+  which calls Sha256::digest, Sha256::new, update and finalize. A portable SHA-256 from FIPS \
+  180-4 is about 100 lines with its constants, padding and streaming buffer, and 50 more for the \
+  NIST test vectors. It would lack the ARMv8 and x86 SHA instructions that sha2 uses where the \
+  CPU has them.\
   """
 exception = ""
 brings = [

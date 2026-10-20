@@ -6,12 +6,12 @@ reason = """\
   """
 write_it_instead.lines = 80
 write_it_instead.how = """\
-  git grep -n 'cc::' finds one use, in crates/plasmosome-membrane/build.rs: Build::new() with \
-  one file, flag_if_supported("-std=c11"), warnings, extra_warnings and compile. Writing that \
-  here means running $CC, or cc, with -c, -std=c11, -Wall and -Wextra, the optimisation and \
-  debug flags cargo passes in OPT_LEVEL and DEBUG, and the target's -arch and deployment \
-  target; then running ar, and printing the two cargo:rustc-link lines. That is about 80 lines \
-  for the one host that compiles it.\
+  On 2026-10-20, git grep -n 'cc::' finds one use, in crates/plasmosome-membrane/build.rs: \
+  Build::new() with one file, flag_if_supported("-std=c11"), warnings, extra_warnings and \
+  compile. Writing that here means running $CC, or cc, with -c, -std=c11, -Wall and -Wextra, the \
+  optimisation and debug flags cargo passes in OPT_LEVEL and DEBUG, and the target's -arch and \
+  deployment target; then running ar, and printing the two cargo:rustc-link lines. That is about \
+  80 lines for the one host that compiles it.\
   """
 exception = ""
 brings = ["find-msvc-tools@0.1", "shlex@2"]
@@ -19,10 +19,10 @@ build_time_code = []
 expands_unsafe = "none"
 native_code = [
   """\
-  cc@1 runs the host C compiler and archiver over the membrane's own src/darwin_group.c at \
-  build time, on macOS only. Its own C is src/detect_compiler_family.c, 15 lines of #pragma \
-  message that it runs through the preprocessor alone, with -E, to tell clang from gcc. \
-  Nothing of cc's is compiled into an object or linked.\
+  cc@1 runs the host C compiler and archiver over the membrane's own src/darwin_group.c at build \
+  time, on macOS only. Its own C is src/detect_compiler_family.c, 15 lines of #pragma message \
+  that it runs through the preprocessor alone, with -E, to tell clang from gcc. Nothing of cc's \
+  is compiled into an object or linked.\
   """,
 ]
 verdict = "kept-pending-owner"
