@@ -145,9 +145,14 @@ and spec 026 §2 allows `unsafe` only in register packages.
 - `SupervisorConfig` is spec 023 §4's record, one line:
   `{"cell":…,"instance_root":…,"runtime_recipe":{…},"boot_deadline_ms":…}` and a newline. The
   recipe is a nested object, not a string holding JSON, so its escapes are not doubled. `decode`
-  refuses the whole record at the first broken rule, with at most 1,048,576 bytes before the
-  newline. `encode` refuses a larger line, and a cell or a zero deadline that `decode` would
-  refuse.
+  refuses the whole record at the first broken rule. It checks the size first: a buffer longer
+  than `supervisor_config::MAX_RECORD_BYTES` (1,048,576) and one newline is `TooLarge`, whether or
+  not it holds a newline. So a reader that stops after `MAX_RECORD_BYTES + 2` bytes gets
+  `TooLarge` for anything longer than a record can be. `encode` refuses a larger line, and a cell
+  or a zero deadline that `decode` would refuse.
+- A refusal inside `runtime_recipe` names its field relative to the recipe, such as `vcpus`, and a
+  template refusal names it relative to the template. `DuplicateKey` names a repeated key from the
+  record's root, such as `runtime_recipe.vcpus`.
 
 ## Cell IDs on a normalizing filesystem
 

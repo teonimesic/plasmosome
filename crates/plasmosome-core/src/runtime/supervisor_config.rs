@@ -67,7 +67,11 @@ pub enum ConfigRecordRefusal {
     /// `instance_root` is not a string, when `fault` is `None`, or not a
     /// canonical absolute path.
     BadInstanceRoot { fault: Option<PathError> },
-    /// `runtime_recipe` is not a recipe this host may launch.
+    /// `runtime_recipe` is not a recipe this host may launch. The field names
+    /// inside are relative to `runtime_recipe`, such as `vcpus`. A repeated
+    /// key is `DuplicateKey` instead, named from the record's root, such as
+    /// `runtime_recipe.vcpus`, because strict JSON finds it before the recipe
+    /// is read.
     Recipe(RecipeRefusal),
     /// `boot_deadline_ms` is not a JSON integer from 1 to `u64::MAX`.
     BadBootDeadline,

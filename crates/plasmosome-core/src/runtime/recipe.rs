@@ -678,9 +678,14 @@ pub enum TemplateRefusal {
     /// The template carries `field`, one of the three paths the controller
     /// sets for each cell. Checked before any other key.
     PerCellField { field: &'static str },
-    /// The template is not a JSON object, or holds an unknown key, or lacks one
-    /// of the other twelve recipe keys, as [`RuntimeRecipe::parse`] would
-    /// refuse it.
+    /// A recipe refusal, whose field names are relative to the template, such
+    /// as `kernel.path`. [`RuntimeTemplate::from_value`] gives only key
+    /// refusals here: the template is not a JSON object, or holds an unknown
+    /// key, or lacks one of the other twelve recipe keys. A caller that wraps a
+    /// refusal from [`RuntimeTemplate::complete`] in it carries any recipe
+    /// refusal, value refusals included, and some of those come from the three
+    /// per-cell paths rather than the template, such as `PathReused` naming
+    /// `writable_root` or `SocketPathTooLong`.
     Recipe(RecipeRefusal),
 }
 
