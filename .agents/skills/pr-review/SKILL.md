@@ -51,7 +51,7 @@ For a work PR, record the PR immediately:
 ```
 
 Then keep ownership, notes and spec016's phases through review as the tasks skill says, never
-the retired `in-review` label.
+the retired `in-review` label. Repairs take `in_progress` and return to `review` on resubmission.
 
 Obtain independent review while draft, after local validation. CodeRabbit skips draft PRs;
 a skipped green is not a completed review. The owner-approval rule in `docs/intents/README.md`
@@ -83,8 +83,8 @@ if Dependabot rewrites the body.
 
 Before approving a first-time contributor's workflow runs, read every change the PR makes to
 `.github/` and `.githooks/`: the runs execute the PR's own copies
-([spec 029 section 6](../../../docs/specs/029-the-contribution-record.md)). The hold ends once a
-commit or PR of theirs has merged; the `gates` rule in step 4 still applies.
+([spec 029 section 6](../../../docs/specs/029-the-contribution-record.md)). GitHub holds their
+runs only until a commit or PR of theirs has merged; the `gates` rule in step 4 still applies.
 
 For a regression test, break
 the implementation in a disposable copy outside the working checkout and establish that it
@@ -172,7 +172,7 @@ only inline threads. “Real, but later” is not resolution.
 
 Take a model tool's suggestion, CodeRabbit's included, as your own commit: by hand, or from
 GitHub's suggestion button and then reworded to remove the `Co-authored-by` line GitHub added.
-Re-commit a commit a model tool's account pushed under your identity before merge, with
+If a model tool's account pushed a commit, re-commit it under your identity before merge, with
 `git commit --amend --reset-author` or
 `git rebase --exec 'git commit --amend --no-edit --reset-author' <base>`. Otherwise the squash
 credits the tool, as #114's credited a session name. A person's suggestion from the button
@@ -195,11 +195,13 @@ Before merging, require all of:
   condition.
 - Every commit's author and committer names a person or a bot (spec 029 section 5), never a
   model, an identity with no address or one on an untraceable domain such as `.local`
-  (spec 029 section 4). Every author other than the PR's becomes a co-author on `main`, as
-  #114's agent session name did. `gh pr view --json commits` has no committer field; use the
-  command below.
+  (spec 029 section 4). `GitHub <noreply@github.com>` as committer passes, since web-UI and
+  suggestion-button commits carry it. Every author other than the PR's becomes a co-author on
+  `main`, as #114's agent session name did. `gh pr view --json commits` has no committer field;
+  use the command below.
 - Every `Co-authored-by` and `Signed-off-by` in those commits' messages (`.commit.message`)
-  names a person or a bot, since the squash keeps them. A Dependabot PR's author, sign-off and
+  names a person or a bot, never a model, since the squash keeps them. A model tool's bot
+  account, such as `coderabbitai[bot]`, is a model. A Dependabot PR's author, sign-off and
   GitHub's co-author line for it all pass (spec 029 section 5).
 - Required CodeRabbit rounds occurred, at least one covered this head, and its current status
   describes `Review completed`, not a skipped or rate-limited green.
