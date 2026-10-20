@@ -85,11 +85,21 @@ the `[mock]` hosts. Only after those does a fix name the example `api.example.co
 `remove this entry`. A command fix runs the program the author wrote, else the command's key,
 else `command-name`.
 
+A fix built from a list the author wrote names each entry once, keeping the first:
+`commands = ["gh", "gh"]` gets one `[commands.commands.gh]` section, since TOML refuses a
+repeated key, and repeated `[mock]` hosts give one host. A fix applies when the field's parents
+are tables, not inline tables: a section fix cannot extend a command written as an inline table,
+which already holds for a `[provides]` binding written that way. A refused `scope.path_scope`
+gets `scope = { path_scope = [...] }`, written in place of `scope`, not of the field.
+
 Paths, the plasmid ID, refused values and fixes are written as TOML: a key that is not bare, and
-every string, is a basic string on one line, with every control character escaped. A command's
+every string, is a basic string on one line. Every control character is escaped, and so are the
+line and paragraph separators U+2028 and U+2029 and the bidi controls U+200E, U+200F, U+202A to
+U+202E and U+2066 to U+2069, which a client can read as a line break or a reordering. A command's
 refusals name it by its TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file
 could not be read) and `ManifestError::Parse` (the text is not TOML) carry no field: the TOML
-parser reports a position, not a field path, and naming one would be a guess.
+parser reports a position, not a field path, and naming one would be a guess. A `Parse` error
+quotes the source line, and its text is written with the same escapes, keeping its line breaks.
 `WireError::manifest_refusal` turns any of them into code 108, carrying the fix when there is one.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
 description.

@@ -113,6 +113,12 @@ field carries a `fix` in one of three forms:
   place of the entry when the field ends in an index, such as `network.pin_cidrs[0]`;
 - exactly `remove this entry`, which deletes the entry or key the field names.
 
+One fix writes the field's parent instead: a credential whose `scope.path_scope` is refused gets
+`scope = { path_scope = ["/required/path/"] }`, written in place of `scope`. A fix applies when
+the field's parents are tables, not inline tables: a section such as
+`[commands.commands.git.network]` cannot be added to a command written as
+`git = { exec = ["git"], network = 443 }`, and TOML refuses the result.
+
 A 108 whose refusal names no declaration field carries no `fix`: a file that cannot be read; text
 that is not TOML, a syntax error included, since the parser reports a position and not a field;
 or a fault in the file rather than in what it declares, such as spec 022's trust checks.
