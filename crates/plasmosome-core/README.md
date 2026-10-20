@@ -204,6 +204,7 @@ the instance root, recover cells or read registry imports (spec 001 §6, item 7)
 the failing component when the configured path:
 
 - is not absolute, or has an empty, `.` or `..` component;
+- names a directory that does not exist, or passes through a component that is not a directory;
 - passes through a symlink, as `/tmp` and `/var` do on macOS;
 - has an ancestor owned by neither root nor the effective UID, or one that group, other or, on
   macOS, an ACL allow entry lets another user replace, as the shared `/tmp` is on Linux;
@@ -211,10 +212,11 @@ the failing component when the configured path:
   permission, or that carries an ACL.
 
 [Private recovery sockets](#private-recovery-sockets) gives the full rules. Nothing is bound when
-it refuses. Otherwise the socket is set to mode 0600 before it listens, whatever the umask. A
-connection whose kernel-reported peer UID is not the daemon's effective UID is closed before a
-byte is read or written, and the daemon goes on to the next connection. Tests and scripts that
-bind under macOS's `TMPDIR` must pass its real path, `/private/var/folders/...`.
+one of these rules refuses it, and the daemon creates no directory. Otherwise the socket is set to
+mode 0600 before it listens, whatever the umask. A connection whose kernel-reported peer UID is
+not the daemon's effective UID is closed before a byte is read or written, and the daemon goes on
+to the next connection. Tests and scripts that bind under macOS's `TMPDIR` must pass its real
+path, `/private/var/folders/...`.
 
 `plasmosomed` refuses a control-socket path that already exists — a live socket, a stale socket,
 a regular file or a symlink — and never unlinks it: the start exits naming the path, and
@@ -246,8 +248,10 @@ alive), and the file-type check still rejects regular files and symlinks even if
 are recycled. A leaf symlink at the configured path is an entry already there, so it is refused
 before `bind`, which would otherwise follow it. When the check `PrivateListener` repeats after
 `bind` fails, the start is refused and the socket just bound is removed only while it is still
-that socket by device and inode. `SIGKILL` is the case no destructor covers, because a killed
-process runs none, so the path survives the daemon and the next start refuses it and says why.
+that socket by device and inode. If no socket owned by the effective UID is at the name in that
+directory after `bind` (`BindEscaped`), the start unlinks nothing and can leave the just-bound
+socket for the operator. `SIGKILL` is the case no destructor covers, because a killed process
+runs none, so the path survives the daemon and the next start refuses it and says why.
 
 Connections are taken one at a time. The shutdown flag is read between accepts and between reads,
 and both halves of a connection carry a timeout, so neither an idle client nor one that never

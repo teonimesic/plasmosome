@@ -134,14 +134,22 @@ exists — live socket, stale socket, regular file, directory or symlink — is 
 touching it: clearing the path is the caller's job, because unlinking a live daemon's socket is
 how a half-alive controller or supervisor is manufactured. Following a successful bind, the
 daemon records the socket's device and inode; on every route out (clean return, later error,
-unwinding panic) it removes the configured path only if a no-follow inspection finds that exact
+unwinding panic) it removes the socket's name only if a no-follow inspection finds that exact
 socket still there, as one best-effort attempt. A replacement settled at the pathname after
 start — a regular file or a leaf symlink, target present or dangling — is preserved with its
 contents, entry type and link target, and an original socket renamed elsewhere stays there: the
 daemon owns the entry it bound, not every name later given to its inode. A missing entry, a
 non-socket, or a non-matching identity leaves the namespace untouched. A start whose identity
 capture fails refuses before any fork or other setup, without unlinking anything, and can leave
-the just-bound socket for explicit operator cleanup.
+the just-bound socket for explicit operator cleanup. `membraned` captures that identity at the
+configured path and inspects the configured path at teardown. `plasmosomed` does both at the
+socket's name in the directory it opened and checked at start, which it holds open: it captures
+the identity only of a socket its effective UID owns, and if that directory is renamed while it
+runs, teardown removes the socket under the directory's new name and leaves whatever is then at
+the configured path. A `plasmosomed` start that fails after the capture, at the repeated path
+check, the change to mode 0600 or `listen`, removes the just-bound socket as any later error does.
+Amended on 2026-10-20: this paragraph said each daemon removes the configured path, and described
+only `membraned`'s capture and teardown.
 
 These are host-conditioned guarantees, not race-free protection. The caller supplies a trusted,
 stable directory and coordinated namespace writers: parent, ancestors and their symlink targets
