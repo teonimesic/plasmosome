@@ -1023,9 +1023,27 @@ mod tests {
             Err(refusal) => {
                 let shown = refusal.to_string();
                 assert!(!shown.contains(['\n', '\r']), "{shown:?} is one line");
+                for name in names_shown_by(&refusal) {
+                    assert!(shown.contains(&name), "{shown:?} names {name}");
+                }
                 refusal
             }
             Ok(recipe) => panic!("{} parsed: {recipe:?}", String::from_utf8_lossy(record)),
+        }
+    }
+
+    fn names_shown_by(refusal: &RecipeRefusal) -> Vec<String> {
+        match refusal {
+            UnknownField { field } | DuplicateField { field } => vec![format!("{field:?}")],
+            NotAnObject { field } if field.is_empty() => Vec::new(),
+            NotAnObject { field }
+            | MissingField { field }
+            | WrongType { field, .. }
+            | BadDigest { field, .. }
+            | BadPath { field, .. } => vec![format!("`{field}`")],
+            SocketPathTooLong { field, .. } => vec![format!("`{field}`")],
+            PathReused { first, second } => vec![format!("`{first}`"), format!("`{second}`")],
+            _ => Vec::new(),
         }
     }
 
@@ -1315,11 +1333,10 @@ mod tests {
         assert_eq!(refused(&kernel_as_text), not_an_object("kernel"));
         let library_as_text = with("/libraries", json!(["/opt/cell/lib/a.dylib"]));
         assert_eq!(refused(&library_as_text), not_an_object("libraries[0]"));
-        let libraries_as_object = with("/libraries", json!({}));
-        assert_eq!(
-            refused(&libraries_as_object),
-            wrong_type("libraries", "an array")
-        );
+        for libraries in [json!({}), json!(null)] {
+            let refusal = refused(&with("/libraries", libraries));
+            assert_eq!(refusal, wrong_type("libraries", "an array"));
+        }
         for (pointer, field) in [
             ("/writable_root", "writable_root"),
             ("/kernel_format", "kernel_format"),
