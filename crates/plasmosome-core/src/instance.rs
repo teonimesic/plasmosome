@@ -1445,6 +1445,53 @@ mod tests {
         );
     }
 
+    fn names_in(dir: BorrowedFd<'_>) -> Vec<Vec<u8>> {
+        let mut names = DirectoryStream::open(dir)
+            .and_then(collect_names)
+            .expect("the directory lists");
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_second_stream_on_one_descriptor_lists_every_name_again() {
+        let (_dir, root) = temp_root();
+        for name in ["a", "b", "c"] {
+            fs::write(root.join(name), b"").expect("write");
+        }
+        let held = File::open(&root).expect("open");
+        let every = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
+        assert_eq!(names_in(held.as_fd()), every, "the first stream");
+        assert_eq!(names_in(held.as_fd()), every, "the second stream");
+    }
+
+    #[test]
+    fn a_stream_dropped_after_one_name_leaves_the_next_stream_every_name() {
+        let (_dir, root) = temp_root();
+        let long = "n".repeat(200);
+        let mut every: Vec<Vec<u8>> = (0..400)
+            .map(|index| format!("{index:03}{long}").into_bytes())
+            .collect();
+        for name in &every {
+            fs::write(root.join(OsStr::from_bytes(name)), b"").expect("write");
+        }
+        every.sort();
+        let held = File::open(&root).expect("open");
+        let mut first = DirectoryStream::open(held.as_fd()).expect("the first stream opens");
+        assert!(
+            matches!(first.next(), Some(Ok(_))),
+            "the first stream yields a name"
+        );
+        drop(first);
+        let listed = names_in(held.as_fd());
+        assert!(
+            listed == every,
+            "the next stream listed {} of {} names",
+            listed.len(),
+            every.len()
+        );
+    }
+
     #[test]
     fn entries_are_classified_and_good_siblings_survive() {
         assert_not_root();
