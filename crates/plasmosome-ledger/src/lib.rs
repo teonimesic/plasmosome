@@ -564,6 +564,10 @@ fn replay(
     Ok(report)
 }
 
+const FORMAT: u8 = 3;
+
+/// One line of a single-plugin ledger log. `format` must be 3: encoding and decoding refuse any
+/// other number, so a record of an older format is never read with a guessed recipe or launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogRecord {
     pub format: u8,
@@ -571,16 +575,17 @@ pub struct LogRecord {
     pub effect: Effect,
 }
 
+fn unsupported(format: u8) -> String {
+    format!("unsupported ledger format {format}; expected {FORMAT}")
+}
+
 impl Serialize for LogRecord {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        if self.format != 2 {
-            return Err(S::Error::custom(format!(
-                "unsupported ledger format {}; expected 2",
-                self.format
-            )));
+        if self.format != FORMAT {
+            return Err(S::Error::custom(unsupported(self.format)));
         }
 
         #[derive(Serialize)]
@@ -613,11 +618,8 @@ impl<'de> Deserialize<'de> for LogRecord {
         }
 
         let wire = Wire::deserialize(ObjectOnly::new(deserializer))?;
-        if wire.format != 2 {
-            return Err(D::Error::custom(format!(
-                "unsupported ledger format {}; expected 2",
-                wire.format
-            )));
+        if wire.format != FORMAT {
+            return Err(D::Error::custom(unsupported(wire.format)));
         }
         Ok(LogRecord {
             format: wire.format,
@@ -748,7 +750,7 @@ impl Ledger {
         let mut records = Vec::new();
         for (index, effect) in self.effects.iter().enumerate() {
             let record = LogRecord {
-                format: 2,
+                format: FORMAT,
                 plugin: self.plugin.clone(),
                 effect: effect.clone(),
             };
