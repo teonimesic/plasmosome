@@ -22,7 +22,8 @@ run's results come only from the guest console, and anything short of a complete
 | `lane-init` | the guest, as process 1 | Mounts `/proc`, `/dev` and the shares, runs each probe as its uid, frames results, powers off |
 | `lane-probe` | the guest | One subcommand per observation, each printing one JSON line |
 | `config` | host and guest | `LaneConfig` and `GuestConfig`, strict JSON: unknown and missing fields refuse |
-| `bundle` | host | `verify_bundle`, and the check of the images `lane-vmm` has loaded |
+| `bundle` | host | `verify_bundle` with the bundle pin, and the check of the images `lane-vmm` has loaded |
+| `dyld` | host | The paths dyld tries for libkrun's `libkrunfw` load, and the inherited `DYLD_` variables |
 | `cpio` | host | A newc writer and reader, and the lane initramfs |
 | `ext4` | host | `ext4_from_dir` and `ext4_read`, through e2fsprogs in a tool directory the caller names |
 | `console` | host | The framing parser |
@@ -36,26 +37,36 @@ run's results come only from the guest console, and anything short of a complete
 ## What lane-vmm does
 
 1. Parse the configuration from stdin. Exit 64 if it is refused.
-2. Check the bundle with `verify_bundle`: every file `SHA256SUMS` lists must match its digest and
-   be a regular file, a listed path must stay inside the bundle, and every file under `lib/` must
-   be listed. Exit 65, naming the path, before anything is loaded.
-3. `dlopen` the bundle's `lib/libkrun.1.19.4.dylib` by absolute path. Exit 69 if it does not
-   load.
-4. `krun_init_log(2, WARN, NEVER, NO_ENV)` and `krun_create_ctx`. Then list the loaded images,
-   and exit 69 if any is not the executable, the bundle's libkrun or a system image under
-   `/usr/lib/` or `/System/`.
-5. `krun_set_vm_config`, `krun_set_kernel` with the bundle's kernel, the lane's initramfs and
+2. Refuse what would change which libraries load. Exit 69 if any `DYLD_` variable is set, or if
+   anything named `libkrunfw.5.dylib`, a dangling symlink included, exists where dyld looks for
+   libkrun's leaf-name load of it: the working directory, the libkrun's `LC_RPATH`
+   `/opt/homebrew/opt/llvm/lib`, `/usr/local/lib` and `/usr/lib`. Nothing is loaded yet.
+3. Check the bundle with `verify_bundle`. The directory's name must be the first 16 hex digits
+   of the SHA-256 of its `manifest.json`, and must equal the pinned `eed141b574337d99`. The
+   manifest's `sha256sums_sha256` must equal the SHA-256 of `SHA256SUMS`. Every file
+   `SHA256SUMS` lists must match its digest, a listed path must stay inside the bundle, and every
+   file under `lib/` must be listed. The tree, read without following links, must hold only
+   regular files and directories, so a symlink or a FIFO anywhere refuses. Exit 65, naming the
+   path, before anything is loaded.
+4. `dlopen` the bundle's `lib/libkrun.1.19.4.dylib` by absolute path. `Libkrun::open` takes only
+   a bundle `verify_bundle` returned, and refuses one whose ID is not the pinned one. Exit 69 if
+   it does not load.
+5. `krun_init_log(2, WARN, NEVER, NO_ENV)` and `krun_create_ctx`. Then list the loaded images,
+   and exit 69 if any is not one of these: the executable, found by its path; the bundle's
+   libkrun; an image in dyld's shared cache; or a file named by a plain path under `/usr/lib/`.
+   Nothing else under `/System/` is accepted, because `/System/Volumes/Data` is writable.
+6. `krun_set_vm_config`, `krun_set_kernel` with the bundle's kernel, the lane's initramfs and
    spec 001 §4.2's `rdinit=/init panic=-1`, `krun_add_disk3` with the root image read-only,
    `krun_disable_implicit_init`, `krun_disable_implicit_vsock`, one `krun_add_virtiofs4` per
    share, and `krun_set_console_output`. A failed call exits 1, naming it.
-6. With a `confinement`, first run four operations unconfined as a control: a read and a write
+7. With a `confinement`, first run four operations unconfined as a control: a read and a write
    inside `allowed`, and a read and a write inside `outside`. All four must succeed, which shows
    the directories refuse nothing by themselves. Then apply the SBPL profile with
    `sandbox_init` and run them again: the read inside must succeed, and the other three must be
    refused with `EPERM`. `EACCES` comes from file modes, not the sandbox, so it does not count.
    Exit 70 if the control or the confined check gives another answer, and 71 if the profile
    does not apply. In each case the VM does not start.
-7. `krun_start_enter`. When the guest powers off, libkrun ends the process.
+8. `krun_start_enter`. When the guest powers off, libkrun ends the process.
 
 ### Where it departs from spec 001 §4.2
 
@@ -138,7 +149,7 @@ cargo test -p plasmosome-lanes --test boot -- --ignored
 ```
 
 They read the bundle from `/usr/local/var/plasmosome/runtime/bundles/eed141b574337d99` unless
-`LANES_BUNDLE` names another, and the guest binaries from
+`LANES_BUNDLE` names another copy of it, and the guest binaries from
 `target/aarch64-unknown-linux-musl/release` unless `LANES_GUEST_DIR` names another. They sign
 `lane-vmm` ad hoc with `lane-vmm.entitlements` (`codesign --sign - --force --entitlements`), which
 needs no keychain. Each lane's files go in a temporary directory under `TMPDIR`.
@@ -150,6 +161,8 @@ needs no keychain. Each lane's files go in a temporary directory under `TMPDIR`.
   stopped. The bundle directory's parent is group-writable on the machine that built it.
 - The bundle's libkrun carries a leftover library search path, `LC_RPATH /opt/homebrew/opt/llvm/lib`,
   and `krun_create_ctx` calls `dlopen("libkrunfw.5.dylib")` by leaf name, which searches it. The
-  lanes load the library as shipped. Step 4's image check refuses the run if a libkrunfw loaded,
-  but its initializers have already run by then.
+  lanes load the library as shipped. Step 2 refuses the run when that name exists anywhere dyld
+  would look, before anything loads. A process running as the same user can still place the
+  file after step 2 and before `krun_create_ctx`. Step 5 then refuses the run, but the library's
+  initializers have already run.
 - `run_lane` kills the VMM process, not a process group. `lane-vmm` starts no children.

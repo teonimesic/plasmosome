@@ -13,9 +13,14 @@ for what each piece does.
 - **Results come only from the guest console.** A probe outcome is what `lane-init` framed on
   `/dev/hvc0`, never something the host inferred. A run with no complete framing is `NotRun`,
   and so is a probe with no result line; neither is ever a pass.
-- **Check the bundle before loading it.** `lane-vmm` calls `verify_bundle` before `dlopen`, and
-  checks the loaded images after `krun_create_ctx`. Moving either check later lets unverified
-  code run first.
+- **Check the bundle before loading it.** `lane-vmm` refuses `DYLD_` variables and any
+  `libkrunfw.5.dylib` on dyld's search list, then calls `verify_bundle` with the pinned bundle
+  ID, all before `dlopen`. It checks the loaded images after `krun_create_ctx`. Moving any of
+  these later lets unverified code run first.
+- **The bundle is pinned.** `PINNED_BUNDLE_ID` names the one bundle these lanes load, and
+  `Libkrun::open` takes only a `VerifiedBundle`. A self-consistent bundle with another ID is
+  refused. A symlink or FIFO anywhere in the bundle tree is refused, because each lets a path
+  `SHA256SUMS` vouched for name other bytes later.
 - **A check that cannot fail proves nothing.** The SBPL self-check runs unconfined first and
   needs all four operations to succeed, so file modes cannot pass for the sandbox. Confined, it
   counts a refusal only as `EPERM`; `EACCES` and a missing directory are not refusals. Keep the
@@ -30,9 +35,12 @@ both clippy safety lints at `deny`. `#[allow(unsafe_code)]` goes only on these t
 in `src/lib.rs`, or on a single item:
 
 - `src/krun.rs` (macOS): libkrun reached through `dlopen` and `dlsym`, the loader's image list,
-  and `sandbox_init`.
+  dyld's shared-cache query, and `sandbox_init`.
 - `src/guest_sys.rs` (Linux): `mount`, `reboot`, `waitpid`, `kill`, `uname` and a private
   read-only `mmap`.
+
+One item outside them carries the allow: `images` in `src/bin/lane_vmm.rs` calls the unsafe
+`krun::loaded_images`, whose caller must promise no image is unloaded during the call.
 
 Every `unsafe` block has a `// SAFETY:` comment, every `unsafe fn` a `# Safety` section, and the
 `unsafe extern` block documents what each declaration assumes. No safe route exists: libkrun is
