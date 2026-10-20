@@ -6,6 +6,8 @@
 //! SHA-256 [`Digest`], spec 001's observation pages in [`paging`], and spec
 //! 027's pinned software trees in [`software`].
 
+#![doc(test(attr(forbid(unsafe_code))))]
+
 pub mod backend;
 pub mod composite;
 pub mod digest;

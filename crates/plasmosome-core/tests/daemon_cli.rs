@@ -46,7 +46,12 @@ fn output_within(mut command: Command) -> Output {
 }
 
 fn write_config(directory: &Path, filename: &OsStr, occupied: &Path) {
-    let body = json!({"control_socket": occupied, "name": "cli-test"});
+    let body = json!({
+        "control_socket": occupied,
+        "name": "cli-test",
+        "instance_root": directory.join("instance"),
+        "recovery_deadline_ms": 5000,
+    });
     std::fs::write(
         directory.join(filename),
         serde_json::to_vec(&body).expect("the config is JSON"),
@@ -66,6 +71,34 @@ fn exact_help_operands_succeed_before_config_reading() {
         let stdout = String::from_utf8(output.stdout).expect("help is UTF-8");
         assert!(stdout.contains("plasmosomed <config.json>"), "{stdout}");
         assert!(stdout.contains("plasmosome.status"), "{stdout}");
+    }
+}
+
+#[test]
+fn help_shows_a_config_the_daemon_accepts_and_says_it_recovers_no_cells() {
+    let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+    let output = output_within(plasmosomed(directory.path(), &[OsStr::new("--help")]));
+    assert!(output.status.success(), "{output:?}");
+    let help = String::from_utf8(output.stdout).expect("help is UTF-8");
+
+    let example = help
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with('{'))
+        .unwrap_or_else(|| panic!("help shows an example config: {help}"));
+    if let Err(error) = plasmosome_core::parse_config(example) {
+        panic!("the config help shows is one plasmosomed accepts, got {error}: {example}");
+    }
+    let prose = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    for claim in [
+        "instance_root, recovery_deadline_ms and an optional absolute registry_root are checked \
+         for shape only",
+        "this build does not open the roots, read registry_root or recover cells yet",
+    ] {
+        assert!(
+            prose.contains(claim),
+            "help claims no more than this build does, and says {claim:?}: {help}"
+        );
     }
 }
 
