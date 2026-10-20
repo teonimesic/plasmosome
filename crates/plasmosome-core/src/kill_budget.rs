@@ -8,13 +8,15 @@ const MS: Duration = Duration::from_millis(1);
 const MOST_LOCK_RESERVE: Duration = Duration::from_secs(3);
 const MOST_WORKLOAD_STOP: Duration = Duration::from_secs(5);
 
-/// The deadline shares of one `cell.kill` (spec 023 §7). Every share is measured from what is
-/// left of the kill's deadline D at the moment it is asked for, counted from the request's
-/// arrival, so a kill that queued behind other mutations gets only what remains.
+/// The deadline shares of one `cell.kill` (spec 023 §7), counted from the request's arrival.
+/// The lock reserve is a tenth of the kill's deadline D, from 1 ms to 3 s. It is fixed for the
+/// request, is not rounded, and is never sent. Every step's share is measured from what is left
+/// of D past that reserve when the step asks for it, so a kill that queued behind other
+/// mutations gets only what remains. Each share is a whole number of milliseconds, so it reaches
+/// the wire unchanged.
 ///
 /// `arrival` and `clock` must read the same clock: `clock` returns the current reading, and
-/// `arrival` is the reading taken when the request's line was read. Every share is a whole
-/// number of milliseconds, so it reaches the wire unchanged.
+/// `arrival` is the reading taken when the request's line was read.
 pub struct KillBudget<C: Fn() -> Instant> {
     arrival: Instant,
     total: Duration,
@@ -22,8 +24,8 @@ pub struct KillBudget<C: Fn() -> Instant> {
     clock: C,
 }
 
-/// A step's budget: at least 1 ms, or none. A step with no budget takes its escalation and
-/// sends nothing.
+/// The withdrawal's budget: its parts, each at least 1 ms, or `NoBudget`. A step with no budget
+/// takes its escalation and sends nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Share<T = Duration> {
     Run(T),
@@ -80,8 +82,8 @@ impl<C: Fn() -> Instant> KillBudget<C> {
         self.total.saturating_sub(elapsed)
     }
 
-    /// The reserve kept for the lock wait: a tenth of D, from 1 ms to 3 s. Fixed for the
-    /// request.
+    /// The reserve kept for the lock wait: a tenth of D, from 1 ms to 3 s, not rounded. Fixed
+    /// for the request.
     pub(crate) fn lock_reserve(&self) -> Duration {
         (self.total / 10).clamp(MS, MOST_LOCK_RESERVE)
     }
@@ -138,8 +140,9 @@ impl<C: Fn() -> Instant> KillBudget<C> {
         GuestStop { drain, answer_wait }
     }
 
-    /// When step 4's lock wait ends: arrival plus D, or the latest instant this platform can
-    /// represent before it. The caller tries the lock at least once, even when this has passed.
+    /// When step 4's lock wait ends: arrival plus D. When this platform's `Instant` cannot hold
+    /// that, it is an instant more than half as far past arrival as the latest one it can hold.
+    /// The caller tries the lock at least once, even when this has passed.
     pub fn lock_wait_until(&self) -> Instant {
         let mut span = self.total;
         loop {
@@ -172,12 +175,13 @@ fn at_least_one_ms(duration: Duration) -> Share {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Shortfall {
-    /// The workload stop failed, was refused, timed out or had no budget.
+    /// The workload stop failed, was refused, timed out or had no budget. Never listed with
+    /// `now`.
     WorkloadStop,
     /// The guest got no `shutdown` for lack of budget, or ignored it, and its helper was
     /// killed. Never listed with `now`.
     Shutdown,
-    /// The teardown was not clean, or the retirement check failed, so the cell was not retired.
+    /// The teardown was not clean, so the cell was not retired.
     Teardown,
 }
 
