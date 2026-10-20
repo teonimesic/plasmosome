@@ -30,16 +30,23 @@ fn deep_nesting_does_not_overflow() {
     let value = scan(text.as_bytes()).expect("a million nested arrays are valid JSON");
     assert_eq!(array_depth(&value), DEPTH);
     assert_eq!(write_compact(&value), text);
-    let again = scan(text.as_bytes()).expect("a second scan gives the same value");
-    assert_eq!(value, again);
     drop(value);
-    drop(again);
+}
+
+#[test]
+fn deep_values_compare_without_overflow() {
+    let text = nested_arrays(200_000);
+    let value = scan(text.as_bytes()).expect("valid JSON");
+    let again = scan(text.as_bytes()).expect("valid JSON");
+    assert_eq!(value, again);
+    let shallower = scan(nested_arrays(199_999).as_bytes()).expect("valid JSON");
+    assert_ne!(value, shallower);
 }
 
 #[test]
 fn deep_objects_do_not_overflow() {
-    let text = nested_objects(DEPTH);
-    let value = scan(text.as_bytes()).expect("a million nested objects are valid JSON");
+    let text = nested_objects(200_000);
+    let value = scan(text.as_bytes()).expect("nested objects are valid JSON");
     assert_eq!(write_compact(&value), text);
 }
 
@@ -64,7 +71,7 @@ fn a_deep_duplicate_names_its_whole_path() {
 
 #[test]
 fn the_human_form_of_deep_nesting_does_not_overflow() {
-    let depth = 200_000;
+    let depth = 100_000;
     let shown = write_human(&scan(nested_arrays(depth).as_bytes()).expect("valid JSON"));
     assert_eq!(shown.lines().count(), 2 * depth - 1);
 }

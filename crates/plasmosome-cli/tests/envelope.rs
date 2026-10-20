@@ -12,6 +12,10 @@ const RESULT: &str = r#"{"name":"work","state":"running","ready":true,"controlle
 
 const KERNEL_ERROR: &str = r#"{"code":101,"message":"no plasmid named x","target":"plasmosome other","fix":"run plasmid list","field":"network.hosts"}"#;
 
+fn escaped(hex: &str) -> String {
+    format!("{}u{hex}", '\\')
+}
+
 fn character(code_point: u32) -> char {
     char::from_u32(code_point).expect("a test names a valid code point")
 }
@@ -143,8 +147,8 @@ fn a_kernel_error_is_an_object_without_domain() {
 fn the_human_form_of_a_failure() {
     let error = format!(
         r#"{{"code":101,"message":"no plasmid{}x","fix":"run{}it","target":"t"}}"#,
-        character(0x1b),
-        character(0x202e)
+        escaped("001b"),
+        escaped("202e")
     );
     assert_eq!(
         emitted(&kernel_failure(&error), Form::Human),
