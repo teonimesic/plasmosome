@@ -4,9 +4,9 @@ reason = """\
   Parses TOML into a tree of values, or through serde into typed structs, and writes a tree back \
   as TOML text. Declarations are written in TOML, and tests also read Cargo manifests with it.\
   """
-write_it_instead.lines = 2400
+write_it_instead.lines = 1865
 write_it_instead.how = """\
-  On 2026-10-20, at main 01cf8a9, `git grep -l 'toml::' -- '*.rs' | wc -l` gives 5 files, and `git \
+  On 2026-10-20, at main a898d01, `git grep -l 'toml::' -- '*.rs' | wc -l` gives 5 files, and `git \
   grep -h -o -E 'toml::(from_str|to_string|Value|Table|de::Error|map::Map)' -- '*.rs' | sort | \
   uniq -c` gives Value 82, from_str 15, Table 6, to_string 5, Error 1 and Map 1. Reading the code \
   shows that the declaration reader in crates/plasmosome-core/src/manifest.rs parses text into a \
@@ -20,13 +20,20 @@ write_it_instead.how = """\
   escapes (200); integers in four bases, and floats with inf and nan (150); the four datetime \
   forms, read and written (250); errors that give line and column (100); Value and Table, with the \
   accessors, FromStr, Display and indexing used here (300); a serde Deserializer over the tree for \
-  from_str and try_into, with structs, enums, options and sequences (600); and a writer for \
-  to_string that puts tables in sections and quotes strings and keys (300): 2400 lines. Replacing \
-  it removes 1 package from Cargo.lock: toml@0.8. `cargo tree --locked --offline -e features -i \
-  serde_spanned --target all` shows that only toml turns on toml_edit's serde feature, which is \
-  what brings serde_spanned, so serde_spanned@0.6 would leave too. Replacing toml and toml_edit \
-  together removes 9 packages from Cargo.lock: equivalent@1, hashbrown@0.17, indexmap@2, \
-  serde_spanned@0.6, toml@0.8, toml_datetime@0.6, toml_edit@0.22, toml_write@0.1 and winnow@0.7.\
+  from_str and try_into, with structs, enums, options and sequences, that hands each value to \
+  deserialize_any through serde's MapDeserializer and SeqDeserializer and a one-key enum access, \
+  so that the target type refuses what it does not take; going through serde_json's Value instead \
+  would refuse an array for a struct variant itself, and a test in the backend exists to show that \
+  the target type refuses it (250); a writer for to_string that writes key = value lines with \
+  inline tables and quotes strings and keys, since the tests only parse its output again and never \
+  compare it as text (100); and the depth bound of 80 nested arrays, inline tables or dotted-key \
+  parts, which toml_edit keeps because its unbounded feature is off, and which spec 026 section 5 \
+  names as the manifest's only bound (15): 1865 lines. Replacing it removes 1 package from \
+  Cargo.lock: toml@0.8. `cargo tree --locked --offline -e features -i serde_spanned --target all` \
+  shows that only toml turns on toml_edit's serde feature, which is what brings serde_spanned, so \
+  serde_spanned@0.6 would leave too. Replacing toml and toml_edit together removes 9 packages from \
+  Cargo.lock: equivalent@1, hashbrown@0.17, indexmap@2, serde_spanned@0.6, toml@0.8, \
+  toml_datetime@0.6, toml_edit@0.22, toml_write@0.1 and winnow@0.7.\
   """
 exception = ""
 brings = [

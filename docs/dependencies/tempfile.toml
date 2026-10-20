@@ -6,19 +6,20 @@ reason = """\
   """
 write_it_instead.lines = 80
 write_it_instead.how = """\
-  On 2026-10-20, at main 01cf8a9, `git grep -l 'tempfile::' -- '*.rs' | wc -l` gives 34 files, all \
-  of them tests, test modules or benchmarks, since every member declares tempfile as a \
-  dev-dependency. `git grep -h -o -E 'tempfile::[A-Za-z_:]+' -- '*.rs' | sort | uniq -c` gives \
-  tempdir 154, TempDir 16, Builder::new 3 and tempfile 2. Reading the code shows that it calls \
-  path() on a TempDir and relies on its drop to remove the tree, that each Builder::new() is \
-  followed by prefix("ps") and tempdir_in, and that tempfile() opens an unnamed file for a child's \
-  stderr. A replacement with the standard library alone needs: a TempDir that holds its path, \
-  gives path() and removes the tree when dropped (20 lines); a unique name, made of a prefix and \
-  six random letters and digits taken from std's RandomState, and tried again when the name exists \
-  (25); tempdir() under std::env::temp_dir(), and a Builder with prefix and tempdir_in (20); and \
-  tempfile(), a file opened with create_new and mode 0o600 and removed at once, which is what the \
-  crate does on macOS, while on Linux it first asks for O_TMPFILE through rustix (15): 80 lines. \
-  Replacing it removes nothing from Cargo.lock: proptest and rusty-fork bring tempfile too.\
+  On 2026-10-20, at main a898d01, `git grep -l 'tempfile::' -- '*.rs' | wc -l` gives 35 files, all \
+  of them tests, test modules or benchmarks, since six of the nine members declare tempfile, all \
+  six as a dev-dependency, and the other three do not declare it. `git grep -h -o -E \
+  'tempfile::[A-Za-z_:]+' -- '*.rs' | sort | uniq -c` gives tempdir 163, TempDir 17, Builder::new \
+  3 and tempfile 2. Reading the code shows that it calls path() on a TempDir and relies on its \
+  drop to remove the tree, that each Builder::new() is followed by prefix("ps") and tempdir_in, \
+  and that tempfile() opens an unnamed file for a child's stderr. A replacement with the standard \
+  library alone needs: a TempDir that holds its path, gives path() and removes the tree when \
+  dropped (20 lines); a unique name, made of a prefix and six random letters and digits taken from \
+  std's RandomState, and tried again when the name exists (25); tempdir() under \
+  std::env::temp_dir(), and a Builder with prefix and tempdir_in (20); and tempfile(), a file \
+  opened with create_new and mode 0o600 and removed at once, which is what the crate does on \
+  macOS, while on Linux it first asks for O_TMPFILE through rustix (15): 80 lines. Replacing it \
+  removes nothing from Cargo.lock: proptest and rusty-fork bring tempfile too.\
   """
 exception = ""
 brings = [
