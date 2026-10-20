@@ -4,6 +4,8 @@
 
 The typed reversibility ledger: per-plasmid stacks of effects, each carrying its inverse.
 Detach replays them LIFO and the result is verified against observed system state.
+The `artifact` module also holds spec 020's registry IDs, release keys and release references,
+as values that only parse, print and compare.
 
 ## Hard rules
 

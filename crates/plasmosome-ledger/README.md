@@ -55,4 +55,13 @@ there, so this API cannot finish the remaining effects under another cell.
 A detach over the first three is a safe operation. Over `External`, it is an assertion the
 operator makes and the record keeps.
 
+`plasmosome_ledger::artifact` holds spec 020's registry identity values: registry IDs, release
+keys and release references pinned to a descriptor digest. They only parse, print and compare;
+this crate never hashes, fetches or verifies an import. A release key or reference decodes only
+from an object with exactly its fields, in JSON or TOML; an array is refused even when its items
+are in field order. A field of the wrong type is refused with a message that names it, such as
+`expected publisher as a string`, and a field whose text breaks its grammar is refused with the
+field's name and the quoted text. Kinds and populations sort by their text, as catalog search
+does.
+
 Tests: `cargo test -p plasmosome-ledger`

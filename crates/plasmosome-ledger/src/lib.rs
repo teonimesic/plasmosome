@@ -1,6 +1,7 @@
 //! Typed reversibility: a plugin's effects, their inverses, and the two-phase
 //! closure that decides whether detach is safe or needs an operator `Force`.
 //! A caller pushes effects onto a `Ledger`, closes it, and detaches the result.
+//! The `artifact` module holds spec 020's registry IDs, release keys and release references.
 
 use std::fmt;
 use std::io::{Read, Write};
@@ -774,6 +775,8 @@ impl Ledger {
         Ok(Ledger { plugin, effects })
     }
 }
+
+pub mod artifact;
 
 #[cfg(test)]
 mod tests {
