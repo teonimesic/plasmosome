@@ -57,15 +57,21 @@ reserved in this repository and unimplemented, and no spec defines its interface
 
 ## Status-only quickstart
 
-Run this block from the root of a trusted source checkout. It requires Rust stable and Cargo with
-edition 2024 support, the host C linker and SDK/build tools, and Python 3.11+. Git is needed only
-to obtain the checkout. Cargo may need registry network access unless the dependencies are
-already cached; `--locked` does not mean offline. The daemons require POSIX Unix sockets and
-`SIGINT`/`SIGTERM`, so Windows is unsupported.
+Run this block from the root of a trusted source checkout. It requires Cargo and rustc 1.96 or
+later, the host C linker and SDK/build tools, and Python 3.11+. Git is needed only to obtain the
+checkout. With rustup, the checkout's `rust-toolchain.toml` selects Rust 1.99.1: the first cargo
+command in the checkout downloads it with clippy and rustfmt, about 463 MB that stays under
+`RUSTUP_HOME`. If rustup cannot download it then, because you are offline or
+`RUSTUP_AUTO_INSTALL=0` is set, run `rustup toolchain install` in the checkout first, while
+online; otherwise cargo exits with `error: toolchain '…' is not installed`. Cargo may need
+registry network access unless the dependencies are already cached; `--locked` does not mean
+offline. The daemons require POSIX Unix sockets and `SIGINT`/`SIGTERM`, so Windows is
+unsupported.
 
 No native Beads/Dolt installation, Python package, `jq`, `nc`, `socat`, root access, hypervisor,
 guest image, MCP service, credential or external endpoint is needed. Cargo keeps its normal
-registry/cache under the user's existing `CARGO_HOME`; that cache can remain after the example.
+registry/cache under the user's existing `CARGO_HOME`, and rustup keeps the pinned toolchain
+under `RUSTUP_HOME`; both remain after the example.
 The checkout is trusted host code: putting build output under the temporary directory does not
 isolate an untrusted build.
 
@@ -486,7 +492,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Rust stable, edition 2024. macOS (Apple Silicon) is the first target; Linux follows.
+Edition 2024. `rust-toolchain.toml` pins the compiler to one exact stable release, and rustup
+downloads it, with clippy and rustfmt, on the first cargo command in a checkout and keeps it.
+If rustup cannot download it then, because you are offline or `RUSTUP_AUTO_INSTALL=0` is set, run
+`rustup toolchain install` in the checkout first, while online. macOS (Apple Silicon) is the first
+target; Linux follows.
 
 ## Development work
 
