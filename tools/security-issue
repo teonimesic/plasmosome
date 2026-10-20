@@ -307,7 +307,9 @@ def main(argv=None):
     findings = [finding for items in sections.values() for finding in items] + own
     failures = [finding for finding in findings if finding["kind"] == "tool-failure"]
     for finding in failures:
-        print(f"tool failure, written into the security issue: {finding.get('title')}", file=sys.stderr)
+        # One line each: the runner ends a log line at a CR too, and reads a line starting "::" as a command.
+        title = " ".join(str(finding.get("title")).split())
+        print(f"tool failure, written into the security issue: {title}", file=sys.stderr)
     count = f"{len(findings)} finding{'s' if len(findings) != 1 else ''}"
     if args.mode == "dry-run":
         print(f"{count} would be in the security issue; this was a dry run")
