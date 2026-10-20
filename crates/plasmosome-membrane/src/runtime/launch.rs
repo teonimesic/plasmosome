@@ -1,7 +1,14 @@
 use crate::runtime::recipe::RuntimeRecipe;
+use crate::spawn_lock::DescriptorsHeld;
 use crate::vmm::Launch;
 use std::ffi::{CStr, CString};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+
+const RUNTIME_FD_FLAG: &CStr = c"--runtime-fd=3";
+
+const FIRST_KEPT: libc::c_int = 10;
+
+const LAST_SIGNAL: libc::c_int = 64;
 
 /// The exit code of a launched child whose setup before `execve` failed: the
 /// signal reset, a `dup2` onto descriptors 0 to 3, closing the descriptors
@@ -35,6 +42,7 @@ pub struct HelperExec {
     dev_null: OwnedFd,
     diagnostics_write: OwnedFd,
     recipe_read: OwnedFd,
+    closer: Closer,
 }
 
 /// A helper ready to launch, and the read end of its diagnostic pipe.
@@ -94,26 +102,341 @@ impl HelperExec {
     /// `VmmChild::spawn` while it runs, since a pipe end exists for a moment
     /// before it is close-on-exec and only `VmmChild::spawn` waits for that.
     pub fn prepare(recipe: &RuntimeRecipe) -> Result<PreparedHelper, LaunchRefusal> {
-        let _ = recipe;
-        todo!()
+        let closer = Closer::prepare()?;
+        let line = recipe.to_ndjson();
+        let dev_null = moved_above_stdio(open_null(c"/dev/null")?).map_err(|errno| {
+            LaunchRefusal::Descriptor {
+                op: "F_DUPFD_CLOEXEC",
+                errno,
+            }
+        })?;
+        let [diagnostics, diagnostics_write, recipe_read, recipe_write] =
+            crate::spawn_lock::with_each_descriptor_held(create_pipes).map_err(|error| {
+                error
+                    .raw_os_error()
+                    .map_or(LaunchRefusal::PipeInheritable, |errno| {
+                        LaunchRefusal::Pipe { errno }
+                    })
+            })?;
+        set_nonblocking(&diagnostics)?;
+        set_nonblocking(&recipe_write)?;
+        preload(recipe_write, &line)?;
+        Ok(PreparedHelper {
+            exec: HelperExec {
+                program: recipe.helper().path().as_c_str().to_owned(),
+                dev_null,
+                diagnostics_write,
+                recipe_read,
+                closer,
+            },
+            diagnostics,
+        })
     }
-}
 
-fn open_null(path: &CStr) -> Result<OwnedFd, LaunchRefusal> {
-    let _ = path;
-    todo!()
+    #[allow(unsafe_code)]
+    fn install_descriptors(&self) -> bool {
+        let dev_null = self.dev_null.as_raw_fd();
+        [
+            (dev_null, libc::STDIN_FILENO),
+            (dev_null, libc::STDOUT_FILENO),
+            (self.diagnostics_write.as_raw_fd(), libc::STDERR_FILENO),
+            (self.recipe_read.as_raw_fd(), 3),
+        ]
+        .into_iter()
+        .all(|(source, target)| {
+            // SAFETY: dup2 takes integers only and is async-signal-safe. Every source is 10 or
+            // above and this HelperExec keeps it open, so no dup2 here closes a source a later
+            // one still needs, and each one copies, which clears close-on-exec on the target.
+            unsafe { libc::dup2(source, target) == target }
+        })
+    }
+
+    #[allow(unsafe_code)]
+    fn exec(&self) -> ! {
+        let argv = [
+            self.program.as_ptr(),
+            RUNTIME_FD_FLAG.as_ptr(),
+            std::ptr::null(),
+        ];
+        let envp: [*const libc::c_char; 1] = [std::ptr::null()];
+        // SAFETY: `argv` and `envp` are null-terminated local arrays whose strings this HelperExec
+        // and a static own, so execve reads only live, terminated memory. execve and _exit are
+        // async-signal-safe.
+        unsafe {
+            libc::execve(self.program.as_ptr(), argv.as_ptr(), envp.as_ptr());
+            libc::_exit(EXEC_FAILED)
+        }
+    }
 }
 
 impl Launch for HelperExec {
+    #[allow(unsafe_code)]
     fn launch(self) -> ! {
-        let _ = (
-            &self.program,
-            &self.dev_null,
-            &self.diagnostics_write,
-            &self.recipe_read,
-        );
-        todo!()
+        let ready = set_signal_mask(Mask::All)
+            && default_signal_actions()
+            && self.install_descriptors()
+            && self.closer.close_above_three()
+            && enter_root()
+            && set_signal_mask(Mask::None);
+        if ready {
+            self.exec()
+        }
+        // SAFETY: _exit is async-signal-safe and ends the forked child without running a Rust
+        // destructor.
+        unsafe { libc::_exit(SETUP_FAILED) }
     }
+}
+
+#[derive(Clone, Copy)]
+enum Mask {
+    All,
+    None,
+}
+
+#[allow(unsafe_code)]
+fn set_signal_mask(mask: Mask) -> bool {
+    // SAFETY: All zeroes is a valid sigset_t, which sigfillset or sigemptyset then sets. The set
+    // is a local that outlives the calls. sigfillset, sigemptyset and sigprocmask are
+    // async-signal-safe, and the forked child has one thread, so sigprocmask sets its whole mask.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        let filled = match mask {
+            Mask::All => libc::sigfillset(&mut set),
+            Mask::None => libc::sigemptyset(&mut set),
+        };
+        filled == 0 && libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut()) == 0
+    }
+}
+
+#[allow(unsafe_code)]
+fn default_signal_actions() -> bool {
+    // SAFETY: libc::sigaction is a plain C struct, for which all zeroes is a valid value: the
+    // default action with an empty mask and no flags.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = libc::SIG_DFL;
+    (1..=LAST_SIGNAL)
+        .filter(|signal| *signal != libc::SIGKILL && *signal != libc::SIGSTOP)
+        .all(|signal| {
+            // SAFETY: `action` is a local the call only reads, the old action is not asked for,
+            // and sigaction is async-signal-safe.
+            let set = unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
+            set == 0 || errno() == libc::EINVAL
+        })
+}
+
+#[allow(unsafe_code)]
+fn enter_root() -> bool {
+    // SAFETY: umask takes an integer and cannot fail. chdir reads a static NUL-terminated string
+    // and keeps no pointer to it. Both are async-signal-safe.
+    unsafe {
+        libc::umask(0o077);
+        libc::chdir(c"/".as_ptr()) == 0
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Closer {
+    #[cfg(not(target_os = "linux"))]
+    limit: libc::c_int,
+}
+
+impl Closer {
+    #[cfg(target_os = "linux")]
+    #[allow(unsafe_code)]
+    fn prepare() -> Result<Closer, LaunchRefusal> {
+        // SAFETY: close_range takes integers only. The range starts at the highest descriptor
+        // number, which no descriptor can have, so the call closes nothing and only shows that
+        // the kernel offers close_range.
+        let probed = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                libc::c_uint::MAX,
+                libc::c_uint::MAX,
+                0 as libc::c_uint,
+            )
+        };
+        if probed == 0 {
+            Ok(Closer {})
+        } else {
+            Err(LaunchRefusal::CloseLimit { errno: errno() })
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(unsafe_code)]
+    fn close_above_three(self) -> bool {
+        // SAFETY: close_range takes integers only and is a raw system call, so it allocates
+        // nothing. prepare showed the kernel offers it.
+        unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                4 as libc::c_uint,
+                libc::c_uint::MAX,
+                0 as libc::c_uint,
+            ) == 0
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[allow(unsafe_code)]
+    fn prepare() -> Result<Closer, LaunchRefusal> {
+        let mut per_process: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>();
+        // SAFETY: The name is a static NUL-terminated string. `per_process` and `size` are locals
+        // that sysctlbyname may write, `size` holds the bytes `per_process` has, and no new value
+        // is passed.
+        let read = unsafe {
+            libc::sysctlbyname(
+                c"kern.maxfilesperproc".as_ptr(),
+                (&mut per_process as *mut libc::c_int).cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if read != 0 {
+            return Err(LaunchRefusal::CloseLimit { errno: errno() });
+        }
+        // SAFETY: getdtablesize takes no arguments.
+        let table = unsafe { libc::getdtablesize() };
+        Ok(Closer {
+            limit: table.max(per_process),
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[allow(unsafe_code)]
+    fn close_above_three(self) -> bool {
+        for fd in 4..self.limit {
+            // SAFETY: close takes an integer and is async-signal-safe. Every descriptor above 3
+            // is one the helper must not inherit, whoever made it.
+            unsafe { libc::close(fd) };
+        }
+        true
+    }
+}
+
+#[allow(unsafe_code)]
+fn open_null(path: &CStr) -> Result<OwnedFd, LaunchRefusal> {
+    // SAFETY: `path` is a NUL-terminated string the caller keeps alive for the call, and open
+    // keeps no pointer to it.
+    let raw = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    if raw == -1 {
+        return Err(LaunchRefusal::DevNull { errno: errno() });
+    }
+    // SAFETY: open returned a new descriptor, and nothing else owns it.
+    let opened = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: libc::stat is a plain C struct, for which all zeroes is a valid value.
+    let mut found: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `found` is a local stat that fstat may write, and `opened` keeps its descriptor
+    // open.
+    if unsafe { libc::fstat(opened.as_raw_fd(), &mut found) } == -1 {
+        return Err(LaunchRefusal::DevNull { errno: errno() });
+    }
+    // SAFETY: libc::stat is a plain C struct, for which all zeroes is a valid value.
+    let mut named: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: The path is a static NUL-terminated string, `named` is a local stat that stat may
+    // write, and stat keeps no pointer to either.
+    if unsafe { libc::stat(c"/dev/null".as_ptr(), &mut named) } == -1 {
+        return Err(LaunchRefusal::DevNull { errno: errno() });
+    }
+    if found.st_mode & libc::S_IFMT == libc::S_IFCHR && found.st_rdev == named.st_rdev {
+        Ok(opened)
+    } else {
+        Err(LaunchRefusal::NotDevNull)
+    }
+}
+
+fn create_pipes(_held: &DescriptorsHeld) -> std::io::Result<[OwnedFd; 4]> {
+    let [diagnostics, diagnostics_write] = pipe_above_stdio()?;
+    let [recipe_read, recipe_write] = pipe_above_stdio()?;
+    Ok([diagnostics, diagnostics_write, recipe_read, recipe_write])
+}
+
+#[allow(unsafe_code)]
+fn pipe_above_stdio() -> std::io::Result<[OwnedFd; 2]> {
+    let mut ends: [RawFd; 2] = [-1; 2];
+    #[cfg(target_os = "linux")]
+    // SAFETY: `ends` is a local array of two c_int, the size pipe2 writes.
+    let made = unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    // SAFETY: `ends` is a local array of two c_int, the size pipe writes.
+    let made = unsafe { libc::pipe(ends.as_mut_ptr()) };
+    if made == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: pipe returned 0, so both entries are new descriptors, and nothing else owns them.
+    let [read, write] = ends.map(|end| unsafe { OwnedFd::from_raw_fd(end) });
+    let moved = |fd| moved_above_stdio(fd).map_err(std::io::Error::from_raw_os_error);
+    Ok([moved(read)?, moved(write)?])
+}
+
+#[allow(unsafe_code)]
+fn moved_above_stdio(fd: OwnedFd) -> Result<OwnedFd, i32> {
+    // SAFETY: fcntl with F_DUPFD_CLOEXEC takes integers only, and `fd` keeps its descriptor open
+    // for the call.
+    match unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, FIRST_KEPT) } {
+        -1 => Err(errno()),
+        // SAFETY: fcntl returned a new descriptor, and nothing else owns it.
+        moved => Ok(unsafe { OwnedFd::from_raw_fd(moved) }),
+    }
+}
+
+#[allow(unsafe_code)]
+fn set_nonblocking(fd: &OwnedFd) -> Result<(), LaunchRefusal> {
+    // SAFETY: fcntl with F_GETFL takes no pointer, and `fd` keeps its descriptor open.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if flags == -1 {
+        return Err(LaunchRefusal::Descriptor {
+            op: "F_GETFL",
+            errno: errno(),
+        });
+    }
+    // SAFETY: fcntl with F_SETFL takes an integer flag set, not a pointer, and `fd` keeps its
+    // descriptor open.
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(LaunchRefusal::Descriptor {
+            op: "F_SETFL",
+            errno: errno(),
+        });
+    }
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn preload(write_end: OwnedFd, line: &[u8]) -> Result<(), LaunchRefusal> {
+    let mut accepted = 0;
+    while let Some(rest) = line.get(accepted..).filter(|rest| !rest.is_empty()) {
+        // SAFETY: `rest` is a live slice of `rest.len()` bytes, and write reads at most that many.
+        // `write_end` keeps its descriptor open.
+        let wrote = unsafe { libc::write(write_end.as_raw_fd(), rest.as_ptr().cast(), rest.len()) };
+        match usize::try_from(wrote) {
+            Ok(count) if count > 0 => accepted += count,
+            Ok(_) => {
+                return Err(LaunchRefusal::RecipeExceedsPipe {
+                    bytes: line.len(),
+                    accepted,
+                });
+            }
+            Err(_) => match errno() {
+                libc::EINTR => {}
+                libc::EAGAIN => {
+                    return Err(LaunchRefusal::RecipeExceedsPipe {
+                        bytes: line.len(),
+                        accepted,
+                    });
+                }
+                errno => return Err(LaunchRefusal::Descriptor { op: "write", errno }),
+            },
+        }
+    }
+    Ok(())
+}
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO)
 }
 
 impl std::fmt::Debug for HelperExec {
@@ -126,8 +449,29 @@ impl std::fmt::Debug for HelperExec {
 
 impl std::fmt::Display for LaunchRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            LaunchRefusal::DevNull { errno } => {
+                write!(f, "/dev/null could not be opened: errno {errno}")
+            }
+            LaunchRefusal::NotDevNull => f.write_str("/dev/null is not the null character device"),
+            LaunchRefusal::Pipe { errno } => {
+                write!(f, "the helper's pipes could not be created: errno {errno}")
+            }
+            LaunchRefusal::PipeInheritable => f.write_str(
+                "a pipe end was still inheritable when it was created, so every end was closed",
+            ),
+            LaunchRefusal::Descriptor { op, errno } => {
+                write!(f, "{op} on a helper descriptor failed: errno {errno}")
+            }
+            LaunchRefusal::RecipeExceedsPipe { bytes, accepted } => write!(
+                f,
+                "the recipe pipe took {accepted} of the recipe line's {bytes} bytes"
+            ),
+            LaunchRefusal::CloseLimit { errno } => write!(
+                f,
+                "the child cannot close every descriptor above 3: errno {errno}"
+            ),
+        }
     }
 }
 

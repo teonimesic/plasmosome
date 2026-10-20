@@ -56,8 +56,29 @@ pub(crate) fn with_descriptors_held<T: AsFd + Into<OwnedFd>>(
 pub(crate) fn with_each_descriptor_held<const N: usize>(
     create: impl FnOnce(&DescriptorsHeld) -> std::io::Result<[OwnedFd; N]>,
 ) -> std::io::Result<[OwnedFd; N]> {
-    let _ = create;
-    todo!()
+    write_held(&SPAWN_LOCK, || {
+        create(&DescriptorsHeld(())).and_then(|created| {
+            if created.iter().all(|fd| is_close_on_exec(fd.as_fd())) {
+                Ok(created)
+            } else {
+                Err(not_close_on_exec())
+            }
+        })
+    })
+}
+
+#[allow(unsafe_code)]
+fn is_close_on_exec(fd: std::os::fd::BorrowedFd<'_>) -> bool {
+    // SAFETY: fcntl with F_GETFD takes no pointer, and the borrow keeps the descriptor open for the
+    // call.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+    flags != -1 && flags & libc::FD_CLOEXEC != 0
+}
+
+fn not_close_on_exec() -> std::io::Error {
+    std::io::Error::other(
+        "a descriptor created under the spawn lock was not close-on-exec, so it was closed",
+    )
 }
 
 #[cfg(test)]
