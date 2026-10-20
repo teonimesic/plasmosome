@@ -287,6 +287,7 @@ mod darwin {
         for profile in [
             "(version 1)(deny default)(allow file-read*)(allow file-write* (subpath \"/\"))(allow network* (remote ip))(allow network* (local ip))",
             "(version 1)(allow default)(deny process-fork)(deny network*)(deny file-write-create)",
+            "(version 1)(allow default)(deny process-fork)(deny network-outbound)(deny network-inbound)(deny network-bind)(deny file-write-create)",
         ] {
             assert!(
                 matches!(
