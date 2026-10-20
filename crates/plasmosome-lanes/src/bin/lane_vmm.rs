@@ -24,7 +24,7 @@ mod macos {
     use std::path::PathBuf;
 
     use plasmosome_lanes::bundle::{
-        KERNEL, LIBKRUN, PINNED_BUNDLE_ID, unverified_images, verify_bundle,
+        KERNEL, LIBKRUN, PINNED_BUNDLE_ID, is_inside, unverified_images, verify_bundle,
     };
     use plasmosome_lanes::config::{Confinement, LaneConfig};
     use plasmosome_lanes::dyld::{LIBKRUNFW, dyld_variables, libkrunfw_search, planted};
@@ -150,6 +150,15 @@ mod macos {
     pub fn run() -> Result<Infallible, Refusal> {
         let config = read_config()?;
         refuse_loader_inputs()?;
+        if is_inside(&config.bundle, &config.root_image) {
+            return fail(
+                CONFIG_REFUSED,
+                format!(
+                    "refused: root_image {} is inside the bundle, and the root disk is writable; give a copy",
+                    config.root_image.display()
+                ),
+            );
+        }
         let bundle = verify_bundle(&config.bundle, PINNED_BUNDLE_ID)
             .or_else(|error| fail(BUNDLE_REFUSED, format!("refused: {error}")))?;
         eprintln!(
@@ -186,9 +195,10 @@ mod macos {
         ctx.set_vm_config(config.vcpus, config.memory_mib)
             .map_err(krun)?;
         ctx.set_kernel(&kernel, &config.initramfs).map_err(krun)?;
-        ctx.add_root_disk(&config.root_image, true).map_err(krun)?;
+        ctx.add_root_disk(&config.root_image, false).map_err(krun)?;
         ctx.disable_implicit_init().map_err(krun)?;
         ctx.disable_implicit_vsock().map_err(krun)?;
+        ctx.add_vsock(0).map_err(krun)?;
         for share in &config.shares {
             ctx.add_virtiofs4(
                 &share.tag,

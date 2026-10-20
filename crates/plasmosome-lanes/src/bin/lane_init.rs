@@ -28,7 +28,7 @@ mod linux {
     use plasmosome_lanes::config::{GuestConfig, GuestMount, MountOption, Probe};
     use plasmosome_lanes::console::{BEGIN, END, ProbeResult, result_line};
     use plasmosome_lanes::guest_sys::{
-        self, MS_NODEV, MS_NOEXEC, MS_NOSUID, MS_RDONLY, kill_all, power_off, reap_exited,
+        self, MS_NODEV, MS_NOEXEC, MS_NOSUID, MS_RDONLY, kill_all, power_off, reap_all, reap_exited,
     };
 
     const CONFIG: &str = "/lane.json";
@@ -59,6 +59,12 @@ mod linux {
             MS_NOSUID | MS_NODEV | MS_NOEXEC,
         );
         let _ = guest_sys::mount("devtmpfs", Path::new("/dev"), "devtmpfs", MS_NOSUID);
+        let _ = guest_sys::mount(
+            "sysfs",
+            Path::new("/sys"),
+            "sysfs",
+            MS_NOSUID | MS_NODEV | MS_NOEXEC,
+        );
         let _ = fs::write("/proc/sys/kernel/printk", "1 4 1 7");
         let mut console = open_console();
         let hold = fs::create_dir_all(HOLD_DIR)
@@ -165,7 +171,10 @@ mod linux {
         let mut console = start();
         run_lane(&mut console);
         kill_all();
-        reap_exited();
+        let reaped = reap_all();
+        console.line(&format!(
+            "lane-init: killed what remained and reaped {reaped}"
+        ));
         let error = power_off();
         console.line(&format!("lane-init: power off failed: {error}"));
     }

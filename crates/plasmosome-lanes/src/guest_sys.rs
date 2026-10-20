@@ -61,6 +61,22 @@ pub fn reap_exited() {
     }
 }
 
+/// Wait for every child until none is left, and return how many were reaped. It blocks while a
+/// child is alive, so call it after `kill_all`.
+pub fn reap_all() -> usize {
+    let mut reaped = 0;
+    loop {
+        let mut status = 0;
+        // SAFETY: `status` is a valid place for waitpid to store an exit status.
+        let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
+        if pid > 0 {
+            reaped += 1;
+        } else if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return reaped;
+        }
+    }
+}
+
 /// Send SIGKILL to every process this one may signal; process 1 itself is spared.
 pub fn kill_all() {
     // SAFETY: kill takes no pointer; -1 addresses every process the caller may signal except

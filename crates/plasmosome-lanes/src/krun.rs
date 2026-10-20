@@ -34,6 +34,7 @@ type SetKernel = unsafe extern "C" fn(u32, *const c_char, u32, *const c_char, *c
 type AddDisk3 =
     unsafe extern "C" fn(u32, *const c_char, *const c_char, u32, bool, bool, u32) -> i32;
 type ContextOnly = unsafe extern "C" fn(u32) -> i32;
+type AddVsock = unsafe extern "C" fn(u32, u32) -> i32;
 type AddVirtiofs4 = unsafe extern "C" fn(u32, *const c_char, *const c_char, u64, bool, u32) -> i32;
 type SetConsoleOutput = unsafe extern "C" fn(u32, *const c_char) -> i32;
 
@@ -45,6 +46,7 @@ struct Symbols {
     add_disk3: AddDisk3,
     disable_implicit_init: ContextOnly,
     disable_implicit_vsock: ContextOnly,
+    add_vsock: AddVsock,
     add_virtiofs4: AddVirtiofs4,
     set_console_output: SetConsoleOutput,
     start_enter: ContextOnly,
@@ -153,6 +155,7 @@ impl Libkrun {
                 add_disk3: symbol(handle, c"krun_add_disk3")?,
                 disable_implicit_init: symbol(handle, c"krun_disable_implicit_init")?,
                 disable_implicit_vsock: symbol(handle, c"krun_disable_implicit_vsock")?,
+                add_vsock: symbol(handle, c"krun_add_vsock")?,
                 add_virtiofs4: symbol(handle, c"krun_add_virtiofs4")?,
                 set_console_output: symbol(handle, c"krun_set_console_output")?,
                 start_enter: symbol(handle, c"krun_start_enter")?,
@@ -253,12 +256,21 @@ impl Context<'_> {
         checked("krun_disable_implicit_init", rc)
     }
 
-    /// `krun_disable_implicit_vsock(ctx)`: no vsock device at all.
+    /// `krun_disable_implicit_vsock(ctx)`: no implicit vsock device, so `add_vsock` decides.
     pub fn disable_implicit_vsock(&self) -> Result<(), KrunError> {
         // SAFETY: the pointer came from dlsym with the header's signature and `self.id` is a
         // live context.
         let rc = unsafe { (self.lib.symbols.disable_implicit_vsock)(self.id) };
         checked("krun_disable_implicit_vsock", rc)
+    }
+
+    /// `krun_add_vsock(ctx, tsi_features)`, after `disable_implicit_vsock`. With 0 the device
+    /// has no TSI, so the guest's network and unix sockets are never passed to the host.
+    pub fn add_vsock(&self, tsi_features: u32) -> Result<(), KrunError> {
+        // SAFETY: the pointer came from dlsym with the header's signature, `self.id` is a live
+        // context, and both arguments are integers.
+        let rc = unsafe { (self.lib.symbols.add_vsock)(self.id, tsi_features) };
+        checked("krun_add_vsock", rc)
     }
 
     /// `krun_add_virtiofs4(ctx, tag, path, shm_size, read_only, semantics)`.

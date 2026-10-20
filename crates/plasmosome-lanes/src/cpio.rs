@@ -246,6 +246,7 @@ pub fn lane_initramfs(
         Entry::char_device("dev/console", 0o600, 5, 1),
         Entry::char_device("dev/null", 0o666, 1, 3),
         Entry::dir("proc", 0o555),
+        Entry::dir("sys", 0o555),
         Entry::dir("run", 0o755),
         Entry::dir("bin", 0o755),
         Entry::file("bin/lane-probe", 0o755, probe.to_vec()),

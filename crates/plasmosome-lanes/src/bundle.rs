@@ -347,7 +347,10 @@ pub fn unverified_images(
         .collect()
 }
 
-/// True when `path` resolves to a file inside `dir`.
-pub fn is_inside(_dir: &Path, _path: &Path) -> bool {
-    false
+/// True when `path` and `dir` both resolve, and `path` resolves to somewhere inside `dir`.
+pub fn is_inside(dir: &Path, path: &Path) -> bool {
+    match (fs::canonicalize(dir), fs::canonicalize(path)) {
+        (Ok(dir), Ok(path)) => path.starts_with(dir),
+        _ => false,
+    }
 }

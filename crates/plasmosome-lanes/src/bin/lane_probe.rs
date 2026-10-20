@@ -213,6 +213,7 @@ mod linux {
             }
             ["mountinfo"] => read_text("mountinfo", "/proc/self/mountinfo", probe::mountinfo_from),
             ["uname"] => uname(),
+            ["devices"] => probe::devices(Path::new("/sys")),
             ["hold-fd", name, path] => start_holder("hold-fd", exe, "fd", name, path),
             ["hold-map", name, path] => start_holder("hold-map", exe, "map", name, path),
             ["hold-exec", name, path] => start_holder("hold-exec", path, "exec", name, path),

@@ -193,9 +193,51 @@ pub fn holder_name_ok(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// The virtio devices and block devices under the sysfs root `sys`.
-pub fn devices(_sys: &Path) -> Value {
-    json!({"probe": "devices", "ok": false, "error": "not written yet"})
+fn sorted_names(dir: &Path) -> io::Result<Vec<String>> {
+    let mut names = fs::read_dir(dir)?
+        .map(|entry| {
+            entry?.file_name().into_string().map_err(|name| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("the name {name:?} is not UTF-8"),
+                )
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    names.sort();
+    Ok(names)
+}
+
+fn devices_under(sys: &Path) -> io::Result<Value> {
+    let virtio_dir = sys.join("bus/virtio/devices");
+    let mut virtio = Vec::new();
+    for name in sorted_names(&virtio_dir)? {
+        let id = fs::read_to_string(virtio_dir.join(&name).join("device"))?;
+        virtio.push(json!({"name": name, "device": id.trim()}));
+    }
+    let block_dir = sys.join("block");
+    let mut block = Vec::new();
+    for name in sorted_names(&block_dir)? {
+        let flag = fs::read_to_string(block_dir.join(&name).join("ro"))?;
+        let read_only = match flag.trim() {
+            "0" => false,
+            "1" => true,
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("block device {name} has ro `{other}`, not 0 or 1"),
+                ));
+            }
+        };
+        block.push(json!({"name": name, "read_only": read_only}));
+    }
+    Ok(json!({"virtio": virtio, "block": block}))
+}
+
+/// The devices under the sysfs root `sys`: each virtio device's name and device ID, such as
+/// `0x0013` for vsock, and whether each block device is read-only.
+pub fn devices(sys: &Path) -> Value {
+    line("devices", devices_under(sys))
 }
 
 /// Resolve `path` without following a final symlink.
