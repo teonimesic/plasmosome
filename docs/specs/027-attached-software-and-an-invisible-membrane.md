@@ -1,7 +1,7 @@
 ---
 id: 027
 title: How attached software appears in a cell, and the test that the membrane stays invisible
-status: draft
+status: accepted
 intents: [011, 004]
 ---
 
@@ -24,7 +24,7 @@ thing does not exist. A workload that can tell "withheld" from "absent" has seen
 
 The layout, the detach accounting and the comparator can be built and shown able to fail now. The
 cell lane waits for a booting cell ("Blocked on") and is reported as not run, never as passed.
-Draft 028 is cited at `78d62c5` (#138); specs 022, 023 and 024 as accepted on main.
+Specs 022, 023 and 024 are cited as accepted on main, and spec 028 as accepted at `d56881a`.
 
 ## Contract
 
@@ -254,7 +254,7 @@ Remaining, so the differential reports them:
 - Spec 024 §5's missing PID namespace: PID1 and its threads, kernel thread names, and PID1's mount
   table through the world-readable `/proc/1/mountinfo` (measured outside this repository in a
   container).
-- Spec 024 §9: a Mount withdrawn, fenced (draft 028) or refused under Force, under a running
+- Spec 024 §9: a Mount withdrawn, fenced (spec 028) or refused under Force, under a running
   process, fails each held reference with 024 §9's error (expected `ENOTCONN`). A fenced Mount with
   no peer also stays in the mount table until its removal finishes, while a fresh lookup there
   fails with `ENOENT`. The reference lanes stage the nearest ordinary analogue, aborting their FUSE
@@ -269,9 +269,10 @@ These are proposed text. The PR that accepts this spec edits no other accepted d
 amendment is applied by a later reviewed change to the document it amends, before any task that
 relies on it.
 
-- **Spec 011, detach (`011:195-207`, `011:358-363`, `011:434-437`).** Draft spec 028 carries the
-  one text for these lines. It covers software-tree references as §4 does, with the `SCM_RIGHTS`
-  limit, and composes spec 024's insertion. This spec proposes no text of its own there.
+- **Spec 011, detach (`011:195-207`, `011:358-363`, `011:432-437`, `011:441-443`).** Spec 028
+  carries the one text for these lines. It covers software-tree references as §4 does, with the
+  `SCM_RIGHTS` limit, and composes spec 024's insertion. This spec proposes no text of its own
+  there.
 - **Spec 011, out of scope (`011:489-493`).** Replace "and its spec belongs to the isolation work
   under intent 011." with "and spec 027 specifies it."
 - **Spec 001 §3.11 and §3.12.** Add `"held": []` to both example results. In §3.11, after the
