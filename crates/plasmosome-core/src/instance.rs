@@ -191,7 +191,8 @@ impl InstanceRoot {
     /// invalid ID is refused before anything is opened, and a missing `cells` or cell is
     /// `Missing`. The name on disk must equal the ID byte for byte: on a filesystem that folds
     /// case or Unicode normalization, another spelling of an existing cell is refused as `Alias`.
-    /// Opening needs no lock; appending to the journal does.
+    /// The ID must also still name the directory that was opened, so a cell retired or replaced
+    /// while it is opened is `Missing`. Opening needs no lock; appending to the journal does.
     pub fn cell_dir(&self, cell: &CellId) -> Result<CellDir, CellDirError> {
         let journal_path = cell_ledger_path(&self.path, cell).map_err(CellDirError::InvalidCell)?;
         let cells_path = self.path.join(CELLS_DIR);
@@ -206,16 +207,16 @@ impl InstanceRoot {
         let dir = open_at(cells.as_fd(), &name, DIRECTORY_FLAGS, 0).map_err(|error| {
             directory_refusal(cells.as_fd(), &name, error).into_cell_dir_error(cell_path.clone())
         })?;
-        let listed = lists_exactly(cells.as_fd(), cell.as_str().as_bytes()).map_err(|source| {
-            CellDirError::Io {
+        let named =
+            naming(cells.as_fd(), &name, dir.as_fd()).map_err(|source| CellDirError::Io {
                 path: cells_path.clone(),
                 source,
-            }
-        })?;
-        if !listed {
-            return Err(CellDirError::Alias { path: cell_path });
+            })?;
+        match named {
+            Naming::Exact => Ok(self.cell_dir_from(dir, cell.clone(), journal_path)),
+            Naming::Alias => Err(CellDirError::Alias { path: cell_path }),
+            Naming::Gone => Err(CellDirError::Missing { path: cell_path }),
         }
-        Ok(self.cell_dir_from(dir, cell.clone(), journal_path))
     }
 
     fn cell_dir_from(&self, dir: OwnedFd, cell: CellId, journal_path: PathBuf) -> CellDir {
@@ -783,6 +784,31 @@ fn lists_exactly(dir: BorrowedFd<'_>, name: &[u8]) -> io::Result<bool> {
     Ok(false)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Naming {
+    Exact,
+    Alias,
+    Gone,
+}
+
+fn naming(cells: BorrowedFd<'_>, name: &CStr, opened: BorrowedFd<'_>) -> io::Result<Naming> {
+    let listed = lists_exactly(cells, name.to_bytes())?;
+    let entry = match stat_at(cells, name) {
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(Naming::Gone),
+        entry => entry?,
+    };
+    let opened = stat_of(opened)?;
+    Ok(
+        if (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino) {
+            Naming::Gone
+        } else if listed {
+            Naming::Exact
+        } else {
+            Naming::Alias
+        },
+    )
+}
+
 fn out_of_descriptors(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
 }
@@ -868,7 +894,7 @@ fn file_refusal(parent: BorrowedFd<'_>, name: &CStr, error: io::Error) -> FileRe
     }
 }
 
-fn kind_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<Kind> {
+fn stat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::stat> {
     let mut status = MaybeUninit::<libc::stat>::uninit();
     let found = unsafe {
         libc::fstatat(
@@ -881,7 +907,19 @@ fn kind_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<Kind> {
     if found != 0 {
         return Err(io::Error::last_os_error());
     }
-    let format = unsafe { status.assume_init() }.st_mode & libc::S_IFMT;
+    Ok(unsafe { status.assume_init() })
+}
+
+fn stat_of(fd: BorrowedFd<'_>) -> io::Result<libc::stat> {
+    let mut status = MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd.as_raw_fd(), status.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { status.assume_init() })
+}
+
+fn kind_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<Kind> {
+    let format = stat_at(dir, name)?.st_mode & libc::S_IFMT;
     Ok(match format {
         libc::S_IFDIR => Kind::Directory,
         libc::S_IFLNK => Kind::Symlink,
