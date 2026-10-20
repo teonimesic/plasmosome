@@ -44,18 +44,25 @@ pub fn request_id(lane: ControlLane) -> u64 {
 ///
 /// `Debug` prints those 64 digits.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct BootToken(Digest);
+pub struct BootToken([u8; 32]);
+
+/// Why a text is not a boot token. It holds the same fault a digest's text
+/// can have, but describes it as a boot token's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootTokenError(pub DigestError);
 
 impl BootToken {
     /// Reads exactly 64 lowercase hexadecimal digits. Uppercase digits, any
     /// other byte and any other length are refused with the first fault.
-    pub fn parse_hex(text: &str) -> Result<BootToken, DigestError> {
-        Digest::parse_hex(text).map(BootToken)
+    pub fn parse_hex(text: &str) -> Result<BootToken, BootTokenError> {
+        Digest::parse_hex(text)
+            .map(|digest| BootToken(*digest.as_bytes()))
+            .map_err(BootTokenError)
     }
 
     /// The 64 lowercase hexadecimal digits.
     pub fn hex(&self) -> String {
-        self.0.hex()
+        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }
 
@@ -65,19 +72,15 @@ impl std::fmt::Debug for BootToken {
     }
 }
 
-/// A hello reply that passed every check in [`judge_reply`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct HelloAnswer {
-    /// The lane the reply arrived on.
-    pub lane: ControlLane,
-    /// The guest's boot token.
-    pub boot: BootToken,
-    /// The SHA-256 of the guest policy the shim verified; equal to the
-    /// expected one.
-    pub policy: Digest,
+impl std::fmt::Display for BootTokenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
-/// Why [`judge_reply`] refused a hello reply.
+impl std::error::Error for BootTokenError {}
+
+/// Why a hello reply was refused.
 ///
 /// `field` and `path` are JSON pointers into the reply: `""` is the whole
 /// reply and `"/result/boot"` its boot token. Text the guest chose is cut to
@@ -102,17 +105,26 @@ pub enum HelloRefusal {
     /// integer request id.
     WrongId { expected: u64, found: String },
     /// The guest answered with an error object, under any id. `code` is
-    /// `None` when the error has no integer `code`; `message` is empty when
-    /// it has no string `message`.
-    GuestError { code: Option<i64>, message: String },
+    /// `None` when the error has no `code` that is a signed 64-bit integer;
+    /// `message` is empty when it has no string `message`; `detail` is the
+    /// compact JSON of its `detail`, when it has one.
+    GuestError {
+        code: Option<i64>,
+        message: String,
+        detail: Option<String>,
+    },
     /// `boot` is not 64 lowercase hexadecimal digits.
-    BadBoot { fault: DigestError },
+    BadBoot { fault: BootTokenError },
     /// `policy` is not 64 lowercase hexadecimal digits.
     BadPolicy { fault: DigestError },
-    /// The guest verified a policy other than the expected one.
-    PolicyMismatch { expected: Digest, reported: Digest },
-    /// This lane's boot token differs from the one an earlier hello returned.
-    BootChanged { first: BootToken, second: BootToken },
+    /// The guest verified the policy `found` instead of the expected one.
+    PolicyMismatch { expected: Digest, found: Digest },
+    /// The withdrawal lane returned the boot token `found` instead of the
+    /// normal lane's.
+    BootChanged {
+        expected: BootToken,
+        found: BootToken,
+    },
 }
 
 impl std::fmt::Display for HelloRefusal {
@@ -144,36 +156,29 @@ impl std::fmt::Display for HelloRefusal {
             HelloRefusal::GuestError {
                 code: Some(code),
                 message,
+                ..
             } => write!(f, "the guest refused hello with code {code}: {message:?}"),
             HelloRefusal::GuestError {
                 code: None,
                 message,
+                ..
             } => write!(
                 f,
                 "the guest refused hello without an integer code: {message:?}"
             ),
-            HelloRefusal::BadBoot {
-                fault: DigestError::WrongLength { bytes },
-            } => write!(
-                f,
-                "the hello boot token is {bytes} bytes long, not 64 lowercase hexadecimal digits"
-            ),
-            HelloRefusal::BadBoot {
-                fault: DigestError::NotLowercaseHex { at },
-            } => write!(
-                f,
-                "byte {at} of the hello boot token is not a lowercase hexadecimal digit"
-            ),
+            HelloRefusal::BadBoot { fault } => {
+                write!(f, "the hello boot token is refused: {fault}")
+            }
             HelloRefusal::BadPolicy { fault } => write!(f, "the hello policy is refused: {fault}"),
-            HelloRefusal::PolicyMismatch { expected, reported } => write!(
+            HelloRefusal::PolicyMismatch { expected, found } => write!(
                 f,
-                "the guest verified policy {reported}, not the expected {expected}"
+                "the guest verified policy {found}, not the expected {expected}"
             ),
-            HelloRefusal::BootChanged { first, second } => write!(
+            HelloRefusal::BootChanged { expected, found } => write!(
                 f,
-                "the guest boot token changed from {} to {}",
-                first.hex(),
-                second.hex()
+                "the withdrawal lane's boot token is {}, not the normal lane's {}",
+                found.hex(),
+                expected.hex()
             ),
         }
     }
@@ -181,22 +186,42 @@ impl std::fmt::Display for HelloRefusal {
 
 impl std::error::Error for HelloRefusal {}
 
-/// Judges one hello reply read from `lane`.
+/// Judges the normal lane's hello reply and returns its boot token, which
+/// [`judge_withdrawal`] needs.
 ///
 /// `frame` is one line without its newline; the caller's reader bounds its
-/// size. The reply must be exactly `{"id", "result": {"boot", "policy"}}`
-/// with the lane's request id, a 64-digit lowercase hexadecimal boot token
-/// and a policy equal to `expected_policy`. Pass the boot token of the
-/// normal lane's answer as `earlier` when judging the withdrawal lane, and
-/// of the original association when judging a reconnection; the boot must
-/// then equal it. An error object refuses as [`HelloRefusal::GuestError`]
-/// whatever its id, because protocol failures answer under a `null` id.
-pub fn judge_reply(
+/// size. The reply must be exactly `{"id": 1, "result": {"boot", "policy"}}`
+/// with a 64-digit lowercase hexadecimal boot token and a policy equal to
+/// `expected_policy`. An error object refuses as
+/// [`HelloRefusal::GuestError`] whatever its id, because protocol failures
+/// answer under a `null` id.
+pub fn judge_normal(frame: &[u8], expected_policy: &Digest) -> Result<BootToken, HelloRefusal> {
+    judge(ControlLane::Normal, frame, expected_policy)
+}
+
+/// Judges the withdrawal lane's hello reply by the same rules under id 2,
+/// and refuses it unless its boot token equals `normal`, the token
+/// [`judge_normal`] returned.
+pub fn judge_withdrawal(
+    frame: &[u8],
+    expected_policy: &Digest,
+    normal: &BootToken,
+) -> Result<(), HelloRefusal> {
+    let found = judge(ControlLane::Withdrawal, frame, expected_policy)?;
+    if found != *normal {
+        return Err(HelloRefusal::BootChanged {
+            expected: *normal,
+            found,
+        });
+    }
+    Ok(())
+}
+
+fn judge(
     lane: ControlLane,
     frame: &[u8],
     expected_policy: &Digest,
-    earlier: Option<&BootToken>,
-) -> Result<HelloAnswer, HelloRefusal> {
+) -> Result<BootToken, HelloRefusal> {
     if std::str::from_utf8(frame).is_err() {
         return Err(HelloRefusal::NotUtf8);
     }
@@ -215,6 +240,7 @@ pub fn judge_reply(
                 .and_then(Value::as_str)
                 .map(cut)
                 .unwrap_or_default(),
+            detail: None,
         });
     }
     closed(reply, "", &["id", "result"])?;
@@ -229,23 +255,15 @@ pub fn judge_reply(
     closed(result, "/result", &["boot", "policy"])?;
     let boot = BootToken::parse_hex(text(result, "/result", "boot")?)
         .map_err(|fault| HelloRefusal::BadBoot { fault })?;
-    let policy = Digest::parse_hex(text(result, "/result", "policy")?)
+    let found = Digest::parse_hex(text(result, "/result", "policy")?)
         .map_err(|fault| HelloRefusal::BadPolicy { fault })?;
-    if policy != *expected_policy {
+    if found != *expected_policy {
         return Err(HelloRefusal::PolicyMismatch {
             expected: *expected_policy,
-            reported: policy,
+            found,
         });
     }
-    if let Some(&first) = earlier
-        && first != boot
-    {
-        return Err(HelloRefusal::BootChanged {
-            first,
-            second: boot,
-        });
-    }
-    Ok(HelloAnswer { lane, boot, policy })
+    Ok(boot)
 }
 
 fn object<'a>(value: &'a Value, at: &str) -> Result<&'a Map<String, Value>, HelloRefusal> {
