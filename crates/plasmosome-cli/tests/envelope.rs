@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use plasmosome_cli::json::{Json, Number, scan};
+use plasmosome_cli::json::{Json, Number, scan, write_compact};
 use plasmosome_cli::{
     ClientCode, ClientError, EmitError, Envelope, ErrorBody, Form, Instance, KernelError, Stream,
     emit,
@@ -500,4 +500,90 @@ fn a_failed_flush_names_its_stream() {
     );
     assert!(sink.is_empty());
     assert!(stdout.0.ends_with(b"\n") && stderr.0.ends_with(b"\n"));
+}
+
+const PIECE: usize = 1024 * 1024;
+
+#[derive(Default)]
+struct Pieces {
+    bytes: Vec<u8>,
+    largest: usize,
+}
+
+impl Write for Pieces {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.largest = self.largest.max(bytes.len());
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn wide() -> Json {
+    let item = format!("{}{}", "x".repeat(48), character(0xe9));
+    Json::Array((0..50_000).map(|_| Json::String(item.clone())).collect())
+}
+
+fn emitted_in_pieces(envelope: &Envelope, form: Form) -> String {
+    let mut stdout = Pieces::default();
+    let mut stderr = Pieces::default();
+    emit(envelope, form, &mut stdout, &mut stderr).expect("writing to memory succeeds");
+    let written = if envelope.outcome.is_ok() {
+        stdout
+    } else {
+        stderr
+    };
+    assert!(
+        written.bytes.len() > 2 * PIECE,
+        "the fixture writes {} bytes, too few to show pieces",
+        written.bytes.len()
+    );
+    assert!(
+        written.largest <= PIECE,
+        "the {form:?} form handed the writer {} bytes at once, so emit held the whole text",
+        written.largest
+    );
+    String::from_utf8(written.bytes).expect("the pieces join into UTF-8")
+}
+
+#[test]
+fn a_large_envelope_is_written_in_pieces() {
+    let success = Envelope {
+        command: "plasmosome.status".to_string(),
+        instance: None,
+        outcome: Ok(wide()),
+    };
+    assert_eq!(
+        emitted_in_pieces(&success, Form::Json),
+        format!(
+            r#"{{"schema":1,"command":"plasmosome.status","result":{}}}"#,
+            write_compact(&wide())
+        ) + "\n"
+    );
+    assert_eq!(
+        emitted_in_pieces(&success, Form::Human).lines().count(),
+        50_000 + 5
+    );
+
+    let error = Json::Object(vec![
+        (
+            "code".to_string(),
+            Json::Number(Number::new("101".to_string()).expect("valid number text")),
+        ),
+        ("message".to_string(), Json::String("m".to_string())),
+        ("fix".to_string(), wide()),
+    ]);
+    let failure = Envelope {
+        command: "plasmosome.status".to_string(),
+        instance: None,
+        outcome: Err(ErrorBody::Kernel(
+            KernelError::new(error).expect("an object without domain"),
+        )),
+    };
+    let shown = emitted_in_pieces(&failure, Form::Human);
+    assert!(shown.starts_with("m\nfix: [\n  \""));
+    assert!(shown.ends_with("\"\n]\n(kernel 101)\n"));
 }
