@@ -309,10 +309,29 @@ def an_existing_workload_name_or_id_1000_refuses():
             ("etc/group", GROUP + b"staff:x:50:alice,workload\n"),
             ("etc/gshadow", GSHADOW + b"sudo:*::workload\n"),
             ("etc/gshadow", GSHADOW + b"staff:*:workload:\n"),
+            ("etc/passwd", USERS + b" workload:x:1001:1001::/home/w:/bin/sh\n"),
+            ("etc/passwd", USERS + b"\tworkload:x:1001:1001::/home/w:/bin/sh\n"),
+            ("etc/group", GROUP + b" workload:x:1001:\n"),
+            ("etc/group", GROUP + b"sudo:x:27: workload\n"),
+            ("etc/group", GROUP + b"staff:x:50:alice, workload\n"),
+            ("etc/shadow", SHADOW + b" workload:$6$salt$hash:20000:0:99999:7:::\n"),
+            ("etc/gshadow", GSHADOW + b" workload:*::\n"),
+            ("etc/gshadow", GSHADOW + b"sudo:*: workload:\n"),
+            ("etc/gshadow", GSHADOW + b"sudo:*:: workload\n"),
+            ("etc/gshadow", GSHADOW + b"\r\x0b\x0cworkload:*::\n"),
         ]:
             _, mode, uid, gid, _, _ = DEBIAN[path]
             detail = refusal("stage", stage_with, root, {path: f(data, mode, uid, gid)})
             assert f"/{path}" in detail and "already" in detail, detail
+        for path, data in [
+            ("etc/passwd", USERS + b"alice:x:1001: 1000::/home/alice:/bin/sh\n"),
+            ("etc/passwd", USERS + b"alice:x:1001:+1000::/home/alice:/bin/sh\n"),
+            ("etc/passwd", USERS + b"alice:x:-4294966296:1001::/home/alice:/bin/sh\n"),
+            ("etc/group", GROUP + b"staff:x:01000:\n"),
+            ("etc/passwd", USERS + b"alice:x:1001:" + b"1" * 5000 + b"::/home/alice:/bin/sh\n"),
+        ]:
+            detail = refusal("stage", stage_with, root, {path: f(data)})
+            assert f"/{path} line" in detail, detail
 
 
 def entries_under_opt_or_usr_local_bin_refuse():
@@ -597,6 +616,9 @@ def judge_accounts_accepts_exactly_the_contract():
         (USERS + WORKLOAD_USER, GROUP + WORKLOAD_GROUP + WORKLOAD_GROUP, "lines 4, 5"),
         (USERS + WORKLOAD_USER, GROUP + b"workload:x:1001:\n" + WORKLOAD_GROUP, "line 4"),
         (b"\xff\n" + USERS + WORKLOAD_USER, GROUP + WORKLOAD_GROUP, "line 1"),
+        (USERS + b" workload:x:1001:1001::/home/w:/bin/sh\n" + WORKLOAD_USER, GROUP + WORKLOAD_GROUP, "line 3 names"),
+        (USERS + WORKLOAD_USER, GROUP + b"\tworkload:x:1001:\n" + WORKLOAD_GROUP, "line 4 names"),
+        (USERS + b" +alice:x:1001:1001::/home/alice:/bin/sh\n" + WORKLOAD_USER, GROUP + WORKLOAD_GROUP, "line 3 is malformed"),
     ]:
         assert needle in refusal("check", API["judge_accounts"], users, group), needle
 
