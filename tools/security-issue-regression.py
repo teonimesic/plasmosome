@@ -43,7 +43,7 @@ if command == "issue list":
         sys.exit("fake gh: issue list without --label security --state open")
     fields = value("--json").split(",")
     rows = [{field: issue[field] for field in fields} for issue in state["issues"]
-            if issue["state"] == "open" and "security" in issue["labels"]]
+            if issue["state"] == "open" and "security" in [name.lower() for name in issue["labels"]]]
     print(json.dumps(rows[:int(value("--limit"))]))
 elif command == "label list":
     print(json.dumps([{"name": name} for name in state["labels"]]))
@@ -135,7 +135,8 @@ def writes(calls):
 
 def marked(forge):
     return [number for number, item in forge.issues().items()
-            if item["state"] == "open" and "security" in item["labels"] and MARKER in (item["body"] or "")]
+            if item["state"] == "open" and "security" in [name.lower() for name in item["labels"]]
+            and MARKER in (item["body"] or "")]
 
 
 def create_then_edit():
@@ -194,6 +195,7 @@ def a_persons_issue_is_untouched():
         assert result.returncode == 0, (result.stdout, result.stderr)
         assert [tuple(call["args"][:2]) for call in writes(calls)] == [("issue", "create")], calls
         assert forge.issues()[5] == person and marked(forge) == [6], forge.issues()
+        assert forge.labels() == ["Security"] and forge.issues()[6]["labels"] == ["Security"], forge.issues()[6]
 
     with tempfile.TemporaryDirectory(prefix="security-issue-person-marked-") as directory:
         forge = Forge(directory, issues=[person, issue(7, MARKER + "\nold findings")], labels=["security"])
@@ -243,8 +245,8 @@ def tool_failures():
         assert marked(forge) == [1], forge.issues()
 
     with tempfile.TemporaryDirectory(prefix="security-issue-gh-failure-") as directory:
-        for fail, expected in ((["issue list"], []), (["issue create"], [("issue", "create")]),
-                               (["label create"], [("label", "create")])):
+        for fail, expected in ((["issue list"], []), (["issue create"], [("label", "create"), ("issue", "create")]),
+                               (["label create"], [("label", "create")]), (["label list"], [])):
             path = Path(directory) / fail[0].replace(" ", "-")
             path.mkdir()
             forge = Forge(path, fail=fail)
