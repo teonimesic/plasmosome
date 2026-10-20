@@ -111,7 +111,18 @@ fn stop(child: &mut Child, pid: u32) -> io::Result<()> {
     let group = kill_group(pid);
     let leader = child.kill();
     child.wait()?;
+    let group = match group {
+        Err(error) if error.raw_os_error() == Some(libc::EPERM) => kill_reaped_group(pid),
+        other => other,
+    };
     group.and(leader)
+}
+
+fn kill_reaped_group(pid: u32) -> io::Result<()> {
+    match kill_group(pid) {
+        Err(error) if error.raw_os_error() == Some(libc::EPERM) => Ok(()),
+        other => other,
+    }
 }
 
 fn read_console(path: &Path) -> (String, Option<String>) {
@@ -204,11 +215,13 @@ pub fn run_lane(
     let pid = child.id();
     let stderr_reader = StderrReader::start(child.stderr.take());
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(configuration.as_bytes());
+        thread::spawn(move || {
+            let _ = stdin.write_all(configuration.as_bytes());
+        });
     }
     let status = match wait_until(&mut child, deadline) {
         Ok(Some(status)) => {
-            kill_group(pid)?;
+            kill_reaped_group(pid)?;
             Some(status)
         }
         Ok(None) => {
