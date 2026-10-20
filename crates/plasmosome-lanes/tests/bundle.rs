@@ -4,7 +4,11 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
-use plasmosome_lanes::bundle::{BundleError, KERNEL, LIBKRUN, sha256_hex, verify_bundle};
+use std::path::PathBuf;
+
+use plasmosome_lanes::bundle::{
+    BundleError, KERNEL, LIBKRUN, sha256_hex, unverified_images, verify_bundle,
+};
 
 fn refused_naming(dir: &Path, path: &str) -> BundleError {
     match verify_bundle(dir) {
@@ -222,4 +226,62 @@ fn sums_that_do_not_list_the_kernel_are_refused_naming_it() {
     common::write_sums(dir.path(), &lines);
 
     refused_naming(dir.path(), KERNEL);
+}
+
+fn system_and_bundle_images(libkrun: &Path) -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/private/tmp/target/debug/lane-vmm"),
+        PathBuf::from("/usr/lib/libSystem.B.dylib"),
+        PathBuf::from("/System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor"),
+        libkrun.to_path_buf(),
+        PathBuf::from("/usr/lib/libiconv.2.dylib"),
+    ]
+}
+
+#[test]
+fn the_main_executable_the_verified_libkrun_and_system_images_are_accepted() {
+    let dir = common::bundle_fixture();
+    let libkrun = dir.path().join(LIBKRUN);
+
+    assert_eq!(
+        unverified_images(&system_and_bundle_images(&libkrun), &libkrun),
+        Vec::<PathBuf>::new()
+    );
+}
+
+#[test]
+fn a_libkrunfw_found_through_the_leftover_search_path_is_reported() {
+    let dir = common::bundle_fixture();
+    let libkrun = dir.path().join(LIBKRUN);
+    let found = PathBuf::from("/opt/homebrew/opt/llvm/lib/libkrunfw.5.dylib");
+    let mut images = system_and_bundle_images(&libkrun);
+    images.push(found.clone());
+
+    assert_eq!(unverified_images(&images, &libkrun), vec![found]);
+}
+
+#[test]
+fn a_libkrun_loaded_from_somewhere_else_is_reported() {
+    let dir = common::bundle_fixture();
+    let libkrun = dir.path().join(LIBKRUN);
+    let other = PathBuf::from("/opt/homebrew/lib/libkrun.1.19.4.dylib");
+    let mut images = system_and_bundle_images(&libkrun);
+    images[3] = other.clone();
+
+    assert_eq!(unverified_images(&images, &libkrun), vec![other]);
+}
+
+#[test]
+fn a_path_that_only_starts_like_a_system_directory_is_reported() {
+    let dir = common::bundle_fixture();
+    let libkrun = dir.path().join(LIBKRUN);
+    let lookalike = PathBuf::from("/usr/libexec-not-really/evil.dylib");
+    let mut images = system_and_bundle_images(&libkrun);
+    images.push(lookalike.clone());
+    images.push(PathBuf::from("/Systemic/evil.dylib"));
+
+    assert_eq!(
+        unverified_images(&images, &libkrun),
+        vec![lookalike, PathBuf::from("/Systemic/evil.dylib")]
+    );
 }
