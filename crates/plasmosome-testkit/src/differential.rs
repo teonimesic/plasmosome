@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -100,13 +102,26 @@ impl RuleKind {
 
     /// The name a manifest uses for this kind, such as `system_time`.
     pub fn name(self) -> &'static str {
-        unimplemented!()
+        match self {
+            RuleKind::Pid => "pid",
+            RuleKind::BootId => "boot_id",
+            RuleKind::MountId => "mount_id",
+            RuleKind::ParentMountId => "parent_mount_id",
+            RuleKind::Device => "device",
+            RuleKind::Inode => "inode",
+            RuleKind::SystemTime => "system_time",
+            RuleKind::Duration => "duration",
+            RuleKind::EphemeralPort => "ephemeral_port",
+            RuleKind::ResolvedAddress => "resolved_address",
+            RuleKind::MemoryCounter => "memory_counter",
+            RuleKind::LoadCounter => "load_counter",
+        }
     }
 
     /// Whether placeholders of this kind keep the order of the values they replace. Only
     /// the system's times and durations do.
     pub fn keeps_order(self) -> bool {
-        unimplemented!()
+        matches!(self, RuleKind::SystemTime | RuleKind::Duration)
     }
 }
 
@@ -199,13 +214,141 @@ pub enum ManifestRefusal {
 /// Parses a manifest from JSON and refuses it before any comparison if spec 027 §6's
 /// measurement rules do not hold.
 pub fn load(json: &str) -> Result<Manifest, ManifestRefusal> {
-    let _ = json;
-    unimplemented!()
+    let raw: RawManifest =
+        serde_json::from_str(json).map_err(|error| ManifestRefusal::Malformed {
+            reason: error.to_string(),
+        })?;
+    let rules = raw
+        .rules
+        .into_iter()
+        .map(|rule| {
+            let kind = RuleKind::ALL
+                .into_iter()
+                .find(|kind| kind.name() == rule.kind)
+                .ok_or_else(|| ManifestRefusal::UnknownRuleKind {
+                    probe: rule.probe.clone(),
+                    field: rule.field.clone(),
+                    kind: rule.kind.clone(),
+                })?;
+            Ok(Rule {
+                probe: rule.probe,
+                field: rule.field,
+                kind,
+            })
+        })
+        .collect::<Result<Vec<Rule>, ManifestRefusal>>()?;
+    let manifest = Manifest {
+        probes: raw.probes,
+        rules,
+        allowances: raw.allowances,
+        neutral: raw.neutral,
+    };
+    manifest.validate()?;
+    Ok(manifest)
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawManifest {
+    probes: Vec<ProbeSpec>,
+    #[serde(default)]
+    rules: Vec<RawRule>,
+    #[serde(default)]
+    allowances: Vec<Allowance>,
+    neutral: Neutral,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRule {
+    probe: String,
+    field: String,
+    kind: String,
+}
+
+const FUSE: &str = "fuse";
 
 impl Manifest {
     /// Checks the measurement rules [`load`] checks, for a manifest built by hand.
     pub fn validate(&self) -> Result<(), ManifestRefusal> {
-        unimplemented!()
+        let mut ids = BTreeSet::new();
+        for probe in &self.probes {
+            if !ids.insert(probe.id.as_str()) {
+                return Err(ManifestRefusal::DuplicateProbe {
+                    id: probe.id.clone(),
+                });
+            }
+        }
+        for channel in Channel::ALL {
+            let count = self
+                .probes
+                .iter()
+                .filter(|probe| probe.channel == channel)
+                .count();
+            if count < 3 {
+                return Err(ManifestRefusal::ChannelShort { channel, count });
+            }
+        }
+        for kind in ReachKind::ALL {
+            let count = self
+                .probes
+                .iter()
+                .filter(|probe| probe.reach == Some(kind))
+                .count();
+            if count < 3 {
+                return Err(ManifestRefusal::KindShort { kind, count });
+            }
+        }
+        let known = |probe: &str, named_by| match ids.contains(probe) {
+            true => Ok(()),
+            false => Err(ManifestRefusal::UnknownProbe {
+                probe: probe.to_string(),
+                named_by,
+            }),
+        };
+        let mut ruled = BTreeSet::new();
+        for rule in &self.rules {
+            known(&rule.probe, "rule")?;
+            let set_by_workload = self
+                .probes
+                .iter()
+                .any(|probe| probe.id == rule.probe && probe.workload_set.contains(&rule.field));
+            if set_by_workload {
+                return Err(ManifestRefusal::RuleOnWorkloadSetField {
+                    probe: rule.probe.clone(),
+                    field: rule.field.clone(),
+                });
+            }
+            if !ruled.insert((&rule.probe, &rule.field)) {
+                return Err(ManifestRefusal::DuplicateRule {
+                    probe: rule.probe.clone(),
+                    field: rule.field.clone(),
+                });
+            }
+        }
+        let mut allowed = BTreeSet::new();
+        for allowance in &self.allowances {
+            known(&allowance.probe, "allowance")?;
+            if !allowed.insert((&allowance.probe, &allowance.field)) {
+                return Err(ManifestRefusal::DuplicateAllowance {
+                    probe: allowance.probe.clone(),
+                    field: allowance.field.clone(),
+                });
+            }
+        }
+        known(&self.neutral.mounts_probe, "neutral")?;
+        known(&self.neutral.cgroup_probe, "neutral")?;
+        let mounts = &self.neutral.mounts;
+        for mount in ["/opt", "/usr/local/bin"] {
+            if !mounts.iter().any(|neutral| neutral.path == mount) {
+                return Err(ManifestRefusal::NeutralMountMissing { mount });
+            }
+        }
+        if !mounts.iter().any(|neutral| neutral.fstype == FUSE) {
+            return Err(ManifestRefusal::NeutralMountMissing {
+                mount: "a FUSE mount",
+            });
+        }
+        Ok(())
     }
 }
