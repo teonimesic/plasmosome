@@ -15,7 +15,9 @@ use serde::{Deserialize, Deserializer, forward_to_deserialize_any};
 /// Wrap only a derived struct, or an enum that serde tags externally (the default). Anything
 /// else is read as a map and refused even when valid: an untagged or internally tagged enum, an
 /// `Option`, a sequence. It reads a struct with `deserialize_map`, not `deserialize_struct`, so
-/// it needs a self-describing format such as JSON.
+/// it needs a self-describing format such as JSON or TOML. The derived visitor is reached only
+/// through `visit_map`, so a format that answers `deserialize_map` with an array, as TOML does,
+/// is refused too.
 pub struct ObjectOnly<D>(D);
 
 impl<D> ObjectOnly<D> {
@@ -28,7 +30,7 @@ impl<'de, D: Deserializer<'de>> Deserializer<'de> for ObjectOnly<D> {
     type Error = D::Error;
 
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, D::Error> {
-        self.0.deserialize_map(visitor)
+        self.0.deserialize_map(Fields(visitor))
     }
 
     fn deserialize_enum<V: Visitor<'de>>(
@@ -501,6 +503,55 @@ mod tests {
                 Ok(expected),
                 "{text}"
             );
+        }
+    }
+
+    #[test]
+    fn a_toml_array_is_refused_for_a_struct_and_for_a_struct_variant() {
+        #[derive(Debug, Deserialize)]
+        struct Document<T> {
+            record: T,
+        }
+
+        fn record<T: DeserializeOwned>(text: &str) -> Result<T, String> {
+            toml::from_str::<Document<T>>(text)
+                .map(|document| document.record)
+                .map_err(|error| error.to_string())
+        }
+
+        let uds = UdsRecipe {
+            upstream: "/run/plasmosome/upstream.sock".to_string(),
+            guest_path: "/run/agent.sock".to_string(),
+        };
+        assert_eq!(
+            record::<UdsRecipe>(
+                "record = { upstream = \"/run/plasmosome/upstream.sock\", \
+                 guest_path = \"/run/agent.sock\" }"
+            ),
+            Ok(uds)
+        );
+        assert_eq!(
+            record::<Capability>(
+                "record = { Mount = { source = \"/srv/repo\", target = \"/workspace\" } }"
+            ),
+            Ok(mount())
+        );
+        for (name, outcome) in [
+            (
+                "UdsRecipe",
+                record::<UdsRecipe>(
+                    "record = [\"/run/agent.sock\", \"/run/plasmosome/upstream.sock\"]",
+                )
+                .map(drop),
+            ),
+            (
+                "Capability::Mount",
+                record::<Capability>("record = { Mount = [\"/workspace\", \"/srv/repo\"] }")
+                    .map(drop),
+            ),
+        ] {
+            let error = outcome.expect_err(name);
+            assert!(error.contains("invalid type: sequence"), "{name}: {error}");
         }
     }
 }

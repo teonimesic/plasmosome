@@ -73,7 +73,21 @@ claim model diversity. The author spawns it when possible and asks the orchestra
 The reviewer does not repair what it reviews.
 
 The reviewer reads the surrounding code as well as the diff, verifies empirical claims, and
-checks every applicable acceptance item in every governing spec. For a regression test, break
+checks every applicable acceptance item in every governing spec.
+
+A PR that changes any path or kind of code listed in
+[spec 026 section 8](../../../docs/specs/026-security-standard.md#8-which-prs-this-spec-governs)
+is also governed by spec 026, whatever its task maps to. Run nothing from a contributor's PR on
+your own machine, its git hooks included, until spec 026's git-only step has passed for that
+head. Fetch the PR's ref and inspect it through the object store, and check it out only after
+that, with hooks disabled: `git -c core.hooksPath=/dev/null checkout …`. Read any change to
+`.githooks/`, `.github/`, `build.rs` or `rust-toolchain*` first. A Dependabot PR gets a Beads
+task under spec 026 before it merges, filed by whoever reviews it straight into spec 016's
+`review` status, with that reviewer as assignee and the PR as `external_ref`, because the
+candidate already exists. The reviewer adds the `task:` footer to the PR body, and adds it again
+if Dependabot rewrites the body.
+
+For a regression test, break
 the implementation in a disposable copy outside the working checkout and establish that it
 fails for the promised reason. Report limits rather than claiming evidence not run.
 
