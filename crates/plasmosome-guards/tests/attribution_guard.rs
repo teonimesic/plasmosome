@@ -210,6 +210,39 @@ fn refuses_a_model_trailer_a_squash_merge_left_before_a_human_trailer_block() {
 }
 
 #[test]
+fn refuses_a_model_sign_off_in_the_closing_trailer_block() {
+    check_workspace(|root| {
+        assert_refused(
+            root,
+            "docs: a change\n\nSome body prose.\n\nSigned-off-by: Claude <noreply@anthropic.com>\n",
+            "closes with a sign-off naming a model",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_sign_off_a_squash_merge_left_mid_body() {
+    check_workspace(|root| {
+        assert_refused(
+            root,
+            "docs: a squashed change (#2)\n\n* docs: the first commit\n\nSome body prose.\n\nSigned-off-by: Claude <noreply@anthropic.com>\n\n* docs: the second commit\n\nMore body prose.\n",
+            "carries a model's sign-off in a paragraph the body continues past",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_with_whitespace_before_its_colon() {
+    check_workspace(|root| {
+        assert_refused(
+            root,
+            "docs: a change\n\nSome body prose.\n\nCo-Authored-By : Claude <noreply@anthropic.com>\n",
+            "puts a space before a model trailer's colon, which git still reads as a trailer",
+        );
+    });
+}
+
+#[test]
 fn refuses_a_model_trailer_mid_body_when_the_message_uses_windows_line_endings() {
     check_workspace(|root| {
         assert_refused(
