@@ -589,3 +589,45 @@ fn a_large_envelope_is_written_in_pieces() {
     assert!(shown.starts_with("m\nfix: [\n  \""));
     assert!(shown.ends_with("\"\n]\n(kernel 101)\n"));
 }
+
+#[derive(Default)]
+struct FailsOnce {
+    calls: usize,
+    after: Vec<u8>,
+}
+
+impl Write for FailsOnce {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.calls += 1;
+        if self.calls == 1 {
+            return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+        }
+        self.after.extend(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn nothing_is_written_after_a_failed_piece() {
+    let envelope = Envelope {
+        command: "plasmosome.status".to_string(),
+        instance: None,
+        outcome: Ok(wide()),
+    };
+    let mut stdout = FailsOnce::default();
+    let mut stderr = Vec::new();
+    assert_eq!(
+        failed_stream(emit(&envelope, Form::Json, &mut stdout, &mut stderr)),
+        Stream::Stdout
+    );
+    assert!(
+        stdout.after.is_empty(),
+        "{} bytes followed a failed piece, so the stream holds a gap",
+        stdout.after.len()
+    );
+    assert!(stderr.is_empty());
+}
