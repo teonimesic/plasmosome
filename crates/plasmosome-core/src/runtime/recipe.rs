@@ -1,7 +1,7 @@
 use super::path::{PathError, RecipePath};
 use super::strict_json::{self, StrictJsonError};
 use plasmosome_backend::digest::{Digest, DigestError};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
@@ -30,6 +30,23 @@ const RECIPE_FIELDS: [&str; 15] = [
 ];
 
 const ARTIFACT_FIELDS: [&str; 2] = ["path", "sha256"];
+
+const PER_CELL_FIELDS: [&str; 3] = ["writable_root", "control_path", "data_path"];
+
+const TEMPLATE_FIELDS: [&str; 12] = [
+    "version",
+    "vcpus",
+    "memory_mib",
+    "kernel",
+    "kernel_format",
+    "initramfs",
+    "root_image",
+    "helper",
+    "libraries",
+    "host_policy",
+    "guest_policy",
+    "architecture",
+];
 
 static ABSENT: Value = Value::Null;
 
@@ -644,6 +661,76 @@ impl RuntimeRecipe {
     }
 }
 
+/// Spec 023 §1's deployment template: a recipe object without the three
+/// per-cell paths `writable_root`, `control_path` and `data_path`.
+///
+/// Reading a template checks only which keys it holds. The value of every key
+/// is checked when [`RuntimeTemplate::complete`] makes a recipe from it, so a
+/// caller that must refuse a bad template before any cell exists completes it
+/// once with the paths it would use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTemplate {
+    fields: Map<String, Value>,
+}
+
+/// Why a value is not a runtime template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateRefusal {
+    /// The template carries `field`, one of the three paths the controller
+    /// sets for each cell. Checked before any other key.
+    PerCellField { field: &'static str },
+    /// The template is not a JSON object, or holds an unknown key, or lacks one
+    /// of the other twelve recipe keys, as [`RuntimeRecipe::parse`] would
+    /// refuse it.
+    Recipe(RecipeRefusal),
+}
+
+impl RuntimeTemplate {
+    /// Reads a template from a JSON object. Refuses a value that is not an
+    /// object, then any of the three per-cell keys in that order, then an
+    /// unknown key (the smallest by bytes), then a missing key in spec order.
+    /// `value` must come from [`strict_json::parse_value`], which refuses
+    /// repeated keys.
+    pub fn from_value(value: &Value) -> Result<RuntimeTemplate, TemplateRefusal> {
+        let Value::Object(entries) = value else {
+            return Err(TemplateRefusal::Recipe(RecipeRefusal::NotAnObject {
+                field: String::new(),
+            }));
+        };
+        if let Some(field) = PER_CELL_FIELDS
+            .into_iter()
+            .find(|field| entries.contains_key(*field))
+        {
+            return Err(TemplateRefusal::PerCellField { field });
+        }
+        fields(value, TEMPLATE_FIELDS, "").map_err(TemplateRefusal::Recipe)?;
+        Ok(RuntimeTemplate {
+            fields: entries.clone(),
+        })
+    }
+
+    /// Makes one cell's recipe: the template with the three per-cell paths
+    /// added, read by [`RuntimeRecipe::from_value`] under `limits`. Every
+    /// value rule and every cross-field rule applies to the result, so a
+    /// refusal here may come from the template's own values.
+    pub fn complete(
+        &self,
+        writable_root: &RecipePath,
+        control_path: &RecipePath,
+        data_path: &RecipePath,
+        limits: &PlatformLimits,
+    ) -> Result<RuntimeRecipe, RecipeRefusal> {
+        let mut fields = self.fields.clone();
+        for (key, path) in PER_CELL_FIELDS
+            .into_iter()
+            .zip([writable_root, control_path, data_path])
+        {
+            fields.insert(key.to_owned(), Value::from(path.as_str()));
+        }
+        RuntimeRecipe::from_value(&Value::Object(fields), limits)
+    }
+}
+
 fn artifact_path((role, artifact): (ArtifactRole, &Artifact)) -> (PathRole, &RecipePath) {
     (PathRole::Artifact(role), &artifact.path)
 }
@@ -907,6 +994,20 @@ impl std::fmt::Display for RecipeRefusal {
 }
 
 impl std::error::Error for RecipeRefusal {}
+
+impl std::fmt::Display for TemplateRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TemplateRefusal::PerCellField { field } => write!(
+                f,
+                "the template carries `{field}`, which the controller sets for each cell"
+            ),
+            TemplateRefusal::Recipe(refusal) => refusal.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for TemplateRefusal {}
 
 #[cfg(test)]
 mod tests {
