@@ -6,10 +6,10 @@ reason = """\
   """
 write_it_instead.lines = 80
 write_it_instead.how = """\
-  On 2026-10-20, at main e61cc2e, `git grep -l 'tempfile::' -- '*.rs' | wc -l` gives 34 files, all \
+  On 2026-10-20, at main 01cf8a9, `git grep -l 'tempfile::' -- '*.rs' | wc -l` gives 34 files, all \
   of them tests, test modules or benchmarks, since every member declares tempfile as a \
   dev-dependency. `git grep -h -o -E 'tempfile::[A-Za-z_:]+' -- '*.rs' | sort | uniq -c` gives \
-  tempdir 153, TempDir 16, Builder::new 3 and tempfile 2. Reading the code shows that it calls \
+  tempdir 154, TempDir 16, Builder::new 3 and tempfile 2. Reading the code shows that it calls \
   path() on a TempDir and relies on its drop to remove the tree, that each Builder::new() is \
   followed by prefix("ps") and tempdir_in, and that tempfile() opens an unnamed file for a child's \
   stderr. A replacement with the standard library alone needs: a TempDir that holds its path, \
