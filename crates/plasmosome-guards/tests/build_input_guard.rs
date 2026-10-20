@@ -1230,6 +1230,21 @@ fn a_refusal_names_the_file_the_key_and_the_harm() {
                     vec![symlink(".cargo", "##[error]flaky runner, re-run")],
                     vec![(".cargo", "(symlink)")],
                 ),
+                (
+                    "a path value that holds a runner command",
+                    vec![member("", "x = { path = \"##[error]x\" }\n")],
+                    vec![("crates/a/Cargo.toml", "dependencies.x.path")],
+                ),
+                (
+                    "a locked package name that holds a runner command",
+                    vec![file(
+                        "Cargo.lock",
+                        &format!(
+                            "{LOCKFILE}\n[[package]]\nname = \"##[warning]x\"\nversion = \"1.0.0\"\nsource = \"git+https://example.com/x\"\n"
+                        ),
+                    )],
+                    vec![("Cargo.lock", "package[4].source")],
+                ),
             ],
         );
         for (route, said) in outputs {
@@ -2010,7 +2025,7 @@ fn a_path_dependency_resolves_to_a_tracked_directory_inside() {
             root,
             &[member(
                 "",
-                "y = \"1\"\nz = { version = \"1\" }\nw = { workspace = true }\n",
+                "y = \"1\"\nz = { version = \"1\" }\nw = { workspace = true }\nc = { path = \"./../b/\" }\n",
             )],
         );
     });
@@ -2087,6 +2102,11 @@ fn a_symlink_to_a_directory_holding_a_manifest_is_refused() {
                     vec![symlink("crates/a/up", "../..")],
                     vec![("crates/a/up", "(symlink)")],
                 ),
+                (
+                    "a symlink to a directory holding manifests only further down",
+                    vec![symlink("all", "crates")],
+                    vec![("all", "(symlink)")],
+                ),
             ],
         );
         assert_says(
@@ -2098,7 +2118,8 @@ fn a_symlink_to_a_directory_holding_a_manifest_is_refused() {
             root,
             &[
                 symlink("docs/notes.md", "../crates/a/src/lib.rs"),
-                symlink("docs/gone", "../nowhere"),
+                symlink("docs/gone", "./../nowhere/"),
+                symlink("docs/skill", "../.agents/skills/x/"),
             ],
         );
     });
@@ -2499,6 +2520,16 @@ fn every_tracked_lockfile_names_only_crates_io() {
                 "a package list that is not an array of tables",
                 vec![file("Cargo.lock", "version = 4\npackage = \"x\"\n")],
                 vec![("Cargo.lock", "package")],
+            ),
+            (
+                "a package entry that is not a table",
+                vec![file("Cargo.lock", "version = 4\npackage = [1]\n")],
+                vec![("Cargo.lock", "package[0]")],
+            ),
+            (
+                "a [root] that is not a table",
+                vec![file("Cargo.lock", &format!("root = 1\n{LOCKFILE}"))],
+                vec![("Cargo.lock", "root")],
             ),
         ];
         let loosened: Vec<String> = cases
