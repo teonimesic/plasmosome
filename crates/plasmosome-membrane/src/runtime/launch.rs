@@ -874,6 +874,49 @@ mod tests {
     }
 
     #[test]
+    fn a_descriptor_above_a_lowered_soft_limit_does_not_survive_the_exec() {
+        run_probe("runtime::launch::tests::probe_launch_under_a_lowered_soft_limit");
+    }
+
+    #[test]
+    #[ignore = "helper process for a_descriptor_above_a_lowered_soft_limit_does_not_survive_the_exec"]
+    #[allow(unsafe_code)]
+    fn probe_launch_under_a_lowered_soft_limit() {
+        if !probing() {
+            return;
+        }
+        let fitting = record_recipe();
+        let inherited = Inheritable::low_and_high();
+        let high = inherited.0[1];
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            // SAFETY: `limit` is a local rlimit that getrlimit may write.
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        limit.rlim_cur = 1024;
+        assert_eq!(
+            // SAFETY: `limit` is a local rlimit that setrlimit only reads. This probe process runs
+            // only this test, so a lower limit reaches no other test.
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) },
+            0
+        );
+        // SAFETY: getdtablesize takes no arguments.
+        let table = unsafe { libc::getdtablesize() };
+        assert!(
+            table <= 1024 && high >= table,
+            "the probe holds descriptor {high} at or above its descriptor table of {table}"
+        );
+        let report = launched(HelperExec::prepare(&fitting).expect("the record recipe prepares"));
+        report.assert_exited_cleanly();
+        let open: Vec<i32> = report.descriptors().into_keys().collect();
+        assert_eq!(open, [0, 1, 2, 3], "{}", report.text);
+    }
+
+    #[test]
     fn descriptor_three_yields_the_canonical_recipe_line_then_end_of_file() {
         let recorded = record();
         recorded.report.assert_exited_cleanly();
