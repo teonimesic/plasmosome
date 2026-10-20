@@ -1,11 +1,9 @@
 use super::cell_id::{MAX_CELL_NUMBER, parse_cell_id};
+use super::line::{LineFault, MAX_RECORD_BYTES, read_line};
 use super::path::{PathError, RecipePath};
 use super::recipe::{PlatformLimits, RecipeRefusal, RuntimeRecipe};
-use super::strict_json::{self, StrictJsonError};
 use plasmosome_backend::CellId;
 use serde_json::{Map, Value};
-
-const MAX_RECORD_BYTES: usize = 1_048_576;
 
 const RECORD_FIELDS: [&str; 4] = [
     "cell",
@@ -118,7 +116,7 @@ impl SupervisorConfig {
         record: &[u8],
         limits: &PlatformLimits,
     ) -> Result<SupervisorConfig, ConfigRecordRefusal> {
-        let value = strict_json::parse_value(one_line(record)?).map_err(refused_json)?;
+        let value = read_line(record).map_err(refused_line)?;
         let Value::Object(entries) = &value else {
             return Err(ConfigRecordRefusal::NotAnObject);
         };
@@ -161,30 +159,13 @@ impl SupervisorConfig {
     }
 }
 
-fn one_line(record: &[u8]) -> Result<&[u8], ConfigRecordRefusal> {
-    let Some(body) = record.strip_suffix(b"\n") else {
-        return Err(ConfigRecordRefusal::NotOneLine);
-    };
-    if body.iter().any(|byte| matches!(byte, b'\n' | b'\r')) {
-        return Err(ConfigRecordRefusal::NotOneLine);
-    }
-    if body.len() > MAX_RECORD_BYTES {
-        return Err(ConfigRecordRefusal::TooLarge { bytes: body.len() });
-    }
-    std::str::from_utf8(body).map_err(|_| ConfigRecordRefusal::NotUtf8)?;
-    Ok(body)
-}
-
-fn refused_json(error: StrictJsonError) -> ConfigRecordRefusal {
-    match error {
-        StrictJsonError::DuplicateKey { field, .. } => ConfigRecordRefusal::DuplicateKey { field },
-        StrictJsonError::NotJson {
-            line,
-            column,
-            reason,
-        } => ConfigRecordRefusal::NotJson {
-            detail: format!("{reason} at line {line}, column {column}"),
-        },
+fn refused_line(fault: LineFault) -> ConfigRecordRefusal {
+    match fault {
+        LineFault::NotOneLine => ConfigRecordRefusal::NotOneLine,
+        LineFault::TooLarge { bytes } => ConfigRecordRefusal::TooLarge { bytes },
+        LineFault::NotUtf8 => ConfigRecordRefusal::NotUtf8,
+        LineFault::NotJson { detail } => ConfigRecordRefusal::NotJson { detail },
+        LineFault::DuplicateKey { field } => ConfigRecordRefusal::DuplicateKey { field },
     }
 }
 

@@ -1,11 +1,9 @@
+use super::line::{LineFault, MAX_RECORD_BYTES, read_line};
 use super::path::{PathError, RecipePath};
-use super::strict_json::{self, StrictJsonError};
 use plasmosome_backend::digest::{Digest, DigestError};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-
-const MAX_RECORD_BYTES: usize = 1_048_576;
 
 const VCPUS_RANGE: &str = "an integer from 1 to 255";
 
@@ -63,7 +61,7 @@ impl Artifact {
     /// `sha256`. Every refusal names its key under `field`, such as
     /// `cell_runtime.membraned.path`; a value that is not an object refuses as
     /// `NotAnObject` naming `field` itself. `value` must come from
-    /// [`strict_json::parse_value`], which refuses repeated keys.
+    /// [`strict_json::parse_value`](super::strict_json::parse_value), which refuses repeated keys.
     pub fn from_value(value: &Value, field: &str) -> Result<Artifact, RecipeRefusal> {
         let [path_value, sha256_value] = fields(value, ARTIFACT_FIELDS, field)?;
         let path = path(path_value, format!("{field}.path"))?;
@@ -399,14 +397,14 @@ impl RuntimeRecipe {
     /// refuses as the unknown format. An artifact's own unknown and missing
     /// keys are checked when the value pass reaches its field.
     pub fn parse(record: &[u8], limits: &PlatformLimits) -> Result<RuntimeRecipe, RecipeRefusal> {
-        let value = strict_json::parse_value(one_line(record)?).map_err(refused_json)?;
+        let value = read_line(record).map_err(refused_line)?;
         RuntimeRecipe::from_value(&value, limits)
     }
 
     /// Reads a recipe from a JSON value, applying every rule of
     /// [`RuntimeRecipe::parse`] after its framing and JSON checks, in the same
     /// order. A recipe nested in a larger record is read this way. `value`
-    /// must come from [`strict_json::parse_value`]: a value read any other way
+    /// must come from [`strict_json::parse_value`](super::strict_json::parse_value): a value read any other way
     /// may have dropped a repeated key, which this cannot see.
     pub fn from_value(
         value: &Value,
@@ -690,7 +688,7 @@ impl RuntimeTemplate {
     /// Reads a template from a JSON object. Refuses a value that is not an
     /// object, then any of the three per-cell keys in that order, then an
     /// unknown key (the smallest by bytes), then a missing key in spec order.
-    /// `value` must come from [`strict_json::parse_value`], which refuses
+    /// `value` must come from [`strict_json::parse_value`](super::strict_json::parse_value), which refuses
     /// repeated keys.
     pub fn from_value(value: &Value) -> Result<RuntimeTemplate, TemplateRefusal> {
         let Value::Object(entries) = value else {
@@ -736,30 +734,13 @@ fn artifact_path((role, artifact): (ArtifactRole, &Artifact)) -> (PathRole, &Rec
     (PathRole::Artifact(role), &artifact.path)
 }
 
-fn one_line(record: &[u8]) -> Result<&[u8], RecipeRefusal> {
-    let Some(body) = record.strip_suffix(b"\n") else {
-        return Err(RecipeRefusal::NotOneLine);
-    };
-    if body.iter().any(|byte| matches!(byte, b'\n' | b'\r')) {
-        return Err(RecipeRefusal::NotOneLine);
-    }
-    if body.len() > MAX_RECORD_BYTES {
-        return Err(RecipeRefusal::TooLarge { bytes: body.len() });
-    }
-    std::str::from_utf8(body).map_err(|_| RecipeRefusal::NotUtf8)?;
-    Ok(body)
-}
-
-fn refused_json(error: StrictJsonError) -> RecipeRefusal {
-    match error {
-        StrictJsonError::DuplicateKey { field, .. } => RecipeRefusal::DuplicateField { field },
-        StrictJsonError::NotJson {
-            line,
-            column,
-            reason,
-        } => RecipeRefusal::NotJson {
-            detail: format!("{reason} at line {line}, column {column}"),
-        },
+fn refused_line(fault: LineFault) -> RecipeRefusal {
+    match fault {
+        LineFault::NotOneLine => RecipeRefusal::NotOneLine,
+        LineFault::TooLarge { bytes } => RecipeRefusal::TooLarge { bytes },
+        LineFault::NotUtf8 => RecipeRefusal::NotUtf8,
+        LineFault::NotJson { detail } => RecipeRefusal::NotJson { detail },
+        LineFault::DuplicateKey { field } => RecipeRefusal::DuplicateField { field },
     }
 }
 
