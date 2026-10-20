@@ -1206,9 +1206,23 @@ mod tests {
             )
             .expect("a listener trusting this UID binds")
         };
-        let unwinding = |listener: PrivateListener| {
-            let flag = AtomicBool::new(false);
-            thread::spawn(move || serve(listener, &flag, &mut Panicking))
+        let unwinding =
+            |listener: PrivateListener| spawned(move |flag| serve(listener, flag, &mut Panicking));
+        let unwound = |mut serving: Running| {
+            assert_eq!(
+                serving.finished.recv_timeout(PATIENCE),
+                Err(mpsc::RecvTimeoutError::Disconnected),
+                "the panic unwinds out of the accept loop within ten seconds"
+            );
+            assert!(
+                serving
+                    .handle
+                    .take()
+                    .expect("the loop thread is joined once")
+                    .join()
+                    .is_err(),
+                "the loop thread ends in the handler's panic"
+            );
         };
 
         let listener = own("control.uds");
@@ -1222,10 +1236,7 @@ mod tests {
             Some(-32603),
             "a handler panic is answered before it unwinds"
         );
-        assert!(
-            serving.join().is_err(),
-            "the panic unwinds out of the accept loop"
-        );
+        unwound(serving);
         assert!(
             std::fs::symlink_metadata(&control).is_err(),
             "the socket is removed on the unwinding route out"
@@ -1239,10 +1250,7 @@ mod tests {
         std::fs::rename(&settled, &saved).expect("the socket is renamed away");
         std::fs::write(&settled, b"a settled replacement").expect("the sentinel is written");
         let _ = ask(&mut client, STATUS_REQUEST);
-        assert!(
-            serving.join().is_err(),
-            "the panic unwinds out of the accept loop"
-        );
+        unwound(serving);
         assert_eq!(
             std::fs::read(&settled).expect("the replacement survives the unwind"),
             b"a settled replacement",
