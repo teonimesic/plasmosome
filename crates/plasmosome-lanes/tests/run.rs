@@ -1,11 +1,14 @@
 mod common;
 
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
-use plasmosome_lanes::config::LaneConfig;
-use plasmosome_lanes::run::{Outcome, run_lane};
+use plasmosome_lanes::config::{GuestConfig, LaneConfig};
+use plasmosome_lanes::run::{LaneRun, Outcome, run_lane};
 
 fn process_exists(pid: u32) -> bool {
     Command::new("ps")
@@ -14,6 +17,67 @@ fn process_exists(pid: u32) -> bool {
         .expect("ps runs")
         .status
         .success()
+}
+
+fn running(pid: u32) -> bool {
+    let output = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps runs");
+    output.status.success()
+        && !String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .starts_with('Z')
+}
+
+fn stops_within(pid: u32, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while running(pid) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    true
+}
+
+struct KillOnDrop(Vec<PathBuf>);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        for file in &self.0 {
+            if let Ok(pid) = fs::read_to_string(file) {
+                let _ = Command::new("kill").args(["-9", pid.trim()]).status();
+            }
+        }
+    }
+}
+
+fn read_pid(file: &Path) -> u32 {
+    fs::read_to_string(file)
+        .unwrap_or_else(|error| panic!("the launcher wrote no pid to {}: {error}", file.display()))
+        .trim()
+        .parse()
+        .expect("the pid file holds a number")
+}
+
+fn run_within(
+    limit: Duration,
+    launcher: PathBuf,
+    lane: LaneConfig,
+    guest: GuestConfig,
+    timeout: Duration,
+) -> (LaneRun, Duration) {
+    let (sender, receiver) = mpsc::channel();
+    let started = Instant::now();
+    thread::spawn(move || {
+        let _ = sender.send(run_lane(&launcher, &lane, &guest, timeout));
+    });
+    let run = receiver
+        .recv_timeout(limit)
+        .unwrap_or_else(|_| panic!("run_lane had not returned after {limit:?}"))
+        .expect("spawned");
+    (run, started.elapsed())
 }
 
 const CONSOLE_BOUND: u64 = 16 * 1024 * 1024;
@@ -261,4 +325,192 @@ fn a_lane_and_guest_with_different_run_ids_are_refused_before_spawning() {
 
     assert!(error.to_string().contains("run-2"), "{error}");
     assert!(!marker.exists(), "the launcher was spawned anyway");
+}
+
+#[test]
+fn a_child_holding_stderr_past_the_timeout_dies_with_the_launchers_group() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let held = dir.path().join("held.pid");
+    let _cleanup = KillOnDrop(vec![held.clone()]);
+    let body = format!(
+        "sleep 60 &\necho $! > '{}'\ncat > /dev/null\nexec sleep 60",
+        held.display()
+    );
+    let launcher = common::script(dir.path(), "holds-stderr", &body);
+    let lane = common::lane_config(dir.path(), "run-1");
+    let guest = common::guest_config("run-1", &["id"]);
+    let timeout = Duration::from_secs(5);
+
+    let (run, elapsed) = run_within(Duration::from_secs(15), launcher, lane, guest, timeout);
+
+    assert_eq!(run.outcome, Outcome::TimedOut);
+    assert!(
+        elapsed < timeout + Duration::from_secs(5),
+        "run_lane returned only after {elapsed:?}"
+    );
+    assert!(
+        !process_exists(run.pid),
+        "the launcher {} still exists",
+        run.pid
+    );
+    assert!(
+        held.exists(),
+        "the launcher had not started its child after {elapsed:?}; stderr: {:?}",
+        run.stderr
+    );
+    let child = read_pid(&held);
+    assert!(
+        stops_within(child, Duration::from_secs(5)),
+        "the launcher's child {child} still runs after the run timed out"
+    );
+}
+
+#[test]
+fn a_child_left_holding_stderr_after_a_complete_run_is_killed_and_the_run_finishes() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let held = dir.path().join("held.pid");
+    let _cleanup = KillOnDrop(vec![held.clone()]);
+    let lane = common::lane_config(dir.path(), "run-1");
+    let body = format!(
+        "cat > /dev/null\n{}\nsleep 30 &\necho $! > '{}'\nexit 0",
+        complete_run(&lane.console),
+        held.display()
+    );
+    let launcher = common::script(dir.path(), "leaves-child", &body);
+    let guest = common::guest_config("run-1", &["id"]);
+
+    let (run, elapsed) = run_within(
+        Duration::from_secs(10),
+        launcher,
+        lane,
+        guest,
+        Duration::from_secs(20),
+    );
+
+    assert!(
+        matches!(run.outcome, Outcome::Finished(_)),
+        "{:?}",
+        run.outcome
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "run_lane took {elapsed:?}"
+    );
+    let child = read_pid(&held);
+    assert!(
+        stops_within(child, Duration::from_secs(5)),
+        "the launcher's child {child} still runs after the launcher exited"
+    );
+}
+
+#[test]
+fn a_process_outside_the_launchers_group_holding_stderr_does_not_keep_run_lane_reading() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let escaped = dir.path().join("escaped.pid");
+    let _cleanup = KillOnDrop(vec![escaped.clone()]);
+    let lane = common::lane_config(dir.path(), "run-1");
+    let body = format!(
+        r#"cat > /dev/null
+{}
+echo 'before the escape' >&2
+perl -e '$| = 1; use POSIX; POSIX::setsid(); print "$$\n"; sleep 30' > '{pid}' &
+while [ ! -s '{pid}' ]; do sleep 0.05; done
+exit 0"#,
+        complete_run(&lane.console),
+        pid = escaped.display()
+    );
+    let launcher = common::script(dir.path(), "escapes", &body);
+    let guest = common::guest_config("run-1", &["id"]);
+
+    let (run, elapsed) = run_within(
+        Duration::from_secs(10),
+        launcher,
+        lane,
+        guest,
+        Duration::from_secs(20),
+    );
+
+    assert!(
+        matches!(run.outcome, Outcome::Finished(_)),
+        "{:?}",
+        run.outcome
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "run_lane took {elapsed:?}"
+    );
+    assert!(
+        run.stderr.contains("before the escape"),
+        "the stderr read before the grace ended is kept: {:?}",
+        run.stderr
+    );
+    assert!(
+        running(read_pid(&escaped)),
+        "the escaped process must still run, or this test shows nothing"
+    );
+}
+
+#[test]
+fn a_fifo_at_the_console_path_is_refused_without_blocking() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let lane = common::lane_config(dir.path(), "run-1");
+    let body = format!(
+        "cat > /dev/null\nmkfifo '{}'\nexit 0",
+        lane.console.display()
+    );
+    let launcher = common::script(dir.path(), "fifo", &body);
+    let guest = common::guest_config("run-1", &["id"]);
+
+    let (run, elapsed) = run_within(
+        Duration::from_secs(10),
+        launcher,
+        lane,
+        guest,
+        Duration::from_secs(20),
+    );
+
+    match &run.outcome {
+        Outcome::NotRun(reason) => {
+            assert!(reason.contains("is not a regular file"), "{reason}")
+        }
+        other => panic!("a FIFO console must be not run, it was {other:?}"),
+    }
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "run_lane took {elapsed:?}"
+    );
+}
+
+#[test]
+fn a_symlink_at_the_console_path_is_refused_and_not_followed() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let lane = common::lane_config(dir.path(), "run-1");
+    let console = lane.console.clone();
+    let body = format!(
+        "cat > /dev/null\nln -s /dev/zero '{}'\nexit 0",
+        console.display()
+    );
+    let launcher = common::script(dir.path(), "symlink", &body);
+    let guest = common::guest_config("run-1", &["id"]);
+
+    let (run, _) = run_within(
+        Duration::from_secs(10),
+        launcher,
+        lane,
+        guest,
+        Duration::from_secs(20),
+    );
+
+    match &run.outcome {
+        Outcome::NotRun(reason) => assert!(
+            reason.contains(&console.display().to_string()),
+            "the refusal names the console: {reason}"
+        ),
+        other => panic!("a symlinked console must be not run, it was {other:?}"),
+    }
+    assert!(
+        run.console.is_empty(),
+        "{} console bytes were read through the symlink",
+        run.console.len()
+    );
 }
