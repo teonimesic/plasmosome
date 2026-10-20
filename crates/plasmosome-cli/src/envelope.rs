@@ -32,12 +32,48 @@ pub enum ErrorBody {
 /// by `fields`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ClientError {
-    pub code: ClientCode,
-    /// Prose for a person. A caller branches on `code` and `fields`, never on this.
-    pub message: String,
-    /// The structured fields spec 025 names for `code`, in the order to write them. A key must
-    /// not repeat, and must not be `domain`, `code` or `message`.
-    pub fields: Vec<(String, Json)>,
+    code: ClientCode,
+    message: String,
+    fields: Vec<(String, Json)>,
+}
+
+impl ClientError {
+    /// Takes the code, prose for a person, and the structured fields spec 025 names for `code` in
+    /// the order to write them. Hands `fields` back when a key repeats or is `domain`, `code` or
+    /// `message`, since writing it would repeat a key.
+    pub fn new(
+        code: ClientCode,
+        message: String,
+        fields: Vec<(String, Json)>,
+    ) -> Result<ClientError, Vec<(String, Json)>> {
+        let clashes = fields.iter().enumerate().any(|(index, (key, _))| {
+            matches!(key.as_str(), "domain" | "code" | "message")
+                || json::member(&fields[..index], key).is_some()
+        });
+        if clashes {
+            return Err(fields);
+        }
+        Ok(ClientError {
+            code,
+            message,
+            fields,
+        })
+    }
+
+    /// Returns the client code.
+    pub fn code(&self) -> ClientCode {
+        self.code
+    }
+
+    /// Returns the message. A caller branches on the code and the fields, never on this.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns the structured fields in the order they are written.
+    pub fn fields(&self) -> &[(String, Json)] {
+        &self.fields
+    }
 }
 
 /// The daemon's error object, relayed unchanged with `domain: "kernel"` written first.
