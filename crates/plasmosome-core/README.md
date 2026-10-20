@@ -101,9 +101,14 @@ every string, is a basic string on one line. Every control character is escaped,
 line and paragraph separators U+2028 and U+2029 and the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069, which a client can read as a line break or a reordering. A command's
 refusals name it by its TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file
-could not be read) and `ManifestError::Parse` (the text is not TOML) carry no field: the TOML
-parser reports a position, not a field path, and naming one would be a guess. A `Parse` error
-quotes the source line, and its text is written with the same escapes, keeping its line breaks.
+could not be read), `ManifestError::Parse` (the text is not TOML) and `ManifestError::TooLarge`
+(the declaration is over 1 MiB) carry no field. For `Parse`, the TOML parser reports a position,
+not a field path, and naming one would be a guess. A `Parse` error quotes the source line, and its
+text is written with the same escapes, keeping its line breaks. `TooLarge` is decided before any
+TOML is parsed: a declaration over `MAX_MANIFEST_BYTES`, 1 MiB, is refused with no field and no
+fix. `load` reads at most 1 MiB plus one byte, so a FIFO or `/dev/zero` is refused at the bound.
+It does not bound time: a FIFO whose writer stops short of the bound and never closes still
+blocks it.
 `WireError::manifest_refusal` turns any of them into code 108, carrying the fix when there is one.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
 description.
