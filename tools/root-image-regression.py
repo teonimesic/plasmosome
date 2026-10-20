@@ -319,7 +319,7 @@ def entries_under_opt_or_usr_local_bin_refuse():
     with scratch() as root:
         for changes, path in [({"opt/yarn-v1.22.22": d()}, "/opt/yarn-v1.22.22"),
                               ({"usr/local/bin/node": f(b"node", 0o755)}, "/usr/local/bin/node"),
-                              ({"opt": s("var/opt")}, "/opt")]:
+                              ({"opt": s("var/opt")}, "/opt"), ({"usr/local/bin": s("../../bin")}, "/usr/local/bin")]:
             assert path in refusal("stage", stage_with, root, changes)
 
 
@@ -340,8 +340,8 @@ def the_product_image_has_nothing_under_opt_or_usr_local_bin():
 
 def dev_proc_sys_are_emptied_and_dockerenv_dropped():
     with scratch() as root:
-        tree, _ = staged(root, {"proc/1": d(), "sys": None, "sys/kernel": d(),
-                                "dev/null": ("char", 0o666, 0, 0, b"", "")})
+        tree, _ = staged(root, {"proc/1": d(), "sys": None, "sys/kernel": d(), "dev": d(0o700, 501, 80),
+                                "proc": d(0o555, 1, 1), "dev/null": ("char", 0o666, 0, 0, b"", "")})
         for name in ("dev", "proc", "sys"):
             assert tree[name][:4] == ("dir", 0o755, 0, 0), (name, tree[name])
         assert [name for name in tree if name.startswith(("dev/", "proc/", "sys/"))] == []
@@ -353,6 +353,12 @@ def a_malformed_base_member_refuses():
         fifo = ("fifo", 0o644, 0, 0, b"", "")
         assert "/run/initctl" in refusal("stage", stage_with, root, {"run": d(), "run/initctl": fifo})
         assert "../escape" in refusal("stage", stage_with, root, {"../escape": f()})
+        for name in ("./etc/hostname", "home//workload/x"):
+            assert "normalised" in refusal("stage", stage_with, root, {name: f()}), name
+        fake = FakeDocker({"etc/passwd": f(USERS + b"+alice:x:1001:1001::/home/alice:/bin/sh\n")})
+        code, out, err, work, images = built(root, fake, work_name="nis")
+        assert code == 1 and err.startswith("root-image: refused stage: /etc/passwd line 3 is malformed"), err
+        assert ["docker", "run"] not in [argv[:2] for argv in fake.calls], fake.calls
         base = root / "base.tar"
         write_tar(base, DEBIAN)
         with tarfile.open(base, "a") as out:
@@ -383,7 +389,8 @@ def a_member_naming_plasmosome_refuses():
     with scratch() as root:
         for changes, name in [({"usr/share": d(), "usr/share/Plasmosome": f()}, "/usr/share/Plasmosome"),
                               ({"etc/PLASMID.conf": f()}, "/etc/PLASMID.conf"),
-                              ({"etc/hint": s("/run/plasmid")}, "/etc/hint")]:
+                              ({"etc/hint": s("/run/plasmid")}, "/etc/hint"),
+                              ({"usr/bin/pla\u017fmid": f()}, "/usr/bin/pla\u017fmid")]:
             assert name in refusal("stage", stage_with, root, changes)
         probe = root / "probe"
         probe.write_bytes(b"probe")
@@ -511,6 +518,7 @@ def contract_check_reads_debugfs_output():
             ("home.stat", home.replace("Type: directory", "Type: regular"), "/home/workload"),
             ("home.stat", "", "/home/workload"),
             ("tmp.stat", tmp.replace("Mode:  01777", "Mode:  0777"), "/tmp"),
+            ("tmp.stat", tmp.replace("User:     0", "User:   501"), "/tmp"),
             ("passwd", users + b"alice:x:1000:1000::/home/alice:/bin/sh\n", "1000"),
             ("passwd", users.replace(b":/home/workload:", b":/home/w:"), "workload"),
             ("passwd", users.replace(b"workload:x:1000:1000", b"workload:x:01000:1000"), "line 3"),
@@ -526,6 +534,7 @@ def contract_check_reads_debugfs_output():
             ("opt.ls", "", "/opt"),
             ("home.ls", (check / "home.ls").read_text().replace(".profile", ".prof1le"), ".profile"),
             ("home.ls", (check / "home.ls").read_text().replace("/1000/1000/.bashrc", "/0/0/.bashrc"), ".bashrc"),
+            ("home.ls", (check / "home.ls").read_text().replace("/1000/1000/.bashrc", "/1000/0/.bashrc"), ".bashrc"),
             ("add-1.stat", (check / "add-1.stat").read_text().replace("Mode:  0755", "Mode:  0644"), "lane-probe"),
             ("add-1.stat", (check / "add-1.stat").read_text().replace("User:     0", "User:  1000"), "lane-probe"),
             ("add-1.data", "other bytes", "lane-probe"),
@@ -563,6 +572,7 @@ def judge_accounts_accepts_exactly_the_contract():
         (USERS + WORKLOAD_USER + b"workload:x:1001:1001::/home/workload:/bin/bash\n", GROUP + WORKLOAD_GROUP, "line 4"),
         (USERS + WORKLOAD_USER + WORKLOAD_USER, GROUP + WORKLOAD_GROUP, "lines 3, 4"),
         (USERS + b"-workload::::::\n" + WORKLOAD_USER, GROUP + WORKLOAD_GROUP, "line 3"),
+        (USERS + b"+alice:x:1001:1001::/home/alice:/bin/sh\n" + WORKLOAD_USER, GROUP + WORKLOAD_GROUP, "line 3"),
         (USERS + WORKLOAD_USER, GROUP + WORKLOAD_GROUP + WORKLOAD_GROUP, "lines 4, 5"),
         (USERS + WORKLOAD_USER, GROUP + b"workload:x:1001:\n" + WORKLOAD_GROUP, "line 4"),
         (b"\xff\n" + USERS + WORKLOAD_USER, GROUP + WORKLOAD_GROUP, "line 1"),
@@ -645,7 +655,18 @@ def a_base_that_is_not_local_or_not_pinned_refuses_before_create():
         fake.repo_digests = [f"debian@sha256:{'0' * 64}"]
         code, out, err, work, images = built(root, fake, work_name="unpinned")
         assert code == 1 and DIGEST in err and ["docker", "create"] not in [argv[:2] for argv in fake.calls], err
+        fake = FakeDocker()
+        fake.descriptor = {**fake.descriptor, "digest": f"sha256:{'0' * 64}"}
+        code, out, err, work, images = built(root, fake, work_name="other-index")
+        assert code == 1 and DIGEST in err and ["docker", "create"] not in [argv[:2] for argv in fake.calls], err
+        fake = FakeDocker()
+        fake.descriptor = None
+        code, out, err, work, images = built(root, fake, work_name="classic-store")
+        assert code == 0, err
+        manifest = json.loads((Path(json.loads(out)["image_dir"]) / "manifest.json").read_text())
+        assert manifest["base"]["digest_form"] == "unknown" and manifest["base"]["digest"] == f"sha256:{DIGEST}"
         for attribute, value, needle in [("inspect_out", "[]", "no image record"), ("create_code", 125, "create"),
+                                         ("create_out", "WARNING: the image has no linux/arm64 variant\n", "create"),
                                          ("export_code", 1, "export"), ("rm_code", 1, "remains")]:
             fake = FakeDocker()
             setattr(fake, attribute, value)
@@ -804,6 +825,9 @@ def failure_before_placement_removes_the_stage_and_keeps_the_work_root():
 def reads_from_the_base_are_bounded():
     with scratch() as root:
         assert "4096" in refusal("stage", stage_with, root, limit=4096)
+        fake = FakeDocker({"usr/share": d(), "usr/share/big": f(bytes(SIZE_MIB << 20))})
+        code, out, err, work, images = built(root, fake, work_name="big-export")
+        assert code == 1 and err.startswith("root-image: refused stage: ") and str(SIZE_MIB << 20) in err, err
         assert "/etc/passwd" in refusal("stage", stage_with, root, {"etc/passwd": f(USERS + b"x" * (1 << 20))})
         with patched("MAX_OUTPUT_BYTES", 8):
             detail = refusal("command", API["run_command"], [sys.executable, "-c", "print('x' * 9)"], dict(os.environ))
