@@ -6,7 +6,7 @@ reason = """\
   """
 write_it_instead.lines = 1865
 write_it_instead.how = """\
-  On 2026-10-20, at main a5e32b5, `git grep -l 'toml::' -- '*.rs' | wc -l` gives 5 files, and `git \
+  On 2026-10-20, at main 7df9935, `git grep -l 'toml::' -- '*.rs' | wc -l` gives 5 files, and `git \
   grep -h -o -E 'toml::(from_str|to_string|Value|Table|de::Error|map::Map)' -- '*.rs' | sort | \
   uniq -c` gives Value 82, from_str 15, Table 6, to_string 5, Error 1 and Map 1. Reading the code \
   shows that the declaration reader in crates/plasmosome-core/src/manifest.rs parses text into a \
@@ -28,12 +28,12 @@ write_it_instead.how = """\
   inline tables and quotes strings and keys, since the tests only parse its output again and never \
   compare it as text (100); and the depth bound of 80 nested arrays, inline tables or dotted-key \
   parts, which toml_edit keeps because its unbounded feature is off, and which spec 026 section 5 \
-  names as the manifest's only bound (15): 1865 lines. Replacing it removes 1 package from \
-  Cargo.lock: toml@0.8. `cargo tree --locked --offline -e features -i serde_spanned --target all` \
-  shows that only toml turns on toml_edit's serde feature, which is what brings serde_spanned, so \
-  serde_spanned@0.6 would leave too. Replacing toml and toml_edit together removes 9 packages from \
-  Cargo.lock: equivalent@1, hashbrown@0.17, indexmap@2, serde_spanned@0.6, toml@0.8, \
-  toml_datetime@0.6, toml_edit@0.22, toml_write@0.1 and winnow@0.7.\
+  lists among the manifest's bounds as TOML depth 80 within each key or value (15): 1865 lines. \
+  Replacing it removes 1 package from Cargo.lock: toml@0.8. `cargo tree --locked --offline -e \
+  features -i serde_spanned --target all` shows that only toml turns on toml_edit's serde feature, \
+  which is what brings serde_spanned, so serde_spanned@0.6 would leave too. Replacing toml and \
+  toml_edit together removes 9 packages from Cargo.lock: equivalent@1, hashbrown@0.17, indexmap@2, \
+  serde_spanned@0.6, toml@0.8, toml_datetime@0.6, toml_edit@0.22, toml_write@0.1 and winnow@0.7.\
   """
 exception = ""
 brings = [
