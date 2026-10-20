@@ -518,16 +518,30 @@ tools/root-image build --base "$BASE" --source-date-epoch 1792454400 \
   --images-root /usr/local/var/plasmosome/runtime/images
 ```
 
-The images root must exist. The work root must not exist yet, and it must sit where Docker
-Desktop shares files with its VM, such as under your home directory. Docker Desktop does not share
-`/usr/local` by default, so a work root there reaches the container empty and the tool refuses.
-Intermediate files stay in the work root, so you can read them after a failure.
+The images root must exist and be writable by you. The work root must not exist yet, and it must
+sit where Docker Desktop shares files with its VM, such as under your home directory. Docker
+Desktop does not share `/usr/local` by default, so a work root there reaches the container empty
+and the tool refuses. Intermediate files stay in the work root, so you can read them after a
+failure. Nothing the build container leaves there is trusted afterwards, except `rootfs.raw`, which
+is opened without following a link and must be exactly `--size-mib` MiB.
+
+The images root above is the lab location, next to the runtime bundles. It is gated. Spec 001
+refuses an artifact with a replaceable parent (001:893), and owner gate O-1 has the product check
+refuse an instance root under the admin-writable `/usr/local/var` (spec 027). So product
+verification cannot accept an image from there until O-1 is answered.
 
 The tool prints one JSON line: `image_dir`, `image_id16`, `manifest_sha256`, `rootfs_sha256`,
 `content_sha256` and `kind`. The image directory is `<images-root>/<image_id16>`, the first 16 hex
 digits of the manifest's sha256. It holds `rootfs.raw`, `content.jsonl` (one line per file in the
-image), `SHA256SUMS` and `manifest.json`, all read-only and `uchg`. An existing directory is never
-replaced. Pin an image by `manifest_sha256`.
+image), `SHA256SUMS` and `manifest.json`, all read-only and `uchg`. `rootfs.raw` keeps the zero
+runs of the filesystem as holes, so a 1024 MiB image takes about 95 MiB on disk. An existing
+directory is never replaced. Pin an image by `manifest_sha256`. The manifest's `tool_sha256` is the
+sha256 of the tool that built the image, so images from different versions of the tool can be told
+apart.
+
+`uchg` guards against accidents, not against the user who owns the directory. To remove a placed
+image, run `chflags -R nouchg <image_dir>`, then `rm -r <image_dir>`. Whether an image stays is the
+owner's decision.
 
 The image is the base with these changes: the `workload` account (uid and gid 1000, home
 `/home/workload` with mode 0700 and the skel files), `/tmp` with mode 01777, empty `/dev`, `/proc`
@@ -536,6 +550,16 @@ with anything under `/opt` or `/usr/local/bin`, or with a path that names plasmo
 (spec 027). `--add SRC:DEST:MODE` adds a root-owned file and makes the kind `test`, never
 `product`. Two builds with the same base and `--source-date-epoch` give the same `content_sha256`.
 The ext4 bytes can differ, so compare rebuilds by `content_sha256`.
+
+The base's own setuid and setgid programs, such as `su`, `passwd` and `mount`, keep their modes.
+They give the workload nothing, because it runs with no-new-privs (spec 024 §4). `--add` refuses
+those modes.
+
+The checks have limits. The base checks itself: `mke2fs`, `e2fsck`, `dumpe2fs` and `debugfs` all
+come from the base image, so the read-back reports only what that base chooses to report. A
+separate, pinned builder image is a planner question, not something the tool does. `content.jsonl`
+lists the stage tar the image was made from. It is not a listing read back from `rootfs.raw`. The
+manifest's `limits` say the same.
 
 ## Development work
 
