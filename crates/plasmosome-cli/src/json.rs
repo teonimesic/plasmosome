@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::slice;
 
 const MAX_INDENT: usize = 32;
 
@@ -530,14 +529,15 @@ pub fn write_human(value: &Json) -> String {
     out
 }
 
+#[derive(Clone, Copy)]
 enum Rest<'a> {
-    Items(slice::Iter<'a, Json>),
-    Members(slice::Iter<'a, (String, Json)>),
+    Items(&'a [Json]),
+    Members(&'a [(String, Json)]),
 }
 
 struct Level<'a> {
     rest: Rest<'a>,
-    first: bool,
+    next: usize,
 }
 
 pub(crate) fn write_value(out: &mut String, value: &Json, style: Style, depth: usize) {
@@ -556,15 +556,15 @@ pub(crate) fn write_value(out: &mut String, value: &Json, style: Style, depth: u
                 Json::Array(items) => {
                     out.push('[');
                     levels.push(Level {
-                        rest: Rest::Items(items.iter()),
-                        first: true,
+                        rest: Rest::Items(items),
+                        next: 0,
                     });
                 }
                 Json::Object(members) => {
                     out.push('{');
                     levels.push(Level {
-                        rest: Rest::Members(members.iter()),
-                        first: true,
+                        rest: Rest::Members(members),
+                        next: 0,
                     });
                 }
             }
@@ -573,16 +573,16 @@ pub(crate) fn write_value(out: &mut String, value: &Json, style: Style, depth: u
         let Some(level) = levels.last_mut() else {
             return;
         };
-        let item = match &mut level.rest {
-            Rest::Items(items) => items.next().map(|value| (None, value)),
+        let item = match level.rest {
+            Rest::Items(items) => items.get(level.next).map(|value| (None, value)),
             Rest::Members(members) => members
-                .next()
+                .get(level.next)
                 .map(|(key, value)| (Some(key.as_str()), value)),
         };
         match item {
             Some((key, value)) => {
-                separator(out, level.first, style, inner);
-                level.first = false;
+                separator(out, level.next == 0, style, inner);
+                level.next += 1;
                 if let Some(key) = key {
                     write_key(out, key, style);
                 }
