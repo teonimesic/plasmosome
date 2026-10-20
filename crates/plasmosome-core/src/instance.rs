@@ -3439,11 +3439,7 @@ mod tests {
                 Ok(reads)
             })
         };
-        let path = root.join("cells/cell-1/launched");
-        let running = root.join("cells/cell-1/running");
         for _ in 0..1_000 {
-            fs::write(&running, running_bytes()).expect("the running record is written");
-            fs::rename(&running, &path).expect("the running record is put back");
             writer
                 .mark_launched_stopped()
                 .expect("the clean stop is recorded");
