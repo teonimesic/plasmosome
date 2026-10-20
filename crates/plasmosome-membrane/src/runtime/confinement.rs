@@ -364,7 +364,8 @@ mod darwin {
         // SAFETY: `record` is a local UniqueIdentifiers, laid out as XNU's struct
         // proc_uniqidentifierinfo from its private proc_info_private.h, which no SDK header
         // declares, and UNIQUE_IDENTIFIERS_SIZE is its exact size. For PROC_PIDUNIQIDENTIFIERINFO
-        // proc_pidinfo writes at most that many bytes into it, and it keeps no pointer.
+        // proc_pidinfo writes at most that many bytes into it, and it keeps no pointer. Every
+        // field is an integer or an array of integers, so any bytes it writes leave a valid value.
         let written = unsafe {
             libc::proc_pidinfo(
                 pid,
