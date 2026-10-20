@@ -19,6 +19,7 @@ one.
 | `registry` | Tool names, their registered owners and author-written descriptions |
 | `reconciler` | Desired state vs observed state, converging by generation |
 | `gatekeeper` | Credential custody — the cell receives handles, never secrets |
+| `kill_budget` | `cell.kill`'s deadlines under spec 023 §7, with no IO. Each step's share is measured from what is left of the kill's deadline when the step starts: the lock reserve, the workload stop, the withdrawal with its drain, effect and publication parts, the guest stop's `DrainSpec` and answer wait, and `membraned`'s shutdown deadline. Each is whole milliseconds and at least 1 ms, or `NoBudget`. `Incomplete` is the reply's closed set, and a reply is a retirement exactly when it lacks `teardown` |
 | `session_log` | Append-only, synced audit record shared by an instance's cells through one locked writer; an IO error stops all later appends |
 | `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode`; the one constructor for a cell's journal and socket paths |
 | `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens |
