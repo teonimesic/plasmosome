@@ -212,12 +212,12 @@ dependencies first, so a PR that changes those relies on the rule below.
 own machine, its git hooks included, until the git-only step has passed for that head. The reviewer
 fetches the PR's ref and inspects it through the object store, and runs main's copy of the step
 against the fetched commit. A CI result counts only if the PR leaves the workflows and the step's
-script unchanged. Only then is the PR checked out, with hooks disabled:
-`git -c core.hooksPath=/dev/null checkout …`. This repository sets a relative `core.hooksPath`, so
-checking out a PR otherwise runs that PR's own `.githooks/`, at checkout and at every later git
-command there. Before running anything, the reviewer reads any change to `.githooks/`, `.github/`,
-`build.rs` or `rust-toolchain*`, the build-time code of every package the lockfile adds or changes,
-and the contributor's own tests and proc macros.
+script unchanged. Only then is the PR checked out, in a separate clone made with
+`git clone --no-checkout -c core.hooksPath=/dev/null`, as spec 030 §3 says. This repository sets
+a relative `core.hooksPath`, so checking out a PR otherwise runs that PR's own `.githooks/`, at
+checkout and at every later git command there. Before running anything, the reviewer reads any
+change to `.githooks/`, `.github/`, `build.rs` or `rust-toolchain*`, the build-time code of every
+package the lockfile adds or changes, and the contributor's own tests and proc macros.
 
 **Dependencies on main.** The record guard's task writes a re-derived record for every direct
 dependency on main: today `serde`, `serde_json`, `uuid`, `toml`, `toml_edit`, `libc`, `cc`,
@@ -234,8 +234,13 @@ updates and advisories. A PR that changes a pin updates the record. Who does the
 
 **CI tools and actions.** Every tool CI installs is pinned to a version and installed with
 `--locked`. Every action is pinned to a commit SHA. Workflows keep least-privilege `permissions:`,
-check out with `persist-credentials: false`, and never use `pull_request_target`. These are
-reviewer items. Q7 asks the owner whether to enforce the action pin as a repository setting.
+check out with `persist-credentials: false`, and never use `pull_request_target`. A job that holds
+a secret or a write permission, or runs on a self-hosted runner, executes no pull request's code,
+and no `workflow_run` or `issue_comment` job checks one out (spec 030). The one exception is
+CodeQL's default setup, which runs on pull request code with `security-events: write` and
+`build-mode: none`, and takes the head's `rust-toolchain.toml` as its toolchain; spec 030 Q6
+holds it. These are reviewer items. Q7 asks the owner whether to enforce the action pin as a
+repository setting.
 
 ### 2. `unsafe` code
 
@@ -380,8 +385,8 @@ once it exists, for `fuzz/`, with a seven-day cooldown that security updates ski
 moves a range never shares a PR with compatible updates. Dependabot groups by update type, not by
 version position, and whether it calls `toml` 0.8 to 0.9 a minor update is unmeasured. If it does,
 the config names the direct `0.x` crates in their own group: today `toml`, `toml_edit`, `libc` and
-`criterion`. Every Dependabot PR passes the same gates as any other, and its reviewer files its task
-(see the pr-review amendment).
+`criterion`. Every Dependabot PR passes the same gates as any other, and its steward files its task
+(spec 030).
 
 ### 5. Bytes from a less-trusted side
 
