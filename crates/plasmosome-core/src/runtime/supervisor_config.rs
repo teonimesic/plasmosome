@@ -1,3 +1,254 @@
+use super::cell_id::{MAX_CELL_NUMBER, parse_cell_id};
+use super::path::{PathError, RecipePath};
+use super::recipe::{PlatformLimits, RecipeRefusal, RuntimeRecipe};
+use super::strict_json::{self, StrictJsonError};
+use plasmosome_backend::CellId;
+use serde_json::{Map, Value};
+
+const MAX_RECORD_BYTES: usize = 1_048_576;
+
+const RECORD_FIELDS: [&str; 4] = [
+    "cell",
+    "instance_root",
+    "runtime_recipe",
+    "boot_deadline_ms",
+];
+
+/// Spec 023 §4's config record: what the controller writes to one
+/// `membraned` on descriptor 3, and all that `membraned` needs to start its
+/// cell.
+///
+/// The fields are public so the controller can build one. A value decoded
+/// from a record always meets every rule [`SupervisorConfig::decode`] checks;
+/// a value built by hand may not, and [`SupervisorConfig::encode`] refuses
+/// the ones decode would refuse without knowing the host's limits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupervisorConfig {
+    /// The cell's ID, `cell-<n>` as [`parse_cell_id`] accepts it.
+    pub cell: CellId,
+    /// The instance root whose `cells/<cell>/` directory the cell runs in.
+    pub instance_root: RecipePath,
+    /// The deployment template completed with this cell's three paths.
+    pub runtime_recipe: RuntimeRecipe,
+    /// `membraned`'s own budget, in milliseconds, from its exec to the
+    /// guest's hello: the start budget left at spawn. At least 1.
+    pub boot_deadline_ms: u64,
+}
+
+/// Why a config record is refused. Each variant names the first rule the
+/// record broke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigRecordRefusal {
+    /// The record does not end in one newline, holds another newline, or holds
+    /// a carriage return.
+    NotOneLine,
+    /// The record holds `bytes` bytes before its newline; at most 1,048,576
+    /// are allowed.
+    TooLarge { bytes: usize },
+    /// The record is not UTF-8.
+    NotUtf8,
+    /// The record is not one JSON value.
+    NotJson { detail: String },
+    /// A key appears twice in one object; `field` is its dotted name, such as
+    /// `runtime_recipe.vcpus`.
+    DuplicateKey { field: String },
+    /// The record is not a JSON object.
+    NotAnObject,
+    /// `field` is not one of the record's four keys. Of several, the smallest
+    /// by bytes is named.
+    UnknownField { field: String },
+    /// `field` is required and absent. Of several, the first in key order is
+    /// named.
+    MissingField { field: &'static str },
+    /// `cell` is not a string that [`parse_cell_id`] accepts.
+    BadCell,
+    /// `instance_root` is not a string, when `fault` is `None`, or not a
+    /// canonical absolute path.
+    BadInstanceRoot { fault: Option<PathError> },
+    /// `runtime_recipe` is not a recipe this host may launch.
+    Recipe(RecipeRefusal),
+    /// `boot_deadline_ms` is not a JSON integer from 1 to `u64::MAX`.
+    BadBootDeadline,
+}
+
+impl SupervisorConfig {
+    /// Writes the record: one line of compact JSON ending in one newline,
+    /// with the keys `cell`, `instance_root`, `runtime_recipe` and
+    /// `boot_deadline_ms` in that order. `runtime_recipe` is the recipe's
+    /// [`RuntimeRecipe::to_ndjson`] line, without its newline, as a nested
+    /// object.
+    ///
+    /// Refuses a `cell` that [`parse_cell_id`] refuses with `BadCell`, a zero
+    /// `boot_deadline_ms` with `BadBootDeadline`, and then a line of more than
+    /// 1,048,576 bytes before its newline with `TooLarge`.
+    pub fn encode(&self) -> Result<Vec<u8>, ConfigRecordRefusal> {
+        if parse_cell_id(self.cell.as_str()).is_none() {
+            return Err(ConfigRecordRefusal::BadCell);
+        }
+        if self.boot_deadline_ms == 0 {
+            return Err(ConfigRecordRefusal::BadBootDeadline);
+        }
+        let recipe = self.runtime_recipe.to_ndjson();
+        let mut line = format!(
+            r#"{{"cell":{},"instance_root":{},"runtime_recipe":"#,
+            quoted(self.cell.as_str()),
+            quoted(self.instance_root.as_str()),
+        )
+        .into_bytes();
+        line.extend_from_slice(recipe.strip_suffix(b"\n").unwrap_or(&recipe));
+        line.extend_from_slice(
+            format!(r#","boot_deadline_ms":{}}}"#, self.boot_deadline_ms).as_bytes(),
+        );
+        if line.len() > MAX_RECORD_BYTES {
+            return Err(ConfigRecordRefusal::TooLarge { bytes: line.len() });
+        }
+        line.push(b'\n');
+        Ok(line)
+    }
+
+    /// Reads a record, refusing it whole at the first rule it breaks, so no
+    /// caller acts on part of one. The rules, in order: exactly one newline,
+    /// at the end, and no carriage return; at most 1,048,576 bytes before the
+    /// newline; UTF-8; one strict JSON value, with no key repeated at any
+    /// depth; an object with exactly the four keys, refusing an unknown key
+    /// before a missing one; then `cell`, `instance_root`, `runtime_recipe`
+    /// (read by [`RuntimeRecipe::from_value`] under `limits`) and
+    /// `boot_deadline_ms`, each on its own, in that order.
+    pub fn decode(
+        record: &[u8],
+        limits: &PlatformLimits,
+    ) -> Result<SupervisorConfig, ConfigRecordRefusal> {
+        let value = strict_json::parse_value(one_line(record)?).map_err(refused_json)?;
+        let Value::Object(entries) = &value else {
+            return Err(ConfigRecordRefusal::NotAnObject);
+        };
+        if let Some(field) = entries
+            .keys()
+            .filter(|key| !RECORD_FIELDS.contains(&key.as_str()))
+            .min()
+        {
+            return Err(ConfigRecordRefusal::UnknownField {
+                field: field.clone(),
+            });
+        }
+        let (cell, instance_root, runtime_recipe, boot_deadline_ms) = (
+            required(entries, "cell")?,
+            required(entries, "instance_root")?,
+            required(entries, "runtime_recipe")?,
+            required(entries, "boot_deadline_ms")?,
+        );
+        Ok(SupervisorConfig {
+            cell: cell
+                .as_str()
+                .filter(|text| parse_cell_id(text).is_some())
+                .map(CellId::from)
+                .ok_or(ConfigRecordRefusal::BadCell)?,
+            instance_root: instance_root
+                .as_str()
+                .ok_or(ConfigRecordRefusal::BadInstanceRoot { fault: None })
+                .and_then(|text| {
+                    RecipePath::parse(text).map_err(|fault| ConfigRecordRefusal::BadInstanceRoot {
+                        fault: Some(fault),
+                    })
+                })?,
+            runtime_recipe: RuntimeRecipe::from_value(runtime_recipe, limits)
+                .map_err(ConfigRecordRefusal::Recipe)?,
+            boot_deadline_ms: boot_deadline_ms
+                .as_u64()
+                .filter(|milliseconds| *milliseconds > 0)
+                .ok_or(ConfigRecordRefusal::BadBootDeadline)?,
+        })
+    }
+}
+
+fn one_line(record: &[u8]) -> Result<&[u8], ConfigRecordRefusal> {
+    let Some(body) = record.strip_suffix(b"\n") else {
+        return Err(ConfigRecordRefusal::NotOneLine);
+    };
+    if body.iter().any(|byte| matches!(byte, b'\n' | b'\r')) {
+        return Err(ConfigRecordRefusal::NotOneLine);
+    }
+    if body.len() > MAX_RECORD_BYTES {
+        return Err(ConfigRecordRefusal::TooLarge { bytes: body.len() });
+    }
+    std::str::from_utf8(body).map_err(|_| ConfigRecordRefusal::NotUtf8)?;
+    Ok(body)
+}
+
+fn refused_json(error: StrictJsonError) -> ConfigRecordRefusal {
+    match error {
+        StrictJsonError::DuplicateKey { field, .. } => ConfigRecordRefusal::DuplicateKey { field },
+        StrictJsonError::NotJson {
+            line,
+            column,
+            reason,
+        } => ConfigRecordRefusal::NotJson {
+            detail: format!("{reason} at line {line}, column {column}"),
+        },
+    }
+}
+
+fn required<'a>(
+    entries: &'a Map<String, Value>,
+    field: &'static str,
+) -> Result<&'a Value, ConfigRecordRefusal> {
+    entries
+        .get(field)
+        .ok_or(ConfigRecordRefusal::MissingField { field })
+}
+
+fn quoted(text: &str) -> String {
+    Value::from(text).to_string()
+}
+
+impl std::fmt::Display for ConfigRecordRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigRecordRefusal::NotOneLine => f.write_str(
+                "the config record is not one line ending in a single newline with no carriage return",
+            ),
+            ConfigRecordRefusal::TooLarge { bytes } => write!(
+                f,
+                "the config record is {bytes} bytes before its newline; at most {MAX_RECORD_BYTES} are allowed"
+            ),
+            ConfigRecordRefusal::NotUtf8 => f.write_str("the config record is not UTF-8"),
+            ConfigRecordRefusal::NotJson { detail } => {
+                write!(f, "the config record is not JSON: {detail}")
+            }
+            ConfigRecordRefusal::DuplicateKey { field } => {
+                write!(f, "the config record repeats the field {field:?}")
+            }
+            ConfigRecordRefusal::NotAnObject => f.write_str("the config record is not a JSON object"),
+            ConfigRecordRefusal::UnknownField { field } => {
+                write!(f, "the config record carries an unknown field {field:?}")
+            }
+            ConfigRecordRefusal::MissingField { field } => {
+                write!(f, "the config record is missing `{field}`")
+            }
+            ConfigRecordRefusal::BadCell => write!(
+                f,
+                "`cell` must be cell-<n>, with n from 1 to {MAX_CELL_NUMBER} and no leading zero"
+            ),
+            ConfigRecordRefusal::BadInstanceRoot { fault: None } => {
+                f.write_str("`instance_root` must be a string")
+            }
+            ConfigRecordRefusal::BadInstanceRoot { fault: Some(fault) } => {
+                write!(f, "`instance_root` is refused: {fault}")
+            }
+            ConfigRecordRefusal::Recipe(refusal) => {
+                write!(f, "`runtime_recipe` is refused: {refusal}")
+            }
+            ConfigRecordRefusal::BadBootDeadline => write!(
+                f,
+                "`boot_deadline_ms` must be an integer from 1 to {}",
+                u64::MAX
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigRecordRefusal {}
+
 #[cfg(test)]
 mod tests {
     use super::ConfigRecordRefusal::*;
