@@ -485,7 +485,11 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
         proxy_map("routes.plasmosome.test", "audit"),
         proxy_map("routes.plasmosome.test", "deploy"),
     ));
-    pairs.push((broker("egressd"), broker("auditd")));
+    let mut relaunched = broker("egressd");
+    if let Capability::Broker { launch, .. } = &mut relaunched {
+        launch.command.push("--audit".to_string());
+    }
+    pairs.push((broker("egressd"), relaunched));
 
     for (first_capability, second_capability) in pairs {
         for drain in drains() {
