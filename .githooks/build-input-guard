@@ -21,9 +21,13 @@ in any dependency table, must reach a tracked directory inside the repository. T
 cargo reads it: `..` first, lexically from the manifest's directory, then through tracked
 symlinks, at most 40 of them. It refuses a tracked symlink that leaves the repository, loops, or
 leads to a directory holding a `Cargo.toml`, because cargo reads that manifest's paths from the
-symlink's location. In every `Cargo.lock`, a package has no source or exactly one of the two
-crates.io sources. It never reads `deny.toml`, which a PR can loosen. Names and paths are
-compared as a case-insensitive filesystem compares them, Unicode normalization included.
+symlink's location. Inside a symlink's target, `..` steps back only out of a tracked directory.
+After any other name, such as `.git` or `target`, it is refused: a checkout can hold anything
+there, and this step sees only the commit. A target that ends at an untracked name passes as a
+dangling link; what a checkout later holds at that name is not judged. In every `Cargo.lock`, a
+package has no source or exactly one of the two crates.io sources. It never reads `deny.toml`,
+which a PR can loosen. Names and paths are compared as a case-insensitive filesystem compares
+them, Unicode normalization included.
 
 Exit 0: clean. Exit 1: refused. Each finding is one line, `build-input-guard: <path>: <key>:
 <reason>`, and the harm follows once. Exit 2: the step could not read the commit, or was run the
