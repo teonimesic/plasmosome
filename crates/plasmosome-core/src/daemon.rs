@@ -16,14 +16,23 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 const WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 const NO_LEDGER_YET: u64 = 0;
 
-/// Everything `plasmosomed` needs to start: the path it answers on, and which
-/// named instance it is.
+/// Everything `plasmosomed` needs to start: the path it answers on, which
+/// named instance it is, where that instance's durable state lives, how long
+/// startup recovery may take, and where trusted registry imports live, if
+/// anywhere. Only `parse_config` checks the rules below; a value built by hand
+/// carries no such promise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonConfig {
     pub control_socket: PathBuf,
     pub name: InstanceName,
+    /// Absolute, and never derived from `control_socket`. A caller opens it
+    /// with [`crate::instance::InstanceRoot::open`]; this build does not.
     pub instance_root: PathBuf,
+    /// Never zero. This build does not recover cells, so nothing waits on it
+    /// yet.
     pub recovery_deadline: Duration,
+    /// Absolute when present. `None` means purely local operation: no other
+    /// path, `HOME` or request supplies a default.
     pub registry_root: Option<PathBuf>,
 }
 
@@ -32,6 +41,13 @@ pub struct DaemonConfig {
 pub enum ConfigError {
     NotConfig(serde_json::Error),
     NotAnInstanceName(InstanceNameError),
+    /// `key` is `instance_root` or `registry_root`, and `path` is what the
+    /// config wrote for it.
+    NotAbsolute {
+        key: &'static str,
+        path: PathBuf,
+    },
+    ZeroRecoveryDeadline,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -39,6 +55,12 @@ impl std::fmt::Display for ConfigError {
         match self {
             ConfigError::NotConfig(error) => write!(f, "cannot read the config as JSON: {error}"),
             ConfigError::NotAnInstanceName(error) => write!(f, "`name` is unusable: {error}"),
+            ConfigError::NotAbsolute { key, path } => {
+                write!(f, "`{key}` must be an absolute path, got {path:?}")
+            }
+            ConfigError::ZeroRecoveryDeadline => {
+                write!(f, "`recovery_deadline_ms` must be at least 1")
+            }
         }
     }
 }
@@ -48,25 +70,47 @@ impl std::error::Error for ConfigError {
         match self {
             ConfigError::NotConfig(error) => Some(error),
             ConfigError::NotAnInstanceName(error) => Some(error),
+            ConfigError::NotAbsolute { .. } | ConfigError::ZeroRecoveryDeadline => None,
         }
     }
 }
 
 /// Reads a config out of JSON text, or says which part of it is not a config.
-/// `control_socket` and `name` are both required, and a key the daemon does
-/// not know is refused rather than ignored, so a misspelled setting stops the
-/// daemon instead of silently not applying. `name` is parsed into an
-/// `InstanceName`, so a path-shaped name never reaches the socket layer.
+/// `control_socket`, `name`, `instance_root` and `recovery_deadline_ms` are
+/// required, and `registry_root` is optional. `instance_root` and
+/// `registry_root` must be absolute paths, and `recovery_deadline_ms` a whole
+/// number of milliseconds, at least 1. An explicit `null` is not an omission:
+/// it is refused like any other value of the wrong type. A key the daemon does
+/// not know, or one given twice, is refused rather than ignored, so a
+/// misspelled setting stops the daemon instead of silently not applying.
+/// `name` is parsed into an `InstanceName`, so a path-shaped name never
+/// reaches the socket layer. Nothing on disk is read or created.
 pub fn parse_config(text: &str) -> Result<DaemonConfig, ConfigError> {
     let written: Written = serde_json::from_str(text).map_err(ConfigError::NotConfig)?;
     let name = InstanceName::parse(&written.name).map_err(ConfigError::NotAnInstanceName)?;
+    let instance_root = absolute("instance_root", written.instance_root)?;
+    if written.recovery_deadline_ms == 0 {
+        return Err(ConfigError::ZeroRecoveryDeadline);
+    }
+    let registry_root = written
+        .registry_root
+        .map(|path| absolute("registry_root", path))
+        .transpose()?;
     Ok(DaemonConfig {
         control_socket: written.control_socket,
         name,
-        instance_root: written.instance_root,
+        instance_root,
         recovery_deadline: Duration::from_millis(written.recovery_deadline_ms),
-        registry_root: written.registry_root,
+        registry_root,
     })
+}
+
+fn absolute(key: &'static str, path: PathBuf) -> Result<PathBuf, ConfigError> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(ConfigError::NotAbsolute { key, path })
+    }
 }
 
 #[derive(Deserialize)]
@@ -76,20 +120,43 @@ struct Written {
     control_socket: PathBuf,
     #[serde(deserialize_with = "name")]
     name: String,
+    #[serde(deserialize_with = "instance_root")]
     instance_root: PathBuf,
+    #[serde(deserialize_with = "recovery_deadline_ms")]
     recovery_deadline_ms: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "registry_root")]
     registry_root: Option<PathBuf>,
 }
 
+fn unusable<'de, D: Deserializer<'de>, T>(
+    key: &str,
+    outcome: Result<T, D::Error>,
+) -> Result<T, D::Error> {
+    outcome.map_err(|error| D::Error::custom(format!("`{key}` is unusable: {error}")))
+}
+
 fn control_socket<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
-    PathBuf::deserialize(deserializer)
-        .map_err(|error| D::Error::custom(format!("`control_socket` is unusable: {error}")))
+    unusable::<D, _>("control_socket", PathBuf::deserialize(deserializer))
 }
 
 fn name<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    String::deserialize(deserializer)
-        .map_err(|error| D::Error::custom(format!("`name` is unusable: {error}")))
+    unusable::<D, _>("name", String::deserialize(deserializer))
+}
+
+fn instance_root<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
+    unusable::<D, _>("instance_root", PathBuf::deserialize(deserializer))
+}
+
+fn recovery_deadline_ms<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    u64::deserialize(deserializer).map_err(|error| {
+        D::Error::custom(format!(
+            "`recovery_deadline_ms` must be a whole number of milliseconds: {error}"
+        ))
+    })
+}
+
+fn registry_root<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<PathBuf>, D::Error> {
+    unusable::<D, _>("registry_root", PathBuf::deserialize(deserializer)).map(Some)
 }
 
 /// Why the daemon could not start, or could not keep serving.
