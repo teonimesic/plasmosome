@@ -78,6 +78,10 @@ EXTENSIONLESS_REFUSED = (
     "an extensionless rust-toolchain is refused; rustup reads a toolchain name or path from it"
 )
 UNREADABLE = "a commit this step cannot read is a commit it cannot clear"
+GITATTRIBUTES_REFUSED = (
+    "every tracked .gitattributes is refused, because through it checkout can write a file other "
+    "than the blob this step judged; a maintainer lifts this by changing this step"
+)
 SUBMODULE_REFUSED = (
     "every submodule is refused; this commit does not hold its files, "
     "so this step cannot judge them"
@@ -280,6 +284,8 @@ def check(entry):
     if entry.kind == "commit":
         return [(entry.path, "(submodule)", SUBMODULE_REFUSED)]
     parts = entry.path.casefold().split("/")
+    if parts[-1] == ".gitattributes":
+        return [whole(entry, GITATTRIBUTES_REFUSED)]
     if parts[-1] in ("config", "config.toml") and parts[-2:-1] == [".cargo"]:
         return configuration(entry)
     if parts[-1] == ".cargo":
