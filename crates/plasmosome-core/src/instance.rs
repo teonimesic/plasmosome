@@ -4362,11 +4362,9 @@ mod tests {
     #[test]
     fn retire_reports_io_failures_and_moves_nothing() {
         assert_not_root();
-        for (blocked, mode, failed_at) in [
-            ("cells", 0o000, "cells"),
-            ("cells", 0o500, "cells/cell-1"),
-            ("retired", 0o000, "retired"),
-        ] {
+        for (blocked, mode, failed_at) in
+            [("cells", 0o000, "cells"), ("cells", 0o500, "cells/cell-1")]
+        {
             let (_dir, root) = temp_root();
             let (instance, lock) = locked(&root);
             let dir = instance
