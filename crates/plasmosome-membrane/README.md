@@ -68,33 +68,58 @@ out the allowance.
 
 Spec 001 §4.2 asks the supervisor to check the helper's host confinement itself before readiness,
 not to take the helper's or the guest's word for it. On Darwin, `runtime::confinement::observe(pid)`
-asks the kernel through `sandbox_check`, from outside the helper. The helper must be sandboxed and
-must be denied `process-fork`, `network-outbound`, `network-inbound`, `network-bind` and
-`file-write-create`. Only then is the result `Confined`. A cell must not be reported ready on any
-other result, which includes a supervisor that is sandboxed itself and a query the kernel cannot
-answer. Off Darwin the result is always `UnsupportedPlatform`. Nothing calls it yet; the cell
-composition in native task `plasmosome-7em` will.
+asks the kernel through `sandbox_check`, from outside the helper. Off Darwin the result is always
+`UnsupportedPlatform`. Nothing calls it yet; the cell composition in native task `plasmosome-7em`
+will.
 
-What it shows is less than the spec asks for, and its evidence says so with
-`PolicyBinding::PropertiesObserved`:
+Pass the pid of a child this process has not reaped, such as the helper it spawned and still
+holds. Until it is reaped, its pid cannot name another process. `observe` also reads the kernel's
+unique id of the process before and after its queries, and the evidence keeps that id.
 
-- It does not identify the installed policy. A bare `(deny default)` profile passes just as the
-  verified host policy does. Owner gate O-3 on native task `plasmosome-qep` decides whether this is
-  the evidence Darwin can give.
-- Each operation is asked with no filter argument, so a denial is the answer for the operation in
-  general. The qualified host policy allows outbound connections to Unix sockets and still answers
-  `network-outbound` denied.
-- It says nothing about descriptors the helper already holds, or about the images it loaded (owner
-  gate O-5).
-- A dead process answers denied to every query. Measured on macOS 26.6.2, a reaped pid, or a
-  zombie that had no sandbox, answers the queries `observe` makes just as a confined process does.
-  So `observe` reads the pid's start time with `proc_pidinfo` before and after the queries, and is
-  unverifiable unless it finds the same process running both times.
+`Confined` claims only this: the kernel reports the process sandboxed, and `process-fork`,
+`network-outbound`, `network-inbound`, `network-bind` and `file-write-create` each answer denied
+when asked with no filter argument. A cell must not be reported ready on any other result, which
+includes a supervisor that is sandboxed itself and a query the kernel cannot answer.
 
-`sandbox_check` is declared in no SDK header, and spec 001 notes that `sandbox_init` is deprecated
-and not a supported portable API. If a later macOS makes `sandbox_check` fail, the observation is
-unverifiable. If it changes the answers instead, the macOS tests here fail: they expect the
-qualified policy confined, allow-default unconfined and a dead pid unverifiable.
+`Confined` does not show that the verified host policy is installed, and its evidence says so with
+`PolicyBinding::PropertiesObserved`. Profiles much looser than the host policy read `Confined` too.
+A reviewer measured two on macOS 26.6.2:
+
+- `(version 1)(deny default)(allow file-read*)(allow file-write* (subpath "/"))(allow network* (remote ip))(allow network* (local ip))`.
+  The child created a file, connected over TCP to 127.0.0.1 and bound a TCP socket. Only `fork`
+  was denied. Asked with no filter, the operations answered denied although the policy allows
+  them under filters that match every argument.
+- `(version 1)(allow default)(deny process-fork)(deny network*)(deny file-write-create)`.
+  The child overwrote and unlinked existing files and ran `/bin/echo`. Operations outside the
+  five are not asked.
+
+The macOS tests here apply both and expect `Confined`.
+
+A bare `(deny default)` profile reads `Confined` as well. Spec 001 §4.2 says "Substituting another
+policy, even one called deny-default, must fail." This check alone cannot meet that: Darwin has no
+call that returns a process's installed profile, and the profiles above are substitutes that pass.
+Nor does it give the evidence §4.2 asks for, binding the verified policy and its installation to
+the process; the unique id binds only the process. Owner gate O-3 on native task `plasmosome-qep`
+decides what Darwin evidence is enough. One option the same reviewer measured: `file-write-create`
+asked with a path filter, for a path outside the work tree, answers allowed under
+`(allow file-write* (subpath "/"))` and denied under a policy that allows writes in one subpath
+only. The network operations have no filter like that.
+
+It also says nothing about descriptors the helper already holds, or about the images it loaded
+(owner gate O-5).
+
+A dead process answers denied to every query. Measured on macOS 26.6.2, a reaped pid, or a zombie
+that had no sandbox, answers the queries `observe` makes just as a confined process does. So the
+result is unverifiable unless `proc_pidinfo` reads the same unique id before and after the
+queries; it cannot read a zombie's. The unique id comes from the flavor
+PROC_PIDUNIQIDENTIFIERINFO, whose record XNU declares only in a private header, so the crate
+declares the 56-byte record itself and its macOS tests check it against the running kernel.
+
+`sandbox_check` is declared in no SDK header either, and spec 001 notes that `sandbox_init` is
+deprecated and not a supported portable API. If a later macOS makes `sandbox_check` return -1, the
+observation is unverifiable. If it changes the answers instead, the macOS tests here fail: they
+expect the qualified policy confined, and allow-default, no sandbox and each of the five allowed
+alone unconfined.
 
 ## Dropping a handle cleans up its managed group
 

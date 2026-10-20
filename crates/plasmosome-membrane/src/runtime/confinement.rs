@@ -1,9 +1,10 @@
 /// The operations a helper's sandbox must deny for `observe` to report it confined, in the order
 /// `observe` asks about them.
 ///
-/// Each is asked with no filter argument, so a denial is the sandbox's answer for the operation in
-/// general. A policy can still allow it for some arguments: the qualified host policy allows
-/// outbound connections to Unix sockets and still answers `network-outbound` denied.
+/// Each is asked with no filter argument, and a denial says only that. A policy that allows the
+/// operation under a filter, even one matching every argument, can still answer denied. The
+/// qualified host policy allows outbound connections to Unix sockets and answers `network-outbound`
+/// denied. Measured on macOS 26.6.2, so does a policy allowing `network*` to any remote IP.
 pub const REQUIRED_DENIALS: [&str; 5] = [
     "process-fork",
     "network-outbound",
@@ -17,8 +18,10 @@ pub const REQUIRED_DENIALS: [&str; 5] = [
 /// Only `Confined` lets readiness go ahead. Treat both other values as a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confinement {
-    /// The process was read running on both sides of the queries, the kernel reported it
-    /// sandboxed, and it reported every operation in `REQUIRED_DENIALS` denied.
+    /// The same process was read running on both sides of the queries, the kernel reported it
+    /// sandboxed, and every answer for each operation in `REQUIRED_DENIALS`, asked with no
+    /// filter, was a denial. It does not show that the verified host policy is installed: much
+    /// looser profiles read `Confined` too; see `PolicyBinding`.
     Confined(ConfinementEvidence),
     /// The kernel answered every query, and the answers fall short: the process is not
     /// sandboxed, or an operation in `REQUIRED_DENIALS` is not denied. A sandbox that allows
@@ -108,11 +111,14 @@ impl ConfinementEvidence {
 /// How a confinement observation relates to the verified host policy the helper applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyBinding {
-    /// Only properties of the installed sandbox were observed. Darwin has no call that returns a
-    /// process's installed profile, so this does not show that the verified policy is the one
-    /// installed: a bare `(deny default)` profile is observed the same way. Spec 001 §4.2 asks
-    /// for evidence binding the verified policy to the process. This is less than that, and owner
-    /// gate O-3 on native task plasmosome-qep decides whether it is enough.
+    /// Only the answers for `REQUIRED_DENIALS`, asked with no filter, were observed. Darwin has no
+    /// call that returns a process's installed profile, so this does not show that the verified
+    /// policy is the one installed. A bare `(deny default)` profile is observed the same way, and
+    /// so are looser ones: `(allow default)` with the five denied, or `(deny default)` allowing
+    /// file writes under `/` and `network*` for any IP. Spec 001 §4.2 asks that substituting
+    /// another policy fail, and for evidence binding the verified policy to the process; this
+    /// cannot give either alone. Owner gate O-3 on native task plasmosome-qep decides what is
+    /// enough.
     PropertiesObserved,
 }
 
@@ -124,9 +130,10 @@ pub enum PolicyBinding {
 /// `pid` with `proc_pidinfo` before and after those queries, and the evidence keeps it. It changes
 /// nothing.
 ///
-/// Only `Confined` lets readiness go ahead. It shows properties of the sandbox, not the policy:
-/// nothing about which profile is installed, about arguments a policy allows for a denied
-/// operation, about descriptors the process already holds, or about the images it loaded.
+/// Only `Confined` lets readiness go ahead. It claims only that the five operations answer denied
+/// with no filter: nothing about which profile is installed, about arguments a policy allows for
+/// a denied operation, about operations outside the five, about descriptors the process already
+/// holds, or about the images it loaded.
 /// `sandbox_check` is declared in no SDK header. If a later macOS makes it fail, the result is
 /// `Unverifiable`; the crate's macOS tests check the answers it gives today.
 #[cfg(target_os = "macos")]
