@@ -204,11 +204,12 @@ impl std::error::Error for ManifestError {}
 
 impl PlasmidManifest {
     /// Reads the declaration at `path` and parses it. At most
-    /// `MAX_MANIFEST_BYTES` plus one byte is read, so a longer file, a FIFO
-    /// or `/dev/zero` is refused with `TooLarge` at the bound. Time is not
-    /// bounded: a FIFO whose writer stops short of the bound and never closes
-    /// blocks this call. A file that is not UTF-8 is an `Io` error of kind
-    /// `InvalidData`.
+    /// `MAX_MANIFEST_BYTES` plus one byte is read, so a file, device or FIFO
+    /// that delivers more than that is refused with `TooLarge` at the bound,
+    /// and nothing past it is parsed. Time is not bounded: a FIFO with no
+    /// writer blocks this call while it opens the FIFO, and a FIFO whose
+    /// writer stops short of the bound and never closes blocks it while it
+    /// reads. A file that is not UTF-8 is an `Io` error of kind `InvalidData`.
     pub fn load(path: &Path) -> Result<PlasmidManifest, ManifestError> {
         let file = std::fs::File::open(path).map_err(ManifestError::Io)?;
         let mut bytes = Vec::new();

@@ -107,9 +107,9 @@ could not be read), `ManifestError::Parse` (the text is not TOML) and `ManifestE
 not a field path, and naming one would be a guess. A `Parse` error quotes the source line, and its
 text is written with the same escapes, keeping its line breaks. `TooLarge` is decided before any
 TOML is parsed: a declaration over `MAX_MANIFEST_BYTES`, 1 MiB, is refused with no field and no
-fix. `load` reads at most 1 MiB plus one byte, so a FIFO or `/dev/zero` is refused at the bound.
-It does not bound time: a FIFO whose writer stops short of the bound and never closes still
-blocks it.
+fix. `load` reads at most 1 MiB plus one byte, so a file, device or FIFO that delivers more than
+1 MiB, `/dev/zero` among them, is refused at the bound. It does not bound time: a FIFO with no
+writer, or whose writer stops short of the bound and never closes, still blocks it.
 `WireError::manifest_refusal` turns any of them into code 108, carrying the fix when there is one.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
 description.
