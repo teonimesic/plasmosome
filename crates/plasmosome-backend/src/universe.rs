@@ -944,6 +944,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn universe_classes_keep_their_five_names_and_labels() {
+        for (class, name, label) in [
+            (UniverseClass::SessionFile, "SessionFile", "session-file"),
+            (UniverseClass::UdsPath, "UdsPath", "uds-path"),
+            (UniverseClass::ProxyMap, "ProxyMap", "proxy-map"),
+            (UniverseClass::BrokerPid, "BrokerPid", "broker-pid"),
+            (UniverseClass::Mount, "Mount", "mount"),
+        ] {
+            assert_eq!(class.as_str(), label);
+            assert_eq!(
+                serde_json::to_value(class).unwrap(),
+                serde_json::json!(name)
+            );
+            assert_eq!(
+                serde_json::from_value::<UniverseClass>(serde_json::json!(name)).unwrap(),
+                class
+            );
+        }
+    }
+
     fn cell_owner(cell: &str, plugin: &str) -> CellOwner {
         CellOwner {
             cell: CellId::from(cell),
