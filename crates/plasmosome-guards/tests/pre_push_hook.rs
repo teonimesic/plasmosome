@@ -122,6 +122,10 @@ impl Scratch {
         set_up(&self.work, &["checkout", "--quiet", branch]);
     }
 
+    fn fast_forward_to(&self, branch: &str) {
+        set_up(&self.work, &["merge", "--quiet", "--ff-only", branch]);
+    }
+
     fn push(&self, refspecs: &[&str]) -> Output {
         git(&self.work, &[&["push", "origin"][..], refspecs].concat())
     }
@@ -204,6 +208,28 @@ fn refuses_a_new_branch_whose_commit_credits_a_model() {
 }
 
 #[test]
+fn refuses_a_new_branch_whose_model_commit_sits_under_a_clean_tip() {
+    check_workspace(|root| {
+        let scratch = Scratch::new(root);
+        let credited = scratch.branch_from_a_clean_root("model", CREDITS_A_MODEL);
+        scratch.commit(CREDITS_A_PERSON);
+
+        let push = scratch.push(&["model"]);
+
+        assert_refused(
+            &push,
+            &credited,
+            "creates a branch whose commit crediting a model sits under a clean tip, which a hook reading only the pushed commit clears",
+        );
+        assert_eq!(
+            scratch.remote_tip("model"),
+            None,
+            "the hook refused the push, yet the remote now holds the branch that credits a model"
+        );
+    });
+}
+
+#[test]
 fn refuses_a_branch_that_is_not_checked_out() {
     check_workspace(|root| {
         let scratch = Scratch::new(root);
@@ -221,6 +247,30 @@ fn refuses_a_branch_that_is_not_checked_out() {
             scratch.remote_tip("model"),
             None,
             "the hook refused the push, yet the remote now holds the branch that credits a model"
+        );
+    });
+}
+
+#[test]
+fn refuses_an_update_to_a_branch_that_is_not_checked_out() {
+    check_workspace(|root| {
+        let scratch = Scratch::new(root);
+        let published = scratch.branch_from_a_clean_root("topic", CREDITS_A_PERSON);
+        scratch.push_past_the_hook(&["main", "topic"]);
+        let credited = scratch.commit(CREDITS_A_MODEL);
+        scratch.check_out("main");
+
+        let push = scratch.push(&["topic"]);
+
+        assert_refused(
+            &push,
+            &credited,
+            "adds a commit crediting a model to a branch the remote has while a clean branch is checked out, which a hook reading <remote>..HEAD clears",
+        );
+        assert_eq!(
+            scratch.remote_tip("topic").as_deref(),
+            Some(published.as_str()),
+            "the hook refused the update, yet the remote's topic moved off the commit it already held"
         );
     });
 }
@@ -257,6 +307,57 @@ fn refuses_an_update_that_adds_a_model_trailer() {
             &push,
             &credited,
             "adds a commit crediting a model to a branch the remote already has",
+        );
+        assert_eq!(
+            scratch.remote_tip("main").as_deref(),
+            Some(published.as_str()),
+            "the hook refused the update, yet the remote's main moved off the commit it already held"
+        );
+    });
+}
+
+#[test]
+fn refuses_an_update_whose_model_commit_sits_under_a_clean_tip() {
+    check_workspace(|root| {
+        let scratch = Scratch::new(root);
+        let published = scratch.commit("docs: a clean root");
+        scratch.push_past_the_hook(&["main"]);
+        let credited = scratch.commit(CREDITS_A_MODEL);
+        scratch.commit(CREDITS_A_PERSON);
+
+        let push = scratch.push(&["main"]);
+
+        assert_refused(
+            &push,
+            &credited,
+            "adds a commit crediting a model under a clean tip to a branch the remote already has, which a hook or guard reading only the newest commit clears",
+        );
+        assert_eq!(
+            scratch.remote_tip("main").as_deref(),
+            Some(published.as_str()),
+            "the hook refused the update, yet the remote's main moved off the commit it already held"
+        );
+    });
+}
+
+#[test]
+fn reads_an_update_from_the_pushed_branch_not_every_remote_ref() {
+    check_workspace(|root| {
+        let scratch = Scratch::new(root);
+        let published = scratch.commit("docs: a clean root");
+        scratch.start("side");
+        let credited = scratch.commit(CREDITS_A_MODEL);
+        scratch.push_past_the_hook(&["main", "side"]);
+        scratch.check_out("main");
+        scratch.fast_forward_to("side");
+        scratch.commit(CREDITS_A_PERSON);
+
+        let push = scratch.push(&["main"]);
+
+        assert_refused(
+            &push,
+            &credited,
+            "moves main onto a commit crediting a model that only another remote branch holds, which a hook reading an update as <local> --not --remotes clears",
         );
         assert_eq!(
             scratch.remote_tip("main").as_deref(),
@@ -336,6 +437,35 @@ fn refuses_when_any_pushed_ref_credits_a_model() {
             scratch.remote_tip("model"),
             None,
             "the hook refused the push, yet the remote now holds the branch that credits a model"
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_ref_between_a_delete_and_a_clean_ref() {
+    check_workspace(|root| {
+        let scratch = Scratch::new(root);
+        scratch.branch_from_a_clean_root("finished", CREDITS_A_PERSON);
+        scratch.push_past_the_hook(&["finished"]);
+        scratch.check_out("main");
+        scratch.start("model");
+        let credited = scratch.commit(CREDITS_A_MODEL);
+
+        let push = scratch.push(&[":finished", "model", "main"]);
+
+        assert_refused(
+            &push,
+            &credited,
+            "deletes a branch, then creates one crediting a model, then a clean one, which a hook letting the last ref's verdict win, or stopping at a delete, clears",
+        );
+        assert_eq!(
+            scratch.remote_tip("model"),
+            None,
+            "the hook refused the push, yet the remote now holds the branch that credits a model"
+        );
+        assert!(
+            scratch.remote_tip("finished").is_some(),
+            "the hook refused the push, yet the remote no longer holds the branch the push would have deleted"
         );
     });
 }
