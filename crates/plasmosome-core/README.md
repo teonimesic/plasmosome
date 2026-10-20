@@ -24,7 +24,7 @@ one.
 | `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens |
 | `supervisor_check` | Spec 023 §8's supervisor check, with no IO: `decide` gives the outcome of the first table row a cell's lock, marker and journal match, and `after_query` says whether one answer from a held lock's supervisor, given within the answer cap, adopts the cell, waits, or sets it aside once the cap passes. Adopting does not promise the cell is served: spec 008's journal replay can still quarantine it, and spec 023's no-`created` rule can end it. Callers gather the facts and carry out the outcome |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
-| `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends |
+| `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends. `list_trusted_dir` lists a directory whose every component, itself included, passes the ancestor rule |
 | `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
 ## Use
@@ -281,6 +281,14 @@ control socket described above.
 - A client calls `check_private_path` before its own nonblocking connect, then `check_peer_uid`
   on the connected stream before it sends anything. A missing directory is `NoDirectory`; a
   missing socket entry in a directory that exists is `NoSocket`.
+- `list_trusted_dir` walks a path the same way, but judges the last directory by the ancestor
+  rule, not the private one. So `~/.plasmosome/instances/` at 0755 lists. On macOS, an ACL
+  entry that lets anyone replace its entries, or a volume with ownership ignored, still refuses
+  it.
+  It returns every entry but `.` and `..`, as raw name bytes sorted by those bytes, each with
+  its kind (`Directory`, `Symlink` or `Other`) from a no-follow `fstatat`. It follows no entry
+  and leaves out one gone before its stat. It is for spec 025's default selection, which
+  applies its own name rules to the bytes.
 
 The integration tests make each private root where every ancestor passes:
 - on macOS, under the per-user temp directory that `confstr(_CS_DARWIN_USER_TEMP_DIR)` reports,
