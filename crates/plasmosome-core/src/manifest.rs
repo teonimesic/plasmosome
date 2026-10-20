@@ -166,7 +166,9 @@ impl std::fmt::Display for ManifestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ManifestError::Io(e) => write!(f, "manifest io error: {e}"),
-            ManifestError::Parse(e) => write!(f, "manifest toml error: {e}"),
+            ManifestError::Parse(e) => {
+                write!(f, "manifest toml error: {}", visible_lines(&e.to_string()))
+            }
             ManifestError::Field {
                 plasmid,
                 field,
@@ -433,6 +435,19 @@ fn without_controls(text: &str) -> String {
     visible
 }
 
+fn visible_lines(text: &str) -> String {
+    let lines: Vec<String> = text.split('\n').map(without_controls).collect();
+    lines.join("\n")
+}
+
+fn acted_on(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
 fn push_visible(text: &mut String, character: char) {
     let escape = match character {
         '\x08' => 'b',
@@ -440,7 +455,7 @@ fn push_visible(text: &mut String, character: char) {
         '\n' => 'n',
         '\x0C' => 'f',
         '\r' => 'r',
-        control if control.is_control() => {
+        control if acted_on(control) => {
             text.push('\\');
             text.push_str(&format!("u{:04X}", u32::from(control)));
             return;
@@ -829,16 +844,17 @@ fn validate_mock(
         return Err(field_error(
             id,
             "network".into(),
-            format!("[network]\n{}", strings_line("hosts", &mock.hosts)),
+            format!(
+                "[network]\n{}",
+                strings_line("hosts", &distinct(&mock.hosts))
+            ),
             "a mock stands in for hosts that [network] declares, and there is no [network]",
         ));
     };
-    let mut undeclared: Vec<String> = Vec::new();
-    for host in &mock.hosts {
-        if !network.hosts.contains(host) && !undeclared.contains(host) {
-            undeclared.push(host.clone());
-        }
-    }
+    let undeclared: Vec<String> = distinct(&mock.hosts)
+        .into_iter()
+        .filter(|host| !network.hosts.contains(host))
+        .collect();
     let Some(host) = undeclared.first() else {
         return Ok(());
     };
@@ -907,9 +923,20 @@ fn evident_strings(value: &toml::Value) -> Vec<String> {
             .iter()
             .map(nonblank)
             .collect::<Option<Vec<String>>>()
+            .map(|names| distinct(&names))
             .unwrap_or_default(),
         value => nonblank(value).into_iter().collect(),
     }
+}
+
+fn distinct(names: &[String]) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for name in names {
+        if !kept.contains(name) {
+            kept.push(name.clone());
+        }
+    }
+    kept
 }
 
 fn evident_or(value: &toml::Value, fallback: &[String], example: &str) -> Vec<String> {
@@ -917,7 +944,7 @@ fn evident_or(value: &toml::Value, fallback: &[String], example: &str) -> Vec<St
     if !evident.is_empty() {
         evident
     } else if !fallback.is_empty() {
-        fallback.to_vec()
+        distinct(fallback)
     } else {
         vec![example.to_string()]
     }
