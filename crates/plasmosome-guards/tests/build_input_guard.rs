@@ -1953,6 +1953,17 @@ fn a_path_dependency_resolves_to_a_tracked_directory_inside() {
                 at("dependencies.x.path"),
             ),
             (
+                "a symlink that steps back out of .git",
+                vec![
+                    symlink("crates/a/lnk", "../../.git/../crates/b"),
+                    dependency("\"lnk\""),
+                ],
+                vec![
+                    ("crates/a/Cargo.toml", "dependencies.x.path"),
+                    ("crates/a/lnk", "(symlink)"),
+                ],
+            ),
+            (
                 "[dev-dependencies]",
                 vec![in_table("dev-dependencies")],
                 at("dev-dependencies.x.path"),
@@ -2029,6 +2040,10 @@ fn a_path_dependency_resolves_to_a_tracked_directory_inside() {
         says(
             "a value that is not a string",
             "cargo reads a path here, and this value is not a string",
+        );
+        says(
+            "a symlink that steps back out of .git",
+            "\"lnk\" steps back with .. out of a name this commit does not track as a directory",
         );
 
         assert_passes(
@@ -2117,12 +2132,36 @@ fn a_symlink_to_a_directory_holding_a_manifest_is_refused() {
                     vec![symlink("all", "crates")],
                     vec![("all", "(symlink)")],
                 ),
+                (
+                    "a member reached by stepping back out of .git",
+                    vec![
+                        file(
+                            "Cargo.toml",
+                            "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+                        ),
+                        symlink("crates/l", "../.git/../x/y/z"),
+                        package(
+                            "x/y/z/Cargo.toml",
+                            "deep",
+                            "\n[dependencies]\nleaf = { path = \"../../../leaf\" }\n",
+                        ),
+                        package("leaf/Cargo.toml", "leaf", ""),
+                    ],
+                    vec![("crates/l", "(symlink)")],
+                ),
             ],
         );
         assert_says(
             &outputs,
             "the measured layout",
             &["link: (symlink): a symlink to a/b; it leads to a directory holding a Cargo.toml"],
+        );
+        assert_says(
+            &outputs,
+            "a member reached by stepping back out of .git",
+            &[
+                "crates/l: (symlink): a symlink to ../.git/../x/y/z; it steps back with .. out of a name this commit does not track as a directory",
+            ],
         );
         assert_passes(
             root,
@@ -2227,6 +2266,44 @@ fn a_symlink_leaving_the_repository_is_refused() {
                     vec![symlink("long", &"x/".repeat(3_000))],
                     vec![("long", "(symlink)")],
                 ),
+                (
+                    "a source directory that steps back out of .git",
+                    vec![symlink("crates/a/src", "../../.git/../../outside")],
+                    vec![("crates/a/src", "(symlink)")],
+                ),
+                (
+                    "a build script that steps back out of .git",
+                    vec![symlink("crates/a/build.rs", "../../.git/../../b.rs")],
+                    vec![("crates/a/build.rs", "(symlink)")],
+                ),
+                (
+                    "a name between the untracked name and the ..",
+                    vec![symlink(
+                        "crates/a/tests",
+                        "../../.git/hooks/../../../outside",
+                    )],
+                    vec![("crates/a/tests", "(symlink)")],
+                ),
+                (
+                    "a build's output directory and back",
+                    vec![symlink("crates/a/benches", "../../target/../../outside")],
+                    vec![("crates/a/benches", "(symlink)")],
+                ),
+                (
+                    "a file and back",
+                    vec![symlink(
+                        "crates/a/examples",
+                        "src/lib.rs/../../../../outside",
+                    )],
+                    vec![("crates/a/examples", "(symlink)")],
+                ),
+            ],
+        );
+        assert_says(
+            &outputs,
+            "a source directory that steps back out of .git",
+            &[
+                "crates/a/src: (symlink): a symlink to ../../.git/../../outside; it steps back with .. out of a name this commit does not track as a directory",
             ],
         );
         assert_says(
@@ -2382,8 +2459,34 @@ fn other_manifest_paths_stay_inside() {
                 vec![target("example")],
                 at("example[0].path"),
             ),
+            (
+                "[lib] path through a symlink that steps back out of .git",
+                vec![
+                    member("", "\n[lib]\npath = \"lnk/lib.rs\"\n"),
+                    symlink("crates/a/lnk", "../../.git/../../x"),
+                ],
+                vec![
+                    ("crates/a/Cargo.toml", "lib.path"),
+                    ("crates/a/lnk", "(symlink)"),
+                ],
+            ),
+            (
+                "a member glob through a symlink that steps back out of .git",
+                vec![
+                    workspace("members = [\"lnk/*\"]\n"),
+                    symlink("lnk", ".git/../crates"),
+                ],
+                vec![("Cargo.toml", "workspace.members[0]"), ("lnk", "(symlink)")],
+            ),
         ];
         let outputs = refusals(root, routes);
+        assert_says(
+            &outputs,
+            "[lib] path through a symlink that steps back out of .git",
+            &[
+                "crates/a/Cargo.toml: lib.path: \"lnk/lib.rs\" steps back with .. out of a name this commit does not track as a directory",
+            ],
+        );
         assert_says(
             &outputs,
             "package.build",
@@ -2457,6 +2560,48 @@ fn a_symlink_in_place_of_a_manifest_or_lockfile_is_refused() {
                 "Cargo.lock: (symlink): a symlink to locks/x.lock; a lockfile must be a regular file",
             ],
         );
+    });
+}
+
+#[test]
+fn each_symlink_target_is_read_once() {
+    check_workspace(|root| {
+        let links = [
+            ("Cargo.lock", "/opt/x.lock"),
+            ("away", "../../outside"),
+            (".gitattributes", "docs/attributes"),
+            ("crates/a/rust-toolchain.toml", "../../rust-toolchain.toml"),
+        ];
+        let plants: Vec<Plant> = links
+            .iter()
+            .map(|(path, target)| symlink(path, target))
+            .collect();
+        let (repository, sha) = commit(&with_base(&plants));
+        let scratch = tempfile::tempdir().expect("a scratch directory is created");
+        let log = scratch.path().join("reads");
+        let shadow = shadow_git(&format!(
+            "  count:cat-file) printf '%s\\n' \"$*\" >> '{}' ;;\n",
+            log.display()
+        ));
+        let output = guard_command(root)
+            .current_dir(repository.path())
+            .env("PATH", first_on_path(shadow.path()))
+            .env("STUB_GIT_CASE", "count")
+            .arg(&sha)
+            .output()
+            .expect("the step runs");
+        let expected: Vec<(&str, &str)> =
+            links.iter().map(|(path, _)| (*path, "(symlink)")).collect();
+        assert_refusal(&output, &expected);
+        let reads = std::fs::read_to_string(&log).expect("the stub git logged the step's reads");
+        for (path, _) in links {
+            let oid = git_ok(repository.path(), &["rev-parse", &format!("{sha}:{path}")]);
+            let times = reads.lines().filter(|line| line.ends_with(&oid)).count();
+            assert_eq!(
+                times, 1,
+                "{path}: the step read this symlink's target {times} times; spec 026 counts one git call per symlink. Its reads:\n{reads}"
+            );
+        }
     });
 }
 
