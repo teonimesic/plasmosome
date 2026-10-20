@@ -336,7 +336,7 @@ drift and readiness: no host authority remains to match it, and it never blocks 
 later attach at the same target. The host side is checked against the supervisor's own inventory
 keyed by GrantId (gates, source roots, handles, listeners and flows), as spec 001 §4.2's absence
 check requires (`001:1089-1090`). It must hold nothing for that grant; a holding found there has
-no journal record and is an unknown holding (`008:464-466`). The amendments to spec 001 and spec
+no journal record and is an unknown holding (`008:466-468`). The amendments to spec 001 and spec
 008 below say the same.
 
 **A binding that stands while the host refuses it.** A grant can stop serving while its guest

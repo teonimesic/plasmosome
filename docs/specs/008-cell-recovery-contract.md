@@ -386,8 +386,8 @@ database, multi-file atomic commit, or a second durable generation store. No rec
 Result<Vec<CellJournalRecord>, CellJournalFault>` returns every record or no history.
 `CellJournalFault` carries `path: PathBuf`, `line: Option<u64>`, `lines_parsed: u64`, and kind
 `Io | Unparseable | UnsupportedFormat | GenerationZero | GenerationOrder | EventOrder |
-InvalidEffect | InvalidSource | InvalidClosure`. Read framing as bytes: invalid UTF-8, a
-malformed complete record and any
+InvalidEffect | InvalidSource | InvalidClosure | InvalidLifetime`. Read framing as bytes: invalid
+UTF-8, a malformed complete record and any
 non-LF-terminated final record all fault. A nonempty physical line is counted once; CRLF does
 not add a line. The reader stops at the first fault. `lines_parsed` counts only complete,
 syntactically and semantically accepted records before it, including terminal records.
@@ -396,6 +396,8 @@ No parsed records or decoded prefix owners are returned on failure. Missing and 
 return an empty history, not a history read using the single-plugin compatibility rules.
 Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default)
 requires. Until then the last kind was `InvalidSource`.
+Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs)
+requires. Until then the list had no kind for a bad `lifetime`.
 
 `recover(instance: &InstanceName, root: &Path, observation: &RecoveryObservation) ->
 Result<RecoveryOutcome, RecoveryError>` is a read-only core operation. It does not append,
