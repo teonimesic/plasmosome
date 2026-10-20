@@ -242,7 +242,7 @@ fn judge(
         return Err(HelloRefusal::NotUtf8);
     }
     let reply = parse_value(frame).map_err(|fault| match fault {
-        StrictJsonError::DuplicateKey { path } => HelloRefusal::DuplicateKey {
+        StrictJsonError::DuplicateKey { path, .. } => HelloRefusal::DuplicateKey {
             path: cut_pointer(&path),
         },
         StrictJsonError::NotJson { .. } => HelloRefusal::NotJson {
