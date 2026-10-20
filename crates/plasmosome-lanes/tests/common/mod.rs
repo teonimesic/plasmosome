@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[cfg(target_os = "macos")]
+pub mod guest;
+
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
