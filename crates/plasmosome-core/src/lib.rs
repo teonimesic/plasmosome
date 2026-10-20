@@ -7,6 +7,7 @@
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod clock;
+pub mod closure;
 pub mod control;
 pub mod daemon;
 pub mod gatekeeper;
