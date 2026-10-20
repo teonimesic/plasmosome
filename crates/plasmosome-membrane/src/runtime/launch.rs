@@ -172,12 +172,11 @@ impl HelperExec {
 impl Launch for HelperExec {
     #[allow(unsafe_code)]
     fn launch(self) -> ! {
-        let ready = set_signal_mask(Mask::All)
-            && default_signal_actions()
+        let ready = default_signal_actions()
             && self.install_descriptors()
             && self.closer.close_above_three()
             && enter_root()
-            && set_signal_mask(Mask::None);
+            && unblock_every_signal();
         if ready {
             self.exec()
         }
@@ -187,24 +186,15 @@ impl Launch for HelperExec {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Mask {
-    All,
-    None,
-}
-
 #[allow(unsafe_code)]
-fn set_signal_mask(mask: Mask) -> bool {
-    // SAFETY: All zeroes is a valid sigset_t, which sigfillset or sigemptyset then sets. The set
-    // is a local that outlives the calls. sigfillset, sigemptyset and sigprocmask are
-    // async-signal-safe, and the forked child has one thread, so sigprocmask sets its whole mask.
+fn unblock_every_signal() -> bool {
+    // SAFETY: All zeroes is a valid sigset_t, which sigemptyset then empties. The set is a local
+    // that outlives the calls. sigemptyset and sigprocmask are async-signal-safe, and the forked
+    // child has one thread, so sigprocmask sets its whole mask.
     unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        let filled = match mask {
-            Mask::All => libc::sigfillset(&mut set),
-            Mask::None => libc::sigemptyset(&mut set),
-        };
-        filled == 0 && libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut()) == 0
+        let mut empty: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut empty) == 0
+            && libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()) == 0
     }
 }
 

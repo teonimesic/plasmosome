@@ -86,17 +86,11 @@ pub(crate) fn hold_fork_side() -> std::sync::RwLockReadGuard<'static, ()> {
     SPAWN_LOCK.read().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[allow(unsafe_code)]
 fn close_on_exec_or_closed<T: AsFd>(created: T) -> std::io::Result<T> {
-    // SAFETY: fcntl with F_GETFD takes no pointer, and `created` keeps its descriptor open for the
-    // call.
-    let flags = unsafe { libc::fcntl(created.as_fd().as_raw_fd(), libc::F_GETFD) };
-    if flags != -1 && flags & libc::FD_CLOEXEC != 0 {
+    if is_close_on_exec(created.as_fd()) {
         Ok(created)
     } else {
-        Err(std::io::Error::other(
-            "a descriptor created under the spawn lock was not close-on-exec, so it was closed",
-        ))
+        Err(not_close_on_exec())
     }
 }
 
