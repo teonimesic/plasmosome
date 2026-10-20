@@ -169,6 +169,40 @@ fn a_failure_in_a_completed_run_is_listed_when_the_lanes_other_run_is_not_run() 
 }
 
 #[test]
+fn every_completed_run_is_compared_with_every_completed_run_of_the_other_lane() {
+    for swapped in [false, true] {
+        let mut runs = runs();
+        let hint = &mut observation(&mut runs, Lane::Cell, 0, "hint-env").fields;
+        hint.insert("HOME".to_string(), json!("/home/plasmosome"));
+        observation(&mut runs, Lane::Cell, 1, "hint-env").completed = false;
+        observation(&mut runs, Lane::Absent, 0, "hint-env").completed = false;
+        never_discriminates(&mut runs, "refusal-host-1");
+        observation(&mut runs, Lane::Open, 1, "refusal-host-1").completed = false;
+        observation(&mut runs, Lane::Absent, 0, "refusal-host-1").completed = false;
+        if swapped {
+            runs.swap(0, 1);
+            runs.swap(2, 3);
+        }
+        assert_eq!(
+            verdict(&manifest(), &runs),
+            Verdict::NotRun {
+                not_run: vec![
+                    not_run("refusal-host-1", Lane::Open),
+                    not_run("refusal-host-1", Lane::Absent),
+                    not_run("hint-env", Lane::Cell),
+                    not_run("hint-env", Lane::Absent),
+                ],
+                failures: vec![
+                    finding("refusal-host-1", Reason::NoDiscrimination),
+                    super::differs("hint-env", "HOME"),
+                ],
+            },
+            "cell and open runs swapped: {swapped}"
+        );
+    }
+}
+
+#[test]
 fn a_probe_whose_two_runs_differ_is_noise_in_that_lane() {
     for lane in Lane::ALL {
         let mut runs = runs();
