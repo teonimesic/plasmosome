@@ -1,6 +1,6 @@
 #!/usr/bin/env -S python3 -I
-"""Spec 026's git-only step: refuse a commit whose Cargo configuration or toolchain files would
-swap or wrap what cargo builds.
+"""Spec 026's git-only step: refuse a commit whose Cargo configuration, toolchain files,
+manifests, symlinks or lockfiles would swap or wrap what cargo builds.
 
 Usage: build-input-guard [COMMIT]    (COMMIT defaults to HEAD)
 
@@ -12,13 +12,18 @@ It refuses any tracked `.cargo/config` or `.cargo/config.toml` at any depth, and
 `.cargo`. It refuses an extensionless `rust-toolchain`, and a `rust-toolchain.toml` holding
 anything beyond a [toolchain] table with channel, components, targets and profile. It refuses
 every submodule, since the commit does not hold a submodule's files. It refuses every tracked
-`.gitattributes`, since through one checkout can write a file other than the blob this step
-judged; a maintainer lifts that by changing this step. Names are compared as a case-insensitive
-filesystem compares them.
+`.gitattributes`, since through one, checkout can write a file other than the blob this step
+judged; a maintainer lifts that by changing this step.
 
-Clean does not yet cover `[patch]`, `[replace]`, path dependencies outside the repository,
-symlinks that leave it, or lockfile sources other than crates.io. A reviewer reads those by hand
-until plasmosome-jfm2 adds them to this step.
+In every `Cargo.toml` it refuses `[patch]`, `[replace]` and `cargo-features`. A path dependency,
+in any dependency table, must reach a tracked directory inside the repository. The build script,
+`package.workspace`, workspace members and target paths must stay inside it. A path is read as
+cargo reads it: `..` first, lexically from the manifest's directory, then through tracked
+symlinks, at most 40 of them. It refuses a tracked symlink that leaves the repository, loops, or
+leads to a directory holding a `Cargo.toml`, because cargo reads that manifest's paths from the
+symlink's location. In every `Cargo.lock`, a package has no source or exactly one of the two
+crates.io sources. It never reads `deny.toml`, which a PR can loosen. Names and paths are
+compared as a case-insensitive filesystem compares them, Unicode normalization included.
 
 Exit 0: clean. Exit 1: refused. Each finding is one line, `build-input-guard: <path>: <key>:
 <reason>`, and the harm follows once. Exit 2: the step could not read the commit, or was run the
@@ -36,7 +41,8 @@ This works from any branch:
 Only a line `build-input-guard: clean (<sha>)` counts as a pass. If main's copy cannot be read,
 python3 gets an empty script and exits 0 with no line at all, which pipefail turns into a failure.
 Check out that exact SHA in the separate clone, not whatever `pull/N/head` names by then: the
-head can move between the two fetches.
+head can move between the two fetches. Checkout honours replace refs, which this step ignores, so
+that clone must hold none; spec 030 section 3's plain clone fetches no `refs/replace/`.
 
 A CI verdict counts only when the PR leaves `.github/`, `.githooks/` and `tools/` unchanged. The
 script runs as `python3 -I`, so a module planted beside it cannot shadow the standard library. It
