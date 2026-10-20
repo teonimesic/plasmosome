@@ -180,9 +180,25 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+const SYSTEM: [&str; 2] = ["/usr/lib/", "/System/"];
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// The loaded images that are neither the main executable (the first image), the verified
 /// `libkrun`, nor part of the system under `/usr/lib/` or `/System/`.
 pub fn unverified_images(images: &[PathBuf], libkrun: &Path) -> Vec<PathBuf> {
-    let _ = (images, libkrun);
-    Vec::new()
+    images
+        .iter()
+        .skip(1)
+        .filter(|image| {
+            let text = image.to_string_lossy();
+            !SYSTEM.iter().any(|prefix| text.starts_with(prefix)) && !same_file(image, libkrun)
+        })
+        .cloned()
+        .collect()
 }
