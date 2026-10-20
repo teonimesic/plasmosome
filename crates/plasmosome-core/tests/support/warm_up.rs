@@ -1,3 +1,4 @@
+use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::LazyLock;
@@ -14,7 +15,7 @@ static WARM_UP: LazyLock<Option<ExitStatus>> = LazyLock::new(|| {
         .stderr(Stdio::null())
         .spawn()
         .expect("plasmosomed starts for its warm-up");
-    exit_within(&mut child, BOUND)
+    exit_within(&mut child, BOUND).expect("the warm-up's state is readable")
 });
 
 /// Takes nothing and returns a command for the plasmosomed under test, with no
@@ -46,19 +47,27 @@ pub fn exited_with_usage(daemon: &str, outcome: Option<ExitStatus>) {
 
 /// Takes a running child and a bound, and returns the child's exit status,
 /// or `None` after killing and reaping a child still running at the bound.
-pub fn exit_within(child: &mut Child, bound: Duration) -> Option<ExitStatus> {
+pub fn exit_within(child: &mut Child, bound: Duration) -> io::Result<Option<ExitStatus>> {
     let deadline = Instant::now() + bound;
     loop {
         if let Some(status) = child.try_wait().expect("the warm-up's state is readable") {
-            return Some(status);
+            return Ok(Some(status));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return None;
+            return Ok(None);
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// Takes a daemon's name, the command that runs it with no arguments and a
+/// bound, and returns `Ok` only when that run exited with status 2 within the
+/// bound; otherwise it returns the one message every caller reports.
+pub fn run_once(daemon: &str, command: Command, bound: Duration) -> Result<(), String> {
+    let _ = (daemon, command, bound);
+    todo!("the warm-up's single run")
 }
 
 #[test]
@@ -68,7 +77,10 @@ fn a_warm_up_still_running_at_its_bound_is_killed_and_reaped() {
         .spawn()
         .expect("sleep starts");
 
-    assert_eq!(exit_within(&mut child, Duration::from_millis(50)), None);
+    assert!(matches!(
+        exit_within(&mut child, Duration::from_millis(50)),
+        Ok(None)
+    ));
     let reaped = child
         .try_wait()
         .expect("the child's state is readable")
