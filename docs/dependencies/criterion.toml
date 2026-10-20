@@ -1,0 +1,141 @@
+name = "criterion"
+range = "0.7"
+reason = """\
+  Runs in-process benchmarks. It warms up, times many samples, estimates each median and flags \
+  outliers, and writes the estimates as JSON for CI to read.\
+  """
+write_it_instead.lines = 550
+write_it_instead.how = """\
+  On 2026-10-20, at main 0d53c22, `git grep -l 'criterion::' -- '*.rs' | wc -l` gives 6 files, \
+  one per benchmark target. \
+  `git grep -h -o -E '(criterion_group|criterion_main)!' -- '*.rs' | sort | uniq -c` gives \
+  criterion_group! 6 and criterion_main! 6. \
+  `git grep -h -o -E '(c|group)\\.(bench_function|benchmark_group|finish)' -- '*.rs' | sort | \
+  uniq -c` gives c.bench_function 5, c.benchmark_group 1, group.bench_function 1 and \
+  group.finish 1. `git grep -h -o -E 'b\\.iter[a-z_]*' -- '*.rs' | sort | uniq -c` gives b.iter \
+  3, b.iter_batched 2 and b.iter_batched_ref 1, and \
+  `git grep -h -o -E 'BatchSize::[A-Za-z]+' -- '*.rs' | sort | uniq -c` gives PerIteration 1 and \
+  SmallInput 2. CI runs cargo bench with --quick and reads median.point_estimate from \
+  new/estimates.json under target/criterion for each of eight benchmark ids. Both criterion and \
+  its replacement serve benchmarks only, so the replacement would be a crate that only bench \
+  targets link, and the scale counts its lines all the same. It needs: criterion_group! and \
+  criterion_main! (25); reading the --bench flag cargo passes, --quick and a name filter from \
+  std::env::args (40); Criterion with bench_function and benchmark_group, the group's \
+  bench_function and finish, and group/name ids (80); Bencher's iter, iter_batched with \
+  SmallInput and iter_batched_ref with PerIteration, timed with std::time::Instant and \
+  std::hint::black_box (90); a warm-up, then 100 samples whose iteration counts grow linearly to \
+  fill the measurement time (80); quick mode, which doubles the iteration count until two \
+  samples agree within 5% (35); the statistics, which are per-iteration times, mean, median, \
+  standard deviation, median absolute deviation and Tukey's fences for outliers (110); writing \
+  new/estimates.json in the shape CI reads, with serde_json, a direct dependency (40); and a \
+  text report of each median and its outliers (50): 550 lines. It leaves out what nothing here \
+  reads: bootstrap confidence intervals, comparison with a saved baseline, the HTML report and \
+  its plots through gnuplot or plotters, CSV output, async benchmarks and custom measurements. \
+  Replacing it removes 32 packages from Cargo.lock: aho-corasick@1, anes@0.1, anstyle@1, \
+  cast@0.3, ciborium-io@0.2, ciborium-ll@0.2, ciborium@0.2, clap@4, clap_builder@4, clap_lex@1, \
+  criterion-plot@0.6, criterion@0.7, crossbeam-deque@0.8, crossbeam-epoch@0.9, \
+  crossbeam-utils@0.8, crunchy@0.2, either@1, half@2, itertools@0.13, oorandom@11, \
+  plotters-backend@0.3, plotters-svg@0.3, plotters@0.3, rayon-core@1, rayon@1, \
+  regex-automata@0.4, regex@1, same-file@1, tinytemplate@1, walkdir@2, web-sys@0.3 and \
+  winapi-util@0.1. The other 33 packages it brings stay, because another direct dependency \
+  brings each of them too. proptest keeps six of them, autocfg@1, num-traits@0.2, \
+  regex-syntax@0.8, syn@2, zerocopy@0.8 and zerocopy-derive@0.8, and replacing both removes \
+  those as well.\
+  """
+exception = ""
+brings = [
+  "aho-corasick@1",
+  "anes@0.1",
+  "anstyle@1",
+  "autocfg@1",
+  "bumpalo@3",
+  "cast@0.3",
+  "cfg-if@1",
+  "ciborium-io@0.2",
+  "ciborium-ll@0.2",
+  "ciborium@0.2",
+  "clap@4",
+  "clap_builder@4",
+  "clap_lex@1",
+  "criterion-plot@0.6",
+  "crossbeam-deque@0.8",
+  "crossbeam-epoch@0.9",
+  "crossbeam-utils@0.8",
+  "crunchy@0.2",
+  "either@1",
+  "futures-core@0.3",
+  "futures-task@0.3",
+  "futures-util@0.3",
+  "half@2",
+  "itertools@0.13",
+  "itoa@1",
+  "js-sys@0.3",
+  "memchr@2",
+  "num-traits@0.2",
+  "once_cell@1",
+  "oorandom@11",
+  "pin-project-lite@0.2",
+  "plotters-backend@0.3",
+  "plotters-svg@0.3",
+  "plotters@0.3",
+  "proc-macro2@1",
+  "quote@1",
+  "rayon-core@1",
+  "rayon@1",
+  "regex-automata@0.4",
+  "regex-syntax@0.8",
+  "regex@1",
+  "rustversion@1",
+  "same-file@1",
+  "serde@1",
+  "serde_core@1",
+  "serde_derive@1",
+  "serde_json@1",
+  "slab@0.4",
+  "syn@2",
+  "syn@3",
+  "tinytemplate@1",
+  "unicode-ident@1",
+  "walkdir@2",
+  "wasm-bindgen-macro-support@0.2",
+  "wasm-bindgen-macro@0.2",
+  "wasm-bindgen-shared@0.2",
+  "wasm-bindgen@0.2",
+  "web-sys@0.3",
+  "winapi-util@0.1",
+  "windows-link@0.2",
+  "windows-sys@0.61",
+  "zerocopy-derive@0.8",
+  "zerocopy@0.8",
+  "zmij@1",
+]
+build_time_code = [
+  "crossbeam-deque@0.8 build script",
+  "crossbeam-epoch@0.9 build script",
+  "crossbeam-utils@0.8 build script",
+  "num-traits@0.2 build script",
+  "proc-macro2@1 build script",
+  "quote@1 build script",
+  "rayon-core@1 build script",
+  "serde@1 build script",
+  "serde_core@1 build script",
+  "serde_derive@1 proc macro",
+  "serde_json@1 build script",
+  "zerocopy-derive@0.8 proc macro",
+  "zerocopy@0.8 build script",
+  "zmij@1 build script",
+]
+# criterion exports two macros, criterion_group! and criterion_main!, and neither writes unsafe.
+expands_unsafe = "none"
+# No package that criterion builds on a supported host compiles native code or links a native
+# library. Three facts look like native code and are not:
+# - rayon-core@1 declares links = "rayon-core" only so that cargo refuses to build two copies of
+#   rayon-core into one program. Its build.rs prints cargo:rerun-if-changed=build.rs and nothing
+#   else, so it compiles no native code and links no library.
+# - walkdir@2 ships compare/nftw.c, a C program its authors compare walkdir against. walkdir has
+#   no build script, so nothing compiles that file.
+# - Criterion::default runs `gnuplot --version` from PATH through criterion-plot, and when gnuplot
+#   is found, criterion runs it to draw the HTML report's plots. That runs a program; it does not
+#   compile or link one.
+native_code = "none"
+verdict = "kept-pending-owner"
