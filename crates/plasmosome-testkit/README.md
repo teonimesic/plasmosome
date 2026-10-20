@@ -73,7 +73,7 @@ and verifies the backend snapshot shows no residue.
 
 | Module | Holds |
 | --- | --- |
-| `builders` | `PlasmidManifest`, `Grant` sequences, `Effect`s and `DesiredState` — a test states only what it is about |
+| `builders` | `PlasmidManifest`, capabilities, `Grant` sequences, `Effect`s and `DesiredState` — a test states only what it is about |
 | `conformance` | Eleven clauses of the backend contract, each generic over `EnforcementBackend` |
 | `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |
@@ -86,5 +86,11 @@ crate's non-dev dependencies.
 test data directly; it is not a second TOML validator. The description scenario in
 `tests/attach_detach_residue.rs` instead parses a real declaration and reads the resulting
 descriptions through `ToolRegistry::lookup`, then verifies withdrawal removes them.
+
+`session_file`, `uds_socket`, `proxy_map`, `broker` and `mount` return the capability of their
+class with exactly the values given and check nothing, and the suite's fixtures build every
+capability through them, so a change to a capability's fields changes these five bodies, not
+every fixture. `plasmosome-backend` cannot depend on this crate and keeps a test-only `fixtures`
+module with the same five functions and `op`.
 
 Tests: `cargo test -p plasmosome-testkit`
