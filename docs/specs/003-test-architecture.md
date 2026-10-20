@@ -52,6 +52,7 @@ Every place the kernel touches the world outside the process, and the trait that
 | OS enforcement (grants, revocation, residue) | `EnforcementBackend` (`plasmosome-backend`) | `FakeBackend`, `CompositeBackend` over fake leaves |
 | Process spawning (the VMM child) | `Launch` (`plasmosome-membrane::vmm`) | test launchers already in the crate's tests |
 | Filesystem (session log, state) | paths injected as arguments | `tempfile::TempDir` |
+| Durable appends that can fail (session log) | `LogStore` and `LogFile` (`plasmosome-core::session_log`) | `FaultLogStore` in core's unit tests |
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
 
 Both forms in that table are seams. Which one a contact gets is decided by what varies between
@@ -210,11 +211,14 @@ only what spans crates.
   `plasmosome-testkit` outside dev-dependencies, and the guard is mutation-tested: the violation
   was added, seen to fail, and reverted.
 - `crates/plasmosome-testkit/AGENTS.md` carries the layer table and the seam rule.
-- The copied-checkout regression exercises the actual publication guard and membrane
-  readiness-verb test through the shared boundary, with the original checkout still present.
-  Binaries compiled only in the original must observe copy-only publication and spec-verb
-  violations, not merely return a different root string or fail before either read. Unset and
+- The copied-checkout regression exercises the actual publication guard through the shared
+  boundary, with the original checkout still present.
+  Binaries compiled only in the original must observe the copy-only publication
+  violation, not merely return a different root string or fail before the read. Unset and
   misleading runtime `CARGO_MANIFEST_DIR` values do not change the observations.
   The copy, move and outside-workspace outcomes, including stale-target failure rather than
   missing-original-file errors, meet [spec013](013-what-earns-a-guard.md#workspace-check-validity).
+  Corrected on 2026-10-09: this item named a second consumer, a membrane test that PR #116
+  removed, as [Workspace files belong to the invocation](#workspace-files-belong-to-the-invocation)
+  records.
 - The gate in the root `AGENTS.md` is green.
