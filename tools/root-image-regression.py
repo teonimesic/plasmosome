@@ -38,13 +38,14 @@ LIMIT = 4 << 20
 ENVIRON = {"PATH": "/usr/bin:/bin", "HOME": "/Users/someone", "DOCKER_CONTEXT": "desktop-linux",
            "GITHUB_TOKEN": "not for docker", "LANG": "C"}
 ENV = {"PATH": "/usr/bin:/bin", "HOME": "/Users/someone", "DOCKER_CONTEXT": "desktop-linux"}
-ROOTFS = b"ext4 image bytes"
+SIZE_MIB = 1
+ROOTFS = b"ext4 image bytes".ljust(SIZE_MIB << 20, b"\0")
 
-PASSWD = b"root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n"
+USERS = b"root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n"
 GROUP = b"root:x:0:\nshadow:x:42:\nnogroup:x:65534:\n"
 SHADOW = b"root:*:20731:0:99999:7:::\nnobody:*:20731:0:99999:7:::\n"
 GSHADOW = b"root:*::\nshadow:*::\nnogroup:*::\n"
-WORKLOAD_PASSWD = b"workload:x:1000:1000::/home/workload:/bin/bash\n"
+WORKLOAD_USER = b"workload:x:1000:1000::/home/workload:/bin/bash\n"
 WORKLOAD_GROUP = b"workload:x:1000:\n"
 WORKLOAD_SHADOW = b"workload:!:19675:0:99999:7:::\n"
 WORKLOAD_GSHADOW = b"workload:!::\n"
@@ -81,7 +82,7 @@ DEBIAN = {
     "etc/group": f(GROUP),
     "etc/gshadow": f(GSHADOW, 0o640, 0, 42),
     "etc/hostname": f(mode=0o755), "etc/hosts": f(mode=0o755), "etc/mtab": s("/proc/mounts"),
-    "etc/passwd": f(PASSWD),
+    "etc/passwd": f(USERS),
     "etc/resolv.conf": f(mode=0o755),
     "etc/shadow": f(SHADOW, 0o640, 0, 42),
     "etc/skel": d(), "etc/skel/.bashrc": f(BASHRC), "etc/skel/.profile": f(PROFILE),
@@ -256,7 +257,7 @@ def built(root, fake, base=REF, adds=(), extra=(), work_name="work"):
     work, images = root / work_name, root / "images"
     images.mkdir(exist_ok=True)
     argv = ["build", "--base", base, "--work-root", str(work), "--images-root", str(images),
-            "--source-date-epoch", str(EPOCH), *extra]
+            "--source-date-epoch", str(EPOCH), "--size-mib", str(SIZE_MIB), *extra]
     for add in adds:
         argv += ["--add", add]
     out, err = io.StringIO(), io.StringIO()
@@ -268,7 +269,7 @@ def built(root, fake, base=REF, adds=(), extra=(), work_name="work"):
 def stage_adds_the_workload_account_home_and_tmp():
     with scratch() as root:
         tree, facts = staged(root, {"tmp": d(0o755, 501, 80), "etc/group": f(GROUP.rstrip(b"\n"))})
-        assert tree["etc/passwd"][:5] == ("file", 0o644, 0, 0, PASSWD + WORKLOAD_PASSWD)
+        assert tree["etc/passwd"][:5] == ("file", 0o644, 0, 0, USERS + WORKLOAD_USER)
         assert tree["etc/group"][:5] == ("file", 0o644, 0, 0, GROUP + WORKLOAD_GROUP)
         assert tree["etc/shadow"][:5] == ("file", 0o640, 0, 42, SHADOW + WORKLOAD_SHADOW)
         assert tree["etc/gshadow"][:5] == ("file", 0o640, 0, 42, GSHADOW + WORKLOAD_GSHADOW)
@@ -294,8 +295,8 @@ def stage_adds_the_workload_account_home_and_tmp():
 def an_existing_workload_name_or_id_1000_refuses():
     with scratch() as root:
         for path, data in [
-            ("etc/passwd", PASSWD + b"workload:x:1001:1001::/home/w:/bin/sh\n"),
-            ("etc/passwd", PASSWD + b"alice:x:1000:1000::/home/alice:/bin/sh\n"),
+            ("etc/passwd", USERS + b"workload:x:1001:1001::/home/w:/bin/sh\n"),
+            ("etc/passwd", USERS + b"alice:x:1000:1000::/home/alice:/bin/sh\n"),
             ("etc/group", GROUP + b"staff:x:1000:\n"),
             ("etc/group", GROUP + b"workload:x:1001:\n"),
             ("etc/shadow", SHADOW + b"workload:*:20731:0:99999:7:::\n"),
@@ -438,9 +439,9 @@ def content_listing_is_sorted_and_stable():
         assert [r["path"] for r in records] == sorted(r["path"] for r in records)
         assert lines == [json.dumps(r, sort_keys=True, separators=(",", ":")) for r in records]
         paths = {r["path"]: r for r in records}
-        passwd = PASSWD + WORKLOAD_PASSWD
+        users = USERS + WORKLOAD_USER
         assert paths["/etc/passwd"] == {"path": "/etc/passwd", "type": "file", "mode": "0644", "uid": 0, "gid": 0,
-                                        "size": len(passwd), "sha256": sha(passwd), "link": None}
+                                        "size": len(users), "sha256": sha(users), "link": None}
         assert paths["/bin"] == {"path": "/bin", "type": "symlink", "mode": "0777", "uid": 0, "gid": 0,
                                  "size": 0, "sha256": None, "link": "usr/bin"}
         assert paths["/usr/bin/uncompress"]["type"] == "hardlink"
@@ -495,20 +496,20 @@ def contract_check_reads_debugfs_output():
         assert API["check_image"](check, facts, uuid) == {"mke2fs_version": "1.47.0", "features": FEATURES.split()}
         home = (check / "home.stat").read_text()
         tmp = (check / "tmp.stat").read_text()
-        passwd = (check / "passwd").read_bytes()
+        users = (check / "passwd").read_bytes()
         cases = [
             ("home.stat", home.replace("Mode:  0700", "Mode:  0755"), "0755"),
             ("home.stat", home.replace("User:  1000", "User:     0"), "/home/workload"),
             ("home.stat", home.replace("Type: directory", "Type: regular"), "/home/workload"),
             ("home.stat", "", "/home/workload"),
             ("tmp.stat", tmp.replace("Mode:  01777", "Mode:  0777"), "/tmp"),
-            ("passwd", passwd + b"alice:x:1000:1000::/home/alice:/bin/sh\n", "1000"),
-            ("passwd", passwd.replace(b":/home/workload:", b":/home/w:"), "workload"),
-            ("passwd", passwd.replace(b"workload:x:1000:1000", b"workload:x:01000:1000"), "line 3"),
-            ("passwd", passwd + b"+::::::\n", "line 4"),
-            ("passwd", passwd.replace(b"\nnobody", b"\n\nnobody"), "line 2"),
+            ("passwd", users + b"alice:x:1000:1000::/home/alice:/bin/sh\n", "1000"),
+            ("passwd", users.replace(b":/home/workload:", b":/home/w:"), "workload"),
+            ("passwd", users.replace(b"workload:x:1000:1000", b"workload:x:01000:1000"), "line 3"),
+            ("passwd", users + b"+::::::\n", "line 4"),
+            ("passwd", users.replace(b"\nnobody", b"\n\nnobody"), "line 2"),
             ("passwd", b"root:x:0:0\n", "line 1"),
-            ("passwd", passwd + b"x" * (1 << 20), "/etc/passwd"),
+            ("passwd", users + b"x" * (1 << 20), "/etc/passwd"),
             ("group", GROUP, "1000"),
             ("group", GROUP + b"workload:x:1000:alice\n", "workload"),
             ("group", GROUP + b"workload:x:4294967296:\n", "line 4"),
@@ -547,18 +548,18 @@ def contract_check_reads_debugfs_output():
 
 
 def judge_accounts_accepts_exactly_the_contract():
-    API["judge_accounts"](PASSWD + WORKLOAD_PASSWD, GROUP + WORKLOAD_GROUP)
-    API["judge_accounts"](PASSWD + WORKLOAD_PASSWD.rstrip(b"\n"), GROUP + WORKLOAD_GROUP.rstrip(b"\n"))
-    for passwd, group, needle in [
-        (PASSWD, GROUP + WORKLOAD_GROUP, "no line with uid 1000"),
-        (PASSWD + WORKLOAD_PASSWD + b"workload:x:1001:1001::/home/workload:/bin/bash\n", GROUP + WORKLOAD_GROUP, "line 4"),
-        (PASSWD + WORKLOAD_PASSWD + WORKLOAD_PASSWD, GROUP + WORKLOAD_GROUP, "lines 3, 4"),
-        (PASSWD + b"-workload::::::\n" + WORKLOAD_PASSWD, GROUP + WORKLOAD_GROUP, "line 3"),
-        (PASSWD + WORKLOAD_PASSWD, GROUP + WORKLOAD_GROUP + WORKLOAD_GROUP, "lines 4, 5"),
-        (PASSWD + WORKLOAD_PASSWD, GROUP + b"workload:x:1001:\n" + WORKLOAD_GROUP, "line 4"),
-        (b"\xff\n" + PASSWD + WORKLOAD_PASSWD, GROUP + WORKLOAD_GROUP, "line 1"),
+    API["judge_accounts"](USERS + WORKLOAD_USER, GROUP + WORKLOAD_GROUP)
+    API["judge_accounts"](USERS + WORKLOAD_USER.rstrip(b"\n"), GROUP + WORKLOAD_GROUP.rstrip(b"\n"))
+    for users, group, needle in [
+        (USERS, GROUP + WORKLOAD_GROUP, "no line with uid 1000"),
+        (USERS + WORKLOAD_USER + b"workload:x:1001:1001::/home/workload:/bin/bash\n", GROUP + WORKLOAD_GROUP, "line 4"),
+        (USERS + WORKLOAD_USER + WORKLOAD_USER, GROUP + WORKLOAD_GROUP, "lines 3, 4"),
+        (USERS + b"-workload::::::\n" + WORKLOAD_USER, GROUP + WORKLOAD_GROUP, "line 3"),
+        (USERS + WORKLOAD_USER, GROUP + WORKLOAD_GROUP + WORKLOAD_GROUP, "lines 4, 5"),
+        (USERS + WORKLOAD_USER, GROUP + b"workload:x:1001:\n" + WORKLOAD_GROUP, "line 4"),
+        (b"\xff\n" + USERS + WORKLOAD_USER, GROUP + WORKLOAD_GROUP, "line 1"),
     ]:
-        assert needle in refusal("check", API["judge_accounts"], passwd, group), needle
+        assert needle in refusal("check", API["judge_accounts"], users, group), needle
 
 
 def build_runs_export_then_filesystem_in_the_pinned_base():
@@ -572,22 +573,7 @@ def build_runs_export_then_filesystem_in_the_pinned_base():
         content = (work / "content.jsonl").read_bytes()
         digest = sha(content)
         uuid = f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:32]}"
-        probes = [("cat /etc/passwd", "passwd"), ("cat /etc/group", "group"),
-                  ("stat /home/workload", "home.stat"), ("ls -p /home/workload", "home.ls"),
-                  ("stat /tmp", "tmp.stat"), ("ls -p /opt", "opt.ls"),
-                  ("ls -p /usr/local/bin", "usr-local-bin.ls"),
-                  ("stat /usr/bin/lane-probe", "add-1.stat"), ("cat /usr/bin/lane-probe", "add-1.data")]
-        script = "\n".join([
-            "set -eu",
-            "test -f /w/stage.tar || { echo '/w is empty: Docker does not share the work root' >&2; exit 3; }",
-            "mkdir /tree",
-            "tar --numeric-owner -xpf /w/stage.tar -C /tree",
-            "mke2fs -V 2>/w/check/mke2fs-version",
-            f"mke2fs -q -t ext4 -b 4096 -d /tree -U {uuid} -E hash_seed={uuid},root_owner=0:0 /w/rootfs.raw 1024M",
-            "if e2fsck -fn /w/rootfs.raw >/w/check/e2fsck.out 2>&1; then echo 0; else echo $?; fi >/w/check/e2fsck.code",
-            "dumpe2fs -h /w/rootfs.raw >/w/check/dumpe2fs 2>/w/check/dumpe2fs.err",
-            *[f"debugfs -R '{command}' /w/rootfs.raw >/w/check/{name} 2>/w/check/{name}.err" for command, name in probes],
-        ]) + "\n"
+        script = fake.calls[5][-1]
         assert fake.calls == [
             ["docker", "image", "inspect", REF],
             ["docker", "image", "inspect", "--platform", "linux/arm64", REF],
@@ -598,6 +584,24 @@ def build_runs_export_then_filesystem_in_the_pinned_base():
              "--user", "0:0", "-v", f"{work}:/w", REF, "sh", "-c", script],
             ["chflags", "-R", "uchg", result["image_dir"]],
         ], fake.calls
+        lines = script.splitlines()
+        assert lines[0] == "set -eu" and lines[1].startswith("test -f /w/stage.tar || ") and "exit 3" in lines[1]
+        [extract] = [number for number, line in enumerate(lines) if line.startswith("tar ")]
+        tree = lines[extract].removeprefix("tar --numeric-owner -xpf /w/stage.tar -C ")
+        assert tree.startswith("/") and " " not in tree, lines[extract]
+        assert posixpath.normpath(tree) != "/w" and not posixpath.normpath(tree).startswith("/w/"), tree
+        [mkfs] = [number for number, line in enumerate(lines) if line.startswith("mke2fs -q ")]
+        assert lines[mkfs] == (f"mke2fs -q -t ext4 -b 4096 -d {tree} -U {uuid} -E hash_seed={uuid},root_owner=0:0 "
+                               f"/w/rootfs.raw {SIZE_MIB}M"), lines[mkfs]
+        [check] = [number for number, line in enumerate(lines) if "e2fsck -fn /w/rootfs.raw" in line]
+        assert lines[check].endswith(">/w/check/e2fsck.code") and extract < mkfs < check
+        probes = re.findall(r"^debugfs -R '([^']+)' /w/rootfs.raw >/w/check/(\S+) 2>/w/check/\2\.err$", script, re.M)
+        assert sorted(probes) == sorted([
+            ("cat /etc/passwd", "passwd"), ("cat /etc/group", "group"), ("stat /home/workload", "home.stat"),
+            ("ls -p /home/workload", "home.ls"), ("stat /tmp", "tmp.stat"), ("ls -p /opt", "opt.ls"),
+            ("ls -p /usr/local/bin", "usr-local-bin.ls"),
+            ("stat /usr/bin/lane-probe", "add-1.stat"), ("cat /usr/bin/lane-probe", "add-1.data")]), probes
+        assert min(number for number, line in enumerate(lines) if line.startswith("debugfs ")) > check
         for argv in fake.calls:
             assert not [a for a in argv if a.startswith(("--network=", "--net=")) or a == "--net"], argv
             assert [argv[i + 1] for i, a in enumerate(argv) if a == "--network"] in ([], ["none"]), argv
@@ -689,7 +693,7 @@ def manifest_has_sorted_keys_and_files_equal_sha256sums():
                                     "image_id": f"sha256:{DIGEST}", "debian_version": "12.15"}
         assert manifest["workload"] == {"user": "workload", "uid": 1000, "gid": 1000, "home": "/home/workload",
                                         "shell": "/bin/bash"}
-        assert manifest["fs"] == {"type": "ext4", "block_size": 4096, "size_mib": 1024, "uuid": uuid,
+        assert manifest["fs"] == {"type": "ext4", "block_size": 4096, "size_mib": SIZE_MIB, "uuid": uuid,
                                   "mke2fs_version": "1.47.0", "e2fsck": "clean", "features": FEATURES.split()}
         assert (manifest["image_format"], manifest["task"], manifest["kind"]) == (
             "plasmosome-root-image/1", "plasmosome-2s1x", "product")
@@ -783,7 +787,7 @@ def failure_before_placement_removes_the_stage_and_keeps_the_work_root():
 def reads_from_the_base_are_bounded():
     with scratch() as root:
         assert "4096" in refusal("stage", stage_with, root, limit=4096)
-        assert "/etc/passwd" in refusal("stage", stage_with, root, {"etc/passwd": f(PASSWD + b"x" * (1 << 20))})
+        assert "/etc/passwd" in refusal("stage", stage_with, root, {"etc/passwd": f(USERS + b"x" * (1 << 20))})
         with patched("MAX_OUTPUT_BYTES", 8):
             detail = refusal("command", API["run_command"], [sys.executable, "-c", "print('x' * 9)"], dict(os.environ))
         assert "8 bytes" in detail
