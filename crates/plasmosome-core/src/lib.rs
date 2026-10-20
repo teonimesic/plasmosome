@@ -18,6 +18,7 @@ pub mod reconciler;
 pub mod registry;
 pub mod session_log;
 pub mod state;
+pub mod supervisor_check;
 pub mod version;
 
 pub use control::{Controller, Handler, MAX_LINE_BYTES, serve_connection};
