@@ -454,8 +454,11 @@ These rules hold for `plasmosome`, `plasmosomed`, `membraned` and `plasmid`.
   the exit-code table. For these two binaries, section 2's reading order applies.
 - For the daemons, `-h`, `--help` and `--version` count only as the sole argument. Every other
   sole argument is still a configuration path, so a file named `--version` is passed as
-  `./--version`, as `./--help` already is. With no arguments, or more than one, the daemon prints
-  its usage on stderr and exits 64.
+  `./--version`, as `./--help` already is. `membraned` also accepts exactly the three arguments
+  spec 023 §4 starts it with, `--config-fd=3 --lock-fd=4 --cell=<id>`, in that order, where
+  `<id>` is a cell ID (spec 023 §2); it then starts as spec 023 §5 says. `plasmosomed` accepts no
+  such form. With no arguments, or any other list of more than one, the daemon prints its usage
+  on stderr and exits 64.
 
 **What changes.** Today `plasmosomed --version` and `membraned --version` try to read a
 configuration file called `--version` and exit 2, and `plasmid --version` exits 2 as an unknown
@@ -508,9 +511,12 @@ on Linux they are deferred with the platform.
    with a file named `--version` in the working directory holding a valid configuration, and
    `./--version` still reaches startup. Catches: reading the operand as configuration.
 2. Each daemon with no arguments, with `--version extra` and with `-h extra` exits 64 with usage
-   on stderr; an unreadable configuration still exits 2. Catches: `--version` overriding the
-   argument count, and an exit code that moved when it should not have, or did not when it
-   should.
+   on stderr; an unreadable configuration still exits 2. `membraned` given spec 023 §4's three
+   arguments prints no usage and does not exit 64. Those three in another order, with a fourth
+   argument, with `--cell=../x`, or given to `plasmosomed`, exit 64 with usage on stderr.
+   Catches: `--version` overriding the argument count, an exit code that moved when it should
+   not have, or did not when it should, and a usage rule that refuses spec 023's form or accepts
+   it loosely.
 3. `plasmid add x`, `plasmid list`, `plasmid remove x` and `plasmid reload x` each exit 2 with one
    JSON envelope on stderr whose `error.code` is `not_served` and whose `command` and `method`
    are the wire method. `plasmid add x --help` exits 0 with help saying `add` is not served.
