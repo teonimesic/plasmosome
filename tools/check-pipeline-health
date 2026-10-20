@@ -32,6 +32,14 @@ PR_QUERY = """query($owner:String!, $name:String!, $cursor:String) {
     }
   }
 }"""
+SECURITY_QUERY = """query($owner:String!, $name:String!, $cursor:String) {
+  repository(owner:$owner, name:$name) {
+    issues(first:100, after:$cursor, states:OPEN, labels:["security"], orderBy:{field:CREATED_AT,direction:ASC}) {
+      totalCount pageInfo { hasNextPage endCursor }
+      nodes { number title url createdAt }
+    }
+  }
+}"""
 
 
 def utc_now():
@@ -304,8 +312,83 @@ def github_empty():
                      "last_merge": None, "seconds_since_last_merge": None, "last_merge_observed_candidate": None,
                      "merge_commit_proof_complete": None, "missing_merge_commit_prs": [],
                      "reported_unverified_candidates": []},
-        "open_prs": [], "errors": [],
+        "open_prs": [], "security_issues": security_empty(), "errors": [],
     }
+
+
+def security_empty():
+    return {"collection_status": "unavailable",
+            "source": {"api": "GitHub GraphQL repository.issues (open, labelled security, created ascending)",
+                       "page_count": 0, "page_total_counts": [], "pagination_complete": False},
+            "count": None, "observed_count": 0, "issues": None}
+
+
+def collect_security_issues(run_json, *, repository, observed_at):
+    """List open issues labelled security with their ages; any failure leaves the count unknown, never zero."""
+    report, errors = security_empty(), []
+    source = report["source"]
+    owner, name = repository.split("/", 1)
+    found, cursors, cursor = {}, set(), None
+    for _ in range(PAGE_LIMIT):
+        argv = ["gh", "api", "graphql", "-f", "query=" + SECURITY_QUERY, "-f", "owner=" + owner, "-f", "name=" + name]
+        if cursor is not None:
+            argv.extend(["-f", "cursor=" + cursor])
+        try:
+            payload = run_json(argv)
+            if not isinstance(payload, dict):
+                raise RuntimeError("GraphQL response is not an object")
+            if payload.get("errors"):
+                errors.append(error("github", "securityIssues", "GraphQL returned errors; any available data is partial"))
+            data = payload.get("data")
+            repo = data.get("repository") if isinstance(data, dict) else None
+            connection = repo.get("issues") if isinstance(repo, dict) else None
+            if not isinstance(connection, dict):
+                raise RuntimeError("GraphQL repository or issues unavailable")
+            nodes, total, page = connection.get("nodes"), connection.get("totalCount"), connection.get("pageInfo")
+            if not isinstance(nodes, list) or type(total) is not int or total < 0 or not isinstance(page, dict):
+                raise RuntimeError("invalid issues connection")
+            source["page_count"] += 1
+            source["page_total_counts"].append(total)
+            for node in nodes:
+                try:
+                    if not isinstance(node, dict) or type(node.get("number")) is not int or node["number"] < 1:
+                        raise ValueError("missing/invalid issue identity")
+                    for field in ("title", "url"):
+                        if not isinstance(node.get(field), str) or not node[field]:
+                            raise ValueError(f"issue {node['number']}: missing/invalid {field}")
+                    created = parse_time(node.get("createdAt"))
+                except ValueError as exc:
+                    errors.append(error("github", "securityIssues", exc))
+                    continue
+                if node["number"] in found:
+                    errors.append(error("github", "securityIssues", f"duplicate issue {node['number']} across pages"))
+                    continue
+                found[node["number"]] = {"number": node["number"], "title": node["title"], "url": node["url"],
+                                         "created_at": timestamp(created),
+                                         "age_seconds": (observed_at - created).total_seconds()}
+            if type(page.get("hasNextPage")) is not bool:
+                raise RuntimeError("missing/invalid hasNextPage")
+            if not page["hasNextPage"]:
+                source["pagination_complete"] = True
+                break
+            cursor = page.get("endCursor")
+            if not isinstance(cursor, str) or not cursor or cursor in cursors or not nodes:
+                raise RuntimeError("nonadvancing issue pagination cursor")
+            cursors.add(cursor)
+        except RuntimeError as exc:
+            errors.append(error("github", "securityIssues", exc))
+            break
+    else:
+        errors.append(error("github", "securityIssues", f"issue pagination exceeded {PAGE_LIMIT} pages"))
+    totals = source["page_total_counts"]
+    if totals and (len(set(totals)) != 1 or (source["pagination_complete"] and totals[-1] != len(found))):
+        errors.append(error("github", "securityIssues", "issue totalCount changed or differs from the issues listed"))
+    if not totals:
+        return report, errors
+    complete = source["pagination_complete"] and not errors
+    report.update(collection_status="complete" if complete else "partial", count=len(found) if complete else None,
+                  observed_count=len(found), issues=list(found.values()))
+    return report, errors
 
 
 def collect_github(run_json, *, repository, window_start, observed_at):
@@ -477,6 +560,16 @@ def collect_report(root, *, repository=None, native_paused=False):
                                                        window_start=window_start, observed_at=observed_at)
         except Exception as exc:
             report["github"]["errors"].append(error("github", "collection", exc))
+        try:
+            security, security_errors = collect_security_issues(github_runner, repository=repository,
+                                                                observed_at=observed_at)
+        except Exception as exc:
+            security, security_errors = security_empty(), [error("github", "securityIssues", exc)]
+        report["github"]["security_issues"] = security
+        report["github"]["errors"].extend(security_errors)
+        sources = {report["github"]["collection_status"], security["collection_status"]}
+        report["github"]["collection_status"] = ("complete" if sources == {"complete"} and not report["github"]["errors"]
+                                                 else "unavailable" if sources == {"unavailable"} else "partial")
         try:
             # Load the owned sibling in safe-path mode without writing checkout bytecode.
             collect_review_usage = runpy.run_path(
