@@ -26,10 +26,14 @@ Snapshots and residue diffs distinguish exact holdings; a separate canonical com
 arbitrary identity values but preserves capability, owner, and multiplicity. These are different
 questions, and neither comparison may silently substitute for the other.
 
-The UUID/exact-object model and version-2 single-plugin log are already implemented. The broker
-launch description, caller-prepared fallible grants, complete fallible observation, exact
-incomplete-effect cleanup and version-3 cutover below are their next contract, not claims that
-the current code or a real OS adapter implements them.
+The UUID/exact-object model, its complete recipes and broker launch description, and the
+version-3 single-plugin log are implemented in the model and the ledger, which writes and reads
+format3 only. Caller-prepared fallible grants, complete fallible observation and exact
+incomplete-effect cleanup below are their next contract, not claims that the current code or a
+real OS adapter implements them; no real OS adapter implements the recipes or the launch yet.
+Amended on 2026-10-20, when plasmosome-8pr4 shipped the first format3 writer. Until then this
+paragraph named the version-2 log as implemented, and the launch and the version-3 cutover as
+next contract.
 Spec008 supplies the cell-qualified owner and durable ordering; its live-recovery acceptance
 is not replaced by the model conformance here.
 
@@ -548,16 +552,20 @@ variants and embed the new exact types.
 No missing identity receives a default. Identity-bearing structures reject unknown fields, so an
 old lossy field cannot quietly accompany and disagree with its replacement.
 
-The single-plugin `LogRecord` now requires `format: 3`. This explicitly replaces the implemented
-format2 boundary; it is not a format2 payload with a silently changed broker meaning.
+The single-plugin `LogRecord` now requires `format: 3`. This explicitly replaces the format2
+boundary implemented before plasmosome-8pr4; it is not a format2 payload with a silently changed
+broker meaning.
 Writers and readers accept only version3. Unversioned/version2 records, other versions, numeric
 handles, identity-less inverses and PID-bearing broker payloads refuse. Preserve old files and
 return an error rather than synthesize IDs or launch descriptions, skip effects or rewrite bytes.
 Even a version2 record that needs no broker recipe is refused at this explicit whole-format cutover.
-The complete nonbroker recipes and broker data endpoint refine that still-unimplemented format3
-before its first writer ships; the repository baseline writes format2, not format3. A future
-already-published incompatible format3 writer would require another explicit version transition,
-not reuse of this refinement as silent compatibility. Missing recipes or data endpoints refuse.
+The complete nonbroker recipes and broker data endpoint are part of format3 as its first writer
+shipped it; the repository baseline writes and reads format3. Format3 now has a published writer,
+so any later incompatible change to these records requires another explicit version transition,
+not a silent change inside format3. Missing recipes or data endpoints refuse.
+Amended on 2026-10-20, when plasmosome-8pr4 shipped the first format3 writer. Until then this
+paragraph called format3 still unimplemented, said the baseline wrote format2, and called format2
+the implemented boundary.
 The separate, not-yet-implemented per-cell `CellJournalRecord` remains spec008's format1.
 
 Before extending a nonempty legacy file, append validates all existing complete LF-terminated

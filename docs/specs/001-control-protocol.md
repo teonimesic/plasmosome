@@ -139,14 +139,23 @@ exists — live socket, stale socket, regular file, directory or symlink — is 
 touching it: clearing the path is the caller's job, because unlinking a live daemon's socket is
 how a half-alive controller or supervisor is manufactured. Following a successful bind, the
 daemon records the socket's device and inode; on every route out (clean return, later error,
-unwinding panic) it removes the configured path only if a no-follow inspection finds that exact
+unwinding panic) it removes the socket's name only if a no-follow inspection finds that exact
 socket still there, as one best-effort attempt. A replacement settled at the pathname after
 start — a regular file or a leaf symlink, target present or dangling — is preserved with its
 contents, entry type and link target, and an original socket renamed elsewhere stays there: the
 daemon owns the entry it bound, not every name later given to its inode. A missing entry, a
 non-socket, or a non-matching identity leaves the namespace untouched. A start whose identity
 capture fails refuses before any fork or other setup, without unlinking anything, and can leave
-the just-bound socket for explicit operator cleanup.
+the just-bound socket for explicit operator cleanup. `membraned` captures that identity at the
+configured path and inspects the configured path at teardown. `plasmosomed` does both at the
+socket's name in the directory it opened and checked at start, which it holds open: it captures
+the identity only of a socket its effective UID owns, and if that directory is renamed while it
+runs, teardown removes the socket under the directory's new name and leaves whatever is then at
+the configured path. A `plasmosomed` start that fails at any step after the capture removes the
+just-bound socket as any later error does. Those steps are, in order, the repeated path check, the
+change to mode 0600, the re-inspection of the socket after that change, `listen`, and the switch
+to nonblocking. Amended on 2026-10-20: this paragraph said each daemon removes the configured
+path, and described only `membraned`'s capture and teardown.
 
 These are host-conditioned guarantees, not race-free protection. The caller supplies a trusted,
 stable directory and coordinated namespace writers: parent, ancestors and their symlink targets
@@ -157,6 +166,11 @@ distinguishes a later socket at the same name only while the original inode stay
 the file-type check still rejects regular files and symlinks even if inode numbers are recycled.
 `SIGKILL` and equivalent hard exits run no destructor; the resulting residue is observed by the
 next start's refusal, not prevented, and no verb observes or repairs it.
+
+`plasmosomed`'s control socket is held to a stricter rule: it is bound under §4.1's path
+boundary for private sockets. The daemon refuses to start when the configured path fails that
+boundary, sets the socket to mode 0600 before listening, and closes unread any connection from
+another effective UID (spec 025 §5 and §6). This does not change `membraned`'s sockets.
 
 ## 2. Naming and addressing (D1a/D1b/D1c)
 
@@ -1495,13 +1509,21 @@ is a claim that the text above may not be corrected.
    requires actual controller restart and independently surviving supervisor observation,
    separately from portable journal/model evidence. Accepting the contract does not turn the
    existing status-only daemons into recovery-capable daemons.
-8. Spec017's PID-free BrokerLaunch, caller-prepared fallible grant API, complete fallible snapshot,
-   typed incomplete effects, drain-aware exact cleanup and single-plugin format3 cutover are
-   **not yet implemented**. Current exact-ID model code still carries PID-bearing capabilities,
-   infallible backend-minted grants and format2 records. The new contract permits complete
-   prepare/inverse before fork and defines cleanup after partial launch; it does not deliver
-   an independent observer, workload confinement or all five real adapters.
-9. The selected hardware runtime, fully resolved resource recipes and physical guest projection
-   account in §4.2/spec017 are **not yet implemented**. Actual guest artifacts, platform
-   confinement and strict managed-file policy witnesses remain deployment/admission obligations.
-   Accepting their specification neither changes the status-only daemon nor completes spec008.
+8. Spec017's PID-free BrokerLaunch and single-plugin format3 cutover are **delivered** in the
+   exact-ID model and the ledger. Its caller-prepared fallible grant API, complete fallible
+   snapshot, typed incomplete effects and drain-aware exact cleanup are **not yet implemented**.
+   Current exact-ID model code carries recipe-bearing capabilities, a PID-free broker launch and
+   format3 records, and still has infallible backend-minted grants. The new contract permits
+   complete prepare/inverse before fork and defines cleanup after partial launch; it does not
+   deliver an independent observer, workload confinement or all five real adapters.
+   Amended on 2026-10-20, when plasmosome-8pr4 shipped the launch and the format3 cutover. Until
+   then this item listed both as not yet implemented, and said the model code carried
+   PID-bearing capabilities and format2 records.
+9. The selected hardware runtime and physical guest projection account in §4.2/spec017 are
+   **not yet implemented**. The exact-ID model and the ledger carry spec017's complete resource
+   recipes as values, but nothing yet resolves a need into one or materializes one. Actual guest
+   artifacts, platform confinement and strict managed-file policy witnesses remain
+   deployment/admission obligations. Accepting their specification neither changes the
+   status-only daemon nor completes spec008. Amended on 2026-10-20, when plasmosome-8pr4 shipped
+   those recipe values. Until then this item listed fully resolved resource recipes as not yet
+   implemented.
