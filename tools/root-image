@@ -33,6 +33,7 @@ PASSWD_LINE = b"workload:x:1000:1000::/home/workload:/bin/bash"
 GROUP_LINE = b"workload:x:1000:"
 SOFTWARE_DIRS = ("opt", "usr/local/bin")
 EMPTIED_DIRS = ("dev", "proc", "sys")
+CREATE_TIMED = ("dev", "proc", "sys", "etc", "etc/mtab")
 PROTECTED = ("opt", "usr/local/bin", "proc", "dev", "sys", "tmp", "home/workload")
 ACCOUNT_FILES = (("etc/passwd", 2), ("etc/group", 2), ("etc/shadow", None), ("etc/gshadow", None))
 NETWORK_FILES = {
@@ -391,12 +392,13 @@ def write_stage_tar(source, members, adds, epoch, stage_tar):
                                      0 if name in NETWORK_FILES else member.gid, epoch, len(rewritten[name])),
                             rewritten[name]))
         elif name in EMPTIED_DIRS:
-            entries.append((tar_info(name, "dir", 0o755, 0, 0, member.mtime), None))
+            entries.append((tar_info(name, "dir", 0o755, 0, 0, epoch), None))
         elif name == "tmp":
             entries.append((tar_info(name, "dir", 0o1777, 0, 0, epoch), None))
         else:
             link = member.linkname if kind in ("symlink", "hardlink") else ""
-            entries.append((tar_info(name, kind, member.mode, member.uid, member.gid, member.mtime,
+            mtime = epoch if name in CREATE_TIMED else member.mtime
+            entries.append((tar_info(name, kind, member.mode, member.uid, member.gid, mtime,
                                      member.size if kind == "file" else 0, link), member if kind == "file" else None))
     for name, mode in [*((d, 0o755) for d in EMPTIED_DIRS), ("tmp", 0o1777), ("home", 0o755)]:
         if name not in members:
