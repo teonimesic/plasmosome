@@ -21,6 +21,5 @@ allow-git = []
 
 [licenses]
 allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
-# 2026-10-20: spec 026 section 4's licence table allows NCSA for libfuzzer-sys only. No lockfile
-# holds libfuzzer-sys until the fuzz workspace lands, so cargo-deny reports this as unused.
-exceptions = [{ crate = "libfuzzer-sys", allow = ["NCSA"] }]
+# Add an exception with the lockfile that needs it. cargo-deny reports an unused exception, and the
+# security report keeps that as a finding.

@@ -6,6 +6,8 @@ use plasmosome_guards::check_workspace;
 
 const TESTKIT: &str = "plasmosome-testkit";
 
+const LANES: &str = "plasmosome-lanes";
+
 const BACKEND: &str = "plasmosome-backend";
 
 const TEST_FIXTURE: &str = "test-fixture";
@@ -277,40 +279,181 @@ fn a_binary_taking_another_packages_name_is_still_reported() {
     );
 }
 
+fn shipping_graph(root: &Path, member: &str) -> String {
+    let output = cargo_in(root)
+        .args([
+            "tree",
+            "--locked",
+            "-p",
+            member,
+            "--edges",
+            "normal,build",
+            "--all-features",
+            "--prefix",
+            "none",
+            "--target",
+            "all",
+        ])
+        .output()
+        .expect("cargo tree runs");
+    assert!(
+        output.status.success(),
+        "cargo tree -p {member} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn members_shipping(root: &Path, members: &[String], package: &str) -> Vec<String> {
+    let node = format!("{package} ");
+    members
+        .iter()
+        .filter(|member| *member != package)
+        .filter(|member| {
+            shipping_graph(root, member)
+                .lines()
+                .any(|line| line.starts_with(&node))
+        })
+        .cloned()
+        .collect()
+}
+
+fn testkit_refusals(root: &Path, members: &[String]) -> Vec<String> {
+    members_shipping(root, members, TESTKIT)
+        .into_iter()
+        .map(|member| {
+            format!(
+                "`{member}` has a non-dev dependency path to `{TESTKIT}`; the testkit is test support and reaches a kernel crate only through `[dev-dependencies]`, or it ships"
+            )
+        })
+        .collect()
+}
+
+fn lanes_refusals(root: &Path, members: &[String]) -> Vec<String> {
+    members_shipping(root, members, LANES)
+        .into_iter()
+        .map(|member| {
+            format!(
+                "`{member}` has a non-dev dependency path to `{LANES}`. The lanes are a test fixture that loads libkrun and boots a guest, so their code would ship inside a product binary (spec 013). Reach them only through `[dev-dependencies]`, never through a normal, build or optional dependency."
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn testkit_is_dev_only() {
     check_workspace(|root| {
-        for member in workspace_members(root) {
-            if member == TESTKIT {
-                continue;
-            }
-            let output = cargo_in(root)
-                .args([
-                    "tree",
-                    "--locked",
-                    "-p",
-                    &member,
-                    "--edges",
-                    "normal,build",
-                    "--prefix",
-                    "none",
-                    "--target",
-                    "all",
-                ])
-                .output()
-                .expect("cargo tree runs");
-            assert!(
-                output.status.success(),
-                "cargo tree -p {member} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let graph = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                !graph.lines().any(|line| line.starts_with(TESTKIT)),
-                "`{member}` has a non-dev dependency path to `{TESTKIT}`; the testkit is test support and reaches a kernel crate only through `[dev-dependencies]`, or it ships"
-            );
-        }
+        let refusals = testkit_refusals(root, &workspace_members(root));
+        assert!(refusals.is_empty(), "{}", refusals.join("\n"));
     });
+}
+
+#[test]
+fn lanes_are_dev_only() {
+    check_workspace(|root| {
+        let members = workspace_members(root);
+        assert!(
+            members.iter().any(|member| member == LANES),
+            "`{LANES}` is no longer a workspace member, so this guard checks nothing: {members:?}"
+        );
+        let refusals = lanes_refusals(root, &members);
+        assert!(refusals.is_empty(), "{}", refusals.join("\n"));
+    });
+}
+
+fn membrane_workspace(sections: &str) -> tempfile::TempDir {
+    fixture_feature_workspace_of(
+        &[
+            (
+                "crates/membrane",
+                &consumer("plasmosome-membrane", sections),
+            ),
+            ("crates/lanes", &member_manifest(LANES)),
+            ("crates/testkit", &member_manifest(TESTKIT)),
+        ],
+        "",
+    )
+}
+
+fn refusals_for(sections: &str) -> (Vec<String>, Vec<String>) {
+    let workspace = membrane_workspace(sections);
+    let members = workspace_members_in(workspace.path());
+    (
+        lanes_refusals(workspace.path(), &members),
+        testkit_refusals(workspace.path(), &members),
+    )
+}
+
+#[test]
+fn a_normal_dependency_on_the_lanes_or_the_testkit_is_refused() {
+    let (lanes, testkit) = refusals_for(
+        "[dependencies]\nplasmosome-lanes = { path = \"../lanes\" }\nplasmosome-testkit = { path = \"../testkit\" }\n",
+    );
+
+    assert_eq!(lanes.len(), 1, "{lanes:?}");
+    assert!(
+        lanes[0].starts_with(
+            "`plasmosome-membrane` has a non-dev dependency path to `plasmosome-lanes`"
+        ),
+        "{lanes:?}"
+    );
+    assert_eq!(testkit.len(), 1, "{testkit:?}");
+    assert!(
+        testkit[0].starts_with(
+            "`plasmosome-membrane` has a non-dev dependency path to `plasmosome-testkit`"
+        ),
+        "{testkit:?}"
+    );
+}
+
+#[test]
+fn an_optional_lanes_dependency_behind_a_feature_is_refused() {
+    let (lanes, testkit) = refusals_for(
+        "[features]\nlanes = [\"dep:plasmosome-lanes\"]\n\n[dependencies]\nplasmosome-lanes = { path = \"../lanes\", optional = true }\n",
+    );
+
+    assert_eq!(
+        lanes.len(),
+        1,
+        "a feature that links the lanes into the membrane is missed: {lanes:?}"
+    );
+    assert!(
+        lanes[0].starts_with(
+            "`plasmosome-membrane` has a non-dev dependency path to `plasmosome-lanes`"
+        ),
+        "{lanes:?}"
+    );
+    assert!(testkit.is_empty(), "{testkit:?}");
+}
+
+#[test]
+fn an_optional_testkit_dependency_behind_a_feature_is_refused() {
+    let (lanes, testkit) = refusals_for(
+        "[features]\nfixtures = [\"dep:plasmosome-testkit\"]\n\n[dependencies]\nplasmosome-testkit = { path = \"../testkit\", optional = true }\n",
+    );
+
+    assert_eq!(
+        testkit.len(),
+        1,
+        "a feature that links the testkit into the membrane is missed: {testkit:?}"
+    );
+    assert!(
+        testkit[0].starts_with(
+            "`plasmosome-membrane` has a non-dev dependency path to `plasmosome-testkit`"
+        ),
+        "{testkit:?}"
+    );
+    assert!(lanes.is_empty(), "{lanes:?}");
+}
+
+#[test]
+fn dev_dependencies_and_a_feature_that_turns_on_no_dependency_are_not_refused() {
+    let (lanes, testkit) = refusals_for(
+        "[features]\ntest-fixture = []\n\n[dev-dependencies]\nplasmosome-lanes = { path = \"../lanes\" }\nplasmosome-testkit = { path = \"../testkit\" }\n",
+    );
+
+    assert!(lanes.is_empty(), "{lanes:?}");
+    assert!(testkit.is_empty(), "{testkit:?}");
 }
 
 fn write_member(root: &Path, directory: &str, manifest: &str) {

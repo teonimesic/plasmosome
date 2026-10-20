@@ -27,7 +27,7 @@ one.
 | `closure` | What removing a plugin takes, with no IO. `AttachmentGraph` holds one cell's attached plugins, the providers each one directly requires, and which ones were asked for by name; a provider is attached before its requirers. `stranded_by` lists the plugins that directly require a given one, which `plasmid.remove` must refuse to strand. `removal_closure` gives that plugin, every plugin that transitively requires it, and every unnamed provider required only by plugins it takes, followed down the chain. Spec 011's `plasmid.remove` and spec 028's expiry are to share it, so the two cannot take different sets; nothing calls it yet |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
 | `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
-| `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends |
+| `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends. `list_trusted_dir` lists a directory whose every component, itself included, passes the ancestor rule |
 | `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
 ## Use
@@ -289,6 +289,15 @@ control socket described above.
 - A client calls `check_private_path` before its own nonblocking connect, then `check_peer_uid`
   on the connected stream before it sends anything. A missing directory is `NoDirectory`; a
   missing socket entry in a directory that exists is `NoSocket`.
+- `list_trusted_dir` walks a path the same way, but judges the last directory by the ancestor
+  rule, not the private one. So `~/.plasmosome/instances` at 0755 lists. On macOS, an ACL
+  entry that lets anyone replace its entries, or a volume with ownership ignored, still refuses
+  it. On Linux, a POSIX ACL counts through the mode it shows: an access ACL whose mask grants
+  write puts write in the group bits, which refuses it.
+  It returns every entry but `.` and `..`, as raw name bytes sorted by those bytes, each with
+  its kind (`Directory`, `Symlink` or `Other`) from a no-follow `fstatat`. It follows no entry
+  and leaves out one gone before its stat. It is for spec 025's default selection, which
+  applies its own name rules to the bytes.
 
 The integration tests make each private root where every ancestor passes:
 - on macOS, under the per-user temp directory that `confstr(_CS_DARWIN_USER_TEMP_DIR)` reports,
@@ -311,6 +320,9 @@ allocation, so an error read too late shows up as the wrong variant.
 
 The Linux ACL tests fail when the filesystem refuses POSIX ACLs. Set
 `PLASMOSOME_ACL_TESTS_UNSUPPORTED=1` to skip them there instead.
+
+The test that lists a name that is not UTF-8 runs on Linux only, because APFS refuses to
+create such a name, with `EILSEQ`.
 
 One test connects to a socket served by another UID and expects the kernel to report that UID,
 not this process's own: `/private/var/run/mDNSResponder` on macOS, the system D-Bus socket or
