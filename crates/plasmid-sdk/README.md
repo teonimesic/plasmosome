@@ -18,8 +18,9 @@ the `plasmid` command line is a [crate of its own](../plasmid) rather than a bin
 ## Status
 
 Reserved and deliberately unimplemented. The interface is being designed rather than accreted —
-a contract that is frozen too early is worse than one that arrives late. The `plasmid new`
-scaffold refuses to run rather than generating against a shape that will change.
+a contract that is frozen too early is worse than one that arrives late. `plasmid new` writes a
+plasmid's declaration, which the kernel already parses, and refuses to generate a component
+against a shape that will change.
 
 ## Intended shape
 
