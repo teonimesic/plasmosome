@@ -179,6 +179,7 @@ class FakeDocker:
         self.base = {**DEBIAN, **(base or {})}
         self.calls, self.envs = [], []
         self.missing, self.e2fsck, self.run_code, self.rootfs = False, "0", 0, ROOTFS
+        self.unshared = False
         self.repo_digests = [f"debian@sha256:{DIGEST}"]
         self.platform = {"Os": "linux", "Architecture": "arm64"}
 
@@ -205,6 +206,9 @@ class FakeDocker:
         if argv[:2] == ["docker", "run"]:
             mount = argv[argv.index("-v") + 1]
             assert mount.endswith(":/w"), mount
+            if self.unshared:
+                message = re.search(r"echo '([^']+)' >&2; exit 3", argv[-1]).group(1)
+                return Result(3, "", message + "\n")
             if self.run_code == 0:
                 self.container(Path(mount[:-3]), argv[-1])
             return Result(self.run_code, "", "docker: exited\n" if self.run_code else "")
@@ -524,6 +528,7 @@ def build_runs_export_then_filesystem_in_the_pinned_base():
                   ("stat /usr/bin/lane-probe", "add-1.stat"), ("cat /usr/bin/lane-probe", "add-1.data")]
         script = "\n".join([
             "set -eu",
+            "test -f /w/stage.tar || { echo '/w is empty: Docker does not share the work root' >&2; exit 3; }",
             "mkdir /tree",
             "tar --numeric-owner -xpf /w/stage.tar -C /tree",
             "mke2fs -V 2>/w/check/mke2fs-version",
@@ -590,6 +595,10 @@ def e2fsck_failure_refuses():
         code, out, err, work, images = built(root, fake, work_name="unclean")
         assert code == 1 and err.startswith("root-image: refused filesystem: ") and "e2fsck" in err, err
         assert "illegal block" in err and list(images.iterdir()) == [] and work.is_dir()
+        fake = FakeDocker()
+        fake.unshared = True
+        code, out, err, work, images = built(root, fake, work_name="unshared")
+        assert code == 1 and "Docker does not share the work root" in err, err
         fake = FakeDocker()
         fake.run_code = 125
         code, out, err, work, images = built(root, fake, work_name="no-container")
