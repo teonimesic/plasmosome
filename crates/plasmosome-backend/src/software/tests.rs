@@ -227,6 +227,17 @@ fn a_root_that_is_a_link_is_refused_as_the_tree_itself() {
 }
 
 #[test]
+fn a_root_that_is_a_link_to_nothing_is_refused_as_a_link_not_as_unreadable() {
+    let tree = Tree::new().file("tool", b"tool");
+    let link = tree.dir.path().join("dangling");
+    symlink(tree.dir.path().join("nothing"), &link).expect("a link to nothing");
+    assert_eq!(
+        pin(&link, &tree.listed, &[]),
+        Err(PinRefusal::Link { path: ".".into() })
+    );
+}
+
+#[test]
 fn a_root_reached_through_a_linked_ancestor_pins() {
     let tree = Tree::new().file("tool", b"tool").file("lib/data", b"data");
     let via = tree.dir.path().join("via");
