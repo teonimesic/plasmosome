@@ -1,4 +1,6 @@
-use plasmosome_cli::json::{Json, Reason, ScanError, scan, write_compact, write_human};
+use plasmosome_cli::json::{
+    Json, MAX_REPLY_BYTES, Reason, ScanError, scan, write_compact, write_human,
+};
 
 const BACKSLASH: char = '\\';
 
@@ -275,6 +277,25 @@ fn the_grammar_is_strict() {
 }
 
 #[test]
+fn a_reply_at_the_bound_scans_and_one_byte_more_is_refused() {
+    assert_eq!(MAX_REPLY_BYTES, 16_777_216, "spec 025's bound on one reply");
+    let mut text = vec![b' '; MAX_REPLY_BYTES];
+    text[0] = b'0';
+    assert_eq!(scan(&text), Ok(number("0")));
+    let too_large = ScanError {
+        offset: MAX_REPLY_BYTES,
+        reason: Reason::TooLarge,
+    };
+    text.push(b' ');
+    assert_eq!(scan(&text), Err(too_large.clone()));
+    assert_eq!(
+        scan(&vec![0xff; MAX_REPLY_BYTES + 1]),
+        Err(too_large),
+        "the bound is checked before anything else is read"
+    );
+}
+
+#[test]
 fn valid_documents_scan() {
     let value = scan(b" \t\r\n{ \"a\" : [ 1 , true , false , null , \"s\" , { } , [ ] ] } \n")
         .expect("whitespace may surround every token");
@@ -381,6 +402,7 @@ fn every_reason_reads_as_prose() {
         (Reason::Escape, "a string holds an invalid escape"),
         (Reason::LoneSurrogate, "a string escapes a lone surrogate"),
         (Reason::Trailing, "more text follows the value"),
+        (Reason::TooLarge, "the text is longer than 16777216 bytes"),
         (
             Reason::DuplicateKey {
                 path: "/a".to_string(),
