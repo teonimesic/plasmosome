@@ -36,7 +36,9 @@ impl SystemClock {
     /// continuous clock can be read. After this, [`Clock::now`] does not fail and does not
     /// panic: a wall clock later set before 1970 reads as 1970-01-01T00:00:00Z, and a
     /// continuous clock that refuses a read gives `u64::MAX`, so every bound of this boot
-    /// session reads as passed.
+    /// session reads as passed. The fence is permanent, so one refused read ends every lease
+    /// of the boot session for good. The next good reading is lower than `u64::MAX`, so a
+    /// caller that subtracts two continuous readings must saturate.
     pub fn new() -> Result<SystemClock, ClockError> {
         wall_ms_at(SystemTime::now())?;
         continuous_ns()?;

@@ -197,16 +197,18 @@ impl Bound {
                 && now.continuous.ns >= self.continuous.ns)
     }
 
-    /// Whole milliseconds left on the reading with less time left, and 0 once that one has
-    /// passed. With another boot session it is the wall reading's.
+    /// Milliseconds left on the reading with less time left, rounded up, so it is 0 exactly
+    /// when [`Bound::passed`] is true. With another boot session it is the wall reading's.
     pub fn remaining_ms(&self, now: &ClockReading) -> u64 {
         let left = u128::try_from(self.remaining_ns(now)).unwrap_or(0);
         u64::try_from(left.div_ceil(u128::from(NS_PER_MS))).unwrap_or(u64::MAX)
     }
 
-    /// The earlier of two bounds, each reading taken separately. When the two continuous
-    /// deadlines are from different boot sessions they cannot be compared, so the result is
-    /// `other` whole when its wall reading is earlier, and `self` otherwise.
+    /// The earlier of two bounds, each reading taken separately. This is exact only when both
+    /// are from one boot session. Across sessions the continuous deadlines cannot be compared,
+    /// so the result is `other` whole when its wall reading is earlier, and `self` otherwise. A
+    /// reading from the session the result did not come from then ignores its continuous
+    /// deadline, as the bound rule says, so only the wall reading can end it there.
     pub fn earlier(self, other: Bound) -> Bound {
         if self.continuous.boot != other.continuous.boot {
             return if other.not_after < self.not_after {
@@ -224,11 +226,14 @@ impl Bound {
         }
     }
 
-    /// Where the bound plus `extra_ms` falls on the wait clock, from this one reading:
-    /// `now.wait` plus [`Bound::remaining_ms`] plus `extra_ms`. The wait clock can stop while
-    /// the host sleeps, so a caller derives this again at each reading and never stores it.
-    /// The sum saturates at `u64::MAX` milliseconds, which an `Instant` on macOS and Linux
-    /// holds; where one cannot, the deadline is `now.wait`.
+    /// Where B plus `extra_ms` falls on the wait clock, seen from this one reading: `now.wait`
+    /// plus the time left on the reading with less time left, plus `extra_ms`. Once B has
+    /// passed, the time overdue is taken off instead. So on an awake host the deadline is the
+    /// same instant at every reading, before B and after it, and once B plus `extra_ms` has
+    /// passed it is at or before `now.wait`, already reached. The wait clock can stop while
+    /// the host sleeps, so a caller derives this again at each reading and never stores it. A
+    /// sleep only moves the deadline earlier. Where an `Instant` cannot hold the result,
+    /// which cannot happen on macOS or Linux, the deadline is `now.wait`, already reached.
     pub fn wait_deadline(&self, now: &ClockReading, extra_ms: u64) -> Instant {
         let ns = self.remaining_ns(now) + i128::from(extra_ms) * i128::from(NS_PER_MS);
         let shift = duration_from_ns(ns.unsigned_abs());

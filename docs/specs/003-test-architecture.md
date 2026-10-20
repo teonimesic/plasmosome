@@ -76,8 +76,9 @@ only.
 
 Spec 028 requires one injected clock for every lifetime decision, with three readings that tests
 set independently: the wall clock, a continuous clock with its boot session, and the clock waits
-use. That clock is `Clock` in `plasmosome-backend::clock`. Production passes `SystemClock` from
-`plasmosome-core::clock`, and tests pass `ManualClock`. Four earlier decisions read elapsed time
+use. That clock is `Clock` in `plasmosome-backend::clock`. `SystemClock` in
+`plasmosome-core::clock` is the production clock, for production code to pass once a caller
+exists, and tests pass `ManualClock`. Four earlier decisions read elapsed time
 outside it, and stay that way until a task moves them. Durations are passed in as arguments.
 `VmmChild::wait_terminal` spends a fixed child-termination allowance with no seam. Two serve one
 shared readiness budget (spec001 §4): `BrokerSet::status_with` runs the set-level `ProbeBudget`
