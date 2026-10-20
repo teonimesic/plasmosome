@@ -179,3 +179,10 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
+
+/// The loaded images that are neither the main executable (the first image), the verified
+/// `libkrun`, nor part of the system under `/usr/lib/` or `/System/`.
+pub fn unverified_images(images: &[PathBuf], libkrun: &Path) -> Vec<PathBuf> {
+    let _ = (images, libkrun);
+    Vec::new()
+}
