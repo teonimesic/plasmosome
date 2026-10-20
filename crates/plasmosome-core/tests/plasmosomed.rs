@@ -27,8 +27,9 @@ impl Daemon {
     #[allow(unsafe_code)]
     fn signal(&self, signal: libc::c_int) {
         assert_eq!(
-            // SAFETY: kill takes no pointer. Nothing has waited `self.child` to an exit yet, so its
-            // pid still names the daemon.
+            // SAFETY: kill takes no pointer. The caller must not have waited `self.child` to an
+            // exit, and every caller signals before wait_for_exit, so its pid still names the
+            // daemon.
             unsafe { libc::kill(self.pid(), signal) },
             0,
             "the daemon is still running and can be signalled"

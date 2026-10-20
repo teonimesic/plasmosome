@@ -341,8 +341,9 @@ impl VmmChild {
         blocking: bool,
     ) -> Result<VmmState, SupervisionError> {
         // SAFETY: kill takes no pointer. Every caller passes a terminal state that a WNOWAIT wait
-        // observed without consuming it, so the zombie leader still holds its pid and no other
-        // group can take its number.
+        // observed without consuming it. The zombie leader then still holds its pid, and no other
+        // group can take its number, only while this handle is the only consuming waiter, as
+        // `VmmChild`'s doc requires.
         if unsafe { libc::kill(-self.pid, libc::SIGKILL) } == -1 {
             let errno = last_errno();
             let permitted = errno == libc::ESRCH
@@ -455,8 +456,10 @@ impl VmmChild {
     #[allow(unsafe_code)]
     fn signal_leader(&self) -> Result<(), SupervisionError> {
         // SAFETY: kill takes no pointer, so the call is memory-safe whatever `self.pid` names. Its
-        // callers reach it only after observe found the child running, so the child is unreaped and
-        // the pid still names it.
+        // callers reach it only after observe found the child running. The pid still names the
+        // child then only while this handle is the only consuming waiter, as `VmmChild`'s doc
+        // requires. The test leader_signal_esrch_is_not_wait_authority_loss breaks that rule on
+        // purpose: it reaps the child itself first, to get ESRCH.
         if unsafe { libc::kill(self.pid, libc::SIGKILL) } == -1 {
             Err(self.error(SupervisionOperation::SignalLeader, None))
         } else {
@@ -685,7 +688,9 @@ fn last_errno() -> i32 {
 unsafe extern "C" {
     /// Reads the process table for the process group `leader` through sysctl. Returns 1 only when
     /// every member is a zombie and `leader` appears exactly once, and 0 otherwise, including on
-    /// any error. It takes no pointer and keeps no state.
+    /// any error. It takes no pointer and keeps no state. When the group has more than one member
+    /// it calls `malloc` and `free`, so it must never run in a forked child, and any call can
+    /// change errno.
     fn plasmosome_darwin_group_all_zombies(leader: libc::pid_t) -> libc::c_int;
     /// Runs one of the fixed scenarios 0 to 13 against a table it builds on its own stack, and
     /// returns 1 or 0. It takes no pointer and keeps no state.
@@ -1633,9 +1638,10 @@ mod signal_pressure {
                             })
                             .is_ok();
                         if claimed {
-                            // SAFETY: `target` is the thread that made this storm. The storm's Drop
-                            // runs on that thread and joins this one first, so the target is alive
-                            // for every signal.
+                            // SAFETY: `target` is the thread that made this storm. The storm is
+                            // `Send`, but its one caller keeps it a local of that thread, so its
+                            // Drop runs there and joins this thread first. The target is therefore
+                            // alive for every signal.
                             unsafe { libc::pthread_kill(target as libc::pthread_t, libc::SIGUSR1) };
                         } else {
                             std::thread::yield_now();

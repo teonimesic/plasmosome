@@ -64,8 +64,11 @@ fn close_on_exec_or_closed<T: AsFd>(created: T) -> std::io::Result<T> {
 #[allow(unsafe_code)]
 pub(crate) fn fork() -> Result<Forked, SpawnError> {
     // SAFETY: This function's doc binds every caller to do only async-signal-safe work in
-    // Forked::Child and never return or unwind there, as VmmChild::spawn does. fork_holding holds
-    // the read side of the spawn lock, so no descriptor is mid-creation.
+    // Forked::Child and never return or unwind there. Its one caller, VmmChild::spawn, calls only
+    // setsid and _exit itself, and its ExitOnUnwind guard exits the child if `launch` panics, after
+    // the panic hook has run. That `launch` does only async-signal-safe work rests on Launch's
+    // documented contract, which safe code can break, as the test launcher PanicOnLaunch does.
+    // fork_holding holds the read side of the spawn lock, so no descriptor is mid-creation.
     fork_holding(&SPAWN_LOCK, || unsafe { libc::fork() })
 }
 
