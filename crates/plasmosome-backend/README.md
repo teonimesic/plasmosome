@@ -80,7 +80,7 @@ address or one owner time out.
 stops a guest under that drain (spec 023 §7). It is a tenth of the drain deadline, and at least
 1 ms, below that deadline, in whole milliseconds. It is none with `Force`, or when under 1 ms
 would be left: then no `shutdown` is sent and the helper is killed at the drain deadline. It
-lives here, beside `DrainSpec`, so `membraned` reaches it without depending on core.
+lives here, beside `DrainSpec`, because it reads only the drain's deadline and policy.
 
 ## What's inside
 

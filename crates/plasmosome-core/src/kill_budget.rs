@@ -169,13 +169,14 @@ fn at_least_one_ms(duration: Duration) -> Option<Duration> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Shortfall {
-    /// The workload stop failed, was refused, timed out or had no budget. Never listed with
-    /// `now`.
+    /// The workload stop failed, was refused, timed out or had no budget, or was skipped
+    /// because the status query got no answer. Never listed with `now`.
     WorkloadStop,
     /// The guest got no `shutdown` for lack of budget, or ignored it, and its helper was
     /// killed. Never listed with `now`.
     Shutdown,
-    /// The teardown was not clean, so the cell was not retired.
+    /// The cell was not retired: its teardown was not clean, or the check in step 5 of spec 023
+    /// §7 failed and §8's table did not retire it.
     Teardown,
 }
 
