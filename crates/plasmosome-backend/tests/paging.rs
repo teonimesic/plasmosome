@@ -442,10 +442,49 @@ fn expired_capture_is_internal_error_and_dropped() {
         (PagingError::Expired, -32603)
     );
     assert!(!slot.is_holding());
-    assert_eq!(
-        read(&mut slot, 1, 4, t),
-        Err(PagingError::UnknownSnapshot { snapshot: 1 })
-    );
+    assert_eq!(read(&mut slot, 1, 4, t), Err(PagingError::Expired));
+}
+
+#[test]
+fn a_capture_dropped_by_expire_still_answers_expired() {
+    let (mut slot, t, _) = ten_bytes_in_pages_of_four();
+    start(&mut slot, account(), t, t + 10 * SECOND);
+    slot.expire(t + 10 * SECOND);
+    assert!(!slot.is_holding());
+    for offset in [0, 4] {
+        let refused = read(&mut slot, 2, offset, t).expect_err("snapshot 2 expired");
+        assert_eq!(
+            (refused.clone(), refused.code()),
+            (PagingError::Expired, -32603)
+        );
+    }
+    let moved = slot.page(&"cell-2", cursor(2, 4), t + SECOND, t);
+    assert_eq!(moved, Err(PagingError::ScopeChanged { snapshot: 2 }));
+    let refused = [1, 3, 0].map(|snapshot| read(&mut slot, snapshot, 4, t));
+    let (snapshot, offset) = (0, 4);
+    let invalid = [
+        PagingError::UnknownSnapshot { snapshot: 1 },
+        PagingError::UnknownSnapshot { snapshot: 3 },
+        PagingError::InvalidCursor { snapshot, offset },
+    ];
+    assert_eq!(refused, invalid.clone().map(Err));
+    assert!(invalid.iter().all(|error| error.code() == -32602));
+}
+
+#[test]
+fn a_discarded_capture_answers_expired_until_the_next_capture() {
+    let (mut slot, t, _) = ten_bytes_in_pages_of_four();
+    slot.discard();
+    slot.discard();
+    slot.expire(t + 20 * SECOND);
+    assert_eq!(read(&mut slot, 1, 4, t), Err(PagingError::Expired));
+    let late = slot.capture(SCOPE, t, &|| t, || Ok::<_, Infallible>(account()));
+    assert!(matches!(
+        late,
+        Err(CaptureError::Paging(PagingError::Expired))
+    ));
+    let refused = read(&mut slot, 1, 4, t);
+    assert_eq!(refused, Err(PagingError::UnknownSnapshot { snapshot: 1 }));
 }
 
 #[test]
@@ -579,10 +618,7 @@ fn capture_stays_after_the_last_page_until_expiry() {
     assert!(slot.is_holding());
     slot.expire(t + 10 * SECOND);
     assert!(!slot.is_holding());
-    assert_eq!(
-        read(&mut slot, 1, 0, t),
-        Err(PagingError::UnknownSnapshot { snapshot: 1 })
-    );
+    assert_eq!(read(&mut slot, 1, 0, t), Err(PagingError::Expired));
     slot.expire(t + 11 * SECOND);
     assert!(!slot.is_holding());
 }
