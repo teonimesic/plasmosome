@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -9,6 +9,13 @@ use crate::config::{GuestConfig, LaneConfig};
 use crate::console::{ConsoleRun, ProbeResult, parse_console};
 
 const POLL: Duration = Duration::from_millis(10);
+
+/// The most console bytes `run_lane` reads. A longer console is `NotRun`, whatever it holds.
+pub const MAX_CONSOLE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The most stderr bytes a `LaneRun` keeps. The rest is read and dropped, so the launcher never
+/// blocks on a full pipe.
+pub const MAX_STDERR_BYTES: u64 = 1024 * 1024;
 
 /// How one lane ended.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,7 +29,7 @@ pub enum Outcome {
 }
 
 /// One lane run: the VMM's process ID, its exit status if it exited, how the run ended, and
-/// what it wrote.
+/// what it wrote: up to `MAX_CONSOLE_BYTES` of its console and `MAX_STDERR_BYTES` of its stderr.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LaneRun {
     pub pid: u32,
@@ -30,6 +37,28 @@ pub struct LaneRun {
     pub outcome: Outcome,
     pub console: String,
     pub stderr: String,
+}
+
+fn read_stderr(pipe: Option<impl Read>) -> String {
+    let Some(mut pipe) = pipe else {
+        return String::new();
+    };
+    let mut kept = Vec::new();
+    let _ = pipe.by_ref().take(MAX_STDERR_BYTES).read_to_end(&mut kept);
+    let _ = io::copy(&mut pipe, &mut io::sink());
+    String::from_utf8_lossy(&kept).to_string()
+}
+
+fn read_console(path: &Path) -> (String, Option<String>) {
+    let mut bytes = Vec::new();
+    if let Ok(file) = File::open(path) {
+        let _ = file.take(MAX_CONSOLE_BYTES + 1).read_to_end(&mut bytes);
+    }
+    let over = bytes.len() as u64 > MAX_CONSOLE_BYTES;
+    bytes.truncate(MAX_CONSOLE_BYTES as usize);
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let refusal = over.then(|| format!("the console passed {MAX_CONSOLE_BYTES} bytes"));
+    (text, refusal)
 }
 
 fn wait_until(child: &mut Child, deadline: Instant) -> io::Result<Option<ExitStatus>> {
@@ -46,7 +75,8 @@ fn wait_until(child: &mut Child, deadline: Instant) -> io::Result<Option<ExitSta
 
 /// Spawn `launcher` (normally `lane-vmm`) with `lane` on its standard input, an empty
 /// environment and `/` as its directory. Wait up to `timeout`; past it, kill and reap the process
-/// and return `TimedOut`. Otherwise parse `lane.console` against `guest`'s run ID and probes.
+/// and return `TimedOut`. Otherwise parse `lane.console` against `guest`'s run ID and probes; a
+/// console longer than `MAX_CONSOLE_BYTES` is `NotRun`.
 pub fn run_lane(
     launcher: &Path,
     lane: &LaneConfig,
@@ -75,14 +105,8 @@ pub fn run_lane(
         .stderr(Stdio::piped())
         .spawn()?;
     let pid = child.id();
-    let mut stderr_pipe = child.stderr.take();
-    let stderr_reader = thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(pipe) = stderr_pipe.as_mut() {
-            let _ = pipe.read_to_string(&mut text);
-        }
-        text
-    });
+    let stderr_pipe = child.stderr.take();
+    let stderr_reader = thread::spawn(move || read_stderr(stderr_pipe));
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(lane.to_json().as_bytes());
     }
@@ -99,12 +123,14 @@ pub fn run_lane(
         child.wait()?;
     }
     let stderr = stderr_reader.join().unwrap_or_default();
-    let console = fs::read(&lane.console)
-        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
-        .unwrap_or_default();
+    let (console, refusal) = read_console(&lane.console);
+    let parsed = match refusal {
+        Some(reason) => ConsoleRun::NotRun(reason),
+        None => parse_console(&console, &guest.run_id, &guest.probe_ids()),
+    };
     let outcome = match status {
         None => Outcome::TimedOut,
-        Some(status) => match parse_console(&console, &guest.run_id, &guest.probe_ids()) {
+        Some(status) => match parsed {
             ConsoleRun::Finished(results) => Outcome::Finished(results),
             ConsoleRun::NotRun(reason) if status.success() => Outcome::NotRun(reason),
             ConsoleRun::NotRun(reason) => {
