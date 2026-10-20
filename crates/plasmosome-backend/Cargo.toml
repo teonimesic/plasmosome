@@ -15,3 +15,6 @@ serde_json = { workspace = true }
 
 [lib]
 bench = false
+
+[lints]
+workspace = true
