@@ -12,7 +12,7 @@ you tested, and the steps that show it. A proof of concept helps.
 ## Scope
 
 - The crates and binaries in this repository.
-- The cell boundary they build: what a workload in a cell can reach beyond its grants.
+- The cell boundary they are building: what a workload in a cell could reach beyond its grants.
 - Their supply chain: dependencies, the Rust toolchain, and CI.
 
 ## Not covered yet
