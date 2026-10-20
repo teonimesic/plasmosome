@@ -1192,12 +1192,36 @@ mod tests {
         );
     }
 
-    fn a_ready_exchange_then(
+    fn every_kind_of_answer() -> [(&'static [u8], Readiness); 3] {
+        [
+            (
+                READY_LINE,
+                Readiness::Ready {
+                    state: "serving".to_string(),
+                },
+            ),
+            (
+                b"{\"id\":0,\"result\":{\"ready\":false,\"state\":\"starting\"}}\n",
+                Readiness::NotReady(NotReady::Reported {
+                    state: "starting".to_string(),
+                }),
+            ),
+            (
+                b"not json at all\n",
+                Readiness::NotReady(NotReady::Malformed {
+                    line: "not json at all".to_string(),
+                }),
+            ),
+        ]
+    }
+
+    fn an_exchange_answering_then(
+        reply: &[u8],
         clock: &FakeClock,
         budget: &ProbeBudget<'_>,
         once_closed: impl Fn(),
     ) -> (Result<Readiness, Cancelled>, Scripted) {
-        let stream = Scripted::new([Event::Deliver(READY_LINE.to_vec())].into());
+        let stream = Scripted::new([Event::Deliver(reply.to_vec())].into());
         let handles = stream.handles();
         let closed = Rc::clone(&handles.closed);
         let ticking = clock.now();
@@ -1219,64 +1243,66 @@ mod tests {
 
     #[test]
     fn a_shutdown_seen_when_the_exchange_ends_is_cancelled_whatever_the_broker_answered() {
-        let flag = AtomicBool::new(false);
+        for (reply, answer) in every_kind_of_answer() {
+            let flag = AtomicBool::new(false);
 
-        let clock = FakeClock::new();
-        let budget = clock.budget(DEADLINE, &flag);
-        let (verdict, _stream) = a_ready_exchange_then(&clock, &budget, || {});
-        assert_eq!(
-            verdict,
-            Ok(Readiness::Ready {
-                state: "serving".to_string()
-            }),
-            "with no shutdown the broker's answer stands"
-        );
+            let clock = FakeClock::new();
+            let budget = clock.budget(DEADLINE, &flag);
+            let (verdict, _stream) = an_exchange_answering_then(reply, &clock, &budget, || {});
+            assert_eq!(
+                verdict,
+                Ok(answer.clone()),
+                "with no shutdown the broker's answer stands"
+            );
 
-        let clock = FakeClock::new();
-        let budget = clock.budget(DEADLINE, &flag);
-        let (verdict, stream) =
-            a_ready_exchange_then(&clock, &budget, || flag.store(true, Ordering::Relaxed));
-        assert_eq!(
-            verdict,
-            Err(Cancelled),
-            "a shutdown seen after the exchange overrides a ready answer"
-        );
-        assert_eq!(stream.written(), STATUS_REQUEST.to_vec());
-        assert!(
-            stream.unwritten_events().is_empty(),
-            "the broker's ready frame was read before the shutdown"
-        );
+            let clock = FakeClock::new();
+            let budget = clock.budget(DEADLINE, &flag);
+            let (verdict, stream) = an_exchange_answering_then(reply, &clock, &budget, || {
+                flag.store(true, Ordering::Relaxed)
+            });
+            assert_eq!(
+                verdict,
+                Err(Cancelled),
+                "a shutdown seen after the exchange overrides {answer:?}"
+            );
+            assert_eq!(stream.written(), STATUS_REQUEST.to_vec());
+            assert!(
+                stream.unwritten_events().is_empty(),
+                "the broker's frame was read before the shutdown"
+            );
+        }
     }
 
     #[test]
     fn an_expiry_seen_when_the_exchange_ends_is_timed_out_whatever_the_broker_answered() {
-        let flag = AtomicBool::new(false);
+        for (reply, answer) in every_kind_of_answer() {
+            let flag = AtomicBool::new(false);
 
-        let clock = FakeClock::new();
-        let budget = clock.budget(DEADLINE, &flag);
-        let (verdict, _stream) = a_ready_exchange_then(&clock, &budget, || {});
-        assert_eq!(
-            verdict,
-            Ok(Readiness::Ready {
-                state: "serving".to_string()
-            }),
-            "inside the allowance the broker's answer stands"
-        );
+            let clock = FakeClock::new();
+            let budget = clock.budget(DEADLINE, &flag);
+            let (verdict, _stream) = an_exchange_answering_then(reply, &clock, &budget, || {});
+            assert_eq!(
+                verdict,
+                Ok(answer.clone()),
+                "inside the allowance the broker's answer stands"
+            );
 
-        let clock = FakeClock::new();
-        let budget = clock.budget(DEADLINE, &flag);
-        let (verdict, stream) =
-            a_ready_exchange_then(&clock, &budget, || clock.set(DEADLINE.as_millis() as u64));
-        assert_eq!(
-            verdict,
-            Ok(spent()),
-            "an allowance spent after the exchange overrides a ready answer"
-        );
-        assert_eq!(stream.written(), STATUS_REQUEST.to_vec());
-        assert!(
-            stream.unwritten_events().is_empty(),
-            "the broker's ready frame was read before the allowance ran out"
-        );
+            let clock = FakeClock::new();
+            let budget = clock.budget(DEADLINE, &flag);
+            let (verdict, stream) = an_exchange_answering_then(reply, &clock, &budget, || {
+                clock.set(DEADLINE.as_millis() as u64)
+            });
+            assert_eq!(
+                verdict,
+                Ok(spent()),
+                "an allowance spent after the exchange overrides {answer:?}"
+            );
+            assert_eq!(stream.written(), STATUS_REQUEST.to_vec());
+            assert!(
+                stream.unwritten_events().is_empty(),
+                "the broker's frame was read before the allowance ran out"
+            );
+        }
     }
 
     #[test]
