@@ -1,10 +1,14 @@
 mod judge;
+mod normalize;
 #[cfg(test)]
 mod tests;
 
 use std::collections::BTreeSet;
 
+use plasmosome_core::runtime::strict_json;
 use serde::Deserialize;
+use serde::de::{self, Deserializer};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
 pub use judge::{Finding, MountKey, NeutralName, Reason, RunRefusal, Subject, Verdict, judge};
@@ -64,13 +68,11 @@ impl Lane {
 /// itself set, such as a time set with `utimensat`, and no rule may cover them. Fields are the
 /// top-level keys of the probe's observation, and a rule covers a field's whole value, so a
 /// value the workload set needs a top-level field of its own.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeSpec {
     pub id: String,
     pub channel: Channel,
     pub step: String,
-    #[serde(default)]
     pub reach: Option<ReachKind>,
     pub workload_set: Vec<String>,
 }
@@ -145,6 +147,7 @@ impl RuleKind {
 pub struct Allowance {
     pub probe: String,
     pub field: String,
+    #[serde(deserialize_with = "strict_value")]
     pub cell_value: Value,
 }
 
@@ -286,8 +289,27 @@ pub fn load(json: &str) -> Result<Manifest, ManifestRefusal> {
             })
         })
         .collect::<Result<Vec<Rule>, ManifestRefusal>>()?;
+    let probes = raw
+        .probes
+        .into_iter()
+        .map(|probe| {
+            let workload_set =
+                probe
+                    .workload_set
+                    .ok_or_else(|| ManifestRefusal::WorkloadSetMissing {
+                        probe: probe.id.clone(),
+                    })?;
+            Ok(ProbeSpec {
+                id: probe.id,
+                channel: probe.channel,
+                step: probe.step,
+                reach: probe.reach,
+                workload_set,
+            })
+        })
+        .collect::<Result<Vec<ProbeSpec>, ManifestRefusal>>()?;
     let manifest = Manifest {
-        probes: raw.probes,
+        probes,
         rules,
         allowances: raw.allowances,
         neutral: raw.neutral,
@@ -299,7 +321,7 @@ pub fn load(json: &str) -> Result<Manifest, ManifestRefusal> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawManifest {
-    probes: Vec<ProbeSpec>,
+    probes: Vec<RawProbe>,
     #[serde(default)]
     rules: Vec<RawRule>,
     #[serde(default)]
@@ -309,10 +331,26 @@ struct RawManifest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawProbe {
+    id: String,
+    channel: Channel,
+    step: String,
+    #[serde(default)]
+    reach: Option<ReachKind>,
+    workload_set: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawRule {
     probe: String,
     field: String,
     kind: String,
+}
+
+fn strict_value<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Value, D::Error> {
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    strict_json::parse_value(raw.get().as_bytes()).map_err(de::Error::custom)
 }
 
 const FUSE: &str = "fuse";

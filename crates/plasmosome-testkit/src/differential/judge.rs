@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
+use super::normalize::normalize;
 use super::{FUSE, Lane, Manifest, ManifestRefusal, Observation, RuleKind, Run};
 
 /// What a finding is about: a declared probe, or the harness transcript.
@@ -123,8 +124,11 @@ pub fn judge(manifest: &Manifest, runs: &[Run]) -> Result<Verdict, RunRefusal> {
                 let reason = Reason::NotNeutral { lane: *lane, name };
                 push(&mut findings, &subject, reason);
             }
-            let fields = observations.map(|seen| seen.map(|seen| seen.fields.clone()));
-            ran.push((*lane, fields));
+            let [first, second] = observations.map(|seen| {
+                seen.map(|seen| normalize(manifest, *lane, seen))
+                    .transpose()
+            });
+            ran.push((*lane, [first?, second?]));
         }
         let allowed = |field: &str, value: &Value| {
             manifest.allowances.iter().any(|allowance| {
@@ -133,13 +137,7 @@ pub fn judge(manifest: &Manifest, runs: &[Run]) -> Result<Verdict, RunRefusal> {
                     && allowance.cell_value == *value
             })
         };
-        let ruled: Vec<&str> = manifest
-            .rules
-            .iter()
-            .filter(|rule| rule.probe == probe.id)
-            .map(|rule| rule.field.as_str())
-            .collect();
-        let reach = probe.reach.map(|_| ruled.as_slice());
+        let reach = probe.reach.is_some();
         compare(&subject, &ran, reach, allowed, &mut findings);
     }
     let mut ran = Vec::new();
@@ -155,7 +153,7 @@ pub fn judge(manifest: &Manifest, runs: &[Run]) -> Result<Verdict, RunRefusal> {
     compare(
         &Subject::Transcript,
         &ran,
-        None,
+        false,
         |_, _| false,
         &mut findings,
     );
@@ -278,7 +276,7 @@ type Ran = [(Lane, [Option<Fields>; 2])];
 fn compare(
     subject: &Subject,
     ran: &Ran,
-    reach: Option<&[&str]>,
+    reach: bool,
     allowed: impl Fn(&str, &Value) -> bool,
     findings: &mut Vec<Finding>,
 ) {
@@ -289,19 +287,9 @@ fn compare(
             }
         }
     }
-    if let Some(ruled) = reach {
-        let unruled = |fields: &Fields| {
-            let mut fields = fields.clone();
-            fields.retain(|field, _| !ruled.contains(&field.as_str()));
-            fields
-        };
-        let pairs = completed_pairs(ran, Lane::Open, Lane::Absent);
-        if pairs
-            .iter()
-            .any(|(open, absent)| unruled(open) == unruled(absent))
-        {
-            push(findings, subject, Reason::NoDiscrimination);
-        }
+    let pairs = || completed_pairs(ran, Lane::Open, Lane::Absent);
+    if reach && pairs().iter().any(|(open, absent)| open == absent) {
+        push(findings, subject, Reason::NoDiscrimination);
     }
     let mut fields = BTreeSet::new();
     for (cell, absent) in completed_pairs(ran, Lane::Cell, Lane::Absent) {
