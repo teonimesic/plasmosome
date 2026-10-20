@@ -1403,6 +1403,100 @@ mod tests {
     }
 
     #[test]
+    fn once_any_call_has_undone_an_effect_unsealing_cannot_finish_the_detach_in_another_cell() {
+        for make_effect in universe_removal_effects() {
+            for with_external in [false, true] {
+                let elsewhere = CellId::from("cell-2");
+                let object = op(
+                    GrantId::new(),
+                    CellOwner {
+                        cell: elsewhere.clone(),
+                        plugin: PluginId::from("github-pr"),
+                    },
+                    session_file("/skills/pr.md"),
+                );
+                let mut backend = FakeBackend::new();
+                backend.apply(object.clone()).unwrap();
+                let stuck = backend
+                    .grant(Grant {
+                        owner: CellOwner {
+                            cell: elsewhere.clone(),
+                            plugin: PluginId::from("github-pr"),
+                        },
+                        capability: session_file("/skills/stuck.md"),
+                        kind: GrantKind::Hot,
+                    })
+                    .handle;
+                backend.mark_stuck(stuck);
+                let mut ledger = Ledger::new("github-pr");
+                if with_external {
+                    ledger.push(Effect::external("the PR comment already left the host"));
+                }
+                ledger.push(make_effect("skill file in cell-2", object.removal()));
+                ledger.push(Effect::exact(
+                    "stuck skill file",
+                    InverseVia::Backend(stuck),
+                ));
+                let mut closure = ledger.close();
+                let untouched = backend.snapshot_os_state();
+                assert_eq!(
+                    detach_either(
+                        &mut closure,
+                        &mut backend,
+                        &cell(),
+                        DrainSpec::graceful(Duration::from_millis(4))
+                    )
+                    .unwrap_err(),
+                    DetachError::Backend(BackendError::DrainTimedOut {
+                        handle: stuck,
+                        deadline_ms: 4,
+                    })
+                );
+                assert_eq!(backend.snapshot_os_state(), untouched);
+                assert_eq!(
+                    detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
+                        .unwrap_err(),
+                    unknown_in_cell_one(&object)
+                );
+                assert_eq!(
+                    backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                    vec![&object.object()]
+                );
+                assert_eq!(
+                    detach_either(&mut closure, &mut backend, &cell(), DrainSpec::forcing())
+                        .unwrap_err(),
+                    unknown_in_cell_one(&object)
+                );
+                assert_eq!(
+                    detach_either(&mut closure, &mut backend, &elsewhere, DrainSpec::forcing())
+                        .unwrap_err(),
+                    DetachError::CellChanged {
+                        began: cell(),
+                        requested: elsewhere.clone(),
+                    }
+                );
+                let mut reclosed = closed_again(closure);
+                for _ in 0..2 {
+                    assert_eq!(
+                        detach_either(
+                            &mut reclosed,
+                            &mut backend,
+                            &elsewhere,
+                            DrainSpec::forcing()
+                        )
+                        .unwrap_err(),
+                        DetachError::Backend(BackendError::UnknownHandle { handle: stuck })
+                    );
+                }
+                assert_eq!(
+                    backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                    vec![&object.object()]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_first_detach_binds_its_cell_when_it_replays_everything_or_nothing() {
         for with_effect in [false, true] {
             for with_external in [false, true] {
