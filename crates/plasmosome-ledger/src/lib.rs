@@ -396,13 +396,8 @@ impl SealedLedger {
     /// what already succeeded. The first call binds `cell` to this ledger,
     /// whatever its outcome. A later call naming another cell returns
     /// `DetachError::CellChanged` before any backend call and moves neither the
-    /// cursor nor the asserted list. Unsealing and closing again starts a new
-    /// detach that may name another cell, but it replays every effect from the
-    /// last. So it corrects a wrong first cell only while the first call has
-    /// undone nothing. Once that call has undone an effect, the new detach
-    /// replays that effect again and fails there, for example with
-    /// `UnknownHandle`, and this API cannot finish the remaining effects under
-    /// another cell.
+    /// cursor nor the asserted list. `SealedLedger::unseal` says when unsealing
+    /// corrects a wrong first cell, and what is left when it cannot.
     pub fn detach(
         &mut self,
         backend: &mut dyn EnforcementBackend,
@@ -420,11 +415,19 @@ impl SealedLedger {
         replay(&owner, effects, pending, asserted, backend, drain, None)
     }
 
-    /// Returns the open ledger with every effect. It drops the pending cursor and the cell the
-    /// first detach bound, so closing it again starts a new detach over every effect, which may
-    /// name any cell. That detach replays the effects the first one already undid, and their
-    /// inverses fail again, so this corrects a wrong first cell only while the first detach has
-    /// undone nothing.
+    /// Returns the open ledger with every effect. It drops the pending cursor and the bound cell,
+    /// so closing it again starts a new detach over every effect, under any cell.
+    ///
+    /// That corrects a wrong first cell only while no call on this closed ledger has undone an
+    /// effect. A graceful call that timed out on its first inverse undid nothing, but a later call
+    /// on the same ledger may have. Once any call has, the new detach replays the undone effects
+    /// first, and the first inverse it runs again fails, for example with `UnknownHandle` for a
+    /// handle already revoked. A ledger bound to a wrong cell is then stuck. On it, every call
+    /// under the bound cell fails at the first remaining removal of an object that cell does not
+    /// own, and any other cell gets `DetachError::CellChanged`. On the reclosed one, every call
+    /// fails at the first undone effect. The objects of the effects not yet undone stay until the
+    /// caller removes them through the backend, or builds by hand a new ledger of those effects,
+    /// with no cursor to say which they are. `ForcedLedger::unseal` behaves the same.
     pub fn unseal(self) -> Ledger {
         Ledger {
             plugin: self.plugin,
@@ -455,7 +458,7 @@ impl ForcedLedger {
     /// `cell` and `drain` rules, and records the operator's `force` in the report.
     /// Its first call binds `cell` as `detach` does, and a later call naming
     /// another cell returns `DetachError::CellChanged` before any backend call.
-    /// `SealedLedger::detach` says when unsealing corrects a wrong first cell.
+    /// `SealedLedger::unseal` says when unsealing corrects a wrong first cell.
     pub fn detach_forced(
         &mut self,
         backend: &mut dyn EnforcementBackend,
@@ -482,11 +485,8 @@ impl ForcedLedger {
         )
     }
 
-    /// Returns the open ledger with every effect. It drops the pending cursor and the cell the
-    /// first detach bound, so closing it again starts a new detach over every effect, which may
-    /// name any cell. That detach replays the effects the first one already undid, and their
-    /// inverses fail again, so this corrects a wrong first cell only while the first detach has
-    /// undone nothing.
+    /// Returns the open ledger with every effect. It drops the pending cursor and the bound cell,
+    /// as `SealedLedger::unseal` does, whose doc says when that corrects a wrong first cell.
     pub fn unseal(self) -> Ledger {
         Ledger {
             plugin: self.plugin,

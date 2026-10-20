@@ -37,11 +37,12 @@ take that cell from the caller, so every universe and compensation removal names
 the detach's drain. A graceful timeout stops the replay with the pending cursor on that effect, and
 a later detach resumes there without replaying what already succeeded.
 The first detach of a closed ledger binds its cell, whatever that call's outcome. A later call
-naming another cell returns `DetachError::CellChanged` before any backend call, so a resume cannot
-move to another cell. The binding lives in memory beside the cursor, not in the log, and `unseal`
-drops both. Unsealing and closing again corrects a wrong first cell only while the first detach has
-undone nothing. Once it has undone an effect, the new detach replays that effect again and fails
-there, so this API cannot finish the remaining effects under another cell.
+naming another cell returns `DetachError::CellChanged` before any backend call, so a resume on
+that ledger cannot move to another cell. The binding lives in memory beside the cursor, not in the
+log. While a bound ledger is alive, `open_file` on the same log gives a new, unbound ledger, by
+design (spec 017 line 321), so the binding holds per ledger instance, not per log. `unseal` drops
+the binding with the cursor. `SealedLedger::unseal`'s doc says when that corrects a wrong first
+cell, and what is left when it cannot.
 
 ## What's inside
 
