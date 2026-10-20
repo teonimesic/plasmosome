@@ -431,9 +431,11 @@ def weekly_findings(root, stable_url):
 
 
 def line_for(finding):
+    """One line of the job log per finding. The runner ends a line at a CR too, and reads a line that
+    starts with "::" as a workflow command, so every run of whitespace becomes one space."""
     where = " ".join(str(finding[key]) for key in ("lockfile", "check", "package", "advisory") if finding.get(key))
     link = f" {finding['url']}" if finding.get("url") else ""
-    return f"{finding['kind']}{' ' + where if where else ''}: {finding['title']}{link}".replace("\n", " ")
+    return " ".join(f"{finding['kind']}{' ' + where if where else ''}: {finding['title']}{link}".split())
 
 
 def report(args):
