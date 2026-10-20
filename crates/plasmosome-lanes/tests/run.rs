@@ -1,6 +1,8 @@
 mod common;
 
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -506,4 +508,24 @@ fn a_symlink_at_the_console_path_is_refused_and_not_followed() {
         "{} console bytes were read through the symlink",
         run.console.len()
     );
+}
+
+#[test]
+fn a_lane_that_cannot_serialize_is_refused_before_spawning() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let marker = dir.path().join("spawned");
+    let launcher = common::script(
+        dir.path(),
+        "touch",
+        &format!("touch '{}'", marker.display()),
+    );
+    let mut lane = common::lane_config(dir.path(), "run-1");
+    lane.bundle = PathBuf::from(OsStr::from_bytes(&[b'/', b'b', 0xff]));
+    let guest = common::guest_config("run-1", &["id"]);
+
+    let error = run_lane(&launcher, &lane, &guest, Duration::from_secs(10))
+        .expect_err("a bundle path that is not UTF-8");
+
+    assert!(error.to_string().contains("bundle"), "{error}");
+    assert!(!marker.exists(), "the launcher was spawned anyway");
 }

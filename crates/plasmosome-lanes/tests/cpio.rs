@@ -1,5 +1,8 @@
 mod common;
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 use std::process::Command;
 
 use plasmosome_lanes::config::GuestConfig;
@@ -155,4 +158,39 @@ fn the_lane_initramfs_holds_init_the_probe_the_configuration_and_device_nodes() 
         entries.iter().all(|entry| entry.uid == 0 && entry.gid == 0),
         "every initramfs entry is owned by root"
     );
+}
+
+#[test]
+fn a_dot_component_an_empty_component_and_a_trailing_slash_are_refused() {
+    for name in ["dev/./console", "dev//console", "dev/console/"] {
+        let error = write_newc(&[
+            Entry::dir("dev", 0o755),
+            Entry::char_device("dev/console", 0o600, 5, 1),
+            Entry::char_device(name, 0o600, 5, 1),
+        ])
+        .expect_err(name);
+        assert!(error.to_string().contains(name), "{error}");
+    }
+}
+
+#[test]
+fn a_leading_dot_component_is_refused() {
+    let error = write_newc(&[Entry::file("./init", 0o755, Vec::new())]).expect_err("./init");
+    assert!(error.to_string().contains("./init"), "{error}");
+}
+
+#[test]
+fn the_trailer_name_and_a_nul_are_refused_as_entry_names() {
+    write_newc(&[Entry::file("TRAILER!!!", 0o644, Vec::new())]).expect_err("the trailer name");
+    let with_nul = format!("in{}it", char::from(0));
+    write_newc(&[Entry::file(&with_nul, 0o755, Vec::new())]).expect_err("a NUL");
+}
+
+#[test]
+fn a_guest_configuration_that_cannot_serialize_is_refused_naming_the_mount() {
+    let mut guest = common::guest_config("run-1", &["id"]);
+    guest.mounts[0].path = PathBuf::from(OsStr::from_bytes(&[b'/', b'm', 0xff]));
+
+    let error = lane_initramfs(b"init", b"probe", &guest).expect_err("not UTF-8");
+    assert!(error.to_string().contains("mount"), "{error}");
 }

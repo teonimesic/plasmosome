@@ -1,6 +1,8 @@
 mod common;
 
-use std::path::Path;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
 use plasmosome_lanes::config::{GuestConfig, LaneConfig, Semantics};
 use serde_json::{Value, json};
@@ -35,7 +37,8 @@ fn a_complete_lane_configuration_parses_to_its_fields() {
 fn a_lane_configuration_round_trips_through_its_json() {
     let config = common::lane_config(Path::new("/lanes"), "run-1");
 
-    assert_eq!(lane(&config.to_json().parse().expect("JSON")), Ok(config));
+    let json = config.to_json().expect("the configuration serializes");
+    assert_eq!(lane(&json.parse().expect("JSON")), Ok(config));
 }
 
 #[test]
@@ -170,7 +173,8 @@ fn a_guest_configuration_parses_and_a_probe_uid_defaults_to_1000() {
 fn a_guest_configuration_round_trips_through_its_json() {
     let config = common::guest_config("run-1", &["a", "b"]);
 
-    assert_eq!(guest(&config.to_json().parse().expect("JSON")), Ok(config));
+    let json = config.to_json().expect("the configuration serializes");
+    assert_eq!(guest(&json.parse().expect("JSON")), Ok(config));
 }
 
 #[test]
@@ -238,4 +242,158 @@ fn a_guest_run_id_with_a_space_is_refused() {
     value["run_id"] = json!("run 1");
 
     refused(guest(&value), "run_id");
+}
+
+fn with_nul() -> String {
+    format!("/lanes/a{}b", char::from(0))
+}
+
+fn not_utf8() -> PathBuf {
+    PathBuf::from(OsStr::from_bytes(&[b'/', b'l', 0xff]))
+}
+
+#[test]
+fn a_relative_root_image_is_refused() {
+    let mut value = common::lane_json(Path::new("/lanes"));
+    value["root_image"] = json!("root.ext4");
+
+    refused(lane(&value), "root_image");
+}
+
+#[test]
+fn a_relative_initramfs_is_refused() {
+    let mut value = common::lane_json(Path::new("/lanes"));
+    value["initramfs"] = json!("initramfs.cpio");
+
+    refused(lane(&value), "initramfs");
+}
+
+#[test]
+fn a_relative_console_is_refused() {
+    let mut value = common::lane_json(Path::new("/lanes"));
+    value["console"] = json!("console.log");
+
+    refused(lane(&value), "console");
+}
+
+#[test]
+fn zero_memory_is_refused() {
+    let mut value = common::lane_json(Path::new("/lanes"));
+    value["memory_mib"] = json!(0);
+
+    refused(lane(&value), "memory_mib");
+}
+
+#[test]
+fn a_share_tag_of_exactly_36_bytes_parses() {
+    let mut value = common::lane_json(Path::new("/lanes"));
+    value["shares"][0]["tag"] = json!("t".repeat(36));
+
+    let parsed = lane(&value).expect("36 bytes is the virtio-fs limit, not past it");
+    assert_eq!(parsed.shares[0].tag.len(), 36);
+}
+
+#[test]
+fn an_empty_share_tag_is_refused() {
+    let mut value = common::lane_json(Path::new("/lanes"));
+    value["shares"][0]["tag"] = json!("");
+
+    refused(lane(&value), "tag");
+}
+
+#[test]
+fn a_share_tag_with_a_nul_is_refused() {
+    let mut value = common::lane_json(Path::new("/lanes"));
+    value["shares"][0]["tag"] = json!(format!("lanes{}0", char::from(0)));
+
+    refused(lane(&value), "NUL");
+}
+
+#[test]
+fn a_relative_confinement_allowed_directory_is_refused() {
+    let mut value = common::lane_json(Path::new("/lanes"));
+    value["confinement"] =
+        json!({"profile": "/lanes/lane.sb", "allowed": "allowed", "outside": "/lanes/outside"});
+
+    refused(lane(&value), "confinement.allowed");
+}
+
+#[test]
+fn a_relative_confinement_outside_directory_is_refused() {
+    let mut value = common::lane_json(Path::new("/lanes"));
+    value["confinement"] =
+        json!({"profile": "/lanes/lane.sb", "allowed": "/lanes/allowed", "outside": "outside"});
+
+    refused(lane(&value), "confinement.outside");
+}
+
+#[test]
+fn a_complete_confinement_parses() {
+    let mut value = common::lane_json(Path::new("/lanes"));
+    value["confinement"] = json!({
+        "profile": "/lanes/lane.sb", "allowed": "/lanes/allowed", "outside": "/lanes/outside"
+    });
+
+    let parsed = lane(&value).expect("every confinement path is absolute");
+    let confinement = parsed.confinement.expect("a confinement");
+    assert_eq!(confinement.outside, Path::new("/lanes/outside"));
+}
+
+#[test]
+fn a_path_with_a_nul_byte_is_refused() {
+    let mut value = common::lane_json(Path::new("/lanes"));
+    value["bundle"] = json!(with_nul());
+
+    refused(lane(&value), "NUL");
+}
+
+#[test]
+fn a_guest_mount_tag_longer_than_virtio_fs_allows_is_refused() {
+    let mut value = common::guest_json();
+    let long = "t".repeat(37);
+    value["mounts"][0]["tag"] = json!(long);
+
+    refused(guest(&value), &long);
+}
+
+#[test]
+fn an_empty_guest_mount_tag_is_refused() {
+    let mut value = common::guest_json();
+    value["mounts"][0]["tag"] = json!("");
+
+    refused(guest(&value), "tag");
+}
+
+#[test]
+fn a_guest_mount_path_with_a_nul_byte_is_refused() {
+    let mut value = common::guest_json();
+    value["mounts"][0]["path"] = json!(with_nul());
+
+    refused(guest(&value), "NUL");
+}
+
+#[test]
+fn an_empty_probe_id_is_refused() {
+    let mut value = common::guest_json();
+    value["probes"][0]["id"] = json!("");
+
+    refused(guest(&value), "probe id");
+}
+
+#[test]
+fn a_lane_path_that_is_not_utf8_refuses_to_serialize_naming_its_field() {
+    let mut config = common::lane_config(Path::new("/lanes"), "run-1");
+    config.shares[0].path = not_utf8();
+
+    let error = config.to_json().expect_err("a path that is not UTF-8");
+    assert!(error.to_string().contains("share"), "{error}");
+}
+
+#[test]
+fn a_guest_mount_path_that_is_not_utf8_refuses_to_serialize_naming_its_field() {
+    let mut config = common::guest_config("run-1", &["id"]);
+    config.mounts[0].path = not_utf8();
+
+    let error = config.to_json().expect_err("a path that is not UTF-8");
+    assert!(error.to_string().contains("mount"), "{error}");
 }

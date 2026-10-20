@@ -82,3 +82,18 @@ fn a_missing_tool_directory_is_refused_naming_debugfs() {
         .expect_err("there is no debugfs");
     assert!(error.to_string().contains("debugfs"), "{error}");
 }
+
+#[test]
+fn a_path_holding_a_quote_or_a_line_break_is_refused_before_debugfs_runs() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let image = common::write_file(scratch.path(), "root.ext4", b"");
+
+    for path in ["/etc/a\"b", "/etc/a\nb", "/etc/a\rb"] {
+        let error = ext4_read(&scratch.path().join("no-tools"), &image, path).expect_err(path);
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidInput,
+            "{path:?}: {error}"
+        );
+    }
+}

@@ -30,7 +30,10 @@ fn vmm_with_bundle(bundle: &Path) -> Output {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let mut lane = common::lane_config(scratch.path(), "run-1");
     lane.bundle = bundle.to_path_buf();
-    run_with_stdin(env!("CARGO_BIN_EXE_lane-vmm"), &lane.to_json())
+    run_with_stdin(
+        env!("CARGO_BIN_EXE_lane-vmm"),
+        &lane.to_json().expect("the lane serializes"),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -76,7 +79,7 @@ fn lane_vmm_refuses_an_inherited_dyld_variable_before_checking_the_bundle() {
         Command::new(env!("CARGO_BIN_EXE_lane-vmm"))
             .env_clear()
             .env("DYLD_LIBRARY_PATH", scratch.path()),
-        &lane.to_json(),
+        &lane.to_json().expect("the lane serializes"),
     );
 
     assert_refused_naming(&output, 69, "DYLD_LIBRARY_PATH");
@@ -94,7 +97,7 @@ fn lane_vmm_refuses_a_libkrunfw_in_its_working_directory_before_checking_the_bun
         Command::new(env!("CARGO_BIN_EXE_lane-vmm"))
             .env_clear()
             .current_dir(&cwd),
-        &lane.to_json(),
+        &lane.to_json().expect("the lane serializes"),
     );
 
     assert_refused_naming(

@@ -188,3 +188,41 @@ fn a_second_begin_marker_is_not_run() {
 
     not_run(&text, &["uname"], "LANE-BEGIN");
 }
+
+fn one_result_line(line: serde_json::Value) -> String {
+    format!("LANE-BEGIN run-1\nLANE-RESULT {line}\nLANE-END run-1 1\n")
+}
+
+#[test]
+fn a_result_line_without_exit_is_not_run() {
+    let line = json!({"probe": "a", "uid": 1000, "result": {"probe": "id", "ok": true}});
+
+    not_run(&one_result_line(line), &["a"], "does not parse");
+}
+
+#[test]
+fn a_result_line_without_result_is_not_run_as_a_framing_error() {
+    let line = json!({"probe": "a", "uid": 1000, "exit": 0});
+
+    not_run(&one_result_line(line), &["a"], "does not parse");
+}
+
+#[test]
+fn a_result_that_is_not_an_object_is_not_run() {
+    for result in [json!("text"), json!(1), json!([]), json!(true)] {
+        let line = json!({"probe": "a", "uid": 1000, "exit": 0, "result": result});
+
+        not_run(&one_result_line(line), &["a"], "not an object");
+    }
+}
+
+#[test]
+fn a_result_with_a_null_exit_from_a_signalled_probe_finishes() {
+    let line =
+        json!({"probe": "a", "uid": 1000, "exit": null, "result": {"probe": "id", "ok": true}});
+
+    match parse_console(&one_result_line(line), "run-1", &ids(&["a"])) {
+        ConsoleRun::Finished(results) => assert_eq!(results[0].exit, None),
+        ConsoleRun::NotRun(reason) => panic!("a null exit is a signalled probe: {reason}"),
+    }
+}

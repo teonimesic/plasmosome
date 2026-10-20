@@ -141,7 +141,7 @@ fn a_libkrunfw_planted_in_the_working_directory_is_refused_and_never_runs() {
             .stdin
             .take()
             .expect("stdin is piped")
-            .write_all(lane.lane.to_json().as_bytes())
+            .write_all(lane.lane.to_json().expect("the lane serializes").as_bytes())
             .expect("the configuration is written");
     }
     let output = child.wait_with_output().expect("lane-vmm exits");

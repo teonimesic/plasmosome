@@ -1,6 +1,8 @@
 mod common;
 
+use std::ffi::OsString;
 use std::fs;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
 use plasmosome_lanes::probe;
@@ -198,10 +200,63 @@ fn mountinfo_reports_mount_point_type_source_and_options() {
     assert_eq!(
         probe::mountinfo_from(text),
         json!({"probe": "mountinfo", "ok": true, "mounts": [
-            {"mount_point": "/dev", "fstype": "devtmpfs", "source": "devtmpfs", "mount_options": "rw,relatime", "super_options": "rw,size=1k"},
-            {"mount_point": "/mnt/share", "fstype": "virtiofs", "source": "lanes0", "mount_options": "ro,nodev,relatime", "super_options": "rw"}
+            {"mount_point": "/dev", "root": "/", "optional_fields": ["shared:2"], "fstype": "devtmpfs", "source": "devtmpfs", "mount_options": "rw,relatime", "super_options": "rw,size=1k"},
+            {"mount_point": "/mnt/share", "root": "/", "optional_fields": [], "fstype": "virtiofs", "source": "lanes0", "mount_options": "ro,nodev,relatime", "super_options": "rw"}
         ]})
     );
+}
+
+#[test]
+fn mountinfo_keeps_each_mounts_root_and_its_propagation_fields() {
+    let text = "40 31 0:28 /membrane /opt rw,relatime shared:3 master:1 - virtiofs lanes0 rw\n\
+                41 31 0:28 / /opt rw,relatime - virtiofs lanes0 rw\n";
+
+    let line = probe::mountinfo_from(text);
+
+    assert_eq!(line["mounts"][0]["root"], "/membrane");
+    assert_eq!(
+        line["mounts"][0]["optional_fields"],
+        json!(["shared:3", "master:1"])
+    );
+    assert_ne!(
+        line["mounts"][0], line["mounts"][1],
+        "a bind of the membrane and a plain mount must not compare equal"
+    );
+}
+
+#[test]
+fn a_listing_with_a_name_that_is_not_utf8_is_refused_rather_than_merged() {
+    let names = vec![
+        OsString::from("alpha"),
+        OsString::from_vec(vec![b'a', 0xff]),
+        OsString::from_vec(vec![b'a', 0xfe]),
+    ];
+
+    let line = probe::list_names(names);
+
+    assert_eq!(line["ok"], false, "{line}");
+    let error = line["error"].as_str().expect("an error text");
+    assert!(error.contains("UTF-8"), "{error}");
+}
+
+#[test]
+fn listed_names_are_sorted() {
+    let line = probe::list_names(vec![OsString::from("zeta"), OsString::from("alpha")]);
+
+    assert_eq!(
+        line,
+        json!({"probe": "list", "ok": true, "names": ["alpha", "zeta"]})
+    );
+}
+
+#[test]
+fn a_holder_name_must_be_a_plain_name_inside_the_holder_directory() {
+    for name in ["held-fd", "a.b", "A_1", "0"] {
+        assert!(probe::holder_name_ok(name), "`{name}` should be accepted");
+    }
+    for name in ["", ".", "..", "../x", "/tmp/x", "a/b", ".hidden", "-x"] {
+        assert!(!probe::holder_name_ok(name), "`{name}` should be refused");
+    }
 }
 
 #[test]
