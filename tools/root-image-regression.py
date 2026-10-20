@@ -1013,20 +1013,34 @@ def files_the_container_leaves_in_the_work_root_are_not_trusted():
         assert (image / "rootfs.raw").read_bytes() == ROOTFS and manifest["files"]["rootfs.raw"] == sha(ROOTFS)
 
 
+class Skipped(Exception):
+    """A test that cannot run on this machine, with the reason the run prints."""
+
+
+def hashed(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def the_placed_rootfs_keeps_its_holes():
     with scratch() as root:
-        size, data = 128 << 20, b"superblock".ljust(4096, b"\1")
-        with open(root / "rootfs.raw", "wb") as out:
+        size, data, source = 128 << 20, b"superblock".ljust(4096, b"\1"), root / "rootfs.raw"
+        with open(source, "wb") as out:
             out.truncate(size)
             for offset in (0, 65 << 20, size - 4096):
                 os.pwrite(out.fileno(), data, offset)
+        allocated = os.stat(source).st_blocks * 512
+        if allocated >= size // 2:
+            raise Skipped(f"this filesystem allocates {allocated} bytes for a {size}-byte file with holes")
         (root / "stage").mkdir()
         digest = API["copy_rootfs"](root, root / "stage", size)
         copied = root / "stage" / "rootfs.raw"
-        with open(root / "rootfs.raw", "rb") as source, open(copied, "rb") as placed:
-            hashes = [hashlib.file_digest(f, "sha256").hexdigest() for f in (source, placed)]
-        assert hashes == [digest, digest], (hashes, digest)
-        assert os.stat(copied).st_size == size and os.stat(copied).st_blocks * 512 < 16 << 20, os.stat(copied)
+        assert [hashed(source), hashed(copied)] == [digest, digest], digest
+        placed = os.stat(copied).st_blocks * 512
+        assert os.stat(copied).st_size == size and placed <= allocated + (1 << 20) and placed < 16 << 20, (placed, allocated)
 
 
 def the_rootfs_copy_reads_no_more_than_its_size():
@@ -1231,10 +1245,13 @@ def main(names):
         print(f"unknown tests: {', '.join(unknown)}")
         return 2
     selected = [test for test in TESTS if not names or test.__name__ in names]
-    failed = []
+    failed, skipped = [], []
     for test in selected:
         try:
             test()
+        except Skipped as reason:
+            skipped.append(test.__name__)
+            print(f"skip {test.__name__}: {reason}")
         except Exception as error:
             failed.append(test.__name__)
             where = traceback.extract_tb(error.__traceback__)[-1]
@@ -1244,7 +1261,8 @@ def main(names):
     if failed:
         print(f"FAILED: {len(failed)} of {len(selected)} root image tests")
         return 1
-    print(f"PASS: {len(selected)} root image tests: contract, refusals, pinned docker sequence, placement")
+    ran = f"{len(selected) - len(skipped)} root image tests" + (f", {len(skipped)} skipped" if skipped else "")
+    print(f"PASS: {ran}: contract, refusals, pinned docker sequence, placement")
     return 0
 
 
