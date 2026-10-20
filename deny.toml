@@ -10,7 +10,9 @@
 unsound = "all"
 unmaintained = "all"
 yanked = "warn"
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2021-0003", reason = "until 2026-11-20; https://rustsec.org/advisories/RUSTSEC-2021-0003; throwaway B3 for plasmosome-yods" },
+]
 
 [sources]
 unknown-registry = "deny"
