@@ -24,3 +24,6 @@ bench = false
 [[bench]]
 name = "ledger_replay"
 harness = false
+
+[lints]
+workspace = true

@@ -16,3 +16,6 @@ toml = { workspace = true }
 
 [lib]
 bench = false
+
+[lints]
+workspace = true

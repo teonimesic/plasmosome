@@ -21,3 +21,6 @@ bench = false
 [[bench]]
 name = "attach_detach"
 harness = false
+
+[lints]
+workspace = true
