@@ -19,7 +19,8 @@ pub enum Reason {
     NotRun { lane: Lane },
     /// The two runs of `lane` differ in `field`.
     Noise { lane: Lane, field: String },
-    /// A reach probe is equal in the open and absent lanes.
+    /// A reach probe is equal in the open and absent lanes, leaving out the fields a rule
+    /// covers.
     NoDiscrimination,
     /// The cell lane differs from the absent lane in `field`, and no allowance admits the
     /// cell's value there.
@@ -88,8 +89,11 @@ pub enum RunRefusal {
 /// transcript ran in every lane, no run differs from its lane's other run, every reach probe
 /// tells the open lane from the absent lane, every lane shows the neutral names, and the cell
 /// lane equals the absent lane except where an allowance admits the cell's exact value.
-/// Every field is compared exactly: the manifest's rules are not applied yet, so a rule never
-/// loosens a comparison.
+/// Neutral names are checked on every completed run and lanes are compared on every pair of
+/// completed runs, so a failure there is listed even when a lane's other run is not run. Every
+/// field is compared exactly, because the manifest's rules are not applied yet. That can only
+/// find more noise and more differences. Discrimination leaves out the fields a rule covers, so
+/// a value a rule would replace cannot make a reach probe look as if it discriminated.
 pub fn judge(manifest: &Manifest, runs: &[Run]) -> Result<Verdict, RunRefusal> {
     manifest.validate().map_err(RunRefusal::Manifest)?;
     let lanes = pair(manifest, runs)?;
@@ -98,18 +102,23 @@ pub fn judge(manifest: &Manifest, runs: &[Run]) -> Result<Verdict, RunRefusal> {
         let subject = Subject::Probe(probe.id.clone());
         let mut ran = Vec::new();
         for (lane, pair) in &lanes {
-            let Some(observations) = pair.and_then(|runs| completed(&probe.id, runs)) else {
+            let observations = pair.map(|runs| runs.map(|run| completed(&probe.id, run)));
+            if !matches!(observations, Some([Some(_), Some(_)])) {
                 not_run(&subject, *lane, &mut findings);
+            }
+            let Some(observations) = observations else {
                 continue;
             };
             for name in observations
                 .iter()
+                .flatten()
                 .flat_map(|seen| not_neutral(manifest, seen))
             {
                 let reason = Reason::NotNeutral { lane: *lane, name };
                 push(&mut findings, &subject, reason);
             }
-            ran.push((*lane, observations.map(|seen| seen.fields.clone())));
+            let fields = observations.map(|seen| seen.map(|seen| seen.fields.clone()));
+            ran.push((*lane, fields));
         }
         let allowed = |field: &str, value: &Value| {
             manifest.allowances.iter().any(|allowance| {
@@ -118,23 +127,29 @@ pub fn judge(manifest: &Manifest, runs: &[Run]) -> Result<Verdict, RunRefusal> {
                     && allowance.cell_value == *value
             })
         };
-        let reach = probe.reach.is_some();
+        let ruled: Vec<&str> = manifest
+            .rules
+            .iter()
+            .filter(|rule| rule.probe == probe.id)
+            .map(|rule| rule.field.as_str())
+            .collect();
+        let reach = probe.reach.map(|_| ruled.as_slice());
         compare(&subject, &ran, reach, allowed, &mut findings);
     }
     let mut ran = Vec::new();
     for (lane, pair) in &lanes {
-        let transcripts = pair.and_then(|[first, second]| {
-            Some([first.transcript.clone()?, second.transcript.clone()?])
-        });
-        match transcripts {
-            Some(transcripts) => ran.push((*lane, transcripts)),
-            None => not_run(&Subject::Transcript, *lane, &mut findings),
+        let transcripts = pair.map(|runs| runs.map(|run| run.transcript.clone()));
+        if !matches!(transcripts, Some([Some(_), Some(_)])) {
+            not_run(&Subject::Transcript, *lane, &mut findings);
+        }
+        if let Some(transcripts) = transcripts {
+            ran.push((*lane, transcripts));
         }
     }
     compare(
         &Subject::Transcript,
         &ran,
-        false,
+        None,
         |_, _| false,
         &mut findings,
     );
@@ -189,14 +204,11 @@ fn pair<'a>(manifest: &Manifest, runs: &'a [Run]) -> Result<Lanes<'a>, RunRefusa
         .collect()
 }
 
-fn completed<'a>(probe: &str, runs: [&'a Run; 2]) -> Option<[&'a Observation; 2]> {
-    let [first, second] = runs.map(|run| {
-        run.observations
-            .iter()
-            .find(|seen| seen.probe == probe)
-            .filter(|seen| seen.completed && !seen.failed_before_step)
-    });
-    Some([first?, second?])
+fn completed<'a>(probe: &str, run: &'a Run) -> Option<&'a Observation> {
+    run.observations
+        .iter()
+        .find(|seen| seen.probe == probe)
+        .filter(|seen| seen.completed && !seen.failed_before_step)
 }
 
 fn push(findings: &mut Vec<Finding>, subject: &Subject, reason: Reason) {
@@ -254,42 +266,62 @@ impl MountKey {
     }
 }
 
+type Ran = [(Lane, [Option<Fields>; 2])];
+
 fn compare(
     subject: &Subject,
-    ran: &[(Lane, [Fields; 2])],
-    reach: bool,
+    ran: &Ran,
+    reach: Option<&[&str]>,
     allowed: impl Fn(&str, &Value) -> bool,
     findings: &mut Vec<Finding>,
 ) {
-    for (lane, [first, second]) in ran {
-        for field in differing(first, second) {
-            push(findings, subject, Reason::Noise { lane: *lane, field });
+    for (lane, runs) in ran {
+        if let [Some(first), Some(second)] = runs {
+            for field in differing(first, second) {
+                push(findings, subject, Reason::Noise { lane: *lane, field });
+            }
         }
     }
-    let lane = |wanted| {
+    if let Some(ruled) = reach {
+        let unruled = |fields: &Fields| {
+            let mut fields = fields.clone();
+            fields.retain(|field, _| !ruled.contains(&field.as_str()));
+            fields
+        };
+        let pairs = completed_pairs(ran, Lane::Open, Lane::Absent);
+        if pairs
+            .iter()
+            .any(|(open, absent)| unruled(open) == unruled(absent))
+        {
+            push(findings, subject, Reason::NoDiscrimination);
+        }
+    }
+    let mut fields = BTreeSet::new();
+    for (cell, absent) in completed_pairs(ran, Lane::Cell, Lane::Absent) {
+        for field in differing(cell, absent) {
+            if !cell.get(&field).is_some_and(|value| allowed(&field, value)) {
+                fields.insert(field);
+            }
+        }
+    }
+    for field in fields {
+        push(findings, subject, Reason::Differs { field });
+    }
+}
+
+fn completed_pairs(ran: &Ran, left: Lane, right: Lane) -> Vec<(&Fields, &Fields)> {
+    let runs = |wanted| {
         ran.iter()
             .find(|(lane, _)| *lane == wanted)
             .map(|(_, runs)| runs)
     };
-    if let (Some(open), Some(absent)) = (lane(Lane::Open), lane(Lane::Absent))
-        && reach
-        && open.iter().zip(absent).any(|(open, absent)| open == absent)
-    {
-        push(findings, subject, Reason::NoDiscrimination);
-    }
-    if let (Some(cell), Some(absent)) = (lane(Lane::Cell), lane(Lane::Absent)) {
-        let mut fields = BTreeSet::new();
-        for (cell, absent) in cell.iter().zip(absent) {
-            for field in differing(cell, absent) {
-                if !cell.get(&field).is_some_and(|value| allowed(&field, value)) {
-                    fields.insert(field);
-                }
-            }
-        }
-        for field in fields {
-            push(findings, subject, Reason::Differs { field });
-        }
-    }
+    let (Some(left), Some(right)) = (runs(left), runs(right)) else {
+        return Vec::new();
+    };
+    left.iter()
+        .zip(right)
+        .filter_map(|(left, right)| left.as_ref().zip(right.as_ref()))
+        .collect()
 }
 
 fn differing(first: &Fields, second: &Fields) -> Vec<String> {
