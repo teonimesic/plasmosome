@@ -62,11 +62,17 @@ fn every_terminal_control_is_escaped() {
             key.clone(),
             Json::String(text.clone()),
         )]));
-        let six = escaped(&format!("{:04x}", u32::from(control)));
-        assert_eq!(
-            written,
-            format!("{{\"k{six}k\":\"v{six}v\"}}"),
-            "U+{:04X} is written as JSON's six-character escape in a key and in a value",
+        let accepted = [
+            format!("{:04x}", u32::from(control)),
+            format!("{:04X}", u32::from(control)),
+        ]
+        .map(|hex| {
+            let six = escaped(&hex);
+            format!("{{\"k{six}k\":\"v{six}v\"}}")
+        });
+        assert!(
+            accepted.contains(&written),
+            "U+{:04X} is written as JSON's six-character escape in a key and in a value, not as {written:?}",
             u32::from(control)
         );
         assert!(

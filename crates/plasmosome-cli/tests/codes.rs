@@ -1,33 +1,42 @@
+use std::fs;
+
 use plasmosome_cli::{ClientCode, Exit};
 
-const SPEC_025_CLIENT_CODES: [(&str, u8); 18] = [
-    ("invalid_argument", 64),
-    ("not_served", 2),
-    ("invalid_home", 2),
-    ("no_instance", 1),
-    ("not_running", 1),
-    ("unreachable", 1),
-    ("deadline", 1),
-    ("transport", 1),
-    ("local_io", 1),
-    ("no_reply", 1),
-    ("outcome_unknown", 3),
-    ("ambiguous_instance", 2),
-    ("unsafe_socket", 2),
-    ("peer_mismatch", 2),
-    ("socket_path_too_long", 2),
-    ("reply_too_large", 2),
-    ("bad_reply", 70),
-    ("internal", 70),
-];
+const SPEC_025: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/specs/025-plasmosome-command-line.md"
+);
+
+const CODE_TABLE_HEADER: &str = "| Code | Exit | When | Structured fields |";
+
+fn spec_025_client_codes() -> Vec<(String, u8)> {
+    let spec = fs::read_to_string(SPEC_025).expect("spec 025 is readable beside the crate");
+    spec.lines()
+        .skip_while(|line| *line != CODE_TABLE_HEADER)
+        .skip(2)
+        .take_while(|line| line.starts_with('|'))
+        .map(|row| {
+            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+            let exit = cells[2]
+                .parse()
+                .unwrap_or_else(|_| panic!("{row:?} gives an exit that is not a number"));
+            (cells[1].trim_matches('`').to_string(), exit)
+        })
+        .collect()
+}
 
 #[test]
 fn every_client_code_has_its_exit() {
-    let listed: Vec<(&str, u8)> = ClientCode::ALL
+    let table = spec_025_client_codes();
+    assert!(
+        !table.is_empty(),
+        "spec 025's client code table was not found"
+    );
+    let listed: Vec<(String, u8)> = ClientCode::ALL
         .iter()
-        .map(|code| (code.as_str(), code.exit().code()))
+        .map(|code| (code.as_str().to_string(), code.exit().code()))
         .collect();
-    assert_eq!(listed, SPEC_025_CLIENT_CODES);
+    assert_eq!(listed, table);
 }
 
 #[test]

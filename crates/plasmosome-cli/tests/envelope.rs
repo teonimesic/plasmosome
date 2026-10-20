@@ -64,6 +64,67 @@ fn client_failure(code: ClientCode, message: &str, fields: Vec<(&str, Json)>) ->
     }
 }
 
+const BACKSLASH: char = '\\';
+
+const SHOWN: &str = "<U+001B><U+0000><U+000A><U+009B><U+007F><U+202E>";
+
+fn controls() -> [char; 6] {
+    [0x1b, 0x00, 0x0a, 0x9b, 0x7f, 0x202e].map(character)
+}
+
+fn hostile(label: &str) -> String {
+    let mut text = format!("{label}\"{BACKSLASH}");
+    text.extend(controls());
+    text
+}
+
+fn hostile_instance() -> Option<Instance> {
+    Some(Instance {
+        name: Some(hostile("name")),
+        socket: hostile("/socket"),
+    })
+}
+
+fn hostile_success() -> Envelope {
+    Envelope {
+        command: hostile("plasmosome.status"),
+        instance: hostile_instance(),
+        outcome: Ok(parsed(r#"{"ready":true}"#)),
+    }
+}
+
+fn hostile_unreachable() -> Envelope {
+    Envelope {
+        command: hostile("plasmosome.status"),
+        instance: hostile_instance(),
+        outcome: Err(ErrorBody::Client(ClientError {
+            code: ClientCode::Unreachable,
+            message: hostile("refused"),
+            fields: vec![("path".to_string(), Json::String(hostile("/socket")))],
+        })),
+    }
+}
+
+fn assert_no_raw_control(text: &str, form: Form) {
+    for control in controls() {
+        if form == Form::Json || control != '\n' {
+            assert!(
+                !text.contains(control),
+                "U+{:04X} reached the {form:?} form raw: {text:?}",
+                u32::from(control)
+            );
+        }
+    }
+}
+
+fn one_json_line(text: &str) -> serde_json::Value {
+    let line = text
+        .strip_suffix('\n')
+        .expect("the JSON form ends with a newline");
+    assert_no_raw_control(line, Form::Json);
+    serde_json::from_str(line).expect("the JSON form is valid JSON")
+}
+
 fn emitted(envelope: &Envelope, form: Form) -> (String, String) {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -254,6 +315,71 @@ fn the_json_form_is_one_line_on_each_stream() {
     assert!(stderr.ends_with('\n'));
 }
 
+#[test]
+fn the_json_form_escapes_the_clients_own_strings() {
+    let (stdout, stderr) = emitted(&hostile_success(), Form::Json);
+    assert_eq!(stderr, "");
+    assert_eq!(
+        one_json_line(&stdout),
+        serde_json::json!({
+            "schema": 1,
+            "command": hostile("plasmosome.status"),
+            "instance": {"name": hostile("name"), "socket": hostile("/socket")},
+            "result": {"ready": true},
+        })
+    );
+
+    let (stdout, stderr) = emitted(&hostile_unreachable(), Form::Json);
+    assert_eq!(stdout, "");
+    assert_eq!(
+        one_json_line(&stderr),
+        serde_json::json!({
+            "schema": 1,
+            "command": hostile("plasmosome.status"),
+            "instance": {"name": hostile("name"), "socket": hostile("/socket")},
+            "error": {
+                "domain": "client",
+                "code": "unreachable",
+                "message": hostile("refused"),
+                "path": hostile("/socket"),
+            },
+        })
+    );
+}
+
+#[test]
+fn the_human_form_shows_the_clients_own_strings() {
+    let quoted = format!("{BACKSLASH}\"{BACKSLASH}{BACKSLASH}{SHOWN}");
+    let expected = [
+        "{".to_string(),
+        "  \"schema\": 1,".to_string(),
+        format!("  \"command\": \"plasmosome.status{quoted}\","),
+        "  \"instance\": {".to_string(),
+        format!("    \"name\": \"name{quoted}\","),
+        format!("    \"socket\": \"/socket{quoted}\""),
+        "  },".to_string(),
+        "  \"result\": {".to_string(),
+        "    \"ready\": true".to_string(),
+        "  }".to_string(),
+        "}".to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let (stdout, stderr) = emitted(&hostile_success(), Form::Human);
+    assert_no_raw_control(&stdout, Form::Human);
+    assert_eq!((stdout, stderr), (expected, String::new()));
+
+    let (stdout, stderr) = emitted(&hostile_unreachable(), Form::Human);
+    assert_no_raw_control(&stderr, Form::Human);
+    assert_eq!(
+        (stdout, stderr),
+        (
+            String::new(),
+            format!("refused\"{BACKSLASH}{SHOWN}\n(client unreachable)\n")
+        )
+    );
+}
+
 struct Broken;
 
 impl Write for Broken {
@@ -266,8 +392,21 @@ impl Write for Broken {
     }
 }
 
+struct Unflushed(Vec<u8>);
+
+impl Write for Unflushed {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::from(io::ErrorKind::BrokenPipe))
+    }
+}
+
 fn failed_stream(result: Result<(), EmitError>) -> Stream {
-    let error = result.expect_err("the stream refuses every write");
+    let error = result.expect_err("the stream fails");
     assert_eq!(error.error.kind(), io::ErrorKind::BrokenPipe);
     error.stream
 }
@@ -298,4 +437,26 @@ fn a_failed_write_names_its_stream() {
         &mut sink,
     )
     .expect("a failure never touches stdout");
+}
+
+#[test]
+fn a_failed_flush_names_its_stream() {
+    let mut sink = Vec::new();
+    let mut stdout = Unflushed(Vec::new());
+    assert_eq!(
+        failed_stream(emit(&success(None), Form::Json, &mut stdout, &mut sink)),
+        Stream::Stdout
+    );
+    let mut stderr = Unflushed(Vec::new());
+    assert_eq!(
+        failed_stream(emit(
+            &kernel_failure(KERNEL_ERROR),
+            Form::Human,
+            &mut sink,
+            &mut stderr
+        )),
+        Stream::Stderr
+    );
+    assert!(sink.is_empty());
+    assert!(stdout.0.ends_with(b"\n") && stderr.0.ends_with(b"\n"));
 }
