@@ -1816,6 +1816,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_longer_name_beginning_with_the_id_is_not_its_spelling() {
+        let (_dir, root) = temp_root();
+        make_cell(&root, "cell-1", None);
+        make_cell(&root, "CELL-10", None);
+        let folded = fs::symlink_metadata(root.join("cells/CELL-1")).is_ok();
+        match (folded, open_root(&root).cell_dir(&cell("CELL-1"))) {
+            (true, Err(CellDirError::Alias { .. }))
+            | (false, Err(CellDirError::Missing { .. })) => {}
+            (_, other) => panic!("folded {folded}: {other:?}"),
+        }
+    }
+
     fn cells_of(root: &Path) -> OwnedFd {
         open_at(open_root(root).dir.as_fd(), c"cells", DIRECTORY_FLAGS, 0).expect("cells opens")
     }
@@ -1850,6 +1863,16 @@ mod tests {
         let (cells, opened) = opened_cell(&root);
         fs::rename(root.join("cells/cell-1"), root.join("retired")).expect("the cell is retired");
         fs::create_dir(root.join("cells/cell-1")).expect("another directory takes its name");
+        let named = naming(cells.as_fd(), c"cell-1", opened.as_fd()).expect("the name is read");
+        assert_eq!(named, Naming::Gone);
+    }
+
+    #[test]
+    fn a_cell_replaced_by_a_link_to_its_directory_is_gone() {
+        let (_dir, root) = temp_root();
+        let (cells, opened) = opened_cell(&root);
+        fs::rename(root.join("cells/cell-1"), root.join("retired")).expect("the cell is retired");
+        symlink(root.join("retired"), root.join("cells/cell-1")).expect("the link is made");
         let named = naming(cells.as_fd(), c"cell-1", opened.as_fd()).expect("the name is read");
         assert_eq!(named, Naming::Gone);
     }
@@ -2303,6 +2326,19 @@ mod tests {
         open_root(&link)
             .discover(&lock)
             .expect("the lock's own root is accepted at another path");
+    }
+
+    #[test]
+    fn a_foreign_lock_creates_no_cells_directory() {
+        let (_first_dir, first) = temp_root();
+        let (_second_dir, second) = temp_root();
+        let (_first, foreign) = locked(&first);
+        let instance = open_root(&second);
+        expect_match!(instance.create_cell_dir(&foreign, &cell("cell-1")), Err(CellDirError::ForeignLock { .. }) => ());
+        assert!(
+            fs::symlink_metadata(second.join("cells")).is_err(),
+            "cells was created under a foreign lock"
+        );
     }
 
     #[test]
