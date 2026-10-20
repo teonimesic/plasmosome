@@ -320,6 +320,13 @@ fn a_freshly_compiled_fixture_is_run_once_before_it_is_returned() {
             && message.contains(&cache.path().display().to_string()),
         "setup fails at the warm-up's exit-64 assertion and names the executable: {message}"
     );
+    let keys = entries(cache.path());
+    assert_eq!(keys.len(), 1, "one source is cached under one key");
+    assert_eq!(
+        entries(&cache.path().join(&keys[0])),
+        ["supervision-worker"],
+        "a failed warm-up leaves the published executable and no temporary name"
+    );
 }
 
 #[test]
