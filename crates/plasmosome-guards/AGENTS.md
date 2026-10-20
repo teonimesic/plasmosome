@@ -14,7 +14,8 @@ A guard that would merely keep a design as it is today does not go here: write t
 where it can be argued with, and let the argument happen in review.
 
 The test to apply before adding one: name what it prevents, and say whether that thing could be
-undone by the next commit. If it could, this is not the place for it.
+undone by the next commit. If it could, this is not the place for it, unless spec 013's operational
+carve-out admits it.
 
 ## Hard rules
 
