@@ -20,6 +20,10 @@ gatekeeper, session log. It decides capability grants. It does not enforce them.
 ## Conventions
 
 - Manifest grammar is frozen. Adding a field is a compatibility decision, not a refactor.
+- This crate is in the `unsafe` register of
+  [spec 026](../../docs/specs/026-security-standard.md#2-unsafe-code), because its signal handler,
+  no-follow file access, file locks and kernel peer credentials need `libc` calls the standard
+  library does not offer.
 
 ## Testing
 
