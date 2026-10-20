@@ -413,7 +413,10 @@ impl WireError {
         let mut wire = WireError::manifest_invalid(error.to_string(), path);
         wire.fix = match error {
             ManifestError::Field { fix, .. } => Some(fix.clone()),
-            ManifestError::Io(_) | ManifestError::Parse(_) | ManifestError::TooLarge { .. } => None,
+            ManifestError::Io(_)
+            | ManifestError::Parse(_)
+            | ManifestError::TooLarge { .. }
+            | ManifestError::TooDeep { .. } => None,
         };
         wire
     }

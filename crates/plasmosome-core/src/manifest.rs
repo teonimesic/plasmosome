@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 /// `ManifestError::TooLarge`.
 pub const MAX_MANIFEST_BYTES: usize = 1 << 20;
 
+/// The deepest a declaration may nest. The root table is level 1. Each array
+/// and each inline table adds a level, and so does each dot in a key, for the
+/// table it implies. Each part of a table header's name adds two levels,
+/// enough for an array of tables and its element. Nothing inside a string or
+/// a comment counts. `parse` refuses a deeper declaration with
+/// `ManifestError::TooDeep` before any TOML is parsed.
+pub const MAX_MANIFEST_DEPTH: usize = 32;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlasmidManifest {
     pub id: String,
@@ -169,6 +177,9 @@ pub enum ManifestError {
     TooLarge {
         limit: usize,
     },
+    TooDeep {
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for ManifestError {
@@ -195,6 +206,9 @@ impl std::fmt::Display for ManifestError {
             }
             ManifestError::TooLarge { limit } => {
                 write!(f, "manifest exceeds the {limit}-byte limit")
+            }
+            ManifestError::TooDeep { limit } => {
+                write!(f, "manifest nests deeper than the {limit}-level limit")
             }
         }
     }
