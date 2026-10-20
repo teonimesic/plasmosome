@@ -259,6 +259,25 @@ fn the_root_is_resolved_once_so_retargeting_a_linked_ancestor_does_not_move_it()
 }
 
 #[test]
+fn a_root_swapped_for_a_link_after_its_check_is_refused_as_the_tree_itself() {
+    let tree = Tree::new().file("tool", b"tool");
+    let elsewhere = tree.dir.path().join("elsewhere");
+    fs::create_dir(&elsewhere).expect("another tree");
+    fs::write(elsewhere.join("tool"), b"tool").expect("the same bytes outside the tree");
+    let (root, moved) = (tree.root(), tree.dir.path().join("moved"));
+    let mut swap = |step: Step, path: &str| {
+        if step == Step::RootChecked && path == "." {
+            fs::rename(&root, &moved).expect("move the root away");
+            symlink(&elsewhere, &root).expect("a link in its place");
+        }
+    };
+    assert_eq!(
+        tree.observed(&mut swap),
+        Err(PinRefusal::Link { path: ".".into() })
+    );
+}
+
+#[test]
 fn a_fifo_is_refused_as_not_regular_without_waiting_for_a_writer() {
     let tree = Tree::new().file("tool", b"tool").listed_only("pipe", b"");
     mkfifo(&tree.at("pipe"));
@@ -381,15 +400,34 @@ fn names_with_dots_and_colons_that_break_no_rule_pin() {
         .file("lib/a..b", b"4")
         .file(".hidden", b"5")
         .file("tool:2", b"6")
-        .file("C", b"7");
+        .file("C", b"7")
+        .file("next\u{85}line", b"8");
     let pinned = tree.pin(&[]).expect("the tree pins");
     let paths: Vec<&str> = pinned.files().iter().map(|f| f.path.as_str()).collect();
     assert_eq!(
         paths,
         [
-            "..x", ".hidden", "C", "foo..bar", "lib/a..b", "tool:2", "x.."
+            "..x",
+            ".hidden",
+            "C",
+            "foo..bar",
+            "lib/a..b",
+            "next\u{85}line",
+            "tool:2",
+            "x.."
         ]
     );
+}
+
+#[test]
+fn names_that_only_unicode_folding_joins_do_not_collide_in_a_listing() {
+    for (one, other) in [("\u{212a}", "k"), ("\u{c9}clair", "\u{e9}clair")] {
+        assert_eq!(
+            check_listing(&[package_file(one, b"1"), package_file(other, b"2")]),
+            Ok(()),
+            "{one} and {other}"
+        );
+    }
 }
 
 #[test]
@@ -404,6 +442,8 @@ fn listed_paths_that_collide_are_refused_naming_the_later_one() {
         ("LIB/data", "lib"),
         ("lib/data", "lib/data/more"),
         ("a/b/c", "A/B"),
+        ("lib", "lib/x/y"),
+        ("lib/x/y", "lib"),
     ] {
         let listed = [package_file(earlier, b"x"), package_file(later, b"x")];
         assert_eq!(
@@ -479,6 +519,52 @@ fn a_file_whose_size_differs_from_its_listing_is_refused_before_it_is_hashed() {
 }
 
 #[test]
+fn a_file_larger_than_its_listing_is_refused_without_reading_it() {
+    let tree = Tree::new().file("tool", b"tool");
+    let huge = fs::OpenOptions::new()
+        .write(true)
+        .open(tree.at("tool"))
+        .expect("the file");
+    huge.set_len(1 << 40).expect("a sparse 1 TiB file");
+    drop(huge);
+    let result = within_patience(move || tree.pin(&[]));
+    assert_eq!(
+        result,
+        Err(PinRefusal::DigestMismatch {
+            path: "tool".into()
+        })
+    );
+}
+
+#[test]
+fn of_two_missing_files_the_first_in_path_order_is_named() {
+    let tree = Tree::new()
+        .file("tool", b"tool")
+        .listed_only("lib/b", b"b")
+        .listed_only("lib/a", b"a");
+    assert_eq!(
+        refusal(tree.pin(&[])),
+        PinRefusal::Missing {
+            path: "lib/a".into()
+        }
+    );
+}
+
+#[test]
+fn of_several_unlisted_files_the_first_in_path_order_is_named() {
+    let mut tree = Tree::new().file("tool", b"tool");
+    for name in ["m", "c", "x", "a", "q", "h", "z", "e", "t", "b", "w", "k"] {
+        tree = tree.unlisted(&format!("extra-{name}"), b"never verified");
+    }
+    assert_eq!(
+        refusal(tree.pin(&[])),
+        PinRefusal::Unexpected {
+            path: "extra-a".into()
+        }
+    );
+}
+
+#[test]
 fn a_listed_file_that_is_missing_is_refused_naming_it() {
     let tree = Tree::new()
         .file("tool", b"tool")
@@ -528,14 +614,14 @@ fn an_unlisted_file_is_refused_even_when_every_listed_file_is_present() {
 
 #[test]
 fn an_empty_directory_the_listing_does_not_imply_is_refused() {
-    let tree = Tree::new().file("tool", b"tool");
-    fs::create_dir_all(tree.at("lib/empty")).expect("an empty directory");
-    assert_eq!(
-        refusal(tree.pin(&[])),
-        PinRefusal::Unexpected {
-            path: "lib/empty".into()
-        }
-    );
+    for empty in ["lib/empty", "share"] {
+        let tree = Tree::new().file("tool", b"tool");
+        fs::create_dir_all(tree.at(empty)).expect("an empty directory");
+        assert_eq!(
+            refusal(tree.pin(&[])),
+            PinRefusal::Unexpected { path: empty.into() }
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -637,6 +723,41 @@ fn a_directory_swapped_for_a_link_after_it_was_listed_is_refused_and_nothing_out
             path: "sub/f".into()
         })
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_directory_below_one_swapped_for_a_link_is_not_opened_through_it() {
+    let tree = Tree::new().file("sub/a", b"a").file("sub/deeper/f", b"f");
+    fs::create_dir_all(tree.outside().join("deeper")).expect("a directory outside the tree");
+    fs::write(tree.outside().join("deeper/f"), b"f").expect("the same bytes outside the tree");
+    let mut swap = |step: Step, path: &str| {
+        if step == Step::Opened && path == "sub/a" {
+            swap_sub_for_a_link_out(&tree);
+        }
+    };
+    assert_eq!(
+        tree.observed(&mut swap),
+        Err(PinRefusal::Link {
+            path: "sub/deeper".into()
+        })
+    );
+}
+
+#[test]
+fn a_directory_swapped_for_a_fifo_before_it_is_opened_is_refused_without_blocking() {
+    let tree = Tree::new().file("a", b"a").file("sub/f", b"f");
+    let result = within_patience(move || {
+        let (sub, moved) = (tree.at("sub"), tree.dir.path().join("moved"));
+        let mut swap = |step: Step, path: &str| {
+            if step == Step::Listed && path == "a" {
+                fs::rename(&sub, &moved).expect("move the directory away");
+                mkfifo(&sub);
+            }
+        };
+        tree.observed(&mut swap)
+    });
+    assert_eq!(result, Err(PinRefusal::Unreadable { path: "sub".into() }));
 }
 
 #[test]
@@ -1037,25 +1158,70 @@ fn the_fold_is_unicode_lowercase_so_the_kelvin_sign_meets_k() {
     );
 }
 
+const FOLDED_TOGETHER: [&str; 3] = ["\u{c9}clair", "\u{d1}", "\u{e9}clair"];
+
+#[test]
+fn an_ascii_case_pair_never_reaches_check_names_because_the_listing_refuses_it() {
+    let listing = [package_file("Foo", b"1"), package_file("foo", b"2")];
+    assert_eq!(
+        check_listing(&listing),
+        Err(PinRefusal::Collides { path: "foo".into() })
+    );
+}
+
 #[test]
 fn two_commands_of_one_tree_that_fold_together_collide_only_when_the_volume_ignores_case() {
-    let tree = commands_tree(&["Foo", "bar", "foo"]);
+    let listing: Vec<PackageFile> = FOLDED_TOGETHER
+        .iter()
+        .map(|name| package_file(name, name.as_bytes()))
+        .collect();
+    assert_eq!(check_listing(&listing), Ok(()), "pin accepts these names");
+    let tree = commands_tree(&FOLDED_TOGETHER);
     assert_eq!(check_names(&tree, &[], no_image, false), Ok(()));
     let within = Err(Conflict {
-        target: "/usr/local/bin/foo".into(),
-        holder: Holder::Command("Foo".into()),
+        target: "/usr/local/bin/\u{e9}clair".into(),
+        holder: Holder::Command("\u{c9}clair".into()),
     });
     assert_eq!(check_names(&tree, &[], no_image, true), within);
-    let foo_tools = commands_tree(&["foo"]);
+    let pastry = commands_tree(&["\u{e9}clair"]);
     assert_eq!(
         check_names(
             &tree,
-            &[("foo-tools", &foo_tools)],
-            image_with("/bin", &["foo"]),
+            &[("pastry", &pastry)],
+            image_with("/bin", &["\u{e9}clair"]),
             true
         ),
         within,
         "the tree's own names are checked first"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_tree_pinned_from_a_volume_that_keeps_case_can_hold_two_commands_that_fold_together() {
+    let mut tree = Tree::new();
+    for name in FOLDED_TOGETHER {
+        tree = tree.file(name, name.as_bytes());
+    }
+    let pinned = tree.pin(&FOLDED_TOGETHER).expect("the tree pins");
+    assert_eq!(
+        check_names(&pinned, &[], no_image, true),
+        Err(Conflict {
+            target: "/usr/local/bin/\u{e9}clair".into(),
+            holder: Holder::Command("\u{c9}clair".into()),
+        })
+    );
+}
+
+#[test]
+fn another_plasmids_files_that_are_not_commands_hold_no_name() {
+    let other = PinnedTree::assemble(vec![
+        file("gh", b"a data file", false),
+        file("rg", b"rg", true),
+    ]);
+    assert_eq!(
+        check_names(&commands_tree(&["gh"]), &[("data", &other)], no_image, true),
+        Ok(())
     );
 }
 
