@@ -302,6 +302,8 @@ def dry_run():
         assert writes(calls) == [] and forge.issues() == {} and forge.labels() == [], calls
         assert "gh label create security" in result.stdout and "gh issue create" in result.stdout, result.stdout
         assert MARKER in result.stdout and "RUSTSEC-2021-0003" in result.stdout, result.stdout
+        assert "None" not in result.stdout.splitlines(), result.stdout
+        assert "2 findings would be in the security issue; this was a dry run" in result.stdout, result.stdout
 
         path = Path(directory) / "marked"
         path.mkdir()
