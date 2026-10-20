@@ -20,8 +20,10 @@ fn main() -> ExitCode {
 #[cfg(target_os = "macos")]
 mod macos {
     use std::convert::Infallible;
-    use std::io::Read;
+    use std::io::{Read, Write};
+    use std::os::unix::process::parent_id;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use plasmosome_lanes::bundle::{
         KERNEL, LIBKRUN, PINNED_BUNDLE_ID, is_inside, unverified_images, verify_bundle,
@@ -39,6 +41,9 @@ mod macos {
     const LOAD_REFUSED: u8 = 69;
     const SELF_CHECK_FAILED: u8 = 70;
     const CONFINEMENT_FAILED: u8 = 71;
+    const PARENT_GONE: u8 = 75;
+
+    const PARENT_POLL: Duration = Duration::from_millis(100);
 
     type Refusal = (u8, String);
 
@@ -106,11 +111,29 @@ mod macos {
         Ok(())
     }
 
+    fn exit_when_the_parent_is_gone() {
+        let parent = parent_id();
+        std::thread::spawn(move || {
+            loop {
+                let now = parent_id();
+                if now != parent || now == 1 {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "lane-vmm: the process that started it is gone (parent {parent}, now {now}); exiting"
+                    );
+                    std::process::exit(PARENT_GONE.into());
+                }
+                std::thread::sleep(PARENT_POLL);
+            }
+        });
+    }
+
     #[allow(unsafe_code)]
     fn images() -> Vec<PathBuf> {
-        // SAFETY: lane-vmm has one thread until krun_start_enter. It starts none, and libkrun
-        // v1.19.4 starts none before then and keeps libkrunfw open in a static for good, so no
-        // image is unloaded during the call.
+        // SAFETY: until krun_start_enter, lane-vmm's only other thread is the parent watch. It
+        // reads its parent's pid, sleeps, writes to stderr and exits, and none of that unloads
+        // an image. libkrun v1.19.4 starts no thread before then and keeps libkrunfw open in a
+        // static for good, so no image is unloaded during the call.
         unsafe { krun::loaded_images() }
     }
 
@@ -148,6 +171,7 @@ mod macos {
     }
 
     pub fn run() -> Result<Infallible, Refusal> {
+        exit_when_the_parent_is_gone();
         let config = read_config()?;
         refuse_loader_inputs()?;
         if is_inside(&config.bundle, &config.root_image) {
