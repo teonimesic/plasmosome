@@ -784,7 +784,9 @@ mod tests {
     struct FakeKernel {
         allows: bool,
         fate: Life,
+        fate_at: usize,
         life: Life,
+        operation_queries: usize,
         record_bytes: libc::c_int,
         own_queries: usize,
     }
@@ -794,7 +796,9 @@ mod tests {
             FakeKernel {
                 allows,
                 fate,
+                fate_at: 0,
                 life: Life::Running,
+                operation_queries: 0,
                 record_bytes: UNIQUE_IDENTIFIERS_SIZE,
                 own_queries: 0,
             }
@@ -808,8 +812,11 @@ mod tests {
                 return Ok(0);
             }
             assert_eq!(pid, PID, "the fake knows only the observer and one process");
-            if operation.is_some() && self.life == Life::Running {
-                self.life = self.fate;
+            if operation.is_some() {
+                if self.operation_queries == self.fate_at && self.life == Life::Running {
+                    self.life = self.fate;
+                }
+                self.operation_queries += 1;
             }
             match (self.life, operation) {
                 (Life::Running, Some(_)) if self.allows => Ok(0),
@@ -858,20 +865,30 @@ mod tests {
 
     #[test]
     fn a_process_that_dies_during_the_queries_is_unverifiable() {
-        assert_eq!(
-            observed(&mut FakeKernel::new(true, Life::Dead)),
-            unverifiable(Unverifiable::ProcessUnreadable { errno: libc::ESRCH }),
-            "an allow-default process that dies at its first operation query answers 1 to the rest"
-        );
+        for fate_at in 0..FIVE.len() {
+            assert_eq!(
+                observed(&mut FakeKernel {
+                    fate_at,
+                    ..FakeKernel::new(true, Life::Dead)
+                }),
+                unverifiable(Unverifiable::ProcessUnreadable { errno: libc::ESRCH }),
+                "an allow-default process that dies at operation query {fate_at} answers 1 from there"
+            );
+        }
     }
 
     #[test]
     fn a_pid_taken_by_another_process_during_the_queries_is_unverifiable() {
-        assert_eq!(
-            observed(&mut FakeKernel::new(true, Life::Replaced)),
-            unverifiable(Unverifiable::ProcessReplaced),
-            "an allow-default process replaced at its first operation query by one that denies the five"
-        );
+        for fate_at in 0..FIVE.len() {
+            assert_eq!(
+                observed(&mut FakeKernel {
+                    fate_at,
+                    ..FakeKernel::new(true, Life::Replaced)
+                }),
+                unverifiable(Unverifiable::ProcessReplaced),
+                "an allow-default process replaced at operation query {fate_at} by one that denies the five"
+            );
+        }
     }
 
     #[test]
