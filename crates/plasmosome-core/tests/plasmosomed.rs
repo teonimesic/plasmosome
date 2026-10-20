@@ -642,4 +642,17 @@ fn plasmosomed_refuses_a_status_params_key_it_does_not_define_with_invalid_param
         "a key the verb does not define is refused with -32602: {extra}"
     );
     assert_eq!(extra.get("result"), None, "{extra}");
+    drop(client);
+
+    let mut unnamed = addressable(&control);
+    let misspelt = ask(
+        &mut unnamed,
+        r#"{"id":3,"method":"plasmosome.status","params":{"nmae":"work"}}"#,
+    );
+    assert_eq!(
+        misspelt.pointer("/error/code").and_then(Value::as_i64),
+        Some(-32602),
+        "a key the verb does not define is refused with -32602 when no name comes with it: {misspelt}"
+    );
+    assert_eq!(misspelt.get("result"), None, "{misspelt}");
 }
