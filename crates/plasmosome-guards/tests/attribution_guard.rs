@@ -343,6 +343,51 @@ fn refuses_a_trailer_naming_a_vendor_whose_name_no_person_carries() {
 }
 
 #[test]
+fn refuses_a_trailer_with_no_address_for_each_model_word() {
+    check_workspace(|root| {
+        for value in [
+            "Claude",
+            "Anthropic",
+            "ChatGPT",
+            "OpenAI",
+            "Copilot",
+            "Codex",
+            "Gemini",
+            "Llama",
+            "Mistral",
+            "Cursor",
+            "Devin (cognition.ai)",
+            "Grok",
+            "Agent (x.ai)",
+        ] {
+            assert_refused(
+                root,
+                &format!("docs: a change\n\nSome body prose.\n\nCo-authored-by: {value}\n"),
+                "credits a model by a name with no address, holding one word of the guard's vendor list and no other",
+            );
+        }
+    });
+}
+
+#[test]
+fn refuses_a_tool_identity_under_a_neutral_name() {
+    check_workspace(|root| {
+        for value in [
+            "Probe <noreply@anthropic.com>",
+            "Probe <198982749+Copilot@users.noreply.github.com>",
+            "Probe <176961590+gemini-code-assist[bot]@users.noreply.github.com>",
+            "Probe <noreply@x.ai>",
+        ] {
+            assert_refused(
+                root,
+                &format!("docs: a change\n\nSome body prose.\n\nCo-authored-by: {value}\n"),
+                "credits a model's own address under a name that holds no vendor word",
+            );
+        }
+    });
+}
+
+#[test]
 fn clears_a_body_whose_only_co_authors_are_people() {
     check_workspace(|root| {
         assert_cleared(
