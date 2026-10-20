@@ -264,9 +264,9 @@ section said the manifest's table covers every target a package compiles, and do
 target it does not reach.
 
 **The register** is the set of packages whose own `[lints]` table sets `unsafe_code = "deny"`.
-Today it holds `plasmosome-membrane` and `plasmosome-core`. Cargo does not let a package mix
-`lints.workspace = true` with local keys, so a register package repeats both clippy safety lints at
-`deny` in its own table.
+Today it holds `plasmosome-membrane`, `plasmosome-core` and `plasmosome-lanes`. Cargo does not let
+a package mix `lints.workspace = true` with local keys, so a register package repeats both clippy
+safety lints at `deny` in its own table.
 
 Inside a register package, `#[allow(unsafe_code)]` goes on each item that needs `unsafe`. It goes on
 a whole module only when the crate's `AGENTS.md` names that module as an FFI module. The crate root
@@ -412,6 +412,7 @@ maximum size and, where it applies, a maximum nesting depth and a time budget.
 | Membrane control request | `plasmosome-membrane` `control.rs` | The controller, under spec 001's peer-UID check | 1 MiB (`MAX_REQUEST_BYTES`), read through a limit | Bound only |
 | Git-only step | `.githooks/build-input-guard`, its TOML reading | A PR's author, through the commit the step judges | 8 MiB per file (`MAX_BYTES`), read from `git cat-file blob` through a limit; nesting bounded by Python's recursion limit; 60 s per git call. The tree listing from `git ls-tree` has the 60 s bound only. Anything it cannot read, decode or parse is refused | Bound only |
 | Root image base export | `tools/root-image`, its reading of the export, of what the build container leaves in the work root, and of Docker's output | The publisher of the base image, pinned by digest, and the base's own programs, which run as root in the build container and write `rootfs.raw` and the read-back | The export at most `--size-mib` MiB, and each account, skel and version file in it 1 MiB; `rootfs.raw` exactly `--size-mib` MiB, copied through that bound; the passwd and group read-back 1 MiB each, each `--add` read-back and source 256 MiB, and every other read-back file and Docker's output 16 MiB; the tool's own manifest and source 1 MiB each. Every one is read through a limit. Every file but an `--add` source, which the operator names, is opened without following a link. The tool reads nothing the container writes beyond `rootfs.raw` and the read-back in `check/`, and `check/` must still be a directory. The stage tar is the tool's own, written before the container runs. JSON nested deeper than Python can parse is refused; 1,800 s per command. Anything it cannot read or parse is refused with the tool's refused line | Bound only |
+| Lane console | `plasmosome-lanes` `run.rs`, `console.rs` | The guest a test lane boots | 16 MiB (`MAX_CONSOLE_BYTES`), read through a limit; JSON depth 128 | Bound only |
 
 The controller's own journals are not on this list: the session log, the ledger and spec 008's
 recovery journal. Only the controller writes them. Any other process that could rewrite them runs

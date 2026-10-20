@@ -8,15 +8,25 @@ broken tool cannot pass one. Spec 026 section 4 is the authority.
 This file decides what the gates job enforces. A pull request that changes
 tools/cargo-deny-check* changes that policy, so review it as code, not as CI plumbing.
 
+`report --json-out FILE --event EVENT` writes the findings that tools/security-issue turns into the
+`security` issue (spec 026 section 4, "The security issue"). It runs the three checks gates runs,
+sources, advisories and licenses but not bans, over every tracked lockfile. It keeps each error and
+warning diagnostic as a finding, so unmaintained, notice, yanked and licence findings are included,
+and a tool failure becomes a finding of kind tool-failure. A WARN log or a note diagnostic is not a
+finding; it is printed as a note in the job log and the step summary. These findings form the
+lockfiles section. On the schedule and workflow_dispatch events it also runs the weekly checks,
+which form the weekly section: ignores past their date or with a reason that does not parse, and a
+stable Rust newer than the pin. It exits 0 once the file is written, whatever it found.
+
 A stale Cargo.lock is a refusal, because the fix is the contributor's: run
 `cargo update --workspace` and commit the lockfile. git-source-underspecified refuses, but no
 fixture holds it: cargo-deny writes it only when deny.toml sets [sources] required-git-spec.
 
 To bump cargo-deny:
-1. In .github/workflows/ci.yml, change the version on the `cargo install cargo-deny` line and in
-   the gates rust-cache `key:`. The cache saves nothing when its key matches, so a stale key
-   restores the old binary and every run rebuilds the new one. The regression suite fails when
-   the two disagree.
+1. In .github/workflows/ci.yml and audit.yml, change the version on the `cargo install
+   cargo-deny` line and in the rust-cache `key:`. The cache saves nothing when its key matches,
+   so a stale key restores the old binary and every run rebuilds the new one. The regression
+   suites fail when any of the four disagree.
 2. Compare REFUSING, REPORTED and TOOL_FAILURE_CODES with the Code enums in the new release's
    src/advisories/diags.rs, src/sources/diags.rs and src/licenses/diags.rs. An error whose code
    no list names is a tool failure, so a new code fails closed until it is placed.
@@ -27,13 +37,18 @@ To bump cargo-deny:
 """
 
 import argparse
+from datetime import date, datetime, timezone
+import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shlex
 import subprocess
 import sys
+import tomllib
 import traceback
+import urllib.request
 
 
 CHECKS = ("sources", "advisories", "licenses")
@@ -61,6 +76,15 @@ REPORTED = {
     },
 }
 TOOL_FAILURE_CODES = {"index-failure", "index-cache-load-failure"}
+FINDING_SEVERITIES = {"error", "warning"}
+EVENTS = ("push", "schedule", "workflow_dispatch")
+WEEKLY_EVENTS = {"schedule", "workflow_dispatch"}
+REASON = re.compile(r"until (\d{4}-\d{2}-\d{2}); (https?://\S+); (.+)", re.ASCII)
+RELEASE = re.compile(r"(\d+)\.(\d+)\.(\d+)", re.ASCII)
+STABLE_URL = "https://static.rust-lang.org/dist/channel-rust-stable.toml"
+RELEASES_URL = "https://github.com/rust-lang/rust/blob/stable/RELEASES.md"
+CHANNEL_LIMIT = 16 * 1024 * 1024
+CHANNEL_TIMEOUT = 60
 STALE_LOCKFILE = "--locked was passed to prevent this"
 LOCK_HINT = "Cargo.lock does not match the manifests: run `cargo update --workspace` (or any cargo build) and commit Cargo.lock"
 
@@ -136,6 +160,16 @@ def describe(fields):
     return " ".join(parts) + ": " + str(advisory.get("title") or fields.get("message") or "no message")
 
 
+def detail(fields):
+    advisory = fields.get("advisory") if isinstance(fields.get("advisory"), dict) else {}
+    title = str(advisory.get("title") or fields.get("message") or "no message")
+    if not advisory and spans(fields):
+        title += " (" + "; ".join(spans(fields)) + ")"
+    return {"kind": str(fields.get("code") or "no code"), "severity": fields.get("severity"),
+            "package": ", ".join(krates(fields)) or None, "advisory": advisory.get("id"), "title": title,
+            "url": advisory.get("url")}
+
+
 def refusal(check, fields):
     text = describe(fields)
     advisory = fields.get("advisory") if isinstance(fields.get("advisory"), dict) else {}
@@ -151,7 +185,7 @@ def stale(causes):
 
 def classify(check, lines, returncode):
     """Classify one cargo-deny run from its JSON lines; the exit status alone decides nothing."""
-    refusals, failures, reported, causes = [], [], [], []
+    refusals, failures, reported, causes, found, notes = [], [], [], [], [], []
     counts, saw_error = None, False
     for line in lines:
         if not line.strip():
@@ -176,6 +210,7 @@ def classify(check, lines, returncode):
                 failures.append(f"error log: {message}")
             elif level == "WARN":
                 reported.append(f"warning log: {message}")
+                notes.append(f"warning log: {message}")
         elif kind == "diagnostic":
             code, severity = fields.get("code"), fields.get("severity")
             saw_error = saw_error or severity == "error"
@@ -183,8 +218,13 @@ def classify(check, lines, returncode):
                 failures.append(describe(fields))
             elif severity != "error" or code in REPORTED[check]:
                 reported.append(describe(fields))
+                if severity in FINDING_SEVERITIES:
+                    found.append(detail(fields))
+                else:
+                    notes.append(describe(fields))
             elif code in REFUSING[check]:
                 refusals.append(refusal(check, fields))
+                found.append(detail(fields))
             else:
                 failures.append(f"an error with a code this wrapper does not know: {describe(fields)}")
         elif kind == "summary":
@@ -196,32 +236,39 @@ def classify(check, lines, returncode):
             failures.append(f"a record of unknown type {kind!r}: {line.strip()}")
     if causes:
         refusals.append(stale(causes))
+        found.append({"kind": "stale-lockfile", "severity": "error", "package": None, "advisory": None,
+                      "title": "; ".join(causes), "url": None})
     if counts is None and not failures and not causes:
         failures.append(f"cargo-deny wrote no {check} summary")
     if returncode != 0 and not saw_error and not failures and not causes:
         failures.append(f"cargo-deny exited {returncode} without an error diagnostic")
     status = TOOL_FAILURE if failures else REFUSAL if refusals else PASS
     return {"status": STATUS_NAMES[status], "code": status, "refusals": refusals, "failures": failures,
-            "reported": reported, "counts": counts}
+            "reported": reported, "counts": counts, "findings": found, "notes": notes}
 
 
-def run(root, check, lockfile):
+def execute(root, check, lockfile):
+    """Run cargo-deny once; return its output lines and exit status, or why it could not run."""
     argv = command(root, check, lockfile)
     print("$ " + shlex.join(argv), flush=True)
     try:
         result = subprocess.run(argv, cwd=root, capture_output=True, timeout=TIMEOUT,
                                 env={**os.environ, "CARGO_TERM_COLOR": "never"})
     except FileNotFoundError:
-        return failed("cargo-deny is not on PATH; install it with the version ci.yml pins")
+        return None, "cargo-deny is not on PATH; install it with the version ci.yml pins"
     except (OSError, subprocess.TimeoutExpired) as error:
-        return failed(f"cargo-deny could not complete: {error}")
-    lines = (result.stderr + result.stdout).decode(errors="replace").splitlines()
-    return classify(check, lines, result.returncode)
+        return None, f"cargo-deny could not complete: {error}"
+    return ((result.stderr + result.stdout).decode(errors="replace").splitlines(), result.returncode), None
+
+
+def run(root, check, lockfile):
+    output, problem = execute(root, check, lockfile)
+    return failed(problem) if problem else classify(check, *output)
 
 
 def failed(message):
     return {"status": STATUS_NAMES[TOOL_FAILURE], "code": TOOL_FAILURE, "refusals": [], "failures": [message],
-            "reported": [], "counts": None}
+            "reported": [], "counts": None, "findings": [], "notes": []}
 
 
 def lines_for(outcome):
@@ -241,12 +288,16 @@ def summarize(text):
             output.write(text)
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("check", choices=CHECKS)
-    parser.add_argument("--changed-since", metavar="REV",
-                        help="skip, and pass, when no Cargo.toml or Cargo.lock changed between REV and HEAD")
-    args = parser.parse_args(argv)
+def lockfiles_to_check(root):
+    if not (root / "deny.toml").is_file():
+        raise ToolFailure("there is no deny.toml at the repository root, and cargo-deny would fall back to its defaults")
+    lockfiles = tracked_lockfiles(root)
+    if not lockfiles:
+        raise ToolFailure("git tracks no Cargo.lock, so there is nothing to check")
+    return lockfiles
+
+
+def gate(args):
     heading = f"## cargo-deny {args.check}\n\n"
     try:
         root = repository_root()
@@ -254,11 +305,7 @@ def main(argv=None):
             print(SKIPPED)
             summarize(f"{heading}{SKIPPED}\n")
             return PASS
-        if not (root / "deny.toml").is_file():
-            raise ToolFailure("there is no deny.toml at the repository root, and cargo-deny would fall back to its defaults")
-        lockfiles = tracked_lockfiles(root)
-        if not lockfiles:
-            raise ToolFailure("git tracks no Cargo.lock, so there is nothing to check")
+        lockfiles = lockfiles_to_check(root)
     except ToolFailure as failure:
         message = f"cargo-deny tool failure (not a finding): {failure}"
         print(message)
@@ -277,6 +324,169 @@ def main(argv=None):
         sections.append("\n")
     summarize("".join(sections))
     return worst
+
+
+def tool_failure(title, check=None, lockfile=None):
+    return {"kind": "tool-failure", "check": check, "lockfile": lockfile, "severity": "error", "package": None,
+            "advisory": None, "title": title, "url": None}
+
+
+def lockfile_findings(root, lockfile):
+    """Return the findings of every check on one lockfile, and the notes that are not findings."""
+    found, notes = [], []
+    for check in CHECKS:
+        try:
+            outcome = run(root, check, lockfile)
+        except Exception as error:
+            found.append(tool_failure(f"the wrapper crashed on cargo-deny's {check} output: {type(error).__name__}: {error}",
+                                      check, str(lockfile)))
+            continue
+        found.extend({"kind": item["kind"], "check": check, "lockfile": str(lockfile), **item} for item in outcome["findings"])
+        found.extend(tool_failure(failure, check, str(lockfile)) for failure in outcome["failures"])
+        notes.extend(f"{lockfile} {check}: {note}" for note in outcome["notes"])
+    return found, notes
+
+
+def weekly(kind, advisory, title, url):
+    return {"kind": kind, "check": None, "lockfile": None, "severity": "warning", "package": None,
+            "advisory": advisory, "title": title, "url": url}
+
+
+def ignore_findings(text, today):
+    """Flag each [advisories] ignore past its until date, or whose reason does not read "until YYYY-MM-DD; <link>; <why>".
+
+    An ignore is valid through its until date, so one dated today is not flagged.
+    """
+    try:
+        advisories = tomllib.loads(text).get("advisories", {})
+        if not isinstance(advisories, dict):
+            raise ValueError("[advisories] is not a table")
+        entries = advisories.get("ignore", [])
+        if not isinstance(entries, list) or not all(isinstance(entry, (str, dict)) for entry in entries):
+            raise ValueError("[advisories] ignore is not a list of ids and tables")
+    except ValueError as error:
+        return [tool_failure(f"deny.toml could not be read for the weekly ignore check: {error}")]
+    found = []
+    for entry in entries:
+        name = entry if isinstance(entry, str) else str(entry.get("id") or entry.get("crate") or "an ignore with no id")
+        reason = entry.get("reason") if isinstance(entry, dict) else None
+        match = REASON.fullmatch(reason) if isinstance(reason, str) else None
+        try:
+            until = date.fromisoformat(match.group(1)) if match else None
+        except ValueError:
+            until = None
+        if until is None:
+            found.append(weekly("unparsable-ignore", name, f'deny.toml ignores {name} with a reason that does not read '
+                                f'"until YYYY-MM-DD; <link>; <why>": {reason!r}', None))
+        elif until < today:
+            found.append(weekly("expired-ignore", name, f"deny.toml ignores {name} until {until}, which has passed",
+                                match.group(2)))
+    return found
+
+
+def release(text):
+    match = RELEASE.fullmatch(text) if isinstance(text, str) else None
+    if match is None:
+        raise ValueError(f"{text!r} is not an exact x.y.z release")
+    return tuple(int(part) for part in match.groups())
+
+
+def stable_findings(toolchain, url):
+    """Flag a stable Rust release newer than the exact release rust-toolchain.toml pins."""
+    try:
+        channel = tomllib.loads(toolchain)["toolchain"]["channel"]
+        pinned = release(channel)
+    except (ValueError, KeyError, TypeError) as error:
+        return [tool_failure(f"rust-toolchain.toml names no exact release to compare with stable: {error}")]
+    try:
+        with urllib.request.urlopen(url, timeout=CHANNEL_TIMEOUT) as response:
+            body = response.read(CHANNEL_LIMIT + 1)
+        if len(body) > CHANNEL_LIMIT:
+            raise ValueError(f"it is over {CHANNEL_LIMIT} bytes")
+        version = tomllib.loads(body.decode())["pkg"]["rust"]["version"].split()[0]
+        latest = release(version)
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError, AttributeError, IndexError) as error:
+        return [tool_failure(f"the stable channel at {url} could not be read: {type(error).__name__}: {error}")]
+    if latest <= pinned:
+        return []
+    return [{"kind": "newer-stable", "check": None, "lockfile": None, "severity": "warning", "package": f"rust {version}",
+             "advisory": None, "title": f"stable Rust {version} is newer than {channel}, the release rust-toolchain.toml pins",
+             "url": RELEASES_URL}]
+
+
+def read(path):
+    try:
+        return path.read_text(), None
+    except (OSError, UnicodeError) as error:
+        return None, tool_failure(f"{path.name} could not be read: {error}")
+
+
+def weekly_findings(root, stable_url):
+    found = []
+    deny, failure = read(root / "deny.toml")
+    found.extend([failure] if failure else ignore_findings(deny, datetime.now(timezone.utc).date()))
+    toolchain, failure = read(root / "rust-toolchain.toml")
+    found.extend([failure] if failure else stable_findings(toolchain, stable_url))
+    return found
+
+
+def line_for(finding):
+    """One line of the job log per finding. The runner ends a line at a CR too, and reads a line that
+    starts with "::" as a workflow command, so every run of whitespace becomes one space."""
+    where = " ".join(str(finding[key]) for key in ("lockfile", "check", "package", "advisory") if finding.get(key))
+    link = f" {finding['url']}" if finding.get("url") else ""
+    return " ".join(f"{finding['kind']}{' ' + where if where else ''}: {finding['title']}{link}".split())
+
+
+def report(args):
+    sections, commit, notes = {"lockfiles": []}, None, []
+    try:
+        root = repository_root()
+        commit = git(root, "rev-parse", "HEAD").decode().strip()
+        lockfiles = lockfiles_to_check(root)
+    except ToolFailure as failure:
+        sections["lockfiles"].append(tool_failure(str(failure)))
+    else:
+        for lockfile in lockfiles:
+            found, noted = lockfile_findings(root, lockfile)
+            sections["lockfiles"].extend(found)
+            notes.extend(noted)
+        if args.event in WEEKLY_EVENTS:
+            sections["weekly"] = weekly_findings(root, args.stable_url)
+    findings = [{**finding, "section": name} for name, found in sections.items() for finding in found]
+    document = {"schema": 2, "event": args.event, "weekly": "weekly" in sections, "commit": commit,
+                "date": datetime.now(timezone.utc).date().isoformat(), "sections": list(sections), "findings": findings}
+    Path(args.json_out).write_text(json.dumps(document) + "\n")
+    lines = [line_for(finding) for finding in findings]
+    notes = [" ".join(note.split()) for note in notes]
+    print(f"{len(findings)} findings, written to {args.json_out}")
+    for line in lines:
+        print(f"finding: {line}")
+    for note in notes:
+        print(f"note: {note}")
+    summarize("## cargo-deny report\n\n" + ("".join(f"- {line}\n" for line in lines) if lines else "No findings.\n")
+              + ("\nNotes, which are not findings:\n\n" + "".join(f"- {note}\n" for note in notes) if notes else ""))
+    return PASS
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("check", choices=(*CHECKS, "report"), help="one check for gates, or report for the security issue")
+    parser.add_argument("--changed-since", metavar="REV",
+                        help="skip, and pass, when no Cargo.toml or Cargo.lock changed between REV and HEAD")
+    parser.add_argument("--json-out", metavar="FILE", help="report only: where to write the findings")
+    parser.add_argument("--event", choices=EVENTS,
+                        help="report only: the GitHub event; schedule and workflow_dispatch add the weekly checks")
+    parser.add_argument("--stable-url", metavar="URL", default=STABLE_URL,
+                        help="report only: the stable channel file the weekly check reads")
+    args = parser.parse_args(argv)
+    if args.check == "report":
+        if args.json_out is None or args.event is None or args.changed_since is not None:
+            parser.error("report needs --json-out and --event, and takes no --changed-since")
+        return report(args)
+    if args.json_out is not None or args.event is not None:
+        parser.error("--json-out and --event belong to report")
+    return gate(args)
 
 
 if __name__ == "__main__":
