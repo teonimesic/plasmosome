@@ -671,7 +671,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_capability_refuses_nul_and_non_canonical_paths_wherever_it_travels() {
+    fn an_invalid_capability_is_refused_wherever_it_travels() {
         for (capability, expected) in invalid_capabilities() {
             assert_eq!(
                 capability.validate(),
