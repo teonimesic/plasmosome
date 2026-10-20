@@ -469,7 +469,7 @@ fn a_capture_dropped_by_expire_still_answers_expired() {
 }
 
 #[test]
-fn a_discarded_capture_answers_expired_until_the_next_capture() {
+fn a_discarded_capture_answers_expired_until_a_zero_zero_request_at_its_deadline() {
     let (mut slot, t, _) = ten_bytes_in_pages_of_four();
     slot.discard();
     slot.discard();
@@ -482,6 +482,35 @@ fn a_discarded_capture_answers_expired_until_the_next_capture() {
     ));
     let refused = read(&mut slot, 1, 4, t);
     assert_eq!(refused, Err(PagingError::UnknownSnapshot { snapshot: 1 }));
+}
+
+#[test]
+fn a_successful_capture_forgets_the_ended_id() {
+    let (mut slot, t, _) = ten_bytes_in_pages_of_four();
+    slot.discard();
+    let next = start(&mut slot, account(), t, t + 10 * SECOND);
+    assert_eq!(next.snapshot, 2);
+    let refused = read(&mut slot, 1, 4, t);
+    assert_eq!(refused, Err(PagingError::UnknownSnapshot { snapshot: 1 }));
+}
+
+#[test]
+fn a_failed_collect_forgets_the_ended_id() {
+    let (mut slot, t, _) = ten_bytes_in_pages_of_four();
+    slot.discard();
+    let failed = slot.capture(SCOPE, t + SECOND, &|| t, || Err::<FrozenAccount, _>("gone"));
+    assert!(matches!(failed, Err(CaptureError::Collect("gone"))));
+    let refused = read(&mut slot, 1, 4, t);
+    assert_eq!(refused, Err(PagingError::UnknownSnapshot { snapshot: 1 }));
+}
+
+#[test]
+fn a_changed_scope_leaves_the_ended_id() {
+    let (mut slot, t, _) = ten_bytes_in_pages_of_four();
+    slot.discard();
+    let moved = slot.page(&"cell-2", cursor(1, 4), t + SECOND, t);
+    assert_eq!(moved, Err(PagingError::ScopeChanged { snapshot: 1 }));
+    assert_eq!(read(&mut slot, 1, 4, t), Err(PagingError::Expired));
 }
 
 #[test]
