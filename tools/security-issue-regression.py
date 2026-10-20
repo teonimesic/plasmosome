@@ -578,15 +578,32 @@ def audit_workflow():
     assert len(tests) == 1 and re.search(r"(?m)^        run: python3 tools/security-issue-regression\.py$", tests[0]), tests
 
 
+OUTPUT_LIMIT = 100000
+
+
+def near_the_output_limit():
+    """The longest findings line, newline included, that still fits OUTPUT_LIMIT bytes."""
+    many = [{**VULNERABILITY, "package": f"crate{index} 1.0.0", "title": "y" * 400} for index in range(1000)]
+    count = 1
+    while len(json.dumps(document(*many[:count + 1]))) + 1 <= OUTPUT_LIMIT:
+        count += 1
+    return json.dumps(document(*many[:count])) + "\n"
+
+
 def the_jobs_hand_over_the_findings():
-    """Run the report and issue steps' scripts under bash, with a fake python3 for the report and the fake gh."""
+    """Run the report and issue steps' scripts under bash, with a fake python3 for the report and the fake gh.
+
+    Linux refuses an environment string over 128 KiB, and the issue step reads the findings from one,
+    so the report step must refuse a findings line over OUTPUT_LIMIT bytes, and one at the limit must pass.
+    """
     jobs = jobs_of((ROOT / ".github" / "workflows" / "audit.yml").read_text())
     reporting = script(next(step for step in steps_of(jobs["report"]) if "tools/cargo-deny-check report" in step))
     writing = script(next(step for step in steps_of(jobs["issue"]) if "tools/security-issue" in step))
     fake_report = (f"#!{sys.executable}\nimport os, sys\nassert sys.argv[1:3] == ['tools/cargo-deny-check', 'report'], sys.argv\n"
                    "assert sys.argv[sys.argv.index('--event') + 1] == os.environ['EVENT'], sys.argv\n"
-                   "if os.environ['FAKE_FINDINGS']:\n"
-                   "    open(sys.argv[sys.argv.index('--json-out') + 1], 'w').write(os.environ['FAKE_FINDINGS'])\n"
+                   "findings = open(os.environ['FAKE_FINDINGS_FILE']).read()\n"
+                   "if findings:\n"
+                   "    open(sys.argv[sys.argv.index('--json-out') + 1], 'w').write(findings)\n"
                    "sys.exit(int(os.environ['FAKE_STATUS']))\n")
     with tempfile.TemporaryDirectory(prefix="security-issue-handover-") as directory:
         directory = Path(directory)
@@ -597,14 +614,15 @@ def the_jobs_hand_over_the_findings():
         system = os.pathsep.join(("/usr/bin", "/bin"))
 
         def report_step(findings, status=0):
-            temp, output = directory / "report-temp", directory / "report-output"
+            temp, output, planned = directory / "report-temp", directory / "report-output", directory / "planned.json"
             shutil.rmtree(temp, ignore_errors=True)
             temp.mkdir()
             output.write_text("")
+            planned.write_text(findings)
             result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", reporting], cwd=ROOT,
                                     env={"PATH": str(fakes) + os.pathsep + system, "EVENT": "schedule",
                                          "RUNNER_TEMP": str(temp), "GITHUB_OUTPUT": str(output),
-                                         "FAKE_FINDINGS": findings, "FAKE_STATUS": str(status)},
+                                         "FAKE_FINDINGS_FILE": str(planned), "FAKE_STATUS": str(status)},
                                     capture_output=True, text=True, timeout=60)
             return result, output.read_text()
 
@@ -631,7 +649,15 @@ def the_jobs_hand_over_the_findings():
         body = forge.issues()[1]["body"]
         assert "RUSTSEC-2021-0003" in body and "naïve" in body, body
 
-        for findings, status in (("", 2), ("x" * 1000001 + "\n", 0)):
+        largest = near_the_output_limit()
+        assert OUTPUT_LIMIT - 1000 < len(largest) <= OUTPUT_LIMIT, len(largest)
+        result, output = report_step(largest)
+        assert result.returncode == 0 and output == "findings=" + largest, (result.stdout, result.stderr, len(output))
+        result = issue_step(forge, output.removeprefix("findings=").removesuffix("\n"))
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert "crate0 1.0.0" in forge.issues()[1]["body"] and "more findings" in forge.issues()[1]["body"], forge.issues()
+
+        for findings, status in (("", 2), ("x" * OUTPUT_LIMIT + "\n", 0)):
             result, output = report_step(findings, status)
             assert result.returncode != 0 and output == "", (len(findings), result.stdout, result.stderr, output)
         result = issue_step(forge, "")
