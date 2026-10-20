@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Defend which lockfiles cargo-deny-check reads, when it runs, how it classifies cargo-deny, and its report."""
 
+import atexit
 import contextlib
+import functools
 from datetime import date, datetime, timezone
 import io
 import json
@@ -192,19 +194,25 @@ def commit(repository, message):
         "commit", "--quiet", "--no-verify", "-m", message)
 
 
+@functools.cache
+def fake_bin():
+    directory = Path(tempfile.mkdtemp(prefix="cargo-deny-check-fakes-"))
+    atexit.register(shutil.rmtree, directory, True)
+    for name, text in (("cargo-deny", FAKE_CARGO_DENY), ("cargo", FAKE_CARGO)):
+        write(directory / name, f"#!{sys.executable}\n{text}")
+        (directory / name).chmod(0o755)
+    return directory
+
+
 class Repository:
     def __init__(self, directory, files):
         self.root = Path(directory) / "repository"
-        self.bin = Path(directory) / "bin"
+        self.bin = fake_bin()
         self.log = Path(directory) / "cargo-deny.log"
         self.cargo_log = Path(directory) / "cargo.log"
         self.plan = Path(directory) / "plan.json"
         self.summary = Path(directory) / "summary.md"
         self.root.mkdir()
-        self.bin.mkdir()
-        for name, text in (("cargo-deny", FAKE_CARGO_DENY), ("cargo", FAKE_CARGO)):
-            write(self.bin / name, f"#!{sys.executable}\n{text}")
-            (self.bin / name).chmod(0o755)
         git(self.root, "init", "--quiet")
         for name, text in files.items():
             write(self.root / name, text)

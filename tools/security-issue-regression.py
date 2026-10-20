@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Defend the one security issue: created once, then edited, never spammed, never a person's issue."""
 
+import atexit
+import functools
 import json
 import os
 from pathlib import Path
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -94,16 +97,22 @@ def issue(number, body, labels=("security",), state="open"):
             "comments": []}
 
 
+@functools.cache
+def fake_bin():
+    directory = Path(tempfile.mkdtemp(prefix="security-issue-fakes-"))
+    atexit.register(shutil.rmtree, directory, True)
+    (directory / "gh").write_text(f"#!{sys.executable}\n{FAKE_GH}")
+    (directory / "gh").chmod(0o755)
+    return directory
+
+
 class Forge:
     def __init__(self, directory, issues=(), labels=(), fail=()):
         self.directory = Path(directory)
-        self.bin = self.directory / "bin"
-        self.bin.mkdir()
+        self.bin = fake_bin()
         self.state = self.directory / "state.json"
         self.log = self.directory / "gh.log"
         self.findings = self.directory / "findings.json"
-        (self.bin / "gh").write_text(f"#!{sys.executable}\n{FAKE_GH}")
-        (self.bin / "gh").chmod(0o755)
         self.state.write_text(json.dumps({"issues": list(issues), "labels": list(labels), "fail": list(fail)}))
 
     def run(self, report=None, *extra, mode="write", findings=None):
