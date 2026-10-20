@@ -27,7 +27,7 @@ pub struct KillBudget<C: Fn() -> Instant> {
 /// The withdrawal's budget: its parts, each at least 1 ms, or `NoBudget`. A step with no budget
 /// takes its escalation and sends nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Share<T = Duration> {
+pub enum Share<T> {
     Run(T),
     NoBudget,
 }
@@ -96,8 +96,8 @@ impl<C: Fn() -> Instant> KillBudget<C> {
         }
         let cap = (self.total / 10).clamp(MS, MOST_WORKLOAD_STOP);
         match at_least_one_ms(cap.min(self.spendable() / 3)) {
-            Share::Run(share) => WorkloadStop::Run(share),
-            Share::NoBudget => WorkloadStop::NoBudget,
+            Some(share) => WorkloadStop::Run(share),
+            None => WorkloadStop::NoBudget,
         }
     }
 
@@ -112,14 +112,12 @@ impl<C: Fn() -> Instant> KillBudget<C> {
             at_least_one_ms(effect),
             at_least_one_ms(share - drain - effect),
         ) {
-            (Share::Run(drain), Share::Run(effect), Share::Run(publication)) => {
-                Share::Run(Withdrawal {
-                    share: whole_ms(share),
-                    drain,
-                    effect,
-                    publication,
-                })
-            }
+            (Some(drain), Some(effect), Some(publication)) => Share::Run(Withdrawal {
+                share: whole_ms(share),
+                drain,
+                effect,
+                publication,
+            }),
             _ => Share::NoBudget,
         }
     }
@@ -162,13 +160,9 @@ fn whole_ms(duration: Duration) -> Duration {
     Duration::new(duration.as_secs(), duration.subsec_millis() * 1_000_000)
 }
 
-fn at_least_one_ms(duration: Duration) -> Share {
+fn at_least_one_ms(duration: Duration) -> Option<Duration> {
     let whole = whole_ms(duration);
-    if whole < MS {
-        Share::NoBudget
-    } else {
-        Share::Run(whole)
-    }
+    if whole < MS { None } else { Some(whole) }
 }
 
 /// A step of `cell.kill` that fell short, as its reply's `incomplete` names it.
