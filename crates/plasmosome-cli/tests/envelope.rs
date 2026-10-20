@@ -437,7 +437,7 @@ struct Unflushed(Vec<u8>);
 
 impl Write for Unflushed {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.extend_from_slice(bytes);
+        self.0.extend(bytes);
         Ok(bytes.len())
     }
 
@@ -515,7 +515,7 @@ struct Pieces {
 impl Write for Pieces {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.largest = self.largest.max(bytes.len());
-        self.bytes.extend_from_slice(bytes);
+        self.bytes.extend(bytes);
         Ok(bytes.len())
     }
 
