@@ -269,7 +269,7 @@ mod tests {
 
         assert_eq!(budget.remaining(), ms(30_000));
         assert_eq!(budget.lock_reserve(), ms(3_000));
-        assert_eq!(budget.workload_stop(), Share::Run(ms(3_000)));
+        assert_eq!(budget.workload_stop(), WorkloadStop::Run(ms(3_000)));
         clock.advance(ms(3_000));
         assert_eq!(
             budget.withdrawal(),
@@ -289,7 +289,7 @@ mod tests {
                 answer_wait: ms(12_000),
             }
         );
-        assert_eq!(shutdown_deadline(&stop.drain), Some(ms(8_100)));
+        assert_eq!(stop.drain.shutdown_deadline(), Some(ms(8_100)));
         assert_eq!(
             ms(3_000) + ms(12_000) + stop.answer_wait + budget.lock_reserve(),
             ms(30_000)
@@ -303,7 +303,7 @@ mod tests {
         let clock = TestClock::at(arrival);
         let budget = KillBudget::new(arrival, ms(30_000), true, || clock.read());
 
-        assert_eq!(budget.workload_stop(), Share::NoBudget);
+        assert_eq!(budget.workload_stop(), WorkloadStop::Skipped);
         assert_eq!(
             budget.withdrawal(),
             Share::Run(Withdrawal {
@@ -324,7 +324,7 @@ mod tests {
                 answer_wait: ms(27_000),
             }
         );
-        assert_eq!(shutdown_deadline(&stop.drain), None);
+        assert_eq!(stop.drain.shutdown_deadline(), None);
     }
 
     #[test]
@@ -337,7 +337,12 @@ mod tests {
 
             assert_eq!(budget.remaining(), Duration::ZERO);
             assert_eq!(budget.lock_reserve(), MS);
-            assert_eq!(budget.workload_stop(), Share::NoBudget);
+            let skipped = if now {
+                WorkloadStop::Skipped
+            } else {
+                WorkloadStop::NoBudget
+            };
+            assert_eq!(budget.workload_stop(), skipped);
             assert_eq!(budget.withdrawal(), Share::NoBudget);
             let policy = if now {
                 RevokePolicy::Force
@@ -354,7 +359,7 @@ mod tests {
                     answer_wait: MS,
                 }
             );
-            assert_eq!(shutdown_deadline(&budget.guest_stop().drain), None);
+            assert_eq!(budget.guest_stop().drain.shutdown_deadline(), None);
             assert_eq!(budget.lock_wait_until(), arrival + MS);
             assert!(budget.lock_wait_until() < clock.read());
         }
@@ -369,7 +374,7 @@ mod tests {
         assert_eq!(budget.lock_reserve(), ms(2));
         clock.advance(ms(16));
         assert_eq!(budget.remaining(), ms(4));
-        assert_eq!(budget.workload_stop(), Share::NoBudget);
+        assert_eq!(budget.workload_stop(), WorkloadStop::NoBudget);
         assert_eq!(budget.withdrawal(), Share::NoBudget);
         clock.advance(Duration::from_micros(500));
         assert_eq!(
@@ -383,7 +388,7 @@ mod tests {
         let budget = KillBudget::new(arrival, ms(30), false, || clock.read());
         clock.set_to(arrival + ms(19));
         assert_eq!(budget.remaining(), ms(11));
-        assert_eq!(budget.workload_stop(), Share::Run(ms(2)));
+        assert_eq!(budget.workload_stop(), WorkloadStop::Run(ms(2)));
         assert_eq!(
             budget.withdrawal(),
             Share::Run(Withdrawal {
@@ -403,7 +408,7 @@ mod tests {
         let clock = TestClock::at(arrival);
         let budget = KillBudget::new(arrival, ms(5), false, || clock.read());
         assert_eq!(budget.lock_reserve(), MS);
-        assert_eq!(budget.workload_stop(), Share::Run(MS));
+        assert_eq!(budget.workload_stop(), WorkloadStop::Run(MS));
         let stop = budget.guest_stop();
         assert_eq!(
             stop,
@@ -412,7 +417,7 @@ mod tests {
                 answer_wait: ms(4),
             }
         );
-        assert_eq!(shutdown_deadline(&stop.drain), Some(ms(2)));
+        assert_eq!(stop.drain.shutdown_deadline(), Some(ms(2)));
         clock.advance(MS);
         assert_eq!(budget.withdrawal(), Share::NoBudget);
         let stop = budget.guest_stop();
@@ -423,16 +428,16 @@ mod tests {
                 answer_wait: ms(3),
             }
         );
-        assert_eq!(shutdown_deadline(&stop.drain), Some(MS));
+        assert_eq!(stop.drain.shutdown_deadline(), Some(MS));
 
         let clock = TestClock::at(arrival);
         let budget = KillBudget::new(arrival, ms(9), false, || clock.read());
-        assert_eq!(budget.workload_stop(), Share::Run(MS));
+        assert_eq!(budget.workload_stop(), WorkloadStop::Run(MS));
 
         let clock = TestClock::at(arrival);
         let budget = KillBudget::new(arrival, ms(15), false, || clock.read());
         assert_eq!(budget.lock_reserve(), Duration::from_micros(1_500));
-        assert_eq!(budget.workload_stop(), Share::Run(MS));
+        assert_eq!(budget.workload_stop(), WorkloadStop::Run(MS));
         clock.advance(MS);
         assert_eq!(
             budget.withdrawal(),
@@ -452,7 +457,7 @@ mod tests {
         let budget = KillBudget::new(arrival, ms(30_000), false, || clock.read());
 
         assert_eq!(budget.remaining(), ms(26_000));
-        assert_eq!(budget.workload_stop(), Share::Run(ms(3_000)));
+        assert_eq!(budget.workload_stop(), WorkloadStop::Run(ms(3_000)));
         assert_eq!(
             budget.withdrawal(),
             Share::Run(Withdrawal {
@@ -466,32 +471,6 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_stays_below_the_drain_deadline() {
-        assert_eq!(shutdown_deadline(&DrainSpec::graceful(MS)), None);
-        assert_eq!(
-            shutdown_deadline(&DrainSpec::graceful(Duration::from_micros(1_999))),
-            None
-        );
-        assert_eq!(shutdown_deadline(&DrainSpec::graceful(ms(2))), Some(MS));
-        assert_eq!(shutdown_deadline(&DrainSpec::graceful(ms(10))), Some(ms(9)));
-        assert_eq!(
-            shutdown_deadline(&DrainSpec::graceful(ms(20))),
-            Some(ms(18))
-        );
-        assert_eq!(
-            shutdown_deadline(&DrainSpec::graceful(Duration::from_micros(10_700))),
-            Some(ms(9))
-        );
-        assert_eq!(
-            shutdown_deadline(&DrainSpec {
-                deadline: ms(30_000),
-                policy: RevokePolicy::Force,
-            }),
-            None
-        );
-    }
-
-    #[test]
     fn a_deadline_no_instant_holds_still_answers() {
         let arrival = Instant::now();
         let clock = TestClock::at(arrival);
@@ -499,7 +478,7 @@ mod tests {
             let budget = KillBudget::new(arrival, total, false, || clock.read());
             assert_eq!(budget.remaining(), total);
             assert_eq!(budget.lock_reserve(), ms(3_000));
-            assert_eq!(budget.workload_stop(), Share::Run(ms(5_000)));
+            assert_eq!(budget.workload_stop(), WorkloadStop::Run(ms(5_000)));
             assert!(matches!(budget.withdrawal(), Share::Run(_)));
             let stop = budget.guest_stop();
             assert!(stop.drain.deadline < stop.answer_wait);
@@ -564,12 +543,19 @@ mod tests {
             clock.advance(queued);
 
             let workload = match budget.workload_stop() {
-                Share::Run(share) => {
+                WorkloadStop::Run(share) => {
                     prop_assert!(!now);
                     prop_assert!(share >= MS && is_whole_ms(share));
                     share
                 }
-                Share::NoBudget => Duration::ZERO,
+                WorkloadStop::NoBudget => {
+                    prop_assert!(!now);
+                    Duration::ZERO
+                }
+                WorkloadStop::Skipped => {
+                    prop_assert!(now);
+                    Duration::ZERO
+                }
             };
             let first = first.of(workload);
             clock.advance(first);
@@ -599,7 +585,7 @@ mod tests {
             } else {
                 prop_assert_eq!(stop.drain.policy, RevokePolicy::Graceful);
             }
-            if let Some(shutdown) = shutdown_deadline(&stop.drain) {
+            if let Some(shutdown) = stop.drain.shutdown_deadline() {
                 prop_assert!(!now);
                 prop_assert!(shutdown >= MS && is_whole_ms(shutdown));
                 prop_assert!(shutdown < stop.drain.deadline);
@@ -626,12 +612,12 @@ mod tests {
             let left = budget.remaining();
             prop_assert_eq!(left, total.saturating_sub(elapsed));
             let workload = match budget.workload_stop() {
-                Share::Run(share) => {
+                WorkloadStop::Run(share) => {
                     prop_assert!(share <= left);
                     prop_assert!(share + reserve <= left);
                     share
                 }
-                Share::NoBudget => Duration::ZERO,
+                WorkloadStop::NoBudget | WorkloadStop::Skipped => Duration::ZERO,
             };
             let first = first.of(workload);
             clock.advance(first);
@@ -711,6 +697,23 @@ mod tests {
                 let read: Incomplete = serde_json::from_value(expected.clone()).unwrap();
                 assert_eq!(read, incomplete);
             }
+        }
+    }
+
+    #[test]
+    fn a_kill_with_now_ends_with_no_incomplete_entry() {
+        for total in [MS, ms(5), ms(30_000)] {
+            let arrival = Instant::now();
+            let clock = TestClock::at(arrival);
+            let budget = KillBudget::new(arrival, total, true, || clock.read());
+            let mut incomplete = Incomplete::default();
+
+            assert_eq!(budget.workload_stop(), WorkloadStop::Skipped);
+            let stop = budget.guest_stop();
+            assert_eq!(stop.drain.shutdown_deadline(), None);
+            incomplete.add(Shortfall::Shutdown, true);
+            assert!(incomplete.is_empty(), "{total:?}");
+            assert_eq!(serde_json::to_string(&incomplete).unwrap(), "[]");
         }
     }
 

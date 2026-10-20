@@ -594,4 +594,56 @@ pub(crate) mod tests {
             assert_eq!(serde_json::from_value::<UniverseOp>(encoded).unwrap(), op);
         }
     }
+
+    fn ms(count: u64) -> Duration {
+        Duration::from_millis(count)
+    }
+
+    #[test]
+    fn a_shutdown_deadline_stays_below_its_drain_deadline() {
+        let graceful = |deadline| DrainSpec::graceful(deadline).shutdown_deadline();
+        assert_eq!(graceful(Duration::ZERO), None);
+        assert_eq!(graceful(ms(1)), None);
+        assert_eq!(graceful(Duration::from_micros(1_999)), None);
+        assert_eq!(graceful(ms(2)), Some(ms(1)));
+        assert_eq!(graceful(ms(3)), Some(ms(2)));
+        assert_eq!(graceful(ms(10)), Some(ms(9)));
+        assert_eq!(graceful(ms(20)), Some(ms(18)));
+        assert_eq!(graceful(Duration::from_micros(10_700)), Some(ms(9)));
+        assert_eq!(graceful(ms(9_000)), Some(ms(8_100)));
+        assert_eq!(DrainSpec::forcing().shutdown_deadline(), None);
+        assert_eq!(
+            DrainSpec {
+                deadline: ms(30_000),
+                policy: RevokePolicy::Force,
+            }
+            .shutdown_deadline(),
+            None
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_shutdown_deadline_is_whole_milliseconds_a_tenth_below_the_drain(
+            nanos in 0u64..=200_000_000_000,
+        ) {
+            let deadline = Duration::from_nanos(nanos);
+            let margin = ms(1).max(deadline / 10);
+            match DrainSpec::graceful(deadline).shutdown_deadline() {
+                Some(shutdown) => {
+                    proptest::prop_assert!(shutdown >= ms(1));
+                    proptest::prop_assert!(shutdown.subsec_nanos().is_multiple_of(1_000_000));
+                    proptest::prop_assert!(shutdown < deadline);
+                    proptest::prop_assert!(deadline - shutdown >= margin);
+                    proptest::prop_assert!(deadline - shutdown < margin + ms(1));
+                }
+                None => proptest::prop_assert!(deadline < ms(2)),
+            }
+            let forced = DrainSpec {
+                deadline,
+                policy: RevokePolicy::Force,
+            };
+            proptest::prop_assert_eq!(forced.shutdown_deadline(), None);
+        }
+    }
 }
