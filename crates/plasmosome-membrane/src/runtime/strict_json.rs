@@ -2,13 +2,6 @@ use serde_core::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 use std::cell::RefCell;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the runtime recipe parser is the first caller outside tests"
-    )
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StrictJsonError {
     NotJson {
@@ -41,13 +34,6 @@ impl std::fmt::Display for StrictJsonError {
 
 impl std::error::Error for StrictJsonError {}
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the runtime recipe parser is the first caller outside tests"
-    )
-)]
 pub(crate) fn parse_value(bytes: &[u8]) -> Result<Value, StrictJsonError> {
     let duplicate = RefCell::new(None);
     let mut reader = serde_json::Deserializer::from_slice(bytes);
@@ -67,13 +53,6 @@ pub(crate) fn parse_value(bytes: &[u8]) -> Result<Value, StrictJsonError> {
     })
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the runtime recipe parser is the first caller outside tests"
-    )
-)]
 fn reason_without_position(error: &serde_json::Error) -> String {
     let shown = error.to_string();
     let position = format!(" at line {} column {}", error.line(), error.column());
@@ -83,13 +62,6 @@ fn reason_without_position(error: &serde_json::Error) -> String {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the runtime recipe parser is the first caller outside tests"
-    )
-)]
 #[derive(Clone, Copy)]
 enum Location<'a> {
     Root,
@@ -98,13 +70,6 @@ enum Location<'a> {
 }
 
 impl Location<'_> {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the runtime recipe parser is the first caller outside tests"
-        )
-    )]
     fn pointer(&self) -> String {
         match self {
             Location::Root => String::new(),
@@ -118,13 +83,6 @@ impl Location<'_> {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the runtime recipe parser is the first caller outside tests"
-    )
-)]
 struct Strict<'a> {
     at: Location<'a>,
     duplicate: &'a RefCell<Option<String>>,
