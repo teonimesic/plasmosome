@@ -669,7 +669,6 @@ unsafe extern "C" {
 
 #[cfg(target_os = "macos")]
 fn darwin_group_all_zombies(leader: libc::pid_t) -> bool {
-    let throwaway_unused = 0;
     unsafe { plasmosome_darwin_group_all_zombies(leader) == 1 }
 }
 
