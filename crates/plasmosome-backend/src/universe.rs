@@ -759,6 +759,19 @@ mod tests {
         object(owner, proxy_map("api.github.com", route))
     }
 
+    fn relaunched_broker(name: &str) -> Capability {
+        Capability::Broker {
+            name: name.to_string(),
+            launch: BrokerLaunch {
+                command: vec![
+                    "/usr/libexec/plasmosome-broker".to_string(),
+                    "--audit".to_string(),
+                ],
+                ..fixtures::launch()
+            },
+        }
+    }
+
     #[test]
     fn grant_identity_defaults_are_fresh_and_non_rfc_variants_are_refused() {
         assert_ne!(GrantId::default(), GrantId::default());
@@ -791,6 +804,22 @@ mod tests {
             }
         );
         assert_eq!(state.objects().collect::<Vec<_>>(), vec![&original]);
+
+        let mut brokers = OsState::new();
+        let egressd = object("deploy", broker("egressd"));
+        assert!(brokers.insert(egressd.clone()).unwrap());
+        let relaunched = OsObject {
+            capability: relaunched_broker("egressd"),
+            ..egressd.clone()
+        };
+        assert_eq!(
+            brokers.insert(relaunched).unwrap_err(),
+            BackendError::IdentityConflict {
+                class: "broker-pid",
+                id: egressd.id,
+            }
+        );
+        assert_eq!(brokers.objects().collect::<Vec<_>>(), vec![&egressd]);
     }
 
     #[test]
@@ -1169,16 +1198,28 @@ mod tests {
             capability: mount("/code", "/workspace"),
         };
         state.insert(held.clone()).unwrap();
+        let egressd = OsObject {
+            id: GrantId::new(),
+            owner: cell_owner("cell-1", "workspace"),
+            capability: broker("egressd"),
+        };
+        state.insert(egressd.clone()).unwrap();
         let before = state.clone();
         let other_source = UniverseRemoval {
             id: held.id,
             capability: mount("/secrets", "/workspace"),
+        };
+        let other_launch = UniverseRemoval {
+            id: egressd.id,
+            capability: relaunched_broker("egressd"),
         };
         let other_id = UniverseRemoval {
             id: GrantId::new(),
             capability: held.capability.clone(),
         };
         assert!(!state.selects(&other_source, &held.owner));
+        assert!(!state.selects(&other_launch, &egressd.owner));
+        assert!(state.selects(&egressd.removal(), &egressd.owner));
         assert!(!state.selects(&other_id, &held.owner));
         assert!(!state.selects(&held.removal(), &cell_owner("cell-1", "audit")));
         assert!(state.selects(&held.removal(), &held.owner));
