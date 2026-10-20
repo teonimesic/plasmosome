@@ -292,9 +292,13 @@ impl PrivateListener {
     }
 
     /// Accepts one pending connection without blocking. `Ok(None)`: nothing pending. A peer
-    /// whose effective UID is not trusted, or whose credentials cannot be read, is shut down and
-    /// closed before any byte is read and reported as `Accepted::Refused`. A trusted stream is
-    /// returned in blocking mode; the caller sets its timeouts. A caller that forks from another
+    /// whose effective UID is not trusted, or whose credentials cannot be read, is closed before
+    /// any byte is read and reported as `Accepted::Refused`. No shutdown comes before the close.
+    /// On Linux, a refused peer that sent bytes then fails its next read with `ECONNRESET`, every
+    /// time, which shows the bytes were never read. A shutdown first would let a read that runs
+    /// between the shutdown and the close return end of file. A refused peer that sent nothing
+    /// reads end of file on Linux. On macOS a refused peer reads end of file either way. A
+    /// trusted stream is returned in blocking mode; the caller sets its timeouts. A caller that forks from another
     /// thread must hold its descriptor lock around this call, because on macOS the accepted
     /// descriptor is marked close-on-exec only after it exists.
     pub fn accept(&self) -> io::Result<Option<Accepted>> {
