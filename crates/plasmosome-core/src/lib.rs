@@ -17,6 +17,11 @@ pub mod private_socket;
 pub mod protocol;
 pub mod reconciler;
 pub mod registry;
+/// The hardware runtime's launch input, shared by the controller and the
+/// cell supervisor: the strictly parsed `RuntimeRecipe` and spec 023's
+/// template, canonical paths, cell IDs, the supervisor's config record and a
+/// JSON reader that refuses repeated keys.
+pub mod runtime;
 pub mod session_log;
 pub mod state;
 pub mod supervisor_check;
