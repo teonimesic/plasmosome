@@ -44,38 +44,39 @@ fn git(repository: &Path, arguments: &[&str], stdin: Option<&str>) -> Output {
     command.output().expect("git runs")
 }
 
-fn repository_with_commit(message: &str) -> TempDir {
-    let directory = tempfile::tempdir().expect("a scratch directory is created");
-    let path = directory.path();
-    for arguments in [
-        vec!["init", "--quiet"],
-        vec!["config", "commit.gpgsign", "false"],
-    ] {
-        let output = git(path, &arguments, None);
-        assert!(
-            output.status.success(),
-            "`git {}` failed in the scratch repository: {}",
-            arguments.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let output = git(
-        path,
-        &[
-            "commit",
-            "--allow-empty",
-            "--cleanup=verbatim",
-            "--file",
-            "-",
-        ],
-        Some(message),
-    );
+fn git_succeeds(repository: &Path, arguments: &[&str], stdin: Option<&str>) {
+    let output = git(repository, arguments, stdin);
     assert!(
         output.status.success(),
-        "the fixture commit was not created: {}",
+        "`git {}` failed in the scratch repository: {}",
+        arguments.join(" "),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn repository_with_commits(messages: &[&str]) -> TempDir {
+    let directory = tempfile::tempdir().expect("a scratch directory is created");
+    let path = directory.path();
+    git_succeeds(path, &["init", "--quiet"], None);
+    git_succeeds(path, &["config", "commit.gpgsign", "false"], None);
+    for message in messages {
+        git_succeeds(
+            path,
+            &[
+                "commit",
+                "--allow-empty",
+                "--cleanup=verbatim",
+                "--file",
+                "-",
+            ],
+            Some(message),
+        );
+    }
     directory
+}
+
+fn repository_with_commit(message: &str) -> TempDir {
+    repository_with_commits(&[message])
 }
 
 fn run_guard_in(root: &Path, repository: &Path, range: &str) -> Output {
@@ -375,6 +376,52 @@ fn refuses_when_the_tool_it_matches_with_cannot_answer() {
             &run_guard_shadowed(root, repository.path(), shadow.path()),
             "grep exited",
             "a commit carrying a model trailer while grep fails (`grep -q` exits 1 for no match and 2 or more for an error, and reading an error as either answer is how a guard decides without having looked)",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_in_a_commit_behind_the_tip_of_the_range() {
+    check_workspace(|root| {
+        let repository = repository_with_commits(&[MODEL_CO_AUTHOR, "docs: a later change\n"]);
+        assert_refused_saying(
+            &run_guard_in(root, repository.path(), "HEAD"),
+            OFFENCE,
+            "a range whose model trailer is in a commit behind its tip",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_after_origin_main_when_given_no_range() {
+    check_workspace(|root| {
+        let repository =
+            repository_with_commits(&["docs: a change main already has\n", MODEL_CO_AUTHOR]);
+        git_succeeds(
+            repository.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD~1"],
+            None,
+        );
+        assert_refused_saying(
+            &guard_command(root, repository.path())
+                .output()
+                .expect("the guard runs"),
+            OFFENCE,
+            "a model trailer after origin/main when it runs with no range, as the root gate runs it",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_model_trailer_on_head_when_given_no_range_and_there_is_no_origin_main() {
+    check_workspace(|root| {
+        let repository = repository_with_commit(MODEL_CO_AUTHOR);
+        assert_refused_saying(
+            &guard_command(root, repository.path())
+                .output()
+                .expect("the guard runs"),
+            OFFENCE,
+            "a model trailer on HEAD when it runs with no range in a repository with no origin/main",
         );
     });
 }
