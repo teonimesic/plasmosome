@@ -11,6 +11,8 @@
 //! carries, are decisions this repository is still making; the place to write them down is the
 //! spec and the crate's own notes, not a test that fails before either exists.
 
+#![doc(test(attr(forbid(unsafe_code))))]
+
 use std::ffi::OsStr;
 use std::path::Path;
 
