@@ -585,6 +585,10 @@ fn complete_invalid_records_are_refused_without_rewriting_the_source() {
     old_lossy_field["effect"]["reversibility"]["Exact"]["via"]["Universe"]["key"] =
         serde_json::json!("session//skills/a.md");
     cases.push(serde_json::to_string(&old_lossy_field).unwrap() + "\n");
+    let mut positional = value.clone();
+    let universe = &mut positional["effect"]["reversibility"]["Exact"]["via"]["Universe"];
+    *universe = serde_json::json!([universe["id"].clone(), universe["capability"].clone()]);
+    cases.push(serde_json::to_string(&positional).unwrap() + "\n");
     let mut numeric_handle = value;
     numeric_handle["effect"]["reversibility"]["Exact"]["via"] = serde_json::json!({"Backend": 7});
     cases.push(serde_json::to_string(&numeric_handle).unwrap() + "\n");

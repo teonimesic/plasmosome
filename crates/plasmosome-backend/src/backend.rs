@@ -503,6 +503,34 @@ pub(crate) mod tests {
             };
             let removal_json = json!({"id": id, "capability": capability_json(&capability)});
             assert_refused(&removal, removal_json, &expected);
+            let handle = Handle {
+                class: capability.class(),
+                id,
+            };
+            let entry = LedgerEntry {
+                handle,
+                owner: owner(),
+                capability: capability.clone(),
+                kind: GrantKind::Hot,
+            };
+            let entry_json = json!({
+                "handle": handle,
+                "owner": owner(),
+                "capability": capability_json(&capability),
+                "kind": "Hot",
+            });
+            assert_refused(&entry, entry_json, &expected);
+            let grant = Grant {
+                owner: owner(),
+                capability: capability.clone(),
+                kind: GrantKind::Hot,
+            };
+            let grant_json = json!({
+                "owner": owner(),
+                "capability": capability_json(&capability),
+                "kind": "Hot",
+            });
+            assert_refused(&grant, grant_json, &expected);
         }
     }
 
