@@ -61,17 +61,17 @@ pub struct ConfinementEvidence {
 impl ConfinementEvidence {
     /// The pid that was observed.
     pub fn pid(&self) -> libc::pid_t {
-        todo!()
+        self.pid
     }
 
     /// The operations the kernel reported denied.
     pub fn denied(&self) -> &[&'static str] {
-        todo!()
+        &self.denied
     }
 
     /// How the observation relates to the verified host policy.
     pub fn binding(&self) -> PolicyBinding {
-        todo!()
+        self.binding
     }
 }
 
@@ -83,20 +83,31 @@ pub enum PolicyBinding {
 }
 
 /// Observes the Darwin sandbox of the process `pid` from this process.
+#[cfg(target_os = "macos")]
 pub fn observe(pid: libc::pid_t) -> Confinement {
-    let _ = pid;
-    todo!()
+    judge(pid, &darwin::read(pid))
+}
+
+/// Observes the Darwin sandbox of the process `pid` from this process.
+#[cfg(not(target_os = "macos"))]
+pub fn observe(_pid: libc::pid_t) -> Confinement {
+    Confinement::Unverifiable {
+        reason: Unverifiable::UnsupportedPlatform,
+    }
 }
 
 /// One answer from `sandbox_check`: the value it returned, or the errno it set when it returned
 /// -1.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) type Answer = Result<libc::c_int, i32>;
 
 /// One read of the observed process's start time, as seconds and microseconds, or the errno the
 /// read set.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) type Started = Result<(u64, u64), i32>;
 
 /// Everything one observation read, in the order it was read.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Readings {
     pub(crate) own: Answer,
@@ -106,9 +117,158 @@ pub(crate) struct Readings {
     pub(crate) after: Started,
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn judge(pid: libc::pid_t, readings: &Readings) -> Confinement {
-    let _ = (pid, readings);
-    todo!()
+    if let Err(reason) = trusted(readings) {
+        return Confinement::Unverifiable { reason };
+    }
+    let sandboxed = readings.sandboxed == Ok(1);
+    let allowed: Vec<&'static str> = REQUIRED_DENIALS
+        .into_iter()
+        .filter(|required| {
+            !readings
+                .operations
+                .iter()
+                .any(|(operation, answer)| operation == required && *answer == Ok(1))
+        })
+        .collect();
+    if !sandboxed || !allowed.is_empty() {
+        return Confinement::Unconfined { sandboxed, allowed };
+    }
+    Confinement::Confined(ConfinementEvidence {
+        pid,
+        denied: REQUIRED_DENIALS.to_vec(),
+        binding: PolicyBinding::PropertiesObserved,
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn trusted(readings: &Readings) -> Result<(), Unverifiable> {
+    match readings.own {
+        Ok(0) => {}
+        Ok(_) => return Err(Unverifiable::SupervisorSandboxed),
+        Err(errno) => {
+            return Err(Unverifiable::CheckFailed {
+                operation: None,
+                errno,
+            });
+        }
+    }
+    let before = readings
+        .before
+        .map_err(|errno| Unverifiable::ProcessUnreadable { errno })?;
+    let after = readings
+        .after
+        .map_err(|errno| Unverifiable::ProcessUnreadable { errno })?;
+    if before != after {
+        return Err(Unverifiable::ProcessReplaced);
+    }
+    if let Err(errno) = readings.sandboxed {
+        return Err(Unverifiable::CheckFailed {
+            operation: None,
+            errno,
+        });
+    }
+    match readings
+        .operations
+        .iter()
+        .find_map(|(operation, answer)| answer.err().map(|errno| (*operation, errno)))
+    {
+        Some((operation, errno)) => Err(Unverifiable::CheckFailed {
+            operation: Some(operation),
+            errno,
+        }),
+        None => Ok(()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod darwin {
+    use super::{Answer, REQUIRED_DENIALS, Readings, Started};
+    use std::ffi::{c_char, c_int};
+
+    const INFO_SIZE: c_int = size_of::<libc::proc_bsdinfo>() as c_int;
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" {
+        /// libsystem_sandbox's query of a process's sandbox. libSystem re-exports it, and no SDK
+        /// header declares it. With a null `operation` it returns 1 when `pid` is sandboxed and 0
+        /// when not. With an operation name it returns 1 when the sandbox denies that operation and
+        /// 0 when it allows it. It returns -1 and sets errno when it cannot answer, as for an
+        /// unknown name or an operation that needs a filter argument. `filter_type` 0 names no
+        /// filter, and then it reads no variadic argument. It reads the NUL-terminated
+        /// `operation` during the call only and keeps no pointer. Measured on macOS 26.6.2, it
+        /// returns 1 to every query about an absent pid or a zombie, unknown names included.
+        fn sandbox_check(
+            pid: libc::pid_t,
+            operation: *const c_char,
+            filter_type: c_int,
+            ...
+        ) -> c_int;
+    }
+
+    pub(super) fn read(pid: libc::pid_t) -> Readings {
+        let own = check(std::process::id().cast_signed(), None);
+        let before = started(pid);
+        let sandboxed = check(pid, None);
+        let operations = REQUIRED_DENIALS
+            .into_iter()
+            .map(|operation| (operation, check(pid, Some(operation))))
+            .collect();
+        let after = started(pid);
+        Readings {
+            own,
+            before,
+            sandboxed,
+            operations,
+            after,
+        }
+    }
+
+    #[allow(unsafe_code)]
+    fn check(pid: libc::pid_t, operation: Option<&str>) -> Answer {
+        let name = operation.map(|operation| [operation.as_bytes(), b"\0"].concat());
+        let pointer = name
+            .as_ref()
+            .map_or(std::ptr::null(), |name| name.as_ptr().cast::<c_char>());
+        // SAFETY: `pointer` is null or points into `name`, a buffer ending in NUL that lives until
+        // this function returns, and sandbox_check reads it during the call only. Filter type 0
+        // names no filter, so no variadic argument is passed or read.
+        let value = unsafe { sandbox_check(pid, pointer, 0) };
+        if value == -1 {
+            Err(last_errno())
+        } else {
+            Ok(value)
+        }
+    }
+
+    #[allow(unsafe_code)]
+    fn started(pid: libc::pid_t) -> Started {
+        // SAFETY: proc_bsdinfo is a plain C struct, for which all zeroes is a valid value.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a local proc_bsdinfo and INFO_SIZE is its exact size, so proc_pidinfo
+        // writes at most that many bytes into it, and it keeps no pointer.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&raw mut info).cast(),
+                INFO_SIZE,
+            )
+        };
+        if written == INFO_SIZE {
+            Ok((info.pbi_start_tvsec, info.pbi_start_tvusec))
+        } else {
+            Err(last_errno())
+        }
+    }
+
+    fn last_errno() -> i32 {
+        std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO)
+    }
 }
 
 #[cfg(test)]
