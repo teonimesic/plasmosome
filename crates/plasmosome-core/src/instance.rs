@@ -9,7 +9,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
-use plasmosome_backend::CellId;
+use plasmosome_backend::{BootSession, CellId};
 
 use crate::state::{
     CELL_JOURNAL_FILE, CELLS_DIR, CellPathError, cell_ledger_path, validate_cell_id,
@@ -21,6 +21,9 @@ const PRIVATE_DIRECTORY: libc::mode_t = 0o700;
 const DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 const JOURNAL_FLAGS: libc::c_int = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+
+/// The most bytes a `launched` record may hold, its newline included.
+pub const MAX_MARKER_BYTES: usize = 4096;
 
 type SyncDirectory = fn(BorrowedFd<'_>) -> io::Result<()>;
 type Identity = (u64, u64);
@@ -277,6 +280,26 @@ impl InstanceRoot {
         Ok(self.cell_dir_from(dir, cell.clone(), journal_path))
     }
 
+    /// Retires a cell (spec 023 §7 step 5, and §8): renames `cells/<cell>` to `retired/<cell>`
+    /// and unlinks nothing, so the journal, the markers, a stale `membrane.uds` and `runtime/`
+    /// all move with it. It needs this root's writer lock; a lock taken on another root is
+    /// `ForeignLock` and nothing is created or moved.
+    ///
+    /// `retired` is created when it is missing. Every call sets it to mode 0700 and syncs the
+    /// root, as [`InstanceRoot::create_cell_dir`] does for `cells`. A symlink or anything but a
+    /// directory there is `RetiredNotADirectory`. The name `cells/<cell>` must still be the
+    /// directory `cell` holds, by device and inode, or the call is `Moved`. The rename never
+    /// replaces: an existing `retired/<cell>` is `AlreadyRetired`. On Linux that needs a
+    /// filesystem with `RENAME_NOREPLACE`; on one without it the rename is an `Io` error and
+    /// nothing is replaced. After the rename, `cells` and then `retired` are synced; if either
+    /// sync fails, the cell is already under `retired` and the error names the directory that
+    /// failed. The identity check and the rename are two steps, so this relies on the controller
+    /// being the only writer of `cells`.
+    pub fn retire(&self, lock: &WriterLock, cell: CellDir) -> Result<(), RetireError> {
+        let _ = (lock, cell);
+        unimplemented!()
+    }
+
     fn create_cells(&self, cells_path: &Path) -> Result<OwnedFd, CellDirError> {
         let io_error = |source| CellDirError::Io {
             path: cells_path.to_path_buf(),
@@ -476,6 +499,127 @@ impl CellDir {
     pub fn sync(&self) -> io::Result<()> {
         (self.sync)(self.dir.as_fd())
     }
+
+    /// Creates spec 023 §3's `launched` marker, which records this cell and `boot_session` and
+    /// no clean stop. It is created exclusively, without following a symlink, with mode 0600
+    /// whatever the umask; then the file is synced, and then this directory. Any existing entry
+    /// named `launched` is `AlreadyExists` and is left as it was. A cell ID that is not spec
+    /// 023's `cell-<n>` is `InvalidCell` and nothing is created, since
+    /// [`LaunchedMarker::decode`] would refuse its record. A failure after the create leaves
+    /// the file, which [`CellDir::read_launched`] then reports as `Unreadable`.
+    pub fn create_launched(&self, boot_session: BootSession) -> Result<(), CellDirError> {
+        let _ = boot_session;
+        unimplemented!()
+    }
+
+    /// Reads the `launched` marker without following a symlink and without blocking on a FIFO.
+    /// It is `Absent` only when no entry named `launched` exists. A symlink, a directory or any
+    /// other entry that is not a regular file, a record [`LaunchedMarker::decode`] refuses, a
+    /// marker naming another cell, and any error opening or reading it are `Unreadable`.
+    pub fn read_launched(&self) -> MarkerRead {
+        unimplemented!()
+    }
+
+    /// Replaces the marker with the same record and `"stopped": true` (spec 023 §5, step 9).
+    /// Any `launched.tmp` left by an earlier call is removed. The new record is written to
+    /// `launched.tmp`, created exclusively with mode 0600, which is synced and renamed over
+    /// `launched`; then this directory is synced. A reader sees the old record or the new one,
+    /// never part of either. It needs this cell's marker: with none it is `Missing`, and an
+    /// unreadable one is `MarkerUnreadable`; either way nothing is written. A stopped marker is
+    /// written again unchanged.
+    pub fn mark_launched_stopped(&self) -> Result<(), CellDirError> {
+        unimplemented!()
+    }
+
+    /// Removes the entry named `launched` and syncs this directory. A missing entry is not an
+    /// error, and the directory is still synced, so a retry after a failed sync completes. A
+    /// directory named `launched` is not removed and is an `Io` error.
+    pub fn remove_launched(&self) -> Result<(), CellDirError> {
+        unimplemented!()
+    }
+
+    /// Creates `runtime/` exclusively with mode 0700 whatever the umask, opens it without
+    /// following a symlink, syncs this directory and returns the opened directory, close-on-exec.
+    /// Any existing entry named `runtime` is `AlreadyExists`: a runtime directory is never
+    /// reused.
+    pub fn create_runtime_dir(&self) -> Result<OwnedFd, CellDirError> {
+        unimplemented!()
+    }
+
+    /// Whether the empty `created` file exists, read without following a symlink. An entry that
+    /// is not a regular file is `NotARegularFile`, never `true`.
+    pub fn has_created(&self) -> Result<bool, CellDirError> {
+        unimplemented!()
+    }
+
+    /// Creates the empty `created` file once `cell.new` has completed (spec 023 §4, step 8): it
+    /// is created exclusively, without following a symlink, with mode 0600 whatever the umask;
+    /// then the file is synced, and then this directory. It needs the writer lock of the root
+    /// this directory was opened from; another root's lock is `ForeignLock` and nothing is
+    /// created. Any existing entry named `created` is `AlreadyExists`.
+    pub fn create_created(&self, lock: &WriterLock) -> Result<(), CellDirError> {
+        let _ = lock;
+        unimplemented!()
+    }
+}
+
+/// Spec 023 §3's `launched` marker: the cell it belongs to and the host boot session its
+/// supervisor started in. `stopped` is true once the supervisor recorded a clean stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchedMarker {
+    pub cell: CellId,
+    pub boot_session: BootSession,
+    pub stopped: bool,
+}
+
+impl LaunchedMarker {
+    /// The record as one line: `{"cell":…,"boot_session":…}` and a newline, with
+    /// `,"stopped":true` before the closing brace when `stopped` is true. The boot session is
+    /// written as a lowercase hyphenated UUID.
+    pub fn encode(&self) -> Vec<u8> {
+        unimplemented!()
+    }
+
+    /// Reads one record: one JSON object and a newline, at most [`MAX_MARKER_BYTES`] bytes in
+    /// all, with no other line and no carriage return. `cell` is required and is spec 023's
+    /// `cell-<n>`. `boot_session` is required and is a lowercase hyphenated UUID. `stopped` is
+    /// optional and, when present, is `true`. A repeated or unknown key is refused. A record
+    /// over the size is `TooLarge`; every other refusal is `Malformed`.
+    pub fn decode(bytes: &[u8]) -> Result<LaunchedMarker, MarkerFault> {
+        let _ = bytes;
+        unimplemented!()
+    }
+}
+
+/// What [`CellDir::read_launched`] found. `Absent` means only that no entry named `launched`
+/// exists.
+#[derive(Debug)]
+pub enum MarkerRead {
+    Absent,
+    Present(LaunchedMarker),
+    Unreadable(MarkerFault),
+}
+
+/// Why an entry named `launched` is not its cell's marker. `WrongCell` is a well-formed marker
+/// that names `found` instead.
+#[derive(Debug)]
+pub enum MarkerFault {
+    Symlink,
+    NotRegular,
+    TooLarge,
+    Io(io::Error),
+    Malformed(String),
+    WrongCell { found: CellId },
+}
+
+/// Why a cell was not retired.
+#[derive(Debug)]
+pub enum RetireError {
+    ForeignLock { path: PathBuf },
+    RetiredNotADirectory { path: PathBuf },
+    AlreadyRetired { path: PathBuf },
+    Moved { path: PathBuf },
+    Io { path: PathBuf, source: io::Error },
 }
 
 /// A journal opened for reading and appending through one descriptor. `created` is true when
@@ -566,6 +710,8 @@ pub enum CellDirError {
     AlreadyExists { path: PathBuf },
     Io { path: PathBuf, source: io::Error },
     ForeignLock { path: PathBuf },
+    NotARegularFile { path: PathBuf },
+    MarkerUnreadable { path: PathBuf, fault: MarkerFault },
 }
 
 /// Why an instance root could not be opened.
@@ -679,6 +825,9 @@ impl fmt::Display for CellDirError {
                 write!(f, "I/O failed at {}: {source}", path.display())
             }
             CellDirError::ForeignLock { path } => f.write_str(&foreign_lock_text(path)),
+            CellDirError::NotARegularFile { .. } | CellDirError::MarkerUnreadable { .. } => {
+                unimplemented!()
+            }
         }
     }
 }
@@ -688,6 +837,9 @@ impl std::error::Error for CellDirError {
         match self {
             CellDirError::InvalidCell(error) => Some(error),
             CellDirError::Io { source, .. } => Some(source),
+            CellDirError::NotARegularFile { .. } | CellDirError::MarkerUnreadable { .. } => {
+                unimplemented!()
+            }
             CellDirError::Missing { .. }
             | CellDirError::Alias { .. }
             | CellDirError::Symlink { .. }
@@ -695,6 +847,30 @@ impl std::error::Error for CellDirError {
             | CellDirError::AlreadyExists { .. }
             | CellDirError::ForeignLock { .. } => None,
         }
+    }
+}
+
+impl fmt::Display for MarkerFault {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        unimplemented!()
+    }
+}
+
+impl std::error::Error for MarkerFault {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        unimplemented!()
+    }
+}
+
+impl fmt::Display for RetireError {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        unimplemented!()
+    }
+}
+
+impl std::error::Error for RetireError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        unimplemented!()
     }
 }
 
