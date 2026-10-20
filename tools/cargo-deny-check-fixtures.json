@@ -221,5 +221,33 @@
   "stderr": [
    "{\"fields\":{\"licenses\":{\"errors\":0,\"helps\":44,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
   ]
+ },
+ "vulnerability-ignored-info": {
+  "origin": "captured from cargo-deny 0.20.2: the vulnerability-ignored workspace with -L info, which the wrapper never passes, so cargo-deny also writes its info logs and the two note diagnostics, advisory-db b19b2c8 (2026-10-20)",
+  "exit": 0,
+  "stderr": [
+   "{\"fields\":{\"level\":\"INFO\",\"message\":\"using config from /work/deny.toml\",\"timestamp\":\"2026-10-20T15:43:32.624689Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"INFO\",\"message\":\"No advisory database configured, falling back to default 'https://github.com/RustSec/advisory-db'\",\"timestamp\":\"2026-10-20T15:43:32.664191Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"INFO\",\"message\":\"fetching crates for Cargo.toml\",\"timestamp\":\"2026-10-20T15:43:32.66814Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"INFO\",\"message\":\"fetched crates in 720.56825ms\",\"timestamp\":\"2026-10-20T15:43:33.388719Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"INFO\",\"message\":\"gathering crates for Cargo.toml\",\"timestamp\":\"2026-10-20T15:43:33.398305Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"INFO\",\"message\":\"gathered 2 crates in 422ms\",\"timestamp\":\"2026-10-20T15:43:33.827288Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"INFO\",\"message\":\"advisory database https://github.com/RustSec/advisory-db fetched in 1.455985791s\",\"timestamp\":\"2026-10-20T15:43:34.121667Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"INFO\",\"message\":\"no workspace dependencies were declared\",\"timestamp\":\"2026-10-20T15:43:34.643887Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"INFO\",\"message\":\"loading index metadata for crates...\",\"timestamp\":\"2026-10-20T15:43:34.644702Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"INFO\",\"message\":\"cached index metadata loaded in 113ms\",\"timestamp\":\"2026-10-20T15:43:34.758206Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"INFO\",\"message\":\"checking advisories...\",\"timestamp\":\"2026-10-20T15:43:34.75857Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"INFO\",\"message\":\"advisories checked in 5ms\",\"timestamp\":\"2026-10-20T15:43:34.76424Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"code\":\"advisory-ignored\",\"graphs\":[{\"Krate\":{\"name\":\"smallvec\",\"version\":\"1.6.0\"},\"parents\":[{\"Krate\":{\"name\":\"fixture\",\"version\":\"0.1.0\"}}]}],\"labels\":[{\"column\":11,\"line\":3,\"message\":\"advisory ignored here\",\"span\":\"RUSTSEC-2021-0003\"},{\"column\":41,\"line\":3,\"message\":\"ignore reason\",\"span\":\"until 2026-12-01; https://github.com/servo/rust-smallvec/issues/252; a fixture\"}],\"message\":\"advisory ignored\",\"severity\":\"note\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisory\":{\"aliases\":[\"CVE-2021-25900\",\"GHSA-43w2-9j62-hq99\"],\"categories\":[\"memory-corruption\"],\"collection\":\"crates\",\"cvss\":\"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\",\"date\":\"2021-01-08\",\"description\":\"A bug in the `SmallVec::insert_many` method caused it to allocate a buffer that was smaller than needed.  It then wrote past the end of the buffer, causing a buffer overflow and memory corruption on the heap.\\n\\nThis bug was only triggered if the iterator passed to `insert_many` yielded more items than the lower bound returned from its `size_hint` method.\\n \\nThe flaw was corrected in smallvec 0.6.14 and 1.6.1, by ensuring that additional space is always reserved for each item inserted.  The fix also simplified the implementation of `insert_many` to use less unsafe code, so it is easier to verify its correctness.\\n\\nThank you to Yechan Bae ([@Qwaz](https://github.com/Qwaz)) and the Rust group at Georgia Tech’s SSLab for finding and reporting this bug.\",\"expect-deleted\":false,\"id\":\"RUSTSEC-2021-0003\",\"informational\":null,\"keywords\":[\"buffer-overflow\",\"heap-overflow\",\"unsound\"],\"license\":\"CC0-1.0\",\"package\":\"smallvec\",\"references\":[],\"related\":[],\"source\":null,\"title\":\"Buffer overflow in SmallVec::insert_many\",\"url\":\"https://github.com/servo/rust-smallvec/issues/252\",\"withdrawn\":null},\"code\":\"vulnerability\",\"graphs\":[{\"Krate\":{\"name\":\"smallvec\",\"version\":\"1.6.0\"},\"parents\":[{\"Krate\":{\"name\":\"fixture\",\"version\":\"0.1.0\"}}]}],\"labels\":[{\"column\":1,\"line\":2,\"message\":\"security vulnerability detected\",\"span\":\"smallvec 1.6.0 registry+https://github.com/rust-lang/crates.io-index\"}],\"message\":\"Buffer overflow in SmallVec::insert_many\",\"notes\":[\"ID: RUSTSEC-2021-0003\",\"Advisory: https://rustsec.org/advisories/RUSTSEC-2021-0003\",\"A bug in the `SmallVec::insert_many` method caused it to allocate a buffer that was smaller than needed.  It then wrote past the end of the buffer, causing a buffer overflow and memory corruption on the heap.\\n\\nThis bug was only triggered if the iterator passed to `insert_many` yielded more items than the lower bound returned from its `size_hint` method.\\n \\nThe flaw was corrected in smallvec 0.6.14 and 1.6.1, by ensuring that additional space is always reserved for each item inserted.  The fix also simplified the implementation of `insert_many` to use less unsafe code, so it is easier to verify its correctness.\\n\\nThank you to Yechan Bae ([@Qwaz](https://github.com/Qwaz)) and the Rust group at Georgia Tech’s SSLab for finding and reporting this bug.\",\"Announcement: https://github.com/servo/rust-smallvec/issues/252\",\"Solution: Upgrade to >=0.6.14, <1.0.0 OR >=1.6.1 (try `cargo update -p smallvec`)\"],\"severity\":\"note\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":0,\"helps\":0,\"notes\":2,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ },
+ "warn-log": {
+  "origin": "synthesized: the WARN log cargo-deny 0.20.2 writes while loading the advisory database and then continues past (src/advisories/helpers/db.rs:413), with an invented reason; it has no summary, so a plan joins it to one",
+  "exit": 0,
+  "stderr": [
+   "{\"fields\":{\"level\":\"WARN\",\"message\":\"failed to read directory entry: an invented reason\",\"timestamp\":\"2026-10-20T08:00:00.000000Z\"},\"type\":\"log\"}"
+  ]
  }
 }

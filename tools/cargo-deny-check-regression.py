@@ -13,9 +13,11 @@ import re
 import runpy
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 
 
 SOURCE = Path(__file__).resolve().with_name("cargo-deny-check")
@@ -471,7 +473,8 @@ def report_covers_every_lockfile_with_warnings():
             assert "RUSTSEC-2022-0058" in text and "bitmaps 3.1.0" in text and "fuzz/Cargo.lock" in text, text
 
         result, calls, summary, document = report(repository, "push", same, {
-            "fuzz/Cargo.toml advisories": "vulnerability", "Cargo.toml sources": "stale-lockfile"})
+            "fuzz/Cargo.toml advisories": "vulnerability", "Cargo.toml sources": "stale-lockfile",
+            "Cargo.toml advisories": "vulnerability-ignored-info", "Cargo.toml licenses": ["warn-log", "licenses-quiet"]})
         assert result.returncode == 0, (result.stdout, result.stderr)
         vulnerability = next(item for item in document["findings"] if item["kind"] == "vulnerability")
         assert vulnerability == {
@@ -483,6 +486,14 @@ def report_covers_every_lockfile_with_warnings():
         stale = next(item for item in document["findings"] if item["kind"] == "stale-lockfile")
         assert stale["lockfile"] == "Cargo.lock" and "--locked was passed to prevent this" in stale["title"], stale
         assert "advisory-ignored" not in kinds(document), document
+        assert [item["lockfile"] for item in document["findings"] if item["kind"] == "vulnerability"] == [
+            "fuzz/Cargo.lock"], document
+        assert not any("directory entry" in item["title"] for item in document["findings"]), document
+        notes = [line for line in result.stdout.splitlines() if line.startswith("note: ")]
+        assert any(line.startswith("note: Cargo.lock licenses: ") and
+                   "warning log: failed to read directory entry: an invented reason" in line for line in notes), notes
+        assert any(line.startswith("note: Cargo.lock advisories: ") and "advisory-ignored" in line for line in notes), notes
+        assert "failed to read directory entry: an invented reason" in summary, summary
 
 
 def report_tool_failures():
@@ -587,7 +598,29 @@ def ignore_expiry():
         assert [item["kind"] for item in found] == ["tool-failure"] and "deny.toml" in found[0]["title"], (broken, found)
 
 
+def serve(answer):
+    """Answer one HTTP request on localhost with these bytes, then close the connection."""
+    listener = socket.create_server(("127.0.0.1", 0))
+
+    def respond():
+        with listener:
+            connection, _ = listener.accept()
+            with connection:
+                connection.recv(65536)
+                connection.sendall(answer)
+
+    thread = threading.Thread(target=respond, daemon=True)
+    thread.start()
+    return f"http://127.0.0.1:{listener.getsockname()[1]}/channel-rust-stable.toml", thread
+
+
 def stable_comparison():
+    for answer, name in ((b"garbage\r\n\r\n", "BadStatusLine"),
+                         (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n40\r\nmanifest-version", "IncompleteRead")):
+        url, thread = serve(answer)
+        found = API["stable_findings"](PIN, url)
+        thread.join(10)
+        assert [item["kind"] for item in found] == ["tool-failure"] and name in found[0]["title"], (name, found)
     with tempfile.TemporaryDirectory(prefix="cargo-deny-check-stable-") as directory:
         for stable, pin, newer in (
             ("1.99.1", "1.99.1", False), ("1.99.2", "1.99.1", True), ("1.100.0", "1.99.1", True),
