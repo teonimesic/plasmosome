@@ -89,5 +89,7 @@ mocks it in the test.
 ## Testing
 
 `cargo test -p plasmosome-testkit`. That runs the conformance suite against `FakeBackend` and
-`CompositeBackend`, plus the cross-crate scenarios. A new backend proves itself by calling the
-same `conformance::` functions with its own constructor, in its own `tests/` file.
+`CompositeBackend`, plus the cross-crate scenarios and the differential's manifest tests. A new
+backend proves itself by calling the same `conformance::` functions with its own constructor, in
+its own `tests/` file. The differential's tests alone run with
+`cargo test -p plasmosome-testkit --lib differential`.
