@@ -96,15 +96,18 @@ The serde envelope is `{ "format": 1, "generation": N, "event": EVENT }`. `EVENT
 `force` is required and is either null or `{ "operator": STRING, "reason": STRING }`, both
 nonblank. It is a recorded operator assertion, not authentication. Each change is
 `{ "plugin": PluginId, "replacement": Replacement-or-null }`; a replacement is
-`{ "mock": MockMode, "source": AttachmentSource, "lifetime": Lifetime, "effects": [RecordedEffect,
-...] }`, where `Lifetime` is spec 028's required record of the attachment's bound in both
-readings, its limits and ceiling, their sources, and its renewal count.
+`{ "mock": MockMode, "source": AttachmentSource, "lifetime": Lifetime, "named": bool, "requires":
+[RecordedRequirement, ...], "effects": [RecordedEffect, ...] }`, where `Lifetime` is spec 028's
+required record of the attachment's bound in both readings, its limits and ceiling, their
+sources, and its renewal count.
 Null removes the attachment. An empty
 effects array is a real attached plasmid with a known mode, not an accidental removal. Changes
 contain each plugin at most once, are nonempty, and carry the complete replacement for each
 changed attachment. Unmentioned attachments remain unchanged. Effect order is grant order.
 Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs)
 requires. Until then a replacement carried no `lifetime`.
+Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default)
+requires. Until then a replacement carried no `named` or `requires`.
 
 `RecordedEffect` is `{ "effect": Effect, "operation": UniverseOp-or-null }`. Exact universe
 inverses and compensation witnesses carry spec017's exact ID and full capability. Their operation
@@ -148,6 +151,45 @@ This registry-source addition is part of the still-unimplemented per-cell format
 first writer ships. Missing source is refused, not defaulted to local. Existing single-plugin
 version2/version3 contracts and the refusal to migrate them into cell histories are unchanged.
 No second file/database maps journal generations or PluginIds back to artifact origins.
+
+`named` is true for a plasmid the request named: the one `plasmid.add` names, or one a genome
+lists. It is false for one that joined only as a provider of another (spec 022 §5). Spec 011
+removes a provider with its last requirer only when it arrived as part of a closure, so removal
+reads `named` to tell the two apart. `RecordedRequirement` is `{ "capability": STRING,
+"providers": [PluginId, ...] }`. It records the edges of the cell's requires graph that start at
+the change's plugin, the requirer. `capability` is a key from the `[requires].capabilities` of
+the declaration its add admitted. `providers` names every attachment of this cell that provided
+that key when the requirer was added: the plasmids already attached that provide it, or the one
+that joined the closure (spec 022 §5), or, for a registry member, the provider its graph binds
+(spec 020). `requires` holds one record for each distinct key, sorted by key in byte order, and is
+`[]` for a plasmid that requires nothing. `providers` is nonempty and sorted by PluginId, names each
+plugin once, and never names the requirer. A requirer requires every provider its records name. When
+several provided one key, the journal cannot tell which one the requirer used, so the end of any
+of them reaches it.
+Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default)
+requires. Until then the journal recorded no requires edges and did not say which plasmids the
+request named.
+
+The prepare that adds the plasmid writes `named` from that request, and `requires` from the
+`[requires]` keys of the plasmid's own declaration, with the providers described above. No later
+replacement changes them. A reload or a renewal carries them unchanged, as a reload carries the
+source and the lifetime. Recovery, expiry, renewal and withdrawal read the requires graph from the
+journal, never from a declaration, which can change on disk after the add. So after a restart a
+provider's end still reaches its requirers (spec 028), and spec 011's detach still knows who
+requires whom and which providers the request named. Journal reading refuses each of these as
+InvalidClosure: a blank, repeated or unsorted key; an empty or unsorted provider list; a repeated
+provider; a requirer naming itself; a provider that is not attached once a prepare's changes apply,
+which also refuses a removal that leaves an attached requirer naming it; a cycle among the
+`requires` edges; an attachment added with `named: false` that no other change of its prepare names
+as a provider; and a replacement of an attached plugin whose `named` or `requires` differs from the
+recorded one. A replacement without `named` or `requires` is InvalidClosure too, and its cell
+quarantines. Neither field has a default. `requires: []` would say the plasmid requires nothing, so
+a provider's end would miss it after a restart. `named: true` would keep a provider after its last
+requirer, and `named: false` would remove an operator's plasmid with its requirer. Format 1 has no
+writer yet, so no journal lacks these fields.
+Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default)
+requires. Until then no text said when these fields are written or how a journal without them is
+read.
 
 Forensic replay can encounter an `Exact(Backend(handle))`, `External`, or `Delayed` effect with
 null operation. The reader retains it rather than pretending it is a universe operation. A
@@ -345,13 +387,18 @@ database, multi-file atomic commit, or a second durable generation store. No rec
 Result<Vec<CellJournalRecord>, CellJournalFault>` returns every record or no history.
 `CellJournalFault` carries `path: PathBuf`, `line: Option<u64>`, `lines_parsed: u64`, and kind
 `Io | Unparseable | UnsupportedFormat | GenerationZero | GenerationOrder | EventOrder |
-InvalidEffect | InvalidSource`. Read framing as bytes: invalid UTF-8, a malformed complete record and any
+InvalidEffect | InvalidSource | InvalidClosure | InvalidLifetime`. Read framing as bytes: invalid
+UTF-8, a malformed complete record and any
 non-LF-terminated final record all fault. A nonempty physical line is counted once; CRLF does
 not add a line. The reader stops at the first fault. `lines_parsed` counts only complete,
 syntactically and semantically accepted records before it, including terminal records.
 A mid-read IO error identifies the next physical line where possible; open errors have no line.
 No parsed records or decoded prefix owners are returned on failure. Missing and empty files
 return an empty history, not a history read using the single-plugin compatibility rules.
+Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default)
+requires. Until then the last kind was `InvalidSource`.
+Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs)
+requires. Until then the list had no kind for a bad `lifetime`.
 
 `recover(instance: &InstanceName, root: &Path, observation: &RecoveryObservation) ->
 Result<RecoveryOutcome, RecoveryError>` is a read-only core operation. It does not append,
@@ -363,8 +410,8 @@ strict reads are never raced against another controller append.
 `DesiredState` retains `generation: u64` and `cells: BTreeMap<CellId, DesiredCell>`.
 `DesiredCell` is `{ generation: u64, genome: Option<GenomeName>,
 plasmids: Vec<DesiredPlasmid> }`. `DesiredPlasmid` is `{ plugin: PluginId, mock: MockMode,
-source: AttachmentSource, lifetime: Lifetime, generation: u64, effects: Vec<RecordedEffect> }`.
-This is separate from the existing compact
+source: AttachmentSource, lifetime: Lifetime, named: bool, requires: Vec<RecordedRequirement>,
+generation: u64, effects: Vec<RecordedEffect> }`. This is separate from the existing compact
 status `PlasmidRecord`; a status projection cannot replace the recovered effects.
 `RecoveryOutcome.tombstones` is `BTreeMap<CellId, BTreeMap<PluginId, u64>>`, retaining removed
 attachments' last committed change generations rather than fake attached plasmids. A cell's
@@ -377,10 +424,13 @@ are ordered by PluginId, effects and sources retain their recorded values, and g
 because this journal persists no separate cell-level genome label. Per-attachment registry root
 provenance does not infer that label. Unrecorded live metadata cannot enter the published record
 and disappear on restart. Complete-content equality compares every decoded field, including
-attachment generations, source tags/full references, modes, ordered effects and exact operations,
-not JSON formatting or only OS holdings.
+attachment generations, source tags/full references, modes, named markers, requirements with
+their providers, ordered effects and exact operations, not JSON formatting or only OS holdings.
 Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs)
 requires. Until then `DesiredPlasmid` carried no `lifetime`.
+Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default)
+requires. Until then `DesiredPlasmid` carried no `named` or `requires`, and the equality sentence
+named neither.
 
 An empty journal adopts an empty generation-0 desired cell; an empty attachment remains an
 attachment. No recovered genome is invented: it is None internally and omitted on spec001's
@@ -638,6 +688,15 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   UTF-8, unknown fields/version and complete final JSON without LF fault at the right physical
   line. No partial history escapes, no source file changes, and diagnostics count only the
   accepted prefix. A corrupt first line still permits cell-aware found attribution.
+  A replacement without `named` or `requires` is InvalidClosure rather than taking a default. Replay
+  of a cell whose declarations were all deleted or edited after the add yields each attachment's
+  recorded `named` and `requires` unchanged. Each of these is InvalidClosure at its physical line: a
+  blank, repeated or unsorted key; an empty or unsorted provider list; a repeated provider; a
+  requirer naming itself; a provider not attached once a prepare's changes apply; a cycle among the
+  `requires` edges; a `named: false` attachment that no other change of its prepare names as a
+  provider; and a later replacement that changes `named` or `requires`. Amended on 2026-10-20, as
+  [spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default) requires. Until then
+  this item named neither field.
 - **R3 — durable generation:** prepare/commit/finish and prepare/abort/finish round-trip;
   interrupted legal prefixes are pending. Zero, decreasing/skipped generations, duplicate or
   reordered terminal events refuse. Empty attachments and removal consume durable generations;
