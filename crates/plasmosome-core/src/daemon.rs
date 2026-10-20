@@ -1213,4 +1213,25 @@ mod tests {
             "the refusal is kept as the cause"
         );
     }
+
+    #[test]
+    fn a_listener_failure_reads_as_one_and_keeps_its_cause() {
+        use std::error::Error as _;
+
+        let error = DaemonError::Listener(std::io::Error::from_raw_os_error(libc::EMFILE));
+        assert!(
+            error
+                .to_string()
+                .starts_with("the control socket stopped accepting connections: "),
+            "{error}"
+        );
+        assert_eq!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .and_then(std::io::Error::raw_os_error),
+            Some(libc::EMFILE),
+            "the accept failure is kept as the cause"
+        );
+    }
 }
