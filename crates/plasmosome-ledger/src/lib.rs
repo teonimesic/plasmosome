@@ -612,7 +612,7 @@ impl<'de> Deserialize<'de> for LogRecord {
     }
 }
 
-fn read_records(bytes: &[u8]) -> std::io::Result<(Option<PluginId>, Vec<Effect>)> {
+fn read_plugin_log(bytes: &[u8]) -> std::io::Result<(Option<PluginId>, Vec<Effect>)> {
     let mut plugin: Option<PluginId> = None;
     let mut effects = Vec::new();
     for (index, framed) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
@@ -709,7 +709,7 @@ impl Ledger {
                 "ledger log does not end with a newline; refusing to append",
             ));
         }
-        match read_records(existing)? {
+        match read_plugin_log(existing)? {
             (Some(found), _) if found != self.plugin => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
@@ -753,7 +753,7 @@ impl Ledger {
     }
 
     pub fn open_file(path: &Path) -> std::io::Result<Ledger> {
-        let (plugin, effects) = read_records(&std::fs::read(path)?)?;
+        let (plugin, effects) = read_plugin_log(&std::fs::read(path)?)?;
         let plugin = plugin.ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
