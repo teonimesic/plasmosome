@@ -1,0 +1,41 @@
+name = "serde_json"
+range = "1"
+reason = """\
+  Reads and writes the JSON on the control sockets, and in recipes, ledgers, session logs and \
+  paged accounts.\
+  """
+write_it_instead.lines = 3500
+write_it_instead.how = """\
+  On 2026-10-20, at main 8fe24e3, `git grep -l serde_json -- '*.rs' | wc -l` gives 33 files. \
+  `git grep -h -o -w -E \
+  'serde_json::(from_str|from_value|to_string|to_value|from_slice|to_vec|to_writer)' -- '*.rs' | \
+  sort | uniq -c` gives from_str 75, from_value 35, to_value 34, to_string 33, from_slice 5, \
+  to_vec 4 and to_writer 1. `git grep -h -o -E '(^|[^A-Za-z_])json!' -- '*.rs' | wc -l` gives \
+  327 uses of json!, and `git grep -n 'serde_json::' -- '*.rs'` shows Deserializer, Value, Map, \
+  Number and value::RawValue in use as well. A replacement needs: a reader that drives serde's \
+  Deserializer (1200 lines), made of the tokenizer, strings, numbers and errors that \
+  serde_core's record counts at 600, and 600 more for the Deserializer's methods, enum, map and \
+  sequence access, borrowed strings and the nesting bound; a writer (500); Value, Map and \
+  Number, with the Serializer and Deserializer that to_value and from_value need (1300); \
+  RawValue (200); json! (150); and the error type (150): 3500 lines. Replacing it removes \
+  nothing from Cargo.lock: criterion and tinytemplate bring serde_json too.\
+  """
+exception = ""
+# serde, and through it serde_derive, proc-macro2, quote and syn, are here through serde_json's
+# cfg(any()) dependency on serde, which never builds. So build_time_code holds no proc macro.
+brings = [
+  "itoa@1",
+  "memchr@2",
+  "proc-macro2@1",
+  "quote@1",
+  "serde@1",
+  "serde_core@1",
+  "serde_derive@1",
+  "syn@3",
+  "unicode-ident@1",
+  "zmij@1",
+]
+build_time_code = ["serde_core@1 build script", "serde_json@1 build script", "zmij@1 build script"]
+expands_unsafe = "none"
+native_code = "none"
+verdict = "kept-pending-owner"

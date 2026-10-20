@@ -1,0 +1,40 @@
+name = "sha2"
+range = "0.11"
+reason = """\
+  Computes SHA-256, which lets a paged reader check that it reassembled exactly the bytes a \
+  frozen account holds.\
+  """
+write_it_instead.lines = 100
+write_it_instead.how = """\
+  On 2026-10-20, at main 8fe24e3, `git grep -n 'sha2::' -- '*.rs'` finds one use, the import in \
+  crates/plasmosome-backend/src/digest.rs, which calls Sha256::digest, Sha256::new, update and \
+  finalize. A portable SHA-256 from FIPS 180-4 needs: the round constants and initial hash \
+  values (25 lines); the compression function (35); and the streaming buffer, with update, \
+  padding and finalize (40): 100 lines. NIST's test vectors would come on top as tests, and are \
+  not counted. It would lack the ARMv8 and x86 SHA instructions that sha2 uses where the CPU has \
+  them. Replacing it removes 7 packages from Cargo.lock: sha2@0.11, block-buffer@0.12, \
+  cpufeatures@0.3, crypto-common@0.2, digest@0.11, hybrid-array@0.4 and typenum@1. cfg-if and \
+  libc stay.\
+  """
+exception = ""
+brings = [
+  "block-buffer@0.12",
+  "cfg-if@1",
+  "cpufeatures@0.3",
+  "crypto-common@0.2",
+  "digest@0.11",
+  "hybrid-array@0.4",
+  "libc@0.2",
+  "typenum@1",
+]
+build_time_code = ["libc@0.2 build script"]
+expands_unsafe = "none"
+native_code = [
+  """\
+  libc@0.2 links the system libiconv on macOS, through the #[link(name = "iconv")] that \
+  libc.toml describes. libc builds here because cpufeatures depends on it on aarch64 Apple \
+  targets. On aarch64-apple-darwin, sha2's feature checks pass at compile time, so cpufeatures \
+  never calls into libc on sha2's path, but the link stays.\
+  """,
+]
+verdict = "kept-pending-owner"
