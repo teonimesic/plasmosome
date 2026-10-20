@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use plasmosome_backend::ObjectOnly;
-use serde::de::Error as _;
+use serde::de::{Error as _, Visitor};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -46,7 +46,7 @@ impl Serialize for RegistryId {
 
 impl<'de> Deserialize<'de> for RegistryId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        RegistryId::parse(&String::deserialize(deserializer)?).map_err(D::Error::custom)
+        RegistryId::parse(&text(deserializer, "registry_id")?).map_err(D::Error::custom)
     }
 }
 
@@ -87,7 +87,7 @@ impl Serialize for ArtifactKind {
 
 impl<'de> Deserialize<'de> for ArtifactKind {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
+        let text = text(deserializer, "kind")?;
         match text.as_str() {
             "plasmid" => Ok(ArtifactKind::Plasmid),
             "genome" => Ok(ArtifactKind::Genome),
@@ -135,7 +135,7 @@ impl Serialize for Population {
 
 impl<'de> Deserialize<'de> for Population {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
+        let text = text(deserializer, "population")?;
         match text.as_str() {
             "curated" => Ok(Population::Curated),
             "user" => Ok(Population::User),
@@ -205,7 +205,7 @@ impl Serialize for Digest {
 
 impl<'de> Deserialize<'de> for Digest {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Digest::parse(&String::deserialize(deserializer)?).map_err(D::Error::custom)
+        Digest::parse(&text(deserializer, "digest")?).map_err(D::Error::custom)
     }
 }
 
@@ -302,8 +302,11 @@ impl Serialize for ReleaseKey {
 struct ReleaseKeyWire {
     kind: ArtifactKind,
     population: Population,
+    #[serde(deserialize_with = "publisher_text")]
     publisher: String,
+    #[serde(deserialize_with = "name_text")]
     name: String,
+    #[serde(deserialize_with = "version_text")]
     version: String,
 }
 
@@ -360,8 +363,11 @@ impl Serialize for ReleaseRef {
 struct ReleaseRefWire {
     kind: ArtifactKind,
     population: Population,
+    #[serde(deserialize_with = "publisher_text")]
     publisher: String,
+    #[serde(deserialize_with = "name_text")]
     name: String,
+    #[serde(deserialize_with = "version_text")]
     version: String,
     digest: Digest,
 }
@@ -379,6 +385,43 @@ impl<'de> Deserialize<'de> for ReleaseRef {
         .map_err(D::Error::custom)?;
         Ok(ReleaseRef::new(key, wire.digest))
     }
+}
+
+struct Text(&'static str);
+
+impl Visitor<'_> for Text {
+    type Value = String;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} as a string", self.0)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<String, E> {
+        Ok(text.to_owned())
+    }
+
+    fn visit_string<E: serde::de::Error>(self, text: String) -> Result<String, E> {
+        Ok(text)
+    }
+}
+
+fn text<'de, D: Deserializer<'de>>(
+    deserializer: D,
+    field: &'static str,
+) -> Result<String, D::Error> {
+    deserializer.deserialize_string(Text(field))
+}
+
+fn publisher_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    text(deserializer, "publisher")
+}
+
+fn name_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    text(deserializer, "name")
+}
+
+fn version_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    text(deserializer, "version")
 }
 
 /// Checks one publisher or name, and is also usable for a client alias: `[a-z0-9]+(-[a-z0-9]+)*`
