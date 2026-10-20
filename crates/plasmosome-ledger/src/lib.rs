@@ -365,7 +365,9 @@ impl fmt::Display for DetachError {
             DetachError::Backend(e) => write!(f, "ledger replay failed: {e}"),
             DetachError::CellChanged { began, requested } => write!(
                 f,
-                "ledger detach began in cell {began} and cannot resume in cell {requested}"
+                "ledger detach began in cell {:?} and cannot resume in cell {:?}",
+                began.as_str(),
+                requested.as_str()
             ),
         }
     }
