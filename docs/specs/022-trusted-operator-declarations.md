@@ -194,15 +194,17 @@ The requires edges spec 008 records must not form a cycle. When they would, the 
 plasmid ID, the key and the provider's plasmid ID, sorted by the requirer's plasmid ID in byte
 order; `path` the declaration of the first requirer in that order; field `requires.capabilities[i]`
 for its edge's key; and `fix` exactly `remove this entry`. Removing the entry for any edge the
-`detail` names ends the cycle. A cycle of one plasmid is the self-provider refusal above. Only local
-plasmids that this request attaches can be on a cycle: an attached plasmid's recorded providers are
-all attached (spec 008), so no edge leads from one back to a plasmid this request attaches, and a
-registry member's edges follow its graph, which spec 020 §2 requires to be acyclic. So this refusal
-agrees with spec 020, which refuses a cyclic graph before publication or import, and with spec 008,
-which refuses a cycle among the `requires` edges when the journal is read: no add that this section
-accepts writes a cycle. Amended on 2026-10-20: this did not refuse a cycle, or say that a shared
-provider joins once. When step 2 chose a member already in the closure and that edge closed a cycle,
-the add could write records spec 008 refuses as a cycle among the `requires` edges.
+`detail` names ends the cycle. When the edges hold more than one cycle, each is its own refusal, and
+which one is returned is not part of the contract (§7). A cycle of one plasmid is the self-provider
+refusal above. Only local plasmids that this request attaches can be on a cycle: an attached
+plasmid's recorded providers are all attached (spec 008), so no edge leads from one back to a
+plasmid this request attaches, and a registry member's edges follow its graph, which spec 020 §2
+requires to be acyclic. So this refusal agrees with spec 020, which refuses a cyclic graph before
+publication or import, and with spec 008, which refuses a cycle among the `requires` edges when the
+journal is read: no add that this section accepts writes a cycle. Amended on 2026-10-20: this did
+not refuse a cycle, or say that a shared provider joins once. When step 2 chose a member already in
+the closure and that edge closed a cycle, the add could write records spec 008 refuses as a cycle
+among the `requires` edges.
 
 A registry member (spec 020) keeps its imported declaration and its graph's provider bindings.
 The operator file supplies only its ProxyMap and Mount entries, keyed by its plasmid ID alone.
@@ -542,16 +544,17 @@ ProxyMap (O-11) or Mount (O-7).
    leaves no journal record, whether P is unlisted, listed or attached. A P that R's search selects
    and that requires a key `j` it provides is 108 with `path` P's declaration and a `detail` naming
    `j` and P, and leaves no journal record. Cycles are each 108 with `fix` `remove this entry` and
-   leave no journal record. R requires `k` from P, P requires `j` from Q, and Q requires `m`, which
-   R provides: `path` P's declaration, field `requires.capabilities[0]`, and a `detail` naming the
-   edges of P, Q and R in that order. With Q requiring `i` from P instead: `path` P's declaration
-   and a `detail` naming only the edges of P and Q. A shared provider is not a cycle: with P
-   requiring nothing, R requiring `k` and `m`, and Q providing `m` and requiring `k`, R, P and Q
-   attach, and P is attached once. Catches: borrowing another member's entries, an undefined
-   candidate set, skipping an unsafe listing, re-reading an attached provider, a plasmid made its
-   own provider or only left out of its own candidates, a refusal that names R's declaration for P's
-   fault, a cycle check that sees only two plasmids or only cycles through R, refusing a shared
-   provider, and a `path` that depends on the order of the walk. Amended on 2026-10-20: this item
+   leave no journal record. R requires `k` from P, P requires `n`, which an attached plasmid
+   provides, and then `j` from Q, and Q requires `m`, which R provides: `path` P's declaration,
+   field `requires.capabilities[1]`, and a `detail` naming the edges of P, Q and R in that order.
+   With Q requiring `i` from P instead: `path` P's declaration and a `detail` naming only the edges
+   of P and Q. A shared provider is not a cycle: with P requiring nothing, R requiring `k` and `m`,
+   and Q providing `m` and requiring `k`, R, P and Q attach, and P is attached once. Catches:
+   borrowing another member's entries, an undefined candidate set, skipping an unsafe listing,
+   re-reading an attached provider, a plasmid made its own provider or only left out of its own
+   candidates, a refusal that names R's declaration for P's fault, a cycle check that sees only two
+   plasmids or only cycles through R, refusing a shared provider, a field that names the requirer's
+   first entry, and a `path` that depends on the order of the walk. Amended on 2026-10-20: this item
    had no self-provider case. Amended on 2026-10-20: this item had no cycle case.
 5. Local selection. An unlisted ID is 101 `plasmid <id>`, even with a valid declaration at the
    project root and under `.plasmosome/plasmids/`; so is an entry with no `declaration`. An unsafe
