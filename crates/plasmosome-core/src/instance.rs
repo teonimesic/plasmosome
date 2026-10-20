@@ -974,6 +974,9 @@ impl DirectoryStream {
         let stream = unsafe { libc::fdopendir(owned.as_raw_fd()) };
         let stream = NonNull::new(stream).ok_or_else(io::Error::last_os_error)?;
         let _owned_by_stream = owned.into_raw_fd();
+        // SAFETY: `stream` is the non-null stream fdopendir just returned. Only closedir in Drop
+        // closes it, so it is still open here.
+        unsafe { libc::rewinddir(stream.as_ptr()) };
         Ok(DirectoryStream(stream))
     }
 }
