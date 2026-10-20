@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Run cargo-deny over every git-tracked Cargo.lock, and say whether it refused, failed or passed.
+
+Exit 0 is a pass, 1 a refusal and 2 a tool failure. A run is classified by the diagnostic codes
+cargo-deny writes, never by its exit status alone, so a warned code cannot refuse a merge and a
+broken tool cannot pass one. Spec 026 section 4 is the authority.
+"""
+
+import argparse
+import json
+import os
+from pathlib import Path, PurePosixPath
+import subprocess
+import sys
+
+
+CHECKS = ("sources", "advisories", "licenses")
+PASS, REFUSAL, TOOL_FAILURE = 0, 1, 2
+STATUS_NAMES = {PASS: "pass", REFUSAL: "refusal", TOOL_FAILURE: "tool failure"}
+TIMEOUT = 900
+MANIFEST_NAMES = {"Cargo.toml", "Cargo.lock"}
+SKIPPED = "skipped: this change touches no Cargo.toml or Cargo.lock"
+EXTRA_ARGUMENTS = {"sources": [], "advisories": ["-W", "notice", "-W", "unmaintained"], "licenses": []}
+REFUSING = {
+    "sources": {"source-not-allowed", "git-source-underspecified"},
+    "advisories": {"vulnerability", "unsound"},
+    "licenses": set(),
+}
+REPORTED = {
+    "sources": {"allowed-source", "allowed-by-organization", "unmatched-source", "unmatched-organization"},
+    "advisories": {
+        "notice", "unmaintained", "yanked", "advisory-not-detected", "advisory-ignored",
+        "unknown-advisory", "yanked-ignored", "yanked-not-detected",
+    },
+    "licenses": {
+        "accepted", "rejected", "unlicensed", "skipped-private-workspace-crate",
+        "license-not-encountered", "license-exception-not-encountered", "missing-clarification-file",
+        "parse-error", "empty-license-field", "no-license-field", "gather-failure",
+    },
+}
+TOOL_FAILURE_CODES = {"index-failure", "index-cache-load-failure"}
+
+
+class ToolFailure(Exception):
+    pass
+
+
+def git(root, *args):
+    try:
+        result = subprocess.run(["git", *args], cwd=root, capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ToolFailure(f"git {args[0]} could not run: {error}") from error
+    if result.returncode != 0:
+        detail = result.stderr.decode(errors="replace").strip()
+        raise ToolFailure(f"git {' '.join(args)} exited {result.returncode}: {detail}")
+    return result.stdout
+
+
+def repository_root():
+    return Path(git(Path.cwd(), "rev-parse", "--show-toplevel").decode().strip())
+
+
+def paths(output):
+    return [PurePosixPath(name) for name in output.decode(errors="surrogateescape").split("\0") if name]
+
+
+def touches_manifests(root, revision):
+    changed = paths(git(root, "diff", "--name-only", "--no-renames", "-z", revision, "HEAD", "--"))
+    return any(path.name in MANIFEST_NAMES for path in changed)
+
+
+def tracked_lockfiles(root):
+    return sorted(path for path in paths(git(root, "ls-files", "-z")) if path.name == "Cargo.lock")
+
+
+def command(root, check, lockfile):
+    manifest = lockfile.parent / "Cargo.toml"
+    return [
+        "cargo-deny", "--locked", "--all-features", "--workspace",
+        "--manifest-path", str(manifest), "--config", str(root / "deny.toml"),
+        "--format", "json", "--color", "never",
+        "check", check, *EXTRA_ARGUMENTS[check],
+    ]
+
+
+def krates(fields):
+    found = []
+    for graph in fields.get("graphs") or []:
+        krate = graph.get("Krate") if isinstance(graph, dict) else None
+        if isinstance(krate, dict):
+            found.append(f"{krate.get('name')} {krate.get('version')}")
+    return found
+
+
+def spans(fields):
+    found = []
+    for label in fields.get("labels") or []:
+        span = label.get("span") if isinstance(label, dict) else None
+        if isinstance(span, str) and span not in found:
+            found.append(span)
+    return found
+
+
+def describe(fields):
+    advisory = fields.get("advisory") if isinstance(fields.get("advisory"), dict) else {}
+    parts = [str(fields.get("severity", "no severity")), str(fields.get("code") or "no code")]
+    if advisory.get("id"):
+        parts.append(str(advisory["id"]))
+    parts.extend(krates(fields))
+    if not advisory and spans(fields):
+        parts.append("(" + "; ".join(spans(fields)) + ")")
+    return " ".join(parts) + ": " + str(advisory.get("title") or fields.get("message") or "no message")
+
+
+def refusal(check, fields):
+    text = describe(fields)
+    advisory = fields.get("advisory") if isinstance(fields.get("advisory"), dict) else {}
+    if check == "advisories" and advisory.get("id"):
+        form = f'{{ id = "{advisory["id"]}", reason = "until YYYY-MM-DD; <link>; <why>" }}'
+        text += f"\n  to accept it for now, add to [advisories] ignore in deny.toml: {form}"
+    if check == "sources":
+        text += "\n  crates.io is the only allowed source"
+    return text
+
+
+def classify(check, lines, returncode):
+    """Classify one cargo-deny run from its JSON lines; the exit status alone decides nothing."""
+    refusals, failures, reported = [], [], []
+    counts, saw_error = None, False
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            failures.append(f"a line that is not JSON: {line.strip()}")
+            continue
+        fields = record.get("fields") if isinstance(record, dict) else None
+        if not isinstance(fields, dict):
+            failures.append(f"a record without fields: {line.strip()}")
+            continue
+        kind = record.get("type")
+        if kind == "log":
+            level, message = fields.get("level"), fields.get("message")
+            if level == "ERROR":
+                failures.append(f"error log: {message}")
+            elif level == "WARN":
+                reported.append(f"warning log: {message}")
+        elif kind == "diagnostic":
+            code, severity = fields.get("code"), fields.get("severity")
+            saw_error = saw_error or severity == "error"
+            if code in TOOL_FAILURE_CODES:
+                failures.append(describe(fields))
+            elif severity != "error" or code in REPORTED[check]:
+                reported.append(describe(fields))
+            elif code in REFUSING[check]:
+                refusals.append(refusal(check, fields))
+            else:
+                failures.append(f"an error with a code this wrapper does not know: {describe(fields)}")
+        elif kind == "summary":
+            if isinstance(fields.get(check), dict):
+                counts = fields[check]
+            else:
+                failures.append(f"a summary for another check: {line.strip()}")
+        else:
+            failures.append(f"a record of unknown type {kind!r}: {line.strip()}")
+    if counts is None and not failures:
+        failures.append(f"cargo-deny wrote no {check} summary")
+    if returncode != 0 and not saw_error and not failures:
+        failures.append(f"cargo-deny exited {returncode} without an error diagnostic")
+    status = TOOL_FAILURE if failures else REFUSAL if refusals else PASS
+    return {"status": STATUS_NAMES[status], "code": status, "refusals": refusals, "failures": failures,
+            "reported": reported, "counts": counts}
+
+
+def run(root, check, lockfile):
+    argv = command(root, check, lockfile)
+    print("$ " + " ".join(argv), flush=True)
+    try:
+        result = subprocess.run(argv, cwd=root, capture_output=True, timeout=TIMEOUT)
+    except FileNotFoundError:
+        return failed("cargo-deny is not on PATH; install it with the version ci.yml pins")
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return failed(f"cargo-deny could not complete: {error}")
+    lines = (result.stderr + result.stdout).decode(errors="replace").splitlines()
+    return classify(check, lines, result.returncode)
+
+
+def failed(message):
+    return {"status": STATUS_NAMES[TOOL_FAILURE], "code": TOOL_FAILURE, "refusals": [], "failures": [message],
+            "reported": [], "counts": None}
+
+
+def lines_for(outcome):
+    lines = []
+    lines.extend(f"cargo-deny tool failure (not a finding): {failure}" for failure in outcome["failures"])
+    lines.extend(f"cargo-deny refusal: {refusal}" for refusal in outcome["refusals"])
+    lines.extend(f"reported: {item}" for item in outcome["reported"])
+    if outcome["counts"] is not None:
+        lines.append("counts: " + ", ".join(f"{key} {value}" for key, value in sorted(outcome["counts"].items())))
+    return lines
+
+
+def summarize(text):
+    target = os.environ.get("GITHUB_STEP_SUMMARY")
+    if target:
+        with open(target, "a") as output:
+            output.write(text)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("check", choices=CHECKS)
+    parser.add_argument("--changed-since", metavar="REV",
+                        help="skip, and pass, when no Cargo.toml or Cargo.lock changed between REV and HEAD")
+    args = parser.parse_args(argv)
+    heading = f"## cargo-deny {args.check}\n\n"
+    try:
+        root = repository_root()
+        if args.changed_since is not None and not touches_manifests(root, args.changed_since):
+            print(SKIPPED)
+            summarize(f"{heading}{SKIPPED}\n")
+            return PASS
+        if not (root / "deny.toml").is_file():
+            raise ToolFailure("there is no deny.toml at the repository root, and cargo-deny would fall back to its defaults")
+        lockfiles = tracked_lockfiles(root)
+        if not lockfiles:
+            raise ToolFailure("git tracks no Cargo.lock, so there is nothing to check")
+    except ToolFailure as failure:
+        message = f"cargo-deny tool failure (not a finding): {failure}"
+        print(message)
+        summarize(f"{heading}{message}\n")
+        return TOOL_FAILURE
+    worst, sections = PASS, [heading]
+    for lockfile in lockfiles:
+        outcome = run(root, args.check, lockfile)
+        worst = max(worst, outcome["code"])
+        lines = lines_for(outcome)
+        print(f"{lockfile}: {outcome['status']}")
+        for line in lines:
+            print(line)
+        sections.append(f"### `{lockfile}`: {outcome['status']}\n\n")
+        sections.extend("- " + line.replace("\n", "\n  ") + "\n" for line in lines)
+        sections.append("\n")
+    summarize("".join(sections))
+    return worst
+
+
+if __name__ == "__main__":
+    sys.exit(main())
