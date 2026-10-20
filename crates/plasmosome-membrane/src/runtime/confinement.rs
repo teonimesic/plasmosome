@@ -1,5 +1,9 @@
-/// The operations a helper's sandbox must deny before it counts as confined, in the order
+/// The operations a helper's sandbox must deny for `observe` to report it confined, in the order
 /// `observe` asks about them.
+///
+/// Each is asked with no filter argument, so a denial is the sandbox's answer for the operation in
+/// general. A policy can still allow it for some arguments: the qualified host policy allows
+/// outbound connections to Unix sockets and still answers `network-outbound` denied.
 pub const REQUIRED_DENIALS: [&str; 5] = [
     "process-fork",
     "network-outbound",
@@ -9,18 +13,23 @@ pub const REQUIRED_DENIALS: [&str; 5] = [
 ];
 
 /// What the supervisor saw of one process's Darwin sandbox, asked from outside that process.
+///
+/// Only `Confined` lets readiness go ahead. Treat both other values as a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confinement {
-    /// The process was confined in the properties `observe` checks.
+    /// The process was read running on both sides of the queries, the kernel reported it
+    /// sandboxed, and it reported every operation in `REQUIRED_DENIALS` denied.
     Confined(ConfinementEvidence),
-    /// The kernel answered, and the answers fall short of confinement.
+    /// The kernel answered every query, and the answers fall short: the process is not
+    /// sandboxed, or an operation in `REQUIRED_DENIALS` is not denied. A sandbox that allows
+    /// everything still reports itself sandboxed.
     Unconfined {
         /// Whether the kernel reported the process sandboxed.
         sandboxed: bool,
-        /// The operations of `REQUIRED_DENIALS` the kernel did not report denied.
+        /// The operations of `REQUIRED_DENIALS` the kernel did not report denied, in that order.
         allowed: Vec<&'static str>,
     },
-    /// The observation could not be made or trusted.
+    /// The observation could not be made, or its answers cannot be trusted.
     Unverifiable {
         /// Why.
         reason: Unverifiable,
@@ -30,27 +39,34 @@ pub enum Confinement {
 /// Why an observation could not be made or trusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unverifiable {
-    /// The supervisor itself is sandboxed.
+    /// This process is sandboxed itself, so its view of another process is not trusted.
     SupervisorSandboxed,
-    /// A sandbox query failed.
+    /// `sandbox_check` returned -1 instead of an answer.
     CheckFailed {
-        /// The operation asked about, or `None` for the sandboxed query.
+        /// The operation asked about, or `None` for a query of whether a process is sandboxed,
+        /// this one's or the observed one's.
         operation: Option<&'static str>,
-        /// The errno the query set.
+        /// The errno it set.
         errno: i32,
     },
-    /// The process could not be read as running before or after the sandbox queries.
+    /// `proc_pidinfo` could not read the process before or after the sandbox queries. The
+    /// kernel answers every sandbox query about an absent pid or a zombie as denied, so those
+    /// answers count only when the process is read running on both sides of them.
     ProcessUnreadable {
-        /// The errno the read set.
+        /// The errno it set: `ESRCH` for an absent pid or a zombie, `EPERM` for another user's
+        /// process.
         errno: i32,
     },
-    /// The pid named a different process after the sandbox queries than before them.
+    /// The process read after the sandbox queries started at a different time from the one read
+    /// before them, so the pid was reused while it was observed.
     ProcessReplaced,
-    /// This platform has no supervisor-side sandbox observation.
+    /// This platform has no supervisor-side sandbox observation. Every pid off Darwin gives
+    /// this.
     UnsupportedPlatform,
 }
 
-/// What a `Confined` observation found.
+/// What a `Confined` observation found. Only `observe` makes one. It does not name the installed
+/// policy; see `PolicyBinding`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfinementEvidence {
     pid: libc::pid_t,
@@ -64,31 +80,47 @@ impl ConfinementEvidence {
         self.pid
     }
 
-    /// The operations the kernel reported denied.
+    /// The operations the kernel reported denied: all of `REQUIRED_DENIALS`.
     pub fn denied(&self) -> &[&'static str] {
         &self.denied
     }
 
-    /// How the observation relates to the verified host policy.
+    /// How the observation relates to the verified host policy: always `PropertiesObserved`.
     pub fn binding(&self) -> PolicyBinding {
         self.binding
     }
 }
 
-/// How a confinement observation relates to the verified host policy.
+/// How a confinement observation relates to the verified host policy the helper applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyBinding {
-    /// Only properties of the installed sandbox were observed.
+    /// Only properties of the installed sandbox were observed. Darwin has no call that returns a
+    /// process's installed profile, so this does not show that the verified policy is the one
+    /// installed: a bare `(deny default)` profile is observed the same way. Spec 001 §4.2 asks
+    /// for evidence binding the verified policy to the process. This is less than that, and owner
+    /// gate O-3 on native task plasmosome-qep decides whether it is enough.
     PropertiesObserved,
 }
 
-/// Observes the Darwin sandbox of the process `pid` from this process.
+/// Observes, from this process, the Darwin sandbox of the running process `pid`.
+///
+/// Pass the pid of a process this process keeps from being reaped, such as the helper child it
+/// owns. `observe` asks `sandbox_check` whether this process is sandboxed, whether `pid` is, and
+/// whether each operation in `REQUIRED_DENIALS` is denied. It reads the start time of `pid` with
+/// `proc_pidinfo` before and after those queries. It changes nothing.
+///
+/// Only `Confined` lets readiness go ahead. It shows properties of the sandbox, not the policy:
+/// nothing about which profile is installed, about arguments a policy allows for a denied
+/// operation, about descriptors the process already holds, or about the images it loaded.
+/// `sandbox_check` is declared in no SDK header. If a later macOS makes it fail, the result is
+/// `Unverifiable`; the crate's macOS tests check the answers it gives today.
 #[cfg(target_os = "macos")]
 pub fn observe(pid: libc::pid_t) -> Confinement {
     judge(pid, &darwin::read(pid))
 }
 
-/// Observes the Darwin sandbox of the process `pid` from this process.
+/// Off Darwin there is no supervisor-side sandbox observation, so every `pid` gives
+/// `Unverifiable` with `UnsupportedPlatform`.
 #[cfg(not(target_os = "macos"))]
 pub fn observe(_pid: libc::pid_t) -> Confinement {
     Confinement::Unverifiable {

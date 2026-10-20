@@ -20,7 +20,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. Nothing here touches an artifact or launches a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. Nothing here touches an artifact or launches a cell yet |
 
 ## Use
 
@@ -63,6 +63,38 @@ verdict is refused.
 Shutdown reaches the probes. SIGINT or SIGTERM cancels the query in flight: the control
 conversation closes with no reply and no invented wire state, and teardown begins without waiting
 out the allowance.
+
+## Observing a helper's sandbox
+
+Spec 001 §4.2 asks the supervisor to check the helper's host confinement itself before readiness,
+not to take the helper's or the guest's word for it. On Darwin, `runtime::confinement::observe(pid)`
+asks the kernel through `sandbox_check`, from outside the helper. The helper must be sandboxed and
+must be denied `process-fork`, `network-outbound`, `network-inbound`, `network-bind` and
+`file-write-create`. Only then is the result `Confined`. A cell must not be reported ready on any
+other result, which includes a supervisor that is sandboxed itself and a query the kernel cannot
+answer. Off Darwin the result is always `UnsupportedPlatform`. Nothing calls it yet; the cell
+composition in native task `plasmosome-7em` will.
+
+What it shows is less than the spec asks for, and its evidence says so with
+`PolicyBinding::PropertiesObserved`:
+
+- It does not identify the installed policy. A bare `(deny default)` profile passes just as the
+  verified host policy does. Owner gate O-3 on native task `plasmosome-qep` decides whether this is
+  the evidence Darwin can give.
+- Each operation is asked with no filter argument, so a denial is the answer for the operation in
+  general. The qualified host policy allows outbound connections to Unix sockets and still answers
+  `network-outbound` denied.
+- It says nothing about descriptors the helper already holds, or about the images it loaded (owner
+  gate O-5).
+- A dead process answers denied to every query. Measured on macOS 26.6.2, a reaped pid, or a
+  zombie that had no sandbox, answers the queries `observe` makes just as a confined process does.
+  So `observe` reads the pid's start time with `proc_pidinfo` before and after the queries, and is
+  unverifiable unless it finds the same process running both times.
+
+`sandbox_check` is declared in no SDK header, and spec 001 notes that `sandbox_init` is deprecated
+and not a supported portable API. If a later macOS makes `sandbox_check` fail, the observation is
+unverifiable. If it changes the answers instead, the macOS tests here fail: they expect the
+qualified policy confined, allow-default unconfined and a dead pid unverifiable.
 
 ## Dropping a handle cleans up its managed group
 
