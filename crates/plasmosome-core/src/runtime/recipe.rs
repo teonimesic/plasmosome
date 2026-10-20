@@ -406,7 +406,7 @@ impl RuntimeRecipe {
     /// order. A recipe nested in a larger record is read this way. `value`
     /// must come from [`strict_json::parse_value`](super::strict_json::parse_value): a value read any other way
     /// may have dropped a repeated key, which this cannot see.
-    pub fn from_value(
+    pub(crate) fn from_value(
         value: &Value,
         limits: &PlatformLimits,
     ) -> Result<RuntimeRecipe, RecipeRefusal> {
