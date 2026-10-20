@@ -170,24 +170,27 @@ fn the_transcript_is_compared_exactly_and_is_not_run_without_one() {
         subject: Subject::Transcript,
         reason,
     };
-    let mut runs = runs();
-    let cell = runs[1].transcript.as_mut().expect("a transcript");
-    cell.insert("exit_statuses".to_string(), json!([1]));
-    runs[3].transcript = None;
     let field = || "exit_statuses".to_string();
-    assert_eq!(
-        verdict(&manifest(), &runs),
-        Verdict::NotRun {
-            not_run: vec![transcript(Reason::NotRun { lane: Lane::Open })],
-            failures: vec![
-                transcript(Reason::Noise {
-                    lane: Lane::Cell,
-                    field: field()
-                }),
-                transcript(Reason::Differs { field: field() }),
-            ],
-        }
-    );
+    for missing in [2, 3] {
+        let mut runs = runs();
+        let cell = runs[1].transcript.as_mut().expect("a transcript");
+        cell.insert(field(), json!([1]));
+        runs[missing].transcript = None;
+        assert_eq!(
+            verdict(&manifest(), &runs),
+            Verdict::NotRun {
+                not_run: vec![transcript(Reason::NotRun { lane: Lane::Open })],
+                failures: vec![
+                    transcript(Reason::Noise {
+                        lane: Lane::Cell,
+                        field: field()
+                    }),
+                    transcript(Reason::Differs { field: field() }),
+                ],
+            },
+            "open run {missing} has no transcript"
+        );
+    }
 }
 
 #[test]
