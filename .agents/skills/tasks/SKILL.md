@@ -144,9 +144,12 @@ admission ceases to hold.
 
 Set a unique actor for this executor session, not a shared Git username. For implementation,
 even when dispatched directly by ID, read `show ID`, check its `planned` label and governing
-main documents, and inspect its native prerequisites with `show ID` and `blocked`. Native ready
-filters dependency blockers; native claim does not check dependency edges. Claim only eligible
-implementation work before creating its code worktree or executing it:
+main documents, and inspect its native prerequisites with `show ID` and `blocked`. An outside
+PR's task ([spec030](../../../docs/specs/030-outside-contributions.md) §2) is the one exception
+to the `planned` check: it is filed with no label, and spec016 lets its steward take
+`in_progress` without `planned` while it writes code. Native ready filters dependency blockers;
+native claim does not check dependency edges. Claim only eligible implementation work before
+creating its code worktree or executing it:
 
 ```shell
 export BEADS_ACTOR='agent-name-unique-session-id'
