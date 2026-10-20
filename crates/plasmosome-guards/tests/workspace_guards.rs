@@ -6,6 +6,8 @@ use plasmosome_guards::check_workspace;
 
 const TESTKIT: &str = "plasmosome-testkit";
 
+const LANES: &str = "plasmosome-lanes";
+
 const HELD_NAMES: &[&str] = &["plasmosome", "plasmid"];
 
 const HELD_REGISTRIES: &[&str] = &["crates-io"];
@@ -273,6 +275,30 @@ fn a_binary_taking_another_packages_name_is_still_reported() {
     );
 }
 
+fn shipping_graph(root: &Path, member: &str) -> String {
+    let output = cargo_in(root)
+        .args([
+            "tree",
+            "--locked",
+            "-p",
+            member,
+            "--edges",
+            "normal,build",
+            "--prefix",
+            "none",
+            "--target",
+            "all",
+        ])
+        .output()
+        .expect("cargo tree runs");
+    assert!(
+        output.status.success(),
+        "cargo tree -p {member} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 #[test]
 fn testkit_is_dev_only() {
     check_workspace(|root| {
@@ -280,30 +306,33 @@ fn testkit_is_dev_only() {
             if member == TESTKIT {
                 continue;
             }
-            let output = cargo_in(root)
-                .args([
-                    "tree",
-                    "--locked",
-                    "-p",
-                    &member,
-                    "--edges",
-                    "normal,build",
-                    "--prefix",
-                    "none",
-                    "--target",
-                    "all",
-                ])
-                .output()
-                .expect("cargo tree runs");
-            assert!(
-                output.status.success(),
-                "cargo tree -p {member} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let graph = String::from_utf8_lossy(&output.stdout);
+            let graph = shipping_graph(root, &member);
             assert!(
                 !graph.lines().any(|line| line.starts_with(TESTKIT)),
                 "`{member}` has a non-dev dependency path to `{TESTKIT}`; the testkit is test support and reaches a kernel crate only through `[dev-dependencies]`, or it ships"
+            );
+        }
+    });
+}
+
+#[test]
+fn lanes_are_dev_only() {
+    check_workspace(|root| {
+        let members = workspace_members(root);
+        assert!(
+            members.iter().any(|member| member == LANES),
+            "`{LANES}` is no longer a workspace member, so this guard checks nothing: {members:?}"
+        );
+        for member in members {
+            if member == LANES {
+                continue;
+            }
+            let graph = shipping_graph(root, &member);
+            assert!(
+                !graph
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{LANES} "))),
+                "`{member}` has a non-dev dependency path to `{LANES}`. The lanes are a test fixture that loads libkrun and boots a guest, so their code would ship inside a product binary (spec 013). Reach them only through `[dev-dependencies]`."
             );
         }
     });
