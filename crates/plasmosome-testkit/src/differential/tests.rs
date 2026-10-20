@@ -1,8 +1,13 @@
+mod comparison;
 mod manifest;
+mod runs;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
-use super::{Manifest, ManifestRefusal, load};
+use super::{
+    Finding, Lane, Manifest, ManifestRefusal, Observation, Reason, Run, Subject, Verdict, judge,
+    load,
+};
 
 const REACH: [(&str, &str, &str); 9] = [
     ("refusal-host-1", "refusal", "host"),
@@ -74,4 +79,111 @@ fn load_value(value: &Value) -> Result<Manifest, ManifestRefusal> {
 
 fn manifest() -> Manifest {
     load_value(&manifest_json()).expect("the fixture manifest loads")
+}
+
+fn ids() -> impl Iterator<Item = &'static str> {
+    REACH
+        .iter()
+        .map(|(id, _, _)| *id)
+        .chain(PLAIN.iter().map(|(id, _)| *id))
+}
+
+fn object(value: Value) -> Map<String, Value> {
+    value.as_object().expect("an object").clone()
+}
+
+fn fields(lane: Lane, probe: &str) -> Map<String, Value> {
+    object(match probe {
+        "hint-mounts" => json!({
+            "/opt": {"source": "none", "fstype": "virtiofs", "options": "ro"},
+            "/usr/local/bin": {"source": "none", "fstype": "virtiofs", "options": "ro"},
+            "/workspace": {"source": "workspace", "fstype": "fuse", "options": "rw", "subtype": "passthrough"}
+        }),
+        "hint-cgroup" => json!({"path": "/workload"}),
+        "hint-env" => json!({"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/home/workload"}),
+        "hint-processes" => json!({"pids": [1, 100, 200], "leader": 200}),
+        "hint-self" => json!({"pid": 200}),
+        "op-inodes" => json!({"distinct": [1000, 2000], "linked": [3000, 3000]}),
+        "op-times" => json!({"times": [10_000, 20_000]}),
+        "op-utimensat" => json!({
+            "mtime": 1_234_567_890,
+            "ctime": 30_000,
+            "mode": if lane == Lane::Cell { "0600" } else { "0644" }
+        }),
+        _ if lane == Lane::Open => json!({"outcome": "reached"}),
+        _ => json!({"outcome": "name does not resolve"}),
+    })
+}
+
+fn lane_run(lane: Lane, run: u64) -> Run {
+    Run {
+        lane,
+        boot_id: format!("{lane:?}-{run}"),
+        observations: ids()
+            .map(|id| Observation {
+                probe: id.to_string(),
+                completed: true,
+                failed_before_step: false,
+                fields: fields(lane, id),
+            })
+            .collect(),
+        transcript: Some(object(json!({
+            "tool_calls": [{"tool": "bash", "input": "ls /opt"}],
+            "exit_statuses": [0],
+            "files_left_behind": ["/workspace/notes.txt"]
+        }))),
+    }
+}
+
+fn runs() -> Vec<Run> {
+    Lane::ALL
+        .into_iter()
+        .flat_map(|lane| [lane_run(lane, 0), lane_run(lane, 1)])
+        .collect()
+}
+
+fn observation<'a>(
+    runs: &'a mut [Run],
+    lane: Lane,
+    run: usize,
+    probe: &str,
+) -> &'a mut Observation {
+    runs[2 * lane as usize + run]
+        .observations
+        .iter_mut()
+        .find(|candidate| candidate.probe == probe)
+        .expect("the run observed that probe")
+}
+
+fn set(runs: &mut [Run], lane: Lane, probe: &str, field: &str, value: Value) {
+    for run in 0..2 {
+        observation(runs, lane, run, probe)
+            .fields
+            .insert(field.to_string(), value.clone());
+    }
+}
+
+fn verdict(manifest: &Manifest, runs: &[Run]) -> Verdict {
+    judge(manifest, runs).expect("the runs can be judged")
+}
+
+fn finding(probe: &str, reason: Reason) -> Finding {
+    Finding {
+        subject: Subject::Probe(probe.to_string()),
+        reason,
+    }
+}
+
+fn differs(probe: &str, field: &str) -> Finding {
+    finding(
+        probe,
+        Reason::Differs {
+            field: field.to_string(),
+        },
+    )
+}
+
+#[test]
+fn runs_equal_but_for_the_allowed_mode_and_the_open_lanes_reach_pass() {
+    assert_eq!(verdict(&manifest(), &runs()), Verdict::Pass);
 }
