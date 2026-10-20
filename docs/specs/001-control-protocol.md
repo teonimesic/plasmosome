@@ -258,38 +258,37 @@ and failure rules as internal observations. A supported client presents only the
 logical account, never pages or a prefix as a complete recovery diagnostic.
 
 The assembled logical result is `{name, ledger_generation, desired, tombstones, observed_cells,
-expected, drift, unmatched, incomplete, pending, quarantined,
-set_aside}`. `set_aside` is the required array of the cells spec 023's supervisor check set aside,
-in byte order of the cell ID string (so `cell-10` sorts before `cell-9`), and `[]` when there is
-none. Each entry is `{cell, reason, lock, marker, desired, pending}`. `reason` is one of
-`unresponsive`, `germinating`, `external_obligations`, `supervisor_lost`,
-`holdings_without_supervisor`, `retire_unlogged` and `retire_failed`. `lock` is `held` or `free`.
-`marker` is required whatever the lock, since the check reads `launched` for every cell before it
-acts: `absent`, `earlier_boot`, `this_boot_stopped`, `this_boot` or `unreadable`, for no marker, one
-from an earlier boot, one from this boot that records a clean stop, one from this boot that records
-none, or one that cannot be read. `desired` is the cell's settled DesiredCell from its journal, in
-this section's projection, so each attachment shows its spec 028 `lifetime`; an empty journal gives
-the empty generation-0 record. `pending` is the cell's pending transaction in this section's
-projection, omitted when it has none. Both are omitted when the cell's journal is corrupt, which
-happens only when the lock is held, since a free lock with a corrupt journal quarantines; spec 008
-then reports that journal under `quarantined`. A cell appears in `set_aside` once. A set-aside
-cell's records appear only in its entry, apart from a corrupt journal's report under `quarantined`,
-and never in the top-level `desired`, `observed_cells`, `pending`, `expected`, `drift`, `unmatched`,
-`incomplete` or `tombstones`. Its tombstones stay in its journal and are not reported until it is
-adopted. `set_aside` belongs to the outcome, like every other key: it names the cells set aside when
-that outcome completed. A supervisor check while serving that sets a cell aside, changes its entry,
-quarantines a cell, or adopts or retires a set-aside cell, completes a new outcome in which only
-that cell's records change and `ledger_generation` is recomputed over the adopted cells. So a new
-capture shows the current list, and a capture already pinned keeps its outcome. `set_aside` is not
-added to §4.1's stderr diagnostic, since a set-aside cell never refuses startup; the quarantine
-reports in that diagnostic carry `lock` and `marker` when spec 023's check quarantined their cell
-(spec 008). `incomplete` is the required
-`[IncompleteEffect, ...]`, preserving every complete operation and its original cell/plugin owner;
-it is not coerced into drift, unmatched or an OsObject. `desired`, exact objects, pending transactions and quarantine
-reports use spec008's typed records with this wire projection: absent genome/cell/line,
-operation and force fields are omitted; a journal change whose replacement is null becomes
-`{plugin, remove: true}`, while a replacement change is `{plugin, replacement: ...}`.
-These are response encodings, not changes to the required nullable journal fields.
+expected, drift, unmatched, incomplete, pending, quarantined, set_aside}`. `set_aside` is the
+required array of the cells spec 023's supervisor check set aside, in byte order of the cell ID
+string (so `cell-10` sorts before `cell-9`), and `[]` when there is none. Each entry is `{cell,
+reason, lock, marker, desired, pending}`. `reason` is one of `unresponsive`, `germinating`,
+`external_obligations`, `supervisor_lost`, `holdings_without_supervisor`, `retire_unlogged` and
+`retire_failed`. `lock` is `held` or `free`. `marker` is required whatever the lock, since the check
+reads `launched` for every cell before it acts: `absent`, `earlier_boot`, `this_boot_stopped`,
+`this_boot` or `unreadable`, for no marker, one from an earlier boot, one from this boot that
+records a clean stop, one from this boot that records none, or one that cannot be read. `desired` is
+the cell's settled DesiredCell from its journal, in this section's projection, so each attachment
+shows its spec 028 `lifetime`; an empty journal gives the empty generation-0 record. `pending` is
+the cell's pending transaction in this section's projection, omitted when it has none. Both are
+omitted when the cell's journal is corrupt, which happens only when the lock is held, since a free
+lock with a corrupt journal quarantines; spec 008 then reports that journal under `quarantined`. A
+cell appears in `set_aside` once. A set-aside cell's records appear only in its entry, apart from a
+corrupt journal's report under `quarantined`, and never in the top-level `desired`,
+`observed_cells`, `pending`, `expected`, `drift`, `unmatched`, `incomplete` or `tombstones`. Its
+tombstones stay in its journal and are not reported until it is adopted. `set_aside` belongs to the
+outcome, like every other key: it names the cells set aside when that outcome completed. A
+supervisor check while serving that sets a cell aside, changes its entry, quarantines a cell, or
+adopts or retires a set-aside cell, completes a new outcome in which only that cell's records change
+and `ledger_generation` is recomputed over the adopted cells. So a new capture shows the current
+list, and a capture already pinned keeps its outcome. `set_aside` is not added to §4.1's stderr
+diagnostic, since a set-aside cell never refuses startup; the quarantine reports in that diagnostic
+carry `lock` and `marker` when spec 023's check quarantined their cell (spec 008). `incomplete` is
+the required `[IncompleteEffect, ...]`, preserving every complete operation and its original
+cell/plugin owner; it is not coerced into drift, unmatched or an OsObject. `desired`, exact objects,
+pending transactions and quarantine reports use spec008's typed records with this wire projection:
+absent genome/cell/line, operation and force fields are omitted; a journal change whose replacement
+is null becomes `{plugin, remove: true}`, while a replacement change is `{plugin, replacement:
+...}`. These are response encodings, not changes to the required nullable journal fields.
 `drift` retains `Diff { added, removed }`: added objects were observed but not desired; removed
 objects were desired but absent. IDs, complete capabilities and cell/plugin owners are
 preserved. This is not a canonical-equivalence comparison. Empty collections are `[]` or their
@@ -688,8 +687,8 @@ no-follow device-and-inode identity. The subset this spec covers:
   helper_killed}` with residue it observed itself after teardown, and `residue_items` exactly when
   `residue` is `items`. `helper_killed` is a required boolean, true when it killed the helper's
   process group because the helper still ran at the deadline. After a clean teardown it removes its
-  launch marker, removes its own socket and exits; otherwise it keeps
-  running with its lock and marker (spec 023).
+  launch marker, removes its own socket and exits; otherwise it keeps running with its lock and
+  marker (spec 023).
 - `membrane.cell.exec`, `membrane.exec.status`, `membrane.exec.output` and `membrane.workload.stop`
   relay to the 4090 `exec`, `exec_status`, `exec_output` and `workload_stop` verbs on the original
   association's normal lane (spec 024).
@@ -1081,10 +1080,9 @@ the responder. ControlLane is exactly `normal | withdrawal`. Normal admits the t
 withdrawal admits only hello, observe and remove. No install, activate, drain, shutdown, exec,
 exec_status, exec_output or workload_stop may enter the withdrawal lane. Each lane has its own
 bounded dispatcher and request IDs; several normal requests may be outstanding at once; spec 024
-says which wait for an outstanding mutation, and none blocks
-withdrawal dispatch. A wait in normal drain must
-not hold a lock or executor needed by withdrawal. Readiness requires both hellos, the data
-association, the workload namespaces and the workload control group; no workload process exists
+says which wait for an outstanding mutation, and none blocks withdrawal dispatch. A wait in normal
+drain must not hold a lock or executor needed by withdrawal. Readiness requires both hellos, the
+data association, the workload namespaces and the workload control group; no workload process exists
 before readiness. On4091 the shim is sole caller and the host the responder,
 within that same verified original VMM association. No stream uses notifications or accepts
 opposite-direction requests. Bounded data requests may overlap with distinct IDs. Actual loss
@@ -1163,10 +1161,10 @@ healthy stream merely because this observation timed out. The outstanding drain 
 request ID until its eventual reply is discarded; later normal-lane mutations wait for that
 request to settle or return a bounded refusal without effects. `exec_status` and `exec_output` are
 not mutations; they and `workload_stop` never wait for one, and `exec` waits within its deadline and
-then refuses as busy (spec 024). Later normal-lane mutations do not block Force's
-independent host transition or the withdrawal lane. Actual stream loss is the
-separate incomplete transition above, not an unproved remote-restoration result relabelled as
-a timeout. This preserves spec017 A4 and spec008 R7 rather than weakening their pure-timeout rule.
+then refuses as busy (spec 024). Later normal-lane mutations do not block Force's independent host
+transition or the withdrawal lane. Actual stream loss is the separate incomplete transition above,
+not an unproved remote-restoration result relabelled as a timeout. This preserves spec017 A4 and
+spec008 R7 rather than weakening their pure-timeout rule.
 
 Only while the deadline is still live and both drains have completed may the host irreversibly
 close that selected grant's gate and send remove with force:false. This begins destructive
@@ -1456,9 +1454,9 @@ not libkrun/HVF compatibility or whole-cell isolation.
 - `cell.clone` / `cell.save` / `cell.load` / `freeze` (D1c tiers 2–3), genome
   `new/show/lint/test/export` details beyond D1's one-line definitions, and exec output streaming.
 - Remaining VMM/shim and broker lifecycle verbs beyond §4.2's selected launch, observation, data and
-  shutdown contract and spec 024's exec and workload verbs. Their concrete
-  implementation remains required; the selected
-  runtime and bounded bridge schemas are no longer undecided substitutes for an actual cell.
+  shutdown contract and spec 024's exec and workload verbs. Their concrete implementation remains
+  required; the selected runtime and bounded bridge schemas are no longer undecided substitutes for
+  an actual cell.
 - Multi-instance brokers, remote orchestration, multi-tenancy — out of scope per 90.
 
 ## 6. How much of this is delivered

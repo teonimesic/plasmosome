@@ -64,12 +64,12 @@ Private supervisor sockets additionally require spec001 §4.1's owner/mode, kern
 workload-confinement boundary. A trusted path or writer lock alone does not authorize an RPC.
 
 There is one controller writer per instance. Startup opens `<root>/controller.lock` without
-following a symlink and takes a nonblocking exclusive `flock(2)` lock on a
-close-on-exec descriptor before discovery; contention
-refuses startup. The lock is held through serving and recovery, released by process death, and
-its file is not unlinked. This is cooperative local writer exclusion, not authentication or a
-cross-host lock. All journal mutation runs under it and is serialized per cell. No later
-transaction on a cell starts until the preceding transaction finishes or the cell is blocked.
+following a symlink and takes a nonblocking exclusive `flock(2)` lock on a close-on-exec descriptor
+before discovery; contention refuses startup. The lock is held through serving and recovery,
+released by process death, and its file is not unlinked. This is cooperative local writer exclusion,
+not authentication or a cross-host lock. All journal mutation runs under it and is serialized per
+cell. No later transaction on a cell starts until the preceding transaction finishes or the cell is
+blocked.
 
 After opening the trusted root directory, discovery and journal IO use directory-relative,
 no-follow opens. `cells`, cell directories and journal files must not be symlinks; journals must
