@@ -297,8 +297,8 @@ mod tests {
     fn each_array_inline_table_and_key_dot_counts_a_level() {
         at_and_past("x = [[[[1]]]]", "x = [[[[[1]]]]]");
         at_and_past(
-            "x = { a = { b = { c = 1 } } }",
             "x = { a = { b = { c = { d = 1 } } } }",
+            "x = { a = { b = { c = { d = { e = 1 } } } } }",
         );
         at_and_past("a.b.c.d.e = 1", "a.b.c.d.e.f = 1");
         at_and_past("x.y = { a.b = [1] }", "x.y = { a.b = [[1]] }");
