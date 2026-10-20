@@ -362,10 +362,7 @@ impl Walk<'_> {
     fn directory(&mut self, at: &Path, prefix: &str) -> Result<(), PinRefusal> {
         let name = if prefix.is_empty() { "." } else { prefix };
         let unreadable = || PinRefusal::Unreadable { path: name.into() };
-        let checked = open_without_links(at, name)?;
-        if !checked.metadata().is_ok_and(|metadata| metadata.is_dir()) {
-            return Err(unreadable());
-        }
+        open_without_links(at, name)?;
         let mut entries = fs::read_dir(at)
             .map_err(|_| unreadable())?
             .map(|entry| entry.map_err(|_| unreadable()))
