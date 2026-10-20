@@ -13,17 +13,19 @@ require an explicit force to discard, which the record then notes.
 
 Ledger log records use format 3 and retain every exact grant identity in backend handles and
 universe inverses. Every capability in a record carries its complete recipe, and a broker carries
-its launch, never a process ID. `open_file` and `append_to_file` read a complete line's `format`
-before the rest of it, whether or not the line ends with LF. Any whole number but 3, up to
-2^64 - 1 and 256 included, is refused on that line with `unsupported ledger format {n}; expected 3`,
-so a complete old line is reported as old, not as a missing recipe or an unknown `pid`. A torn
-final fragment cannot be read that way and takes the full decode instead: it is dropped as torn if
-it ends before that decode meets a field it refuses, and refused naming that field if not. A
-one-element array such as `[2]` is read the same way, and gets the format message although it is
-not an object. Any other `format` value is refused as malformed. Encoding refuses any
-number but 3, and so does decoding a `LogRecord` through serde, after the rest of the record has
-decoded. Every ledger record, the outbox, policy and detach report included, refuses a field it
-does not name. Opening a log refuses unversioned, older, unsupported, or malformed complete records
+its launch, never a process ID. `open_file` and `append_to_file` first read `format` from each
+line that holds one complete JSON value. `open_file` does so with or without a final LF;
+`append_to_file` refuses a nonempty target without one before it reads any line. Any whole number
+but 3, up to 2^64 - 1 and 256 included, is refused on that line with
+`unsupported ledger format {n}; expected 3`, so a complete old line is reported as old, not as a
+missing recipe or an unknown `pid`. Every other line takes the full decode: a torn final fragment
+is dropped as torn if it ends before that decode refuses anything, and is refused with that
+decode's error if not. A one-element array such as `[2]` is read the same way, and gets the format
+message although it is not an object. Any other `format` value is refused as malformed. Encoding
+refuses any number but 3, and so does decoding a `LogRecord` through serde, after the rest of the
+record has decoded. Every ledger record, the outbox, policy and detach report included, refuses a
+field it does not name.
+Opening a log refuses unversioned, older, unsupported, or malformed complete records
 instead of guessing which holding an old lossy inverse meant, or which recipe an old capability
 had. Only an incomplete final JSON fragment without a newline is treated as a torn write.
 A split UTF-8 character may be discarded with that incomplete final record; other invalid UTF-8
