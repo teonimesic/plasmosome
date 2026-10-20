@@ -89,10 +89,17 @@ fn help_shows_a_config_the_daemon_accepts_and_says_it_recovers_no_cells() {
     if let Err(error) = plasmosome_core::parse_config(example) {
         panic!("the config help shows is one plasmosomed accepts, got {error}: {example}");
     }
-    assert!(
-        help.contains("this build does not recover cells yet"),
-        "help says the recovery keys are validated but not used: {help}"
-    );
+    let prose = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    for claim in [
+        "instance_root, recovery_deadline_ms and an optional absolute registry_root are checked \
+         for shape only",
+        "this build does not open the roots, read registry_root or recover cells yet",
+    ] {
+        assert!(
+            prose.contains(claim),
+            "help claims no more than this build does, and says {claim:?}: {help}"
+        );
+    }
 }
 
 #[test]
