@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use super as conformance;
+use crate::builders::{broker, mount, proxy_map, session_file, uds_socket};
 use plasmosome_backend::{
     BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, Grant, GrantId,
     GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass,
@@ -655,24 +656,11 @@ fn remove_planted(
 
 fn substituted_capability(capability: &Capability) -> Capability {
     match capability {
-        Capability::SessionFile { .. } => Capability::SessionFile {
-            path: "/substituted-session".to_string(),
-        },
-        Capability::UdsSocket { .. } => Capability::UdsSocket {
-            path: "/substituted.uds".to_string(),
-        },
-        Capability::ProxyMap { host, .. } => Capability::ProxyMap {
-            host: host.clone(),
-            route: "substituted-route".to_string(),
-        },
-        Capability::Broker { pid, .. } => Capability::Broker {
-            pid: *pid,
-            name: "substituted-broker".to_string(),
-        },
-        Capability::Mount { target, .. } => Capability::Mount {
-            source: "/substituted".to_string(),
-            target: target.clone(),
-        },
+        Capability::SessionFile { .. } => session_file("/substituted-session"),
+        Capability::UdsSocket { .. } => uds_socket("/substituted.uds"),
+        Capability::ProxyMap { host, .. } => proxy_map(host, "substituted-route"),
+        Capability::Broker { pid, .. } => broker(*pid, "substituted-broker"),
+        Capability::Mount { target, .. } => mount("/substituted", target),
     }
 }
 
@@ -680,32 +668,17 @@ fn shadow_of(entry: &LedgerEntry) -> OsObject {
     OsObject {
         id: GrantId::new(),
         owner: entry.owner.clone(),
-        capability: Capability::SessionFile {
-            path: format!("/shadow/{}", entry.handle.id),
-        },
+        capability: session_file(&format!("/shadow/{}", entry.handle.id)),
     }
 }
 
 fn a_stranger(handle: Handle) -> LedgerEntry {
     let capability = match handle.class {
-        UniverseClass::SessionFile => Capability::SessionFile {
-            path: "/stranger.md".to_string(),
-        },
-        UniverseClass::UdsPath => Capability::UdsSocket {
-            path: "/stranger.uds".to_string(),
-        },
-        UniverseClass::ProxyMap => Capability::ProxyMap {
-            host: "stranger.test".to_string(),
-            route: "stranger".to_string(),
-        },
-        UniverseClass::BrokerPid => Capability::Broker {
-            pid: 999,
-            name: "stranger".to_string(),
-        },
-        UniverseClass::Mount => Capability::Mount {
-            source: "/stranger".to_string(),
-            target: "/stranger".to_string(),
-        },
+        UniverseClass::SessionFile => session_file("/stranger.md"),
+        UniverseClass::UdsPath => uds_socket("/stranger.uds"),
+        UniverseClass::ProxyMap => proxy_map("stranger.test", "stranger"),
+        UniverseClass::BrokerPid => broker(999, "stranger"),
+        UniverseClass::Mount => mount("/stranger", "/stranger"),
     };
     LedgerEntry {
         handle,
@@ -1153,10 +1126,7 @@ fn revoke_after_one_removal(
     let mut backend = DefectiveBackend::carrying(defect);
     let entry = backend.grant(Grant {
         owner: conformance::conformance_owner(),
-        capability: Capability::Broker {
-            pid: 7,
-            name: "egressd".to_string(),
-        },
+        capability: broker(7, "egressd"),
         kind: GrantKind::Hot,
     });
     backend
