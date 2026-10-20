@@ -303,7 +303,7 @@ def a_successful_step_whose_output_is_not_in_the_log_is_refused():
     """Case 9. Catches a tee path the report does not read."""
     missing = report(None)
     assert missing.code == 1, missing
-    assert "cargo-test.log" in missing.stderr, missing
+    assert "cargo-test.log does not exist" in missing.stderr, missing
 
     no_running = report(["   Compiling plasmosome-core v0.1.0 (/w/crates/core)",
                          "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s"])
