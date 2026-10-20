@@ -301,7 +301,10 @@ fn null_object(keys: &[String]) -> Json {
 }
 
 fn two_fields(detail: Json) -> Vec<(String, Json)> {
-    vec![("first".to_string(), Json::Null), ("detail".to_string(), detail)]
+    vec![
+        ("first".to_string(), Json::Null),
+        ("detail".to_string(), detail),
+    ]
 }
 
 #[test]
