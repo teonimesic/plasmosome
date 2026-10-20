@@ -19,7 +19,14 @@ pub enum Exit {
 impl Exit {
     /// Returns the process exit code.
     pub fn code(self) -> u8 {
-        todo!()
+        match self {
+            Exit::Done => 0,
+            Exit::Unavailable => 1,
+            Exit::Refused => 2,
+            Exit::OutcomeUnknown => 3,
+            Exit::Usage => 64,
+            Exit::Internal => 70,
+        }
     }
 }
 
@@ -71,11 +78,48 @@ impl ClientCode {
 
     /// Returns the code as the error object's `code` string.
     pub fn as_str(self) -> &'static str {
-        todo!()
+        match self {
+            ClientCode::InvalidArgument => "invalid_argument",
+            ClientCode::NotServed => "not_served",
+            ClientCode::InvalidHome => "invalid_home",
+            ClientCode::NoInstance => "no_instance",
+            ClientCode::NotRunning => "not_running",
+            ClientCode::Unreachable => "unreachable",
+            ClientCode::Deadline => "deadline",
+            ClientCode::Transport => "transport",
+            ClientCode::LocalIo => "local_io",
+            ClientCode::NoReply => "no_reply",
+            ClientCode::OutcomeUnknown => "outcome_unknown",
+            ClientCode::AmbiguousInstance => "ambiguous_instance",
+            ClientCode::UnsafeSocket => "unsafe_socket",
+            ClientCode::PeerMismatch => "peer_mismatch",
+            ClientCode::SocketPathTooLong => "socket_path_too_long",
+            ClientCode::ReplyTooLarge => "reply_too_large",
+            ClientCode::BadReply => "bad_reply",
+            ClientCode::Internal => "internal",
+        }
     }
 
     /// Returns the exit status the command ends with when it refuses with this code.
     pub fn exit(self) -> Exit {
-        todo!()
+        match self {
+            ClientCode::InvalidArgument => Exit::Usage,
+            ClientCode::NoInstance
+            | ClientCode::NotRunning
+            | ClientCode::Unreachable
+            | ClientCode::Deadline
+            | ClientCode::Transport
+            | ClientCode::LocalIo
+            | ClientCode::NoReply => Exit::Unavailable,
+            ClientCode::OutcomeUnknown => Exit::OutcomeUnknown,
+            ClientCode::NotServed
+            | ClientCode::InvalidHome
+            | ClientCode::AmbiguousInstance
+            | ClientCode::UnsafeSocket
+            | ClientCode::PeerMismatch
+            | ClientCode::SocketPathTooLong
+            | ClientCode::ReplyTooLarge => Exit::Refused,
+            ClientCode::BadReply | ClientCode::Internal => Exit::Internal,
+        }
     }
 }
