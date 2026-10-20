@@ -3,6 +3,8 @@ use std::fmt;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
+use crate::bundle::{LIBKRUN, VerifiedBundle};
+
 /// The command line spec 001 §4.2 fixes for the guest kernel.
 pub const CMDLINE: &str = "rdinit=/init panic=-1";
 
@@ -115,7 +117,10 @@ fn checked(call: &str, rc: i32) -> Result<(), KrunError> {
 impl Libkrun {
     /// Load the libkrun at the absolute `path` and resolve every function `lane-vmm` calls.
     /// The library's initializers run here, so verify its bytes first.
-    pub fn open(path: &Path) -> Result<Libkrun, KrunError> {
+    pub fn open(bundle: &VerifiedBundle) -> Result<Libkrun, KrunError> {
+        let path = &bundle
+            .path(LIBKRUN)
+            .ok_or_else(|| KrunError(format!("{LIBKRUN} is not listed")))?;
         let c_name = c_path("the libkrun path", path)?;
         // SAFETY: `c_name` is a NUL-terminated absolute path. Loading runs the library's
         // initializers; the caller verified the file against the bundle's SHA256SUMS first.

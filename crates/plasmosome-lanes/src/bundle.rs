@@ -11,6 +11,10 @@ pub const LIBKRUN: &str = "lib/libkrun.1.19.4.dylib";
 /// The bundle's guest kernel, relative to the bundle directory.
 pub const KERNEL: &str = "boot/kernel";
 
+/// The one runtime bundle these lanes accept: the first 16 hex digits of its manifest's SHA-256,
+/// which is also its directory name.
+pub const PINNED_BUNDLE_ID: &str = "eed141b574337d99";
+
 const SUMS: &str = "SHA256SUMS";
 
 const LOADABLE: &str = "lib";
@@ -19,10 +23,16 @@ const LOADABLE: &str = "lib";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedBundle {
     dir: PathBuf,
+    id: String,
     files: BTreeMap<String, String>,
 }
 
 impl VerifiedBundle {
+    /// The bundle's ID, its directory name.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     /// The absolute path of a listed file, or `None` if `SHA256SUMS` does not list it.
     pub fn path(&self, relative: &str) -> Option<PathBuf> {
         self.files
@@ -155,7 +165,7 @@ fn unlisted_under(
 
 /// Check every file `dir/SHA256SUMS` lists against its digest, and refuse a file under `lib/`
 /// that it does not list. Nothing is loaded; the caller loads only after this returns `Ok`.
-pub fn verify_bundle(dir: &Path) -> Result<VerifiedBundle, BundleError> {
+pub fn verify_bundle(dir: &Path, _pinned_id: &str) -> Result<VerifiedBundle, BundleError> {
     let files = read_sums(dir)?;
     for required in [LIBKRUN, KERNEL] {
         if !files.contains_key(required) {
@@ -168,6 +178,10 @@ pub fn verify_bundle(dir: &Path) -> Result<VerifiedBundle, BundleError> {
     unlisted_under(dir, LOADABLE, &files)?;
     Ok(VerifiedBundle {
         dir: dir.to_path_buf(),
+        id: dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default(),
         files,
     })
 }

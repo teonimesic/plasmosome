@@ -22,7 +22,9 @@ mod macos {
     use std::convert::Infallible;
     use std::io::Read;
 
-    use plasmosome_lanes::bundle::{KERNEL, LIBKRUN, unverified_images, verify_bundle};
+    use plasmosome_lanes::bundle::{
+        KERNEL, LIBKRUN, PINNED_BUNDLE_ID, unverified_images, verify_bundle,
+    };
     use plasmosome_lanes::config::{Confinement, LaneConfig};
     use plasmosome_lanes::krun::{self, Libkrun};
     use plasmosome_lanes::selfcheck::{Check, Phase, passed, self_check};
@@ -104,19 +106,16 @@ mod macos {
 
     pub fn run() -> Result<Infallible, Refusal> {
         let config = read_config()?;
-        let bundle = verify_bundle(&config.bundle)
+        let bundle = verify_bundle(&config.bundle, PINNED_BUNDLE_ID)
             .or_else(|error| fail(BUNDLE_REFUSED, format!("refused: {error}")))?;
         eprintln!(
             "lane-vmm: bundle {} matches its SHA256SUMS",
             config.bundle.display()
         );
-        let libkrun_path = bundle
-            .path(LIBKRUN)
-            .ok_or((BUNDLE_REFUSED, format!("refused: {LIBKRUN} is not listed")))?;
         let kernel = bundle
             .path(KERNEL)
             .ok_or((BUNDLE_REFUSED, format!("refused: {KERNEL} is not listed")))?;
-        let lib = Libkrun::open(&libkrun_path).or_else(|error| fail(LOAD_REFUSED, error))?;
+        let lib = Libkrun::open(&bundle).or_else(|error| fail(LOAD_REFUSED, error))?;
         let krun = |error: krun::KrunError| (KRUN_FAILED, error.to_string());
         lib.init_log().map_err(krun)?;
         let ctx = lib.create_ctx().map_err(krun)?;
