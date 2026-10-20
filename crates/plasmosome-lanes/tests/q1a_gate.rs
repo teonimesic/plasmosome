@@ -99,7 +99,8 @@ fn suid_seen(results: &[ProbeResult], options: &[MountOption]) -> Vec<String> {
             .map_or_else(|| "no result".to_string(), |line| line[key].to_string())
     };
     vec![format!(
-        "guest mount options {options:?}: the workload's stat of `{SUID_TOOL}` gave mode {} owned by {}:{}; the copy it ran started with effective uid {}, and its release ran as effective uid {}",
+        "guest mount options {}: the workload's stat of `{SUID_TOOL}` gave mode {} owned by {}:{}; the copy it ran started with effective uid {}, and its release ran as effective uid {}",
+        serde_json::to_string(options).unwrap_or_default(),
         field("suid-stat", "mode"),
         field("suid-stat", "uid"),
         field("suid-stat", "gid"),
@@ -744,7 +745,7 @@ fn rows() -> Vec<RowSpec> {
         ),
         row(
             "R2 visible",
-            "027 §3.4, item 4: the control. A bind PID1 makes on a shared mount reaches the workload's slave copy, and its stat finds the file.",
+            "027 §3.4, item 4: the control. A bind made in the initial namespace on a shared mount reaches the workload's slave copy, and the workload's stat finds the file.",
             vec![run_spec(
                 "r2-staging",
                 "guest root stages each configuration",

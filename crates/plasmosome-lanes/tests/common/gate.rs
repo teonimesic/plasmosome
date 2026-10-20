@@ -253,7 +253,7 @@ pub fn configuration(gate: &GateLane, layout: &[&str]) -> Value {
         "memory_mib": lane.lane.memory_mib,
         "shares": shares,
         "guest_mounts": mounts,
-        "confinement": gate.profile,
+        "confinement": gate.profile.as_ref().map(|profile| profile.lines().collect::<Vec<_>>()),
         "layout": layout,
         "probes": lane.guest.probes.len(),
     })

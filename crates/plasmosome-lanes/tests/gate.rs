@@ -632,7 +632,7 @@ fn stage(config: &str, mount: Value, workload_stat: Value) -> ProbeResult {
         &format!("r2-{config}"),
         0,
         json!({"probe": "stage", "ok": true, "config": config, "mount": mount,
-               "pid1_stat": {"probe": "stat", "ok": true, "kind": "file", "id_u": 0},
+               "initial_stat": {"probe": "stat", "ok": true, "kind": "file", "id_u": 0},
                "workload_stat": workload_stat}),
     )
 }
