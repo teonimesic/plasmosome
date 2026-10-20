@@ -252,6 +252,7 @@ mod tests {
             " /skills/pr.md\n",
             "/skills/pr.md/",
             "/Skills/PR.md",
+            "/skills//pr.md",
         ] {
             assert_eq!(
                 session_file(path),
@@ -271,6 +272,7 @@ mod tests {
             "\t/run/plasmosome/egressd.uds ",
             "/run/plasmosome/egressd.uds/",
             "/RUN/Plasmosome/EgressD.uds",
+            "/run/egress\0d.uds",
         ] {
             assert_eq!(
                 uds_socket(path),
@@ -290,6 +292,8 @@ mod tests {
             (" api.github.com\t", "\nsplice "),
             ("API.GitHub.com", "Splice"),
             ("api.github.com.", "/splice/"),
+            ("", "spl\0ice//"),
+            ("api.github.com", ""),
         ] {
             assert_eq!(
                 proxy_map(host, route),
@@ -329,6 +333,9 @@ mod tests {
             ("/srv/repo/", "/workspace/"),
             (" /srv/repo", "/workspace\n"),
             ("/SRV/Repo", "/Workspace"),
+            ("/srv/re\0po\n", " /work//space"),
+            ("", ""),
+            ("/srv//repo", "/work\0space"),
         ] {
             assert_eq!(
                 mount(source, target),
