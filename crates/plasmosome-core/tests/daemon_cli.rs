@@ -6,6 +6,8 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "support/private_root.rs"]
+mod private_root;
 #[path = "support/warm_up.rs"]
 mod warm_up;
 
@@ -104,7 +106,7 @@ fn help_shows_a_config_the_daemon_accepts_and_says_it_recovers_no_cells() {
 
 #[test]
 fn every_other_sole_operand_remains_a_literal_config_path() {
-    let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+    let directory = private_root::private_root();
     let occupied = directory.path().join("taken.uds");
     std::fs::write(&occupied, b"owned occupied path").expect("the occupied path is written");
 
