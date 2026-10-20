@@ -1,7 +1,7 @@
 ---
 id: 030
 title: Outside contributions — how a contributor's PR is admitted, and the guide that says so
-status: draft
+status: accepted
 intents: [013, 005]
 ---
 
@@ -97,7 +97,9 @@ whose second, for an agent, is `Model: <name>`. It names the PR's kind:
 steward of the earlier comment keeps the PR. That steward is the actor its `Steward:` line names,
 not the GitHub account, which is the owner's for every agent. Its task survives, even if the other
 task was created first. The later steward posts a retraction citing the earlier comment, and
-closes its own task as a duplicate of the surviving one, as spec 019 does for carriers.
+closes its own task as a duplicate of the surviving one, as spec 019 does for carriers. The one
+exception: a comment that names an earlier one as superseded outranks the comment it names. Only
+Main's handoff of an orphaned PR posts one (§6).
 
 **Filing a kind 2 task.** After posting, the steward lists every task, closed ones included, with
 `./tools/work-state list --all --limit 0 --json`:
@@ -267,11 +269,12 @@ PR's code, which spec 026 §7 already gives to the reviewer as a rule about who 
 - **An outside PR nobody stewards:** nothing refuses it. Main's sweep compares the report's
   `open_prs` with every task's `external_ref` and each PR's comments, by hand, until a
   contributor's PR has been admitted under this spec; a report that marks outside PRs is specified
-  then. A
-  kind 2 PR is taken up only when a task's `external_ref` names it. A kind 1 or 3 PR is taken up by
-  its admission comment. A kind 2 PR with a `Steward:` comment and no task is orphaned: its
-  steward stopped mid-admission. Main hands it to a new steward, whose admission comment names the
-  stopped one and supersedes it.
+  then. A kind 2 PR is taken up only when a task's `external_ref` names it. A kind 1 or 3 PR is
+  taken up by its admission comment. A kind 2 PR with a `Steward:` comment and no task is
+  orphaned, unless its steward is still between posting and filing. Main hands an orphaned PR on
+  only once the named actor's session has ended: the new steward's admission comment names the
+  stopped one as superseded. A stopped steward that resumes and finds its comment superseded files
+  nothing, and closes any task it filed as a duplicate.
 
 ## Amendments this spec proposes
 
@@ -354,11 +357,11 @@ lands first:
 > The report does not mark outside PRs (spec 030 §1). Compare `github.open_prs` with each task's
 > `external_ref` and each PR's `Steward:` comment, as spec 030 §6 says. A PR matching neither is
 > waiting for a steward. One whose admission comment names a governing spec, with no task naming
-> it, is orphaned.
+> it, is orphaned unless its steward is still filing (spec 030 §6).
 
 ## Open questions for the owner
 
-Each has a default the work proceeds on until he answers.
+Each has a default the work proceeds on until the owner answers.
 
 1. **Q1, approving workflow runs.** A fork contributor's runs wait for approval only until their
    first merge; `all_external_contributors` would hold every one until after the git-only step.
@@ -413,14 +416,16 @@ observation task, records the first outside PRs after A. Task B lands the guide.
    permissions, build mode and Rust toolchain line. Catches a privileged job on PR code that
    nobody named.
 5. Task A's PR applies §2's two-steward rule and §6's take-up rule to written cases. Catches a
-   sweep that misses a stopped steward, two orders that pick different winners, and a rule that
-   misses the third kind of outside PR.
+   sweep that misses a stopped steward, two orders that pick different winners, a handoff the
+   two-steward rule undoes, and a rule that misses the third kind of outside PR.
    - Taken up: a fork PR with a task; an outside intent PR with a `Steward:` comment; a kind 3 PR
      with one.
    - Orphaned: a kind 2 PR with a `Steward:` comment and no task.
    - Waiting: an owner's PR carrying another's commit, and a fork PR, each with neither.
    - Crossed: A's comment is earlier and B's task was created first. A keeps the PR and its own
      task; B retracts and closes its task as a duplicate.
+   - Handed over: a kind 2 PR with a stopped steward's comment and a later comment superseding it.
+     The later steward holds it, though the stopped one's comment is earlier.
 
 **Task O**
 
