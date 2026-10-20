@@ -25,8 +25,10 @@ for what each piece does.
   needs all four operations to succeed, so file modes cannot pass for the sandbox. Confined, it
   counts a refusal only as `EPERM`; `EACCES` and a missing directory are not refusals. Keep the
   boot tests that make the control and the check fail.
-- **Every spawn is reaped.** `run_lane` kills and reaps the VMM at its timeout; `lane-init` reaps
-  orphans and kills what remains before it powers off.
+- **Every spawn is reaped.** `run_lane` kills the VMM's process group and reaps the VMM at its
+  timeout, and kills what the VMM left in its group after a normal exit. It never waits on
+  stderr past `STDERR_GRACE`. `lane-init` reaps orphans and kills what remains before it powers
+  off.
 
 ## Unsafe code
 
@@ -39,8 +41,12 @@ in `src/lib.rs`, or on a single item:
 - `src/guest_sys.rs` (Linux): `mount`, `reboot`, `waitpid`, `kill`, `uname` and a private
   read-only `mmap`.
 
-One item outside them carries the allow: `images` in `src/bin/lane_vmm.rs` calls the unsafe
-`krun::loaded_images`, whose caller must promise no image is unloaded during the call.
+Two items outside them carry the allow:
+
+- `images` in `src/bin/lane_vmm.rs` calls the unsafe `krun::loaded_images`, whose caller must
+  promise no image is unloaded during the call.
+- `kill_group` in `src/run.rs` calls `kill(-group, SIGKILL)` on the launcher's process group.
+  std kills one process only.
 
 Every `unsafe` block has a `// SAFETY:` comment, every `unsafe fn` a `# Safety` section, and the
 `unsafe extern` block documents what each declaration assumes. No safe route exists: libkrun is

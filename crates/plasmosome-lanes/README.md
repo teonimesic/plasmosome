@@ -27,7 +27,7 @@ run's results come only from the guest console, and anything short of a complete
 | `cpio` | host | A newc writer and reader, and the lane initramfs |
 | `ext4` | host | `ext4_from_dir` and `ext4_read`, through e2fsprogs in a tool directory the caller names |
 | `console` | host | The framing parser |
-| `run` | host | `run_lane`: spawn, wait up to a timeout, kill and reap, parse |
+| `run` | host | `run_lane`: spawn in a new process group, wait up to a timeout, kill the group and reap, parse |
 | `selfcheck` | host | The four confinement checks `lane-vmm` runs after applying an SBPL profile |
 | `probe` | host and guest | The probe observations that need no Linux system call |
 
@@ -92,9 +92,16 @@ any line between the markers that is not a result, a result out of order or for 
 probe, and a probe with no result or a `null` one. Lines before `LANE-BEGIN` and after `LANE-END`
 are ignored.
 
-`run_lane` reads the console through a limit of 16 MiB (`MAX_CONSOLE_BYTES`), and a longer
-console is `NotRun` whatever it holds, as spec 026 §5 asks of bytes a guest writes. It keeps the
-first MiB of the VMM's stderr and reads and drops the rest, so the VMM never blocks on the pipe.
+`run_lane` opens the console without following a final symlink and without blocking, and checks
+with `fstat` that it is a regular file before reading it. A FIFO, a symlink or a device is
+`NotRun`, naming the path. It reads the console through a limit of 16 MiB (`MAX_CONSOLE_BYTES`),
+and a longer console is `NotRun` whatever it holds, as spec 026 §5 asks of bytes a guest writes.
+
+`run_lane` starts the VMM in its own process group. At the timeout it kills the group, then reaps
+the VMM. After a normal exit it kills whatever is left in the group. It keeps the first MiB of
+the VMM's stderr and reads and drops the rest, so the VMM never blocks on the pipe. It stops
+reading one second (`STDERR_GRACE`) after it kills the group, so a process that holds stderr
+cannot keep it waiting.
 
 ## Probes
 
@@ -165,4 +172,9 @@ needs no keychain. Each lane's files go in a temporary directory under `TMPDIR`.
   would look, before anything loads. A process running as the same user can still place the
   file after step 2 and before `krun_create_ctx`. Step 5 then refuses the run, but the library's
   initializers have already run.
-- `run_lane` kills the VMM process, not a process group. `lane-vmm` starts no children.
+- A process that leaves the VMM's process group escapes the kill. `lane-vmm` starts no children,
+  so only a launcher other than `lane-vmm` can leave one. Its stderr reader thread then stays
+  blocked until that process closes the pipe.
+- After a normal exit, `run_lane` reaps the VMM before it kills the group. If the group is empty
+  by then, a new process could take its ID in between, but only if the system's process IDs
+  wrap around in that moment.
