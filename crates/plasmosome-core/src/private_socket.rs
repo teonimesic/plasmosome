@@ -1918,8 +1918,8 @@ mod tests {
         }
     }
 
-    fn names(listed: &[&str]) -> std::vec::IntoIter<io::Result<Vec<u8>>> {
-        listed
+    fn names(given: &[&str]) -> std::vec::IntoIter<io::Result<Vec<u8>>> {
+        given
             .iter()
             .map(|name| Ok(name.as_bytes().to_vec()))
             .collect::<Vec<_>>()
