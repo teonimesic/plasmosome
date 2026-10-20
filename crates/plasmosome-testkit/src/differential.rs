@@ -1,10 +1,13 @@
+mod judge;
 #[cfg(test)]
 mod tests;
 
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
+
+pub use judge::{Finding, MountKey, NeutralName, Reason, RunRefusal, Subject, Verdict, judge};
 
 /// One of spec 027 §5's five ways a workload can observe the membrane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
@@ -42,6 +45,20 @@ impl ReachKind {
     pub const ALL: [ReachKind; 3] = [ReachKind::Host, ReachKind::Path, ReachKind::Facility];
 }
 
+/// The three lanes of spec 027 §6: the cell lane under test, and the open and absent
+/// reference lanes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Lane {
+    Cell,
+    Open,
+    Absent,
+}
+
+impl Lane {
+    /// Every lane, in the order findings list them.
+    pub const ALL: [Lane; 3] = [Lane::Cell, Lane::Open, Lane::Absent];
+}
+
 /// One probe as the manifest declares it. `reach` is set only on a reach probe.
 /// `workload_set` is required, even when empty: it names the fields whose values the workload
 /// itself set, such as a time set with `utimensat`, and no rule may cover them. Fields are the
@@ -58,8 +75,9 @@ pub struct ProbeSpec {
     pub workload_set: Vec<String>,
 }
 
-/// One row of the normalization table: the values of `field` in `probe` are replaced by
-/// placeholders of `kind`.
+/// One row of the normalization table: the values of `field` in `probe` are to be replaced by
+/// placeholders of `kind`. [`judge`] does not apply rules yet, so it compares every field
+/// exactly, and its discrimination check leaves out the fields a rule covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub probe: String,
@@ -400,4 +418,27 @@ impl Manifest {
         }
         Ok(())
     }
+}
+
+/// What one probe reported in one run. `completed` is its completion marker, and
+/// `failed_before_step` says it failed before the step it observes. Each field is compared
+/// whole and exactly, except that the discrimination check leaves out the fields a rule covers.
+/// The manifest's normalization rules are not applied yet, so a rule never loosens a comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Observation {
+    pub probe: String,
+    pub completed: bool,
+    pub failed_before_step: bool,
+    pub fields: Map<String, Value>,
+}
+
+/// One run of one lane from a fresh boot. `transcript` holds what the harness did, such as its
+/// tool calls, results, exit statuses and files left behind, each field compared exactly; it is
+/// `None` when the harness left no transcript, which leaves the transcript not run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    pub lane: Lane,
+    pub boot_id: String,
+    pub observations: Vec<Observation>,
+    pub transcript: Option<Map<String, Value>>,
 }

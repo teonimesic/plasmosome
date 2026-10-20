@@ -7,13 +7,18 @@ license.workspace = true
 publish = false
 
 [dependencies]
+libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+test-fixture = []
+
 [dev-dependencies]
 proptest = { workspace = true }
+tempfile = { workspace = true }
 toml = { workspace = true }
 
 [lib]
