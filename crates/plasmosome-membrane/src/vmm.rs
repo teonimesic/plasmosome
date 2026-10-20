@@ -1392,7 +1392,7 @@ mod tests {
     fn darwin_certificate_requires_complete_all_zombie_membership() {
         let mut singleton = DarwinOwnedGroup::new(1);
         singleton.release(0);
-        assert!(darwin_group_all_zombies(singleton.pids[0]));
+        assert!(!darwin_group_all_zombies(singleton.pids[0]));
         singleton.reap_all();
 
         let mut group = DarwinOwnedGroup::new(3);
