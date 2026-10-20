@@ -900,7 +900,7 @@ fn nothing_beside_the_script_is_imported() {
             &copy,
             &std::fs::read_to_string(guard(root)).expect("the step's script is readable"),
         );
-        let markers: Vec<PathBuf> = ["tomllib", "subprocess", "threading", "json"]
+        let markers: Vec<PathBuf> = ["tomllib", "subprocess", "threading", "re", "json"]
             .iter()
             .map(|module| {
                 let marker = beside.path().join(format!("marker-{module}"));
