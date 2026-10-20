@@ -1048,6 +1048,53 @@ mod tests {
     }
 
     #[test]
+    fn a_child_whose_setup_fails_exits_with_125_and_never_execs() {
+        run_probe("runtime::launch::tests::probe_launch_with_descriptor_three_out_of_range");
+    }
+
+    #[test]
+    #[ignore = "helper process for a_child_whose_setup_fails_exits_with_125_and_never_execs"]
+    #[allow(unsafe_code)]
+    fn probe_launch_with_descriptor_three_out_of_range() {
+        if !probing() {
+            return;
+        }
+        let prepared = HelperExec::prepare(&record_recipe()).expect("the record recipe prepares");
+        let PreparedHelper { exec, diagnostics } = prepared;
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            // SAFETY: `limit` is a local rlimit that getrlimit may write.
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        let restored = limit;
+        limit.rlim_cur = 3;
+        assert_eq!(
+            // SAFETY: `limit` is a local rlimit that setrlimit only reads. This probe process runs
+            // only this test, and the fork below opens no descriptor, so the child inherits a
+            // limit under which descriptor 3 cannot be made.
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) },
+            0
+        );
+        let spawned = VmmChild::spawn(exec);
+        assert_eq!(
+            // SAFETY: `restored` is a local rlimit that setrlimit only reads.
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &restored) },
+            0
+        );
+        let mut child = spawned.expect("the fork succeeds");
+        let text = read_to_end_of_file(&diagnostics, DEADLINE);
+        let exit = child
+            .wait_terminal(DEADLINE)
+            .expect("the helper child is supervised");
+        assert_eq!(exit, VmmState::Exited { code: SETUP_FAILED }, "{text}");
+        assert_eq!(text, "", "the helper never ran");
+    }
+
+    #[test]
     fn the_diagnostics_reach_end_of_file_once_the_helper_has_exited() {
         let prepared = HelperExec::prepare(&record_recipe()).expect("the record recipe prepares");
         let PreparedHelper { exec, diagnostics } = prepared;
