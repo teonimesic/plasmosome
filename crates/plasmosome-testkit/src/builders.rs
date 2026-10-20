@@ -244,7 +244,15 @@ mod tests {
 
     #[test]
     fn session_file_holds_exactly_its_path_unchecked() {
-        for path in ["/skills/pr.md", "skills/../pr.md/", "/skills/pr\0.md", ""] {
+        for path in [
+            "/skills/pr.md",
+            "skills/../pr.md/",
+            "/skills/pr\0.md",
+            "",
+            " /skills/pr.md\n",
+            "/skills/pr.md/",
+            "/Skills/PR.md",
+        ] {
             assert_eq!(
                 session_file(path),
                 Capability::SessionFile {
@@ -256,7 +264,14 @@ mod tests {
 
     #[test]
     fn uds_socket_holds_exactly_its_path_unchecked() {
-        for path in ["/run/plasmosome/egressd.uds", "run//egressd.uds", ""] {
+        for path in [
+            "/run/plasmosome/egressd.uds",
+            "run//egressd.uds",
+            "",
+            "\t/run/plasmosome/egressd.uds ",
+            "/run/plasmosome/egressd.uds/",
+            "/RUN/Plasmosome/EgressD.uds",
+        ] {
             assert_eq!(
                 uds_socket(path),
                 Capability::UdsSocket {
@@ -272,6 +287,9 @@ mod tests {
             ("api.github.com", "splice"),
             ("splice", "api.github.com"),
             ("api.github\0.com", "../relative/route/"),
+            (" api.github.com\t", "\nsplice "),
+            ("API.GitHub.com", "Splice"),
+            ("api.github.com.", "/splice/"),
         ] {
             assert_eq!(
                 proxy_map(host, route),
@@ -285,7 +303,13 @@ mod tests {
 
     #[test]
     fn broker_holds_exactly_its_pid_and_name() {
-        for (pid, name) in [(4242, "egressd"), (0, "egress\0d"), (u32::MAX, "")] {
+        for (pid, name) in [
+            (4242, "egressd"),
+            (0, "egress\0d"),
+            (u32::MAX, ""),
+            (7, " egressd\n"),
+            (31337, "EgressD"),
+        ] {
             assert_eq!(
                 broker(pid, name),
                 Capability::Broker {
@@ -302,6 +326,9 @@ mod tests {
             ("/srv/repo", "/workspace"),
             ("/workspace", "/srv/repo"),
             ("srv/repo", "/workspace/"),
+            ("/srv/repo/", "/workspace/"),
+            (" /srv/repo", "/workspace\n"),
+            ("/SRV/Repo", "/Workspace"),
         ] {
             assert_eq!(
                 mount(source, target),
