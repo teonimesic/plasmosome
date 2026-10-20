@@ -35,11 +35,11 @@ fn deep_nesting_does_not_overflow() {
 
 #[test]
 fn deep_values_compare_without_overflow() {
-    let text = nested_arrays(200_000);
+    let text = nested_arrays(DEPTH);
     let value = scan(text.as_bytes()).expect("valid JSON");
     let again = scan(text.as_bytes()).expect("valid JSON");
     assert_eq!(value, again);
-    let shallower = scan(nested_arrays(199_999).as_bytes()).expect("valid JSON");
+    let shallower = scan(nested_arrays(DEPTH - 1).as_bytes()).expect("valid JSON");
     assert_ne!(value, shallower);
 }
 
