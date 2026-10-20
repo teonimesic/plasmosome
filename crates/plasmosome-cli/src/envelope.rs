@@ -303,41 +303,25 @@ fn write_view(out: &mut impl Sink, view: &View<'_>, style: Style, depth: usize) 
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, Write};
+    use std::io;
 
     use super::{PIECE, Pieces};
     use crate::json::Sink;
 
-    struct Refuses;
-
-    impl Write for Refuses {
-        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-            Err(io::Error::from(io::ErrorKind::BrokenPipe))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn a_failed_piece_is_not_kept() {
-        let mut writer = Refuses;
+        let mut full: &mut [u8] = &mut [];
         let mut out = Pieces {
             text: String::new(),
-            writer: &mut writer,
+            writer: &mut full,
             failed: None,
         };
         let line = "x".repeat(1024);
         for _ in 0..4 * PIECE / line.len() {
             out.push_str(&line);
-            assert!(
-                out.text.len() < PIECE,
-                "{} bytes are held after the stream failed",
-                out.text.len()
-            );
+            assert!(out.text.len() < PIECE, "the failed pieces are held");
         }
-        let error = out.finish().expect_err("the stream refuses every write");
-        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        let error = out.finish().expect_err("a full buffer refuses every write");
+        assert_eq!(error.kind(), io::ErrorKind::WriteZero);
     }
 }
