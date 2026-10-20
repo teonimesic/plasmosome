@@ -143,6 +143,54 @@ pub fn exact_backend_effect(entry: &LedgerEntry) -> Effect {
     )
 }
 
+/// Returns `Capability::SessionFile` holding exactly `path`. Nothing is checked, so a test may
+/// pass an invalid path. Test support only: production capabilities come from the manifest
+/// resolver.
+pub fn session_file(path: &str) -> Capability {
+    Capability::SessionFile {
+        path: path.to_string(),
+    }
+}
+
+/// Returns `Capability::UdsSocket` holding exactly `path`. Nothing is checked, so a test may
+/// pass an invalid path. Test support only: production capabilities come from the manifest
+/// resolver.
+pub fn uds_socket(path: &str) -> Capability {
+    Capability::UdsSocket {
+        path: path.to_string(),
+    }
+}
+
+/// Returns `Capability::ProxyMap` holding exactly `host` and `route`. Nothing is checked, so a
+/// test may pass an invalid name. Test support only: production capabilities come from the
+/// manifest resolver.
+pub fn proxy_map(host: &str, route: &str) -> Capability {
+    Capability::ProxyMap {
+        host: host.to_string(),
+        route: route.to_string(),
+    }
+}
+
+/// Returns `Capability::Broker` holding exactly `pid` and `name`. Nothing is checked, so a test
+/// may pass an invalid name. Test support only: production capabilities come from the manifest
+/// resolver.
+pub fn broker(pid: u32, name: &str) -> Capability {
+    Capability::Broker {
+        pid,
+        name: name.to_string(),
+    }
+}
+
+/// Returns `Capability::Mount` holding exactly `source` and `target`. Nothing is checked, so a
+/// test may pass an invalid path. Test support only: production capabilities come from the
+/// manifest resolver.
+pub fn mount(source: &str, target: &str) -> Capability {
+    Capability::Mount {
+        source: source.to_string(),
+        target: target.to_string(),
+    }
+}
+
 /// Builds a `DesiredState` one cell and one plasmid at a time. A plasmid named
 /// for a cell that was never declared creates that cell without a genome.
 pub struct DesiredStateBuilder {
