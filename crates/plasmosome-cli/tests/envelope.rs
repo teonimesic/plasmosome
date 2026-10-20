@@ -194,6 +194,20 @@ fn the_human_form_of_a_failure() {
 }
 
 #[test]
+fn the_human_form_of_an_unusual_kernel_error() {
+    assert_eq!(
+        emitted(
+            &kernel_failure(r#"{"code":101,"fix":{"run":"plasmid list"}}"#),
+            Form::Human
+        ),
+        (
+            String::new(),
+            "\nfix: {\n  \"run\": \"plasmid list\"\n}\n(kernel 101)\n".to_string()
+        )
+    );
+}
+
+#[test]
 fn the_human_form_of_a_success() {
     let envelope = Envelope {
         command: "plasmosome.status".to_string(),

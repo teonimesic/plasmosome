@@ -231,6 +231,8 @@ fn the_grammar_is_strict() {
         (b"[1,".to_vec(), 3, Reason::End),
         (b"{".to_vec(), 1, Reason::End),
         (b"{\"a\"".to_vec(), 4, Reason::End),
+        (format!("\"{BACKSLASH}").into_bytes(), 2, Reason::End),
+        (format!("\"{BACKSLASH}u12").into_bytes(), 5, Reason::End),
         (b"{\"a\" 1}".to_vec(), 5, Reason::Expected("':'")),
         (b"{1:2}".to_vec(), 1, Reason::Expected("a string key")),
         (b"[1 2]".to_vec(), 3, Reason::Expected("',' or ']'")),
@@ -333,6 +335,60 @@ fn a_scan_error_says_where() {
     assert_eq!(error.to_string(), "expected ',' or ']' at byte 3");
     let error = refused(br#"{"a":1,"a":2}"#);
     assert_eq!(error.to_string(), "the key /a repeats at byte 7");
+}
+
+#[test]
+fn every_reason_reads_as_prose() {
+    let cases = [
+        (Reason::NotUtf8, "the text is not UTF-8"),
+        (Reason::End, "the text ends inside a value"),
+        (Reason::Expected("a value"), "expected a value"),
+        (Reason::Number, "a number breaks the JSON grammar"),
+        (Reason::Control, "a string holds a raw control character"),
+        (Reason::Escape, "a string holds an invalid escape"),
+        (Reason::LoneSurrogate, "a string escapes a lone surrogate"),
+        (Reason::Trailing, "more text follows the value"),
+        (
+            Reason::DuplicateKey {
+                path: "/a".to_string(),
+            },
+            "the key /a repeats",
+        ),
+    ];
+    for (reason, text) in cases {
+        assert_eq!(
+            ScanError { offset: 9, reason }.to_string(),
+            format!("{text} at byte 9")
+        );
+    }
+}
+
+#[test]
+fn values_compare_by_structure_and_text() {
+    assert_ne!(
+        object(vec![("a", number("1"))]),
+        object(vec![("b", number("1"))])
+    );
+    assert_ne!(
+        object(vec![("a", number("1"))]),
+        object(vec![("a", number("2"))])
+    );
+    assert_ne!(number("1"), number("1.0"));
+    assert_ne!(number("1"), string("1"));
+    assert_ne!(
+        Json::Array(vec![Json::Null]),
+        Json::Array(vec![Json::Null, Json::Null])
+    );
+    assert_eq!(
+        object(vec![("a", Json::Array(vec![Json::Bool(true)]))]),
+        object(vec![("a", Json::Array(vec![Json::Bool(true)]))])
+    );
+}
+
+#[test]
+fn debug_prints_the_compact_form() {
+    let value = object(vec![("a", Json::Array(vec![number("1"), string("x")]))]);
+    assert_eq!(format!("{value:?}"), r#"{"a":[1,"x"]}"#);
 }
 
 #[test]
