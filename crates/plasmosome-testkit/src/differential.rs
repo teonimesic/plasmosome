@@ -53,7 +53,6 @@ pub struct ProbeSpec {
     pub step: String,
     #[serde(default)]
     pub reach: Option<ReachKind>,
-    #[serde(default)]
     pub workload_set: Vec<String>,
 }
 
@@ -342,18 +341,36 @@ impl Manifest {
                     field: allowance.field.clone(),
                 });
             }
+            if ruled.contains(&(&allowance.probe, &allowance.field)) {
+                return Err(ManifestRefusal::RuleAndAllowance {
+                    probe: allowance.probe.clone(),
+                    field: allowance.field.clone(),
+                });
+            }
         }
         known(&self.neutral.mounts_probe, "neutral")?;
         known(&self.neutral.cgroup_probe, "neutral")?;
         let mounts = &self.neutral.mounts;
-        for mount in ["/opt", "/usr/local/bin"] {
-            if !mounts.iter().any(|neutral| neutral.path == mount) {
+        let mut paths = BTreeSet::new();
+        for mount in mounts {
+            if !paths.insert(mount.path.as_str()) {
+                return Err(ManifestRefusal::DuplicateNeutralMount {
+                    path: mount.path.clone(),
+                });
+            }
+        }
+        let software = ["/opt", "/usr/local/bin"];
+        for mount in software {
+            if !paths.contains(mount) {
                 return Err(ManifestRefusal::NeutralMountMissing { mount });
             }
         }
-        if !mounts.iter().any(|neutral| neutral.fstype == FUSE) {
+        let workspace = mounts
+            .iter()
+            .any(|neutral| neutral.fstype == FUSE && !software.contains(&neutral.path.as_str()));
+        if !workspace {
             return Err(ManifestRefusal::NeutralMountMissing {
-                mount: "a FUSE mount",
+                mount: "a FUSE workspace",
             });
         }
         Ok(())
