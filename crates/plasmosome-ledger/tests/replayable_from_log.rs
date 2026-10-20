@@ -784,13 +784,15 @@ fn a_record_with_a_repeated_key_at_any_depth_is_refused() {
     }
 }
 
-const REFUSED_TARGET_NAMES: [&str; 25] = [
+const REFUSED_TARGET_NAMES: [&str; 27] = [
     "an unversioned record",
     "the format before the current one",
     "the format after the current one",
     "a format 2 record whose only inverse is a session file removal",
     "a format 2 record whose only inverse is a broker removal by pid",
     "a format number too large for a byte",
+    "a format number that reads as 3 in a byte",
+    "the largest format number",
     "a format 1 record",
     "a numeric backend handle",
     "a universe inverse without its id",
@@ -805,7 +807,7 @@ const REFUSED_TARGET_NAMES: [&str; 25] = [
     "invalid UTF-8 in a complete line",
     "a malformed line between two valid records",
     "an empty line between two valid records",
-    "a complete final record of an unsupported format without LF",
+    "a complete final format 2 broker record by pid without LF",
     "two valid records naming different plugins",
     "a torn final record that ends with LF",
     "a valid record followed by a torn final fragment",
@@ -890,6 +892,14 @@ fn refused_targets() -> Vec<RefusedTarget> {
     let unsupported_later = changed(&first, |record| {
         record["format"] = serde_json::json!(format + 1)
     });
+    let format_2_broker = changed(&without(&broker_line, &broker_at, "launch"), |record| {
+        record
+            .pointer_mut(&broker_at)
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .insert("pid".to_string(), serde_json::json!(31337));
+        record["format"] = serde_json::json!(2);
+    });
     let path_once = r#""path":"/skills/a.md""#;
     assert_eq!(first.matches(path_once).count(), 1, "{first}");
     let (before_description, after_description) = first.split_once("entry one").unwrap();
@@ -919,7 +929,7 @@ fn refused_targets() -> Vec<RefusedTarget> {
         ),
         row(
             "the format after the current one",
-            unsupported_later.clone(),
+            unsupported_later,
             Some((1, "unsupported ledger format 4; expected 3")),
         ),
         row(
@@ -931,20 +941,28 @@ fn refused_targets() -> Vec<RefusedTarget> {
         ),
         row(
             "a format 2 record whose only inverse is a broker removal by pid",
-            changed(&without(&broker_line, &broker_at, "launch"), |record| {
-                record
-                    .pointer_mut(&broker_at)
-                    .and_then(serde_json::Value::as_object_mut)
-                    .unwrap()
-                    .insert("pid".to_string(), serde_json::json!(31337));
-                record["format"] = serde_json::json!(2);
-            }),
+            format_2_broker.clone(),
             Some((1, "unsupported ledger format 2; expected 3")),
         ),
         row(
             "a format number too large for a byte",
             changed(&first, |record| record["format"] = serde_json::json!(256)),
             Some((1, "unsupported ledger format 256; expected 3")),
+        ),
+        row(
+            "a format number that reads as 3 in a byte",
+            changed(&first, |record| record["format"] = serde_json::json!(259)),
+            Some((1, "unsupported ledger format 259; expected 3")),
+        ),
+        row(
+            "the largest format number",
+            changed(&first, |record| {
+                record["format"] = serde_json::json!(u64::MAX)
+            }),
+            Some((
+                1,
+                "unsupported ledger format 18446744073709551615; expected 3",
+            )),
         ),
         row(
             "a format 1 record",
@@ -1046,9 +1064,9 @@ fn refused_targets() -> Vec<RefusedTarget> {
             Some((2, "EOF while parsing a value")),
         ),
         row(
-            "a complete final record of an unsupported format without LF",
-            format!("{first}{}", unsupported_later.trim_end()),
-            Some((2, "unsupported ledger format 4; expected 3")),
+            "a complete final format 2 broker record by pid without LF",
+            format!("{first}{}", format_2_broker.trim_end()),
+            Some((2, "unsupported ledger format 2; expected 3")),
         ),
         row(
             "two valid records naming different plugins",
