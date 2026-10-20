@@ -235,6 +235,33 @@ fn a_symlink_to_a_file_at_the_declaration_path_is_refused_and_its_target_left_un
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_directory_it_cannot_write_into_is_refused_and_nothing_is_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let locked = scratch.path().join("locked");
+    std::fs::create_dir(&locked).expect("the locked directory is made");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))
+        .expect("the directory is made read-only");
+    let bypassed = std::fs::write(locked.join("probe"), "").is_ok();
+    let output = (!bypassed).then(|| plasmid_in(&locked, &["new", "demo"]));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+        .expect("the directory is made writable again");
+    let Some(output) = output else {
+        eprintln!(
+            "skipped a_directory_it_cannot_write_into_is_refused_and_nothing_is_written: this \
+             process writes into a read-only directory, as root does"
+        );
+        return;
+    };
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("cannot create demo.toml"), "{stderr}");
+    assert_eq!(entries(&locked), Vec::<String>::new());
+}
+
 fn assert_name_refused<S: AsRef<OsStr> + std::fmt::Debug>(name: S) {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let work = scratch.path().join("work");
