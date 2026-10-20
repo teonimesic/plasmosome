@@ -80,7 +80,7 @@ DEBIAN = {
     "etc/debian_version": f(b"12.15\n"),
     "etc/group": f(GROUP),
     "etc/gshadow": f(GSHADOW, 0o640, 0, 42),
-    "etc/hostname": f(mode=0o755), "etc/hosts": f(mode=0o755),
+    "etc/hostname": f(mode=0o755), "etc/hosts": f(mode=0o755), "etc/mtab": s("/proc/mounts"),
     "etc/passwd": f(PASSWD),
     "etc/resolv.conf": f(mode=0o755),
     "etc/shadow": f(SHADOW, 0o640, 0, 42),
@@ -110,7 +110,7 @@ def scratch():
         shutil.rmtree(root)
 
 
-def write_tar(path, entries):
+def write_tar(path, entries, mtimes=None):
     with tarfile.open(path, "w", format=tarfile.GNU_FORMAT) as out:
         for name, spec in entries.items():
             if spec is None:
@@ -118,7 +118,7 @@ def write_tar(path, entries):
             kind, mode, uid, gid, data, link = spec
             info = tarfile.TarInfo(name)
             info.type, info.mode, info.uid, info.gid = TYPES[kind], mode, uid, gid
-            info.mtime, info.linkname, info.size = BASE_MTIME, link, len(data)
+            info.mtime, info.linkname, info.size = (mtimes or {}).get(name, BASE_MTIME), link, len(data)
             out.addfile(info, io.BytesIO(data) if kind == "file" else None)
 
 
@@ -422,6 +422,20 @@ def content_listing_is_sorted_and_stable():
         write_tar(base, {**DEBIAN, "usr/bin/gunzip": f(b"gunzip", 0o700)})
         API["stage"](base, root / "c.tar", [], EPOCH, LIMIT)
         assert sha(API["content_listing"](root / "c.tar")) != sha(listing)
+
+
+def docker_create_times_do_not_reach_the_stage():
+    with scratch() as root:
+        touched = (".dockerenv", "dev", "dev/console", "dev/pts", "dev/shm", "etc", "etc/hostname", "etc/hosts",
+                   "etc/mtab", "etc/resolv.conf", "proc", "sys")
+        for number, created in enumerate((1_792_521_222, 1_792_521_289)):
+            write_tar(root / f"base-{number}.tar", DEBIAN, {name: created for name in touched})
+            API["stage"](root / f"base-{number}.tar", root / f"stage-{number}.tar", [], EPOCH, LIMIT)
+        assert (root / "stage-0.tar").read_bytes() == (root / "stage-1.tar").read_bytes()
+        tree = read_tar(root / "stage-0.tar")
+        assert {tree[name].mtime for name in ("dev", "etc", "etc/mtab", "proc", "sys")} == {EPOCH}
+        assert tree["etc/mtab"][:6] == ("symlink", 0o777, 0, 0, b"", "/proc/mounts")
+        assert tree["usr/bin/bash"].mtime == BASE_MTIME and tree["etc/skel"].mtime == BASE_MTIME
 
 
 @contextmanager
@@ -762,6 +776,7 @@ TESTS = [
     add_places_a_root_owned_file_and_refuses_bad_destinations,
     the_kind_is_test_exactly_when_add_is_given,
     content_listing_is_sorted_and_stable,
+    docker_create_times_do_not_reach_the_stage,
     contract_check_reads_debugfs_output,
     judge_accounts_accepts_exactly_the_contract,
     build_runs_export_then_filesystem_in_the_pinned_base,
