@@ -647,17 +647,26 @@ fn a_workspace_dependency_that_enables_the_test_fixture_is_reported() {
 
 #[test]
 fn a_dependency_for_one_target_that_enables_the_test_fixture_is_reported() {
-    let workspace = fixture_feature_workspace(
-        &consumer(
-            "plasmosome-ledger",
-            "[target.'cfg(target_os = \"linux\")'.dependencies]\nplasmosome-backend = { path = \"../backend\", features = [\"test-fixture\"] }\n",
-        ),
-        "",
-    );
-    assert_eq!(
-        test_fixture_enablers_outside_the_testkit(workspace.path()),
-        ["plasmosome-ledger"]
-    );
+    for target in [
+        "cfg(target_os = \"linux\")",
+        "cfg(target_os = \"macos\")",
+        "cfg(windows)",
+    ] {
+        let workspace = fixture_feature_workspace(
+            &consumer(
+                "plasmosome-ledger",
+                &format!(
+                    "[target.'{target}'.dependencies]\nplasmosome-backend = {{ path = \"../backend\", features = [\"test-fixture\"] }}\n"
+                ),
+            ),
+            "",
+        );
+        assert_eq!(
+            test_fixture_enablers_outside_the_testkit(workspace.path()),
+            ["plasmosome-ledger"],
+            "a dependency for {target} is missed"
+        );
+    }
 }
 
 #[test]
