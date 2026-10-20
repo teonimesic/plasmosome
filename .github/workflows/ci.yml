@@ -106,7 +106,10 @@ jobs:
       # pull request, so the commit landing on main is exactly the one worth reading. A ref being
       # created reports forty zeroes as its previous tip, which resolves to nothing, so that case
       # reads the whole history the push brought with it.
+      # The read runs even after an earlier step failed. On a push, the next push's range starts at
+      # this push's tip, so a commit this run does not read is never read by a later run (spec 029).
       - name: attribution guard
+        if: ${{ !cancelled() }}
         env:
           RANGE: ${{ github.base_ref && format('origin/{0}..HEAD', github.base_ref) || (github.event.before == '0000000000000000000000000000000000000000' && github.sha || format('{0}..{1}', github.event.before, github.sha)) }}
         run: ./.githooks/attribution-guard "$RANGE"
