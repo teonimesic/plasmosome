@@ -13,7 +13,9 @@ pub const END: &str = "LANE-END";
 pub struct ProbeResult {
     pub probe: String,
     pub uid: u32,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub exit: Option<i32>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub result: Option<serde_json::Value>,
 }
 
@@ -58,6 +60,15 @@ fn framed(text: &str, run_id: &str) -> Result<Vec<ProbeResult>, String> {
             .ok_or_else(|| format!("a line between the markers is not a result: `{line}`"))?;
         let parsed: ProbeResult = serde_json::from_str(json)
             .map_err(|error| format!("a {RESULT} line does not parse ({error}): `{line}`"))?;
+        if parsed
+            .result
+            .as_ref()
+            .is_some_and(|result| !result.is_object())
+        {
+            return Err(format!(
+                "a {RESULT} line's result is not an object or null: `{line}`"
+            ));
+        }
         results.push(parsed);
     }
     Err(format!("the console has no {END} line"))

@@ -167,6 +167,20 @@ fn parse<T: for<'de> Deserialize<'de>>(text: &str) -> Result<T, ConfigError> {
     serde_json::from_str(text).map_err(|error| ConfigError(error.to_string()))
 }
 
+fn check_utf8(field: &str, path: &Path) -> Result<(), ConfigError> {
+    if path.to_str().is_none() {
+        return refuse(format!(
+            "{field} `{}` is not UTF-8, so JSON cannot carry it",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn serialize(value: &impl Serialize) -> Result<String, ConfigError> {
+    serde_json::to_string(value).map_err(|error| ConfigError(error.to_string()))
+}
+
 impl LaneConfig {
     /// Parse and check one lane configuration. Unknown and missing fields are refused, every
     /// path must be absolute, and share tags must be unique.
@@ -196,9 +210,21 @@ impl LaneConfig {
         Ok(config)
     }
 
-    /// The configuration as one JSON line.
+    /// The configuration as one JSON line. A path that is not UTF-8 is refused, naming its field.
     pub fn to_json(&self) -> Result<String, ConfigError> {
-        Ok(serde_json::to_string(self).unwrap_or_default())
+        check_utf8("bundle", &self.bundle)?;
+        check_utf8("initramfs", &self.initramfs)?;
+        check_utf8("root_image", &self.root_image)?;
+        check_utf8("console", &self.console)?;
+        for share in &self.shares {
+            check_utf8("a share path", &share.path)?;
+        }
+        if let Some(confinement) = &self.confinement {
+            check_utf8("confinement.profile", &confinement.profile)?;
+            check_utf8("confinement.allowed", &confinement.allowed)?;
+            check_utf8("confinement.outside", &confinement.outside)?;
+        }
+        serialize(self)
     }
 }
 
@@ -229,9 +255,12 @@ impl GuestConfig {
         Ok(config)
     }
 
-    /// The configuration as one JSON line.
+    /// The configuration as one JSON line. A mount path that is not UTF-8 is refused.
     pub fn to_json(&self) -> Result<String, ConfigError> {
-        Ok(serde_json::to_string(self).unwrap_or_default())
+        for mount in &self.mounts {
+            check_utf8("a mount path", &mount.path)?;
+        }
+        serialize(self)
     }
 
     /// The probe IDs in the order `lane-init` runs them.

@@ -75,13 +75,12 @@ fn padding(length: usize) -> usize {
 }
 
 fn check_name(name: &str) -> Result<(), CpioError> {
-    let path = std::path::Path::new(name);
-    let normal = path
-        .components()
-        .all(|component| matches!(component, std::path::Component::Normal(_)));
-    if name.is_empty() || !normal || name.contains('\0') || name == TRAILER {
+    let plain = name
+        .split('/')
+        .all(|part| !part.is_empty() && part != "." && part != "..");
+    if !plain || name.contains('\0') || name == TRAILER {
         return Err(CpioError(format!(
-            "`{name}` is not a relative name with only normal components"
+            "`{name}` is not a relative name of plain parts: no `.`, `..`, empty part or trailing `/`"
         )));
     }
     Ok(())
@@ -124,8 +123,9 @@ fn push_member(out: &mut Vec<u8>, ino: u32, entry: &Entry, nlink: u32) -> Result
     Ok(())
 }
 
-/// Write `entries` as an uncompressed newc archive ending in `TRAILER!!!`. Names are relative,
-/// with no `.` or `..` component, and appear once.
+/// Write `entries` as an uncompressed newc archive ending in `TRAILER!!!`. A name is relative and
+/// made of parts joined by single `/`s, with no `.`, `..` or empty part and no trailing `/`, so
+/// each guest path has one spelling. Each name appears once.
 pub fn write_newc(entries: &[Entry]) -> Result<Vec<u8>, CpioError> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
@@ -238,6 +238,9 @@ pub fn lane_initramfs(
     probe: &[u8],
     guest: &GuestConfig,
 ) -> Result<Vec<u8>, CpioError> {
+    let configuration = guest
+        .to_json()
+        .map_err(|error| CpioError(format!("lane.json: {error}")))?;
     write_newc(&[
         Entry::dir("dev", 0o755),
         Entry::char_device("dev/console", 0o600, 5, 1),
@@ -246,11 +249,7 @@ pub fn lane_initramfs(
         Entry::dir("run", 0o755),
         Entry::dir("bin", 0o755),
         Entry::file("bin/lane-probe", 0o755, probe.to_vec()),
-        Entry::file(
-            "lane.json",
-            0o644,
-            guest.to_json().unwrap_or_default().into_bytes(),
-        ),
+        Entry::file("lane.json", 0o644, configuration.into_bytes()),
         Entry::file("init", 0o755, init.to_vec()),
     ])
 }

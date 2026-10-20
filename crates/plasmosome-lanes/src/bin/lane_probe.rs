@@ -48,8 +48,16 @@ mod linux {
         }
     }
 
-    fn socket(name: &str) -> PathBuf {
-        Path::new(HOLD_DIR).join(format!("{name}.sock"))
+    fn socket(name: &str) -> io::Result<PathBuf> {
+        if probe::holder_name_ok(name) {
+            return Ok(Path::new(HOLD_DIR).join(format!("{name}.sock")));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "holder name `{name}` must start with a letter or digit and hold only letters, digits, `.`, `_` and `-`"
+            ),
+        ))
     }
 
     fn read_all_at(file: &File) -> io::Result<Vec<u8>> {
@@ -98,6 +106,13 @@ mod linux {
 
     fn serve(kind: &str, name: &str, path: &str) -> ExitCode {
         let probe = format!("hold-{kind}");
+        let place = match socket(name) {
+            Ok(place) => place,
+            Err(error) => {
+                print(&failure(&probe, &error));
+                return ExitCode::SUCCESS;
+            }
+        };
         let held = match hold(kind, path) {
             Ok(held) => held,
             Err(error) => {
@@ -105,7 +120,6 @@ mod linux {
                 return ExitCode::SUCCESS;
             }
         };
-        let place = socket(name);
         let listener = match UnixListener::bind(&place).and_then(|listener| {
             fs::set_permissions(&place, fs::Permissions::from_mode(0o666)).map(|()| listener)
         }) {
@@ -138,9 +152,12 @@ mod linux {
         ExitCode::SUCCESS
     }
 
-    fn start_holder(probe: &str, program: &str, args: &[&str]) -> Value {
+    fn start_holder(probe: &str, program: &str, kind: &str, name: &str, path: &str) -> Value {
+        if let Err(error) = socket(name) {
+            return failure(probe, &error);
+        }
         let spawned = Command::new(program)
-            .args(args)
+            .args(["serve", kind, name, path])
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -166,7 +183,11 @@ mod linux {
     }
 
     fn release(name: &str) -> Value {
-        let mut stream = match UnixStream::connect(socket(name)) {
+        let place = match socket(name) {
+            Ok(place) => place,
+            Err(error) => return failure("release", &error),
+        };
+        let mut stream = match UnixStream::connect(place) {
             Ok(stream) => stream,
             Err(error) => return failure("release", &error),
         };
@@ -192,13 +213,9 @@ mod linux {
             }
             ["mountinfo"] => read_text("mountinfo", "/proc/self/mountinfo", probe::mountinfo_from),
             ["uname"] => uname(),
-            ["hold-fd", name, path] => start_holder("hold-fd", exe, &["serve", "fd", name, path]),
-            ["hold-map", name, path] => {
-                start_holder("hold-map", exe, &["serve", "map", name, path])
-            }
-            ["hold-exec", name, path] => {
-                start_holder("hold-exec", path, &["serve", "exec", name, path])
-            }
+            ["hold-fd", name, path] => start_holder("hold-fd", exe, "fd", name, path),
+            ["hold-map", name, path] => start_holder("hold-map", exe, "map", name, path),
+            ["hold-exec", name, path] => start_holder("hold-exec", path, "exec", name, path),
             ["release", name] => release(name),
             _ => return None,
         })

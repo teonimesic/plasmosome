@@ -156,28 +156,41 @@ pub fn create(path: &Path) -> Value {
 /// The sorted names in the directory at `path`.
 pub fn list(path: &Path) -> Value {
     let names = fs::read_dir(path).and_then(|entries| {
-        let mut names = entries
-            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().to_string()))
-            .collect::<io::Result<Vec<_>>>()?;
-        names.sort();
-        Ok(json!({"names": names}))
+        entries
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<io::Result<Vec<_>>>()
     });
-    line("list", names)
+    match names {
+        Ok(names) => list_names(names),
+        Err(error) => failure("list", &error),
+    }
 }
 
-/// The `list` line for `names`, sorted.
+/// The `list` line for `names`, sorted. A name that is not UTF-8 fails the whole listing,
+/// because a lossy conversion would report two different names as one.
 pub fn list_names(names: impl IntoIterator<Item = OsString>) -> Value {
-    let mut names: Vec<String> = names
-        .into_iter()
-        .map(|name| name.to_string_lossy().to_string())
-        .collect();
-    names.sort();
-    json!({"probe": "list", "ok": true, "names": names})
+    let mut listed = Vec::new();
+    for name in names {
+        match name.into_string() {
+            Ok(name) => listed.push(name),
+            Err(name) => {
+                return json!({"probe": "list", "ok": false,
+                              "error": format!("the name {name:?} is not UTF-8")});
+            }
+        }
+    }
+    listed.sort();
+    json!({"probe": "list", "ok": true, "names": listed})
 }
 
-/// True when `name` can name a holder's socket inside the holder directory.
-pub fn holder_name_ok(_name: &str) -> bool {
-    true
+/// True when `name` can name a holder's socket inside the holder directory: it starts with a
+/// letter or digit and holds only letters, digits, `.`, `_` and `-`.
+pub fn holder_name_ok(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Resolve `path` without following a final symlink.
@@ -232,11 +245,19 @@ pub fn filesystems_from(text: &str) -> Value {
     json!({"probe": "filesystems", "ok": true, "names": names})
 }
 
+const OPTIONAL_FIELDS: usize = 6;
+
 fn mount(row: &str) -> Option<Value> {
     let fields: Vec<&str> = row.split(' ').collect();
-    let separator = fields.iter().position(|field| *field == "-")?;
+    let separator = OPTIONAL_FIELDS
+        + fields
+            .get(OPTIONAL_FIELDS..)?
+            .iter()
+            .position(|field| *field == "-")?;
     Some(json!({
         "mount_point": fields.get(4)?,
+        "root": fields.get(3)?,
+        "optional_fields": fields.get(OPTIONAL_FIELDS..separator)?,
         "fstype": fields.get(separator + 1)?,
         "source": fields.get(separator + 2)?,
         "mount_options": fields.get(5)?,
@@ -244,8 +265,9 @@ fn mount(row: &str) -> Option<Value> {
     }))
 }
 
-/// The mounts in a `/proc/<pid>/mountinfo` text: mount point, filesystem type, source and
-/// options of each.
+/// The mounts in a `/proc/<pid>/mountinfo` text: of each, the mount point, the root within its
+/// filesystem, the optional fields such as `shared:N` and `master:N`, the filesystem type, the
+/// source and both option lists.
 pub fn mountinfo_from(text: &str) -> Value {
     let mounts: Option<Vec<Value>> = text
         .lines()
@@ -255,7 +277,7 @@ pub fn mountinfo_from(text: &str) -> Value {
     match mounts {
         Some(mounts) => json!({"probe": "mountinfo", "ok": true, "mounts": mounts}),
         None => {
-            json!({"probe": "mountinfo", "ok": false, "error": "a mountinfo line has no `-` field"})
+            json!({"probe": "mountinfo", "ok": false, "error": "a mountinfo line has fewer than six fields before its `-` separator"})
         }
     }
 }

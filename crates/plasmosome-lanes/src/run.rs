@@ -185,6 +185,9 @@ pub fn run_lane(
             ),
         ));
     }
+    let configuration = lane
+        .to_json()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
     match fs::remove_file(&lane.console) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}
@@ -201,7 +204,7 @@ pub fn run_lane(
     let pid = child.id();
     let stderr_reader = StderrReader::start(child.stderr.take());
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(lane.to_json().unwrap_or_default().as_bytes());
+        let _ = stdin.write_all(configuration.as_bytes());
     }
     let status = match wait_until(&mut child, deadline) {
         Ok(Some(status)) => {

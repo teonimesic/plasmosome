@@ -62,6 +62,14 @@ pub fn ext4_from_dir(tool_dir: &Path, staged: &Path, out: &Path) -> io::Result<(
 /// Read the file at `path` inside the ext4 `image` with `debugfs` from `tool_dir`. Refuses,
 /// naming the tool, when `tool_dir` has no `debugfs`, and refuses a path the image lacks.
 pub fn ext4_read(tool_dir: &Path, image: &Path, path: &str) -> io::Result<Vec<u8>> {
+    if path.contains(['"', '\n', '\r', '\0']) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{path:?} holds a quote, a line break or a NUL, which a debugfs request cannot carry"
+            ),
+        ));
+    }
     let debugfs = tool(tool_dir, "debugfs")?;
     let run = |request: String| {
         Command::new(&debugfs)
