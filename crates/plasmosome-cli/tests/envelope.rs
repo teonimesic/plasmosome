@@ -565,7 +565,7 @@ fn a_large_envelope_is_written_in_pieces() {
     );
     assert_eq!(
         emitted_in_pieces(&success, Form::Human).lines().count(),
-        50_000 + 5
+        50_000 + 6
     );
 
     let error = Json::Object(vec![
