@@ -16,6 +16,10 @@ const LAST_SIGNAL: libc::c_int = 64;
 pub const SETUP_FAILED: i32 = 125;
 
 /// The exit code of a launched child whose `execve` of the helper returned.
+///
+/// On Linux it is a hint, not proof: glibc's dynamic loader also exits 127
+/// when a library the helper needs cannot be loaded, after `execve` has
+/// succeeded. Darwin's dyld aborts the process instead.
 pub const EXEC_FAILED: i32 = 127;
 
 /// The pinned VMM helper, laid out in the parent so that a child forked by

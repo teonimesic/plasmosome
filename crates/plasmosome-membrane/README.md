@@ -116,7 +116,9 @@ recipe's one ndjson line and then end of file, and no other descriptor survives 
 `VmmChild::spawn` forks then calls only async-signal-safe functions: it resets every signal to its
 default action, copies the four descriptors into place, closes every descriptor above 3, sets umask
 077 and the working directory `/`, unblocks every signal last and calls `execve`.
-It exits 125 when that setup fails and 127 when `execve` returns.
+It exits 125 when that setup fails and 127 when `execve` returns. On Linux, 127 can also come from
+glibc's dynamic loader, after `execve` succeeded, when a library the helper needs is missing, so
+there it is a hint rather than proof.
 
 Closing every descriptor above 3 is one `close_range` call on Linux; `prepare` refuses when the
 kernel does not offer it. Darwin has no such call, so the child closes each number below the larger
