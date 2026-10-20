@@ -105,7 +105,9 @@ An author who does not understand the kernel cannot act on a refusal phrased in 
 terms. So every refusal an author can cause names the declaration it read, the field in it that
 is wrong or missing, and the line the author would write, or the entry to remove. This is what
 makes the write-attach-fix loop converge for someone who never learns the rules: they do not have
-to know what is allowed, because the refusal tells them what they did not say.
+to know what is allowed, because the refusal tells them what they did not say. The two refusals
+of the file as a whole, a TOML syntax error and a declaration over 1 MiB, are the only
+exceptions (Contract).
 
 There are three shapes, and the third is the one that matters most.
 
