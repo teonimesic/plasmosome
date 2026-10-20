@@ -322,3 +322,61 @@ fn the_sbpl_self_check_exits_70_when_the_profile_allows_writes_outside_the_direc
         run.stderr
     );
 }
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn a_held_descriptor_mapping_and_executable_are_read_back_on_release() {
+    let mut lane = lane(
+        "boot-f",
+        vec![
+            probe("hold-fd", 1000, &["hold-fd", "fd", "/mnt/share/hello.txt"]),
+            probe(
+                "hold-map",
+                1000,
+                &["hold-map", "map", "/mnt/share/hello.txt"],
+            ),
+            probe("hold-exec", 1000, &["hold-exec", "exec", "/mnt/share/tool"]),
+            probe("release-fd", 1000, &["release", "fd"]),
+            probe("release-map", 1000, &["release", "map"]),
+            probe("release-exec", 1000, &["release", "exec"]),
+            probe("release-none", 1000, &["release", "none"]),
+        ],
+    );
+    let share = lane.lane.console.with_file_name("share");
+    let placed = b"placed by the host\n";
+    common::write_file(&share, "hello.txt", placed);
+    let tool_bytes = guest_binary("lane-probe");
+    let tool = common::write_file(&share, "tool", &tool_bytes);
+    fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("the tool is made executable");
+    lane.lane.shares.push(Share {
+        tag: "lanes0".to_string(),
+        path: share,
+        shm_size: 0,
+        read_only: true,
+        semantics: Semantics::Complete,
+    });
+    lane.guest.mounts.push(GuestMount {
+        tag: "lanes0".to_string(),
+        path: PathBuf::from("/mnt/share"),
+        options: Vec::new(),
+    });
+
+    let run = boot(&lane);
+
+    let results = finished(&run);
+    for id in ["hold-fd", "hold-map", "hold-exec"] {
+        assert_eq!(line(results, id)["ok"], true, "{}", line(results, id));
+    }
+    for (id, bytes) in [
+        ("release-fd", placed.as_slice()),
+        ("release-map", placed.as_slice()),
+        ("release-exec", tool_bytes.as_slice()),
+    ] {
+        let released = line(results, id);
+        assert_eq!(released["ok"], true, "{released}");
+        assert_eq!(released["sha256"], common::sha256(bytes), "{released}");
+        assert_eq!(released["bytes"], bytes.len(), "{released}");
+    }
+    assert_eq!(line(results, "release-none")["errno"], "ENOENT");
+}
