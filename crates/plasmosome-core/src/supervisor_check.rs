@@ -1,3 +1,158 @@
+use serde::Serialize;
+
+use crate::state::CellStatus;
+
+/// What the controller's `flock(LOCK_EX | LOCK_NB)` on a fresh descriptor found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockFact {
+    /// Another holder has the lock: a live supervisor.
+    Held,
+    /// The controller got the lock, and holds it until the outcome is carried out. A missing
+    /// `supervisor.lock` that the controller created exclusively and locked is free.
+    Free,
+}
+
+/// What the cell's `launched` marker says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerFact {
+    /// No marker: no runtime was launched, or it was cleanly ended.
+    Absent,
+    /// A marker whose boot session is not this boot's, whether or not it records a clean stop.
+    EarlierBoot,
+    /// A marker from this boot that records a clean stop.
+    ThisBootStopped,
+    /// A marker from this boot with no clean stop.
+    ThisBootRunning,
+    /// A marker that exists but cannot be read or parsed.
+    Unreadable,
+}
+
+/// What the cell's journal holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalFact {
+    /// A journal spec 008 quarantines.
+    Corrupt,
+    /// Nothing settled and nothing pending. A missing journal is empty.
+    Empty,
+    /// A settled attachment or a pending operation. `external_obligation` is true when any of
+    /// them is a published delayed effect or an external assertion, which only an operator's
+    /// Force discharges.
+    Holdings { external_obligation: bool },
+}
+
+/// Why a cell is set aside. Serializes as the name spec 023 gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetAsideReason {
+    /// The supervisor gave no answer by the cap.
+    Unresponsive,
+    /// The supervisor still reported `germinating` at the cap.
+    Germinating,
+    /// The cell would retire, but its journal holds an outstanding external obligation.
+    ExternalObligations,
+    /// The lock is free, but the marker is from this boot with no clean stop, or unreadable.
+    SupervisorLost,
+    /// No marker, but the journal holds a settled attachment or a pending operation.
+    HoldingsWithoutSupervisor,
+    /// The cell would retire, but its session log line could not be appended. `decide` never
+    /// returns it: the caller whose append failed sets the cell aside with it.
+    RetireUnlogged,
+}
+
+/// What the controller does with one cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckOutcome {
+    /// Query the supervisor within the cap and pass each result to [`after_query`].
+    Query,
+    /// Quarantine the cell under spec 008, reporting its lock state and marker.
+    Quarantine,
+    /// Retire the cell, writing every settled holding and pending operation to the session log
+    /// as residue.
+    RetireWithResidue,
+    /// Set the cell aside for this reason.
+    SetAside(SetAsideReason),
+    /// Retire the cell with a session log line.
+    RetireEmpty,
+}
+
+/// Decides one cell from its lock, marker and journal, by the first row of spec 023 §8's table
+/// that matches. The caller gathers the facts and carries out the outcome.
+pub const fn decide(lock: LockFact, marker: MarkerFact, journal: JournalFact) -> CheckOutcome {
+    match (lock, marker, journal) {
+        (LockFact::Held, _, _) => CheckOutcome::Query,
+        (LockFact::Free, _, JournalFact::Corrupt) => CheckOutcome::Quarantine,
+        (
+            LockFact::Free,
+            MarkerFact::EarlierBoot | MarkerFact::ThisBootStopped,
+            JournalFact::Empty
+            | JournalFact::Holdings {
+                external_obligation: false,
+            },
+        ) => CheckOutcome::RetireWithResidue,
+        (
+            LockFact::Free,
+            MarkerFact::EarlierBoot | MarkerFact::ThisBootStopped,
+            JournalFact::Holdings {
+                external_obligation: true,
+            },
+        ) => CheckOutcome::SetAside(SetAsideReason::ExternalObligations),
+        (LockFact::Free, MarkerFact::ThisBootRunning | MarkerFact::Unreadable, _) => {
+            CheckOutcome::SetAside(SetAsideReason::SupervisorLost)
+        }
+        (LockFact::Free, MarkerFact::Absent, JournalFact::Empty) => CheckOutcome::RetireEmpty,
+        (LockFact::Free, MarkerFact::Absent, JournalFact::Holdings { .. }) => {
+            CheckOutcome::SetAside(SetAsideReason::HoldingsWithoutSupervisor)
+        }
+    }
+}
+
+/// One query to a held lock's supervisor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryResult {
+    /// The supervisor answered with this lifecycle.
+    Answered { lifecycle: CellStatus },
+    /// No answer. A caller maps a malformed answer here too.
+    NoAnswer,
+}
+
+/// What the controller does after one query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryOutcome {
+    /// The supervisor is live: adopt the cell.
+    Adopt,
+    /// Query again before the cap.
+    KeepWaiting,
+    /// Set the cell aside as `unresponsive` or `germinating`.
+    SetAside(SetAsideReason),
+}
+
+/// Decides what one query's result means. `cap_reached` is true once the answer cap has passed.
+/// A supervisor that answers any lifecycle but `germinating` is adopted, `dead` included.
+pub const fn after_query(result: &QueryResult, cap_reached: bool) -> QueryOutcome {
+    match (result, cap_reached) {
+        (
+            QueryResult::Answered {
+                lifecycle: CellStatus::Ready | CellStatus::Draining | CellStatus::Dead,
+            },
+            _,
+        ) => QueryOutcome::Adopt,
+        (
+            QueryResult::Answered {
+                lifecycle: CellStatus::Germinating,
+            }
+            | QueryResult::NoAnswer,
+            false,
+        ) => QueryOutcome::KeepWaiting,
+        (
+            QueryResult::Answered {
+                lifecycle: CellStatus::Germinating,
+            },
+            true,
+        ) => QueryOutcome::SetAside(SetAsideReason::Germinating),
+        (QueryResult::NoAnswer, true) => QueryOutcome::SetAside(SetAsideReason::Unresponsive),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
