@@ -74,6 +74,16 @@ SYMLINK_TARGET_BYTES = 4096
 GIT_TIMEOUT_SECONDS = 60
 MAX_SYMLINKS = 40
 
+LEAVES = "leaves"
+OUTSIDE = "outside"
+LOOP = "loop"
+AMBIGUOUS = "ambiguous"
+UNREADABLE_TARGET = "unreadable target"
+MISSING = "missing"
+FILE = "file"
+SUBMODULE = "submodule"
+DIRECTORY = "directory"
+
 # Spec 026 section 1 names no key that tracked Cargo configuration may hold. A key is added here
 # only after the spec names it.
 CONFIG_KEYS = frozenset()
@@ -93,6 +103,36 @@ SUBMODULE_REFUSED = (
     "every submodule is refused; this commit does not hold its files, "
     "so this step cannot judge them"
 )
+MANIFEST_REFUSED = "a manifest must be a regular file"
+TOP_LEVEL_REFUSED = {
+    "patch": "[patch] swaps the code cargo builds for a dependency, so it is refused",
+    "replace": "[replace] swaps the code cargo builds for a dependency, so it is refused",
+    "cargo-features": (
+        "unstable cargo features are refused; on a nightly toolchain, profile-rustflags lets a "
+        "manifest pass rustflags such as --cap-lints=allow"
+    ),
+}
+NOT_A_STRING = "cargo reads a path here, and this value is not a string"
+GLOB_THEN_PARENT = "has a .. after a glob, which can leave the repository"
+PATH_PROBLEMS = {
+    LEAVES: "leaves the repository",
+    OUTSIDE: "leaves the repository through a tracked symlink",
+    LOOP: f"goes through more than {MAX_SYMLINKS} symlinks",
+    AMBIGUOUS: "reaches tracked paths that a case-insensitive filesystem treats as one",
+    UNREADABLE_TARGET: "goes through a symlink whose target this step cannot read as a path",
+    MISSING: "does not resolve to a tracked directory: nothing is tracked there",
+    FILE: "does not resolve to a tracked directory: it is a file",
+    SUBMODULE: "does not resolve to a tracked directory: it is a submodule",
+}
+DEPENDENCY_TABLES = (
+    "dependencies",
+    "dev-dependencies",
+    "dev_dependencies",
+    "build-dependencies",
+    "build_dependencies",
+)
+TARGET_KINDS = ("bin", "example", "test", "bench")
+GLOB = re.compile(r"[*?\[]")
 
 HARM = (
     "A program nobody reviewed runs at the first cargo command on every machine that builds main, "
@@ -119,17 +159,6 @@ class Entry:
         self.mode = mode
         self.kind = kind
         self.oid = oid
-
-
-LEAVES = "leaves"
-OUTSIDE = "outside"
-LOOP = "loop"
-AMBIGUOUS = "ambiguous"
-UNREADABLE_TARGET = "unreadable target"
-MISSING = "missing"
-FILE = "file"
-SUBMODULE = "submodule"
-DIRECTORY = "directory"
 
 
 def folded(name):
@@ -378,9 +407,104 @@ def toolchain(entry):
     return found
 
 
-def check(entry):
+def key_name(parts):
+    shown = ""
+    for part in parts:
+        if isinstance(part, int):
+            shown += f"[{part}]"
+        else:
+            shown += ("." if shown else "") + key_path([part])
+    return shown
+
+
+def table_at(document, *keys):
+    for key in keys:
+        document = document.get(key) if isinstance(document, dict) else None
+    return document if isinstance(document, dict) else {}
+
+
+def dependency_tables(document):
+    holders = [([], document)]
+    holders.extend(
+        (["target", cfg], table)
+        for cfg, table in table_at(document, "target").items()
+        if isinstance(table, dict)
+    )
+    for keys, holder in holders:
+        for name in DEPENDENCY_TABLES:
+            yield [*keys, name], table_at(holder, name)
+    yield ["workspace", "dependencies"], table_at(document, "workspace", "dependencies")
+
+
+def path_values(document):
+    for keys, table in dependency_tables(document):
+        for name, dependency in table.items():
+            if isinstance(dependency, dict) and "path" in dependency:
+                yield [*keys, name, "path"], dependency["path"], True
+    package = table_at(document, "package")
+    build = package.get("build")
+    if isinstance(build, str):
+        yield ["package", "build"], build, False
+    elif isinstance(build, list):
+        for index, script in enumerate(build):
+            yield ["package", "build", index], script, False
+    if "workspace" in package:
+        yield ["package", "workspace"], package["workspace"], False
+    library = table_at(document, "lib")
+    if "path" in library:
+        yield ["lib", "path"], library["path"], False
+    for kind in TARGET_KINDS:
+        targets = document.get(kind)
+        for index, target in enumerate(targets if isinstance(targets, list) else []):
+            if isinstance(target, dict) and "path" in target:
+                yield [kind, index, "path"], target["path"], False
+
+
+def path_problem(tree, base, value, directory, globbing):
+    if not isinstance(value, str):
+        return NOT_A_STRING
+    judged = value
+    if globbing:
+        parts = value.split("/")
+        globbed = next((index for index, part in enumerate(parts) if GLOB.search(part)), None)
+        if globbed is not None:
+            if ".." in parts[globbed:]:
+                return f'"{printable(value)}" {GLOB_THEN_PARENT}'
+            judged, directory = "/".join(parts[:globbed]), False
+    kind, _ = tree.reach(base, judged)
+    if kind == DIRECTORY or (kind in (MISSING, FILE, SUBMODULE) and not directory):
+        return None
+    return f'"{printable(value)}" {PATH_PROBLEMS[kind]}'
+
+
+def manifest(entry, tree):
+    if entry.kind != "blob" or entry.mode == SYMLINK:
+        return [whole(entry, MANIFEST_REFUSED)]
+    document, problem = read_toml(entry)
+    if problem:
+        return [(entry.path, "(file)", problem)]
+    found = [(entry.path, key, reason) for key, reason in TOP_LEVEL_REFUSED.items() if key in document]
+    base = entry.path.split("/")[:-1]
+    values = [(keys, value, directory, False) for keys, value, directory in path_values(document)]
+    workspace = table_at(document, "workspace")
+    for field in ("members", "default-members"):
+        members = workspace.get(field)
+        for index, member in enumerate(members if isinstance(members, list) else []):
+            values.append((["workspace", field, index], member, True, True))
+    for keys, value, directory, globbing in values:
+        problem = path_problem(tree, base, value, directory, globbing)
+        if problem:
+            found.append((entry.path, key_name(keys), problem))
+    return found
+
+
+def check(entry, tree):
     if entry.kind == "commit":
         return [(entry.path, "(submodule)", SUBMODULE_REFUSED)]
+    return named(entry, tree)
+
+
+def named(entry, tree):
     parts = entry.path.casefold().split("/")
     if parts[-1] == ".gitattributes":
         return [whole(entry, GITATTRIBUTES_REFUSED)]
@@ -392,6 +516,8 @@ def check(entry):
         return [whole(entry, EXTENSIONLESS_REFUSED)]
     if parts[-1] == "rust-toolchain.toml":
         return toolchain(entry)
+    if parts[-1] == "cargo.toml":
+        return manifest(entry, tree)
     return []
 
 
@@ -401,7 +527,9 @@ def main(arguments):
         return 2
     try:
         sha = resolve(arguments[0] if arguments else "HEAD")
-        findings = [finding for entry in entries(sha) for finding in check(entry)]
+        listed = entries(sha)
+        tree = Tree(listed)
+        findings = [finding for entry in listed for finding in check(entry, tree)]
     except CannotRead as error:
         print(f"build-input-guard: cannot read {error.what}: {error.detail}", file=sys.stderr)
         print(f"Refusing rather than passing: {UNREADABLE}.", file=sys.stderr)
