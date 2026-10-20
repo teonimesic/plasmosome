@@ -23,6 +23,12 @@ Runs on the host, one per cell. This is where enforcement lives.
 ## Conventions
 
 - Prefer types that make misuse unrepresentable over documentation asking callers to be careful.
+- This crate is in the `unsafe` register of
+  [spec 026](../../docs/specs/026-security-standard.md#2-unsafe-code), because forking a child
+  that may only call async-signal-safe functions, exact-child waits, process-group signals and
+  the Darwin process-table helper need `libc` and C calls the standard library does not offer;
+  `#[allow(unsafe_code)]` goes on the item that holds the `unsafe`, never on a `mod` or the crate
+  root.
 
 ## Testing
 
