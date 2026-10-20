@@ -10,8 +10,10 @@ import argparse
 import json
 import os
 from pathlib import Path, PurePosixPath
+import shlex
 import subprocess
 import sys
+import traceback
 
 
 CHECKS = ("sources", "advisories", "licenses")
@@ -39,6 +41,8 @@ REPORTED = {
     },
 }
 TOOL_FAILURE_CODES = {"index-failure", "index-cache-load-failure"}
+STALE_LOCKFILE = "--locked was passed to prevent this"
+LOCK_HINT = "Cargo.lock does not match the manifests: run `cargo update --workspace` (or any cargo build) and commit Cargo.lock"
 
 
 class ToolFailure(Exception):
@@ -118,14 +122,16 @@ def refusal(check, fields):
     if check == "advisories" and advisory.get("id"):
         form = f'{{ id = "{advisory["id"]}", reason = "until YYYY-MM-DD; <link>; <why>" }}'
         text += f"\n  to accept it for now, add to [advisories] ignore in deny.toml: {form}"
-    if check == "sources":
-        text += "\n  crates.io is the only allowed source"
     return text
+
+
+def stale(causes):
+    return "the lockfile is stale; cargo said: " + "; ".join(causes) + "\n  " + LOCK_HINT
 
 
 def classify(check, lines, returncode):
     """Classify one cargo-deny run from its JSON lines; the exit status alone decides nothing."""
-    refusals, failures, reported = [], [], []
+    refusals, failures, reported, causes = [], [], [], []
     counts, saw_error = None, False
     for line in lines:
         if not line.strip():
@@ -142,7 +148,11 @@ def classify(check, lines, returncode):
         kind = record.get("type")
         if kind == "log":
             level, message = fields.get("level"), fields.get("message")
-            if level == "ERROR":
+            stale_lines = [text.strip().removeprefix("error: ") for text in str(message).splitlines()
+                           if STALE_LOCKFILE in text]
+            if level == "ERROR" and stale_lines:
+                causes.extend(text for text in stale_lines if text not in causes)
+            elif level == "ERROR":
                 failures.append(f"error log: {message}")
             elif level == "WARN":
                 reported.append(f"warning log: {message}")
@@ -164,9 +174,11 @@ def classify(check, lines, returncode):
                 failures.append(f"a summary for another check: {line.strip()}")
         else:
             failures.append(f"a record of unknown type {kind!r}: {line.strip()}")
-    if counts is None and not failures:
+    if causes:
+        refusals.append(stale(causes))
+    if counts is None and not failures and not causes:
         failures.append(f"cargo-deny wrote no {check} summary")
-    if returncode != 0 and not saw_error and not failures:
+    if returncode != 0 and not saw_error and not failures and not causes:
         failures.append(f"cargo-deny exited {returncode} without an error diagnostic")
     status = TOOL_FAILURE if failures else REFUSAL if refusals else PASS
     return {"status": STATUS_NAMES[status], "code": status, "refusals": refusals, "failures": failures,
@@ -175,7 +187,7 @@ def classify(check, lines, returncode):
 
 def run(root, check, lockfile):
     argv = command(root, check, lockfile)
-    print("$ " + " ".join(argv), flush=True)
+    print("$ " + shlex.join(argv), flush=True)
     try:
         result = subprocess.run(argv, cwd=root, capture_output=True, timeout=TIMEOUT,
                                 env={**os.environ, "CARGO_TERM_COLOR": "never"})
@@ -248,4 +260,10 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        status = main()
+    except Exception:
+        print("cargo-deny tool failure (not a finding): the wrapper crashed:", flush=True)
+        print(traceback.format_exc(), end="", flush=True)
+        status = TOOL_FAILURE
+    sys.exit(status)
