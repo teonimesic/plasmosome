@@ -12,3 +12,6 @@ exclude = ["AGENTS.md", "CLAUDE.md"]
 
 [lib]
 bench = false
+
+[lints]
+workspace = true

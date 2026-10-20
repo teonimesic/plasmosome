@@ -20,7 +20,8 @@ one.
 | `reconciler` | Desired state vs observed state, converging by generation |
 | `gatekeeper` | Credential custody — the cell receives handles, never secrets |
 | `session_log` | Append-only, synced audit record shared by an instance's cells through one locked writer; an IO error stops all later appends |
-| `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode` |
+| `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode`; the one constructor for a cell's journal and socket paths |
+| `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends |
 
@@ -111,6 +112,15 @@ Registration preserves last-registration-wins behavior; withdrawal removes the o
 and their descriptions. `list()` still returns sorted names.
 
 Tests: `cargo test -p plasmosome-core`
+
+## Cell IDs on a normalizing filesystem
+
+`InstanceRoot::cell_dir` opens a cell only when its ID is the exact bytes of the name on disk, and
+refuses another spelling as `Alias`. HFS+ stores names in decomposed Unicode, so a cell created
+there with a composed non-ASCII ID such as `café` is stored as other bytes, and `cell_dir` refuses
+that ID every time. APFS and ext4 keep the bytes a name was created with. Spec 023
+allocates ASCII `cell-<n>` IDs, which are stored as given everywhere; nothing here refuses a
+non-ASCII ID on HFS+ at creation.
 
 ## Socket ownership
 
