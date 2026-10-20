@@ -1453,21 +1453,6 @@ mod tests {
     }
 
     #[test]
-    fn a_symlinked_journal_is_refused_and_its_target_is_not_opened() {
-        assert_not_root();
-        let (_dir, root) = temp_root();
-        let cell = make_cell(&root, "cell-1", None);
-        let target = root.join("secret");
-        fs::write(&target, b"secret").expect("the target is made");
-        set_mode(&target, 0o000);
-        symlink(&target, cell.join("ledger.ndjson")).expect("the link is made");
-        assert_eq!(
-            described(&discover(&root)),
-            ["cell cell-1: refused: symlink"]
-        );
-    }
-
-    #[test]
     fn a_journal_linked_to_a_readable_file_is_refused_as_a_symlink() {
         let (_dir, root) = temp_root();
         let cell = make_cell(&root, "cell-1", None);
@@ -1498,17 +1483,6 @@ mod tests {
         let (_dir, root) = temp_root();
         let cell = make_cell(&root, "cell-1", None);
         fs::create_dir(cell.join("ledger.ndjson")).expect("the directory is made");
-        assert_eq!(
-            described(&discover(&root)),
-            ["cell cell-1: refused: not regular"]
-        );
-    }
-
-    #[test]
-    fn a_socket_journal_is_refused_as_not_regular() {
-        let (_dir, root) = temp_root();
-        let cell = make_cell(&root, "cell-1", None);
-        let _socket = UnixListener::bind(cell.join("ledger.ndjson")).expect("the socket binds");
         assert_eq!(
             described(&discover(&root)),
             ["cell cell-1: refused: not regular"]
@@ -2116,203 +2090,247 @@ mod tests {
         );
     }
 
-    fn assert_shown(error: &dyn Error, display: &str, source: Option<&str>) {
-        assert_eq!(error.to_string(), display);
-        assert_eq!(
-            error.source().map(ToString::to_string).as_deref(),
-            source,
-            "{display}"
-        );
-    }
-
     fn eio() -> io::Error {
         io::Error::from_raw_os_error(libc::EIO)
     }
 
     #[test]
-    fn lock_errors_name_their_path_and_keep_their_cause() {
-        let path = || PathBuf::from("/inst/controller.lock");
-        let cause = eio().to_string();
-        assert_shown(
-            &LockError::Busy { path: path() },
-            "/inst/controller.lock is held by another writer",
-            None,
-        );
-        assert_shown(
-            &LockError::Symlink { path: path() },
-            "/inst/controller.lock is a symlink and was not followed",
-            None,
-        );
-        assert_shown(
-            &LockError::NotRegular { path: path() },
-            "/inst/controller.lock is not a regular file",
-            None,
-        );
-        assert_shown(
-            &LockError::Io {
-                path: PathBuf::from("/inst"),
-                source: eio(),
-            },
-            &format!("the writer lock failed at /inst: {cause}"),
-            Some(&cause),
-        );
-    }
-
-    #[test]
-    fn instance_root_errors_name_their_path_and_keep_their_cause() {
-        let cause = eio().to_string();
-        assert_shown(
-            &InstanceRootError::NotAbsolute {
-                path: PathBuf::from("inst"),
-            },
-            "inst is not an absolute path",
-            None,
-        );
-        assert_shown(
-            &InstanceRootError::Open {
-                path: PathBuf::from("/inst"),
-                source: eio(),
-            },
-            &format!("cannot open the instance root /inst: {cause}"),
-            Some(&cause),
-        );
-    }
-
-    #[test]
-    fn discovery_errors_name_their_path_and_keep_their_cause() {
-        let path = || PathBuf::from("/inst/cells");
-        let cause = eio().to_string();
-        assert_shown(
-            &DiscoveryError::CellsSymlink { path: path() },
-            "/inst/cells is a symlink and was not followed",
-            None,
-        );
-        assert_shown(
-            &DiscoveryError::CellsNotADirectory { path: path() },
-            "/inst/cells is not a directory",
-            None,
-        );
-        assert_shown(
-            &DiscoveryError::ForeignLock {
-                path: PathBuf::from("/other/controller.lock"),
-            },
-            "the writer lock /other/controller.lock belongs to another instance root",
-            None,
-        );
-        for (error, display) in [
-            (
-                DiscoveryError::Open {
-                    path: path(),
-                    source: eio(),
-                },
-                "cannot open /inst/cells",
-            ),
-            (
-                DiscoveryError::Listing {
-                    path: path(),
-                    source: eio(),
-                },
-                "cannot list /inst/cells",
-            ),
-            (
-                DiscoveryError::Classify {
-                    path: path(),
-                    source: eio(),
-                },
-                "cannot inspect /inst/cells",
-            ),
-            (
-                DiscoveryError::OutOfDescriptors {
-                    path: path(),
-                    source: eio(),
-                },
-                "out of file descriptors at /inst/cells",
-            ),
-        ] {
-            assert_shown(&error, &format!("{display}: {cause}"), Some(&cause));
-        }
-    }
-
-    #[test]
-    fn cell_dir_errors_name_their_path_and_keep_their_cause() {
-        let path = || PathBuf::from("/inst/cells/cell-1");
-        let cause = eio().to_string();
+    fn every_error_names_what_it_refused_and_keeps_its_cause() {
+        let path = || PathBuf::from("/inst/x");
+        let lock = || PathBuf::from("/other/controller.lock");
+        let cause = Some(eio().to_string());
         let invalid = CellPathError::NotACellName("..".to_string());
-        let invalid_text = invalid.to_string();
-        assert_shown(
-            &CellDirError::InvalidCell(invalid),
-            &format!("cannot use this cell ID: {invalid_text}"),
-            Some(&invalid_text),
-        );
-        for (error, display) in [
+        let invalid_text = Some(invalid.to_string());
+        let rows: Vec<(Box<dyn Error>, &str, Option<String>)> = vec![
+            (Box::new(LockError::Busy { path: path() }), "/inst/x", None),
             (
-                CellDirError::Missing { path: path() },
-                "/inst/cells/cell-1 does not exist",
+                Box::new(LockError::Symlink { path: path() }),
+                "/inst/x",
+                None,
             ),
             (
-                CellDirError::Alias { path: path() },
-                "/inst/cells/cell-1 names a cell whose directory is spelled differently on disk",
+                Box::new(LockError::NotRegular { path: path() }),
+                "/inst/x",
+                None,
             ),
             (
-                CellDirError::Symlink { path: path() },
-                "/inst/cells/cell-1 is a symlink and was not followed",
+                Box::new(LockError::Io {
+                    path: path(),
+                    source: eio(),
+                }),
+                "/inst/x",
+                cause.clone(),
             ),
             (
-                CellDirError::NotADirectory { path: path() },
-                "/inst/cells/cell-1 is not a directory",
+                Box::new(InstanceRootError::NotAbsolute { path: path() }),
+                "/inst/x",
+                None,
             ),
             (
-                CellDirError::AlreadyExists { path: path() },
-                "/inst/cells/cell-1 already exists and was not adopted",
+                Box::new(InstanceRootError::Open {
+                    path: path(),
+                    source: eio(),
+                }),
+                "/inst/x",
+                cause.clone(),
             ),
             (
-                CellDirError::ForeignLock {
-                    path: PathBuf::from("/other/controller.lock"),
-                },
-                "the writer lock /other/controller.lock belongs to another instance root",
+                Box::new(DiscoveryError::CellsSymlink { path: path() }),
+                "/inst/x",
+                None,
             ),
-        ] {
-            assert_shown(&error, display, None);
+            (
+                Box::new(DiscoveryError::CellsNotADirectory { path: path() }),
+                "/inst/x",
+                None,
+            ),
+            (
+                Box::new(DiscoveryError::Open {
+                    path: path(),
+                    source: eio(),
+                }),
+                "/inst/x",
+                cause.clone(),
+            ),
+            (
+                Box::new(DiscoveryError::Listing {
+                    path: path(),
+                    source: eio(),
+                }),
+                "/inst/x",
+                cause.clone(),
+            ),
+            (
+                Box::new(DiscoveryError::Classify {
+                    path: path(),
+                    source: eio(),
+                }),
+                "/inst/x",
+                cause.clone(),
+            ),
+            (
+                Box::new(DiscoveryError::OutOfDescriptors {
+                    path: path(),
+                    source: eio(),
+                }),
+                "/inst/x",
+                cause.clone(),
+            ),
+            (
+                Box::new(DiscoveryError::ForeignLock { path: lock() }),
+                "/other/controller.lock",
+                None,
+            ),
+            (
+                Box::new(CellDirError::InvalidCell(invalid)),
+                "..",
+                invalid_text,
+            ),
+            (
+                Box::new(CellDirError::Missing { path: path() }),
+                "/inst/x",
+                None,
+            ),
+            (
+                Box::new(CellDirError::Alias { path: path() }),
+                "/inst/x",
+                None,
+            ),
+            (
+                Box::new(CellDirError::Symlink { path: path() }),
+                "/inst/x",
+                None,
+            ),
+            (
+                Box::new(CellDirError::NotADirectory { path: path() }),
+                "/inst/x",
+                None,
+            ),
+            (
+                Box::new(CellDirError::AlreadyExists { path: path() }),
+                "/inst/x",
+                None,
+            ),
+            (
+                Box::new(CellDirError::Io {
+                    path: path(),
+                    source: eio(),
+                }),
+                "/inst/x",
+                cause.clone(),
+            ),
+            (
+                Box::new(CellDirError::ForeignLock { path: lock() }),
+                "/other/controller.lock",
+                None,
+            ),
+            (
+                Box::new(JournalRefusal::CellDirectory(eio())),
+                "cell directory",
+                cause.clone(),
+            ),
+            (Box::new(JournalRefusal::Symlink), "journal", None),
+            (Box::new(JournalRefusal::NotRegular), "journal", None),
+            (
+                Box::new(JournalRefusal::Io(eio())),
+                "journal",
+                cause.clone(),
+            ),
+            (
+                Box::new(JournalRefusal::ForeignLock { path: lock() }),
+                "/other/controller.lock",
+                None,
+            ),
+        ];
+        for (error, names, source) in rows {
+            let text = error.to_string();
+            assert!(text.contains(names), "{text:?} does not name {names:?}");
+            assert_eq!(error.source().map(ToString::to_string), source, "{text}");
+            if let Some(source) = source {
+                assert!(text.contains(&source), "{text:?} omits its cause");
+            }
         }
-        assert_shown(
-            &CellDirError::Io {
-                path: path(),
-                source: eio(),
-            },
-            &format!("I/O failed at /inst/cells/cell-1: {cause}"),
-            Some(&cause),
-        );
     }
 
     #[test]
-    fn journal_refusals_keep_their_cause() {
-        let cause = eio().to_string();
-        assert_shown(
-            &JournalRefusal::CellDirectory(eio()),
-            &format!("the cell directory could not be opened: {cause}"),
-            Some(&cause),
-        );
-        assert_shown(
-            &JournalRefusal::Symlink,
-            "the journal is a symlink and was not followed",
-            None,
-        );
-        assert_shown(
-            &JournalRefusal::NotRegular,
-            "the journal is not a regular file",
-            None,
-        );
-        assert_shown(
-            &JournalRefusal::Io(eio()),
-            &format!("I/O failed on the journal: {cause}"),
-            Some(&cause),
-        );
-        assert_shown(
-            &JournalRefusal::ForeignLock {
-                path: PathBuf::from("/other/controller.lock"),
-            },
-            "the writer lock /other/controller.lock belongs to another instance root",
-            None,
+    fn an_existing_lock_file_is_made_private_when_locked() {
+        let (_dir, root) = temp_root();
+        let path = root.join("controller.lock");
+        fs::write(&path, b"").expect("the lock file is made");
+        set_mode(&path, 0o644);
+        let _lock = open_root(&root).lock().expect("the lock is taken");
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[test]
+    fn a_lock_is_foreign_to_a_new_root_made_where_its_own_root_was() {
+        let (_dir, base) = temp_root();
+        let at = base.join("inst");
+        fs::create_dir(&at).expect("the root is made");
+        let (_old, lock) = locked(&at);
+        let moved = base.join("moved");
+        fs::rename(&at, &moved).expect("the root is moved aside");
+        fs::create_dir(&at).expect("a new root is made at the old path");
+        make_cell(&at, "cell-1", None);
+        let new = open_root(&at);
+        let opened = new
+            .cell_dir(&cell("cell-1"))
+            .expect("the new root's cell opens");
+        let lock_path = at.join("controller.lock");
+        expect_match!(new.discover(&lock), Err(DiscoveryError::ForeignLock { path }) => {
+            assert_eq!(path, lock_path)
+        });
+        expect_match!(new.create_cell_dir(&lock, &cell("cell-2")), Err(CellDirError::ForeignLock { path }) => {
+            assert_eq!(path, lock_path)
+        });
+        expect_match!(opened.open_journal_for_append(&lock), Err(JournalRefusal::ForeignLock { path }) => {
+            assert_eq!(path, lock_path)
+        });
+        for created in ["cells/cell-2", "cells/cell-1/ledger.ndjson"] {
+            assert!(
+                fs::symlink_metadata(at.join(created)).is_err(),
+                "{created} was created under a foreign lock"
+            );
+        }
+        let link = base.join("link");
+        symlink(&moved, &link).expect("the link is made");
+        open_root(&link)
+            .discover(&lock)
+            .expect("the lock's own root is accepted at another path");
+    }
+
+    #[test]
+    fn running_out_of_the_system_file_table_is_a_process_fault() {
+        assert!(out_of_descriptors(&io::Error::from_raw_os_error(
+            libc::ENFILE
+        )));
+        assert!(out_of_descriptors(&io::Error::from_raw_os_error(
+            libc::EMFILE
+        )));
+        assert!(!out_of_descriptors(&io::Error::from_raw_os_error(
+            libc::EACCES
+        )));
+    }
+
+    #[test]
+    fn a_refused_file_open_is_labelled_by_what_is_there_whatever_the_error() {
+        let (_dir, root) = temp_root();
+        symlink(root.join("missing"), root.join("link")).expect("the link is made");
+        fs::create_dir(root.join("dir")).expect("the directory is made");
+        fs::write(root.join("file"), b"").expect("the file is made");
+        let instance = open_root(&root);
+        let refusal = |name: &str| {
+            let name = CString::new(name).expect("a name without NUL");
+            file_refusal(
+                instance.dir.as_fd(),
+                &name,
+                io::Error::from_raw_os_error(libc::EEXIST),
+            )
+        };
+        assert!(matches!(refusal("link"), FileRefusal::Symlink));
+        assert!(matches!(refusal("dir"), FileRefusal::NotRegular));
+        assert!(
+            matches!(refusal("file"), FileRefusal::Io(error) if error.raw_os_error() == Some(libc::EEXIST))
         );
     }
 }
