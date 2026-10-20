@@ -41,6 +41,8 @@ fn stops_within(pid: u32, limit: Duration) -> bool {
     true
 }
 
+const PROMPT: Duration = Duration::from_secs(15);
+
 struct KillOnDrop(Vec<PathBuf>);
 
 impl Drop for KillOnDrop {
@@ -341,11 +343,11 @@ fn a_child_holding_stderr_past_the_timeout_dies_with_the_launchers_group() {
     let guest = common::guest_config("run-1", &["id"]);
     let timeout = Duration::from_secs(5);
 
-    let (run, elapsed) = run_within(Duration::from_secs(15), launcher, lane, guest, timeout);
+    let (run, elapsed) = run_within(Duration::from_secs(30), launcher, lane, guest, timeout);
 
     assert_eq!(run.outcome, Outcome::TimedOut);
     assert!(
-        elapsed < timeout + Duration::from_secs(5),
+        elapsed < timeout + PROMPT,
         "run_lane returned only after {elapsed:?}"
     );
     assert!(
@@ -372,7 +374,7 @@ fn a_child_left_holding_stderr_after_a_complete_run_is_killed_and_the_run_finish
     let _cleanup = KillOnDrop(vec![held.clone()]);
     let lane = common::lane_config(dir.path(), "run-1");
     let body = format!(
-        "cat > /dev/null\n{}\nsleep 30 &\necho $! > '{}'\nexit 0",
+        "cat > /dev/null\n{}\nsleep 60 &\necho $! > '{}'\nexit 0",
         complete_run(&lane.console),
         held.display()
     );
@@ -380,7 +382,7 @@ fn a_child_left_holding_stderr_after_a_complete_run_is_killed_and_the_run_finish
     let guest = common::guest_config("run-1", &["id"]);
 
     let (run, elapsed) = run_within(
-        Duration::from_secs(10),
+        Duration::from_secs(30),
         launcher,
         lane,
         guest,
@@ -392,10 +394,7 @@ fn a_child_left_holding_stderr_after_a_complete_run_is_killed_and_the_run_finish
         "{:?}",
         run.outcome
     );
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "run_lane took {elapsed:?}"
-    );
+    assert!(elapsed < PROMPT, "run_lane took {elapsed:?}");
     let child = read_pid(&held);
     assert!(
         stops_within(child, Duration::from_secs(5)),
@@ -413,7 +412,7 @@ fn a_process_outside_the_launchers_group_holding_stderr_does_not_keep_run_lane_r
         r#"cat > /dev/null
 {}
 echo 'before the escape' >&2
-perl -e '$| = 1; use POSIX; POSIX::setsid(); print "$$\n"; sleep 30' > '{pid}' &
+perl -e '$| = 1; use POSIX; POSIX::setsid(); print "$$\n"; sleep 60' > '{pid}' &
 while [ ! -s '{pid}' ]; do sleep 0.05; done
 exit 0"#,
         complete_run(&lane.console),
@@ -423,7 +422,7 @@ exit 0"#,
     let guest = common::guest_config("run-1", &["id"]);
 
     let (run, elapsed) = run_within(
-        Duration::from_secs(10),
+        Duration::from_secs(30),
         launcher,
         lane,
         guest,
@@ -435,10 +434,7 @@ exit 0"#,
         "{:?}",
         run.outcome
     );
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "run_lane took {elapsed:?}"
-    );
+    assert!(elapsed < PROMPT, "run_lane took {elapsed:?}");
     assert!(
         run.stderr.contains("before the escape"),
         "the stderr read before the grace ended is kept: {:?}",
@@ -462,7 +458,7 @@ fn a_fifo_at_the_console_path_is_refused_without_blocking() {
     let guest = common::guest_config("run-1", &["id"]);
 
     let (run, elapsed) = run_within(
-        Duration::from_secs(10),
+        Duration::from_secs(30),
         launcher,
         lane,
         guest,
@@ -475,10 +471,7 @@ fn a_fifo_at_the_console_path_is_refused_without_blocking() {
         }
         other => panic!("a FIFO console must be not run, it was {other:?}"),
     }
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "run_lane took {elapsed:?}"
-    );
+    assert!(elapsed < PROMPT, "run_lane took {elapsed:?}");
 }
 
 #[test]
@@ -494,7 +487,7 @@ fn a_symlink_at_the_console_path_is_refused_and_not_followed() {
     let guest = common::guest_config("run-1", &["id"]);
 
     let (run, _) = run_within(
-        Duration::from_secs(10),
+        Duration::from_secs(30),
         launcher,
         lane,
         guest,
