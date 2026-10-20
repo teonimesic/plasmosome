@@ -774,3 +774,37 @@ fn a_group_writable_ancestor_is_refused() {
         },
     );
 }
+
+#[test]
+fn a_missing_socket_directory_is_refused_and_not_created() {
+    let root = private_root();
+    let missing = root.path().join("missing");
+    refused_naming(
+        root.path(),
+        &missing.join("control.uds"),
+        PrivateSocketError::NoDirectory {
+            path: missing.clone(),
+        },
+    );
+    assert!(
+        std::fs::symlink_metadata(&missing).is_err(),
+        "the daemon creates no directory for its socket: the operator makes it private"
+    );
+}
+
+#[test]
+fn a_socket_directory_that_is_a_file_is_refused_and_left_alone() {
+    let root = private_root();
+    let file = root.path().join("file");
+    std::fs::write(&file, b"not a directory").expect("the test writes a file");
+    refused_naming(
+        root.path(),
+        &file.join("control.uds"),
+        PrivateSocketError::NotDirectory { path: file.clone() },
+    );
+    assert_eq!(
+        std::fs::read(&file).expect("the file is still there"),
+        b"not a directory",
+        "the refusal leaves the file as it was"
+    );
+}

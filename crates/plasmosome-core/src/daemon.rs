@@ -410,6 +410,13 @@ mod tests {
         bases
     }
 
+    #[cfg(target_os = "macos")]
+    const SUN_PATH_MAX: usize = 103;
+    #[cfg(target_os = "linux")]
+    const SUN_PATH_MAX: usize = 107;
+
+    const NAME_ROOM: usize = 16;
+
     fn private_root() -> tempfile::TempDir {
         let mut refusals = Vec::new();
         for base in root_bases() {
@@ -422,9 +429,14 @@ mod tests {
             };
             std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
                 .expect("the test root is made private");
+            let length = root.path().as_os_str().len();
             match PrivateDir::open(root.path()) {
-                Ok(_) => return root,
                 Err(refusal) => refusals.push(format!("{}: {refusal}", base.display())),
+                Ok(_) if length + 1 + NAME_ROOM > SUN_PATH_MAX => refusals.push(format!(
+                    "{}: a {length}-byte root leaves fewer than {NAME_ROOM} bytes for a socket name",
+                    base.display()
+                )),
+                Ok(_) => return root,
             }
         }
         panic!(
@@ -590,8 +602,7 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "the daemon is addressable on {} within five seconds",
-                socket.display()
+                "the daemon is addressable within five seconds"
             );
             thread::sleep(Duration::from_millis(25));
         }
@@ -1098,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn another_uid_is_closed_unread() {
+    fn another_uid_gets_no_reply_and_the_loop_goes_on() {
         let root = private_root();
         let euid = effective_uid();
         let foreign = PrivateListener::bind(
@@ -1107,15 +1118,21 @@ mod tests {
             euid.wrapping_add(1),
         )
         .expect("a listener trusting another UID binds");
-        let path = foreign.entry().path.clone();
+        let clients: Vec<UnixStream> = (0..2)
+            .map(|_| {
+                let mut client = UnixStream::connect(&foreign.entry().path)
+                    .expect("the listener queues the connection");
+                client
+                    .set_read_timeout(Some(PATIENCE))
+                    .expect("the test client bounds its own reads");
+                writeln!(client, "{STATUS_REQUEST}")
+                    .expect("the request is queued before the daemon accepts");
+                client
+            })
+            .collect();
         let daemon = serving(foreign, "work");
 
-        for attempt in ["first", "second"] {
-            let mut client = UnixStream::connect(&path).expect("the listener takes connections");
-            client
-                .set_read_timeout(Some(PATIENCE))
-                .expect("the test client bounds its own reads");
-            let _ = writeln!(client, "{STATUS_REQUEST}");
+        for (attempt, mut client) in ["first", "second"].into_iter().zip(clients) {
             let mut reply = Vec::new();
             let end = client.read_to_end(&mut reply);
             assert!(
@@ -1123,30 +1140,44 @@ mod tests {
                 "the {attempt} connection from an untrusted UID got a reply: {:?}",
                 String::from_utf8_lossy(&reply)
             );
-            assert!(
-                matches!(&end, Ok(0))
-                    || matches!(&end, Err(error) if error.kind() == ErrorKind::ConnectionReset),
-                "the {attempt} untrusted connection is closed, by end of file or by a reset for \
-                 the request it left unread, not held open: {end:?}"
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                end.expect("macOS ends a refused connection with end of file"),
+                0,
+                "the {attempt} untrusted connection is closed"
+            );
+            #[cfg(target_os = "linux")]
+            assert_eq!(
+                end.expect_err("the daemon closed the connection with its request unread")
+                    .kind(),
+                ErrorKind::ConnectionReset,
+                "the {attempt} untrusted connection is reset: its request was never read"
             );
         }
+        assert!(
+            daemon
+                .finished
+                .recv_timeout(Duration::from_millis(200))
+                .is_err(),
+            "the loop is still serving after it refused two peers"
+        );
         daemon
             .stop()
             .expect("refusing a peer is not a listener failure: the loop keeps serving");
 
-        let trusted = PrivateListener::bind(
+        let own = PrivateListener::bind(
             PrivateDir::open(root.path()).expect("the test root is private"),
-            "trusted.uds",
+            "own.uds",
             euid,
         )
         .expect("a listener trusting this UID binds");
-        let path = trusted.entry().path.clone();
-        let _daemon = serving(trusted, "work");
+        let path = own.entry().path.clone();
+        let _daemon = serving(own, "work");
         let mut client = addressable(&path);
         assert_eq!(
             ask(&mut client, STATUS_REQUEST).pointer("/result/name"),
             Some(&json!("work")),
-            "the same loop answers a peer whose UID it trusts"
+            "a loop serving this UID answers it"
         );
     }
 
