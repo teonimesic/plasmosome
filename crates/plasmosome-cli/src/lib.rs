@@ -1,5 +1,6 @@
 //! The `plasmosome` command line's client logic. A caller reads a daemon's reply with
-//! [`json::scan`], wraps it in an [`Envelope`] and writes it with [`emit`].
+//! [`reply::read_reply`], judges it with [`reply::judge_reply`], wraps it in an [`Envelope`] and
+//! writes it with [`emit`].
 
 #![doc(test(attr(forbid(unsafe_code))))]
 

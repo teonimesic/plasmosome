@@ -39,6 +39,7 @@ Every place the kernel touches the world outside the process, and the seam that 
 | Directory reads that can fail (cell discovery, the trusted-directory listing) | the private name iterator that `collect_names` (`plasmosome-core::instance`) and `listed_from` (`plasmosome-core::private_socket`) take | a `Vec` of names and read errors in core's unit tests |
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
 | Standard output and error (the command line's envelopes) | writers injected as arguments to `plasmosome_cli::emit` | a `Vec<u8>`; writers that refuse every write, fail only on flush, or fail only their first write; one that records the largest piece; all in plasmosome-cli's tests |
+| A daemon's reply line (the command line's socket read) | the reader injected as an argument to `plasmosome_cli::reply::read_reply` | a byte slice; readers that give a script of chunks and errors, serve a fixed chunk size, or never end and count what was taken; all in plasmosome-cli's tests |
 | The pinned guest (`plasmosome-lanes`) | the bundle directory and the e2fsprogs tool directory injected as paths, and the VMM launcher path given to `run_lane` | a `TempDir` bundle, and launcher scripts that hang or write a console |
 
 **The seam rule.** Both forms in that table are seams. Which one a contact gets is decided by
