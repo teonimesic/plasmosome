@@ -74,15 +74,20 @@ fn child_root() -> Option<PathBuf> {
     std::env::var_os(ROOT_VARIABLE).map(PathBuf::from)
 }
 
+#[allow(unsafe_code)]
 fn lower_descriptor_limit(headroom: libc::rlim_t) {
+    // SAFETY: dup takes no pointer.
     let next = unsafe { libc::dup(libc::STDERR_FILENO) };
     assert!(next >= 0, "dup: {}", io::Error::last_os_error());
+    // SAFETY: `next` is the descriptor dup just returned, which nothing else owns, so closing it
+    // closes no other owner's descriptor.
     unsafe { libc::close(next) };
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
     };
     assert_eq!(
+        // SAFETY: `limit` is a local libc::rlimit that getrlimit may write.
         unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
         0,
         "getrlimit: {}",
@@ -90,6 +95,7 @@ fn lower_descriptor_limit(headroom: libc::rlim_t) {
     );
     limit.rlim_cur = next as libc::rlim_t + headroom;
     assert_eq!(
+        // SAFETY: `limit` is a local libc::rlimit that setrlimit only reads.
         unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) },
         0,
         "setrlimit: {}",
@@ -164,10 +170,12 @@ fn running_out_of_descriptors_aborts_discovery_instead_of_refusing_cells() {
 
 #[test]
 #[ignore = "helper process for the umask test"]
+#[allow(unsafe_code)]
 fn instance_under_a_restrictive_umask_child() {
     let Some(root) = child_root() else {
         return;
     };
+    // SAFETY: umask takes no pointer and cannot fail.
     unsafe { libc::umask(0o377) };
     let instance = InstanceRoot::open(&root).expect("the instance root opens");
     let lock = instance.lock().expect("the child takes the writer lock");
