@@ -120,7 +120,7 @@ mod macos {
         lib.init_log().map_err(krun)?;
         let ctx = lib.create_ctx().map_err(krun)?;
         let images = krun::loaded_images();
-        let unverified = unverified_images(&images, lib.path());
+        let unverified = unverified_images(&images, &images[0], lib.path(), krun::in_shared_cache);
         if !unverified.is_empty() {
             return fail(
                 LOAD_REFUSED,

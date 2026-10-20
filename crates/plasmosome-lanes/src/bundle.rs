@@ -319,7 +319,12 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// The loaded images that are neither the main executable (the first image), the verified
 /// `libkrun`, nor part of the system under `/usr/lib/` or `/System/`.
-pub fn unverified_images(images: &[PathBuf], libkrun: &Path) -> Vec<PathBuf> {
+pub fn unverified_images(
+    images: &[PathBuf],
+    _executable: &Path,
+    libkrun: &Path,
+    _in_shared_cache: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
     images
         .iter()
         .skip(1)

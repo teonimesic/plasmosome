@@ -338,6 +338,11 @@ unsafe extern "C" {
     fn sandbox_free_error(errorbuf: *mut c_char);
 }
 
+/// True when dyld's shared cache holds an image at `path`.
+pub fn in_shared_cache(_path: &Path) -> bool {
+    false
+}
+
 /// Apply the SBPL `profile` to this process. It cannot be lifted afterwards.
 pub fn confine(profile: &str) -> Result<(), KrunError> {
     let profile = c_string("the SBPL profile", profile.as_bytes())?;

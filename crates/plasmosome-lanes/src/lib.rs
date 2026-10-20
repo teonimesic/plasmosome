@@ -4,6 +4,7 @@ pub mod bundle;
 pub mod config;
 pub mod console;
 pub mod cpio;
+pub mod dyld;
 pub mod ext4;
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
