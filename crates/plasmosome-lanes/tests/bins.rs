@@ -6,8 +6,11 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn run_with_stdin(binary: &str, stdin: &str) -> Output {
-    let mut child = Command::new(binary)
-        .env_clear()
+    run_in(Command::new(binary).env_clear(), stdin)
+}
+
+fn run_in(command: &mut Command, stdin: &str) -> Output {
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -60,6 +63,44 @@ fn lane_vmm_refuses_a_bundle_that_is_not_the_pinned_one_before_loading() {
     assert!(
         stderr.contains(&bundle.id) && stderr.contains("eed141b574337d99"),
         "the refusal should name both bundles: {stderr}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn lane_vmm_refuses_an_inherited_dyld_variable_before_checking_the_bundle() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let lane = common::lane_config(scratch.path(), "run-1");
+
+    let output = run_in(
+        Command::new(env!("CARGO_BIN_EXE_lane-vmm"))
+            .env_clear()
+            .env("DYLD_LIBRARY_PATH", scratch.path()),
+        &lane.to_json(),
+    );
+
+    assert_refused_naming(&output, 69, "DYLD_LIBRARY_PATH");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn lane_vmm_refuses_a_libkrunfw_in_its_working_directory_before_checking_the_bundle() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let cwd = std::fs::canonicalize(scratch.path()).expect("the scratch directory resolves");
+    common::write_file(&cwd, "libkrunfw.5.dylib", b"planted");
+    let lane = common::lane_config(&cwd, "run-1");
+
+    let output = run_in(
+        Command::new(env!("CARGO_BIN_EXE_lane-vmm"))
+            .env_clear()
+            .current_dir(&cwd),
+        &lane.to_json(),
+    );
+
+    assert_refused_naming(
+        &output,
+        69,
+        &cwd.join("libkrunfw.5.dylib").display().to_string(),
     );
 }
 

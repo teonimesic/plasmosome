@@ -100,6 +100,62 @@ fn lane_vmm_refuses_an_extra_file_under_lib_in_a_copy_of_the_pinned_bundle() {
     );
 }
 
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn a_libkrunfw_planted_in_the_working_directory_is_refused_and_never_runs() {
+    let mut lane = lane("planted", vec![probe("uname", 1000, &["uname"])]);
+    let cwd = lane
+        .lane
+        .console
+        .parent()
+        .expect("a lane directory")
+        .to_path_buf();
+    fs::write(
+        cwd.join("planted.c"),
+        "#include <stdio.h>\n__attribute__((constructor)) static void planted(void) {\n  FILE *f = fopen(\"planted-ran\", \"w\");\n  if (f) fclose(f);\n}\n",
+    )
+    .expect("the planted library's source is written");
+    let built = Command::new("cc")
+        .args(["-dynamiclib", "-o", "libkrunfw.5.dylib", "planted.c"])
+        .current_dir(&cwd)
+        .output()
+        .expect("this test needs cc to build a harmless library");
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    lane.lane.initramfs = cwd.join("unused.cpio");
+
+    let mut child = Command::new(signed_vmm())
+        .env_clear()
+        .current_dir(&cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("lane-vmm starts");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(lane.lane.to_json().as_bytes())
+            .expect("the configuration is written");
+    }
+    let output = child.wait_with_output().expect("lane-vmm exits");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("{stderr}");
+    assert_eq!(output.status.code(), Some(69), "{stderr}");
+    assert!(stderr.contains("libkrunfw.5.dylib"), "{stderr}");
+    assert!(
+        !cwd.join("planted-ran").exists(),
+        "the planted library's constructor ran"
+    );
+}
+
 fn guest_binary(name: &str) -> Vec<u8> {
     let dir = std::env::var_os("LANES_GUEST_DIR").map_or_else(
         || manifest_dir().join("../../target/aarch64-unknown-linux-musl/release"),

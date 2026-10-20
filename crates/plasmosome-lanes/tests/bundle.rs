@@ -340,23 +340,40 @@ fn sums_that_do_not_list_the_kernel_are_refused_naming_it() {
     refused_naming(&dir, KERNEL);
 }
 
+const EXECUTABLE: &str = "/private/tmp/target/debug/lane-vmm";
+
+fn cached(path: &Path) -> bool {
+    [
+        "/usr/lib/libSystem.B.dylib",
+        "/usr/lib/libiconv.2.dylib",
+        "/System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor",
+    ]
+    .iter()
+    .any(|image| Path::new(image) == path)
+}
+
 fn system_and_bundle_images(libkrun: &Path) -> Vec<PathBuf> {
     vec![
-        PathBuf::from("/private/tmp/target/debug/lane-vmm"),
+        PathBuf::from(EXECUTABLE),
         PathBuf::from("/usr/lib/libSystem.B.dylib"),
         PathBuf::from("/System/Library/Frameworks/Hypervisor.framework/Versions/A/Hypervisor"),
         libkrun.to_path_buf(),
         PathBuf::from("/usr/lib/libiconv.2.dylib"),
+        PathBuf::from("/usr/lib/dyld"),
     ]
 }
 
+fn unverified(images: &[PathBuf], libkrun: &Path) -> Vec<PathBuf> {
+    unverified_images(images, Path::new(EXECUTABLE), libkrun, cached)
+}
+
 #[test]
-fn the_main_executable_the_verified_libkrun_and_system_images_are_accepted() {
+fn the_executable_the_verified_libkrun_the_shared_cache_and_usr_lib_are_accepted() {
     let dir = common::bundle_fixture();
     let libkrun = dir.path().join(LIBKRUN);
 
     assert_eq!(
-        unverified_images(&system_and_bundle_images(&libkrun), &libkrun),
+        unverified(&system_and_bundle_images(&libkrun), &libkrun),
         Vec::<PathBuf>::new()
     );
 }
@@ -369,7 +386,7 @@ fn a_libkrunfw_found_through_the_leftover_search_path_is_reported() {
     let mut images = system_and_bundle_images(&libkrun);
     images.push(found.clone());
 
-    assert_eq!(unverified_images(&images, &libkrun), vec![found]);
+    assert_eq!(unverified(&images, &libkrun), vec![found]);
 }
 
 #[test]
@@ -380,20 +397,47 @@ fn a_libkrun_loaded_from_somewhere_else_is_reported() {
     let mut images = system_and_bundle_images(&libkrun);
     images[3] = other.clone();
 
-    assert_eq!(unverified_images(&images, &libkrun), vec![other]);
+    assert_eq!(unverified(&images, &libkrun), vec![other]);
 }
 
 #[test]
-fn a_path_that_only_starts_like_a_system_directory_is_reported() {
+fn a_library_loaded_before_the_executable_is_reported_and_not_taken_for_it() {
     let dir = common::bundle_fixture();
     let libkrun = dir.path().join(LIBKRUN);
-    let lookalike = PathBuf::from("/usr/libexec-not-really/evil.dylib");
+    let inserted = PathBuf::from("/tmp/inserted.dylib");
     let mut images = system_and_bundle_images(&libkrun);
-    images.push(lookalike.clone());
-    images.push(PathBuf::from("/Systemic/evil.dylib"));
+    images.insert(0, inserted.clone());
 
-    assert_eq!(
-        unverified_images(&images, &libkrun),
-        vec![lookalike, PathBuf::from("/Systemic/evil.dylib")]
-    );
+    assert_eq!(unverified(&images, &libkrun), vec![inserted]);
+}
+
+#[test]
+fn a_system_path_outside_the_shared_cache_is_reported() {
+    let dir = common::bundle_fixture();
+    let libkrun = dir.path().join(LIBKRUN);
+    let data = PathBuf::from("/System/Volumes/Data/tmp/evil.dylib");
+    let framework = PathBuf::from("/System/Library/Frameworks/Evil.framework/Evil");
+    let mut images = system_and_bundle_images(&libkrun);
+    images.push(data.clone());
+    images.push(framework.clone());
+
+    assert_eq!(unverified(&images, &libkrun), vec![data, framework]);
+}
+
+#[test]
+fn a_path_that_only_starts_like_usr_lib_is_reported() {
+    let dir = common::bundle_fixture();
+    let libkrun = dir.path().join(LIBKRUN);
+    let lookalikes = [
+        "/usr/libexec-not-really/evil.dylib",
+        "/usr/lib/../../tmp/evil.dylib",
+        "/usr/lib/./evil.dylib",
+        "/usr/lib//evil.dylib",
+        "/Systemic/evil.dylib",
+    ]
+    .map(PathBuf::from);
+    let mut images = system_and_bundle_images(&libkrun);
+    images.extend(lookalikes.iter().cloned());
+
+    assert_eq!(unverified(&images, &libkrun), lookalikes.to_vec());
 }
