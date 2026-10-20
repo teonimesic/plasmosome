@@ -11,6 +11,7 @@ use plasmosome_core::{DiscoveryError, InstanceRoot};
 
 const ROOT_VARIABLE: &str = "PLASMOSOME_INSTANCE_CHILD_ROOT";
 const HEADROOM_VARIABLE: &str = "PLASMOSOME_INSTANCE_CHILD_HEADROOM";
+const UMASK_VARIABLE: &str = "PLASMOSOME_INSTANCE_CHILD_UMASK";
 const REPORT: &str = "plasmosome-test-out-of-descriptors-at ";
 const DEADLINE: Duration = Duration::from_secs(5);
 
@@ -37,17 +38,15 @@ fn drain(mut pipe: impl Read + Send + 'static) -> JoinHandle<String> {
     })
 }
 
-fn run_child(test: &str, root: &Path, headroom: Option<u64>) -> Finished {
+fn run_child(test: &str, root: &Path, setting: (&str, String)) -> Finished {
     let mut command = Command::new(std::env::current_exe().expect("the test binary's path"));
     command
         .args(["--exact", test, "--ignored", "--nocapture"])
         .env(ROOT_VARIABLE, root)
+        .env(setting.0, setting.1)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(headroom) = headroom {
-        command.env(HEADROOM_VARIABLE, headroom.to_string());
-    }
     let mut child = command.spawn().expect("the child starts");
     let stdout = drain(child.stdout.take().expect("stdout is piped"));
     let stderr = drain(child.stderr.take().expect("stderr is piped"));
@@ -138,7 +137,7 @@ fn running_out_of_descriptors_aborts_discovery_instead_of_refusing_cells() {
         let finished = run_child(
             "discovery_under_a_descriptor_limit_child",
             &root,
-            Some(headroom),
+            (HEADROOM_VARIABLE, headroom.to_string()),
         );
         assert!(
             finished.succeeded,
@@ -175,8 +174,10 @@ fn instance_under_a_restrictive_umask_child() {
     let Some(root) = child_root() else {
         return;
     };
+    let umask = std::env::var(UMASK_VARIABLE).expect("the umask is set");
+    let umask = libc::mode_t::from_str_radix(&umask, 8).expect("the umask is octal");
     // SAFETY: umask takes no pointer and cannot fail.
-    unsafe { libc::umask(0o377) };
+    unsafe { libc::umask(umask) };
     let instance = InstanceRoot::open(&root).expect("the instance root opens");
     let lock = instance.lock().expect("the child takes the writer lock");
     let created = instance
@@ -206,8 +207,6 @@ fn instance_under_a_restrictive_umask_child() {
 
 #[test]
 fn modes_are_private_whatever_the_umask() {
-    let (_dir, root) = temp_root();
-    let finished = run_child("instance_under_a_restrictive_umask_child", &root, None);
     let names = [
         "controller.lock",
         "cells",
@@ -220,39 +219,47 @@ fn modes_are_private_whatever_the_umask() {
         "retired/cell-2",
         "retired/cell-2/launched",
     ];
-    let modes = names.map(|name| {
-        fs::symlink_metadata(root.join(name))
-            .map(|metadata| metadata.mode() & 0o7777)
-            .ok()
-    });
-    for name in [
-        "cells",
-        "cells/cell-1",
-        "cells/cell-1/runtime",
-        "retired",
-        "retired/cell-2",
-    ] {
-        let _ = fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o700));
+    for umask in ["377", "477", "777"] {
+        let (_dir, root) = temp_root();
+        let finished = run_child(
+            "instance_under_a_restrictive_umask_child",
+            &root,
+            (UMASK_VARIABLE, umask.to_owned()),
+        );
+        let modes = names.map(|name| {
+            fs::symlink_metadata(root.join(name))
+                .map(|metadata| metadata.mode() & 0o7777)
+                .ok()
+        });
+        for name in [
+            "cells",
+            "cells/cell-1",
+            "cells/cell-1/runtime",
+            "retired",
+            "retired/cell-2",
+        ] {
+            let _ = fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o700));
+        }
+        assert!(
+            finished.succeeded,
+            "umask {umask}: the child failed\nstdout:\n{}\nstderr:\n{}",
+            finished.stdout, finished.stderr
+        );
+        assert_eq!(
+            modes,
+            [
+                Some(0o600),
+                Some(0o700),
+                Some(0o700),
+                Some(0o600),
+                Some(0o600),
+                Some(0o600),
+                Some(0o700),
+                Some(0o700),
+                Some(0o700),
+                Some(0o600),
+            ],
+            "umask {umask}: {names:?}"
+        );
     }
-    assert!(
-        finished.succeeded,
-        "the child failed\nstdout:\n{}\nstderr:\n{}",
-        finished.stdout, finished.stderr
-    );
-    assert_eq!(
-        modes,
-        [
-            Some(0o600),
-            Some(0o700),
-            Some(0o700),
-            Some(0o600),
-            Some(0o600),
-            Some(0o600),
-            Some(0o700),
-            Some(0o700),
-            Some(0o700),
-            Some(0o600),
-        ],
-        "{names:?}"
-    );
 }

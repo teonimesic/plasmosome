@@ -2868,7 +2868,7 @@ mod tests {
     #[test]
     fn a_cells_directory_left_without_its_mode_is_made_private() {
         assert_not_root();
-        for left in [0o500, 0o755] {
+        for left in [0o500, 0o755, 0o300, 0o000] {
             let (_dir, root) = temp_root();
             let (instance, lock) = locked(&root);
             fs::create_dir(root.join("cells")).expect("cells is made");
@@ -4145,6 +4145,23 @@ mod tests {
                 ],
                 "{existing:?}"
             );
+        }
+    }
+
+    #[test]
+    fn retire_makes_a_retired_it_cannot_read_private_and_retires_into_it() {
+        assert_not_root();
+        for left in [0o300, 0o000] {
+            let (_dir, root) = temp_root();
+            let retired = root.join("retired");
+            fs::create_dir(&retired).expect("retired is made");
+            let _restore = restrict(&retired, left);
+            let (instance, lock, dir) = recording_cell(&root, "cell-1");
+            instance
+                .retire(&lock, dir)
+                .unwrap_or_else(|error| panic!("retired left at {left:o}: {error:?}"));
+            assert_eq!(mode_of(&retired), 0o700, "left at {left:o}");
+            assert!(exists(&retired.join("cell-1")), "left at {left:o}");
         }
     }
 
