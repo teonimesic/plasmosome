@@ -58,6 +58,7 @@ Every place the kernel touches the world outside the process, and the trait that
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
 | Standard output and error (the command line's envelopes) | writers injected as arguments to `plasmosome_cli::emit` | a `Vec<u8>`; writers that refuse every write, fail only on flush, or fail only their first write; one that records the largest piece; all in plasmosome-cli's tests |
 | Time (lifetime bounds, the fence, expiry scheduling) | `Clock` (`plasmosome-backend::clock`), `SystemClock` in `plasmosome-core::clock` | `ManualClock` |
+| The pinned guest (`plasmosome-lanes`) | the bundle directory and the e2fsprogs tool directory injected as paths, and the VMM launcher path given to `run_lane` | a `TempDir` bundle, and launcher scripts that hang or write a console |
 
 Both forms in that table are seams. Which one a contact gets is decided by what varies between
 the real thing and the test. When the *behavior* varies — enforcement that really grants and
@@ -90,7 +91,10 @@ inject a fake at each. The fourth is the capture deadline of a paged observation
 `CaptureSlot` in `plasmosome-backend::paging` decides it in `capture`, `page` and `expire`:
 `capture` takes an injected clock and reads it before and after collection, and `page` and `expire`
 take the current instant. Each server that pages a result passes its clock in and counts no decision
-of its own.
+of its own. One test fixture outside the kernel also reads elapsed time: `run_lane` in
+`plasmosome-lanes` kills a lane at a timeout passed in. It reads `Instant` itself, not `Clock`,
+because it makes no lifetime decision and its test needs no fake clock: a launcher that never exits
+times out whatever the clock reads.
 
 ### Workspace files belong to the invocation
 

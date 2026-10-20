@@ -264,9 +264,9 @@ section said the manifest's table covers every target a package compiles, and do
 target it does not reach.
 
 **The register** is the set of packages whose own `[lints]` table sets `unsafe_code = "deny"`.
-Today it holds `plasmosome-membrane` and `plasmosome-core`. Cargo does not let a package mix
-`lints.workspace = true` with local keys, so a register package repeats both clippy safety lints at
-`deny` in its own table.
+Today it holds `plasmosome-membrane`, `plasmosome-core` and `plasmosome-lanes`. Cargo does not let
+a package mix `lints.workspace = true` with local keys, so a register package repeats both clippy
+safety lints at `deny` in its own table.
 
 Inside a register package, `#[allow(unsafe_code)]` goes on each item that needs `unsafe`. It goes on
 a whole module only when the crate's `AGENTS.md` names that module as an FFI module. The crate root
@@ -412,6 +412,7 @@ maximum size and, where it applies, a maximum nesting depth and a time budget.
 | Membrane control request | `plasmosome-membrane` `control.rs` | The controller, under spec 001's peer-UID check | 1 MiB (`MAX_REQUEST_BYTES`), read through a limit | Bound only |
 | Client reply | `plasmosome-cli` `json.rs`, `scan` | The kernel, on the private control socket under spec 025's peer-UID check. Its strings can come from a plasmid's broker | 16 MiB (`MAX_REPLY_BYTES`): `scan` refuses a longer input before reading it. No depth bound, by design: the scan keeps its own stack, so nesting costs memory, never the call stack. Measured at the bound, release build: 8,388,608 nested arrays peak at 508 MB resident to scan, and 779 MB to scan and write either form. Their human form is 1.1 GB, written in 64 KiB pieces | Bound only. No fuzz target exists for it yet. The reader, through a limit of the bound plus one byte, lands with plasmosome-0t7j |
 | Git-only step | `.githooks/build-input-guard`, its TOML reading | A PR's author, through the commit the step judges | 8 MiB per file (`MAX_BYTES`), read from `git cat-file blob` through a limit; nesting bounded by Python's recursion limit; 60 s per git call. The tree listing from `git ls-tree` has the 60 s bound only. Anything it cannot read, decode or parse is refused | Bound only |
+| Lane console | `plasmosome-lanes` `run.rs`, `console.rs` | The guest a test lane boots | 16 MiB (`MAX_CONSOLE_BYTES`), read through a limit; JSON depth 128 | Bound only |
 
 The controller's own journals are not on this list: the session log, the ledger and spec 008's
 recovery journal. Only the controller writes them. Any other process that could rewrite them runs

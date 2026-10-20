@@ -488,6 +488,7 @@ that its complete runtime role is delivered.
 | `plasmid-sdk` | Reserved stability boundary for plasmid authors |
 | `plasmosome-guards` | Repository policy checks |
 | `plasmosome-testkit` | Test support; never shipped |
+| `plasmosome-lanes` | Test lanes that boot the pinned libkrun guest with no cell; a fixture no product path uses |
 
 ## Build
 
