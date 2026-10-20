@@ -482,6 +482,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "plasmosome-lanes"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "plasmosome-ledger"
 version = "0.1.0"
 dependencies = [
