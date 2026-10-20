@@ -43,3 +43,10 @@ harness = false
 [[bench]]
 name = "session_log_read"
 harness = false
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
