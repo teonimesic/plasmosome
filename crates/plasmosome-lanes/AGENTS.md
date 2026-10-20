@@ -38,8 +38,8 @@ in `src/lib.rs`, or on a single item:
 
 - `src/krun.rs` (macOS): libkrun reached through `dlopen` and `dlsym`, the loader's image list,
   dyld's shared-cache query, and `sandbox_init`.
-- `src/guest_sys.rs` (Linux): `mount`, `reboot`, `waitpid`, `kill`, `uname` and a private
-  read-only `mmap`.
+- `src/guest_sys.rs` (Linux): `mount`, `sync`, `reboot`, `waitpid`, `kill`, `uname`, and a
+  private read-only `mmap` read with `read_volatile` and released with `munmap`.
 
 Two items outside them carry the allow:
 
@@ -48,9 +48,15 @@ Two items outside them carry the allow:
 - `kill_group` in `src/run.rs` calls `kill(-group, SIGKILL)` on the launcher's process group.
   std kills one process only.
 
-Every `unsafe` block has a `// SAFETY:` comment, every `unsafe fn` a `# Safety` section, and the
-`unsafe extern` block documents what each declaration assumes. No safe route exists: libkrun is
-a C library, and std offers none of those Linux calls.
+These are the FFI modules spec 026 §2 lets this file name for a module-wide allow. Everything
+else takes the per-item allow that `plasmosome-core` and `plasmosome-membrane` use.
+
+Every `unsafe` block has a `// SAFETY:` comment, every `unsafe fn` a `# Safety` section, private
+ones included, and the `unsafe extern` block documents what each declaration assumes. No safe
+route exists. libkrun is a C library. std offers none of those Linux calls, no `sync`, no
+process-group kill, and nothing that lists dyld's loaded images or asks its shared cache.
+`nix` and `rustix` wrap some of the Linux calls, but each would be a new dependency under spec
+026 §1, and neither reaches libkrun or dyld.
 
 ## Testing
 
