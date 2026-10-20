@@ -1,0 +1,26 @@
+# cargo-deny's configuration for every git-tracked Cargo.lock. The authority is spec 026
+# section 4, docs/specs/026-security-standard.md. CI runs it through tools/cargo-deny-check,
+# which calls the cargo-deny binary and never `cargo deny`.
+#
+# Fix the dependency before you add an exception. Write each advisory ignore as `id` and
+# `reason` only. Spec 026 asks that the reason read "until YYYY-MM-DD; <link>; <why>".
+# cargo-deny does not check that form, so the reviewer of the change does. For example:
+#   { id = "RUSTSEC-0000-0000", reason = "until 2026-12-01; https://example.org/fix; no release fixes it yet" }
+
+[advisories]
+unsound = "all"
+unmaintained = "all"
+yanked = "warn"
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
+# 2026-10-20: spec 026 section 4's licence table allows NCSA for libfuzzer-sys only. No lockfile
+# holds libfuzzer-sys until the fuzz workspace lands, so cargo-deny reports this as unused.
+exceptions = [{ crate = "libfuzzer-sys", allow = ["NCSA"] }]
