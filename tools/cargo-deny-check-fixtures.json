@@ -1,0 +1,202 @@
+{
+ "clean-sources": {
+  "origin": "captured from cargo-deny 0.20.2: check sources over main 11c67d6's Cargo.lock",
+  "exit": 0,
+  "stderr": [
+   "{\"fields\":{\"sources\":{\"errors\":0,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ },
+ "clean-advisories": {
+  "origin": "captured from cargo-deny 0.20.2: check advisories over main 11c67d6's Cargo.lock, advisory-db 999ec89 (2026-10-17)",
+  "exit": 0,
+  "stderr": [
+   "{\"fields\":{\"advisories\":{\"errors\":0,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ },
+ "clean-licenses": {
+  "origin": "captured from cargo-deny 0.20.2: check licenses over main 11c67d6's Cargo.lock; libfuzzer-sys is not locked yet",
+  "exit": 0,
+  "stderr": [
+   "{\"fields\":{\"code\":\"license-exception-not-encountered\",\"graphs\":[],\"labels\":[{\"column\":26,\"line\":15,\"message\":\"unmatched license exception\",\"span\":\"libfuzzer-sys\"}],\"message\":\"license exception was not encountered\",\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"licenses\":{\"errors\":0,\"helps\":44,\"notes\":0,\"warnings\":1}},\"type\":\"summary\"}"
+  ]
+ },
+ "vulnerability": {
+  "origin": "captured from cargo-deny 0.20.2: check advisories over a workspace locking smallvec 1.6.0, advisory-db 999ec89 (2026-10-17)",
+  "exit": 1,
+  "stderr": [
+   "{\"fields\":{\"advisory\":{\"aliases\":[\"CVE-2021-25900\",\"GHSA-43w2-9j62-hq99\"],\"categories\":[\"memory-corruption\"],\"collection\":\"crates\",\"cvss\":\"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\",\"date\":\"2021-01-08\",\"description\":\"A bug in the `SmallVec::insert_many` method caused it to allocate a buffer that was smaller than needed.  It then wrote past the end of the buffer, causing a buffer overflow and memory corruption on the heap.\\n\\nThis bug was only triggered if the iterator passed to `insert_many` yielded more items than the lower bound returned from its `size_hint` method.\\n \\nThe flaw was corrected in smallvec 0.6.14 and 1.6.1, by ensuring that additional space is always reserved for each item inserted.  The fix also simplified the implementation of `insert_many` to use less unsafe code, so it is easier to verify its correctness.\\n\\nThank you to Yechan Bae ([@Qwaz](https://github.com/Qwaz)) and the Rust group at Georgia Tech’s SSLab for finding and reporting this bug.\",\"expect-deleted\":false,\"id\":\"RUSTSEC-2021-0003\",\"informational\":null,\"keywords\":[\"buffer-overflow\",\"heap-overflow\",\"unsound\"],\"license\":\"CC0-1.0\",\"package\":\"smallvec\",\"references\":[],\"related\":[],\"source\":null,\"title\":\"Buffer overflow in SmallVec::insert_many\",\"url\":\"https://github.com/servo/rust-smallvec/issues/252\",\"withdrawn\":null},\"code\":\"vulnerability\",\"graphs\":[{\"Krate\":{\"name\":\"smallvec\",\"version\":\"1.6.0\"},\"parents\":[{\"Krate\":{\"name\":\"m\",\"version\":\"0.1.0\"}}]}],\"labels\":[{\"column\":1,\"line\":2,\"message\":\"security vulnerability detected\",\"span\":\"smallvec 1.6.0 registry+https://github.com/rust-lang/crates.io-index\"}],\"message\":\"Buffer overflow in SmallVec::insert_many\",\"notes\":[\"ID: RUSTSEC-2021-0003\",\"Advisory: https://rustsec.org/advisories/RUSTSEC-2021-0003\",\"A bug in the `SmallVec::insert_many` method caused it to allocate a buffer that was smaller than needed.  It then wrote past the end of the buffer, causing a buffer overflow and memory corruption on the heap.\\n\\nThis bug was only triggered if the iterator passed to `insert_many` yielded more items than the lower bound returned from its `size_hint` method.\\n \\nThe flaw was corrected in smallvec 0.6.14 and 1.6.1, by ensuring that additional space is always reserved for each item inserted.  The fix also simplified the implementation of `insert_many` to use less unsafe code, so it is easier to verify its correctness.\\n\\nThank you to Yechan Bae ([@Qwaz](https://github.com/Qwaz)) and the Rust group at Georgia Tech’s SSLab for finding and reporting this bug.\",\"Announcement: https://github.com/servo/rust-smallvec/issues/252\",\"Solution: Upgrade to >=0.6.14, <1.0.0 OR >=1.6.1 (try `cargo update -p smallvec`)\"],\"severity\":\"error\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":1,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ },
+ "vulnerability-ignored": {
+  "origin": "captured from cargo-deny 0.20.2: the same workspace with RUSTSEC-2021-0003 ignored in the stated reason form, advisory-db 999ec89 (2026-10-17)",
+  "exit": 0,
+  "stderr": [
+   "{\"fields\":{\"advisories\":{\"errors\":0,\"helps\":0,\"notes\":2,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ },
+ "unsound-transitive": {
+  "origin": "captured from cargo-deny 0.20.2: check advisories with unsound = \"all\" over a workspace locking colored 2.0.0, which brings atty 0.2.14, advisory-db 999ec89 (2026-10-17)",
+  "exit": 1,
+  "stderr": [
+   "{\"fields\":{\"advisory\":{\"aliases\":[\"GHSA-g98v-hv3f-hcfr\"],\"categories\":[],\"collection\":\"crates\",\"cvss\":null,\"date\":\"2021-07-04\",\"description\":\"On windows, `atty` dereferences a potentially unaligned pointer.\\n\\nIn practice however, the pointer won't be unaligned unless a custom global allocator is used.\\n\\nIn particular, the `System` allocator on windows uses `HeapAlloc`, which guarantees a large enough alignment.\\n\\n# atty is Unmaintained\\n\\nA Pull Request with a fix has been provided over a year ago but the maintainer seems to be unreachable.\\n\\nLast release of `atty` was almost 3 years ago.\\n\\n## Possible Alternative(s)\\n\\nThe below list has not been vetted in any way and may or may not contain alternatives;\\n\\n - [std::io::IsTerminal](https://doc.rust-lang.org/stable/std/io/trait.IsTerminal.html) - Stable since Rust 1.70.0\\n - [is-terminal](https://crates.io/crates/is-terminal) - Standalone crate supporting Rust older than 1.70.0\",\"expect-deleted\":false,\"id\":\"RUSTSEC-2021-0145\",\"informational\":\"unsound\",\"keywords\":[\"unaligned-read\"],\"license\":\"CC0-1.0\",\"package\":\"atty\",\"references\":[\"https://github.com/softprops/atty/pull/51\",\"https://github.com/softprops/atty/issues/57\"],\"related\":[],\"source\":null,\"title\":\"Potential unaligned read\",\"url\":\"https://github.com/softprops/atty/issues/50\",\"withdrawn\":null},\"code\":\"unsound\",\"graphs\":[{\"Krate\":{\"name\":\"atty\",\"version\":\"0.2.14\"},\"parents\":[{\"Krate\":{\"name\":\"colored\",\"version\":\"2.0.0\"},\"parents\":[{\"Krate\":{\"name\":\"m\",\"version\":\"0.1.0\"}}]}]}],\"labels\":[{\"column\":1,\"line\":1,\"message\":\"unsound advisory detected\",\"span\":\"atty 0.2.14 registry+https://github.com/rust-lang/crates.io-index\"}],\"message\":\"Potential unaligned read\",\"notes\":[\"ID: RUSTSEC-2021-0145\",\"Advisory: https://rustsec.org/advisories/RUSTSEC-2021-0145\",\"On windows, `atty` dereferences a potentially unaligned pointer.\\n\\nIn practice however, the pointer won't be unaligned unless a custom global allocator is used.\\n\\nIn particular, the `System` allocator on windows uses `HeapAlloc`, which guarantees a large enough alignment.\\n\\n# atty is Unmaintained\\n\\nA Pull Request with a fix has been provided over a year ago but the maintainer seems to be unreachable.\\n\\nLast release of `atty` was almost 3 years ago.\\n\\n## Possible Alternative(s)\\n\\nThe below list has not been vetted in any way and may or may not contain alternatives;\\n\\n - [std::io::IsTerminal](https://doc.rust-lang.org/stable/std/io/trait.IsTerminal.html) - Stable since Rust 1.70.0\\n - [is-terminal](https://crates.io/crates/is-terminal) - Standalone crate supporting Rust older than 1.70.0\",\"Announcement: https://github.com/softprops/atty/issues/50\",\"Solution: No safe upgrade is available!\"],\"severity\":\"error\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisory\":{\"aliases\":[],\"categories\":[],\"collection\":\"crates\",\"cvss\":null,\"date\":\"2024-09-25\",\"description\":\"The maintainer of `atty` has [published](https://github.com/softprops/atty/commit/5bfdbe9e48c6ca6a4909e8d5b04f5e843a257e93) an official notice that the crate is no longer\\nunder development, and that users should instead rely on the functionality in the standard library's [`IsTerminal`](https://doc.rust-lang.org/std/io/trait.IsTerminal.html) trait.\\n\\n## Alternative(s)\\n\\n- [std::io::IsTerminal](https://doc.rust-lang.org/stable/std/io/trait.IsTerminal.html) - Stable since Rust 1.70.0 and the recommended replacement per the `atty` maintainer.\\n- [is-terminal](https://crates.io/crates/is-terminal) - Standalone crate supporting Rust older than 1.70.0\",\"expect-deleted\":false,\"id\":\"RUSTSEC-2024-0375\",\"informational\":\"unmaintained\",\"keywords\":[],\"license\":\"CC0-1.0\",\"package\":\"atty\",\"references\":[],\"related\":[],\"source\":null,\"title\":\"`atty` is unmaintained\",\"url\":\"https://github.com/softprops/atty/issues/57\",\"withdrawn\":null},\"code\":\"unmaintained\",\"graphs\":[{\"Krate\":{\"name\":\"atty\",\"version\":\"0.2.14\"},\"parents\":[{\"Krate\":{\"name\":\"colored\",\"version\":\"2.0.0\"},\"parents\":[{\"Krate\":{\"name\":\"m\",\"version\":\"0.1.0\"}}]}]}],\"labels\":[{\"column\":1,\"line\":1,\"message\":\"unmaintained advisory detected\",\"span\":\"atty 0.2.14 registry+https://github.com/rust-lang/crates.io-index\"}],\"message\":\"`atty` is unmaintained\",\"notes\":[\"ID: RUSTSEC-2024-0375\",\"Advisory: https://rustsec.org/advisories/RUSTSEC-2024-0375\",\"The maintainer of `atty` has [published](https://github.com/softprops/atty/commit/5bfdbe9e48c6ca6a4909e8d5b04f5e843a257e93) an official notice that the crate is no longer\\nunder development, and that users should instead rely on the functionality in the standard library's [`IsTerminal`](https://doc.rust-lang.org/std/io/trait.IsTerminal.html) trait.\\n\\n## Alternative(s)\\n\\n- [std::io::IsTerminal](https://doc.rust-lang.org/stable/std/io/trait.IsTerminal.html) - Stable since Rust 1.70.0 and the recommended replacement per the `atty` maintainer.\\n- [is-terminal](https://crates.io/crates/is-terminal) - Standalone crate supporting Rust older than 1.70.0\",\"Announcement: https://github.com/softprops/atty/issues/57\",\"Solution: No safe upgrade is available!\"],\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":1,\"helps\":0,\"notes\":0,\"warnings\":1}},\"type\":\"summary\"}"
+  ]
+ },
+ "notice-warned": {
+  "origin": "captured from cargo-deny 0.20.2: check advisories -W notice -W unmaintained over a workspace locking inconceivable 0.9.0, advisory-db 999ec89 (2026-10-17)",
+  "exit": 0,
+  "stderr": [
+   "{\"fields\":{\"advisory\":{\"aliases\":[],\"categories\":[],\"collection\":\"crates\",\"cvss\":null,\"date\":\"2022-09-28\",\"description\":\"Quoting from the crate description:\\n\\n> This crate is created purely to inject undefined behavior into stable, safe rust.\\n\\nSpecifically, the `inconceivable!` macro is insta-UB if the `ub_inconceivable` feature is enabled by *any* reverse dependency.\\nThe value this adds is questionable, and hides `unsafe` code from naive analysis.\",\"expect-deleted\":false,\"id\":\"RUSTSEC-2022-0058\",\"informational\":\"notice\",\"keywords\":[],\"license\":\"CC0-1.0\",\"package\":\"inconceivable\",\"references\":[],\"related\":[],\"source\":null,\"title\":\"Library exclusively intended to inject UB into safe Rust.\",\"url\":\"https://crates.io/crates/inconceivable\",\"withdrawn\":null},\"code\":\"notice\",\"graphs\":[{\"Krate\":{\"name\":\"inconceivable\",\"version\":\"0.9.0\"},\"parents\":[{\"Krate\":{\"name\":\"m\",\"version\":\"0.1.0\"}}]}],\"labels\":[{\"column\":1,\"line\":1,\"message\":\"notice advisory detected\",\"span\":\"inconceivable 0.9.0 registry+https://github.com/rust-lang/crates.io-index\"}],\"message\":\"Library exclusively intended to inject UB into safe Rust.\",\"notes\":[\"ID: RUSTSEC-2022-0058\",\"Advisory: https://rustsec.org/advisories/RUSTSEC-2022-0058\",\"Quoting from the crate description:\\n\\n> This crate is created purely to inject undefined behavior into stable, safe rust.\\n\\nSpecifically, the `inconceivable!` macro is insta-UB if the `ub_inconceivable` feature is enabled by *any* reverse dependency.\\nThe value this adds is questionable, and hides `unsafe` code from naive analysis.\",\"Announcement: https://crates.io/crates/inconceivable\",\"Solution: No safe upgrade is available!\"],\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":0,\"helps\":0,\"notes\":0,\"warnings\":1}},\"type\":\"summary\"}"
+  ]
+ },
+ "notice-unwarned": {
+  "origin": "captured from cargo-deny 0.20.2: check advisories without -W over a workspace locking inconceivable 0.9.0, advisory-db 999ec89 (2026-10-17)",
+  "exit": 1,
+  "stderr": [
+   "{\"fields\":{\"advisory\":{\"aliases\":[],\"categories\":[],\"collection\":\"crates\",\"cvss\":null,\"date\":\"2022-09-28\",\"description\":\"Quoting from the crate description:\\n\\n> This crate is created purely to inject undefined behavior into stable, safe rust.\\n\\nSpecifically, the `inconceivable!` macro is insta-UB if the `ub_inconceivable` feature is enabled by *any* reverse dependency.\\nThe value this adds is questionable, and hides `unsafe` code from naive analysis.\",\"expect-deleted\":false,\"id\":\"RUSTSEC-2022-0058\",\"informational\":\"notice\",\"keywords\":[],\"license\":\"CC0-1.0\",\"package\":\"inconceivable\",\"references\":[],\"related\":[],\"source\":null,\"title\":\"Library exclusively intended to inject UB into safe Rust.\",\"url\":\"https://crates.io/crates/inconceivable\",\"withdrawn\":null},\"code\":\"notice\",\"graphs\":[{\"Krate\":{\"name\":\"inconceivable\",\"version\":\"0.9.0\"},\"parents\":[{\"Krate\":{\"name\":\"m\",\"version\":\"0.1.0\"}}]}],\"labels\":[{\"column\":1,\"line\":1,\"message\":\"notice advisory detected\",\"span\":\"inconceivable 0.9.0 registry+https://github.com/rust-lang/crates.io-index\"}],\"message\":\"Library exclusively intended to inject UB into safe Rust.\",\"notes\":[\"ID: RUSTSEC-2022-0058\",\"Advisory: https://rustsec.org/advisories/RUSTSEC-2022-0058\",\"Quoting from the crate description:\\n\\n> This crate is created purely to inject undefined behavior into stable, safe rust.\\n\\nSpecifically, the `inconceivable!` macro is insta-UB if the `ub_inconceivable` feature is enabled by *any* reverse dependency.\\nThe value this adds is questionable, and hides `unsafe` code from naive analysis.\",\"Announcement: https://crates.io/crates/inconceivable\",\"Solution: No safe upgrade is available!\"],\"severity\":\"error\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":1,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ },
+ "unmaintained-warned": {
+  "origin": "captured from cargo-deny 0.20.2: check advisories -W notice -W unmaintained over a workspace locking bitmaps 3.1.0, advisory-db 999ec89 (2026-10-17)",
+  "exit": 0,
+  "stderr": [
+   "{\"fields\":{\"advisory\":{\"aliases\":[],\"categories\":[],\"collection\":\"crates\",\"cvss\":null,\"date\":\"2026-05-03\",\"description\":\"The bitmaps crate is unmaintained; all versions are affected. The GitHub\\nrepository was archived by the owner on 2026-05-03.\\n\\nRecommended alternatives:\\n\\n* [fixedbitset](https://crates.io/crates/fixedbitset)\\n* [bitvec](https://crates.io/crates/bitvec)\",\"expect-deleted\":false,\"id\":\"RUSTSEC-2026-0247\",\"informational\":\"unmaintained\",\"keywords\":[],\"license\":\"CC0-1.0\",\"package\":\"bitmaps\",\"references\":[],\"related\":[],\"source\":null,\"title\":\"bitmaps is unmaintained\",\"url\":\"https://github.com/bodil/bitmaps\",\"withdrawn\":null},\"code\":\"unmaintained\",\"graphs\":[{\"Krate\":{\"name\":\"bitmaps\",\"version\":\"3.1.0\"},\"parents\":[{\"Krate\":{\"name\":\"m\",\"version\":\"0.1.0\"}}]}],\"labels\":[{\"column\":1,\"line\":1,\"message\":\"unmaintained advisory detected\",\"span\":\"bitmaps 3.1.0 registry+https://github.com/rust-lang/crates.io-index\"}],\"message\":\"bitmaps is unmaintained\",\"notes\":[\"ID: RUSTSEC-2026-0247\",\"Advisory: https://rustsec.org/advisories/RUSTSEC-2026-0247\",\"The bitmaps crate is unmaintained; all versions are affected. The GitHub\\nrepository was archived by the owner on 2026-05-03.\\n\\nRecommended alternatives:\\n\\n* [fixedbitset](https://crates.io/crates/fixedbitset)\\n* [bitvec](https://crates.io/crates/bitvec)\",\"Announcement: https://github.com/bodil/bitmaps\",\"Solution: No safe upgrade is available!\"],\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":0,\"helps\":0,\"notes\":0,\"warnings\":1}},\"type\":\"summary\"}"
+  ]
+ },
+ "unmaintained-unwarned": {
+  "origin": "captured from cargo-deny 0.20.2: check advisories without -W over a workspace locking bitmaps 3.1.0, advisory-db 999ec89 (2026-10-17)",
+  "exit": 1,
+  "stderr": [
+   "{\"fields\":{\"advisory\":{\"aliases\":[],\"categories\":[],\"collection\":\"crates\",\"cvss\":null,\"date\":\"2026-05-03\",\"description\":\"The bitmaps crate is unmaintained; all versions are affected. The GitHub\\nrepository was archived by the owner on 2026-05-03.\\n\\nRecommended alternatives:\\n\\n* [fixedbitset](https://crates.io/crates/fixedbitset)\\n* [bitvec](https://crates.io/crates/bitvec)\",\"expect-deleted\":false,\"id\":\"RUSTSEC-2026-0247\",\"informational\":\"unmaintained\",\"keywords\":[],\"license\":\"CC0-1.0\",\"package\":\"bitmaps\",\"references\":[],\"related\":[],\"source\":null,\"title\":\"bitmaps is unmaintained\",\"url\":\"https://github.com/bodil/bitmaps\",\"withdrawn\":null},\"code\":\"unmaintained\",\"graphs\":[{\"Krate\":{\"name\":\"bitmaps\",\"version\":\"3.1.0\"},\"parents\":[{\"Krate\":{\"name\":\"m\",\"version\":\"0.1.0\"}}]}],\"labels\":[{\"column\":1,\"line\":1,\"message\":\"unmaintained advisory detected\",\"span\":\"bitmaps 3.1.0 registry+https://github.com/rust-lang/crates.io-index\"}],\"message\":\"bitmaps is unmaintained\",\"notes\":[\"ID: RUSTSEC-2026-0247\",\"Advisory: https://rustsec.org/advisories/RUSTSEC-2026-0247\",\"The bitmaps crate is unmaintained; all versions are affected. The GitHub\\nrepository was archived by the owner on 2026-05-03.\\n\\nRecommended alternatives:\\n\\n* [fixedbitset](https://crates.io/crates/fixedbitset)\\n* [bitvec](https://crates.io/crates/bitvec)\",\"Announcement: https://github.com/bodil/bitmaps\",\"Solution: No safe upgrade is available!\"],\"severity\":\"error\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":1,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ },
+ "yanked-warned": {
+  "origin": "captured from cargo-deny 0.20.2: check advisories with yanked = \"warn\" over a workspace locking the yanked smallvec 1.13.0, advisory-db 999ec89 (2026-10-17)",
+  "exit": 0,
+  "stderr": [
+   "{\"fields\":{\"code\":\"yanked\",\"graphs\":[{\"Krate\":{\"name\":\"smallvec\",\"version\":\"1.13.0\"},\"parents\":[{\"Krate\":{\"name\":\"m\",\"version\":\"0.1.0\"}}]}],\"labels\":[{\"column\":1,\"line\":2,\"message\":\"yanked version\",\"span\":\"smallvec 1.13.0 registry+https://github.com/rust-lang/crates.io-index\"}],\"message\":\"detected yanked crate (try `cargo update -p smallvec`)\",\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":0,\"helps\":0,\"notes\":0,\"warnings\":1}},\"type\":\"summary\"}"
+  ]
+ },
+ "yanked-denied": {
+  "origin": "captured from cargo-deny 0.20.2: check advisories -D yanked over a workspace locking the yanked smallvec 1.13.0, advisory-db 999ec89 (2026-10-17)",
+  "exit": 1,
+  "stderr": [
+   "{\"fields\":{\"code\":\"yanked\",\"graphs\":[{\"Krate\":{\"name\":\"smallvec\",\"version\":\"1.13.0\"},\"parents\":[{\"Krate\":{\"name\":\"m\",\"version\":\"0.1.0\"}}]}],\"labels\":[{\"column\":1,\"line\":2,\"message\":\"yanked version\",\"span\":\"smallvec 1.13.0 registry+https://github.com/rust-lang/crates.io-index\"}],\"message\":\"detected yanked crate (try `cargo update -p smallvec`)\",\"severity\":\"error\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":1,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ },
+ "ignore-unknown-and-undetected": {
+  "origin": "captured from cargo-deny 0.20.2: the smallvec 1.6.0 workspace, ignoring a nonexistent id and an advisory that affects nothing locked, advisory-db 999ec89 (2026-10-17)",
+  "exit": 1,
+  "stderr": [
+   "{\"fields\":{\"advisory\":{\"aliases\":[\"CVE-2021-25900\",\"GHSA-43w2-9j62-hq99\"],\"categories\":[\"memory-corruption\"],\"collection\":\"crates\",\"cvss\":\"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\",\"date\":\"2021-01-08\",\"description\":\"A bug in the `SmallVec::insert_many` method caused it to allocate a buffer that was smaller than needed.  It then wrote past the end of the buffer, causing a buffer overflow and memory corruption on the heap.\\n\\nThis bug was only triggered if the iterator passed to `insert_many` yielded more items than the lower bound returned from its `size_hint` method.\\n \\nThe flaw was corrected in smallvec 0.6.14 and 1.6.1, by ensuring that additional space is always reserved for each item inserted.  The fix also simplified the implementation of `insert_many` to use less unsafe code, so it is easier to verify its correctness.\\n\\nThank you to Yechan Bae ([@Qwaz](https://github.com/Qwaz)) and the Rust group at Georgia Tech’s SSLab for finding and reporting this bug.\",\"expect-deleted\":false,\"id\":\"RUSTSEC-2021-0003\",\"informational\":null,\"keywords\":[\"buffer-overflow\",\"heap-overflow\",\"unsound\"],\"license\":\"CC0-1.0\",\"package\":\"smallvec\",\"references\":[],\"related\":[],\"source\":null,\"title\":\"Buffer overflow in SmallVec::insert_many\",\"url\":\"https://github.com/servo/rust-smallvec/issues/252\",\"withdrawn\":null},\"code\":\"vulnerability\",\"graphs\":[{\"Krate\":{\"name\":\"smallvec\",\"version\":\"1.6.0\"},\"parents\":[{\"Krate\":{\"name\":\"m\",\"version\":\"0.1.0\"}}]}],\"labels\":[{\"column\":1,\"line\":2,\"message\":\"security vulnerability detected\",\"span\":\"smallvec 1.6.0 registry+https://github.com/rust-lang/crates.io-index\"}],\"message\":\"Buffer overflow in SmallVec::insert_many\",\"notes\":[\"ID: RUSTSEC-2021-0003\",\"Advisory: https://rustsec.org/advisories/RUSTSEC-2021-0003\",\"A bug in the `SmallVec::insert_many` method caused it to allocate a buffer that was smaller than needed.  It then wrote past the end of the buffer, causing a buffer overflow and memory corruption on the heap.\\n\\nThis bug was only triggered if the iterator passed to `insert_many` yielded more items than the lower bound returned from its `size_hint` method.\\n \\nThe flaw was corrected in smallvec 0.6.14 and 1.6.1, by ensuring that additional space is always reserved for each item inserted.  The fix also simplified the implementation of `insert_many` to use less unsafe code, so it is easier to verify its correctness.\\n\\nThank you to Yechan Bae ([@Qwaz](https://github.com/Qwaz)) and the Rust group at Georgia Tech’s SSLab for finding and reporting this bug.\",\"Announcement: https://github.com/servo/rust-smallvec/issues/252\",\"Solution: Upgrade to >=0.6.14, <1.0.0 OR >=1.6.1 (try `cargo update -p smallvec`)\"],\"severity\":\"error\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"code\":\"unknown-advisory\",\"graphs\":[],\"labels\":[{\"column\":19,\"line\":5,\"message\":\"unknown advisory\",\"span\":\"RUSTSEC-2099-9999\"},{\"column\":49,\"line\":5,\"message\":\"ignore reason\",\"span\":\"until 2026-11-30; https://example.invalid; fixture\"}],\"message\":\"advisory not found in any advisory database\",\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"code\":\"advisory-not-detected\",\"graphs\":[],\"labels\":[{\"column\":112,\"line\":5,\"message\":\"no crate matched advisory criteria\",\"span\":\"RUSTSEC-2021-0145\"},{\"column\":142,\"line\":5,\"message\":\"ignore reason\",\"span\":\"until 2026-11-30; https://rustsec.org/advisories/RUSTSEC-2021-0145; fixture\"}],\"message\":\"advisory was not encountered\",\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"code\":\"advisory-not-detected\",\"graphs\":[],\"labels\":[{\"column\":19,\"line\":5,\"message\":\"no crate matched advisory criteria\",\"span\":\"RUSTSEC-2099-9999\"},{\"column\":49,\"line\":5,\"message\":\"ignore reason\",\"span\":\"until 2026-11-30; https://example.invalid; fixture\"}],\"message\":\"advisory was not encountered\",\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":1,\"helps\":0,\"notes\":0,\"warnings\":3}},\"type\":\"summary\"}"
+  ]
+ },
+ "ignore-bad-form": {
+  "origin": "captured from cargo-deny 0.20.2: an ignore entry with an expires key, which cargo-deny refuses to load",
+  "exit": 1,
+  "stderr": [
+   "{\"fields\":{\"code\":\"unexpected-keys\",\"labels\":[{\"column\":137,\"line\":5,\"message\":\"\",\"span\":\"expires\"}],\"message\":\"found 1 unexpected keys, expected: [\\\"id\\\", \\\"reason\\\"]\",\"severity\":\"error\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"level\":\"ERROR\",\"message\":\"failed to deserialize config from '/work/deny.toml'\",\"timestamp\":\"2026-10-20T07:57:16.601161Z\"},\"type\":\"log\"}"
+  ]
+ },
+ "db-unreachable": {
+  "origin": "captured from cargo-deny 0.20.2: db-urls pointing at a repository that does not exist",
+  "exit": 1,
+  "stderr": [
+   "{\"fields\":{\"level\":\"ERROR\",\"message\":\"failed to fetch advisory database https://github.com/teonimesic/no-such-advisory-db with cli: failed to clone: [\\\"clone\\\", \\\"--depth=1\\\", \\\"--branch\\\", \\\"main\\\", \\\"https://github.com/teonimesic/no-such-advisory-db\\\", \\\"/work/advisory-dbs/no-such-advisory-db-332b49863f62785b\\\"]\\nCloning into '/work/advisory-dbs/no-such-advisory-db-332b49863f62785b'...\\nremote: Repository not found.\\nfatal: repository 'https://github.com/teonimesic/no-such-advisory-db/' not found\\n\",\"timestamp\":\"2026-10-20T07:57:16.464538Z\"},\"type\":\"log\"}"
+  ]
+ },
+ "stale-lockfile": {
+  "origin": "captured from cargo-deny 0.20.2: check sources --locked after a member Cargo.toml raised serde_json to 1.0.154 without its Cargo.lock update",
+  "exit": 1,
+  "stderr": [
+   "{\"fields\":{\"level\":\"ERROR\",\"message\":\"failed to fetch crates:     Updating crates.io index\\nerror: cannot update the lock file /work/Cargo.lock because --locked was passed to prevent this\\nhelp: to generate the lock file without accessing the network, remove the --locked flag and use --offline instead.\\n\",\"timestamp\":\"2026-10-20T07:52:55.188328Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"ERROR\",\"message\":\"`cargo metadata` exited with an error:     Updating crates.io index\\nerror: cannot update the lock file /work/Cargo.lock because --locked was passed to prevent this\\nhelp: to generate the lock file without accessing the network, remove the --locked flag and use --offline instead.\\n\",\"timestamp\":\"2026-10-20T07:52:56.872848Z\"},\"type\":\"log\"}"
+  ]
+ },
+ "git-source": {
+  "origin": "captured from cargo-deny 0.20.2: check sources over a workspace locking a git dependency, allow-git = []",
+  "exit": 8,
+  "stderr": [
+   "{\"fields\":{\"code\":\"source-not-allowed\",\"graphs\":[{\"Krate\":{\"name\":\"gitdep\",\"version\":\"0.1.0\"},\"parents\":[{\"Krate\":{\"name\":\"m\",\"version\":\"0.1.0\"}}]}],\"labels\":[{\"column\":14,\"line\":1,\"message\":\"source\",\"span\":\"git+file:///work/gitsrc\"}],\"message\":\"detected 'git' source not explicitly allowed\",\"severity\":\"error\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"sources\":{\"errors\":1,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ },
+ "licence-rejected": {
+  "origin": "captured from cargo-deny 0.20.2: check licenses over a published workspace member licensed GPL-3.0-only",
+  "exit": 4,
+  "stderr": [
+   "{\"fields\":{\"code\":\"rejected\",\"graphs\":[{\"Krate\":{\"name\":\"m\",\"version\":\"0.1.0\"}}],\"labels\":[{\"column\":12,\"line\":5,\"message\":\"\",\"span\":\"GPL-3.0-only\"},{\"column\":12,\"line\":5,\"message\":\"rejected: license is not explicitly allowed\",\"span\":\"GPL-3.0-only\"}],\"message\":\"failed to satisfy license requirements\",\"notes\":[\"GPL-3.0-only - GNU General Public License v3.0 only:\",\"  - OSI approved\",\"  - FSF Free/Libre\",\"  - Copyleft\"],\"severity\":\"error\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"code\":\"license-exception-not-encountered\",\"graphs\":[],\"labels\":[{\"column\":26,\"line\":15,\"message\":\"unmatched license exception\",\"span\":\"libfuzzer-sys\"}],\"message\":\"license exception was not encountered\",\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"code\":\"license-not-encountered\",\"graphs\":[],\"labels\":[{\"column\":18,\"line\":14,\"message\":\"unmatched license allowance\",\"span\":\"Apache-2.0\"}],\"message\":\"license was not encountered\",\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"code\":\"license-not-encountered\",\"graphs\":[],\"labels\":[{\"column\":11,\"line\":14,\"message\":\"unmatched license allowance\",\"span\":\"MIT\"}],\"message\":\"license was not encountered\",\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"code\":\"license-not-encountered\",\"graphs\":[],\"labels\":[{\"column\":32,\"line\":14,\"message\":\"unmatched license allowance\",\"span\":\"Unicode-3.0\"}],\"message\":\"license was not encountered\",\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"licenses\":{\"errors\":1,\"helps\":0,\"notes\":0,\"warnings\":4}},\"type\":\"summary\"}"
+  ]
+ },
+ "unknown-error-code": {
+  "origin": "synthesized: an error diagnostic whose code no list names",
+  "exit": 1,
+  "stderr": [
+   "{\"fields\":{\"code\":\"a-code-cargo-deny-0-20-2-never-writes\",\"graphs\":[],\"labels\":[],\"message\":\"a failure mode this wrapper has not met\",\"severity\":\"error\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":1,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ },
+ "index-failure": {
+  "origin": "synthesized: an index-failure diagnostic at warning severity, with exit status 0",
+  "exit": 0,
+  "stderr": [
+   "{\"fields\":{\"code\":\"index-failure\",\"graphs\":[],\"labels\":[],\"message\":\"failed to load index entries for the crates.io registry\",\"severity\":\"warning\"},\"type\":\"diagnostic\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":0,\"helps\":0,\"notes\":0,\"warnings\":1}},\"type\":\"summary\"}"
+  ]
+ },
+ "error-log-with-summary": {
+  "origin": "synthesized: an ERROR log record beside a clean summary, with exit status 0",
+  "exit": 0,
+  "stderr": [
+   "{\"fields\":{\"level\":\"ERROR\",\"message\":\"failed to load advisory database\",\"timestamp\":\"2026-10-20T08:00:00.000000Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":0,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ },
+ "not-json": {
+  "origin": "synthesized: a panic, which writes plain text",
+  "exit": 101,
+  "stderr": [
+   "thread 'main' panicked at src/cargo-deny/main.rs:1:1:",
+   "a line that is not JSON"
+  ]
+ },
+ "nonzero-without-diagnostic": {
+  "origin": "synthesized: a clean summary with exit status 1",
+  "exit": 1,
+  "stderr": [
+   "{\"fields\":{\"advisories\":{\"errors\":0,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ },
+ "silent": {
+  "origin": "synthesized: no output at all, with exit status 0",
+  "exit": 0,
+  "stderr": []
+ },
+ "unknown-record-type": {
+  "origin": "synthesized: a record type cargo-deny 0.20.2 never writes",
+  "exit": 0,
+  "stderr": [
+   "{\"fields\":{\"code\":\"vulnerability\",\"severity\":\"error\"},\"type\":\"finding\"}",
+   "{\"fields\":{\"advisories\":{\"errors\":0,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
+  ]
+ }
+}
