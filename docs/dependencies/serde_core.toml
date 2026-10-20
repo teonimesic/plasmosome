@@ -1,0 +1,30 @@
+name = "serde_core"
+range = "1"
+reason = """\
+  Provides serde's deserialization traits without the derive. Implementing them by hand lets a \
+  reader drive serde_json's parser and refuse a duplicate object key while parsing.\
+  """
+write_it_instead.lines = 700
+write_it_instead.how = """\
+  On 2026-10-20, at main 8fe24e3, `git grep -l serde_core -- '*.rs'` finds one file, \
+  crates/plasmosome-membrane/src/runtime/strict_json.rs. It uses DeserializeSeed, Visitor, \
+  MapAccess, SeqAccess and de::Error to walk serde_json's Deserializer and refuse a duplicate \
+  key. Those traits are useful only because serde_json implements them, so a replacement is a \
+  strict reader of our own that builds serde_json's Value, and leans on serde_json for Value, \
+  Map and Number. It needs: a tokenizer that tracks line and column (150 lines); strings, with \
+  escapes and surrogate pairs (150); numbers, split into i64, u64 and f64 as serde_json splits \
+  them (150); errors that give serde_json's reasons, which the module's tests compare against \
+  (150); and the tree, with the duplicate-key refusal and the nesting bound (100): 700 lines. \
+  The first four parts, 600 lines, are the ones serde_json's record counts inside its 1200-line \
+  reader. That reader adds the methods that let serde's Deserializer read any type, which a \
+  reader that builds only Value does not need. Replacing it removes nothing from Cargo.lock: \
+  serde, serde_json and uuid bring serde_core too.\
+  """
+exception = ""
+# serde_derive, proc-macro2, quote and syn are here through serde_core's cfg(any()) dependency on
+# serde_derive, which never builds. So build_time_code holds no proc macro.
+brings = ["proc-macro2@1", "quote@1", "serde_derive@1", "syn@3", "unicode-ident@1"]
+build_time_code = ["serde_core@1 build script"]
+expands_unsafe = "none"
+native_code = "none"
+verdict = "kept-pending-owner"

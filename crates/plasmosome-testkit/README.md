@@ -1,13 +1,12 @@
 # plasmosome-testkit
 
-Test support shared by the kernel crates: builders, the backend conformance suite, and the
-scenarios that cross crate boundaries.
+Test support shared by the kernel crates: builders, the backend conformance suite, the
+scenarios that cross crate boundaries, and the membrane differential's probe manifest.
 
-Two things live here that cannot live anywhere else. The first is the **conformance suite** — the
-behavioral clauses of the `EnforcementBackend` contract, written once as functions generic over
-the trait. Every backend is held to the same functions, unchanged; a backend that fails one is
-the thing that is wrong. That is what makes the fake a model of enforcement rather than a hope
-about it.
+Three things live here. The first is the **conformance suite** — the behavioral clauses of the
+`EnforcementBackend` contract, written once as functions generic over the trait. Every backend
+is held to the same functions, unchanged; a backend that fails one is the thing that is wrong.
+That is what makes the fake a model of enforcement rather than a hope about it.
 
 `FakeBackend` and `CompositeBackend` over three fake leaves both pass all eleven clauses. The
 composite failed three of the original clauses when it was first wired in, because it lost the
@@ -69,6 +68,26 @@ backend and ledger together through their public APIs, with the outside world re
 the seams — the first of them attaches a plasmid's capabilities, replays its ledger on detach,
 and verifies the backend snapshot shows no residue.
 
+The third is the **membrane differential** of spec 027 §6, a test fixture that no product path
+uses. So far it holds the probe manifest. `differential::load` reads it from JSON and refuses it,
+naming what is wrong, before anything is compared:
+
+- a channel of spec 027 §5 with fewer than three probes, or a reach kind with fewer than three
+  reach probes, none included;
+- a rule kind §6 does not list, matched exactly, so `PID` is refused;
+- a rule on a field the probe lists in its `workload_set`, a key every probe must give, even
+  when the list is empty;
+- a probe id used twice, in the same channel or in two;
+- two rules, two allowances, or a rule and an allowance, on one field;
+- a rule, allowance or neutral name for an undeclared probe;
+- neutral names without `/opt`, `/usr/local/bin` and a FUSE workspace at a path of its own, or
+  with two mounts at one path;
+- an unknown key at any level, or data after the manifest.
+
+Refusing unknown keys matters because a misspelt `rules` or `allowances` would otherwise load as
+an empty table. `Manifest::validate` checks a manifest built by hand the same way. Rules about
+runs, such as two boots per lane, are not the manifest's, and are not checked here.
+
 ## What's inside
 
 | Module | Holds |
@@ -76,6 +95,7 @@ and verifies the backend snapshot shows no residue.
 | `builders` | `PlasmidManifest`, capabilities, `Grant` sequences, `Effect`s and `DesiredState` — a test states only what it is about |
 | `conformance` | Eleven clauses of the backend contract, each generic over `EnforcementBackend` |
 | `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
+| `differential` | Spec 027 §6's probe manifest for the membrane differential, and the refusals that keep a suite from dropping probes |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |
 
 Nothing here ships: the crate is `publish = false`, and a guard keeps it out of every other
