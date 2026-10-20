@@ -85,6 +85,7 @@ OUTSIDE = "outside"
 LOOP = "loop"
 AMBIGUOUS = "ambiguous"
 UNREADABLE_TARGET = "unreadable target"
+PAST_UNTRACKED = "past an untracked name"
 MISSING = "missing"
 FILE = "file"
 SUBMODULE = "submodule"
@@ -120,12 +121,17 @@ TOP_LEVEL_REFUSED = {
 }
 NOT_A_STRING = "cargo reads a path here, and this value is not a string"
 GLOB_THEN_PARENT = "has a .. after a glob, which can leave the repository"
+STEPS_BACK = (
+    "steps back with .. out of a name this commit does not track as a directory, such as .git, "
+    "so this step cannot tell where it leads"
+)
 PATH_PROBLEMS = {
     LEAVES: "leaves the repository",
     OUTSIDE: "leaves the repository through a tracked symlink",
     LOOP: f"goes through more than {MAX_SYMLINKS} symlinks",
     AMBIGUOUS: "reaches tracked paths that a case-insensitive filesystem treats as one",
     UNREADABLE_TARGET: "goes through a symlink whose target this step cannot read as a path",
+    PAST_UNTRACKED: STEPS_BACK,
     MISSING: "does not resolve to a tracked directory: nothing is tracked there",
     FILE: "does not resolve to a tracked directory: it is a file",
     SUBMODULE: "does not resolve to a tracked directory: it is a submodule",
@@ -144,6 +150,7 @@ SYMLINK_PROBLEMS = {
     LOOP: f"it goes through more than {MAX_SYMLINKS} symlinks",
     AMBIGUOUS: "it reaches tracked paths that a case-insensitive filesystem treats as one",
     UNREADABLE_TARGET: "this step cannot read its target as a path",
+    PAST_UNTRACKED: f"it {STEPS_BACK}",
 }
 LOCKFILE_REFUSED = "a lockfile must be a regular file"
 CRATES_IO = (
@@ -204,7 +211,6 @@ def lexical(base, value):
 class Tree:
     def __init__(self, listed):
         self.found = {}
-        self.targets = {}
         self.holding_a_manifest = set()
         for entry in listed:
             parts = [folded(part) for part in entry.path.split("/")]
@@ -213,16 +219,6 @@ class Tree:
                 self.holding_a_manifest.update(
                     "/".join(parts[:depth]) for depth in range(len(parts))
                 )
-
-    def target(self, entry):
-        if entry.oid not in self.targets:
-            data = git(
-                ["cat-file", "blob", entry.oid], blob_what(entry), limit=SYMLINK_TARGET_BYTES
-            )
-            self.targets[entry.oid] = (
-                None if data is None else data.decode("utf-8", "surrogateescape")
-            )
-        return self.targets[entry.oid]
 
     def walk(self, parts):
         pending = list(reversed(parts))
@@ -242,17 +238,21 @@ class Tree:
             if found and all(entry.kind == "tree" for entry in found):
                 reached = here
                 continue
-            if len(found) != 1:
-                return (AMBIGUOUS if found else MISSING), None
-            entry = found[0]
-            if entry.kind == "commit":
-                return SUBMODULE, None
-            if entry.mode != SYMLINK:
+            if len(found) > 1:
+                return AMBIGUOUS, None
+            entry = found[0] if found else None
+            if entry is None or entry.mode != SYMLINK:
+                if ".." in pending:
+                    return PAST_UNTRACKED, None
+                if entry is None:
+                    return MISSING, None
+                if entry.kind == "commit":
+                    return SUBMODULE, None
                 return (MISSING if pending else FILE), None
             hops += 1
             if hops > MAX_SYMLINKS:
                 return LOOP, None
-            target = self.target(entry)
+            target = symlink_target(entry)
             if target is None or "\0" in target:
                 return UNREADABLE_TARGET, None
             if target.startswith("/"):
@@ -375,12 +375,22 @@ def read_toml(entry):
         return None, f"cannot be parsed as TOML: {printable(str(error))}"
 
 
+TARGETS = {}
+
+
+def symlink_target(entry):
+    if entry.oid not in TARGETS:
+        data = git(["cat-file", "blob", entry.oid], blob_what(entry), limit=SYMLINK_TARGET_BYTES)
+        TARGETS[entry.oid] = None if data is None else data.decode("utf-8", "surrogateescape")
+    return TARGETS[entry.oid]
+
+
 def whole(entry, rule):
     if entry.mode != SYMLINK:
         return (entry.path, KIND_LABELS[entry.kind], rule)
-    target = git(["cat-file", "blob", entry.oid], blob_what(entry), limit=SYMLINK_TARGET_BYTES)
+    target = symlink_target(entry)
     shown = (
-        printable(target.decode("utf-8", "surrogateescape"))
+        printable(target)
         if target is not None
         else f"a target longer than {SYMLINK_TARGET_BYTES} bytes"
     )
