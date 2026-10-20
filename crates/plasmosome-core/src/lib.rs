@@ -10,6 +10,8 @@ pub mod daemon;
 pub mod gatekeeper;
 pub mod lifecycle;
 pub mod manifest;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod private_socket;
 pub mod protocol;
 pub mod reconciler;
 pub mod registry;
@@ -22,10 +24,17 @@ pub use daemon::{ConfigError, DaemonConfig, DaemonError, parse_config, run};
 pub use gatekeeper::Gatekeeper;
 pub use lifecycle::{PluginState, StateError};
 pub use manifest::{ManifestError, PlasmidManifest};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub use private_socket::{
+    Accepted, DirIdentity, PrivateDir, PrivateListener, PrivateSocketError, SocketEntry,
+    check_peer_uid, check_private_path, effective_uid, peer_uid,
+};
 pub use protocol::{ErrorCode, Request, Response, StatusResult, WireError};
 pub use reconciler::{DesiredState, ObservedState, ReconcilePlan, Reconciler};
 pub use registry::{LookupError, RegistryEntry, ToolRegistry};
-pub use session_log::{SessionLog, read_events};
+pub use session_log::{
+    LogFault, LogFile, LogStep, LogStore, OsLogStore, SessionLog, SessionLogError, read_events,
+};
 pub use state::{
     CellRecord, CellStatus, ControllerState, GenomeName, InstanceName, InstanceNameError,
     InstanceRecord, PlasmidRecord,
