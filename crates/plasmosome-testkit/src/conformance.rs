@@ -8,7 +8,7 @@ use plasmosome_backend::{
     UniverseOp, UniverseRemoval,
 };
 
-use crate::builders::GrantSequence;
+use crate::builders::{GrantSequence, broker, mount, proxy_map, session_file, uds_socket};
 
 const DRAIN: Duration = Duration::from_millis(50);
 
@@ -478,35 +478,14 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
         .map(|capability| (capability.clone(), capability))
         .collect();
     pairs.push((
-        Capability::Mount {
-            source: "/secrets".to_string(),
-            target: "/workspace".to_string(),
-        },
-        Capability::Mount {
-            source: "/code".to_string(),
-            target: "/workspace".to_string(),
-        },
+        mount("/secrets", "/workspace"),
+        mount("/code", "/workspace"),
     ));
     pairs.push((
-        Capability::ProxyMap {
-            host: "routes.plasmosome.test".to_string(),
-            route: "audit".to_string(),
-        },
-        Capability::ProxyMap {
-            host: "routes.plasmosome.test".to_string(),
-            route: "deploy".to_string(),
-        },
+        proxy_map("routes.plasmosome.test", "audit"),
+        proxy_map("routes.plasmosome.test", "deploy"),
     ));
-    pairs.push((
-        Capability::Broker {
-            pid: 5150,
-            name: "egressd".to_string(),
-        },
-        Capability::Broker {
-            pid: 5150,
-            name: "auditd".to_string(),
-        },
-    ));
+    pairs.push((broker(5150, "egressd"), broker(5150, "auditd")));
 
     for (first_capability, second_capability) in pairs {
         for drain in drains() {
@@ -554,10 +533,7 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
         }
     }
 
-    let capability = Capability::Broker {
-        pid: 31337,
-        name: "egressd".to_string(),
-    };
+    let capability = broker(31337, "egressd");
     for drain in drains() {
         let mut backend = make();
         let residue = OsObject {
@@ -956,24 +932,11 @@ fn sample_grants() -> Vec<Grant> {
 
 fn sample_capabilities() -> Vec<Capability> {
     vec![
-        Capability::UdsSocket {
-            path: "/run/conformance/egressd.uds".to_string(),
-        },
-        Capability::ProxyMap {
-            host: "api.plasmosome.test".to_string(),
-            route: "splice".to_string(),
-        },
-        Capability::Broker {
-            pid: 4242,
-            name: "egressd".to_string(),
-        },
-        Capability::Mount {
-            source: "/src/conformance".to_string(),
-            target: "/workspace".to_string(),
-        },
-        Capability::SessionFile {
-            path: "/var/lib/plasmosome/conformance/skills/pr.md".to_string(),
-        },
+        uds_socket("/run/conformance/egressd.uds"),
+        proxy_map("api.plasmosome.test", "splice"),
+        broker(4242, "egressd"),
+        mount("/src/conformance", "/workspace"),
+        session_file("/var/lib/plasmosome/conformance/skills/pr.md"),
     ]
 }
 
@@ -981,9 +944,7 @@ fn grants_with_two_of_one_class() -> Vec<Grant> {
     let mut grants = sample_grants();
     grants.push(Grant {
         owner: second_owner(),
-        capability: Capability::SessionFile {
-            path: "/var/lib/plasmosome/conformance/skills/review.md".to_string(),
-        },
+        capability: session_file("/var/lib/plasmosome/conformance/skills/review.md"),
         kind: GrantKind::Hot,
     });
     grants
