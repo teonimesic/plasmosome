@@ -1,0 +1,40 @@
+name = "libc"
+range = "0.2"
+reason = """\
+  Declares the C library's calls, types and constants for macOS and Linux, so that Rust code can \
+  spawn and reap processes, handle signals, use Unix sockets and descriptors, and read file \
+  metadata through the operating system directly.\
+  """
+write_it_instead.lines = 560
+write_it_instead.how = """\
+  On 2026-10-20, at main 8fe24e3, `git grep -h -o -E 'libc::[A-Za-z_][A-Za-z0-9_]*' -- '*.rs' | \
+  sort -u | wc -l` gives 169 distinct names, and `git grep -l 'libc::' -- '*.rs' | wc -l` gives \
+  20 files, all under crates/plasmosome-core and crates/plasmosome-membrane. Read one by one in \
+  libc 0.2.189's src, they are about 60 functions, 10 structs, 15 type aliases and C scalar \
+  types, and 87 constants; stat, statfs and sigaction each name both a struct and a function. A \
+  replacement declares them for aarch64-apple-darwin and x86_64-unknown-linux-gnu. It needs \
+  extern declarations (110 lines); struct layouts, since stat, statfs, sigaction, siginfo_t, \
+  sigset_t and sockaddr_un differ between the two hosts (240); types (30); and constants, many \
+  of whose values differ by host (180): 560 lines. Nothing here would check those layouts \
+  against the C headers, as libc's own test suite does. Replacing it removes nothing from \
+  Cargo.lock. The lockfile keeps libc through cpufeatures, errno, getrandom 0.3, getrandom 0.4, \
+  rustix and wait-timeout. `cargo tree --locked --offline -i libc -e normal,build,dev --depth 1 \
+  --target x86_64-unknown-linux-gnu` lists getrandom 0.3, getrandom 0.4 and wait-timeout as what \
+  builds libc there; rustix uses linux-raw-sys on that host and leaves its libc and errno \
+  dependencies off. `cargo tree --locked --offline -i libc -e normal,build,dev --depth 1 \
+  --target aarch64-apple-darwin` lists cpufeatures, errno, getrandom 0.3, getrandom 0.4, rustix \
+  and wait-timeout. uuid and tempfile bring getrandom 0.4, proptest brings getrandom 0.3 and \
+  wait-timeout, tempfile brings rustix, and sha2 brings cpufeatures.\
+  """
+exception = ""
+brings = []
+build_time_code = ["libc@0.2 build script"]
+expands_unsafe = "none"
+native_code = [
+  """\
+  libc@0.2 links the system libiconv on macOS, through #[link(name = "iconv")] in \
+  src/unix/bsd/apple/mod.rs. With its std feature on, as the workspace builds it, it adds no \
+  other library, and it compiles no C.\
+  """,
+]
+verdict = "kept-pending-owner"
