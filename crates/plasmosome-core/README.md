@@ -182,7 +182,8 @@ non-ASCII ID on HFS+ at creation.
  "registry_root": "/private/path/imports"}
 ```
 
-- `control_socket` is the path the daemon binds, and `name` is the instance it answers for.
+- `control_socket` is the path the daemon binds, and `name` is the instance it answers for. The
+  path must pass the private-socket boundary in [Socket ownership](#socket-ownership).
 - `instance_root` is required and absolute. The trusted operator supplies it (spec 008); it is
   never inferred from `control_socket`, even when the socket sits in the usual instance layout.
 - `recovery_deadline_ms` is required: a whole number of milliseconds, at least 1.
@@ -196,9 +197,26 @@ the instance root, recover cells or read registry imports (spec 001 §6, item 7)
 
 ## Socket ownership
 
+`plasmosomed` binds its control socket through `PrivateListener`, under the path boundary spec
+001 §4.1 sets for private sockets (spec 025 amendment B). It refuses to start, exits 1 and names
+the failing component when the configured path:
+
+- is not absolute, or has an empty, `.` or `..` component;
+- passes through a symlink, as `/tmp` and `/var` do on macOS;
+- has an ancestor owned by neither root nor the effective UID, or one that group, other or, on
+  macOS, an ACL allow entry lets another user replace, as the shared `/tmp` is on Linux;
+- sits in a directory that the effective UID does not own, that grants group or other any
+  permission, or that carries an ACL.
+
+[Private recovery sockets](#private-recovery-sockets) gives the full rules. Nothing is bound when
+it refuses. Otherwise the socket is set to mode 0600 before it listens, whatever the umask. A
+connection whose kernel-reported peer UID is not the daemon's effective UID is closed before a
+byte is read or written, and the daemon goes on to the next connection. Tests and scripts that
+bind under macOS's `TMPDIR` must pass its real path, `/private/var/folders/...`.
+
 `plasmosomed` refuses a control-socket path that already exists — a live socket, a stale socket,
-a regular file or a symlink — and never unlinks it: bind fails, the start exits naming the path,
-and clearing it is the operator's or caller's job. The alternative — clearing whatever is there
+a regular file or a symlink — and never unlinks it: the start exits naming the path, and
+clearing it is the operator's or caller's job. The alternative — clearing whatever is there
 and binding anyway — cannot tell a stale file from a live daemon's socket, and taking the socket
 out from under a running controller leaves it alive but unreachable. Refusing costs an operator
 one `rm` after a hard kill; the other way round produces a controller that is running and cannot
@@ -206,9 +224,9 @@ be talked to.
 
 A daemon that returns removes its socket path on every route out — a clean shutdown, an error
 raised after the bind, or a panic unwinding through — but only when the entry still at that name
-is the socket it bound. Right after binding, the daemon records the socket's device and inode;
-teardown inspects the path without following symlinks and unlinks only on an exact match, as one
-best-effort attempt. So:
+is the socket it bound. Right after binding, `PrivateListener` records the socket's device and
+inode; teardown inspects the name in the directory opened at start, without following symlinks,
+and unlinks only on an exact match, as one best-effort attempt. So:
 
 - A replacement a caller settles at the pathname after start — a regular file or a leaf symlink,
   with target present or dangling — is left exactly as it was, contents and all.
@@ -218,16 +236,16 @@ best-effort attempt. So:
 
 This is ownership-correct cleanup under a coordinated namespace, not defense against a hostile
 writer. The path is inspected and then unlinked in two steps that are not atomic together, so
-another process with write authority over the directory — the same UID included; a private 0700
-directory is the recommended setup and does not remove that authority — can substitute a victim
-between them. The identity is not an eternal token either: device and inode tell the daemon's
+another process with write authority over the directory — the same UID included; the private
+directory the daemon requires does not remove that authority — can substitute a victim between
+them. The identity is not an eternal token either: device and inode tell the daemon's
 socket from a later one only while the original inode stays allocated (its new name keeps it
 alive), and the file-type check still rejects regular files and symlinks even if inode numbers
-are recycled. A start whose identity capture fails — including a leaf symlink at the configured
-path, which `bind` would otherwise follow — refuses without unlinking anything, and can leave
-the just-bound socket for explicit operator cleanup. `SIGKILL` is the case no destructor covers,
-because a killed process runs none, so the path survives the daemon and the next start refuses
-it and says why.
+are recycled. A leaf symlink at the configured path is an entry already there, so it is refused
+before `bind`, which would otherwise follow it. When the check `PrivateListener` repeats after
+`bind` fails, the start is refused and the socket just bound is removed only while it is still
+that socket by device and inode. `SIGKILL` is the case no destructor covers, because a killed
+process runs none, so the path survives the daemon and the next start refuses it and says why.
 
 Connections are taken one at a time. The shutdown flag is read between accepts and between reads,
 and both halves of a connection carry a timeout, so neither an idle client nor one that never
@@ -238,8 +256,8 @@ reads its replies can hold the daemon open past shutdown.
 `private_socket` gives a recovery socket the boundary spec 001 §4.1 requires, on macOS and Linux.
 It refuses every peer whose kernel-reported effective UID is not the trusted one. It also keeps
 other UIDs from reaching the socket path. That second property has not yet been shown with a
-second UID: the distinct-UID test waits on owner decision O-8. It does not change the public
-control socket described above.
+second UID: the distinct-UID test waits on owner decision O-8. `plasmosomed` binds its control
+socket through it too, as [Socket ownership](#socket-ownership) says.
 
 - `PrivateDir::open` walks the socket's parent directory from `/`, without following symlinks.
   The path must be absolute and normal: no `.` or `..` component, no empty component and no
@@ -286,6 +304,11 @@ The integration tests make each private root where every ancestor passes:
 - on macOS, under the per-user temp directory that `confstr(_CS_DARWIN_USER_TEMP_DIR)` reports,
   whatever `TMPDIR` says;
 - on Linux, under `XDG_RUNTIME_DIR` when it is set, else under `CARGO_TARGET_TMPDIR`.
+
+`tests/private_socket.rs` has its own copy of that rule; the daemon's integration tests take it
+from `tests/support/private_root.rs`. The daemon's unit tests follow it too, but on Linux they
+fall back to the test binary's directory, because Cargo sets `CARGO_TARGET_TMPDIR` only for
+integration tests.
 
 If no base passes, the tests fail and name each base with the ancestor that refused it. Each
 test root is removed when its test ends, even after a panic: modes are opened up and, on macOS,

@@ -153,6 +153,11 @@ the file-type check still rejects regular files and symlinks even if inode numbe
 `SIGKILL` and equivalent hard exits run no destructor; the resulting residue is observed by the
 next start's refusal, not prevented, and no verb observes or repairs it.
 
+`plasmosomed`'s control socket is held to a stricter rule: it is bound under §4.1's path
+boundary for private sockets. The daemon refuses to start when the configured path fails that
+boundary, sets the socket to mode 0600 before listening, and closes unread any connection from
+another effective UID (spec 025 §5 and §6). This does not change `membraned`'s sockets.
+
 ## 2. Naming and addressing (D1a/D1b/D1c)
 
 - A **kernel instance** has a name (`plasmosome start --name work`); its state lives at

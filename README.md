@@ -75,6 +75,13 @@ under `RUSTUP_HOME`; both remain after the example.
 The checkout is trusted host code: putting build output under the temporary directory does not
 isolate an untrusted build.
 
+The example keeps its files and sockets in a private directory under the per-user temporary
+directory, spelled by its real path, not under `/tmp`. `plasmosomed` refuses a control socket
+path that passes through a symlink, as `/tmp` and `/var` do on macOS, or that has an ancestor
+another user can replace, as the shared `/tmp` is on Linux. On macOS the real path is
+`/private/var/folders/...`. On Linux Python's temporary directory is `/tmp` unless `TMPDIR` names
+another, so set `TMPDIR` to a directory only you can write, such as `$XDG_RUNTIME_DIR`.
+
 ```shell
 python3 - <<'PY'
 import errno
@@ -84,6 +91,7 @@ from pathlib import Path
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -114,7 +122,8 @@ for executable in ("cargo", "rustc"):
 
 failure = None
 scratch_path = None
-with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir="/tmp") as scratch_text:
+private_base = os.path.realpath(tempfile.gettempdir())
+with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir=private_base) as scratch_text:
     scratch_path = Path(scratch_text).resolve()
     require(
         scratch_path.stat().st_mode & 0o077 == 0,
@@ -328,6 +337,12 @@ with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir="/tmp") as scr
             type(uptime) is int and uptime >= 0,
             f"controller uptime is not a nonnegative integer: {result}",
         )
+        controller_mode = stat.S_IMODE(os.lstat(controller_socket).st_mode)
+        require(
+            controller_mode == 0o600,
+            f"controller socket mode is {controller_mode:04o}, not 0600",
+        )
+        print(f"controller socket mode: {controller_mode:04o}")
 
         membrane_request = {"id": 2, "method": "membrane.status", "params": {}}
         membrane_response = request_status(membrane, membrane_socket, membrane_request)
