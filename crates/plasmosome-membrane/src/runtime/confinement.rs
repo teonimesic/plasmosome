@@ -269,6 +269,23 @@ mod darwin {
             .raw_os_error()
             .unwrap_or(libc::EIO)
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_query_the_kernel_cannot_answer_reads_as_its_errno_never_a_value() {
+            let own = std::process::id().cast_signed();
+            for operation in ["process-exec", "no-such-operation"] {
+                assert_eq!(
+                    check(own, Some(operation)),
+                    Err(libc::EINVAL),
+                    "{operation} needs a filter or is unknown, so sandbox_check returns -1"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
