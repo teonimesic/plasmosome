@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
 #[cfg(target_os = "macos")]
+pub mod gate;
+#[cfg(target_os = "macos")]
 pub mod guest;
 
 use std::fs;
