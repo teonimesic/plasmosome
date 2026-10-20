@@ -210,13 +210,10 @@ fn completed<'a>(probe: &str, run: &'a Run) -> Option<&'a Observation> {
 }
 
 fn push(findings: &mut Vec<Finding>, subject: &Subject, reason: Reason) {
-    let finding = Finding {
+    findings.push(Finding {
         subject: subject.clone(),
         reason,
-    };
-    if !findings.contains(&finding) {
-        findings.push(finding);
-    }
+    });
 }
 
 fn not_run(subject: &Subject, lane: Lane, findings: &mut Vec<Finding>) {
