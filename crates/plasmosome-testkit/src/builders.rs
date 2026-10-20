@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use plasmosome_backend::{Capability, CellId, CellOwner, Grant, GrantKind, LedgerEntry, MockMode};
+use plasmosome_backend::{
+    BrokerLaunch, Capability, CellId, CellOwner, FileAccess, Grant, GrantKind, LedgerEntry,
+    MockMode, MountRecipe, ProxyRecipe, ProxyTransport, SessionFileRecipe, UdsRecipe,
+};
 use plasmosome_core::manifest::{NetworkSpec, PlasmidManifest, ToolDeclaration};
 use plasmosome_core::reconciler::{DesiredCell, DesiredState};
 use plasmosome_core::state::{GenomeName, PlasmidRecord};
@@ -143,51 +146,78 @@ pub fn exact_backend_effect(entry: &LedgerEntry) -> Effect {
     )
 }
 
-/// Returns `Capability::SessionFile` holding exactly `path`. Nothing is checked or normalized,
-/// so a test may pass an invalid path.
+/// Returns `Capability::SessionFile` holding exactly `path` and a fixed recipe: empty contents,
+/// read-only, at guest path `/run/plasmosome/session`. The path is neither checked nor
+/// normalized, so a test may pass an invalid one; the recipe passes `validate`.
 /// Test support only: production capabilities will come from spec 017's manifest resolver.
 pub fn session_file(path: &str) -> Capability {
     Capability::SessionFile {
         path: path.to_string(),
+        recipe: SessionFileRecipe {
+            contents: Vec::new(),
+            mode: FileAccess::ReadOnly,
+            guest_path: "/run/plasmosome/session".to_string(),
+        },
     }
 }
 
-/// Returns `Capability::UdsSocket` holding exactly `path`. Nothing is checked or normalized, so
-/// a test may pass an invalid path.
+/// Returns `Capability::UdsSocket` holding exactly `path` and a fixed recipe: upstream
+/// `/run/plasmosome/upstream.sock`, guest path `/run/plasmosome/guest.sock`. The path is neither
+/// checked nor normalized, so a test may pass an invalid one; the recipe passes `validate`.
 /// Test support only: production capabilities will come from spec 017's manifest resolver.
 pub fn uds_socket(path: &str) -> Capability {
     Capability::UdsSocket {
         path: path.to_string(),
+        recipe: UdsRecipe {
+            upstream: "/run/plasmosome/upstream.sock".to_string(),
+            guest_path: "/run/plasmosome/guest.sock".to_string(),
+        },
     }
 }
 
-/// Returns `Capability::ProxyMap` holding exactly `host` and `route`. Nothing is checked or
-/// normalized, so a test may pass an invalid name.
+/// Returns `Capability::ProxyMap` holding exactly `host` and `route` and a fixed recipe: TCP to
+/// `upstream.plasmosome.test` port 443, private addresses not allowed. The names are neither
+/// checked nor normalized, so a test may pass an invalid one; the recipe passes `validate`.
 /// Test support only: production capabilities will come from spec 017's manifest resolver.
 pub fn proxy_map(host: &str, route: &str) -> Capability {
     Capability::ProxyMap {
         host: host.to_string(),
         route: route.to_string(),
+        recipe: ProxyRecipe {
+            transport: ProxyTransport::Tcp,
+            destination: "upstream.plasmosome.test".to_string(),
+            port: 443,
+            allow_private: false,
+        },
     }
 }
 
-/// Returns `Capability::Broker` holding exactly `pid` and `name`. Nothing is checked or
-/// normalized, so a test may pass an invalid name.
+/// Returns `Capability::Broker` holding exactly `name` and a fixed launch: the command
+/// `/usr/libexec/plasmosome-broker`, control socket `/run/plasmosome/broker.control` and data
+/// socket `/run/plasmosome/broker.data`. The name is neither checked nor normalized, so a test
+/// may pass an invalid one; the launch passes `validate`.
 /// Test support only: production capabilities will come from spec 017's manifest resolver.
-pub fn broker(pid: u32, name: &str) -> Capability {
+pub fn broker(name: &str) -> Capability {
     Capability::Broker {
-        pid,
         name: name.to_string(),
+        launch: BrokerLaunch {
+            command: vec!["/usr/libexec/plasmosome-broker".to_string()],
+            control_socket: "/run/plasmosome/broker.control".to_string(),
+            data_socket: "/run/plasmosome/broker.data".to_string(),
+        },
     }
 }
 
-/// Returns `Capability::Mount` holding exactly `source` and `target`. Nothing is checked or
-/// normalized, so a test may pass an invalid path.
+/// Returns `Capability::Mount` holding exactly `source` and `target` and a read-only recipe.
+/// The paths are neither checked nor normalized, so a test may pass an invalid one.
 /// Test support only: production capabilities will come from spec 017's manifest resolver.
 pub fn mount(source: &str, target: &str) -> Capability {
     Capability::Mount {
         source: source.to_string(),
         target: target.to_string(),
+        recipe: MountRecipe {
+            access: FileAccess::ReadOnly,
+        },
     }
 }
 
@@ -243,7 +273,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_file_holds_exactly_its_path_unchecked() {
+    fn session_file_holds_exactly_its_path_unchecked_and_the_default_recipe() {
         for path in [
             "/skills/pr.md",
             "skills/../pr.md/",
@@ -258,13 +288,18 @@ mod tests {
                 session_file(path),
                 Capability::SessionFile {
                     path: path.to_string(),
+                    recipe: SessionFileRecipe {
+                        contents: Vec::new(),
+                        mode: FileAccess::ReadOnly,
+                        guest_path: "/run/plasmosome/session".to_string(),
+                    },
                 }
             );
         }
     }
 
     #[test]
-    fn uds_socket_holds_exactly_its_path_unchecked() {
+    fn uds_socket_holds_exactly_its_path_unchecked_and_the_default_recipe() {
         for path in [
             "/run/plasmosome/egressd.uds",
             "run//egressd.uds",
@@ -278,13 +313,17 @@ mod tests {
                 uds_socket(path),
                 Capability::UdsSocket {
                     path: path.to_string(),
+                    recipe: UdsRecipe {
+                        upstream: "/run/plasmosome/upstream.sock".to_string(),
+                        guest_path: "/run/plasmosome/guest.sock".to_string(),
+                    },
                 }
             );
         }
     }
 
     #[test]
-    fn proxy_map_holds_exactly_its_host_and_route_in_place() {
+    fn proxy_map_holds_exactly_its_host_and_route_in_place_and_the_default_recipe() {
         for (host, route) in [
             ("api.github.com", "splice"),
             ("splice", "api.github.com"),
@@ -300,32 +339,36 @@ mod tests {
                 Capability::ProxyMap {
                     host: host.to_string(),
                     route: route.to_string(),
+                    recipe: ProxyRecipe {
+                        transport: ProxyTransport::Tcp,
+                        destination: "upstream.plasmosome.test".to_string(),
+                        port: 443,
+                        allow_private: false,
+                    },
                 }
             );
         }
     }
 
     #[test]
-    fn broker_holds_exactly_its_pid_and_name() {
-        for (pid, name) in [
-            (4242, "egressd"),
-            (0, "egress\0d"),
-            (u32::MAX, ""),
-            (7, " egressd\n"),
-            (31337, "EgressD"),
-        ] {
+    fn broker_holds_exactly_its_name_and_the_default_launch() {
+        for name in ["egressd", "egress\0d", "", " egressd\n", "EgressD"] {
             assert_eq!(
-                broker(pid, name),
+                broker(name),
                 Capability::Broker {
-                    pid,
                     name: name.to_string(),
+                    launch: BrokerLaunch {
+                        command: vec!["/usr/libexec/plasmosome-broker".to_string()],
+                        control_socket: "/run/plasmosome/broker.control".to_string(),
+                        data_socket: "/run/plasmosome/broker.data".to_string(),
+                    },
                 }
             );
         }
     }
 
     #[test]
-    fn mount_holds_exactly_its_source_and_target_in_place() {
+    fn mount_holds_exactly_its_source_and_target_in_place_and_the_default_recipe() {
         for (source, target) in [
             ("/srv/repo", "/workspace"),
             ("/workspace", "/srv/repo"),
@@ -342,8 +385,24 @@ mod tests {
                 Capability::Mount {
                     source: source.to_string(),
                     target: target.to_string(),
+                    recipe: MountRecipe {
+                        access: FileAccess::ReadOnly,
+                    },
                 }
             );
+        }
+    }
+
+    #[test]
+    fn every_factory_given_valid_values_returns_a_capability_that_validates() {
+        for capability in [
+            session_file("/skills/pr.md"),
+            uds_socket("/run/plasmosome/egressd.uds"),
+            proxy_map("api.github.com", "splice"),
+            broker("egressd"),
+            mount("/srv/repo", "/workspace"),
+        ] {
+            assert_eq!(capability.validate(), Ok(()), "{capability:?}");
         }
     }
 }
