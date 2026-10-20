@@ -199,7 +199,7 @@ impl PlatformLimits {
         })?;
         Ok(PlatformLimits {
             architecture,
-            max_vcpus: u8::try_from(parallelism.get()).unwrap_or(u8::MAX),
+            max_vcpus: capped_vcpus(parallelism.get()),
             max_memory_mib: physical_memory_mib()?,
             max_socket_path_bytes: array_length(|address: &libc::sockaddr_un| &address.sun_path)
                 - 1,
@@ -216,8 +216,17 @@ fn physical_memory_mib() -> Result<u32, RecipeRefusal> {
             limit: "physical memory",
         });
     };
-    let mib = u128::from(pages) * u128::from(page_bytes) / (1 << 20);
-    Ok(u32::try_from(mib).unwrap_or(u32::MAX))
+    Ok(capped_mib(
+        u128::from(pages) * u128::from(page_bytes) / (1 << 20),
+    ))
+}
+
+fn capped_vcpus(parallelism: usize) -> u8 {
+    u8::try_from(parallelism).unwrap_or(u8::MAX)
+}
+
+fn capped_mib(mib: u128) -> u32 {
+    u32::try_from(mib).unwrap_or(u32::MAX)
 }
 
 fn array_length<S, T, const N: usize>(_field: fn(&S) -> &[T; N]) -> usize {
