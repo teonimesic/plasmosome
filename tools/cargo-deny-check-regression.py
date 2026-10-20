@@ -94,6 +94,16 @@ def classification():
         assert FIXTURES[fixture]["exit"] != 0, fixture
     assert classified("db-unreachable", "advisories")["refusals"] == []
 
+    malformed = API["classify"]("advisories", ["", "[]", '{"type": "log"}'], 0)
+    assert malformed["status"] == "tool failure" and len(malformed["failures"]) == 2, malformed
+    warning = "unable to find a config path, falling back to default config"
+    logged = API["classify"]("sources", [
+        json.dumps({"fields": {"level": "WARN", "message": warning}, "type": "log"}),
+        json.dumps({"fields": {"level": "INFO", "message": "checking sources"}, "type": "log"}),
+        FIXTURES["clean-sources"]["stderr"][0],
+    ], 0)
+    assert logged["status"] == "pass" and logged["reported"] == [f"warning log: {warning}"], logged
+
 
 def write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -257,6 +267,16 @@ def outcomes():
         result, calls, summary = repository.run("sources", plan=plan("sources"), path=str(bare))
         assert result.returncode == 2 and calls == [], result.stdout
         assert TOOL_FAILURE in result.stdout and "cargo-deny" in result.stdout, result.stdout
+
+        write(bare / "cargo-deny", "not a program\n")
+        result, calls, summary = repository.run("sources", plan=plan("sources"), path=str(bare))
+        assert result.returncode == 2 and calls == [] and "could not complete" in result.stdout, result.stdout
+
+        empty = Path(directory) / "empty-bin"
+        empty.mkdir()
+        result, calls, summary = repository.run("sources", plan=plan("sources"), path=str(empty))
+        assert result.returncode == 2 and calls == [] and TOOL_FAILURE in result.stdout, result.stdout
+        assert "git rev-parse could not run" in result.stdout, result.stdout
 
     with tempfile.TemporaryDirectory(prefix="cargo-deny-check-nothing-") as directory:
         repository = Repository(directory, {"README.md": "readme\n", "deny.toml": "[sources]\n"})
