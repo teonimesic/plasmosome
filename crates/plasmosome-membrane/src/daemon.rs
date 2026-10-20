@@ -536,8 +536,11 @@ mod tests {
         }
     }
 
+    #[allow(unsafe_code)]
     fn is_reaped(pid: i32) -> bool {
         let mut status: libc::c_int = 0;
+        // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of this
+        // process.
         let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
         observed == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD)
     }

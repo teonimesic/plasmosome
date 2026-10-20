@@ -24,7 +24,11 @@ extern "C" fn note_shutdown(_signal: libc::c_int) {
     SHUTDOWN.store(true, Ordering::Relaxed);
 }
 
+#[allow(unsafe_code)]
 fn stop_on(signal: libc::c_int) {
+    // SAFETY: An all-zero libc::sigaction is a valid empty action with no flags. The handler only
+    // stores to an atomic, which is async-signal-safe. Both pointers are to the local `action`,
+    // which outlives the calls, and sigaction copies what it reads.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = note_shutdown as *const () as libc::sighandler_t;

@@ -21,8 +21,11 @@ impl Daemon {
         self.child.id() as i32
     }
 
+    #[allow(unsafe_code)]
     fn signal(&self, signal: libc::c_int) {
         assert_eq!(
+            // SAFETY: kill takes no pointer. Nothing has waited `self.child` to an exit yet, so its
+            // pid still names the daemon.
             unsafe { libc::kill(self.pid(), signal) },
             0,
             "the daemon is still running and can be signalled"
@@ -49,10 +52,13 @@ impl Daemon {
 }
 
 impl Drop for Daemon {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(Some(_))) {
             return;
         }
+        // SAFETY: kill takes no pointer. try_wait above found no exit, so the daemon is not reaped
+        // and its pid still names it.
         unsafe { libc::kill(self.pid(), libc::SIGTERM) };
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {

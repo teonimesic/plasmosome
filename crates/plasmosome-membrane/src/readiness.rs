@@ -334,6 +334,7 @@ enum Connected<S> {
     Stopped(ProbeStopped),
 }
 
+#[allow(unsafe_code)]
 fn connect_budgeted(socket: &Path, budget: &ProbeBudget<'_>) -> Connected<UnixStream> {
     let (address, address_length) = match address_for(socket) {
         Ok(pair) => pair,
@@ -343,6 +344,8 @@ fn connect_budgeted(socket: &Path, budget: &ProbeBudget<'_>) -> Connected<UnixSt
         Ok(fd) => fd,
         Err(_) => return Connected::Unreachable,
     };
+    // SAFETY: address_for filled `address`, and `address_length` covers only its used part, so
+    // connect reads initialized bytes of a live local. `fd` keeps its descriptor open for the call.
     match unsafe {
         libc::connect(
             fd.as_raw_fd(),
@@ -388,9 +391,12 @@ fn halted(budget: &ProbeBudget<'_>) -> ProbeStopped {
     }
 }
 
+#[allow(unsafe_code)]
 fn socket_error(fd: RawFd) -> Result<libc::c_int, ()> {
     let mut code: libc::c_int = 0;
     let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: `code` is a local c_int and `length` holds its exact size, so getsockopt writes at
+    // most that many bytes. The caller keeps `fd` open.
     let outcome = unsafe {
         libc::getsockopt(
             fd,
@@ -407,8 +413,10 @@ fn open_nonblocking() -> std::io::Result<OwnedFd> {
     crate::spawn_lock::with_descriptors_held(create_nonblocking)
 }
 
+#[allow(unsafe_code)]
 fn create_nonblocking(_held: &DescriptorsHeld) -> std::io::Result<OwnedFd> {
     #[cfg(target_os = "linux")]
+    // SAFETY: socket takes no pointer.
     let raw = unsafe {
         libc::socket(
             libc::AF_UNIX,
@@ -417,21 +425,30 @@ fn create_nonblocking(_held: &DescriptorsHeld) -> std::io::Result<OwnedFd> {
         )
     };
     #[cfg(not(target_os = "linux"))]
+    // SAFETY: socket takes no pointer.
     let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
     let fd = match raw {
         -1 => return Err(std::io::Error::last_os_error()),
+        // SAFETY: socket returns -1 or a new descriptor. This arm excludes -1, and nothing else
+        // owns the descriptor.
         raw => unsafe { OwnedFd::from_raw_fd(raw) },
     };
     #[cfg(not(target_os = "linux"))]
     {
+        // SAFETY: fcntl with F_GETFL takes no pointer, and `fd` keeps its descriptor open.
         let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
         if flags < 0
+            // SAFETY: fcntl with F_SETFL takes an integer flag set, not a pointer, and `fd` keeps
+            // its descriptor open.
             || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
         {
             return Err(std::io::Error::last_os_error());
         }
+        // SAFETY: fcntl with F_GETFD takes no pointer, and `fd` keeps its descriptor open.
         let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
         if flags < 0
+            // SAFETY: fcntl with F_SETFD takes an integer flag set, not a pointer, and `fd` keeps
+            // its descriptor open.
             || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
         {
             return Err(std::io::Error::last_os_error());
@@ -440,8 +457,10 @@ fn create_nonblocking(_held: &DescriptorsHeld) -> std::io::Result<OwnedFd> {
     Ok(fd)
 }
 
+#[allow(unsafe_code)]
 fn address_for(socket: &Path) -> std::io::Result<(libc::sockaddr_un, libc::socklen_t)> {
     let bytes = socket.as_os_str().as_bytes();
+    // SAFETY: sockaddr_un is a plain C struct, for which all zeroes is a valid value.
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     address.sun_family = libc::AF_UNIX as _;
     let path_at = std::mem::offset_of!(libc::sockaddr_un, sun_path);
@@ -472,6 +491,7 @@ impl Interest {
     }
 }
 
+#[allow(unsafe_code)]
 fn wait_fd(fd: RawFd, interest: Interest, slice: Duration) -> std::io::Result<bool> {
     let mut polling = [libc::pollfd {
         fd,
@@ -479,6 +499,7 @@ fn wait_fd(fd: RawFd, interest: Interest, slice: Duration) -> std::io::Result<bo
         revents: 0,
     }];
     let timeout = slice.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32;
+    // SAFETY: `polling` is a local array of one pollfd, matching the count of 1.
     let counted = unsafe { libc::poll(polling.as_mut_ptr(), 1, timeout.max(1)) };
     if counted < 0 {
         return Err(std::io::Error::last_os_error());
@@ -548,9 +569,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn the_probe_socket_is_close_on_exec_and_nonblocking() {
         let socket = open_nonblocking().expect("a probe socket opens");
+        // SAFETY: fcntl with F_GETFD takes no pointer, and `socket` keeps its descriptor open.
         let descriptor_flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFD) };
+        // SAFETY: fcntl with F_GETFL takes no pointer, and `socket` keeps its descriptor open.
         let status_flags = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_GETFL) };
         assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0, "close-on-exec");
         assert_ne!(status_flags & libc::O_NONBLOCK, 0, "nonblocking");

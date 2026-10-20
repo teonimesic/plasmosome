@@ -45,7 +45,10 @@ pub(crate) fn with_descriptors_held<T: AsFd + Into<OwnedFd>>(
     })
 }
 
+#[allow(unsafe_code)]
 fn close_on_exec_or_closed<T: AsFd>(created: T) -> std::io::Result<T> {
+    // SAFETY: fcntl with F_GETFD takes no pointer, and `created` keeps its descriptor open for the
+    // call.
     let flags = unsafe { libc::fcntl(created.as_fd().as_raw_fd(), libc::F_GETFD) };
     if flags != -1 && flags & libc::FD_CLOEXEC != 0 {
         Ok(created)
@@ -58,7 +61,11 @@ fn close_on_exec_or_closed<T: AsFd>(created: T) -> std::io::Result<T> {
 
 /// Forks while holding the read side of the spawn lock. In `Forked::Child`, do
 /// only async-signal-safe work, and never return or unwind.
+#[allow(unsafe_code)]
 pub(crate) fn fork() -> Result<Forked, SpawnError> {
+    // SAFETY: This function's doc binds every caller to do only async-signal-safe work in
+    // Forked::Child and never return or unwind there, as VmmChild::spawn does. fork_holding holds
+    // the read side of the spawn lock, so no descriptor is mid-creation.
     fork_holding(&SPAWN_LOCK, || unsafe { libc::fork() })
 }
 
@@ -123,7 +130,10 @@ mod tests {
     struct ExitAtOnce;
 
     impl Launch for ExitAtOnce {
+        #[allow(unsafe_code)]
         fn launch(self) -> ! {
+            // SAFETY: _exit takes no pointer and is async-signal-safe, which is all this forked
+            // child may call.
             unsafe { libc::_exit(0) }
         }
     }
@@ -131,6 +141,7 @@ mod tests {
     struct ReportsInheritedReadSide;
 
     impl Launch for ReportsInheritedReadSide {
+        #[allow(unsafe_code)]
         fn launch(self) -> ! {
             let code = match SPAWN_LOCK.try_write() {
                 Err(TryLockError::WouldBlock) => 0,
@@ -143,6 +154,8 @@ mod tests {
                     3
                 }
             };
+            // SAFETY: _exit takes no pointer and is async-signal-safe, which is all this forked
+            // child may call.
             unsafe { libc::_exit(code) }
         }
     }
@@ -186,9 +199,13 @@ mod tests {
         matches!(lock.try_write(), Err(TryLockError::WouldBlock))
     }
 
+    #[allow(unsafe_code)]
     fn inheritable_null() -> OwnedFd {
+        // SAFETY: The path is a static NUL-terminated string, and open keeps no pointer to it.
         let raw = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
         assert!(raw >= 0, "/dev/null opens");
+        // SAFETY: The assert above shows `raw` is a non-negative descriptor, and nothing else owns
+        // it.
         unsafe { OwnedFd::from_raw_fd(raw) }
     }
 
@@ -259,15 +276,22 @@ mod tests {
         child_status: libc::c_int,
     }
 
+    #[allow(unsafe_code)]
     fn reaped_within(pid: libc::pid_t, patience: Duration) -> libc::c_int {
         let deadline = Instant::now() + patience;
         let mut status = 0;
         loop {
+            // SAFETY: `status` is a local the call may write, and `pid` is a child this test forked
+            // and has not reaped.
             match unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } {
                 reaped if reaped == pid => return status,
                 0 if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(1)),
                 0 => {
+                    // SAFETY: kill takes no pointer. waitpid just returned 0, so `pid` is an
+                    // unreaped child of this process and still names it.
                     unsafe { libc::kill(pid, libc::SIGKILL) };
+                    // SAFETY: `status` is a local the call may write, and `pid` is the unreaped
+                    // child just killed.
                     unsafe { libc::waitpid(pid, &mut status, 0) };
                     panic!("the child did not exit within {patience:?}, so it was killed");
                 }
@@ -280,6 +304,7 @@ mod tests {
         }
     }
 
+    #[allow(unsafe_code)]
     fn fork_during_creation(lock: &'static RwLock<()>) -> ForkDuringCreation {
         let released = Arc::new(AtomicBool::new(false));
         let (starting, started) = mpsc::channel();
@@ -294,10 +319,14 @@ mod tests {
                 let mut forked_while_held = false;
                 let forked = fork_holding(lock, || {
                     forked_while_held = !seen.load(Ordering::SeqCst);
+                    // SAFETY: The forked child only reads one descriptor's flags with fcntl and
+                    // calls _exit, both async-signal-safe.
                     unsafe { libc::fork() }
                 });
                 let outcome = match forked {
                     Ok(Forked::Child) => {
+                        // SAFETY: fcntl with F_GETFD takes no pointer and is async-signal-safe, and
+                        // the child only queries `fd`.
                         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
                         let code = if flags == -1 {
                             4
@@ -306,6 +335,8 @@ mod tests {
                         } else {
                             3
                         };
+                        // SAFETY: _exit takes no pointer and is async-signal-safe, which is all
+                        // this forked child may call.
                         unsafe { libc::_exit(code) }
                     }
                     Ok(Forked::Parent(pid)) => {
@@ -320,6 +351,8 @@ mod tests {
                 .expect("the forking thread starts");
             std::thread::sleep(HOLD);
             assert_eq!(
+                // SAFETY: fcntl with F_SETFD takes an integer flag, not a pointer, and `watched`
+                // keeps `fd` open.
                 unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
                 0,
                 "the descriptor is marked close-on-exec"
@@ -396,9 +429,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn a_failed_fork_keeps_its_errno_and_releases_the_lock() {
         let lock = fresh_lock();
         let forked = fork_holding(lock, || {
+            // SAFETY: close(-1) closes nothing: it fails with EBADF, the errno this test needs.
             unsafe { libc::close(-1) };
             -1
         });
