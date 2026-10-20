@@ -11,7 +11,7 @@ fn attach_detach(
     let before = backend.snapshot_os_state();
     for (index, capability) in [
         Capability::SessionFile {
-            path: "session".into(),
+            path: "/session".into(),
         },
         Capability::UdsSocket {
             path: "/run/egressd.uds".into(),
