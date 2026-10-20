@@ -19,8 +19,8 @@ pub enum Reason {
     NotRun { lane: Lane },
     /// The two runs of `lane` differ in `field`.
     Noise { lane: Lane, field: String },
-    /// A reach probe is equal in the open and absent lanes, leaving out the fields a rule
-    /// covers.
+    /// A completed open run and a completed absent run of a reach probe are equal, leaving out
+    /// the fields a rule covers.
     NoDiscrimination,
     /// The cell lane differs from the absent lane in `field`, and no allowance admits the
     /// cell's value there.
@@ -89,8 +89,9 @@ pub enum RunRefusal {
 /// transcript ran in every lane, no run differs from its lane's other run, every reach probe
 /// tells the open lane from the absent lane, every lane shows the neutral names, and the cell
 /// lane equals the absent lane except where an allowance admits the cell's exact value.
-/// Neutral names are checked on every completed run and lanes are compared on every pair of
-/// completed runs, so a failure there is listed even when a lane's other run is not run. Every
+/// Neutral names are checked on every completed run, and every completed run of one lane is
+/// compared with every completed run of the other. So a failure is listed even when a lane's
+/// other run is not run, and the verdict does not depend on the order of a lane's runs. Every
 /// field is compared exactly, because the manifest's rules are not applied yet. That can only
 /// find more noise and more differences. Discrimination leaves out the fields a rule covers, so
 /// a value a rule would replace cannot make a reach probe look as if it discriminated.

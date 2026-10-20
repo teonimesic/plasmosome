@@ -422,8 +422,8 @@ impl Manifest {
 
 /// What one probe reported in one run. `completed` is its completion marker, and
 /// `failed_before_step` says it failed before the step it observes. Each field is compared
-/// whole and exactly. The manifest's normalization rules are not applied yet, so a rule never
-/// loosens a comparison.
+/// whole and exactly, except that the discrimination check leaves out the fields a rule covers.
+/// The manifest's normalization rules are not applied yet, so a rule never loosens a comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
     pub probe: String,

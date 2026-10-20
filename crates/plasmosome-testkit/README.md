@@ -94,11 +94,13 @@ the manifest with `validate`, then refuses runs it cannot judge: a lane with run
 two, two runs from one boot in one lane or across two, and a run that observes an undeclared probe
 or one probe twice. A probe with no completion marker, or one that failed before the step it
 observes, is not run in that lane, and so is every probe in a lane with no runs. Any not run makes
-the verdict not run. Every completed run is still judged, so the verdict lists each failure it
-finds, even in a lane whose other run is not run:
+the verdict not run. Every completed run is still judged, and compared with every completed run
+of the other lane, so the verdict lists each failure it finds, even in a lane whose other run is
+not run, and does not depend on the order of a lane's runs:
 
 - noise, a field in which a lane's two runs differ;
-- a reach probe equal in the open and absent lanes, leaving out the fields a rule covers;
+- a reach probe that one open run and one absent run show equal, leaving out the fields a rule
+  covers;
 - a lane, any lane, that does not show the manifest's neutral mount source, type, options, FUSE
   subtype or cgroup path, so a name copied from the cell into the reference lanes still fails;
 - a field in which the cell lane differs from the absent lane, unless an allowance names that
