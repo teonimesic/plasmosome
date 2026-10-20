@@ -219,6 +219,7 @@ impl Ledger {
                 effects: self.effects,
                 pending,
                 asserted: Vec::new(),
+                began: None,
             })
         } else {
             Closure::ExternalFree(SealedLedger {
@@ -226,6 +227,7 @@ impl Ledger {
                 effects: self.effects,
                 pending,
                 asserted: Vec::new(),
+                began: None,
             })
         }
     }
@@ -242,6 +244,7 @@ pub struct SealedLedger {
     effects: Vec<Effect>,
     pending: usize,
     asserted: Vec<String>,
+    began: Option<CellId>,
 }
 
 #[derive(Debug)]
@@ -250,6 +253,7 @@ pub struct ForcedLedger {
     effects: Vec<Effect>,
     pending: usize,
     asserted: Vec<String>,
+    began: Option<CellId>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -394,11 +398,9 @@ impl SealedLedger {
             effects,
             pending,
             asserted,
+            began,
         } = self;
-        let owner = CellOwner {
-            cell: cell.clone(),
-            plugin: plugin.clone(),
-        };
+        let owner = bind(began, cell, plugin)?;
         replay(&owner, effects, pending, asserted, backend, drain, None)
     }
 
@@ -444,11 +446,9 @@ impl ForcedLedger {
             effects,
             pending,
             asserted,
+            began,
         } = self;
-        let owner = CellOwner {
-            cell: cell.clone(),
-            plugin: plugin.clone(),
-        };
+        let owner = bind(began, cell, plugin)?;
         replay(
             &owner,
             effects,
@@ -466,6 +466,24 @@ impl ForcedLedger {
             effects: self.effects,
         }
     }
+}
+
+fn bind(
+    began: &mut Option<CellId>,
+    cell: &CellId,
+    plugin: &PluginId,
+) -> Result<CellOwner, DetachError> {
+    let bound = began.get_or_insert_with(|| cell.clone());
+    if bound != cell {
+        return Err(DetachError::CellChanged {
+            began: bound.clone(),
+            requested: cell.clone(),
+        });
+    }
+    Ok(CellOwner {
+        cell: cell.clone(),
+        plugin: plugin.clone(),
+    })
 }
 
 fn replay(
