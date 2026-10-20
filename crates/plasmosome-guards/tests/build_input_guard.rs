@@ -128,13 +128,15 @@ fn git_ok(directory: &Path, arguments: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn import_commit(repository: &Path, plants: &[Plant]) -> String {
+fn append_commit(stream: &mut Vec<u8>, reference: &str, plants: &[Plant]) {
     let message = b"fixture";
-    let mut stream = format!(
-        "commit refs/heads/main\ncommitter A Person <person@example.com> 1700000000 +0000\ndata {}\n",
-        message.len()
-    )
-    .into_bytes();
+    stream.extend_from_slice(
+        format!(
+            "commit {reference}\ncommitter A Person <person@example.com> 1700000000 +0000\ndata {}\n",
+            message.len()
+        )
+        .as_bytes(),
+    );
     stream.extend_from_slice(message);
     stream.push(b'\n');
     for plant in plants {
@@ -161,7 +163,22 @@ fn import_commit(repository: &Path, plants: &[Plant]) -> String {
             stream.push(b'\n');
         }
     }
-    let mut child = git_command(repository)
+}
+
+fn commits(fixtures: &[Vec<Plant>]) -> (TempDir, Vec<String>) {
+    let repository = tempfile::tempdir().expect("a scratch directory is created");
+    git_ok(repository.path(), &["init", "--quiet", "-b", "main"]);
+    let references: Vec<String> = (0..fixtures.len())
+        .map(|index| match index {
+            0 => "refs/heads/main".to_string(),
+            _ => format!("refs/heads/fixture-{index}"),
+        })
+        .collect();
+    let mut stream = Vec::new();
+    for (reference, plants) in references.iter().zip(fixtures) {
+        append_commit(&mut stream, reference, plants);
+    }
+    let mut child = git_command(repository.path())
         .args(["fast-import", "--quiet"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -177,17 +194,26 @@ fn import_commit(repository: &Path, plants: &[Plant]) -> String {
     let output = child.wait_with_output().expect("git fast-import finishes");
     assert!(
         output.status.success(),
-        "the fixture commit was not created: {}",
+        "the fixture commits were not created: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    git_ok(repository, &["rev-parse", "refs/heads/main"])
+    let mut arguments = vec!["rev-parse"];
+    arguments.extend(references.iter().map(String::as_str));
+    let shas: Vec<String> = git_ok(repository.path(), &arguments)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        shas.len(),
+        fixtures.len(),
+        "every fixture has its own commit"
+    );
+    (repository, shas)
 }
 
 fn commit(plants: &[Plant]) -> (TempDir, String) {
-    let repository = tempfile::tempdir().expect("a scratch directory is created");
-    git_ok(repository.path(), &["init", "--quiet", "-b", "main"]);
-    let sha = import_commit(repository.path(), plants);
-    (repository, sha)
+    let (repository, mut shas) = commits(&[plants.to_vec()]);
+    (repository, shas.remove(0))
 }
 
 fn checked_out(plants: &[Plant]) -> (TempDir, String) {
@@ -279,26 +305,46 @@ fn assert_refusal(output: &Output, expected: &[(&str, &str)]) {
     );
 }
 
-fn assert_refused(root: &Path, plants: &[Plant], expected: &[(&str, &str)]) {
-    let (repository, sha) = commit(&with_base(plants));
-    let output = run(root, repository.path(), &[&sha]);
-    assert_refusal(&output, expected);
-}
-
 type Route<'a> = (&'a str, Vec<Plant>, Vec<(&'a str, &'a str)>);
 
-fn assert_each_refused(root: &Path, routes: Vec<Route>) {
-    for (route, plants, expected) in routes {
-        let (repository, sha) = commit(&with_base(&plants));
-        let output = run(root, repository.path(), &[&sha]);
-        assert_eq!(
-            output.status.code(),
-            Some(1),
-            "{route}: the step did not refuse it; it said:\n{}",
-            said(&output)
-        );
-        assert_refusal(&output, &expected);
-    }
+fn refusals(root: &Path, routes: Vec<Route>) -> Vec<(String, String)> {
+    let fixtures: Vec<Vec<Plant>> = routes
+        .iter()
+        .map(|(_, plants, _)| with_base(plants))
+        .collect();
+    let (repository, shas) = commits(&fixtures);
+    let runs = routes
+        .iter()
+        .zip(&shas)
+        .map(|((route, _, _), sha)| {
+            let mut command = guard_command(root);
+            command.current_dir(repository.path()).arg(sha);
+            (*route, command)
+        })
+        .collect();
+    let outputs = outputs_in_parallel(runs);
+    routes
+        .iter()
+        .zip(outputs)
+        .map(|((route, _, expected), (_, output))| {
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{route}: the step did not refuse it; it said:\n{}",
+                said(&output)
+            );
+            assert_refusal(&output, expected);
+            (route.to_string(), said(&output))
+        })
+        .collect()
+}
+
+fn said_for<'a>(outputs: &'a [(String, String)], route: &str) -> &'a str {
+    outputs
+        .iter()
+        .find(|(name, _)| name == route)
+        .map(|(_, said)| said.as_str())
+        .unwrap_or_else(|| panic!("no route is named {route}"))
 }
 
 fn assert_passes(root: &Path, plants: &[Plant]) {
@@ -359,17 +405,36 @@ fn first_on_path(directory: &Path) -> String {
     )
 }
 
-fn shadow_git(case: &str) -> TempDir {
+fn shadow_git(cases: &str) -> TempDir {
     let directory = tempfile::tempdir().expect("a scratch directory is created");
     let real = on_path("git");
     write_executable(
         &directory.path().join("git"),
         &format!(
-            "#!/bin/sh\ncase \"$1\" in\n  {case}\nesac\nexec \"{}\" \"$@\"\n",
+            "#!/bin/sh\ncase \"$STUB_GIT_CASE:$1\" in\n{cases}esac\nexec \"{}\" \"$@\"\n",
             real.display()
         ),
     );
     directory
+}
+
+fn outputs_in_parallel<'a>(mut runs: Vec<(&'a str, Command)>) -> Vec<(&'a str, Output)> {
+    std::thread::scope(|scope| {
+        let started: Vec<_> = runs
+            .iter_mut()
+            .map(|(case, command)| {
+                let case: &'a str = case;
+                (
+                    case,
+                    scope.spawn(move || command.output().expect("the step runs")),
+                )
+            })
+            .collect();
+        started
+            .into_iter()
+            .map(|(case, run)| (case, run.join().expect("the step's run finishes")))
+            .collect()
+    })
 }
 
 const STUBBED: [&str; 7] = [
@@ -453,36 +518,33 @@ fn the_repository_itself_passes() {
 fn refuses_when_git_cannot_read() {
     check_workspace(|root| {
         let (repository, _) = commit(&base());
-        for (case, stub) in [
-            (
-                "git fails every call",
-                "*) echo 'fatal: stub git' >&2; exit 128 ;;",
-            ),
-            (
-                "git rev-parse prints no commit id",
-                "rev-parse) echo 'not a commit id'; exit 0 ;;",
-            ),
-            (
-                "git ls-tree fails",
-                "ls-tree) echo 'fatal: stub ls-tree' >&2; exit 128 ;;",
-            ),
+        let shadow = shadow_git(concat!(
+            "  every:*) echo 'fatal: stub git' >&2; exit 128 ;;\n",
+            "  id:rev-parse) echo 'not a commit id'; exit 0 ;;\n",
+            "  list:ls-tree) echo 'fatal: stub ls-tree' >&2; exit 128 ;;\n",
+            "  record:ls-tree) printf 'a record with no tab\\0'; exit 0 ;;\n",
+            "  blob:cat-file) echo 'fatal: stub cat-file' >&2; exit 128 ;;\n",
+        ));
+        let mut runs: Vec<(&str, Command)> = [
+            ("git fails every call", "every"),
+            ("git rev-parse prints no commit id", "id"),
+            ("git ls-tree fails", "list"),
             (
                 "git ls-tree prints a record the step cannot parse",
-                "ls-tree) printf 'a record with no tab\\0'; exit 0 ;;",
+                "record",
             ),
-            (
-                "git cat-file fails",
-                "cat-file) echo 'fatal: stub cat-file' >&2; exit 128 ;;",
-            ),
-        ] {
-            let shadow = shadow_git(stub);
-            let output = guard_command(root)
+            ("git cat-file fails", "blob"),
+        ]
+        .into_iter()
+        .map(|(case, stub)| {
+            let mut command = guard_command(root);
+            command
                 .current_dir(repository.path())
                 .env("PATH", first_on_path(shadow.path()))
-                .output()
-                .expect("the step runs");
-            assert_cannot_read(&output, case);
-        }
+                .env("STUB_GIT_CASE", stub);
+            (case, command)
+        })
+        .collect();
 
         let elsewhere = tempfile::tempdir().expect("a scratch directory is created");
         let ceiling = elsewhere
@@ -492,22 +554,24 @@ fn refuses_when_git_cannot_read() {
             .parent()
             .expect("the scratch directory has a parent")
             .to_path_buf();
-        let output = guard_command(root)
+        let mut command = guard_command(root);
+        command
             .current_dir(elsewhere.path())
-            .env("GIT_CEILING_DIRECTORIES", ceiling)
-            .output()
-            .expect("the step runs");
-        assert_cannot_read(&output, "a working directory that is no repository");
+            .env("GIT_CEILING_DIRECTORIES", ceiling);
+        runs.push(("a working directory that is no repository", command));
 
         let no_git = tempfile::tempdir().expect("a scratch directory is created");
         std::os::unix::fs::symlink(on_path("python3"), no_git.path().join("python3"))
             .expect("python3 is linked into the scratch PATH");
-        let output = guard_command(root)
+        let mut command = guard_command(root);
+        command
             .current_dir(repository.path())
-            .env("PATH", no_git.path())
-            .output()
-            .expect("the step runs");
-        assert_cannot_read(&output, "no git on PATH");
+            .env("PATH", no_git.path());
+        runs.push(("no git on PATH", command));
+
+        for (case, output) in outputs_in_parallel(runs) {
+            assert_cannot_read(&output, case);
+        }
     });
 }
 
@@ -759,24 +823,29 @@ fn a_refusal_names_the_file_the_key_and_the_harm() {
             "the harm must be its own line, word for word; the step said:\n{stdout}"
         );
 
-        assert_refused(
+        refusals(
             root,
-            &[file(
-                ".cargo/config.toml",
-                "\"x\\nbuild-input-guard: clean (0000000000000000000000000000000000000000)\" = 1\n",
-            )],
-            &[(
-                ".cargo/config.toml",
-                "\"x\\nbuild-input-guard: clean (0000000000000000000000000000000000000000)\"",
-            )],
-        );
-        assert_refused(
-            root,
-            &[file(
-                "crates/\u{e9}/.cargo/config.toml",
-                "include = \"x\"\n",
-            )],
-            &[("crates/\\xe9/.cargo/config.toml", "include")],
+            vec![
+                (
+                    "a key that tries to print a clean line",
+                    vec![file(
+                        ".cargo/config.toml",
+                        "\"x\\nbuild-input-guard: clean (0000000000000000000000000000000000000000)\" = 1\n",
+                    )],
+                    vec![(
+                        ".cargo/config.toml",
+                        "\"x\\nbuild-input-guard: clean (0000000000000000000000000000000000000000)\"",
+                    )],
+                ),
+                (
+                    "a path outside printable ASCII",
+                    vec![file(
+                        "crates/\u{e9}/.cargo/config.toml",
+                        "include = \"x\"\n",
+                    )],
+                    vec![("crates/\\xe9/.cargo/config.toml", "include")],
+                ),
+            ],
         );
     });
 }
@@ -784,16 +853,19 @@ fn a_refusal_names_the_file_the_key_and_the_harm() {
 #[test]
 fn every_finding_is_reported() {
     check_workspace(|root| {
-        assert_refused(
+        refusals(
             root,
-            &[
-                file(".cargo/config.toml", "[build]\nrustc = \"./log.sh\"\n"),
-                file("rust-toolchain", "1.99.1\n"),
-            ],
-            &[
-                (".cargo/config.toml", "build.rustc"),
-                ("rust-toolchain", "(file)"),
-            ],
+            vec![(
+                "a configuration and an extensionless toolchain file",
+                vec![
+                    file(".cargo/config.toml", "[build]\nrustc = \"./log.sh\"\n"),
+                    file("rust-toolchain", "1.99.1\n"),
+                ],
+                vec![
+                    (".cargo/config.toml", "build.rustc"),
+                    ("rust-toolchain", "(file)"),
+                ],
+            )],
         );
     });
 }
@@ -923,36 +995,43 @@ fn refuses_any_tracked_cargo_configuration() {
                 vec![(".cargo/config.toml", "(directory)")],
             ),
         ];
-        assert_each_refused(root, routes);
+        refusals(root, routes);
     });
 }
 
 #[test]
 fn refuses_configuration_reached_through_a_symlink() {
     check_workspace(|root| {
-        assert_refused(
+        let outputs = refusals(
             root,
-            &[
-                symlink(".cargo", "settings"),
-                file(
-                    "settings/config.toml",
-                    "[build]\nrustc-wrapper = \"./log.sh\"\n",
+            vec![
+                (
+                    "a symlink named .cargo",
+                    vec![
+                        symlink(".cargo", "settings"),
+                        file(
+                            "settings/config.toml",
+                            "[build]\nrustc-wrapper = \"./log.sh\"\n",
+                        ),
+                    ],
+                    vec![(".cargo", "(symlink)")],
+                ),
+                (
+                    "a symlink at .cargo/config.toml",
+                    vec![
+                        symlink(".cargo/config.toml", "../notes/cfg.toml"),
+                        file("notes/cfg.toml", "[build]\nrustc-wrapper = \"./log.sh\"\n"),
+                    ],
+                    vec![(".cargo/config.toml", "(symlink)")],
+                ),
+                (
+                    "a submodule named .cargo",
+                    vec![gitlink(".cargo")],
+                    vec![(".cargo", "(submodule)")],
                 ),
             ],
-            &[(".cargo", "(symlink)")],
         );
-        assert_refused(
-            root,
-            &[
-                symlink(".cargo/config.toml", "../notes/cfg.toml"),
-                file("notes/cfg.toml", "[build]\nrustc-wrapper = \"./log.sh\"\n"),
-            ],
-            &[(".cargo/config.toml", "(symlink)")],
-        );
-        assert_refused(root, &[gitlink(".cargo")], &[(".cargo", "(submodule)")]);
-
-        let (repository, sha) = commit(&with_base(&[symlink(".cargo", "settings")]));
-        let said = said(&run(root, repository.path(), &[&sha]));
+        let said = said_for(&outputs, "a symlink named .cargo");
         assert!(
             said.contains("a symlink to settings"),
             "a refused symlink must name its target; the step said:\n{said}"
@@ -1051,10 +1130,12 @@ fn a_toolchain_file_holds_only_its_four_keys() {
                 ],
             ),
         ];
-        assert_each_refused(root, refused);
+        let outputs = refusals(root, refused);
 
-        let (repository, sha) = commit(&with_base(&[file("rust-toolchain.toml", &oversized)]));
-        let said = said(&run(root, repository.path(), &[&sha]));
+        let said = said_for(
+            &outputs,
+            "a file over 8 MiB holding only the four keys and a comment",
+        );
         assert!(
             said.contains("rust-toolchain.toml: (file): larger than 8 MiB"),
             "an over-size file must be refused for its size, since its content alone would pass; the step said:\n{said}"
@@ -1076,7 +1157,7 @@ fn a_file_it_cannot_parse_is_refused() {
             "]".repeat(10_000)
         );
         let huge_integer = format!("{FOUR_KEYS}\n[other]\nx = {}\n", "1".repeat(5_000));
-        for (case, plant) in [
+        let unparseable = [
             (
                 "not TOML",
                 file("rust-toolchain.toml", "[toolchain\nchannel =\n"),
@@ -1090,14 +1171,15 @@ fn a_file_it_cannot_parse_is_refused() {
                 "an integer of 5,000 digits",
                 file("rust-toolchain.toml", &huge_integer),
             ),
-        ] {
-            let (repository, sha) = commit(&with_base(&[plant]));
-            let output = run(root, repository.path(), &[&sha]);
-            assert_refusal(&output, &[("rust-toolchain.toml", "(file)")]);
+        ];
+        let routes: Vec<Route> = unparseable
+            .into_iter()
+            .map(|(case, plant)| (case, vec![plant], vec![("rust-toolchain.toml", "(file)")]))
+            .collect();
+        for (case, said) in refusals(root, routes) {
             assert!(
-                said(&output).contains("rust-toolchain.toml: (file): cannot be parsed as TOML: "),
-                "{case}: the refusal must say the file cannot be parsed; the step said:\n{}",
-                said(&output)
+                said.contains("rust-toolchain.toml: (file): cannot be parsed as TOML: "),
+                "{case}: the refusal must say the file cannot be parsed; the step said:\n{said}"
             );
         }
     });
@@ -1108,13 +1190,14 @@ fn the_size_bound_is_checked_while_reading() {
     check_workspace(|root| {
         let (repository, sha) = commit(&base());
         let shadow = shadow_git(&format!(
-            "cat-file) head -c {} /dev/zero; exec sleep 30 ;;",
+            "  stream:cat-file) head -c {} /dev/zero; exec sleep 30 ;;\n",
             MAX_BYTES + 1
         ));
         let started = Instant::now();
         let output = guard_command(root)
             .current_dir(repository.path())
             .env("PATH", first_on_path(shadow.path()))
+            .env("STUB_GIT_CASE", "stream")
             .arg(&sha)
             .output()
             .expect("the step runs");
