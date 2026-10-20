@@ -1264,7 +1264,7 @@ fn list_trusted_dir_takes_an_ancestor_mode_as_enough() {
     let usr = list_trusted_dir(Path::new("/usr")).expect("root-owned /usr lists");
     assert!(
         usr.contains(&listed("bin", EntryKind::Directory)),
-        "{usr:?}"
+        "/usr lists no bin directory"
     );
 }
 
