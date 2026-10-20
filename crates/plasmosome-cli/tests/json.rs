@@ -233,6 +233,13 @@ fn the_grammar_is_strict() {
         (b"{\"a\"".to_vec(), 4, Reason::End),
         (format!("\"{BACKSLASH}").into_bytes(), 2, Reason::End),
         (format!("\"{BACKSLASH}u12").into_bytes(), 5, Reason::End),
+        (
+            format!("\"{}{BACKSLASH}uZZZZ\"", escaped("D800")).into_bytes(),
+            7,
+            Reason::Escape,
+        ),
+        (b"{\"a\x01\":1}".to_vec(), 3, Reason::Control),
+        (b"{\"a".to_vec(), 3, Reason::End),
         (b"{\"a\" 1}".to_vec(), 5, Reason::Expected("':'")),
         (b"{1:2}".to_vec(), 1, Reason::Expected("a string key")),
         (b"[1 2]".to_vec(), 3, Reason::Expected("',' or ']'")),
