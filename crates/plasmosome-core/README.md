@@ -178,33 +178,41 @@ non-ASCII ID on HFS+ at creation.
 
 Spec 023 §3 puts two marker files and a runtime directory in a cell directory, beside the
 journal, and §7 moves an ended cell out of `cells/`. `CellDir` and `InstanceRoot` create, read
-and move them through the opened cell directory, never by path and never through a symlink.
-Nothing calls them yet.
+and move them through opened directories (the cell directory, `cells/` and `retired/`), never by
+path and never through a symlink. Nothing calls them yet.
 
-- `launched` is one line, `{"cell":"cell-3","boot_session":"<uuid>"}` and a newline, with
-  `,"stopped":true` before the closing brace after a clean stop. `LaunchedMarker::decode` refuses
-  anything else: a second line, a carriage return, a repeated or unknown key, `"stopped": false`,
-  a cell that is not `cell-<n>`, a boot session that is not a lowercase hyphenated UUID, or more
-  than 4,096 bytes. The boot session is `plasmosome_backend::BootSession`, and `clock`'s
-  `boot_session()` reads the host's.
-- `create_launched` creates the marker exclusively with mode 0600, then syncs the file and then
-  the directory. `mark_launched_stopped` writes the stopped record to `launched.tmp`, syncs it,
-  renames it over `launched` and syncs the directory, so a reader sees one whole record or the
-  other. `remove_launched` removes it, and a missing marker is not an error.
+- `launched` is written as one line, `{"cell":"cell-3","boot_session":"<uuid>"}` and a newline,
+  with `,"stopped":true` before the closing brace after a clean stop. The boot session is
+  `plasmosome_backend::BootSession`, written in lowercase, and `clock`'s `boot_session()` reads
+  the host's. Spec 023 gives the record's shape, not its exact text, so reading accepts any one
+  JSON object on one line with these keys: in any order, with spaces or tabs around its tokens,
+  and with any JSON string escape, so spec 023's spaced example reads too. It refuses, among
+  others: a second line, a carriage return, a repeated or unknown key, `"stopped": false`, a
+  cell that is not `cell-<n>`, a boot session that is not a lowercase hyphenated UUID, and more
+  than 4,096 bytes.
+- `create_launched` writes the record to `launched.tmp`, created exclusively with mode 0600,
+  syncs it, renames it to `launched` without replacing anything, and syncs the directory.
+  `mark_launched_stopped` writes the stopped record the same way, but its rename replaces
+  `launched`. A reader sees no marker or one whole record, never part of one. A failure before a
+  rename leaves what was there and maybe a `launched.tmp`, which the next write removes. A failed
+  directory sync after a rename leaves the new record in place. `remove_launched` removes the
+  marker, and a missing marker is not an error.
 - `read_launched` is `Absent` only when no entry named `launched` exists. A symlink, a
-  directory, a FIFO or a socket, a record `decode` refuses, a marker naming another cell, and an
-  error opening or reading it are `Unreadable`. An error never reads as absence, because an
+  directory, a FIFO or a socket, a record that reading refuses, a marker naming another cell, and
+  an error opening or reading it are `Unreadable`. An error never reads as absence, because an
   absent marker lets spec 023's supervisor check retire the cell.
-- `create_created` needs the writer lock and creates the empty `created` file the same way.
+- `create_created` needs the writer lock. It creates the empty `created` file exclusively with
+  mode 0600, and syncs it and then the directory; if a sync fails, the file is already there.
   `has_created` refuses an entry that is not a regular file rather than reading it as true.
   `create_runtime_dir` creates `runtime/` exclusively with mode 0700 and returns it opened.
-- `InstanceRoot::retire` takes the writer lock and consumes the `CellDir`. It creates `retired/`
-  with mode 0700 when it is missing, checks that `cells/<cell>` is still the opened directory by
-  device and inode, renames it to `retired/<cell>`, and syncs `cells/` and then `retired/`. The
-  rename never replaces an entry: macOS uses `renameatx_np` with `RENAME_EXCL` and Linux
-  `renameat2` with `RENAME_NOREPLACE`, so an existing `retired/<cell>` is `AlreadyRetired`.
-  Nothing is unlinked: the journal, the markers, a stale `membrane.uds` and `runtime/root.img`
-  move with the directory.
+- `InstanceRoot::retire` takes the writer lock and consumes the `CellDir`. Its caller must also
+  hold the cell's `supervisor.lock`, which `retire` does not check. It creates `retired/` with
+  mode 0700 when it is missing, checks that `cells/<cell>` is still the opened directory by
+  device and inode, renames it to `retired/<cell>`, and then syncs `cells/` and `retired/`. If one
+  of those syncs fails, the cell is already under `retired/`. The rename never replaces an entry:
+  macOS uses `renameatx_np` with `RENAME_EXCL` and Linux `renameat2` with `RENAME_NOREPLACE`, so
+  an existing `retired/<cell>` is `AlreadyRetired`. Nothing is unlinked: the journal, the markers,
+  a stale `membrane.uds` and `runtime/root.img` move with the directory.
 
 ## Configuration
 
