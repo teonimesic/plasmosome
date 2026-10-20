@@ -305,6 +305,28 @@ fn a_root_swapped_for_a_fifo_after_its_check_is_refused_without_blocking() {
 }
 
 #[test]
+fn a_root_removed_or_swapped_for_a_socket_after_its_check_is_refused_as_unreadable() {
+    for socket in [false, true] {
+        let tree = Tree::new().file("tool", b"tool");
+        let (root, moved) = (tree.root(), tree.dir.path().join("moved"));
+        let mut held = Vec::new();
+        let mut swap = |step: Step, path: &str| {
+            if step == Step::RootChecked && path == "." {
+                fs::rename(&root, &moved).expect("move the root away");
+                if socket {
+                    held.push(UnixListener::bind(&root).expect("a socket in its place"));
+                }
+            }
+        };
+        assert_eq!(
+            tree.observed(&mut swap),
+            Err(PinRefusal::Unreadable { path: ".".into() }),
+            "socket in its place: {socket}"
+        );
+    }
+}
+
+#[test]
 fn a_fifo_is_refused_as_not_regular_without_waiting_for_a_writer() {
     let tree = Tree::new().file("tool", b"tool").listed_only("pipe", b"");
     mkfifo(&tree.at("pipe"));
@@ -1185,7 +1207,7 @@ fn the_fold_is_unicode_lowercase_so_the_kelvin_sign_meets_k() {
     );
 }
 
-const FOLDED_TOGETHER: [&str; 3] = ["\u{c9}clair", "\u{d1}", "\u{e9}clair"];
+const FOLDED_TOGETHER: [&str; 4] = ["Abc", "\u{c9}clair", "\u{d1}", "\u{e9}clair"];
 
 #[test]
 fn an_ascii_case_pair_never_reaches_check_names_because_the_listing_refuses_it() {
