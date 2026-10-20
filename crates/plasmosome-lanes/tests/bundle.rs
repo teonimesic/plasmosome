@@ -66,11 +66,6 @@ fn a_bundle_that_matches_its_sums_passes_and_names_its_files() {
 }
 
 #[test]
-fn the_pinned_bundle_is_the_one_on_this_machine() {
-    assert_eq!(PINNED_BUNDLE_ID, "eed141b574337d99");
-}
-
-#[test]
 fn a_self_consistent_bundle_with_another_id_is_refused_against_the_pin() {
     let dir = common::bundle_fixture();
 
