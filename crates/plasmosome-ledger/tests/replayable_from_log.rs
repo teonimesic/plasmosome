@@ -725,6 +725,24 @@ fn a_record_with_a_repeated_key_at_any_depth_is_refused() {
     }
 }
 
+const REFUSED_TARGET_NAMES: [&str; 15] = [
+    "an unversioned record",
+    "the format before the current one",
+    "the format after the current one",
+    "a numeric backend handle",
+    "a universe inverse without its id",
+    "an unknown field nested in a capability",
+    "a key repeated with its own value",
+    "invalid UTF-8 in a complete line",
+    "a malformed line between two valid records",
+    "an empty line between two valid records",
+    "a complete final record of an unsupported format without LF",
+    "two valid records naming different plugins",
+    "a torn final record that ends with LF",
+    "a valid record followed by a torn final fragment",
+    "one complete valid record without LF",
+];
+
 struct RefusedTarget {
     name: &'static str,
     bytes: Vec<u8>,
@@ -865,6 +883,11 @@ fn refused_targets() -> Vec<RefusedTarget> {
             Some(2),
         ),
         row(
+            "a torn final record that ends with LF",
+            format!("{first}{}\n", &second[..second.len() - 12]),
+            Some(2),
+        ),
+        row(
             "a valid record followed by a torn final fragment",
             format!("{first}{}", &second[..second.len() - 12]),
             None,
@@ -882,7 +905,9 @@ fn open_file_refuses_each_refused_target_on_its_line_and_keeps_its_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("ledger.ndjson");
     let mut problems = Vec::new();
+    let mut checked = Vec::new();
     for target in refused_targets() {
+        checked.push(target.name);
         std::fs::write(&log, &target.bytes).unwrap();
         match (Ledger::open_file(&log), target.open_refuses_on_line) {
             (Err(error), Some(line))
@@ -904,6 +929,7 @@ fn open_file_refuses_each_refused_target_on_its_line_and_keeps_its_bytes() {
         }
     }
     assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(checked, REFUSED_TARGET_NAMES);
 }
 
 #[test]
@@ -912,7 +938,9 @@ fn append_to_file_refuses_each_refused_target_and_keeps_its_bytes() {
     let log = dir.path().join("ledger.ndjson");
     let appended = one_effect_ledger("github-pr", "appended", "/skills/c.md");
     let mut problems = Vec::new();
+    let mut checked = Vec::new();
     for target in refused_targets() {
+        checked.push(target.name);
         std::fs::write(&log, &target.bytes).unwrap();
         let expected = if target.bytes.ends_with(b"\n") {
             Ledger::open_file(&log).expect_err(target.name).to_string()
@@ -933,6 +961,7 @@ fn append_to_file_refuses_each_refused_target_and_keeps_its_bytes() {
         }
     }
     assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(checked, REFUSED_TARGET_NAMES);
 }
 
 #[test]
@@ -1009,4 +1038,45 @@ fn open_file_refuses_an_empty_log_or_one_holding_only_a_torn_record() {
         assert_eq!(error.to_string(), "ledger log holds no record");
         assert_eq!(std::fs::read(&log).unwrap(), bytes);
     }
+}
+
+#[test]
+fn append_to_file_reads_and_checks_the_whole_of_a_long_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut long = Ledger::new("github-pr");
+    for index in 0..1000 {
+        long.push(Effect::exact(
+            format!("entry {index}"),
+            InverseVia::Universe(file_removal(&format!("/skills/{index}.md"))),
+        ));
+    }
+    let mut valid = Vec::new();
+    long.write_to(&mut valid).unwrap();
+    assert!(valid.len() > 64 * 1024, "{}", valid.len());
+    let appended = one_effect_ledger("github-pr", "appended", "/skills/c.md");
+
+    let extended = dir.path().join("extended.ndjson");
+    std::fs::write(&extended, &valid).unwrap();
+    assert_eq!(appended.append_to_file(&extended).unwrap(), 1);
+    let expected: Vec<Effect> = long
+        .effects()
+        .iter()
+        .chain(appended.effects())
+        .cloned()
+        .collect();
+    assert_eq!(Ledger::open_file(&extended).unwrap().effects(), expected);
+
+    let refused = dir.path().join("refused.ndjson");
+    let unversioned = changed(
+        &encoded_line("github-pr", "entry one", "/skills/a.md"),
+        |record| {
+            record.as_object_mut().unwrap().remove("format");
+        },
+    );
+    let bytes = [unversioned.into_bytes(), valid].concat();
+    std::fs::write(&refused, &bytes).unwrap();
+    let error = appended.append_to_file(&refused).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("on line 1:"), "{error}");
+    assert_eq!(std::fs::read(&refused).unwrap(), bytes);
 }
