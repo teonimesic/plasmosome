@@ -102,7 +102,7 @@ Application error codes (closed set; additions are a contract change):
 | 102 | `already_exists` / `already_attached` | `target` |
 | 103 | `unresolved_requirement` | `capability`, `plasmid` |
 | 104 | `mock_mode_conflict` | `node`, `modes`, `plasmids`, `resolutions` — per D2b rule 3, or per spec 022 when a mutation would change an attached plasmid's mode or serve one host, port and transport at two modes in a cell; spec 022's cases name one plasmid as `node` and offer only `remove_plasmid` |
-| 105 | `illegal_state` | `from`, `to`; private recovery methods additionally carry the typed `recovery` refusal in §4.1 |
+| 105 | `illegal_state` | `from`, `to`; `detail`, a record of a kind spec 001 defines, including spec 024's; `cell` whenever the refusal concerns a created cell (spec 023); private recovery methods additionally carry the typed `recovery` refusal in §4.1 |
 | 106 | `drain_timeout` | `handle`, `deadline_ms` |
 | 107 | `not_running` | `target` — the named instance is not up |
 | 108 | `manifest_invalid` | `detail`, `path`; `fix` when the refusal names a declaration field |
@@ -139,14 +139,23 @@ exists — live socket, stale socket, regular file, directory or symlink — is 
 touching it: clearing the path is the caller's job, because unlinking a live daemon's socket is
 how a half-alive controller or supervisor is manufactured. Following a successful bind, the
 daemon records the socket's device and inode; on every route out (clean return, later error,
-unwinding panic) it removes the configured path only if a no-follow inspection finds that exact
+unwinding panic) it removes the socket's name only if a no-follow inspection finds that exact
 socket still there, as one best-effort attempt. A replacement settled at the pathname after
 start — a regular file or a leaf symlink, target present or dangling — is preserved with its
 contents, entry type and link target, and an original socket renamed elsewhere stays there: the
 daemon owns the entry it bound, not every name later given to its inode. A missing entry, a
 non-socket, or a non-matching identity leaves the namespace untouched. A start whose identity
 capture fails refuses before any fork or other setup, without unlinking anything, and can leave
-the just-bound socket for explicit operator cleanup.
+the just-bound socket for explicit operator cleanup. `membraned` captures that identity at the
+configured path and inspects the configured path at teardown. `plasmosomed` does both at the
+socket's name in the directory it opened and checked at start, which it holds open: it captures
+the identity only of a socket its effective UID owns, and if that directory is renamed while it
+runs, teardown removes the socket under the directory's new name and leaves whatever is then at
+the configured path. A `plasmosomed` start that fails at any step after the capture removes the
+just-bound socket as any later error does. Those steps are, in order, the repeated path check, the
+change to mode 0600, the re-inspection of the socket after that change, `listen`, and the switch
+to nonblocking. Amended on 2026-10-20: this paragraph said each daemon removes the configured
+path, and described only `membraned`'s capture and teardown.
 
 These are host-conditioned guarantees, not race-free protection. The caller supplies a trusted,
 stable directory and coordinated namespace writers: parent, ancestors and their symlink targets
@@ -157,6 +166,11 @@ distinguishes a later socket at the same name only while the original inode stay
 the file-type check still rejects regular files and symlinks even if inode numbers are recycled.
 `SIGKILL` and equivalent hard exits run no destructor; the resulting residue is observed by the
 next start's refusal, not prevented, and no verb observes or repairs it.
+
+`plasmosomed`'s control socket is held to a stricter rule: it is bound under §4.1's path
+boundary for private sockets. The daemon refuses to start when the configured path fails that
+boundary, sets the socket to mode 0600 before listening, and closes unread any connection from
+another effective UID (spec 025 §5 and §6). This does not change `membraned`'s sockets.
 
 ## 2. Naming and addressing (D1a/D1b/D1c)
 
@@ -258,13 +272,37 @@ and failure rules as internal observations. A supported client presents only the
 logical account, never pages or a prefix as a complete recovery diagnostic.
 
 The assembled logical result is `{name, ledger_generation, desired, tombstones, observed_cells,
-expected, drift, unmatched, incomplete, pending, quarantined}`. `incomplete` is the required
-`[IncompleteEffect, ...]`, preserving every complete operation and its original cell/plugin owner;
-it is not coerced into drift, unmatched or an OsObject. `desired`, exact objects, pending transactions and quarantine
-reports use spec008's typed records with this wire projection: absent genome/cell/line,
-operation and force fields are omitted; a journal change whose replacement is null becomes
-`{plugin, remove: true}`, while a replacement change is `{plugin, replacement: ...}`.
-These are response encodings, not changes to the required nullable journal fields.
+expected, drift, unmatched, incomplete, pending, quarantined, set_aside}`. `set_aside` is the
+required array of the cells spec 023's supervisor check set aside, in byte order of the cell ID
+string (so `cell-10` sorts before `cell-9`), and `[]` when there is none. Each entry is `{cell,
+reason, lock, marker, desired, pending}`. `reason` is one of `unresponsive`, `germinating`,
+`external_obligations`, `supervisor_lost`, `holdings_without_supervisor`, `retire_unlogged` and
+`retire_failed`. `lock` is `held` or `free`. `marker` is required whatever the lock, since the check
+reads `launched` for every cell before it acts: `absent`, `earlier_boot`, `this_boot_stopped`,
+`this_boot` or `unreadable`, for no marker, one from an earlier boot, one from this boot that
+records a clean stop, one from this boot that records none, or one that cannot be read. `desired` is
+the cell's settled DesiredCell from its journal, in this section's projection, so each attachment
+shows its spec 028 `lifetime`; an empty journal gives the empty generation-0 record. `pending` is
+the cell's pending transaction in this section's projection, omitted when it has none. Both are
+omitted when the cell's journal is corrupt, which happens only when the lock is held, since a free
+lock with a corrupt journal quarantines; spec 008 then reports that journal under `quarantined`. A
+cell appears in `set_aside` once. A set-aside cell's records appear only in its entry, apart from a
+corrupt journal's report under `quarantined`, and never in the top-level `desired`,
+`observed_cells`, `pending`, `expected`, `drift`, `unmatched`, `incomplete` or `tombstones`. Its
+tombstones stay in its journal and are not reported until it is adopted. `set_aside` belongs to the
+outcome, like every other key: it names the cells set aside when that outcome completed. A
+supervisor check while serving that sets a cell aside, changes its entry, quarantines a cell, or
+adopts or retires a set-aside cell, completes a new outcome in which only that cell's records change
+and `ledger_generation` is recomputed over the adopted cells. So a new capture shows the current
+list, and a capture already pinned keeps its outcome. `set_aside` is not added to §4.1's stderr
+diagnostic, since a set-aside cell never refuses startup; the quarantine reports in that diagnostic
+carry `lock` and `marker` when spec 023's check quarantined their cell (spec 008). `incomplete` is
+the required `[IncompleteEffect, ...]`, preserving every complete operation and its original
+cell/plugin owner; it is not coerced into drift, unmatched or an OsObject. `desired`, exact objects,
+pending transactions and quarantine reports use spec008's typed records with this wire projection:
+absent genome/cell/line, operation and force fields are omitted; a journal change whose replacement
+is null becomes `{plugin, remove: true}`, while a replacement change is `{plugin, replacement:
+...}`. These are response encodings, not changes to the required nullable journal fields.
 `drift` retains `Diff { added, removed }`: added objects were observed but not desired; removed
 objects were desired but absent. IDs, complete capabilities and cell/plugin owners are
 preserved. This is not a canonical-equivalence comparison. Empty collections are `[]` or their
@@ -278,7 +316,9 @@ The call neither forces cleanup nor claims to refresh a failed observation. Name
 and wrong-name errors are the same as `plasmosome.status`. Recovery startup with incomplete
 observation or blocked cleanup does not serve this or any other method: it exits with the
 structured stderr diagnostic described in §4.1. Quarantine alone can coexist with a serving
-controller when all live observations are complete; readiness remains false.
+controller when all live observations are complete; readiness remains false. A cell that spec 023's
+supervisor check sets aside is handled the same way: it is not an incomplete observation, it
+coexists with a serving controller, and readiness remains false.
 A complete observation containing unrequested incomplete effects may serve this diagnostic,
 with readiness false. That does not turn unresolved required startup cleanup into success.
 
@@ -325,6 +365,12 @@ or authorize removing a different holding with an equal resource description.
 ```
 
 - `genome` is optional; without it the cell starts empty (plasmids attach later).
+- The controller allocates the cell ID and starts its supervisor as spec 023 says. It replies only
+  when the guest is up and the genome is attached; until then the cell is `germinating` and refuses
+  `cell.exec`. Resolution refusals come before any cell directory exists; every later refusal
+  carries `cell`, and its cell is ended first. On a host other than Darwin arm64, or without
+  `cell_runtime`, cell.new is 105 `{from: "unsupported_host" | "no_cell_runtime", to:
+  "germinating"}`.
 - Optional `artifact: {registry_id,release:ReleaseRef}` selects the exact already imported
   spec020 genome, with required digest and a matching required `genome` name. It does not fetch,
   authorize widening or bypass normal closure checks. Missing import is101; corrupt/mismatched
@@ -382,30 +428,63 @@ Drain-by-default teardown of one cell; `--now` is the authority-class immediate 
 {"id": 8, "result": {"cell": "cell-1", "state": "dead", "drained": true, "residue": "empty"}}
 ```
 
-With `"now": true` the reply carries `"drained": false` and the recorded operator assertion.
+With `"now": true` the reply carries `"drained": false` and the recorded operator assertion. `now`
+requires `operator` and `reason`, nonblank strings: that assertion, which the reply carries as
+`force: {operator, reason}`, spec 008's record shape, exactly when `now` is true. Optional
+`deadline_ms` bounds the whole kill, default `cell_runtime.stop_deadline_ms` or 30,000. The cell is
+`draining` from the start. The controller stops the workload if the guest runs and `now` is not set,
+withdraws every attachment, sends `membrane.cell.kill`, waits for the supervisor to exit, and moves
+the directory to `<instance>/retired/<cell>` before replying (spec 023). A step that falls short is
+listed in `incomplete`, over the closed set `workload_stop`, `shutdown` and `teardown`; a failed
+workload stop never blocks. `incomplete` is present only when a step fell short (spec 023 §7,
+step 6), as §1 allows for a collection whose text says when it is present, so the clean kill above
+has none. Amended on 2026-10-20: spec 023's text did not say when `incomplete` is present, so §1
+would have sent `[]` on a clean kill. Every 106 a kill sends, for a drain or publication timeout, a
+resumed transaction that does not finish without `now`, or a `now` kill whose session log line
+cannot be appended, is `{handle, deadline_ms}` with `handle` the cell ID and `deadline_ms` the
+kill's deadline. An unclean teardown replies `"state": "dead"` with its residue and `teardown` in
+`incomplete`, and the cell stays listed for a retry. A cell that fails the check before its
+retirement (spec 023 §7, step 5) is decided at once by spec 023 §8's table: unless the table retires
+it, the reply lists `teardown` in `incomplete`, and the cell is set aside or quarantined and leaves
+`cell.list`; a later `cell.kill` of it is 101, since clearing it is spec 023's owner question 3, or
+for a quarantined cell outside spec 008. A guest not stopped or a supervisor not gone within the
+deadline, or a rename that fails after the retire check passed, is 105 naming the cell.
 
 ### 3.8 `cell.exec`
 
-Run a command inside the cell. Requests an E13-style subject spawn when a `subject` is named.
+Run a command inside the cell as its unprivileged workload user (spec 024). A named `subject`
+requests an E13-style subject spawn, refused with 110 until host-side attestation exists.
 
 ```json
 {"id": 9, "method": "cell.exec",
- "params": {"kernel": "work", "cell": "cell-1", "argv": ["git", "push"], "subject": "git"}}
+ "params": {"kernel": "work", "cell": "cell-1", "argv": ["git", "push"], "request_key": "push-1"}}
 ```
 
 ```json
-{"id": 9, "result": {"exec_id": "e-11", "state": "running"}}
+{"id": 9, "result": {"cell": "cell-1", "exec_id": "e-11", "state": "running"}}
 ```
 
 Completion is asynchronous; `exec.status` (companion, same envelope) polls:
 
 ```json
 {"id": 10, "method": "exec.status", "params": {"kernel": "work", "cell": "cell-1", "exec_id": "e-11"}}
-{"id": 10, "result": {"exec_id": "e-11", "state": "exited", "exit_code": 0, "duration_ms": 1823}}
+{"id": 10, "result": {"cell": "cell-1", "exec_id": "e-11", "state": "exited", "exit_code": 0, "duration_ms": 1823}}
+```
+
+```json
+{"id": 11, "method": "exec.output",
+ "params": {"kernel": "work", "cell": "cell-1", "exec_id": "e-11"}}
+{"id": 11, "result": {"cell": "cell-1", "exec_id": "e-11",
+  "stdout": {"bytes": [111, 107, 10], "total": 3, "truncated": false, "closed": true},
+  "stderr": {"bytes": [], "total": 0, "truncated": false, "closed": true}}}
 ```
 
 - A subject spawn is a **host-side attested** request (the E13b residual: the wire narrows to
   this one verb); an unattested spawn subject is refused with code `110`.
+- The parameters, including `exec.status`'s `wait`, the workload's identity and environment, exit
+  codes, retained output and the refusals are spec 024's. Every result names `cell`. A started
+  process is not a capability: it is not journaled, observed as a grant or stopped by plasmid
+  removal.
 - RESERVED: streaming stdout/stderr frames as ndjson on the same connection.
 
 ### 3.9 `plasmid.list`
@@ -535,13 +614,16 @@ no-follow device-and-inode identity. The subset this spec covers:
   Readiness = the socket **answers**; accept-without-answer is the half-alive broker and is
   reported not-ready (measured in F9; implemented in `plasmosome-membrane::readiness`).
   A membrane that is **not** ready answers the same `result` object with `"ready": false` and a
-  `state` naming which case it is. Every call asks every broker again; no answer is kept.
+  `state` naming which case it is. Every call asks every broker again, and a membrane configured for
+  a cell also reports its cell; no answer is kept. Such a membrane is ready exactly when its guest
+  has said hello, no stop or kill has arrived, and every broker answers ready.
 
   | `state` | further fields |
   | --- | --- |
   | `not_serving` | `broker` — the one that held the set back; `reason`; and `broker_state` when, and only when, `reason` is `reported` |
   | `deadline_spent` | `unreached` — the first broker never asked; `asked` — those that spent the budget, in probe order, omitted when the deadline was gone before any broker was asked |
-  | `empty` | none — a membrane supervising no brokers, which is never ready |
+  | `cell_not_ready` | `cell_state` — the cell's lifecycle state: `germinating`, `draining` or `dead` |
+  | `empty` | none — a membrane with neither a cell nor brokers, which is never ready |
 
   `reason` is one of `unreachable`, `timed_out`, `malformed` or `reported`: the socket was not
   there, it did not answer inside the deadline, it answered something that was not a status, or
@@ -613,7 +695,17 @@ no-follow device-and-inode identity. The subset this spec covers:
 - `membrane.cell.kill` — drain-then-kill with `DrainSpec { deadline, policy }` carried
   verbatim from the seam types; the membrane owns the VMM child, shim, and brokers as **its**
   children — never the controller's (86 §4 rule 5), and per-cell vs per-host brokers is an
-  explicit parameter in the desired record.
+  explicit parameter in the desired record. The DrainSpec deadline is positive, and the policy is
+  `Graceful`, or `Force` for `cell.kill --now`. The membrane sends the guest `shutdown` within the
+  deadline, kills and reaps the helper when it passes, and answers `{cell, state, clean, residue,
+  helper_killed}` with residue it observed itself after teardown, and `residue_items` exactly when
+  `residue` is `items`. `helper_killed` is a required boolean, true when it killed the helper's
+  process group because the helper still ran at the deadline. After a clean teardown it removes its
+  launch marker, removes its own socket and exits; otherwise it keeps running with its lock and
+  marker (spec 023).
+- `membrane.cell.exec`, `membrane.exec.status`, `membrane.exec.output` and `membrane.workload.stop`
+  relay to the 4090 `exec`, `exec_status`, `exec_output` and `workload_stop` verbs on the original
+  association's normal lane (spec 024).
 - The selected hardware runtime, shim and noncredential bridge are specified in §4.2.
   Remaining broker lifecycle verbs beyond the exact apply/withdraw contract stay reserved.
   The credential vsock proxy remains RESERVED: port4041 terminates at the membrane and proxies
@@ -628,7 +720,8 @@ The configured controller gains required absolute `instance_root` and positive i
 socket. Startup has one monotonic recovery deadline covering discovery, observation, pending
 cleanup and settled-generation publication, not a new budget per retry. After a live mutation's
 durable finish, its publication exchange gets one recovery_deadline_ms budget, likewise not
-reset on retry. Exhaustion refuses startup or blocks further mutation of that cell; it is never
+reset on retry. Under `cell.kill`, that exchange also ends within the kill's deadline (spec 023).
+Exhaustion refuses startup or blocks further mutation of that cell; it is never
 an empty observation or successful client result. JSON configuration rejects unknown keys as before.
 
 The same strict JSON configuration also admits optional `registry_root`, an explicitly supplied
@@ -647,6 +740,10 @@ supplied absolute path to spec 022's operator declarations file. Nothing supplie
 relative or non-string value is invalid configuration. Only the resolving mutations of spec 022
 read it. Startup, recovery, status and every withdrawal never open it, and its absence or
 corruption never blocks them.
+
+The same configuration admits optional `cell_runtime: {membraned: Artifact, template,
+start_deadline_ms, stop_deadline_ms}`, spec 023's deployment input for new cells, in which
+`stop_deadline_ms` is optional. Recovery never reads it.
 
 The controller holds spec008's instance writer lock and discovers validated cell directories
 before sending requests to their membrane sockets. A membrane is configured for one validated
@@ -892,7 +989,11 @@ Use immutable verified kernel/initramfs/base artifacts and a separately owned RA
 for writes. Verification/opening must preserve the selected inode/bytes through the library's
 path-based opens; a replaceable parent or mutable artifact is refused, not trusted after hashing.
 A runtime recipe is deployment input retained by the original supervisor, not a mutable recovery
-database or permission to recreate a lost VM. Recovery reconnects, not relaunches.
+database or permission to recreate a lost VM. Recovery reconnects, not relaunches. The controller
+starts each cell's supervisor once, as spec 023 §4 says. The supervisor holds the cell's
+`supervisor.lock` for its whole life, and creates the `launched` marker, which records the host boot
+session, before any runtime resource. Only `membrane.cell.kill`, or a launch that fails before
+hello, removes the marker and the guest's disk.
 `control_path` and `data_path` are distinct absolute NUL-free Unix socket paths under owned,
 nonreplaceable private per-cell directories. The original supervisor creates and retains those
 listeners before launching this helper. Their permissions admit only this supervisor and its
@@ -940,7 +1041,9 @@ of guest_policy, not a host pathname or mutable lookup. Before launch verify tha
 binding against the pinned artifact and reject duplicate, escaping, symlinked or mismatching entries.
 PID1 remains in the protected initramfs, mounts the single unpartitioned ext4 `/dev/vda` at
 `/workload`, establishes the effective guest policy from that retained policy file, and only
-then starts the unprivileged workload chrooted into `/workload` in its controlled namespaces.
+then creates the workload's controlled mount and network namespaces and its control group. It starts
+no workload at boot. Every workload process is started by a 4090 `exec` (spec 024), with
+`/workload` moved over `/` in those namespaces.
 It does not replace itself with a workload-root executable or make its original root/policy
 accessible to the workload. Managed guest paths are relative to that workload root. Host-only
 RuntimeRecipe fields are never injected into it. Add exactly one disk, first and only,
@@ -970,7 +1073,8 @@ replacement listener. The host's private recovery socket is not exposed by eithe
 
 The trusted guest shim alone owns these channels, its mount/network namespaces and kernel-policy
 loader. Workload uid1000 runs without capabilities, with no-new-privs, and without privileged
-inherited FDs or authority to open AF_VSOCK, mount/setns, load BPF or ptrace the shim. Establish
+inherited FDs or authority to open AF_VSOCK, mount/setns, load BPF or ptrace the shim. Each such
+denial returns an ordinary error to the caller and never kills the process (spec 024). Establish
 the kernel boundary before workload launch and refuse unsupported enforcement. A poisoned model
 or harness is not asked to cooperate. Keep the existing subject attestation/code110 requirement
 and10.29.0.0/24 subject range; this runtime does not implement credential custody or attestation
@@ -987,11 +1091,13 @@ budget, never renewed internally. `boot` is the original association's opaque no
 same mapping: first the normal lane, then after its hello the prioritized withdrawal lane.
 The original host supervisor is sole RPC caller and assigns that role in hello; the shim is
 the responder. ControlLane is exactly `normal | withdrawal`. Normal admits the table's verbs;
-withdrawal admits only hello, observe and remove. No install, activate, drain or shutdown may
-enter the withdrawal lane. Each lane has its own bounded dispatcher and request IDs; one normal
-request may be outstanding without blocking withdrawal dispatch. A wait in normal drain must
-not hold a lock or executor needed by withdrawal. Readiness requires both hellos and the data
-association before workload launch. On4091 the shim is sole caller and the host the responder,
+withdrawal admits only hello, observe and remove. No install, activate, drain, shutdown, exec,
+exec_status, exec_output or workload_stop may enter the withdrawal lane. Each lane has its own
+bounded dispatcher and request IDs; several normal requests may be outstanding at once; spec 024
+says which wait for an outstanding mutation, and none blocks withdrawal dispatch. A wait in normal
+drain must not hold a lock or executor needed by withdrawal. Readiness requires both hellos, the
+data association, the workload namespaces and the workload control group; no workload process exists
+before readiness. On4091 the shim is sole caller and the host the responder,
 within that same verified original VMM association. No stream uses notifications or accepts
 opposite-direction requests. Bounded data requests may overlap with distinct IDs. Actual loss
 of any of these streams closes host admission and moves every affected operation out of standing state
@@ -1014,6 +1120,10 @@ Connection-local data-handle loss remains distinct from the original grant/resou
 | `drain` | `{grant:GrantId, deadline_ms}` | `{boot, grant, drained:true}` |
 | `remove` | `{inverse:UniverseRemoval, owner:CellOwner, force:bool, deadline_ms}` | `{boot, grant, guest_removed:true}` |
 | `shutdown` | `{deadline_ms}` | `{boot, shutdown_requested:true}` |
+| `exec` | `{argv:[String], request_key:String\|null, deadline_ms}` | `{boot, exec_id:String, state:ExecState}`, where `ExecState` is `running \| exited \| signaled` (spec 024) |
+| `exec_status` | `{exec_id:String, wait:bool, deadline_ms}` | `ExecStatus` (spec 024) |
+| `exec_output` | `{exec_id:String, deadline_ms}` | `{boot, exec_id, stdout:Stream, stderr:Stream}` (spec 024) |
+| `workload_stop` | `{deadline_ms}` | `{boot, stopped:true}` |
 
 Before the first connection the trusted PID1 obtains32random bytes from the guest kernel,
 waiting for initialized cryptographic randomness, and retains their64lowercase-hex encoding
@@ -1063,10 +1173,12 @@ DrainTimedOut with original objects, handles, guest admission and peers unchange
 drain reply cannot authorize removal or change admission after that deadline. Do not close a
 healthy stream merely because this observation timed out. The outstanding drain retains its
 request ID until its eventual reply is discarded; later normal-lane mutations wait for that
-request to settle or return a bounded refusal without effects. They do not block Force's
-independent host transition or the withdrawal lane. Actual stream loss is the
-separate incomplete transition above, not an unproved remote-restoration result relabelled as
-a timeout. This preserves spec017 A4 and spec008 R7 rather than weakening their pure-timeout rule.
+request to settle or return a bounded refusal without effects. `exec_status` and `exec_output` are
+not mutations; they and `workload_stop` never wait for one, and `exec` waits within its deadline and
+then refuses as busy (spec 024). Later normal-lane mutations do not block Force's independent host
+transition or the withdrawal lane. Actual stream loss is the separate incomplete transition above,
+not an unproved remote-restoration result relabelled as a timeout. This preserves spec017 A4 and
+spec008 R7 rather than weakening their pure-timeout rule.
 
 Only while the deadline is still live and both drains have completed may the host irreversibly
 close that selected grant's gate and send remove with force:false. This begins destructive
@@ -1087,7 +1199,8 @@ just to escape an unanswered request. Retried cleanup uses that same original as
 Withdrawal-lane observe/remove requests may not hold a peer's gate while waiting; pending work
 cannot prevent another locally authorized Force from closing its selected host gate.
 For either form, the shim returns guest_removed:true only after fresh observation proves the
-selected guest bindings absent. This guest-only acknowledgement never attests host cleanup.
+selected guest bindings absent. A `revoked` Mount binding counts as absent (spec 024). This
+guest-only acknowledgement never attests host cleanup.
 The host's `apply_removal` succeeds only after fresh independent observation proves both those
 guest bindings and every original host effect of the selected operation absent, including its
 holding on shared resources. Equal peers and shared resources still required by them remain
@@ -1101,7 +1214,8 @@ before finish or publication. A matching already-installed
 or active operation may be acknowledged only after actual inspection and only while still
 standing; no retry creates another attachment, rebinds an old handle or promotes an incomplete
 operation. Install/activate refuse an address made incomplete by a lost stream or other failure.
-Shutdown requests orderly guest exit; only actual original-child terminal/reap observation
+Shutdown requests orderly guest exit; PID1 first stops the workload as `workload_stop` does, leaving
+time to sync the root disk (spec 024); only actual original-child terminal/reap observation
 establishes completion. Lost channels or handshakes are faults, not assumed graceful shutdown.
 
 **Proxy projection.** The recorded `host` is a lower-case ASCII DNS name (nonempty1..63-byte
@@ -1287,15 +1401,25 @@ Unknown or lost associations fail observation instead of inventing IDs or omitti
 Host gate closure, listener unlink or disappearance of only one end cannot complete withdrawal:
 the operation remains incomplete until this guest pair and its original host access resources
 are all freshly absent. Equal-peer streams keep their own grants and cannot be retargeted.
-GuestBinding is `{grant:GrantId, admission:GuestAdmission}` and GuestAdmission is exactly
-`staged | active | draining | closed`. Admission describes the actually inspected gate, not the
+GuestBinding is `{grant:GrantId, admission:GuestAdmission}` and GuestAdmission is exactly `staged |
+active | draining | closed | revoked`. `revoked` is a Mount binding whose backing is revoked under
+spec 024: the guest serves nothing for its grant and the host side is closed, while workload
+references to it may remain, and every use of them fails. A `revoked` binding accounts for its own
+physical object, the aborted connection or the withdrawn grant's inodes on a shared connection, so
+the inventory rules below still apply to that object. Once its removal has completed, it is exempt
+only from host-authority association, residue, drift and readiness: it needs no retained host
+authority, and it never blocks readiness or a later attach at the same target. The host checks,
+against its own inventory keyed by GrantId (gates, source roots, handles, listeners and flows), that
+it holds nothing for that grant, as withdrawal's absence check requires; a holding found there is an
+unknown holding under spec 008. Admission describes the actually inspected gate, not the
 last requested transition. IDs identify actual objects within this boot/namespace lifetime, not
 logical capability addresses. Each binding is associated with independently verified original
 host authority and the proper cell. Empty binding lists, duplicate object IDs within a kind,
 duplicate bindings on an object, unknown objects, missing enforcement policy or an unverifiable
 association are named observation faults, not rows invented from desired state. Actual
 mountinfo, filesystem connection/handle state, listeners, rules and flows must agree with this
-inventory. Closed/staged attachments remain visible until physically removed; a rule is
+inventory. Closed/staged attachments remain visible until physically removed; a `revoked` binding
+also remains visible until its last reference goes, and counts as absent for removal; a rule is
 inventoried even with no active flow. A compromised workload cannot write this account; the host
 separately verifies effective resource gates. Unknown or unattributable managed objects fail
 complete observation rather than disappearing from stop/recovery.
@@ -1343,9 +1467,10 @@ not libkrun/HVF compatibility or whole-cell isolation.
   with a placeholder world.
 - `cell.clone` / `cell.save` / `cell.load` / `freeze` (D1c tiers 2–3), genome
   `new/show/lint/test/export` details beyond D1's one-line definitions, and exec output streaming.
-- Remaining VMM/shim and broker lifecycle verbs beyond §4.2's selected launch, observation,
-  data and shutdown contract. Their concrete implementation remains required; the selected
-  runtime and bounded bridge schemas are no longer undecided substitutes for an actual cell.
+- Remaining VMM/shim and broker lifecycle verbs beyond §4.2's selected launch, observation, data and
+  shutdown contract and spec 024's exec and workload verbs. Their concrete implementation remains
+  required; the selected runtime and bounded bridge schemas are no longer undecided substitutes for
+  an actual cell.
 - Multi-instance brokers, remote orchestration, multi-tenancy — out of scope per 90.
 
 ## 6. How much of this is delivered
@@ -1384,13 +1509,21 @@ is a claim that the text above may not be corrected.
    requires actual controller restart and independently surviving supervisor observation,
    separately from portable journal/model evidence. Accepting the contract does not turn the
    existing status-only daemons into recovery-capable daemons.
-8. Spec017's PID-free BrokerLaunch, caller-prepared fallible grant API, complete fallible snapshot,
-   typed incomplete effects, drain-aware exact cleanup and single-plugin format3 cutover are
-   **not yet implemented**. Current exact-ID model code still carries PID-bearing capabilities,
-   infallible backend-minted grants and format2 records. The new contract permits complete
-   prepare/inverse before fork and defines cleanup after partial launch; it does not deliver
-   an independent observer, workload confinement or all five real adapters.
-9. The selected hardware runtime, fully resolved resource recipes and physical guest projection
-   account in §4.2/spec017 are **not yet implemented**. Actual guest artifacts, platform
-   confinement and strict managed-file policy witnesses remain deployment/admission obligations.
-   Accepting their specification neither changes the status-only daemon nor completes spec008.
+8. Spec017's PID-free BrokerLaunch and single-plugin format3 cutover are **delivered** in the
+   exact-ID model and the ledger. Its caller-prepared fallible grant API, complete fallible
+   snapshot, typed incomplete effects and drain-aware exact cleanup are **not yet implemented**.
+   Current exact-ID model code carries recipe-bearing capabilities, a PID-free broker launch and
+   format3 records, and still has infallible backend-minted grants. The new contract permits
+   complete prepare/inverse before fork and defines cleanup after partial launch; it does not
+   deliver an independent observer, workload confinement or all five real adapters.
+   Amended on 2026-10-20, when plasmosome-8pr4 shipped the launch and the format3 cutover. Until
+   then this item listed both as not yet implemented, and said the model code carried
+   PID-bearing capabilities and format2 records.
+9. The selected hardware runtime and physical guest projection account in §4.2/spec017 are
+   **not yet implemented**. The exact-ID model and the ledger carry spec017's complete resource
+   recipes as values, but nothing yet resolves a need into one or materializes one. Actual guest
+   artifacts, platform confinement and strict managed-file policy witnesses remain
+   deployment/admission obligations. Accepting their specification neither changes the
+   status-only daemon nor completes spec008. Amended on 2026-10-20, when plasmosome-8pr4 shipped
+   those recipe values. Until then this item listed fully resolved resource recipes as not yet
+   implemented.

@@ -10,6 +10,7 @@ members = [
     "crates/plasmid-sdk",
     "crates/plasmosome-guards",
     "crates/plasmosome-testkit",
+    "crates/plasmosome-cli",
     "crates/plasmosome-lanes",
 ]
 
