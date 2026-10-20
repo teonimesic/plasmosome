@@ -187,6 +187,23 @@ For each key the plasmid does not provide itself, in order:
    to it. None is 103, `capability` the key, `plasmid` the requirer. More than one is 100 with
    their IDs.
 
+**No cycle.** When step 2's one candidate is already in the closure, it does not join or get
+resolved again: the requirer's edge goes to it, so two members that require one provider share it.
+The requires edges spec 008 records must not form a cycle. When they would, the request refuses with
+108 under spec 011's author-refusal rule: `detail` naming each edge on the cycle as the requirer's
+plasmid ID, the key and the provider's plasmid ID, sorted by the requirer's plasmid ID in byte
+order; `path` the declaration of the first requirer in that order; field `requires.capabilities[i]`
+for its edge's key; and `fix` exactly `remove this entry`. Removing the entry for any edge the
+`detail` names ends the cycle. A cycle of one plasmid is the self-provider refusal above. Only local
+plasmids that this request attaches can be on a cycle: an attached plasmid's recorded providers are
+all attached (spec 008), so no edge leads from one back to a plasmid this request attaches, and a
+registry member's edges follow its graph, which spec 020 §2 requires to be acyclic. So this refusal
+agrees with spec 020, which refuses a cyclic graph before publication or import, and with spec 008,
+which refuses a cycle among the `requires` edges when the journal is read: no add that this section
+accepts writes a cycle. Amended on 2026-10-20: this did not refuse a cycle, or say that a shared
+provider joins once. When step 2 chose a member already in the closure and that edge closed a cycle,
+the add could write records spec 008 refuses as a cycle among the `requires` edges.
+
 A registry member (spec 020) keeps its imported declaration and its graph's provider bindings.
 The operator file supplies only its ProxyMap and Mount entries, keyed by its plasmid ID alone.
 So an entry written for the operator's own `workspace` also serves any imported registry plasmid
@@ -524,10 +541,18 @@ ProxyMap (O-11) or Mount (O-7).
    `requires.capabilities[0]`, `fix` `remove this entry` and a `detail` naming `k` and R, and
    leaves no journal record, whether P is unlisted, listed or attached. A P that R's search selects
    and that requires a key `j` it provides is 108 with `path` P's declaration and a `detail` naming
-   `j` and P, and leaves no journal record. Catches: borrowing another member's entries, an
-   undefined candidate set, skipping an unsafe listing, re-reading an attached provider, a plasmid
-   made its own provider or only left out of its own candidates, and a refusal that names R's
-   declaration for P's fault. Amended on 2026-10-20: this item had no self-provider case.
+   `j` and P, and leaves no journal record. Cycles are each 108 with `fix` `remove this entry` and
+   leave no journal record. R requires `k` from P, P requires `j` from Q, and Q requires `m`, which
+   R provides: `path` P's declaration, field `requires.capabilities[0]`, and a `detail` naming the
+   edges of P, Q and R in that order. With Q requiring `i` from P instead: `path` P's declaration
+   and a `detail` naming only the edges of P and Q. A shared provider is not a cycle: with P
+   requiring nothing, R requiring `k` and `m`, and Q providing `m` and requiring `k`, R, P and Q
+   attach, and P is attached once. Catches: borrowing another member's entries, an undefined
+   candidate set, skipping an unsafe listing, re-reading an attached provider, a plasmid made its
+   own provider or only left out of its own candidates, a refusal that names R's declaration for P's
+   fault, a cycle check that sees only two plasmids or only cycles through R, refusing a shared
+   provider, and a `path` that depends on the order of the walk. Amended on 2026-10-20: this item
+   had no self-provider case. Amended on 2026-10-20: this item had no cycle case.
 5. Local selection. An unlisted ID is 101 `plasmid <id>`, even with a valid declaration at the
    project root and under `.plasmosome/plasmids/`; so is an entry with no `declaration`. An unsafe
    or mismatched declaration is 108 with `path` the declaration. A listed, matching one attaches
