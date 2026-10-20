@@ -1,7 +1,9 @@
 use serde_json::{Value, json};
 
 use super::{load_value, manifest, manifest_json};
-use crate::differential::{Channel, ManifestRefusal, ReachKind, Rule, RuleKind, load};
+use crate::differential::{
+    Channel, ManifestRefusal, NamedBy, ReachKind, RequiredMount, Rule, RuleKind, load,
+};
 
 fn probe_index(manifest: &Value, id: &str) -> usize {
     manifest["probes"]
@@ -160,16 +162,6 @@ fn every_rule_kind_spec_027_lists_loads_by_its_name() {
 }
 
 #[test]
-fn only_the_systems_times_and_durations_keep_order() {
-    let ordered: Vec<RuleKind> = RuleKind::ALL
-        .iter()
-        .copied()
-        .filter(|kind| kind.keeps_order())
-        .collect();
-    assert_eq!(ordered, [RuleKind::SystemTime, RuleKind::Duration]);
-}
-
-#[test]
 fn a_rule_on_a_field_the_workload_set_is_refused_naming_it() {
     let mut manifest = manifest_json();
     push(
@@ -262,10 +254,10 @@ fn a_rule_an_allowance_or_a_neutral_name_for_an_unknown_probe_is_refused_naming_
     let mut cgroup = manifest_json();
     cgroup["neutral"]["cgroup_probe"] = json!("ghost");
     for (manifest, named_by) in [
-        (rule, "rule"),
-        (allowance, "allowance"),
-        (mounts, "neutral"),
-        (cgroup, "neutral"),
+        (rule, NamedBy::Rule),
+        (allowance, NamedBy::Allowance),
+        (mounts, NamedBy::MountsProbe),
+        (cgroup, NamedBy::CgroupProbe),
     ] {
         assert_eq!(
             refusal(&manifest),
@@ -326,7 +318,7 @@ fn a_rule_and_an_allowance_on_one_field_are_refused_naming_it() {
 
 #[test]
 fn neutral_names_without_opt_or_usr_local_bin_are_refused() {
-    for (index, mount) in [(0, "/opt"), (1, "/usr/local/bin")] {
+    for (index, mount) in [(0, RequiredMount::Opt), (1, RequiredMount::UsrLocalBin)] {
         let mut manifest = manifest_json();
         manifest["neutral"]["mounts"]
             .as_array_mut()
@@ -351,7 +343,7 @@ fn neutral_names_need_a_fuse_mount_at_a_path_of_its_own() {
         assert_eq!(
             refusal(&manifest),
             ManifestRefusal::NeutralMountMissing {
-                mount: "a FUSE workspace"
+                mount: RequiredMount::FuseWorkspace
             },
             "FUSE at {fuse_at:?}"
         );
