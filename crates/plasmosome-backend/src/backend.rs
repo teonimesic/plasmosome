@@ -264,6 +264,22 @@ impl DrainSpec {
     pub fn deadline_ms(&self) -> u64 {
         u64::try_from(self.deadline.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX)
     }
+
+    /// The deadline `membraned` sends with the 4090 `shutdown` when it stops a guest under this
+    /// drain (spec 023 §7). It is whole milliseconds, at least 1 ms, and strictly below the
+    /// drain's deadline. `None` with `RevokePolicy::Force`, and when under 1 ms would be left:
+    /// then no `shutdown` is sent, and the helper is killed at the drain deadline.
+    pub fn shutdown_deadline(&self) -> Option<Duration> {
+        const MS: Duration = Duration::from_millis(1);
+        match self.policy {
+            RevokePolicy::Force => None,
+            RevokePolicy::Graceful => {
+                let left = self.deadline.saturating_sub(MS.max(self.deadline / 10));
+                let whole = Duration::new(left.as_secs(), left.subsec_millis() * 1_000_000);
+                (whole >= MS).then_some(whole)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -584,6 +600,58 @@ pub(crate) mod tests {
             let encoded = serde_json::to_value(&op).unwrap();
             assert_eq!(encoded, operation_json(id, &capability));
             assert_eq!(serde_json::from_value::<UniverseOp>(encoded).unwrap(), op);
+        }
+    }
+
+    fn ms(count: u64) -> Duration {
+        Duration::from_millis(count)
+    }
+
+    #[test]
+    fn a_shutdown_deadline_stays_below_its_drain_deadline() {
+        let graceful = |deadline| DrainSpec::graceful(deadline).shutdown_deadline();
+        assert_eq!(graceful(Duration::ZERO), None);
+        assert_eq!(graceful(ms(1)), None);
+        assert_eq!(graceful(Duration::from_micros(1_999)), None);
+        assert_eq!(graceful(ms(2)), Some(ms(1)));
+        assert_eq!(graceful(ms(3)), Some(ms(2)));
+        assert_eq!(graceful(ms(10)), Some(ms(9)));
+        assert_eq!(graceful(ms(20)), Some(ms(18)));
+        assert_eq!(graceful(Duration::from_micros(10_700)), Some(ms(9)));
+        assert_eq!(graceful(ms(9_000)), Some(ms(8_100)));
+        assert_eq!(DrainSpec::forcing().shutdown_deadline(), None);
+        assert_eq!(
+            DrainSpec {
+                deadline: ms(30_000),
+                policy: RevokePolicy::Force,
+            }
+            .shutdown_deadline(),
+            None
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_shutdown_deadline_is_whole_milliseconds_a_tenth_below_the_drain(
+            nanos in 0u64..=200_000_000_000,
+        ) {
+            let deadline = Duration::from_nanos(nanos);
+            let margin = ms(1).max(deadline / 10);
+            match DrainSpec::graceful(deadline).shutdown_deadline() {
+                Some(shutdown) => {
+                    proptest::prop_assert!(shutdown >= ms(1));
+                    proptest::prop_assert!(shutdown.subsec_nanos().is_multiple_of(1_000_000));
+                    proptest::prop_assert!(shutdown < deadline);
+                    proptest::prop_assert!(deadline - shutdown >= margin);
+                    proptest::prop_assert!(deadline - shutdown < margin + ms(1));
+                }
+                None => proptest::prop_assert!(deadline < ms(2)),
+            }
+            let forced = DrainSpec {
+                deadline,
+                policy: RevokePolicy::Force,
+            };
+            proptest::prop_assert_eq!(forced.shutdown_deadline(), None);
         }
     }
 }
