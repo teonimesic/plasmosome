@@ -409,7 +409,7 @@ pub enum PagingError {
         offset: u64,
         total: u64,
     },
-    /// The capture's deadline passed; its bytes are gone.
+    /// The capture ended: its deadline passed or the server discarded it. Its bytes are gone.
     Expired,
     SnapshotsExhausted,
     BadPageSize {
@@ -670,7 +670,9 @@ impl fmt::Display for PagingError {
             PagingError::OffsetOutOfRange { offset, total } => {
                 write!(f, "offset {offset} is outside the {total}-byte account")
             }
-            PagingError::Expired => f.write_str("the capture's deadline has passed"),
+            PagingError::Expired => {
+                f.write_str("the capture has ended: its deadline passed or the server dropped it")
+            }
             PagingError::SnapshotsExhausted => {
                 f.write_str("this connection has issued every snapshot ID")
             }
