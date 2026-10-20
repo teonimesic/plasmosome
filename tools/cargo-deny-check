@@ -9,11 +9,14 @@ This file decides what the gates job enforces. A pull request that changes
 tools/cargo-deny-check* changes that policy, so review it as code, not as CI plumbing.
 
 `report --json-out FILE --event EVENT` writes the findings that tools/security-issue turns into the
-`security` issue (spec 026 section 4, "The security issue"). It runs every check over every tracked
-lockfile and keeps each error and warning as a finding, so unmaintained, notice, yanked and licence
-findings are included. A tool failure becomes a finding of kind tool-failure. On the schedule and
-workflow_dispatch events it also flags ignores past their date or with a reason that does not
-parse, and a stable Rust newer than the pin. It exits 0 once the file is written, whatever it found.
+`security` issue (spec 026 section 4, "The security issue"). It runs the three checks gates runs,
+sources, advisories and licenses but not bans, over every tracked lockfile. It keeps each error and
+warning diagnostic as a finding, so unmaintained, notice, yanked and licence findings are included,
+and a tool failure becomes a finding of kind tool-failure. A WARN log or a note diagnostic is not a
+finding; it is printed as a note in the job log and the step summary. These findings form the
+lockfiles section. On the schedule and workflow_dispatch events it also runs the weekly checks,
+which form the weekly section: ignores past their date or with a reason that does not parse, and a
+stable Rust newer than the pin. It exits 0 once the file is written, whatever it found.
 
 A stale Cargo.lock is a refusal, because the fix is the contributor's: run
 `cargo update --workspace` and commit the lockfile. git-source-underspecified refuses, but no
@@ -35,6 +38,7 @@ To bump cargo-deny:
 
 import argparse
 from datetime import date, datetime, timezone
+import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -181,7 +185,7 @@ def stale(causes):
 
 def classify(check, lines, returncode):
     """Classify one cargo-deny run from its JSON lines; the exit status alone decides nothing."""
-    refusals, failures, reported, causes, found = [], [], [], [], []
+    refusals, failures, reported, causes, found, notes = [], [], [], [], [], []
     counts, saw_error = None, False
     for line in lines:
         if not line.strip():
@@ -206,6 +210,7 @@ def classify(check, lines, returncode):
                 failures.append(f"error log: {message}")
             elif level == "WARN":
                 reported.append(f"warning log: {message}")
+                notes.append(f"warning log: {message}")
         elif kind == "diagnostic":
             code, severity = fields.get("code"), fields.get("severity")
             saw_error = saw_error or severity == "error"
@@ -215,6 +220,8 @@ def classify(check, lines, returncode):
                 reported.append(describe(fields))
                 if severity in FINDING_SEVERITIES:
                     found.append(detail(fields))
+                else:
+                    notes.append(describe(fields))
             elif code in REFUSING[check]:
                 refusals.append(refusal(check, fields))
                 found.append(detail(fields))
@@ -237,7 +244,7 @@ def classify(check, lines, returncode):
         failures.append(f"cargo-deny exited {returncode} without an error diagnostic")
     status = TOOL_FAILURE if failures else REFUSAL if refusals else PASS
     return {"status": STATUS_NAMES[status], "code": status, "refusals": refusals, "failures": failures,
-            "reported": reported, "counts": counts, "findings": found}
+            "reported": reported, "counts": counts, "findings": found, "notes": notes}
 
 
 def execute(root, check, lockfile):
@@ -261,7 +268,7 @@ def run(root, check, lockfile):
 
 def failed(message):
     return {"status": STATUS_NAMES[TOOL_FAILURE], "code": TOOL_FAILURE, "refusals": [], "failures": [message],
-            "reported": [], "counts": None, "findings": []}
+            "reported": [], "counts": None, "findings": [], "notes": []}
 
 
 def lines_for(outcome):
@@ -325,7 +332,8 @@ def tool_failure(title, check=None, lockfile=None):
 
 
 def lockfile_findings(root, lockfile):
-    found = []
+    """Return the findings of every check on one lockfile, and the notes that are not findings."""
+    found, notes = [], []
     for check in CHECKS:
         try:
             outcome = run(root, check, lockfile)
@@ -335,7 +343,8 @@ def lockfile_findings(root, lockfile):
             continue
         found.extend({"kind": item["kind"], "check": check, "lockfile": str(lockfile), **item} for item in outcome["findings"])
         found.extend(tool_failure(failure, check, str(lockfile)) for failure in outcome["failures"])
-    return found
+        notes.extend(f"{lockfile} {check}: {note}" for note in outcome["notes"])
+    return found, notes
 
 
 def weekly(kind, advisory, title, url):
@@ -396,7 +405,7 @@ def stable_findings(toolchain, url):
             raise ValueError(f"it is over {CHANNEL_LIMIT} bytes")
         version = tomllib.loads(body.decode())["pkg"]["rust"]["version"].split()[0]
         latest = release(version)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError) as error:
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError, AttributeError, IndexError) as error:
         return [tool_failure(f"the stable channel at {url} could not be read: {type(error).__name__}: {error}")]
     if latest <= pinned:
         return []
@@ -428,7 +437,7 @@ def line_for(finding):
 
 
 def report(args):
-    sections, commit = {"lockfiles": []}, None
+    sections, commit, notes = {"lockfiles": []}, None, []
     try:
         root = repository_root()
         commit = git(root, "rev-parse", "HEAD").decode().strip()
@@ -437,7 +446,9 @@ def report(args):
         sections["lockfiles"].append(tool_failure(str(failure)))
     else:
         for lockfile in lockfiles:
-            sections["lockfiles"].extend(lockfile_findings(root, lockfile))
+            found, noted = lockfile_findings(root, lockfile)
+            sections["lockfiles"].extend(found)
+            notes.extend(noted)
         if args.event in WEEKLY_EVENTS:
             sections["weekly"] = weekly_findings(root, args.stable_url)
     findings = [{**finding, "section": name} for name, found in sections.items() for finding in found]
@@ -445,10 +456,14 @@ def report(args):
                 "date": datetime.now(timezone.utc).date().isoformat(), "sections": list(sections), "findings": findings}
     Path(args.json_out).write_text(json.dumps(document, indent=1, ensure_ascii=False) + "\n")
     lines = [line_for(finding) for finding in findings]
+    notes = [" ".join(note.split()) for note in notes]
     print(f"{len(findings)} findings, written to {args.json_out}")
     for line in lines:
         print(f"finding: {line}")
-    summarize("## cargo-deny report\n\n" + ("".join(f"- {line}\n" for line in lines) if lines else "No findings.\n"))
+    for note in notes:
+        print(f"note: {note}")
+    summarize("## cargo-deny report\n\n" + ("".join(f"- {line}\n" for line in lines) if lines else "No findings.\n")
+              + ("\nNotes, which are not findings:\n\n" + "".join(f"- {note}\n" for note in notes) if notes else ""))
     return PASS
 
 
