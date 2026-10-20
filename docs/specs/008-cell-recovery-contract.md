@@ -161,31 +161,32 @@ the change's plugin, the requirer. `capability` is a key from the `[requires].ca
 the declaration its add admitted. `providers` names every attachment of this cell that provided
 that key when the requirer was added: the plasmids already attached that provide it, or the one
 that joined the closure (spec 022 §5), or, for a registry member, the provider its graph binds
-(spec 020). `requires` holds one record for each distinct key, sorted by key, and is `[]` for a
-plasmid that requires nothing. `providers` is nonempty and sorted by PluginId, names each plugin
-once, and never names the requirer. A requirer requires every provider its records name. When
+(spec 020). `requires` holds one record for each distinct key, sorted by key in byte order, and is
+`[]` for a plasmid that requires nothing. `providers` is nonempty and sorted by PluginId, names each
+plugin once, and never names the requirer. A requirer requires every provider its records name. When
 several provided one key, the journal cannot tell which one the requirer used, so the end of any
 of them reaches it.
 Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default)
 requires. Until then the journal recorded no requires edges and did not say which plasmids the
 request named.
 
-The prepare that adds the plasmid writes `named` and `requires` from that request and the
-declarations it admitted, in spec 022's single read or from the imported graph. No later
+The prepare that adds the plasmid writes `named` from that request, and `requires` from the
+`[requires]` keys of the plasmid's own declaration, with the providers described above. No later
 replacement changes them. A reload or a renewal carries them unchanged, as a reload carries the
 source and the lifetime. Recovery, expiry, renewal and withdrawal read the requires graph from the
 journal, never from a declaration, which can change on disk after the add. So after a restart a
 provider's end still reaches its requirers (spec 028), and spec 011's detach still knows who
-requires whom and which providers the request named. Journal reading refuses a blank or repeated
-key, an empty or unsorted provider list, a repeated provider, a requirer naming itself, an
-attachment added with `named: false` that no other change of its prepare names as a provider,
-and a replacement of an attached plugin whose `named` or `requires` differs from the recorded
-one, each as InvalidClosure. A replacement without `named` or `requires` is refused as one
-without a source is, and its cell quarantines. Neither field has a default. `requires: []` would
-say the plasmid requires nothing, so a provider's end would miss it after a restart.
-`named: true` would keep a provider after its last requirer, and `named: false` would remove an
-operator's plasmid with its requirer. Format 1 has no writer yet, so no journal lacks these
-fields.
+requires whom and which providers the request named. Journal reading refuses each of these as
+InvalidClosure: a blank, repeated or unsorted key; an empty or unsorted provider list; a repeated
+provider; a requirer naming itself; a provider that is not attached once a prepare's changes apply,
+which also refuses a removal that leaves an attached requirer naming it; a cycle among the
+`requires` edges; an attachment added with `named: false` that no other change of its prepare names
+as a provider; and a replacement of an attached plugin whose `named` or `requires` differs from the
+recorded one. A replacement without `named` or `requires` is InvalidClosure too, and its cell
+quarantines. Neither field has a default. `requires: []` would say the plasmid requires nothing, so
+a provider's end would miss it after a restart. `named: true` would keep a provider after its last
+requirer, and `named: false` would remove an operator's plasmid with its requirer. Format 1 has no
+writer yet, so no journal lacks these fields.
 Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default)
 requires. Until then no text said when these fields are written or how a journal without them is
 read.
@@ -687,8 +688,13 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   UTF-8, unknown fields/version and complete final JSON without LF fault at the right physical
   line. No partial history escapes, no source file changes, and diagnostics count only the
   accepted prefix. A corrupt first line still permits cell-aware found attribution.
-  A replacement without `named` or `requires` faults rather than taking a default, and a later
-  replacement that changes either is InvalidClosure. Amended on 2026-10-20, as
+  A replacement without `named` or `requires` is InvalidClosure rather than taking a default. Replay
+  of a cell whose declarations were all deleted or edited after the add yields each attachment's
+  recorded `named` and `requires` unchanged. Each of these is InvalidClosure at its physical line: a
+  blank, repeated or unsorted key; an empty or unsorted provider list; a repeated provider; a
+  requirer naming itself; a provider not attached once a prepare's changes apply; a cycle among the
+  `requires` edges; a `named: false` attachment that no other change of its prepare names as a
+  provider; and a later replacement that changes `named` or `requires`. Amended on 2026-10-20, as
   [spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default) requires. Until then
   this item named neither field.
 - **R3 — durable generation:** prepare/commit/finish and prepare/abort/finish round-trip;
