@@ -502,7 +502,9 @@ fn a_failed_flush_names_its_stream() {
     assert!(stdout.0.ends_with(b"\n") && stderr.0.ends_with(b"\n"));
 }
 
-const PIECE: usize = 1024 * 1024;
+const PIECE: usize = 256 * 1024;
+
+const ITEMS: usize = 12_500;
 
 #[derive(Default)]
 struct Pieces {
@@ -524,7 +526,7 @@ impl Write for Pieces {
 
 fn wide() -> Json {
     let item = format!("{}{}", "x".repeat(48), character(0xe9));
-    Json::Array((0..50_000).map(|_| Json::String(item.clone())).collect())
+    Json::Array((0..ITEMS).map(|_| Json::String(item.clone())).collect())
 }
 
 fn emitted_in_pieces(envelope: &Envelope, form: Form) -> String {
@@ -565,7 +567,7 @@ fn a_large_envelope_is_written_in_pieces() {
     );
     assert_eq!(
         emitted_in_pieces(&success, Form::Human).lines().count(),
-        50_000 + 6
+        ITEMS + 6
     );
 
     let error = Json::Object(vec![
