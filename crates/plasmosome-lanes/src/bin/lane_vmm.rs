@@ -21,11 +21,13 @@ fn main() -> ExitCode {
 mod macos {
     use std::convert::Infallible;
     use std::io::Read;
+    use std::path::PathBuf;
 
     use plasmosome_lanes::bundle::{
         KERNEL, LIBKRUN, PINNED_BUNDLE_ID, unverified_images, verify_bundle,
     };
     use plasmosome_lanes::config::{Confinement, LaneConfig};
+    use plasmosome_lanes::dyld::{LIBKRUNFW, dyld_variables, libkrunfw_search, planted};
     use plasmosome_lanes::krun::{self, Libkrun};
     use plasmosome_lanes::selfcheck::{Check, Phase, passed, self_check};
 
@@ -104,8 +106,50 @@ mod macos {
         Ok(())
     }
 
+    #[allow(unsafe_code)]
+    fn images() -> Vec<PathBuf> {
+        // SAFETY: lane-vmm has one thread until krun_start_enter. It starts none, and libkrun
+        // v1.19.4 starts none before then and keeps libkrunfw open in a static for good, so no
+        // image is unloaded during the call.
+        unsafe { krun::loaded_images() }
+    }
+
+    fn refuse_loader_inputs() -> Result<(), Refusal> {
+        let variables = dyld_variables(std::env::vars_os());
+        if !variables.is_empty() {
+            return fail(
+                LOAD_REFUSED,
+                format!(
+                    "refused: inherited dyld variables {variables:?}; start lane-vmm with an empty environment"
+                ),
+            );
+        }
+        let cwd = std::env::current_dir().or_else(|error| {
+            fail(
+                LOAD_REFUSED,
+                format!("refused: no working directory: {error}"),
+            )
+        })?;
+        let found = planted(&libkrunfw_search(&cwd));
+        if !found.is_empty() {
+            return fail(
+                LOAD_REFUSED,
+                format!(
+                    "refused: libkrun would load {LIBKRUNFW} by leaf name, and these are on its search list: {}",
+                    found
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
+        Ok(())
+    }
+
     pub fn run() -> Result<Infallible, Refusal> {
         let config = read_config()?;
+        refuse_loader_inputs()?;
         let bundle = verify_bundle(&config.bundle, PINNED_BUNDLE_ID)
             .or_else(|error| fail(BUNDLE_REFUSED, format!("refused: {error}")))?;
         eprintln!(
@@ -119,8 +163,14 @@ mod macos {
         let krun = |error: krun::KrunError| (KRUN_FAILED, error.to_string());
         lib.init_log().map_err(krun)?;
         let ctx = lib.create_ctx().map_err(krun)?;
-        let images = krun::loaded_images();
-        let unverified = unverified_images(&images, &images[0], lib.path(), krun::in_shared_cache);
+        let images = images();
+        let executable = std::env::current_exe().or_else(|error| {
+            fail(
+                LOAD_REFUSED,
+                format!("refused: no executable path: {error}"),
+            )
+        })?;
+        let unverified = unverified_images(&images, &executable, lib.path(), krun::in_shared_cache);
         if !unverified.is_empty() {
             return fail(
                 LOAD_REFUSED,
@@ -130,7 +180,7 @@ mod macos {
             );
         }
         eprintln!(
-            "lane-vmm: {} images loaded, each the executable, {LIBKRUN} or a system image",
+            "lane-vmm: {} images loaded, each the executable, {LIBKRUN}, a shared-cache image or under /usr/lib",
             images.len()
         );
         ctx.set_vm_config(config.vcpus, config.memory_mib)

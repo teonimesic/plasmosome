@@ -308,7 +308,14 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-const SYSTEM: [&str; 2] = ["/usr/lib/", "/System/"];
+const USR_LIB: &str = "/usr/lib/";
+
+fn plain_absolute(text: &str) -> bool {
+    text.strip_prefix('/').is_some_and(|rest| {
+        rest.split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+    })
+}
 
 fn same_file(a: &Path, b: &Path) -> bool {
     match (fs::canonicalize(a), fs::canonicalize(b)) {
@@ -317,20 +324,24 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// The loaded images that are neither the main executable (the first image), the verified
-/// `libkrun`, nor part of the system under `/usr/lib/` or `/System/`.
+/// The loaded images that are none of: the file at `executable`, the verified `libkrun`, an
+/// image `in_shared_cache` accepts, or a file named by a plain absolute path under `/usr/lib/`.
+/// Nothing else under `/System/` is accepted, because `/System/Volumes/Data` is writable.
 pub fn unverified_images(
     images: &[PathBuf],
-    _executable: &Path,
+    executable: &Path,
     libkrun: &Path,
-    _in_shared_cache: impl Fn(&Path) -> bool,
+    in_shared_cache: impl Fn(&Path) -> bool,
 ) -> Vec<PathBuf> {
     images
         .iter()
-        .skip(1)
         .filter(|image| {
             let text = image.to_string_lossy();
-            !SYSTEM.iter().any(|prefix| text.starts_with(prefix)) && !same_file(image, libkrun)
+            let system = plain_absolute(&text) && text.starts_with(USR_LIB);
+            !(system
+                || in_shared_cache(image)
+                || same_file(image, executable)
+                || same_file(image, libkrun))
         })
         .cloned()
         .collect()

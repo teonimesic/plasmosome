@@ -308,8 +308,13 @@ impl Context<'_> {
     }
 }
 
-/// The path of every image the loader has mapped into this process, the main executable first.
-pub fn loaded_images() -> Vec<PathBuf> {
+/// The path of every image the loader has mapped into this process.
+///
+/// # Safety
+///
+/// No other thread may unload an image (`dlclose`) while this runs, because dyld frees an
+/// image's name when it unloads the image.
+pub unsafe fn loaded_images() -> Vec<PathBuf> {
     (0.._dyld_image_count())
         .filter_map(|index| {
             let name = _dyld_get_image_name(index);
@@ -317,7 +322,8 @@ pub fn loaded_images() -> Vec<PathBuf> {
                 return None;
             }
             // SAFETY: `name` is non-null, so it points to a NUL-terminated path the loader owns
-            // for as long as the image stays loaded, and no image is unloaded while it is copied.
+            // for as long as the image stays loaded, and the caller guarantees that no image is
+            // unloaded during this call.
             let bytes = unsafe { CStr::from_ptr(name) }.to_bytes().to_vec();
             Some(PathBuf::from(OsString::from_vec(bytes)))
         })
@@ -336,11 +342,18 @@ unsafe extern "C" {
     fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> c_int;
     /// Releases a message `sandbox_init` stored; `errorbuf` must be that pointer, freed once.
     fn sandbox_free_error(errorbuf: *mut c_char);
+    /// dyld's test for an image in the shared cache, macOS 11 and later. It reads the
+    /// NUL-terminated `path` during the call only and keeps nothing.
+    fn _dyld_shared_cache_contains_path(path: *const c_char) -> bool;
 }
 
-/// True when dyld's shared cache holds an image at `path`.
-pub fn in_shared_cache(_path: &Path) -> bool {
-    false
+/// True when dyld's shared cache holds an image at `path`. A path holding a NUL is not in it.
+pub fn in_shared_cache(path: &Path) -> bool {
+    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is NUL-terminated and outlives the call, which only reads it.
+    unsafe { _dyld_shared_cache_contains_path(path.as_ptr()) }
 }
 
 /// Apply the SBPL `profile` to this process. It cannot be lifted afterwards.
