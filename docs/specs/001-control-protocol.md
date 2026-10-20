@@ -146,10 +146,11 @@ configured path and inspects the configured path at teardown. `plasmosomed` does
 socket's name in the directory it opened and checked at start, which it holds open: it captures
 the identity only of a socket its effective UID owns, and if that directory is renamed while it
 runs, teardown removes the socket under the directory's new name and leaves whatever is then at
-the configured path. A `plasmosomed` start that fails after the capture, at the repeated path
-check, the change to mode 0600 or `listen`, removes the just-bound socket as any later error does.
-Amended on 2026-10-20: this paragraph said each daemon removes the configured path, and described
-only `membraned`'s capture and teardown.
+the configured path. A `plasmosomed` start that fails at any step after the capture removes the
+just-bound socket as any later error does. Those steps are, in order, the repeated path check, the
+change to mode 0600, the re-inspection of the socket after that change, `listen`, and the switch
+to nonblocking. Amended on 2026-10-20: this paragraph said each daemon removes the configured
+path, and described only `membraned`'s capture and teardown.
 
 These are host-conditioned guarantees, not race-free protection. The caller supplies a trusted,
 stable directory and coordinated namespace writers: parent, ancestors and their symlink targets
