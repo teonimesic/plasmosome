@@ -959,6 +959,12 @@ fn clear_nonblocking(file: BorrowedFd<'_>) -> io::Result<()> {
 pub(crate) struct DirectoryStream(NonNull<libc::DIR>);
 
 impl DirectoryStream {
+    /// Yields the names in `dir`, without `.` and `..`, starting at the descriptor's offset.
+    ///
+    /// The stream reads a duplicate of `dir`, and a duplicate shares the offset, so pass a
+    /// descriptor nothing has read yet. Reading moves that offset to the end: a second stream
+    /// on the same descriptor yields nothing, so listing a held directory twice gives an empty
+    /// second listing.
     #[allow(unsafe_code)]
     pub(crate) fn open(dir: BorrowedFd<'_>) -> io::Result<DirectoryStream> {
         let owned = dir.try_clone_to_owned()?;

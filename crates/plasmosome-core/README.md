@@ -284,9 +284,10 @@ control socket described above.
   on the connected stream before it sends anything. A missing directory is `NoDirectory`; a
   missing socket entry in a directory that exists is `NoSocket`.
 - `list_trusted_dir` walks a path the same way, but judges the last directory by the ancestor
-  rule, not the private one. So `~/.plasmosome/instances/` at 0755 lists. On macOS, an ACL
+  rule, not the private one. So `~/.plasmosome/instances` at 0755 lists. On macOS, an ACL
   entry that lets anyone replace its entries, or a volume with ownership ignored, still refuses
-  it.
+  it. On Linux, a POSIX ACL counts through the mode it shows: an access ACL whose mask grants
+  write puts write in the group bits, which refuses it.
   It returns every entry but `.` and `..`, as raw name bytes sorted by those bytes, each with
   its kind (`Directory`, `Symlink` or `Other`) from a no-follow `fstatat`. It follows no entry
   and leaves out one gone before its stat. It is for spec 025's default selection, which
@@ -313,6 +314,9 @@ allocation, so an error read too late shows up as the wrong variant.
 
 The Linux ACL tests fail when the filesystem refuses POSIX ACLs. Set
 `PLASMOSOME_ACL_TESTS_UNSUPPORTED=1` to skip them there instead.
+
+The test that lists a name that is not UTF-8 runs on Linux only, because APFS refuses to
+create such a name, with `EILSEQ`.
 
 One test connects to a socket served by another UID and expects the kernel to report that UID,
 not this process's own: `/private/var/run/mDNSResponder` on macOS, the system D-Bus socket or
