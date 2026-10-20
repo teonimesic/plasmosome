@@ -155,16 +155,18 @@ workspace root. A valid tree with no consumer violation is assumed unless stated
   architectural rules, and does instruct it to flag a new guard over an unbuilt design.
 - The crate docs that claimed an enforcement which no longer exists — `plasmosome-core`,
   `plasmosome-backend`, spec 001 §6 item 3 — say instead that review holds the line.
-- The workspace validity regression runs the same prebuilt guard and membrane test binaries
+- The workspace validity regression runs the same prebuilt guard test binary
   in a copied tree while the original remains valid. Mutating only the copy must expose its
-  unheld publication and changed readiness verb as well as `StaleTarget`; restoring those
-  mutations leaves only staleness. Rebuilding for that tree permits the clean consumers to
+  unheld publication as well as `StaleTarget`; restoring that
+  mutation leaves only staleness. Rebuilding for that tree permits the clean consumer to
   pass. Moving the original gives the same stale refusal without reading the old location.
   Every matrix row is exercised, including symlink-equivalent roots and external
   `CARGO_TARGET_DIR`. With the same prebuilt component, these aliases and target locations
   preserve the selected tree, the consumer's outcome and the staleness verdict. Direct
   outside-workspace execution and Cargo manifest selection meet their stated outcomes.
-  Independently restoring either compile-root consumer must break the copy-observation
+  Restoring the compile-root consumer must break the copy-observation
   regression; an early mismatch-only panic must break it too. A generic nonzero exit is not
   proof of reading the copy. Root diagnostics are asserted by cause, not exact prose.
+  Corrected on 2026-10-09: this item named a second consumer, a membrane test that PR #116
+  removed, as [spec003](003-test-architecture.md#workspace-files-belong-to-the-invocation) records.
 - The gate in the root `AGENTS.md` is green.

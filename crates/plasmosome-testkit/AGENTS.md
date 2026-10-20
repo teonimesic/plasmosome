@@ -17,7 +17,7 @@ Nothing here ships. The crate is `publish = false`, and the guard `testkit_is_de
 | Unit | each crate: `#[cfg(test)]` modules and its `tests/` | `cargo test -p <crate>` | yes |
 | Integration | `crates/plasmosome-testkit/tests/` | `cargo test -p plasmosome-testkit` | yes |
 | End-to-end | `crates/plasmosome-testkit/tests/e2e_*.rs`, `#[ignore]` until a cell boots | `cargo test -p plasmosome-testkit -- --ignored` | no — defined only |
-| Performance | `benches/` per crate and in testkit | `cargo bench` | no — specs 005 and 006 |
+| Performance | `benches/` per crate and in testkit | `cargo bench` | spec 005's kernel benchmarks, run with `--quick` in CI; spec 006 is a draft |
 
 A unit test exercises one crate through its own API. An integration test exercises two or more
 crates together through public APIs only, with the outside world replaced at the seams below. An
@@ -33,6 +33,7 @@ Every place the kernel touches the world outside the process, and the seam that 
 | OS enforcement (grants, revocation, residue) | `EnforcementBackend` (`plasmosome-backend`) | `FakeBackend`, `CompositeBackend` over fake leaves |
 | Process spawning (the VMM child) | `Launch` (`plasmosome-membrane::vmm`) | test launchers already in the crate's tests |
 | Filesystem (session log, state) | paths injected as arguments | `tempfile::TempDir` |
+| Durable appends that can fail (session log) | `LogStore` and `LogFile` (`plasmosome-core::session_log`) | `FaultLogStore` in core's unit tests |
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
 
 **The seam rule.** Both forms in that table are seams. Which one a contact gets is decided by
