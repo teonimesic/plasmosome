@@ -607,6 +607,9 @@ mod tests {
                 prop_assert_eq!(stop.drain, DrainSpec { deadline: MS, policy: RevokePolicy::Force });
             } else {
                 prop_assert_eq!(stop.drain.policy, RevokePolicy::Graceful);
+                prop_assert!(
+                    stop.answer_wait - stop.drain.deadline < MS.max(stop.answer_wait / 4) + MS
+                );
             }
             if let Some(shutdown) = stop.drain.shutdown_deadline() {
                 prop_assert!(!now);
