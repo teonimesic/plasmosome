@@ -43,7 +43,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: run quick benchmarks
-        run: cargo bench --workspace -- --quick
+        run: cargo bench --locked --workspace -- --quick
 
       - name: publish benchmark medians
         run: |
@@ -89,22 +89,42 @@ jobs:
         run: rustup show active-toolchain --verbose
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: cargo-deny-0.20.2
 
       - name: format
         run: cargo fmt --all -- --check
 
+      - name: cargo-deny check regression
+        run: python3 tools/cargo-deny-check-regression.py
+
+      # Bump with the steps in tools/cargo-deny-check's docstring; the rust-cache key must match.
+      - name: install cargo-deny
+        run: cargo install cargo-deny --version 0.20.2 --locked
+
+      - name: cargo-deny sources
+        run: python3 tools/cargo-deny-check sources
+
+      - name: cargo-deny advisories
+        if: github.event_name == 'pull_request'
+        run: python3 tools/cargo-deny-check advisories --changed-since HEAD^1
+
+      - name: cargo-deny licence report
+        if: github.event_name == 'pull_request'
+        run: python3 tools/cargo-deny-check licenses --changed-since HEAD^1
+
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings -D clippy::ignore_without_reason
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings -D clippy::ignore_without_reason
 
       - name: tests
         id: tests
         shell: bash
-        run: cargo test --workspace --exclude plasmosome-guards --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/cargo-test.log"
+        run: cargo test --locked --workspace --exclude plasmosome-guards --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/cargo-test.log"
 
       - name: workspace guards
         id: guards
         shell: bash
-        run: cargo test -p plasmosome-guards --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/cargo-test.log"
+        run: cargo test --locked -p plasmosome-guards --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/cargo-test.log"
 
       - name: ignored tests
         if: always()
@@ -247,10 +267,10 @@ jobs:
         run: cargo install cargo-llvm-cov --version 0.9.1 --locked
 
       - name: clean coverage data
-        run: cargo llvm-cov clean --workspace
+        run: cargo llvm-cov clean --locked --workspace
 
       - name: measured run
-        run: cargo llvm-cov --workspace --exclude plasmosome-guards --no-report
+        run: cargo llvm-cov --locked --workspace --exclude plasmosome-guards --no-report
 
       - name: coverage summary
         run: |
@@ -259,7 +279,7 @@ jobs:
           import subprocess
 
           table = subprocess.run(
-              ["cargo", "llvm-cov", "report", "--summary-only"],
+              ["cargo", "llvm-cov", "report", "--locked", "--summary-only"],
               check=True,
               stdout=subprocess.PIPE,
               text=True,
@@ -288,7 +308,7 @@ jobs:
           PY
 
       - name: lcov report
-        run: cargo llvm-cov report --lcov --output-path lcov.info
+        run: cargo llvm-cov report --locked --lcov --output-path lcov.info
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
