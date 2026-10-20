@@ -157,12 +157,7 @@ pub(crate) fn judge(pid: libc::pid_t, readings: &Readings) -> Confinement {
     let sandboxed = readings.sandboxed == Ok(1);
     let allowed: Vec<&'static str> = REQUIRED_DENIALS
         .into_iter()
-        .filter(|required| {
-            !readings
-                .operations
-                .iter()
-                .any(|(operation, answer)| operation == required && *answer == Ok(1))
-        })
+        .filter(|required| !denied(readings, required))
         .collect();
     if !sandboxed || !allowed.is_empty() {
         return Confinement::Unconfined { sandboxed, allowed };
@@ -172,6 +167,17 @@ pub(crate) fn judge(pid: libc::pid_t, readings: &Readings) -> Confinement {
         denied: REQUIRED_DENIALS.to_vec(),
         binding: PolicyBinding::PropertiesObserved,
     })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn denied(readings: &Readings, required: &str) -> bool {
+    let mut answers = readings
+        .operations
+        .iter()
+        .filter(|(operation, _)| *operation == required)
+        .map(|(_, answer)| *answer)
+        .peekable();
+    answers.peek().is_some() && answers.all(|answer| answer == Ok(1))
 }
 
 #[cfg(any(target_os = "macos", test))]
