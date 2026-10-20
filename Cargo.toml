@@ -17,6 +17,13 @@ edition = "2024"
 rust-version = "1.96"
 license = "MIT"
 
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_core = "1"
