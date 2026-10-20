@@ -502,9 +502,12 @@ mod tests {
         assert_eq!(serde_json::to_value(id).unwrap(), json!(UUID));
         assert_eq!(decoded::<RegistryId>(json!(UUID)), id);
         for value in [Value::Null, json!(7), json!([UUID]), json!({ "id": UUID })] {
+            let error = serde_json::from_value::<RegistryId>(value.clone()).unwrap_err();
             assert!(
-                serde_json::from_value::<RegistryId>(value.clone()).is_err(),
-                "{value}"
+                error
+                    .to_string()
+                    .contains("expected registry_id as a string"),
+                "{value}: {error}"
             );
         }
         let refused = [
@@ -585,11 +588,13 @@ mod tests {
             Value::Null,
             json!(["plasmid"]),
         ] {
-            assert!(
-                serde_json::from_str::<ArtifactKind>(&value.to_string()).is_err()
-                    && serde_json::from_str::<Population>(&value.to_string()).is_err(),
-                "{value}"
-            );
+            for (field, error) in [
+                ("kind", refusal::<ArtifactKind>(&value.to_string())),
+                ("population", refusal::<Population>(&value.to_string())),
+            ] {
+                let expected = format!("expected {field} as a string");
+                assert!(error.contains(&expected), "{value}: {error}");
+            }
         }
     }
 
@@ -769,9 +774,14 @@ mod tests {
                 let mut missing = value.clone();
                 missing.as_object_mut().unwrap().remove(*field);
                 cases.push((missing.to_string(), format!("missing field `{field}`")));
-                let mut null = value.clone();
-                null[*field] = Value::Null;
-                cases.push((null.to_string(), "invalid type: null".to_string()));
+                for (wrong, unexpected) in [(Value::Null, "null"), (json!(7), "integer `7`")] {
+                    let mut typed = value.clone();
+                    typed[*field] = wrong;
+                    cases.push((
+                        typed.to_string(),
+                        format!("invalid type: {unexpected}, expected {field} as a string"),
+                    ));
+                }
             }
             let mut unknown = value.clone();
             unknown["registry_id"] = json!(UUID);
@@ -895,6 +905,10 @@ mod tests {
             (
                 swapped,
                 "invalid type: sequence, expected a ReleaseRef object",
+            ),
+            (
+                format!("{{ {} }}", six.replace("kind = \"plasmid\"", "kind = 1")),
+                "invalid type: integer `1`, expected kind as a string",
             ),
         ] {
             let error = toml::from_str::<GenomeFile>(&member(&release)).unwrap_err();
