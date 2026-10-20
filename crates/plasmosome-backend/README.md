@@ -66,7 +66,10 @@ A `Capability` checks its own strings first, in field order, then its recipe or 
 paths; `host`, `route` and `name` are exact selection names and only need to be NUL-free. A
 `UniverseOp` checks the capability it creates, in the same order. Both refuse an invalid value on
 decode and on encode, so every record that carries one does too, and an invalid capability can be
-neither read from nor written to a log.
+neither read from nor written to a log. Decoding names the first rule it meets instead. Each recipe
+and launch checks itself while it decodes, so decoding names a broken recipe before a broken path
+or name of the same capability, and a zero port before a NUL in its host. The value is refused on
+every path either way.
 The trait's `apply` and `plant` refuse an invalid value before any change, with
 `BackendError::InvalidOperation` naming the address and the broken rule; `FakeBackend` does.
 `grant` does not check yet.

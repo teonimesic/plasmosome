@@ -13,13 +13,15 @@ require an explicit force to discard, which the record then notes.
 
 Ledger log records use format 3 and retain every exact grant identity in backend handles and
 universe inverses. Every capability in a record carries its complete recipe, and a broker carries
-its launch, never a process ID. Encoding and decoding refuse any other format number with
-`unsupported ledger format {n}; expected 3`. A format 2 line is refused either way: its capability
-lacks a recipe, or its number is wrong. Every ledger record, the outbox, policy and detach report
-included, refuses a field it does not name. Opening a log refuses unversioned, older, unsupported,
-or malformed complete records instead of guessing which holding an old lossy inverse meant, or
-which recipe an old capability had. Only an incomplete final JSON fragment without a newline is
-treated as a torn write.
+its launch, never a process ID. `open_file` and `append_to_file` read a line's `format` before the
+rest of it. Any other whole number up to 2^64 - 1, 256 included, is refused on that line with
+`unsupported ledger format {n}; expected 3`, so an old line is reported as old, never as a missing
+recipe or an unknown `pid`. Any other `format` value is refused as malformed. Encoding refuses any
+number but 3, and so does decoding a `LogRecord` through serde, after the rest of the record has
+decoded. Every ledger record, the outbox, policy and detach report included, refuses a field it
+does not name. Opening a log refuses unversioned, older, unsupported, or malformed complete records
+instead of guessing which holding an old lossy inverse meant, or which recipe an old capability
+had. Only an incomplete final JSON fragment without a newline is treated as a torn write.
 A split UTF-8 character may be discarded with that incomplete final record; other invalid UTF-8
 is rejected with its record's line number. Opening a log never rewrites the source file.
 Every record decodes only from a JSON object, and a line that repeats a key at any depth is
