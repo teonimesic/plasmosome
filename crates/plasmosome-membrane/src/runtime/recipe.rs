@@ -352,8 +352,10 @@ impl RuntimeRecipe {
     ///
     /// Rules are checked in a fixed order and the first broken one is
     /// returned: framing, JSON, the recipe's unknown then missing keys, each
-    /// field's value in spec order, then the rules that compare fields with
-    /// each other and with `limits`. An artifact's own unknown and missing
+    /// field's value on its own in spec order, then a final pass. That pass
+    /// refuses zero vCPUs or memory first, then compares fields with each
+    /// other and with `limits`. So `vcpus: 0` with an unknown `kernel_format`
+    /// refuses as the unknown format. An artifact's own unknown and missing
     /// keys are checked when the value pass reaches its field.
     pub fn parse(record: &[u8], limits: &PlatformLimits) -> Result<RuntimeRecipe, RecipeRefusal> {
         let value = strict_json::parse_value(one_line(record)?).map_err(refused_json)?;
