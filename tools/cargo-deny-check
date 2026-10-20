@@ -177,7 +177,8 @@ def run(root, check, lockfile):
     argv = command(root, check, lockfile)
     print("$ " + " ".join(argv), flush=True)
     try:
-        result = subprocess.run(argv, cwd=root, capture_output=True, timeout=TIMEOUT)
+        result = subprocess.run(argv, cwd=root, capture_output=True, timeout=TIMEOUT,
+                                env={**os.environ, "CARGO_TERM_COLOR": "never"})
     except FileNotFoundError:
         return failed("cargo-deny is not on PATH; install it with the version ci.yml pins")
     except (OSError, subprocess.TimeoutExpired) as error:
