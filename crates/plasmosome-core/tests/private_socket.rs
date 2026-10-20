@@ -13,8 +13,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use plasmosome_core::private_socket::{
-    Accepted, PrivateDir, PrivateListener, PrivateSocketError, SocketEntry, check_peer_uid,
-    check_private_path, effective_uid, peer_uid,
+    Accepted, EntryKind, ListedEntry, PrivateDir, PrivateListener, PrivateSocketError, SocketEntry,
+    check_peer_uid, check_private_path, effective_uid, list_trusted_dir, peer_uid,
 };
 use tempfile::TempDir;
 
@@ -686,6 +686,19 @@ fn a_volume_mounted_with_ownership_ignored_is_refused() {
     );
     assert_eq!(
         check_private_path(&cell.join("sock"), effective_uid()),
+        Err(PrivateSocketError::OwnershipIgnored {
+            path: mount.clone()
+        })
+    );
+    assert_eq!(
+        list_trusted_dir(&mount),
+        Err(PrivateSocketError::OwnershipIgnored {
+            path: mount.clone()
+        }),
+        "the volume's own root as the listed directory"
+    );
+    assert_eq!(
+        list_trusted_dir(&cell),
         Err(PrivateSocketError::OwnershipIgnored { path: mount })
     );
 }
@@ -1179,6 +1192,261 @@ fn check_private_path_checks_the_parent_and_the_entry() {
             mode: 0o755
         })
     );
+}
+
+fn listed(name: &str, kind: EntryKind) -> ListedEntry {
+    ListedEntry {
+        name: name.as_bytes().to_vec(),
+        kind,
+    }
+}
+
+fn instances_in(root: &TestRoot, mode: u32) -> PathBuf {
+    let instances = root.path().join("instances");
+    make_dir(&instances, mode);
+    instances
+}
+
+#[test]
+fn list_trusted_dir_lists_children_with_their_kinds_sorted_by_name_bytes() {
+    let root = private_root();
+    let instances = instances_in(&root, 0o755);
+    let at = |name: &str| instances.join(name);
+    make_dir(&at("alpha"), 0o700);
+    fs::write(at("Beta"), b"").expect("write");
+    symlink(at("alpha"), at("link")).expect("symlink");
+    symlink(at("absent"), at("dangling")).expect("symlink");
+    let _socket = UnixListener::bind(at("sock")).expect("bind a socket");
+    assert_eq!(
+        list_trusted_dir(&instances),
+        Ok(vec![
+            listed("Beta", EntryKind::Other),
+            listed("alpha", EntryKind::Directory),
+            listed("dangling", EntryKind::Symlink),
+            listed("link", EntryKind::Symlink),
+            listed("sock", EntryKind::Other),
+        ])
+    );
+}
+
+#[test]
+fn list_trusted_dir_takes_an_ancestor_mode_as_enough() {
+    let root = private_root();
+    let instances = instances_in(&root, 0o755);
+    make_dir(&instances.join("work"), 0o700);
+    for mode in [0o755, 0o750, 0o711, 0o700, 0o555] {
+        set_mode(&instances, mode);
+        assert_eq!(
+            list_trusted_dir(&instances),
+            Ok(vec![listed("work", EntryKind::Directory)]),
+            "{mode:04o}"
+        );
+    }
+    let usr = list_trusted_dir(Path::new("/usr")).expect("root-owned /usr lists");
+    assert!(
+        usr.contains(&listed("bin", EntryKind::Directory)),
+        "{usr:?}"
+    );
+}
+
+#[test]
+fn list_trusted_dir_refuses_a_replaceable_directory_or_ancestor() {
+    let root = private_root();
+    let home = root.path().join("home");
+    make_dir(&home, 0o755);
+    let instances = home.join("instances");
+    make_dir(&instances, 0o755);
+    for mode in [0o775, 0o757, 0o1777] {
+        set_mode(&instances, mode);
+        assert_eq!(
+            list_trusted_dir(&instances),
+            Err(PrivateSocketError::Replaceable {
+                path: instances.clone(),
+                mode
+            })
+        );
+    }
+    set_mode(&instances, 0o755);
+    set_mode(&home, 0o775);
+    let refused = list_trusted_dir(&instances);
+    set_mode(&home, 0o755);
+    assert_eq!(
+        refused,
+        Err(PrivateSocketError::Replaceable {
+            path: home,
+            mode: 0o775
+        })
+    );
+}
+
+#[test]
+fn list_trusted_dir_refuses_a_symlink_anywhere_in_the_path() {
+    let root = private_root();
+    let at = |name: &str| root.path().join(name);
+    make_dir(&at("real"), 0o755);
+    make_dir(&at("real/instances"), 0o755);
+    make_dir(&at("real/instances/work"), 0o700);
+    symlink(at("real/instances"), at("instances")).expect("symlink");
+    symlink(at("real"), at("home")).expect("symlink");
+    symlink(at("absent"), at("dangling")).expect("symlink");
+    assert_eq!(
+        list_trusted_dir(&at("real/instances")),
+        Ok(vec![listed("work", EntryKind::Directory)]),
+        "the directory the links lead to lists"
+    );
+    for (path, link) in [
+        (at("instances"), at("instances")),
+        (at("dangling"), at("dangling")),
+        (at("home/instances"), at("home")),
+    ] {
+        assert_eq!(
+            list_trusted_dir(&path),
+            Err(PrivateSocketError::SymlinkInPath { path: link }),
+            "{}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn list_trusted_dir_names_a_missing_component_and_refuses_an_unnormal_path() {
+    let root = private_root();
+    let at = |name: &str| root.path().join(name);
+    fs::write(at("file"), b"").expect("write");
+    let spelled = root.path().to_str().expect("a UTF-8 test root");
+    for (path, expected) in [
+        (
+            at("instances"),
+            PrivateSocketError::NoDirectory {
+                path: at("instances"),
+            },
+        ),
+        (
+            at("absent/instances"),
+            PrivateSocketError::NoDirectory { path: at("absent") },
+        ),
+        (
+            at("file"),
+            PrivateSocketError::NotDirectory { path: at("file") },
+        ),
+        (
+            at("file/instances"),
+            PrivateSocketError::NotDirectory { path: at("file") },
+        ),
+        (
+            PathBuf::from("relative/instances"),
+            PrivateSocketError::BadPath {
+                path: PathBuf::from("relative/instances"),
+            },
+        ),
+        (
+            PathBuf::from(format!("{spelled}/./instances")),
+            PrivateSocketError::BadPath {
+                path: PathBuf::from(format!("{spelled}/./instances")),
+            },
+        ),
+        (
+            PathBuf::from(format!("{spelled}/x/../instances")),
+            PrivateSocketError::BadPath {
+                path: PathBuf::from(format!("{spelled}/x/../instances")),
+            },
+        ),
+        (
+            PathBuf::from(format!("{spelled}/instances/")),
+            PrivateSocketError::BadPath {
+                path: PathBuf::from(format!("{spelled}/instances/")),
+            },
+        ),
+    ] {
+        assert_eq!(list_trusted_dir(&path), Err(expected), "{}", path.display());
+    }
+}
+
+#[test]
+fn list_trusted_dir_never_lists_dot_entries() {
+    let root = private_root();
+    let instances = instances_in(&root, 0o755);
+    assert_eq!(list_trusted_dir(&instances), Ok(Vec::new()));
+    fs::write(instances.join(".DS_Store"), b"").expect("write");
+    make_dir(&instances.join("..."), 0o700);
+    make_dir(&instances.join(".hidden"), 0o700);
+    assert_eq!(
+        list_trusted_dir(&instances),
+        Ok(vec![
+            listed("...", EntryKind::Directory),
+            listed(".DS_Store", EntryKind::Other),
+            listed(".hidden", EntryKind::Directory),
+        ])
+    );
+}
+
+#[test]
+fn list_trusted_dir_reports_an_entry_it_cannot_stat() {
+    if effective_uid() == 0 {
+        println!("skipped: root stats an entry without search permission");
+        return;
+    }
+    let root = private_root();
+    let instances = instances_in(&root, 0o755);
+    make_dir(&instances.join("work"), 0o700);
+    set_mode(&instances, 0o444);
+    let refused = list_trusted_dir(&instances);
+    set_mode(&instances, 0o755);
+    assert_eq!(
+        refused,
+        Err(PrivateSocketError::Io {
+            op: "fstatat",
+            path: instances.join("work"),
+            errno: libc::EACCES
+        })
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn list_trusted_dir_returns_a_name_that_is_not_utf8_as_its_bytes() {
+    let root = private_root();
+    let name = [b'c', 0xff, 0xfe, b'l'];
+    fs::write(root.path().join(OsStr::from_bytes(&name)), b"").expect("write");
+    assert_eq!(
+        list_trusted_dir(root.path()),
+        Ok(vec![ListedEntry {
+            name: name.to_vec(),
+            kind: EntryKind::Other
+        }])
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn list_trusted_dir_refuses_an_acl_that_allows_replacing_entries() {
+    let root = private_root();
+    let home = root.path().join("home");
+    make_dir(&home, 0o755);
+    let instances = home.join("instances");
+    make_dir(&instances, 0o755);
+    add_acl(&instances, "everyone deny delete");
+    add_acl(&instances, "everyone allow list,search,readattr");
+    let read_only = list_trusted_dir(&instances);
+    clear_acl(&instances);
+    assert_eq!(
+        read_only,
+        Ok(Vec::new()),
+        "an ACL that only denies or reads passes the ancestor rule"
+    );
+    for refused in [&instances, &home] {
+        add_acl(refused, "everyone allow add_file");
+        let outcome = list_trusted_dir(&instances);
+        clear_acl(refused);
+        assert_eq!(
+            outcome,
+            Err(PrivateSocketError::ReplaceableByAcl {
+                path: refused.clone()
+            }),
+            "{}",
+            refused.display()
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]

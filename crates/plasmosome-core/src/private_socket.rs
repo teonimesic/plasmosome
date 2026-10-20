@@ -1805,6 +1805,77 @@ mod tests {
         );
     }
 
+    fn listed(name: &str, kind: EntryKind) -> ListedEntry {
+        ListedEntry {
+            name: name.as_bytes().to_vec(),
+            kind,
+        }
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn listing_takes_each_kind_from_a_no_follow_stat_whatever_readdir_reports() {
+        let root = test_root();
+        let at = |name: &str| root.path().join(name);
+        make_dir(&at("dir"), 0o700);
+        fs::write(at("file"), b"").expect("write");
+        symlink("dir", at("link")).expect("symlink");
+        let _socket = UnixListener::bind(at("sock")).expect("bind a socket");
+        for reported in [libc::DT_UNKNOWN, libc::DT_DIR] {
+            let listing = list_entries_with(&start(&root), root.path(), |entry| {
+                // SAFETY: `entry` is the non-null record readdir just returned, which stays valid
+                // until the next readdir on the stream, and d_type lies in its fixed header.
+                unsafe { (*entry).d_type = reported };
+            });
+            assert_eq!(
+                listing,
+                Ok(vec![
+                    listed("dir", EntryKind::Directory),
+                    listed("file", EntryKind::Other),
+                    listed("link", EntryKind::Symlink),
+                    listed("sock", EntryKind::Other),
+                ]),
+                "readdir reported d_type {reported} for every entry"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn listing_skips_an_entry_that_vanishes_after_readdir_reports_it() {
+        let root = test_root();
+        make_dir(&root.path().join("gone"), 0o700);
+        make_dir(&root.path().join("kept"), 0o700);
+        let mut removed = false;
+        let listing = list_entries_with(&start(&root), root.path(), |entry| {
+            // SAFETY: `entry` is the non-null record readdir just returned, which stays valid
+            // until the next readdir on the stream, and its d_name is NUL-terminated.
+            let name = unsafe { CStr::from_ptr((&raw const (*entry).d_name).cast()) };
+            if name == c"gone" {
+                fs::remove_dir(root.path().join("gone")).expect("rmdir");
+                removed = true;
+            }
+        });
+        assert!(removed, "readdir never reported gone");
+        assert_eq!(listing, Ok(vec![listed("kept", EntryKind::Directory)]));
+    }
+
+    #[test]
+    fn listing_a_descriptor_that_is_not_a_directory_is_io() {
+        let root = test_root();
+        let file = root.path().join("file");
+        fs::write(&file, b"").expect("write");
+        let held = OwnedFd::from(fs::File::open(&file).expect("open"));
+        assert_eq!(
+            list_entries(&held, &file),
+            Err(PrivateSocketError::Io {
+                op: "fdopendir",
+                path: file,
+                errno: libc::ENOTDIR
+            })
+        );
+    }
+
     #[test]
     fn errors_name_the_path_and_the_rule() {
         let at = || PathBuf::from("/r/cell");
