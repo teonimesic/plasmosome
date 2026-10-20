@@ -487,6 +487,46 @@ mod tests {
             (replacing("name", r#""""#), "empty"),
             (replacing("name", r#""a/b""#), "a/b"),
             (replacing("name", r#""..""#), ".."),
+            (replacing("instance_root", r#""cells""#), "`instance_root`"),
+            (replacing("instance_root", r#""""#), "`instance_root`"),
+            (replacing("instance_root", "7"), "`instance_root`"),
+            (replacing("instance_root", "null"), "`instance_root`"),
+            (
+                replacing("recovery_deadline_ms", "0"),
+                "`recovery_deadline_ms`",
+            ),
+            (
+                replacing("recovery_deadline_ms", "-1"),
+                "`recovery_deadline_ms`",
+            ),
+            (
+                replacing("recovery_deadline_ms", "1.5"),
+                "`recovery_deadline_ms`",
+            ),
+            (
+                replacing("recovery_deadline_ms", "1e3"),
+                "`recovery_deadline_ms`",
+            ),
+            (
+                replacing("recovery_deadline_ms", r#""5000""#),
+                "`recovery_deadline_ms`",
+            ),
+            (
+                replacing("recovery_deadline_ms", "null"),
+                "`recovery_deadline_ms`",
+            ),
+            (
+                replacing("registry_root", r#""imports""#),
+                "`registry_root`",
+            ),
+            (replacing("registry_root", r#""""#), "`registry_root`"),
+            (replacing("registry_root", "7"), "`registry_root`"),
+            (replacing("registry_root", "null"), "`registry_root`"),
+            (adding("registry", r#""/srv/imports""#), "`registry`"),
+            (
+                adding("instance_root", r#""/srv/other""#),
+                "`instance_root`",
+            ),
         ]);
     }
 
