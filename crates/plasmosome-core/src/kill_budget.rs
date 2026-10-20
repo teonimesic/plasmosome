@@ -390,6 +390,74 @@ mod tests {
     }
 
     #[test]
+    fn small_deadlines_get_exact_shares() {
+        let arrival = Instant::now();
+        let clock = TestClock::at(arrival);
+        let budget = KillBudget::new(arrival, ms(5), false, || clock.read());
+        assert_eq!(budget.lock_reserve(), MS);
+        assert_eq!(budget.workload_stop(), Share::Run(MS));
+        let stop = budget.guest_stop();
+        assert_eq!(
+            stop,
+            GuestStop {
+                drain: DrainSpec::graceful(ms(3)),
+                answer_wait: ms(4),
+            }
+        );
+        assert_eq!(shutdown_deadline(&stop.drain), Some(ms(2)));
+        clock.advance(MS);
+        assert_eq!(budget.withdrawal(), Share::NoBudget);
+        let stop = budget.guest_stop();
+        assert_eq!(
+            stop,
+            GuestStop {
+                drain: DrainSpec::graceful(ms(2)),
+                answer_wait: ms(3),
+            }
+        );
+        assert_eq!(shutdown_deadline(&stop.drain), Some(MS));
+
+        let clock = TestClock::at(arrival);
+        let budget = KillBudget::new(arrival, ms(9), false, || clock.read());
+        assert_eq!(budget.workload_stop(), Share::Run(MS));
+
+        let clock = TestClock::at(arrival);
+        let budget = KillBudget::new(arrival, ms(15), false, || clock.read());
+        assert_eq!(budget.lock_reserve(), Duration::from_micros(1_500));
+        assert_eq!(budget.workload_stop(), Share::Run(MS));
+        clock.advance(MS);
+        assert_eq!(
+            budget.withdrawal(),
+            Share::Run(Withdrawal {
+                share: ms(6),
+                drain: ms(3),
+                effect: MS,
+                publication: MS,
+            })
+        );
+    }
+
+    #[test]
+    fn a_budget_built_after_its_request_queued_counts_from_arrival() {
+        let arrival = Instant::now();
+        let clock = TestClock::at(arrival + ms(4_000));
+        let budget = KillBudget::new(arrival, ms(30_000), false, || clock.read());
+
+        assert_eq!(budget.remaining(), ms(26_000));
+        assert_eq!(budget.workload_stop(), Share::Run(ms(3_000)));
+        assert_eq!(
+            budget.withdrawal(),
+            Share::Run(Withdrawal {
+                share: ms(11_500),
+                drain: ms(5_750),
+                effect: ms(2_875),
+                publication: ms(2_875),
+            })
+        );
+        assert_eq!(budget.lock_wait_until(), arrival + ms(30_000));
+    }
+
+    #[test]
     fn shutdown_stays_below_the_drain_deadline() {
         assert_eq!(shutdown_deadline(&DrainSpec::graceful(MS)), None);
         assert_eq!(
@@ -459,7 +527,7 @@ mod tests {
     }
 
     fn kill() -> impl Strategy<Value = (Duration, bool, Duration, Took, Took)> {
-        (1u64..=120_000, any::<bool>()).prop_flat_map(|(total_ms, now)| {
+        (prop_oneof![1u64..=50, 1u64..=120_000], any::<bool>()).prop_flat_map(|(total_ms, now)| {
             let total = ms(total_ms);
             (
                 Just(total),
@@ -515,6 +583,9 @@ mod tests {
             prop_assert!(stop.drain.deadline >= MS && is_whole_ms(stop.drain.deadline));
             prop_assert!(stop.answer_wait >= MS && is_whole_ms(stop.answer_wait));
             prop_assert!(stop.drain.deadline <= stop.answer_wait);
+            if stop.answer_wait >= ms(2) {
+                prop_assert!(stop.answer_wait - stop.drain.deadline >= MS.max(stop.answer_wait / 4));
+            }
             if now {
                 prop_assert_eq!(stop.drain, DrainSpec { deadline: MS, policy: RevokePolicy::Force });
             } else {
@@ -636,18 +707,20 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_is_never_listed_with_now() {
+    fn now_lists_neither_the_workload_stop_nor_shutdown() {
         let mut incomplete = Incomplete::default();
+        incomplete.add(Shortfall::WorkloadStop, true);
         incomplete.add(Shortfall::Shutdown, true);
         assert!(incomplete.is_empty());
+        assert!(incomplete.is_retirement());
         assert_eq!(serde_json::to_string(&incomplete).unwrap(), "[]");
 
-        incomplete.add(Shortfall::WorkloadStop, true);
         incomplete.add(Shortfall::Teardown, true);
         incomplete.add(Shortfall::Shutdown, true);
+        incomplete.add(Shortfall::WorkloadStop, true);
         assert_eq!(
             serde_json::to_string(&incomplete).unwrap(),
-            r#"["workload_stop","teardown"]"#
+            r#"["teardown"]"#
         );
         assert!(!incomplete.is_retirement());
     }
@@ -665,6 +738,8 @@ mod tests {
             r#"["Shutdown"]"#,
             r#"["workload-stop"]"#,
             r#"["teardown",""]"#,
+            r#"["teardown","teardown"]"#,
+            r#"["shutdown","workload_stop","shutdown"]"#,
             r#"[1]"#,
             r#""teardown""#,
             r#"{"teardown":true}"#,
