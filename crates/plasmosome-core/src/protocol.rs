@@ -457,6 +457,28 @@ impl WireError {
     }
 }
 
+impl WireError {
+    /// Code 102 for a software command name that is already taken (spec 027 §3.1): `target` is
+    /// the command's path, and the message names the plasmid or the root image that holds it.
+    pub fn name_conflict(conflict: &plasmosome_backend::software::Conflict) -> WireError {
+        let mut error = WireError::bare(ErrorCode::AlreadyExists, conflict.to_string());
+        error.target = Some(conflict.target.clone());
+        error
+    }
+
+    /// Code 108 for a software tree that cannot be pinned (spec 027 §3.1): `path` is the path
+    /// inside the tree, and `detail` says what is wrong with it.
+    pub fn pin_refusal(refusal: &plasmosome_backend::software::PinRefusal) -> WireError {
+        let mut error = WireError::bare(
+            ErrorCode::ManifestInvalid,
+            format!("the software tree cannot be pinned: {refusal}"),
+        );
+        error.detail = Some(refusal.to_string());
+        error.path = Some(refusal.path().to_string());
+        error
+    }
+}
+
 /// What a named instance is doing, as reported by whoever probed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
