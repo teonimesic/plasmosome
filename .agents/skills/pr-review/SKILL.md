@@ -36,13 +36,10 @@ rerun those checks before the next push. A failed check or unavailable local pre
 the push: report it rather than silently defer validation to CI. Do not bypass this requirement
 by opening an unvalidated draft.
 
-- **Intent-filing PR:** file the intent under `docs/intents/` using its template. It has no
-  parent task, `task:` footer or Beads external reference. Keep the PR draft until the owner
-  reads and approves it on GitHub, as required by `docs/intents/README.md`.
-- **Spec-filing PR:** file the spec under `docs/specs/` using its template and name the intents
-  it serves. It has no task, `task:` footer or Beads external reference. Follow
-  `docs/specs/README.md` for draft versus accepted state; implementation waits for acceptance
-  on main. Filing a spec does not approve its intents.
+- **Intent- or spec-filing PR:** it has no task, `task:` footer or Beads external reference.
+  `docs/intents/README.md` and `docs/specs/README.md` give its template and when it leaves
+  draft. An intent PR stays draft until the owner reads and approves it on GitHub, and filing a
+  spec approves no intent.
 - **Work PR:** start from the claimed Beads task, using `./tools/work-state show ID`. Open a
   draft whose body ends with `task: BEADS_ID` on its own line. Link the record once; do not
   duplicate its plan, description or acceptance as another task authority.
@@ -53,10 +50,8 @@ For a work PR, record the PR immediately:
 ./tools/work-state update ID --external-ref PR_URL --status review
 ```
 
-For a work PR, retain task ownership through review and record verification and important
-decisions in Beads notes. Spec016 defines entry into `review` for a settled local candidate,
-active repairs in `in_progress`, and genuine blockers; follow those phases rather than the
-retired `in-review` label. These updates never require a commit, extra push or status-only PR.
+Then keep ownership, notes and spec016's phases through review as the tasks skill says, never
+the retired `in-review` label.
 
 Obtain independent review while draft, after local validation. CodeRabbit skips draft PRs;
 a skipped green is not a completed review. The owner-approval rule in `docs/intents/README.md`
@@ -70,7 +65,6 @@ Use a fresh-context top-tier agent with no memory of authoring the change, prefe
 model family and otherwise a different model. If the owner authorizes a same-model independent
 review, use the fresh-context reviewer and disclose the model correlation limitation; do not
 claim model diversity. The author spawns it when possible and asks the orchestrator otherwise.
-The reviewer does not repair what it reviews.
 
 The reviewer reads the surrounding code as well as the diff, verifies empirical claims, and
 checks every applicable acceptance item in every governing spec.
@@ -232,13 +226,9 @@ any of the review conditions.
 ## 5. Observe the merge and verify task completion
 
 Ask GitHub for `state,mergeCommit,mergedAt,url`. Only `MERGED` with the actual squash commit
-establishes source publication; the old branch tip is not that commit. For a work PR, append
-the observed PR, squash SHA, merge time and verification references to Beads notes, then follow
-spec016's full-acceptance closure contract through the tasks skill. If post-merge work remains,
-the author keeps ownership, records the next action and continues in its actual phase rather
-than closing on source publication alone. Close only after all required acceptance is verified;
-keep the plan and evidence. There is no later closure commit, next-branch status edit or
-`chore(tasks)` PR. Intent- and spec-filing PRs have no Beads task to close.
+establishes source publication; the old branch tip is not that commit. For a work PR, record
+the merge and close the task as the tasks skill says, only once every acceptance item holds,
+keeping the plan and evidence. Intent- and spec-filing PRs have no Beads task to close.
 
 Remove your code worktree by its actual path only after its work is committed and its owner is
 finished, then prune and delete the merged branch as appropriate. Preserve anyone else's or any
