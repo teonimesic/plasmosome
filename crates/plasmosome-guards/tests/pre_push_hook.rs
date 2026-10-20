@@ -31,6 +31,7 @@ fn git(directory: &Path, arguments: &[&str]) -> Output {
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_OBJECT_DIRECTORY")
         .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_CONFIG")
         .env_remove("GIT_CONFIG_PARAMETERS")
         .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_TEMPLATE_DIR")
