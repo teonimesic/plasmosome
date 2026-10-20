@@ -5,7 +5,10 @@ use serde::de::Error as _;
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::recipe::{RecipeError, canonical_path, nul_free};
+use crate::recipe::{
+    BrokerLaunch, MountRecipe, ProxyRecipe, RecipeError, SessionFileRecipe, UdsRecipe,
+    canonical_path, nul_free,
+};
 use crate::universe::{
     CellOwner, GrantId, OsObject, OsState, UniverseClass, UniverseOp, UniverseRemoval,
 };
@@ -45,28 +48,63 @@ impl GrantKind {
     }
 }
 
-/// A capability, identified by its class and its exact fields.
+/// A capability: its class, its exact fields, and the complete recipe or launch that creates
+/// it. A broker carries its name and launch, never a process ID.
 ///
-/// Decoding refuses a missing or unknown field and a positional array, and decoding and encoding
-/// both refuse any value `validate` refuses. A value built in memory is not checked: call
-/// `validate` before acting on it.
+/// Decoding refuses a missing or unknown field and a positional array, in the capability and in
+/// its recipe, and decoding and encoding both refuse any value `validate` refuses. No field has
+/// a default. A value built in memory is not checked: call `validate` before acting on it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Capability {
-    SessionFile { path: String },
-    UdsSocket { path: String },
-    ProxyMap { host: String, route: String },
-    Broker { pid: u32, name: String },
-    Mount { source: String, target: String },
+    SessionFile {
+        path: String,
+        recipe: SessionFileRecipe,
+    },
+    UdsSocket {
+        path: String,
+        recipe: UdsRecipe,
+    },
+    ProxyMap {
+        host: String,
+        route: String,
+        recipe: ProxyRecipe,
+    },
+    Broker {
+        name: String,
+        launch: BrokerLaunch,
+    },
+    Mount {
+        source: String,
+        target: String,
+        recipe: MountRecipe,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "Capability", deny_unknown_fields)]
 enum CapabilityShape {
-    SessionFile { path: String },
-    UdsSocket { path: String },
-    ProxyMap { host: String, route: String },
-    Broker { pid: u32, name: String },
-    Mount { source: String, target: String },
+    SessionFile {
+        path: String,
+        recipe: SessionFileRecipe,
+    },
+    UdsSocket {
+        path: String,
+        recipe: UdsRecipe,
+    },
+    ProxyMap {
+        host: String,
+        route: String,
+        recipe: ProxyRecipe,
+    },
+    Broker {
+        name: String,
+        launch: BrokerLaunch,
+    },
+    Mount {
+        source: String,
+        target: String,
+        recipe: MountRecipe,
+    },
 }
 
 impl Capability {
@@ -84,36 +122,78 @@ impl Capability {
         self.class().as_str()
     }
 
+    /// The diagnostic key, not an address: `session/{path}`, the socket path, the proxy host,
+    /// `broker/{name}` or the mount target. Two different capabilities can share a key.
     pub fn key(&self) -> String {
         match self {
-            Capability::SessionFile { path } => format!("session/{path}"),
-            Capability::UdsSocket { path } => path.clone(),
+            Capability::SessionFile { path, .. } => format!("session/{path}"),
+            Capability::UdsSocket { path, .. } => path.clone(),
             Capability::ProxyMap { host, .. } => host.clone(),
-            Capability::Broker { pid, .. } => format!("broker/{pid}"),
+            Capability::Broker { name, .. } => format!("broker/{name}"),
             Capability::Mount { target, .. } => target.clone(),
         }
     }
 
-    /// Returns the first rule this capability breaks, in field order. `SessionFile.path`,
-    /// `UdsSocket.path`, `Mount.source` and `Mount.target` are canonical absolute paths as
-    /// `RecipeError` defines them. `host`, `route` and `name` are exact selection names, so they
-    /// only need to be NUL-free.
+    /// Returns the first rule this capability breaks. Its own strings come first, in field
+    /// order: `SessionFile.path`, `UdsSocket.path`, `Mount.source` and `Mount.target` are
+    /// canonical absolute paths as `RecipeError` defines them, and `host`, `route` and `name`
+    /// are exact selection names, so they only need to be NUL-free. Then the recipe's or the
+    /// launch's own `validate` runs.
     pub fn validate(&self) -> Result<(), RecipeError> {
         match self {
-            Capability::SessionFile { path } | Capability::UdsSocket { path } => {
-                canonical_path("path", path)
-            }
-            Capability::ProxyMap { host, route } => {
-                nul_free("host", host)?;
-                nul_free("route", route)
-            }
-            Capability::Broker { name, .. } => nul_free("name", name),
-            Capability::Mount { source, target } => {
-                canonical_path("source", source)?;
-                canonical_path("target", target)
-            }
+            Capability::SessionFile { path, recipe } => session_file_rules(path, recipe),
+            Capability::UdsSocket { path, recipe } => uds_socket_rules(path, recipe),
+            Capability::ProxyMap {
+                host,
+                route,
+                recipe,
+            } => proxy_map_rules(host, route, recipe),
+            Capability::Broker { name, launch } => broker_rules(name, launch),
+            Capability::Mount {
+                source,
+                target,
+                recipe,
+            } => mount_rules(source, target, recipe),
         }
     }
+}
+
+pub(crate) fn session_file_rules(
+    path: &str,
+    recipe: &SessionFileRecipe,
+) -> Result<(), RecipeError> {
+    canonical_path("path", path)?;
+    recipe.validate()
+}
+
+pub(crate) fn uds_socket_rules(path: &str, recipe: &UdsRecipe) -> Result<(), RecipeError> {
+    canonical_path("path", path)?;
+    recipe.validate()
+}
+
+pub(crate) fn proxy_map_rules(
+    host: &str,
+    route: &str,
+    recipe: &ProxyRecipe,
+) -> Result<(), RecipeError> {
+    nul_free("host", host)?;
+    nul_free("route", route)?;
+    recipe.validate()
+}
+
+pub(crate) fn broker_rules(name: &str, launch: &BrokerLaunch) -> Result<(), RecipeError> {
+    nul_free("name", name)?;
+    launch.validate()
+}
+
+pub(crate) fn mount_rules(
+    source: &str,
+    target: &str,
+    recipe: &MountRecipe,
+) -> Result<(), RecipeError> {
+    canonical_path("source", source)?;
+    canonical_path("target", target)?;
+    recipe.validate()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +204,7 @@ pub struct Grant {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "Grant")]
+#[serde(remote = "Grant", deny_unknown_fields)]
 struct GrantShape {
     owner: CellOwner,
     capability: Capability,
@@ -227,7 +307,7 @@ pub struct DrainSpec {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "DrainSpec")]
+#[serde(remote = "DrainSpec", deny_unknown_fields)]
 struct DrainSpecShape {
     #[serde(deserialize_with = "crate::wire::object")]
     deadline: Duration,
@@ -378,9 +458,14 @@ pub(crate) mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::fixtures::{self, mount, proxy_map};
-    use crate::recipe::RecipeError;
+    use crate::fixtures::{self, broker, mount, proxy_map, session_file, uds_socket};
+    use crate::recipe::{
+        BrokerLaunch, FileAccess, MAX_SESSION_FILE_BYTES, ProxyRecipe, ProxyTransport, RecipeError,
+        SessionFileRecipe, UdsRecipe,
+    };
     use crate::universe::{CellId, PluginId};
+
+    const ID: &str = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 
     pub(crate) fn owner() -> CellOwner {
         CellOwner {
@@ -422,56 +507,126 @@ pub(crate) mod tests {
     fn invalid_capabilities() -> Vec<(Capability, RecipeError)> {
         let mut cases = Vec::new();
         for (path, error) in path_faults("path") {
-            cases.push((
-                Capability::SessionFile { path: path.clone() },
-                error.clone(),
-            ));
-            cases.push((Capability::UdsSocket { path }, error));
+            cases.push((session_file(&path), error.clone()));
+            cases.push((uds_socket(&path), error));
         }
         for (source, error) in path_faults("source") {
-            let target = "/workspace".to_string();
-            cases.push((Capability::Mount { source, target }, error));
+            cases.push((mount(&source, "/workspace"), error));
         }
         for (target, error) in path_faults("target") {
-            let source = "/srv/repo".to_string();
-            cases.push((Capability::Mount { source, target }, error));
+            cases.push((mount("/srv/repo", &target), error));
         }
         let nul = |field| RecipeError::ContainsNul { field };
+        cases.push((proxy_map("api.github\0.com", "splice"), nul("host")));
+        cases.push((proxy_map("api.github.com", "spl\0ice"), nul("route")));
+        cases.push((broker("egress\0d"), nul("name")));
         cases.push((
-            Capability::ProxyMap {
-                host: "api.github\0.com".to_string(),
-                route: "splice".to_string(),
+            Capability::SessionFile {
+                path: "/skills/pr.md".to_string(),
+                recipe: SessionFileRecipe {
+                    guest_path: "run/session".to_string(),
+                    ..fixtures::session_recipe()
+                },
             },
-            nul("host"),
+            RecipeError::NotAbsolute {
+                field: "guest_path",
+                value: "run/session".to_string(),
+            },
+        ));
+        cases.push((
+            Capability::UdsSocket {
+                path: "/run/plasmosome/egressd.uds".to_string(),
+                recipe: UdsRecipe {
+                    guest_path: "agent.sock".to_string(),
+                    ..fixtures::uds_recipe()
+                },
+            },
+            RecipeError::NotAbsolute {
+                field: "guest_path",
+                value: "agent.sock".to_string(),
+            },
         ));
         cases.push((
             Capability::ProxyMap {
                 host: "api.github.com".to_string(),
-                route: "spl\0ice".to_string(),
+                route: "splice".to_string(),
+                recipe: ProxyRecipe {
+                    port: 0,
+                    ..fixtures::proxy_recipe()
+                },
             },
-            nul("route"),
+            RecipeError::ZeroPort,
         ));
         cases.push((
             Capability::Broker {
-                pid: 4242,
-                name: "egress\0d".to_string(),
+                name: "egressd".to_string(),
+                launch: BrokerLaunch {
+                    command: Vec::new(),
+                    ..fixtures::launch()
+                },
             },
-            nul("name"),
+            RecipeError::EmptyCommand,
+        ));
+        cases.push((
+            Capability::Broker {
+                name: "egressd".to_string(),
+                launch: BrokerLaunch {
+                    data_socket: fixtures::launch().control_socket,
+                    ..fixtures::launch()
+                },
+            },
+            RecipeError::SharedEndpoint {
+                path: fixtures::launch().control_socket,
+            },
         ));
         cases
     }
 
     fn capability_json(capability: &Capability) -> Value {
         match capability {
-            Capability::SessionFile { path } => json!({"SessionFile": {"path": path}}),
-            Capability::UdsSocket { path } => json!({"UdsSocket": {"path": path}}),
-            Capability::ProxyMap { host, route } => {
-                json!({"ProxyMap": {"host": host, "route": route}})
-            }
-            Capability::Broker { pid, name } => json!({"Broker": {"pid": pid, "name": name}}),
-            Capability::Mount { source, target } => {
-                json!({"Mount": {"source": source, "target": target}})
-            }
+            Capability::SessionFile { path, recipe } => json!({"SessionFile": {
+                "path": path,
+                "recipe": {
+                    "contents": recipe.contents,
+                    "mode": recipe.mode,
+                    "guest_path": recipe.guest_path,
+                },
+            }}),
+            Capability::UdsSocket { path, recipe } => json!({"UdsSocket": {
+                "path": path,
+                "recipe": {"upstream": recipe.upstream, "guest_path": recipe.guest_path},
+            }}),
+            Capability::ProxyMap {
+                host,
+                route,
+                recipe,
+            } => json!({"ProxyMap": {
+                "host": host,
+                "route": route,
+                "recipe": {
+                    "transport": recipe.transport,
+                    "destination": recipe.destination,
+                    "port": recipe.port,
+                    "allow_private": recipe.allow_private,
+                },
+            }}),
+            Capability::Broker { name, launch } => json!({"Broker": {
+                "name": name,
+                "launch": {
+                    "command": launch.command,
+                    "control_socket": launch.control_socket,
+                    "data_socket": launch.data_socket,
+                },
+            }}),
+            Capability::Mount {
+                source,
+                target,
+                recipe,
+            } => json!({"Mount": {
+                "source": source,
+                "target": target,
+                "recipe": {"access": recipe.access},
+            }}),
         }
     }
 
@@ -479,8 +634,8 @@ pub(crate) mod tests {
         fixtures::op(id, owner(), capability)
     }
 
-    fn operation_json(id: GrantId, capability: &Capability) -> Value {
-        let (variant, mut fields) = match capability_json(capability) {
+    fn operation_json(id: GrantId, capability: Value) -> Value {
+        let (variant, mut fields) = match capability {
             Value::Object(outer) => outer.into_iter().next().expect("one variant"),
             other => panic!("a capability encodes as an object, not {other}"),
         };
@@ -516,7 +671,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_capability_refuses_nul_and_non_canonical_paths_wherever_it_travels() {
+    fn an_invalid_capability_is_refused_wherever_it_travels() {
         for (capability, expected) in invalid_capabilities() {
             assert_eq!(
                 capability.validate(),
@@ -527,7 +682,11 @@ pub(crate) mod tests {
             let id = GrantId::new();
             let op = operation(id, capability.clone());
             assert_eq!(op.validate(), Err(expected.clone()), "{op:?}");
-            assert_refused(&op, operation_json(id, &capability), &expected);
+            assert_refused(
+                &op,
+                operation_json(id, capability_json(&capability)),
+                &expected,
+            );
             let object = OsObject {
                 id,
                 owner: owner(),
@@ -542,6 +701,34 @@ pub(crate) mod tests {
             };
             let removal_json = json!({"id": id, "capability": capability_json(&capability)});
             assert_refused(&removal, removal_json, &expected);
+            let handle = Handle {
+                class: capability.class(),
+                id,
+            };
+            let entry = LedgerEntry {
+                handle,
+                owner: owner(),
+                capability: capability.clone(),
+                kind: GrantKind::Hot,
+            };
+            let entry_json = json!({
+                "handle": handle,
+                "owner": owner(),
+                "capability": capability_json(&capability),
+                "kind": "Hot",
+            });
+            assert_refused(&entry, entry_json, &expected);
+            let grant = Grant {
+                owner: owner(),
+                capability: capability.clone(),
+                kind: GrantKind::Hot,
+            };
+            let grant_json = json!({
+                "owner": owner(),
+                "capability": capability_json(&capability),
+                "kind": "Hot",
+            });
+            assert_refused(&grant, grant_json, &expected);
         }
     }
 
@@ -559,6 +746,64 @@ pub(crate) mod tests {
                 proxy_map("api.github\0.com", "spl\0ice"),
                 RecipeError::ContainsNul { field: "host" },
             ),
+            (
+                Capability::SessionFile {
+                    path: "skills/pr.md".to_string(),
+                    recipe: SessionFileRecipe {
+                        contents: vec![0; MAX_SESSION_FILE_BYTES + 1],
+                        ..fixtures::session_recipe()
+                    },
+                },
+                RecipeError::NotAbsolute {
+                    field: "path",
+                    value: "skills/pr.md".to_string(),
+                },
+            ),
+            (
+                Capability::UdsSocket {
+                    path: "run/egressd.uds".to_string(),
+                    recipe: UdsRecipe {
+                        upstream: "upstream.sock".to_string(),
+                        ..fixtures::uds_recipe()
+                    },
+                },
+                RecipeError::NotAbsolute {
+                    field: "path",
+                    value: "run/egressd.uds".to_string(),
+                },
+            ),
+            (
+                Capability::ProxyMap {
+                    host: "api.github\0.com".to_string(),
+                    route: "splice".to_string(),
+                    recipe: ProxyRecipe {
+                        port: 0,
+                        ..fixtures::proxy_recipe()
+                    },
+                },
+                RecipeError::ContainsNul { field: "host" },
+            ),
+            (
+                Capability::ProxyMap {
+                    host: "api.github.com".to_string(),
+                    route: "spl\0ice".to_string(),
+                    recipe: ProxyRecipe {
+                        port: 0,
+                        ..fixtures::proxy_recipe()
+                    },
+                },
+                RecipeError::ContainsNul { field: "route" },
+            ),
+            (
+                Capability::Broker {
+                    name: "egress\0d".to_string(),
+                    launch: BrokerLaunch {
+                        command: Vec::new(),
+                        ..fixtures::launch()
+                    },
+                },
+                RecipeError::ContainsNul { field: "name" },
+            ),
         ] {
             assert_eq!(capability.validate(), Err(first.clone()), "{capability:?}");
             assert_eq!(operation(GrantId::new(), capability).validate(), Err(first));
@@ -566,26 +811,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn decoding_names_a_broken_recipe_before_its_capabilitys_own_strings() {
+        for (capability, decoded_first, validated_first) in [
+            (
+                Capability::SessionFile {
+                    path: "skills/pr.md".to_string(),
+                    recipe: SessionFileRecipe {
+                        guest_path: "run/session".to_string(),
+                        ..fixtures::session_recipe()
+                    },
+                },
+                RecipeError::NotAbsolute {
+                    field: "guest_path",
+                    value: "run/session".to_string(),
+                },
+                RecipeError::NotAbsolute {
+                    field: "path",
+                    value: "skills/pr.md".to_string(),
+                },
+            ),
+            (
+                Capability::ProxyMap {
+                    host: "api.github\0.com".to_string(),
+                    route: "splice".to_string(),
+                    recipe: ProxyRecipe {
+                        port: 0,
+                        ..fixtures::proxy_recipe()
+                    },
+                },
+                RecipeError::ZeroPort,
+                RecipeError::ContainsNul { field: "host" },
+            ),
+        ] {
+            assert_eq!(capability.validate(), Err(validated_first));
+            let decoded = serde_json::from_value::<Capability>(capability_json(&capability));
+            assert_eq!(
+                decoded.unwrap_err().to_string(),
+                decoded_first.to_string(),
+                "{capability:?}"
+            );
+        }
+    }
+
+    #[test]
     fn selection_names_need_only_be_nul_free_and_valid_values_round_trip() {
         for capability in [
-            Capability::SessionFile {
-                path: "/skills/.pr..md".to_string(),
-            },
-            Capability::UdsSocket {
-                path: "/run/plasmosome/egressd.uds".to_string(),
-            },
-            Capability::ProxyMap {
-                host: "not a dns name".to_string(),
-                route: "../relative/route/".to_string(),
-            },
-            Capability::Broker {
-                pid: 4242,
-                name: "./egressd".to_string(),
-            },
-            Capability::Mount {
-                source: "/srv/repo".to_string(),
-                target: "/workspace".to_string(),
-            },
+            session_file("/skills/.pr..md"),
+            uds_socket("/run/plasmosome/egressd.uds"),
+            proxy_map("not a dns name", "../relative/route/"),
+            broker("./egressd"),
+            mount("/srv/repo", "/workspace"),
         ] {
             assert_eq!(capability.validate(), Ok(()), "{capability:?}");
             let encoded = serde_json::to_value(&capability).unwrap();
@@ -598,9 +873,214 @@ pub(crate) mod tests {
             let op = operation(id, capability.clone());
             assert_eq!(op.validate(), Ok(()));
             let encoded = serde_json::to_value(&op).unwrap();
-            assert_eq!(encoded, operation_json(id, &capability));
+            assert_eq!(encoded, operation_json(id, capability_json(&capability)));
             assert_eq!(serde_json::from_value::<UniverseOp>(encoded).unwrap(), op);
         }
+    }
+
+    #[test]
+    fn each_capability_and_its_operation_encode_as_the_designed_json_text() {
+        let id: GrantId = serde_json::from_str(&format!("\"{ID}\"")).unwrap();
+        let owner_text = r#"{"cell":"cell-1","plugin":"github-pr"}"#;
+        for (capability, variant, text) in [
+            (
+                Capability::SessionFile {
+                    path: "/skills/pr.md".to_string(),
+                    recipe: SessionFileRecipe {
+                        contents: b"hi".to_vec(),
+                        mode: FileAccess::ReadWrite,
+                        guest_path: "/etc/plasmosome/seed".to_string(),
+                    },
+                },
+                "WriteSessionFile",
+                r#"{"SessionFile":{"path":"/skills/pr.md","recipe":{"contents":[104,105],"mode":"read_write","guest_path":"/etc/plasmosome/seed"}}}"#,
+            ),
+            (
+                Capability::UdsSocket {
+                    path: "/run/plasmosome/egressd.uds".to_string(),
+                    recipe: UdsRecipe {
+                        upstream: "/run/plasmosome/upstream.sock".to_string(),
+                        guest_path: "/run/agent.sock".to_string(),
+                    },
+                },
+                "BindUds",
+                r#"{"UdsSocket":{"path":"/run/plasmosome/egressd.uds","recipe":{"upstream":"/run/plasmosome/upstream.sock","guest_path":"/run/agent.sock"}}}"#,
+            ),
+            (
+                Capability::ProxyMap {
+                    host: "api.github.com".to_string(),
+                    route: "splice".to_string(),
+                    recipe: ProxyRecipe {
+                        transport: ProxyTransport::Tcp,
+                        destination: "api.github.com".to_string(),
+                        port: 443,
+                        allow_private: false,
+                    },
+                },
+                "SetProxyMap",
+                r#"{"ProxyMap":{"host":"api.github.com","route":"splice","recipe":{"transport":"tcp","destination":"api.github.com","port":443,"allow_private":false}}}"#,
+            ),
+            (
+                Capability::Broker {
+                    name: "egressd".to_string(),
+                    launch: BrokerLaunch {
+                        command: vec!["/usr/libexec/egressd".to_string(), "--serve".to_string()],
+                        control_socket: "/run/plasmosome/egressd.control".to_string(),
+                        data_socket: "/run/plasmosome/egressd.data".to_string(),
+                    },
+                },
+                "SpawnBroker",
+                r#"{"Broker":{"name":"egressd","launch":{"command":["/usr/libexec/egressd","--serve"],"control_socket":"/run/plasmosome/egressd.control","data_socket":"/run/plasmosome/egressd.data"}}}"#,
+            ),
+            (
+                mount("/srv/repo", "/workspace"),
+                "AddMount",
+                r#"{"Mount":{"source":"/srv/repo","target":"/workspace","recipe":{"access":"read_only"}}}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&capability).unwrap(), text);
+            assert_eq!(
+                serde_json::from_str::<Capability>(text).unwrap(),
+                capability
+            );
+            let fields = &text[text.find(":{").unwrap() + 2..text.len() - 2];
+            let operation_text =
+                format!(r#"{{"{variant}":{{"id":"{ID}",{fields},"owner":{owner_text}}}}}"#);
+            let op = operation(id, capability);
+            assert_eq!(serde_json::to_string(&op).unwrap(), operation_text);
+            assert_eq!(
+                serde_json::from_str::<UniverseOp>(&operation_text).unwrap(),
+                op
+            );
+        }
+    }
+
+    fn edited(
+        capability: &Capability,
+        edit: impl FnOnce(&mut serde_json::Map<String, Value>),
+    ) -> Value {
+        let mut encoded = capability_json(capability);
+        edit(
+            encoded
+                .as_object_mut()
+                .and_then(|outer| outer.values_mut().next())
+                .and_then(Value::as_object_mut)
+                .expect("a capability encodes its fields as an object"),
+        );
+        encoded
+    }
+
+    fn inside(
+        record: &str,
+        edit: impl FnOnce(&mut serde_json::Map<String, Value>),
+    ) -> impl FnOnce(&mut serde_json::Map<String, Value>) {
+        move |fields| edit(fields[record].as_object_mut().expect("a nested object"))
+    }
+
+    #[test]
+    fn decoding_refuses_a_missing_misshapen_or_pid_bearing_recipe_or_launch() {
+        let egressd = broker("egressd");
+        let proxy = proxy_map("api.github.com", "splice");
+        let mut rows = Vec::new();
+        for (capability, field) in [
+            (session_file("/skills/pr.md"), "recipe"),
+            (uds_socket("/run/plasmosome/egressd.uds"), "recipe"),
+            (proxy.clone(), "recipe"),
+            (egressd.clone(), "launch"),
+            (mount("/srv/repo", "/workspace"), "recipe"),
+        ] {
+            let missing = edited(&capability, |fields| {
+                fields.remove(field);
+            });
+            rows.push((missing, format!("missing field `{field}`")));
+        }
+        let pid = |fields: &mut serde_json::Map<String, Value>| {
+            fields.insert("pid".to_string(), json!(31337));
+        };
+        rows.push((edited(&egressd, pid), "unknown field `pid`".to_string()));
+        rows.push((
+            edited(&egressd, |fields| {
+                fields.remove("launch");
+                pid(fields);
+            }),
+            "unknown field `pid`".to_string(),
+        ));
+        rows.push((
+            edited(
+                &egressd,
+                inside("launch", |launch| {
+                    launch.remove("data_socket");
+                }),
+            ),
+            "missing field `data_socket`".to_string(),
+        ));
+        rows.push((
+            edited(
+                &proxy,
+                inside("recipe", |recipe| {
+                    recipe.insert("extra".to_string(), json!(true));
+                }),
+            ),
+            "unknown field `extra`".to_string(),
+        ));
+        rows.push((
+            edited(&mount("/srv/repo", "/workspace"), |fields| {
+                fields["recipe"] = json!(["read_only"]);
+            }),
+            "invalid type: sequence".to_string(),
+        ));
+        for (encoded, expected) in rows {
+            let operation = operation_json(GrantId::new(), encoded.clone());
+            for outcome in [
+                serde_json::from_value::<Capability>(encoded.clone()).map(drop),
+                serde_json::from_str::<Capability>(&encoded.to_string()).map(drop),
+                serde_json::from_value::<UniverseOp>(operation.clone()).map(drop),
+                serde_json::from_str::<UniverseOp>(&operation.to_string()).map(drop),
+            ] {
+                let error = outcome
+                    .expect_err(&format!("{encoded} must be refused"))
+                    .to_string();
+                assert!(
+                    error.contains(&expected),
+                    "{encoded} gave `{error}`, not `{expected}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_broker_is_keyed_by_its_name_and_compared_with_its_whole_launch() {
+        let first = broker("egressd");
+        let relaunched = Capability::Broker {
+            name: "egressd".to_string(),
+            launch: BrokerLaunch {
+                command: vec![
+                    "/usr/libexec/plasmosome-broker".to_string(),
+                    "--audit".to_string(),
+                ],
+                ..fixtures::launch()
+            },
+        };
+        assert_eq!(first.key(), "broker/egressd");
+        assert_eq!(relaunched.key(), first.key());
+        assert_ne!(relaunched, first);
+        assert_eq!(relaunched.class(), UniverseClass::BrokerPid);
+        assert_eq!(broker("auditd").key(), "broker/auditd");
+    }
+
+    #[test]
+    fn each_capability_is_keyed_as_its_doc_says() {
+        assert_eq!(session_file("/skills/pr.md").key(), "session//skills/pr.md");
+        assert_eq!(
+            uds_socket("/run/plasmosome/egressd.uds").key(),
+            "/run/plasmosome/egressd.uds"
+        );
+        assert_eq!(
+            proxy_map("api.github.com", "splice").key(),
+            "api.github.com"
+        );
+        assert_eq!(broker("egressd").key(), "broker/egressd");
+        assert_eq!(mount("/srv/repo", "/workspace").key(), "/workspace");
     }
 
     fn ms(count: u64) -> Duration {
