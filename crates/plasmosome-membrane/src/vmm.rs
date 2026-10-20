@@ -149,12 +149,17 @@ impl VmmChild {
     /// descriptors that are not yet close-on-exec. Called on the thread doing
     /// that creation, it forks nothing and returns
     /// `SpawnError::DescriptorLockHeld`.
+    #[allow(unsafe_code)]
     pub fn spawn(launcher: impl Launch) -> Result<VmmChild, SpawnError> {
         let pid = match crate::spawn_lock::fork()? {
             Forked::Parent(pid) => pid,
             Forked::Child => {
                 let _guard = ExitOnUnwind;
+                // SAFETY: setsid takes no arguments and is async-signal-safe, which is all this
+                // forked child may call.
                 if unsafe { libc::setsid() } == -1 {
+                    // SAFETY: _exit is async-signal-safe and ends the child without running a Rust
+                    // destructor.
                     unsafe { libc::_exit(71) }
                 }
                 launcher.launch()
@@ -329,11 +334,16 @@ impl VmmChild {
         }
     }
 
+    #[allow(unsafe_code)]
     fn signal_group_and_reap(
         &mut self,
         terminal: VmmState,
         blocking: bool,
     ) -> Result<VmmState, SupervisionError> {
+        // SAFETY: kill takes no pointer. Every caller passes a terminal state that a WNOWAIT wait
+        // observed without consuming it. The zombie leader then still holds its pid, and no other
+        // group can take its number, only while this handle is the only consuming waiter, as
+        // `VmmChild`'s doc requires.
         if unsafe { libc::kill(-self.pid, libc::SIGKILL) } == -1 {
             let errno = last_errno();
             let permitted = errno == libc::ESRCH
@@ -385,15 +395,20 @@ impl VmmChild {
         }
     }
 
+    #[allow(unsafe_code)]
     fn wait_once(
         &self,
         operation: SupervisionOperation,
         options: libc::c_int,
     ) -> Result<Option<VmmState>, SupervisionError> {
+        // SAFETY: siginfo_t is a plain C struct, for which all zeroes is a valid value.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a local siginfo_t that waitid may write, and waitid keeps no pointer.
         if unsafe { libc::waitid(libc::P_PID, self.pid as libc::id_t, &mut info, options) } == -1 {
             return Err(self.error(operation, None));
         }
+        // SAFETY: `info` was zeroed and then filled by waitid, so every byte is initialized, and
+        // any bit pattern is a valid pid_t.
         let reported = unsafe { info.si_pid() };
         if reported == 0 {
             return Ok(None);
@@ -438,7 +453,13 @@ impl VmmChild {
         }
     }
 
+    #[allow(unsafe_code)]
     fn signal_leader(&self) -> Result<(), SupervisionError> {
+        // SAFETY: kill takes no pointer, so the call is memory-safe whatever `self.pid` names. Its
+        // callers reach it only after observe found the child running. The pid still names the
+        // child then only while this handle is the only consuming waiter, as `VmmChild`'s doc
+        // requires. The test leader_signal_esrch_is_not_wait_authority_loss breaks that rule on
+        // purpose: it reaps the child itself first, to get ESRCH.
         if unsafe { libc::kill(self.pid, libc::SIGKILL) } == -1 {
             Err(self.error(SupervisionOperation::SignalLeader, None))
         } else {
@@ -639,12 +660,17 @@ impl Drop for VmmChild {
     }
 }
 
+#[allow(unsafe_code)]
 fn decode_info(info: &libc::siginfo_t) -> Option<VmmState> {
     match info.si_code {
         libc::CLD_EXITED => Some(VmmState::Exited {
+            // SAFETY: `info` is an initialized siginfo_t whose si_code is CLD_EXITED, so waitid
+            // filled si_status with the exit status, and any bit pattern is a valid c_int.
             code: unsafe { info.si_status() } & 0xff,
         }),
         libc::CLD_KILLED | libc::CLD_DUMPED => Some(VmmState::Signaled {
+            // SAFETY: `info` is an initialized siginfo_t whose si_code is CLD_KILLED or CLD_DUMPED,
+            // so waitid filled si_status with the signal, and any bit pattern is a valid c_int.
             signal: unsafe { info.si_status() },
         }),
         _ => None,
@@ -658,8 +684,16 @@ fn last_errno() -> i32 {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 unsafe extern "C" {
+    /// Reads the process table for the process group `leader` through sysctl. Returns 1 only when
+    /// every member is a zombie and `leader` appears exactly once, and 0 otherwise, including on
+    /// any error. It takes no pointer and keeps no state. When the group has more than one member
+    /// it calls `malloc` and `free`, so it must never run in a forked child, and any call can
+    /// change errno.
     fn plasmosome_darwin_group_all_zombies(leader: libc::pid_t) -> libc::c_int;
+    /// Runs one of the fixed scenarios 0 to 13 against a table it builds on its own stack, and
+    /// returns 1 or 0. It takes no pointer and keeps no state.
     #[cfg(test)]
     fn plasmosome_darwin_group_test_table(
         scenario: libc::c_int,
@@ -668,7 +702,10 @@ unsafe extern "C" {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 fn darwin_group_all_zombies(leader: libc::pid_t) -> bool {
+    // SAFETY: The foreign function takes a pid by value, only reads the process table, and keeps no
+    // state.
     unsafe { plasmosome_darwin_group_all_zombies(leader) == 1 }
 }
 
@@ -680,7 +717,10 @@ fn darwin_group_all_zombies(_leader: libc::pid_t) -> bool {
 struct ExitOnUnwind;
 
 impl Drop for ExitOnUnwind {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
+        // SAFETY: _exit is async-signal-safe and ends the forked child before the unwind goes
+        // further.
         unsafe { libc::_exit(70) }
     }
 }
@@ -700,7 +740,10 @@ mod tests {
     struct ExitWith(i32);
 
     impl Launch for ExitWith {
+        #[allow(unsafe_code)]
         fn launch(self) -> ! {
+            // SAFETY: _exit takes no pointer and is async-signal-safe, which is all this forked
+            // child may call.
             unsafe { libc::_exit(self.0) }
         }
     }
@@ -708,7 +751,10 @@ mod tests {
     struct DieBySignal(i32);
 
     impl Launch for DieBySignal {
+        #[allow(unsafe_code)]
         fn launch(self) -> ! {
+            // SAFETY: signal, raise and _exit take no pointer and are async-signal-safe, which is
+            // all this forked child may call.
             unsafe {
                 libc::signal(self.0, libc::SIG_DFL);
                 libc::raise(self.0);
@@ -720,8 +766,11 @@ mod tests {
     struct SleepForever;
 
     impl Launch for SleepForever {
+        #[allow(unsafe_code)]
         fn launch(self) -> ! {
             loop {
+                // SAFETY: pause takes no arguments and is async-signal-safe, which is all this
+                // forked child may call.
                 unsafe { libc::pause() };
             }
         }
@@ -738,8 +787,11 @@ mod tests {
     struct PipeEnd(i32);
 
     impl PipeEnd {
+        #[allow(unsafe_code)]
         fn close(mut self) {
             if self.0 >= 0 {
+                // SAFETY: `self.0` is a descriptor this PipeEnd owns. It is set to -1 below, so
+                // Drop skips it and it is closed once.
                 unsafe { libc::close(self.0) };
                 self.0 = -1;
             }
@@ -747,15 +799,20 @@ mod tests {
     }
 
     impl Drop for PipeEnd {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
             if self.0 >= 0 {
+                // SAFETY: `self.0` is a descriptor this PipeEnd owns and has not closed, since
+                // close sets it to -1.
                 unsafe { libc::close(self.0) };
             }
         }
     }
 
+    #[allow(unsafe_code)]
     fn pipe() -> (PipeEnd, PipeEnd) {
         let mut fds = [0; 2];
+        // SAFETY: `fds` is a local array of two c_int, the size pipe writes.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "a pipe opens");
         (PipeEnd(fds[0]), PipeEnd(fds[1]))
     }
@@ -780,10 +837,13 @@ mod tests {
                 .expect("the fixture still owns its leader")
         }
 
+        #[allow(unsafe_code)]
         fn release_live_worker(&mut self) {
             let release = self.release.take().expect("the worker is unreleased");
             let byte = b'x';
             assert_eq!(
+                // SAFETY: `byte` is a local and the length 1 matches it. `release` keeps its
+                // descriptor open for the call.
                 unsafe { libc::write(release.0, &byte as *const u8 as *const libc::c_void, 1,) },
                 1,
                 "the private control descriptor releases the live worker"
@@ -808,6 +868,7 @@ mod tests {
         }
     }
 
+    #[allow(unsafe_code)]
     fn spawn_with_worker(leader_exits: bool) -> WorkerFixture {
         let (ready_read, ready_write) = pipe();
         let (control_read, control_write) = pipe();
@@ -816,10 +877,14 @@ mod tests {
         let c_path = CString::new(liveness_path.as_os_str().as_bytes())
             .expect("the temporary path has no NUL");
         assert_eq!(
+            // SAFETY: `c_path` is a CString that lives until this function returns, and mkfifo
+            // keeps no pointer to it.
             unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) },
             0,
             "the worker liveness FIFO is created"
         );
+        // SAFETY: `c_path` is a CString that lives until this function returns, and open keeps no
+        // pointer to it.
         let liveness = unsafe {
             libc::open(
                 c_path.as_ptr(),
@@ -842,6 +907,8 @@ mod tests {
         wait_readable(&ready_read, DEADLINE);
         let mut byte = 0u8;
         assert_eq!(
+            // SAFETY: `byte` is a local that read may write, and the length 1 matches it.
+            // `ready_read` keeps its descriptor open.
             unsafe { libc::read(ready_read.0, &mut byte as *mut u8 as *mut libc::c_void, 1,) },
             1,
             "the execed worker announces readiness after opening its FIFO"
@@ -855,6 +922,7 @@ mod tests {
         }
     }
 
+    #[allow(unsafe_code)]
     fn wait_readable(pipe: &PipeEnd, patience: Duration) {
         let mut watched = libc::pollfd {
             fd: pipe.0,
@@ -863,6 +931,8 @@ mod tests {
         };
         let timeout = libc::c_int::try_from(patience.as_millis()).expect("timeout fits");
         loop {
+            // SAFETY: `watched` is one local pollfd, matching the count of 1, and `pipe` keeps its
+            // descriptor open.
             let ready = unsafe { libc::poll(&mut watched, 1, timeout) };
             if ready > 0 {
                 return;
@@ -872,10 +942,13 @@ mod tests {
         }
     }
 
+    #[allow(unsafe_code)]
     fn holds_open(pipe: &PipeEnd, patience: Duration) -> bool {
         let started = Instant::now();
         loop {
             let mut byte = 0u8;
+            // SAFETY: `byte` is a local that read may write, and the length 1 matches it. `pipe`
+            // keeps its descriptor open.
             let read = unsafe { libc::read(pipe.0, &mut byte as *mut u8 as *mut libc::c_void, 1) };
             if read == 0 {
                 return false;
@@ -910,10 +983,14 @@ mod tests {
         }
     }
 
+    #[allow(unsafe_code)]
     fn witness_unconsumed_exit(pid: i32, expected: VmmState) {
         let deadline = Instant::now() + DEADLINE;
         loop {
+            // SAFETY: siginfo_t is a plain C struct, for which all zeroes is a valid value.
             let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `info` is a local siginfo_t that waitid may write. WNOWAIT leaves the child
+            // unreaped.
             let waited = unsafe {
                 libc::waitid(
                     libc::P_PID,
@@ -923,6 +1000,8 @@ mod tests {
                 )
             };
             assert_eq!(waited, 0, "the exact direct child remains waitable");
+            // SAFETY: `info` was zeroed and then filled by waitid, so every byte is initialized,
+            // and any bit pattern is a valid pid_t.
             let reported = unsafe { info.si_pid() };
             if reported == pid {
                 assert_eq!(decode_info(&info), Some(expected));
@@ -937,18 +1016,24 @@ mod tests {
         }
     }
 
+    #[allow(unsafe_code)]
     fn assert_no_waitable_child(pid: i32) {
         let mut status = 0;
         assert_eq!(
+            // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of
+            // this process.
             unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
             -1
         );
         assert_eq!(last_errno(), libc::ECHILD);
     }
 
+    #[allow(unsafe_code)]
     fn reap_externally(pid: i32) {
         let mut status = 0;
         loop {
+            // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of
+            // this process.
             let reaped = unsafe { libc::waitpid(pid, &mut status, 0) };
             if reaped == pid {
                 return;
@@ -965,6 +1050,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     impl DarwinOwnedGroup {
+        #[allow(unsafe_code)]
         fn new(count: usize) -> DarwinOwnedGroup {
             let mut group = DarwinOwnedGroup {
                 pids: Vec::with_capacity(count),
@@ -974,9 +1060,14 @@ mod tests {
                 let (control_read, control_write) = pipe();
                 let (ready_read, ready_write) = pipe();
                 let leader = group.pids.first().copied().unwrap_or(0);
+                // SAFETY: The child runs only close, setpgid, write, read and _exit, which are
+                // async-signal-safe, so it cannot deadlock in this threaded test process.
                 let pid = unsafe { libc::fork() };
                 assert!(pid >= 0, "the certificate fixture fork succeeds");
                 if pid == 0 {
+                    // SAFETY: This is the forked child. Every call here is async-signal-safe, the
+                    // descriptors are its own copies, and `byte` and `release` are locals that
+                    // match the length 1.
                     unsafe {
                         libc::close(control_write.0);
                         libc::close(ready_read.0);
@@ -1007,6 +1098,8 @@ mod tests {
                 wait_readable(&ready_read, DEADLINE);
                 let mut byte = 0u8;
                 assert_eq!(
+                    // SAFETY: `byte` is a local that read may write, and the length 1 matches it.
+                    // `ready_read` keeps its descriptor open.
                     unsafe {
                         libc::read(ready_read.0, &mut byte as *mut u8 as *mut libc::c_void, 1)
                     },
@@ -1019,12 +1112,15 @@ mod tests {
             group
         }
 
+        #[allow(unsafe_code)]
         fn release(&mut self, index: usize) {
             let control = self.controls[index]
                 .take()
                 .expect("the owned member is unreleased");
             let byte = b'x';
             assert_eq!(
+                // SAFETY: `byte` is a local and the length 1 matches it. `control` keeps its
+                // descriptor open for the call.
                 unsafe { libc::write(control.0, &byte as *const u8 as *const libc::c_void, 1,) },
                 1,
                 "the private descriptor releases the owned group member"
@@ -1047,11 +1143,14 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     impl Drop for DarwinOwnedGroup {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
             self.controls.clear();
             for pid in self.pids.drain(..) {
                 let mut status = 0;
                 loop {
+                    // SAFETY: `status` is a local the call may write, and `pid` is a child this
+                    // group forked and has not reaped.
                     let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
                     if waited == pid || (waited == -1 && last_errno() == libc::ECHILD) {
                         break;
@@ -1334,9 +1433,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn leader_signal_esrch_is_not_wait_authority_loss() {
         let mut child = VmmChild::spawn(SleepForever).expect("fork succeeds");
         assert_eq!(child.observe(), Ok(VmmState::Running));
+        // SAFETY: kill takes no pointer. observe just found the child running, so it is unreaped
+        // and its pid still names it.
         assert_eq!(unsafe { libc::kill(child.pid(), libc::SIGKILL) }, 0);
         reap_externally(child.pid());
         let expected = SupervisionError {
@@ -1350,11 +1452,16 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn immediate_teardown_while_child_is_pre_setsid_reaps_exact_child() {
         let (gate_read, gate_write) = pipe();
+        // SAFETY: The child runs only close, read, setsid, pause and _exit, which are
+        // async-signal-safe, so it cannot deadlock in this threaded test process.
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "the instrumented fork succeeds");
         if pid == 0 {
+            // SAFETY: This is the forked child. Every call here is async-signal-safe, `byte` is a
+            // local that matches the length 1, and the descriptors are its own copies.
             unsafe {
                 libc::close(gate_write.0);
                 let mut byte = 0u8;
@@ -1389,6 +1496,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    #[allow(unsafe_code)]
     fn darwin_certificate_requires_complete_all_zombie_membership() {
         let mut singleton = DarwinOwnedGroup::new(1);
         singleton.release(0);
@@ -1406,6 +1514,8 @@ mod tests {
 
         for scenario in [0, 1, 12] {
             assert_eq!(
+                // SAFETY: The foreign function takes integers only and reads a table on its own
+                // stack.
                 unsafe { plasmosome_darwin_group_test_table(scenario, 4000) },
                 1,
                 "certificate scenario {scenario} is valid"
@@ -1413,6 +1523,8 @@ mod tests {
         }
         for scenario in [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13] {
             assert_eq!(
+                // SAFETY: The foreign function takes integers only and reads a table on its own
+                // stack.
                 unsafe { plasmosome_darwin_group_test_table(scenario, 4000) },
                 0,
                 "certificate scenario {scenario} fails closed"
@@ -1439,8 +1551,11 @@ mod signal_pressure {
     struct SleepForever;
 
     impl Launch for SleepForever {
+        #[allow(unsafe_code)]
         fn launch(self) -> ! {
             loop {
+                // SAFETY: pause takes no arguments and is async-signal-safe, which is all this
+                // forked child may call.
                 unsafe { libc::pause() };
             }
         }
@@ -1451,8 +1566,13 @@ mod signal_pressure {
     }
 
     impl InterruptingHandler {
+        #[allow(unsafe_code)]
         fn install() -> InterruptingHandler {
+            // SAFETY: libc::sigaction is a plain C struct, for which all zeroes is a valid value.
             let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+            // SAFETY: An all-zero sigaction is a valid empty action. The handler only adds to an
+            // atomic, which is async-signal-safe. `action` and `previous` are locals that outlive
+            // the calls.
             let installed = unsafe {
                 let mut action: libc::sigaction = std::mem::zeroed();
                 libc::sigemptyset(&mut action.sa_mask);
@@ -1469,12 +1589,18 @@ mod signal_pressure {
     }
 
     impl Drop for InterruptingHandler {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
+            // SAFETY: `self.previous` is the action sigaction saved at install, and sigaction only
+            // reads it.
             unsafe { libc::sigaction(libc::SIGUSR1, &self.previous, std::ptr::null_mut()) };
         }
     }
 
+    #[allow(unsafe_code)]
     fn set_sigusr1_blocked(blocked: bool) {
+        // SAFETY: All zeroes is a valid sigset_t, and sigemptyset then sets it. `set` is a local
+        // that outlives the calls, and pthread_sigmask changes only this thread's mask.
         unsafe {
             let mut set: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut set);
@@ -1495,7 +1621,9 @@ mod signal_pressure {
     }
 
     impl SignalStorm {
+        #[allow(unsafe_code)]
         fn aimed_at_this_thread() -> SignalStorm {
+            // SAFETY: pthread_self takes no arguments and cannot fail.
             let target = unsafe { libc::pthread_self() } as usize;
             let budget = Arc::new(AtomicUsize::new(0));
             let running = Arc::new(AtomicBool::new(true));
@@ -1510,6 +1638,10 @@ mod signal_pressure {
                             })
                             .is_ok();
                         if claimed {
+                            // SAFETY: `target` is the thread that made this storm. The storm is
+                            // `Send`, but its one caller keeps it a local of that thread, so its
+                            // Drop runs there and joins this thread first. The target is therefore
+                            // alive for every signal.
                             unsafe { libc::pthread_kill(target as libc::pthread_t, libc::SIGUSR1) };
                         } else {
                             std::thread::yield_now();
@@ -1553,6 +1685,7 @@ mod signal_pressure {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn a_reap_interrupted_by_a_signal_still_leaves_no_orphan() {
         let _handler = InterruptingHandler::install();
         let storm = SignalStorm::aimed_at_this_thread();
@@ -1567,6 +1700,8 @@ mod signal_pressure {
                 drop(child);
             }
             let mut status: libc::c_int = 0;
+            // SAFETY: `status` is a local the call may write, and waitpid can only reap a child of
+            // this process.
             let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
             let errno = std::io::Error::last_os_error().raw_os_error();
             assert!(

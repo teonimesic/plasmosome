@@ -15,10 +15,15 @@ const PATIENCE: Duration = Duration::from_secs(60);
 struct PausedChild(libc::pid_t, Cell<bool>);
 
 impl PausedChild {
+    #[allow(unsafe_code)]
     fn fork() -> PausedChild {
+        // SAFETY: The child runs only pause until it is killed, and pause is async-signal-safe, so
+        // the child of this threaded test process cannot deadlock.
         let pid = unsafe { libc::fork() };
         if pid == 0 {
             loop {
+                // SAFETY: pause takes no arguments and is async-signal-safe, which is all a forked
+                // child of a threaded process may call.
                 unsafe { libc::pause() };
             }
         }
@@ -26,11 +31,14 @@ impl PausedChild {
         PausedChild(pid, Cell::new(false))
     }
 
+    #[allow(unsafe_code)]
     fn is_alive(&self) -> bool {
         if self.1.get() {
             return false;
         }
         let mut status = 0;
+        // SAFETY: `status` is a local the call may write. `self.1` is false, so no wait has reaped
+        // `self.0` and its pid still names this child.
         let running = unsafe { libc::waitpid(self.0, &mut status, libc::WNOHANG) } == 0;
         self.1.set(!running);
         running
@@ -38,14 +46,18 @@ impl PausedChild {
 }
 
 impl Drop for PausedChild {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         if self.1.get() {
             return;
         }
+        // SAFETY: kill takes no pointer. `self.1` is false, so no wait has reaped `self.0` and its
+        // pid still names this child.
         unsafe { libc::kill(self.0, libc::SIGKILL) };
         let deadline = Instant::now() + PATIENCE;
         loop {
             let mut status = 0;
+            // SAFETY: `status` is a local the call may write, and only this loop reaps `self.0`.
             let reaped = unsafe { libc::waitpid(self.0, &mut status, libc::WNOHANG) };
             if reaped == self.0 || reaped == -1 {
                 return;
@@ -149,9 +161,12 @@ fn a_second_writer_in_another_process_is_refused() {
 }
 
 #[test]
+#[allow(unsafe_code)]
 fn a_killed_child_does_not_read_as_alive_before_anyone_reaps_it() {
     let child = PausedChild::fork();
     assert!(child.is_alive(), "a paused child reads as alive");
+    // SAFETY: kill takes no pointer. `child` has just read as alive, so it is not reaped and its
+    // pid still names it.
     unsafe { libc::kill(child.0, libc::SIGKILL) };
     let deadline = Instant::now() + PATIENCE;
     while child.is_alive() {

@@ -1,0 +1,36 @@
+name = "serde"
+range = "1"
+reason = """\
+  Derives Serialize and Deserialize for the types that cross the control sockets and live in \
+  recipes, manifests, ledgers and session logs, so that serde_json and toml can read and write \
+  them.\
+  """
+write_it_instead.lines = 4800
+write_it_instead.how = """\
+  On 2026-10-20, at main 8fe24e3, `git grep -h -o -E 'derive[(][^)]*[)]' -- '*.rs' | grep -o \
+  Deserialize | wc -l` gives 65 Deserialize derives, the same command with Serialize gives 59, \
+  and `git grep -l -E 'derive[(][^)]*(Serialize|Deserialize)' -- '*.rs' | wc -l` gives 13 files. \
+  `git grep -h -o -E '#[[]serde[(][^]]*[]]' -- '*.rs' | grep -o -E '[a-z_]+' | sort | uniq -c` \
+  lists the words in their attributes, among them deny_unknown_fields 29, remote 24, default 23, \
+  skip_serializing_if 17, deserialize_with 9, rename_all 7, expecting 5, rename 1 and untagged \
+  1. `git grep -h -o -E 'impl(<[^>]*>)? \
+  (serde::|de::)?(Serialize|Deserialize<.de>|Visitor<.de>|DeserializeSeed<.de>) for' -- '*.rs' | \
+  wc -l` finds 41 impls already written by hand against serde's traits. Those traits cannot go, \
+  because serde_json and toml reach our types only through them, so a replacement covers what \
+  the derive generates. It writes 59 Serialize impls at about 15 lines each (900) and 65 \
+  Deserialize impls, with their unknown-field refusal and missing-field errors, at about 60 each \
+  (3900): 4800 lines. Replacing it removes nothing from Cargo.lock: toml, toml_edit, criterion \
+  and others bring serde too, and serde_json brings it through a cfg(any()) dependency.\
+  """
+exception = ""
+brings = ["proc-macro2@1", "quote@1", "serde_core@1", "serde_derive@1", "syn@3", "unicode-ident@1"]
+build_time_code = [
+  "proc-macro2@1 build script",
+  "quote@1 build script",
+  "serde@1 build script",
+  "serde_core@1 build script",
+  "serde_derive@1 proc macro",
+]
+expands_unsafe = "none"
+native_code = "none"
+verdict = "kept-pending-owner"

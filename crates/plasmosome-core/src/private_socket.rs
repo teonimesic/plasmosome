@@ -202,12 +202,15 @@ struct BoundEntry {
 }
 
 impl Drop for BoundEntry {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         if let Ok(facts) = stat_at(&self.dir.dir, &self.name)
             && facts.kind == Kind::Socket
             && facts.dev == self.entry.dev
             && facts.ino == self.entry.ino
         {
+            // SAFETY: `self.name` is a CString this entry owns, and `self.dir` keeps the directory
+            // descriptor open for the call. unlinkat keeps no pointer to the name.
             unsafe { libc::unlinkat(self.dir.dir.as_raw_fd(), self.name.as_ptr(), 0) };
         }
     }
@@ -225,12 +228,14 @@ impl PrivateListener {
     /// no part. The listener is nonblocking. A caller that forks from another thread must hold
     /// its descriptor lock around this call, because on macOS the socket is created before it
     /// is marked close-on-exec.
+    #[allow(unsafe_code)]
     pub fn bind(
         dir: PrivateDir,
         name: &str,
         trusted_uid: u32,
     ) -> Result<PrivateListener, PrivateSocketError> {
         let (socket, bound) = prepare(dir, name)?;
+        // SAFETY: listen takes no pointer, and `socket` keeps its descriptor open for the call.
         if unsafe { libc::listen(socket.as_raw_fd(), 16) } != 0 {
             return Err(io_failure(
                 "listen",
@@ -295,9 +300,11 @@ pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 fn kernel_peer_uid(fd: RawFd) -> io::Result<u32> {
     let mut uid: libc::uid_t = 0;
     let mut gid: libc::gid_t = 0;
+    // SAFETY: `uid` and `gid` are locals that getpeereid may write, and it keeps neither pointer.
     if unsafe { libc::getpeereid(fd, &mut uid, &mut gid) } == 0 {
         Ok(uid)
     } else {
@@ -306,6 +313,7 @@ fn kernel_peer_uid(fd: RawFd) -> io::Result<u32> {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
 fn kernel_peer_uid(fd: RawFd) -> io::Result<u32> {
     let mut credentials = libc::ucred {
         pid: 0,
@@ -313,6 +321,8 @@ fn kernel_peer_uid(fd: RawFd) -> io::Result<u32> {
         gid: 0,
     };
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `credentials` is a local libc::ucred and `length` holds its exact size, so getsockopt
+    // writes at most that many bytes into it.
     let outcome = unsafe {
         libc::getsockopt(
             fd,
@@ -364,7 +374,9 @@ pub fn check_private_path(
 }
 
 /// The effective UID of this process.
+#[allow(unsafe_code)]
 pub fn effective_uid() -> u32 {
+    // SAFETY: geteuid takes no arguments and cannot fail.
     unsafe { libc::geteuid() }
 }
 
@@ -686,6 +698,7 @@ fn prepare_with(
     prepare_as(dir, name, effective_uid(), after_bind)
 }
 
+#[allow(unsafe_code)]
 fn prepare_as(
     dir: PrivateDir,
     name: &str,
@@ -708,6 +721,8 @@ fn prepare_as(
         }
     }
     let socket = unix_socket().map_err(|error| io_failure("socket", &path, &error))?;
+    // SAFETY: address_for filled `address`, and `length` covers only its used part, so bind reads
+    // initialized bytes of a live local.
     let outcome = unsafe {
         libc::bind(
             socket.as_raw_fd(),
@@ -751,9 +766,12 @@ fn prepare_as(
     Ok((socket, bound))
 }
 
+#[allow(unsafe_code)]
 fn restrict_to_owner(bound: &BoundEntry) -> Result<(), PrivateSocketError> {
     let dir = bound.dir.dir.as_raw_fd();
     let name = bound.name.as_ptr();
+    // SAFETY: `name` points into `bound.name`, a CString that outlives this function, and
+    // `bound.dir` keeps `dir` open. fchmodat keeps no pointer.
     if unsafe { libc::fchmodat(dir, name, 0o600, libc::AT_SYMLINK_NOFOLLOW) } == 0 {
         return Ok(());
     }
@@ -776,6 +794,8 @@ fn restrict_to_owner(bound: &BoundEntry) -> Result<(), PrivateSocketError> {
             });
         }
     }
+    // SAFETY: `name` points into `bound.name`, a CString that outlives this function, and
+    // `bound.dir` keeps `dir` open. fchmodat keeps no pointer.
     if unsafe { libc::fchmodat(dir, name, 0o600, 0) } == 0 {
         return Ok(());
     }
@@ -823,8 +843,10 @@ fn entry_name(name: &str) -> Result<CString, PrivateSocketError> {
     CString::new(name).map_err(|_| bad())
 }
 
+#[allow(unsafe_code)]
 fn address_for(path: &Path) -> Result<(libc::sockaddr_un, libc::socklen_t), PrivateSocketError> {
     let bytes = path.as_os_str().as_bytes();
+    // SAFETY: sockaddr_un is a plain C struct, for which all zeroes is a valid value.
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     let max = address.sun_path.len() - 1;
     if bytes.len() > max {
@@ -841,7 +863,9 @@ fn address_for(path: &Path) -> Result<(libc::sockaddr_un, libc::socklen_t), Priv
     Ok((address, length as libc::socklen_t))
 }
 
+#[allow(unsafe_code)]
 fn open_root() -> io::Result<OwnedFd> {
+    // SAFETY: The path is a static NUL-terminated string, and open keeps no pointer to it.
     let raw = unsafe {
         libc::open(
             c"/".as_ptr(),
@@ -851,6 +875,7 @@ fn open_root() -> io::Result<OwnedFd> {
     if raw < 0 {
         Err(io::Error::last_os_error())
     } else {
+        // SAFETY: open returned a non-negative descriptor just above, which nothing else owns.
         Ok(unsafe { OwnedFd::from_raw_fd(raw) })
     }
 }
@@ -861,6 +886,7 @@ const SEARCH_ONLY: libc::c_int = libc::O_SEARCH;
 #[cfg(target_os = "linux")]
 const SEARCH_ONLY: libc::c_int = libc::O_PATH;
 
+#[allow(unsafe_code)]
 fn open_child(
     parent: &OwnedFd,
     name: &CStr,
@@ -868,6 +894,8 @@ fn open_child(
     access: libc::c_int,
     judge: impl FnOnce(&Facts, &Path) -> Result<(), PrivateSocketError>,
 ) -> Result<OwnedFd, PrivateSocketError> {
+    // SAFETY: `name` is a CStr that outlives the call, and `parent` keeps its descriptor open for
+    // it. openat keeps no pointer to the name.
     let raw = unsafe {
         libc::openat(
             parent.as_raw_fd(),
@@ -876,6 +904,7 @@ fn open_child(
         )
     };
     if raw >= 0 {
+        // SAFETY: openat returned a non-negative descriptor just above, which nothing else owns.
         return Ok(unsafe { OwnedFd::from_raw_fd(raw) });
     }
     let errno = last_errno();
@@ -905,8 +934,12 @@ fn open_child(
     })
 }
 
+#[allow(unsafe_code)]
 fn stat_fd(fd: &OwnedFd, at: &Path) -> Result<Facts, PrivateSocketError> {
+    // SAFETY: libc::stat is a plain C struct, for which all zeroes is a valid value.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `fd` keeps its descriptor open, and `stat` is a local libc::stat that fstat may
+    // write.
     if unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } == 0 {
         Ok(Facts::of(&stat))
     } else {
@@ -914,8 +947,12 @@ fn stat_fd(fd: &OwnedFd, at: &Path) -> Result<Facts, PrivateSocketError> {
     }
 }
 
+#[allow(unsafe_code)]
 fn stat_at(dir: &OwnedFd, name: &CStr) -> Result<Facts, i32> {
+    // SAFETY: libc::stat is a plain C struct, for which all zeroes is a valid value.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `name` is a CStr that outlives the call, `dir` keeps its descriptor open, and `stat`
+    // is a local libc::stat that fstatat may write.
     let outcome = unsafe {
         libc::fstatat(
             dir.as_raw_fd(),
@@ -931,16 +968,22 @@ fn stat_at(dir: &OwnedFd, name: &CStr) -> Result<Facts, i32> {
     }
 }
 
+#[allow(unsafe_code)]
 fn unix_socket() -> io::Result<OwnedFd> {
     #[cfg(target_os = "linux")]
+    // SAFETY: socket takes no pointer.
     let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
     #[cfg(target_os = "macos")]
+    // SAFETY: socket takes no pointer.
     let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
     if raw < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: socket returned a non-negative descriptor just above, which nothing else owns.
     let socket = unsafe { OwnedFd::from_raw_fd(raw) };
     #[cfg(target_os = "macos")]
+    // SAFETY: fcntl with F_SETFD takes an integer flag, not a pointer, and `socket` keeps its
+    // descriptor open.
     if unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -982,8 +1025,12 @@ fn refuse_replacing_acl(_dir: &OwnedFd, _at: &Path) -> Result<(), PrivateSocketE
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 fn refuse_ignored_ownership(dir: &OwnedFd, at: &Path) -> Result<(), PrivateSocketError> {
+    // SAFETY: libc::statfs is a plain C struct, for which all zeroes is a valid value.
     let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `dir` keeps its descriptor open, and `stats` is a local libc::statfs that fstatfs may
+    // write.
     let ignored = if unsafe { libc::fstatfs(dir.as_raw_fd(), &mut stats) } == 0 {
         Ok(stats.f_flags & libc::MNT_IGNORE_OWNERSHIP as u32 != 0)
     } else {
@@ -1025,18 +1072,32 @@ mod darwin_acl {
         | KAUTH_ACE_GENERIC_ALL
         | KAUTH_ACE_GENERIC_WRITE;
 
+    #[allow(unsafe_code)]
     unsafe extern "C" {
+        /// Reads only the descriptor. Returns a new ACL that the caller frees once with acl_free,
+        /// or null with errno set.
         fn acl_get_fd_np(fd: c_int, kind: c_int) -> *mut c_void;
+        /// Reads `acl`, a live ACL, and writes one entry pointer to `entry`, which points into
+        /// `acl` and dies with it. Returns 0 when it found an entry.
         fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
+        /// Reads `entry`, an entry of a live ACL, and writes one tag to `tag`. Returns 0 on
+        /// success, or -1 with errno set.
         fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
+        /// Reads `entry`, an entry of a live ACL, and writes one mask to `mask`. Returns 0 on
+        /// success, or -1 with errno set.
         fn acl_get_permset_mask_np(entry: *mut c_void, mask: *mut u64) -> c_int;
+        /// Frees an object an acl function allocated. It must be called once per object, and the
+        /// object is not used again.
         fn acl_free(object: *mut c_void) -> c_int;
     }
 
     struct Acl(*mut c_void);
 
     impl Acl {
+        #[allow(unsafe_code)]
         fn of(dir: &OwnedFd) -> Result<Option<Acl>, (&'static str, i32)> {
+            // SAFETY: acl_get_fd_np reads only the descriptor, which `dir` keeps open. A non-null
+            // result is a new ACL that this Acl then owns.
             let acl = unsafe { acl_get_fd_np(dir.as_raw_fd(), ACL_TYPE_EXTENDED) };
             if !acl.is_null() {
                 return Ok(Some(Acl(acl)));
@@ -1049,10 +1110,13 @@ mod darwin_acl {
             }
         }
 
+        #[allow(unsafe_code)]
         fn entries(&self) -> impl Iterator<Item = *mut c_void> + '_ {
             let mut which = ACL_FIRST_ENTRY;
             std::iter::from_fn(move || {
                 let mut entry = std::ptr::null_mut();
+                // SAFETY: `self.0` is a live ACL from acl_get_fd_np, freed only in Drop, and
+                // `entry` is a local the call may write.
                 let found = unsafe { acl_get_entry(self.0, which, &mut entry) } == 0;
                 which = ACL_NEXT_ENTRY;
                 found.then_some(entry)
@@ -1061,7 +1125,10 @@ mod darwin_acl {
     }
 
     impl Drop for Acl {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
+            // SAFETY: `self.0` is the non-null ACL acl_get_fd_np returned, and Drop runs once, so
+            // it is freed exactly once.
             unsafe { acl_free(self.0) };
         }
     }
@@ -1070,12 +1137,15 @@ mod darwin_acl {
         Ok(Acl::of(dir)?.is_some_and(|acl| acl.entries().next().is_some()))
     }
 
+    #[allow(unsafe_code)]
     pub(super) fn allows_replacing_entries(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
         let Some(acl) = Acl::of(dir)? else {
             return Ok(false);
         };
         for entry in acl.entries() {
             let mut tag = 0;
+            // SAFETY: `entry` came from acl.entries() and points into `acl`, which lives through
+            // the loop. `tag` is a local the call may write.
             if unsafe { acl_get_tag_type(entry, &mut tag) } != 0 {
                 return Err(("acl_get_tag_type", super::last_errno()));
             }
@@ -1083,6 +1153,8 @@ mod darwin_acl {
                 continue;
             }
             let mut mask = 0;
+            // SAFETY: `entry` came from acl.entries() and points into `acl`, which lives through
+            // the loop. `mask` is a local the call may write.
             if unsafe { acl_get_permset_mask_np(entry, &mut mask) } != 0 {
                 return Err(("acl_get_permset_mask_np", super::last_errno()));
             }
@@ -1100,8 +1172,11 @@ fn acl_present(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
 fn acl_present(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
     for attribute in [c"system.posix_acl_access", c"system.posix_acl_default"] {
+        // SAFETY: `attribute` is a static NUL-terminated name, and `dir` keeps its descriptor open.
+        // A null buffer of size 0 asks only for the size, so nothing is written.
         let size = unsafe {
             libc::fgetxattr(dir.as_raw_fd(), attribute.as_ptr(), std::ptr::null_mut(), 0)
         };
@@ -1710,9 +1785,13 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn check_peer_uid_refuses_a_socket_without_peer_credentials() {
+        // SAFETY: socket takes no pointer.
         let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
         assert!(raw >= 0, "socket: {}", std::io::Error::last_os_error());
+        // SAFETY: The assert above shows `raw` is a non-negative descriptor, and nothing else owns
+        // it.
         let stream = UnixStream::from(unsafe { OwnedFd::from_raw_fd(raw) });
         assert_eq!(
             peer_uid(&stream).unwrap_err().raw_os_error(),
