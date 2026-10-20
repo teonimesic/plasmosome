@@ -7,16 +7,19 @@ reason = """\
   """
 write_it_instead.lines = 560
 write_it_instead.how = """\
-  On 2026-10-20, git grep -o 'libc::<name>' finds 169 distinct names in 20 files under \
-  crates/plasmosome-core and crates/plasmosome-membrane: 60 functions, 10 structs, 15 type \
-  aliases and C scalar types, and 87 constants, where stat, statfs and sigaction each name a \
-  struct and a function. Declaring them for aarch64-apple-darwin and x86_64-unknown-linux-gnu \
-  takes about 110 lines of extern declarations, 240 of struct layouts (stat, statfs, sigaction, \
-  siginfo_t, sigset_t and sockaddr_un differ between the two), 30 of types and 175 of constants, \
-  many of whose values differ by platform: about 560 lines. Nothing here would check those \
-  layouts against the C headers, as libc's own test suite does. sha2 reaches libc through \
-  cpufeatures on aarch64-apple-darwin, so dropping the direct use would leave libc locked and \
-  linked.\
+  On 2026-10-20, at main 8fe24e3, `git grep -h -o -E 'libc::[A-Za-z_][A-Za-z0-9_]*' -- '*.rs' | \
+  sort -u | wc -l` gives 169 distinct names, and `git grep -l 'libc::' -- '*.rs' | wc -l` gives \
+  20 files, all under crates/plasmosome-core and crates/plasmosome-membrane. Read one by one in \
+  libc 0.2.189's src, they are about 60 functions, 10 structs, 15 type aliases and C scalar \
+  types, and 87 constants; stat, statfs and sigaction each name both a struct and a function. A \
+  replacement declares them for aarch64-apple-darwin and x86_64-unknown-linux-gnu. It needs \
+  extern declarations (110 lines); struct layouts, since stat, statfs, sigaction, siginfo_t, \
+  sigset_t and sockaddr_un differ between the two hosts (240); types (30); and constants, many \
+  of whose values differ by host (180): 560 lines. Nothing here would check those layouts \
+  against the C headers, as libc's own test suite does. Replacing it removes nothing from \
+  Cargo.lock. libc stays locked on both hosts through getrandom (which uuid and tempfile bring), \
+  errno, rustix and wait-timeout, and on aarch64-apple-darwin also through sha2's cpufeatures. \
+  On x86_64-unknown-linux-gnu, sha2 does not reach libc.\
   """
 exception = ""
 brings = []

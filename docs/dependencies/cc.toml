@@ -6,12 +6,14 @@ reason = """\
   """
 write_it_instead.lines = 80
 write_it_instead.how = """\
-  On 2026-10-20, git grep -n 'cc::' finds one use, in crates/plasmosome-membrane/build.rs: \
-  Build::new() with one file, flag_if_supported("-std=c11"), warnings, extra_warnings and \
-  compile. Writing that here means running $CC, or cc, with -c, -std=c11, -Wall and -Wextra, the \
-  optimisation and debug flags cargo passes in OPT_LEVEL and DEBUG, and the target's -arch and \
-  deployment target; then running ar, and printing the two cargo:rustc-link lines. That is about \
-  80 lines for the one host that compiles it.\
+  On 2026-10-20, at main 8fe24e3, `git grep -n 'cc::' -- '*.rs'` finds one use, at \
+  crates/plasmosome-membrane/build.rs line 5: Build::new() with one file, \
+  flag_if_supported("-std=c11"), warnings, extra_warnings and compile, on macOS only. A \
+  replacement in that build script needs: choosing the compiler and its flags from CC, CFLAGS, \
+  OPT_LEVEL, DEBUG and TARGET, with -std=c11, -Wall, -Wextra, -arch and the deployment target \
+  (40 lines); running it on the file and reporting a failure (20); running ar (10); and printing \
+  the cargo:rustc-link-search and cargo:rustc-link-lib lines (10): 80 lines. Replacing it \
+  removes 3 packages from Cargo.lock: cc@1, find-msvc-tools@0.1 and shlex@2.\
   """
 exception = ""
 brings = ["find-msvc-tools@0.1", "shlex@2"]
