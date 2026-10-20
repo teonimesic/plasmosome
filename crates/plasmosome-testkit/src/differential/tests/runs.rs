@@ -183,16 +183,19 @@ fn a_ruled_field_of_a_reach_probe_is_still_noise_and_still_a_difference() {
 
 #[test]
 fn a_reach_probe_equal_in_one_pair_of_boots_does_not_discriminate() {
-    let mut runs = runs();
-    let open = &mut observation(&mut runs, Lane::Open, 0, "refusal-host-1").fields;
-    open.insert("outcome".to_string(), json!("name does not resolve"));
-    assert_eq!(
-        verdict(&manifest(), &runs),
-        Verdict::Fail(vec![
-            noise("refusal-host-1", Lane::Open, "outcome"),
-            finding("refusal-host-1", Reason::NoDiscrimination),
-        ])
-    );
+    for run in 0..2 {
+        let mut runs = runs();
+        let open = &mut observation(&mut runs, Lane::Open, run, "refusal-host-1").fields;
+        open.insert("outcome".to_string(), json!("name does not resolve"));
+        assert_eq!(
+            verdict(&manifest(), &runs),
+            Verdict::Fail(vec![
+                noise("refusal-host-1", Lane::Open, "outcome"),
+                finding("refusal-host-1", Reason::NoDiscrimination),
+            ]),
+            "open run {run}"
+        );
+    }
 }
 
 #[test]
@@ -243,7 +246,7 @@ fn a_failure_in_a_completed_run_is_listed_when_the_lanes_other_run_is_not_run() 
 
 #[test]
 fn every_completed_run_is_compared_with_every_completed_run_of_the_other_lane() {
-    for swapped in [false, true] {
+    for swaps in 0..8 {
         let mut runs = runs();
         let hint = &mut observation(&mut runs, Lane::Cell, 0, "hint-env").fields;
         hint.insert("HOME".to_string(), json!("/home/plasmosome"));
@@ -252,9 +255,10 @@ fn every_completed_run_is_compared_with_every_completed_run_of_the_other_lane() 
         never_discriminates(&mut runs, "refusal-host-1");
         observation(&mut runs, Lane::Open, 1, "refusal-host-1").completed = false;
         observation(&mut runs, Lane::Absent, 0, "refusal-host-1").completed = false;
-        if swapped {
-            runs.swap(0, 1);
-            runs.swap(2, 3);
+        for lane in Lane::ALL {
+            if swaps & (1 << lane as usize) != 0 {
+                runs.swap(2 * lane as usize, 2 * lane as usize + 1);
+            }
         }
         assert_eq!(
             verdict(&manifest(), &runs),
@@ -270,7 +274,7 @@ fn every_completed_run_is_compared_with_every_completed_run_of_the_other_lane() 
                     super::differs("hint-env", "HOME"),
                 ],
             },
-            "cell and open runs swapped: {swapped}"
+            "runs swapped in the lanes {swaps:03b}"
         );
     }
 }
@@ -278,19 +282,21 @@ fn every_completed_run_is_compared_with_every_completed_run_of_the_other_lane() 
 #[test]
 fn a_probe_whose_two_runs_differ_is_noise_in_that_lane() {
     for lane in Lane::ALL {
-        let mut runs = runs();
-        observation(&mut runs, lane, 1, "hint-cgroup")
-            .fields
-            .insert("controllers".to_string(), json!("cpu memory"));
-        let mut expected = vec![noise("hint-cgroup", lane, "controllers")];
-        if lane != Lane::Open {
-            expected.push(super::differs("hint-cgroup", "controllers"));
+        for run in 0..2 {
+            let mut runs = runs();
+            observation(&mut runs, lane, run, "hint-cgroup")
+                .fields
+                .insert("controllers".to_string(), json!("cpu memory"));
+            let mut expected = vec![noise("hint-cgroup", lane, "controllers")];
+            if lane != Lane::Open {
+                expected.push(super::differs("hint-cgroup", "controllers"));
+            }
+            assert_eq!(
+                verdict(&manifest(), &runs),
+                Verdict::Fail(expected),
+                "{lane:?} run {run}"
+            );
         }
-        assert_eq!(
-            verdict(&manifest(), &runs),
-            Verdict::Fail(expected),
-            "{lane:?}"
-        );
     }
 }
 
