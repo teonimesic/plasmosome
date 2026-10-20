@@ -1,3 +1,34 @@
+use plasmosome_backend::CellId;
+
+const PREFIX: &str = "cell-";
+
+const MAX_DIGITS: usize = 10;
+
+/// The largest number a cell ID may carry: spec 023 §1 caps an ID at ten
+/// digits.
+pub const MAX_CELL_NUMBER: u64 = 9_999_999_999;
+
+/// Reads spec 023 §2's cell ID: exactly `cell-` followed by one to ten ASCII
+/// digits, the first not `0`. Returns the number, from 1 to
+/// [`MAX_CELL_NUMBER`]; any other text is `None`.
+pub fn parse_cell_id(text: &str) -> Option<u64> {
+    let digits = text.strip_prefix(PREFIX)?;
+    let well_formed = (1..=MAX_DIGITS).contains(&digits.len())
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && !digits.starts_with('0');
+    if !well_formed {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Writes the cell ID `cell-<number>`. `number` must be from 1 to
+/// [`MAX_CELL_NUMBER`]; any other number gives an ID [`parse_cell_id`]
+/// refuses.
+pub fn format_cell_id(number: u64) -> CellId {
+    CellId::from(format!("{PREFIX}{number}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
