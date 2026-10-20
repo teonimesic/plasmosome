@@ -286,10 +286,11 @@ carries. That needs the `AGENTS.md` amendment below.
   forbid package, and no safety comment is asked for. The record's `expands_unsafe` field covers
   the range as reviewed; a compatible bump can add such a macro unseen. A PR whose code in a forbid
   package first calls a macro some record lists there says why. A forbid package's own
-  `#[macro_export]` macro is another crate's macro to its doctests and integration tests, which
-  compile as separate crates. So a macro whose body holds `unsafe` runs there with no refusal and
-  no safety comment, while a call inside the library is refused. The reviewer reads the body of
-  such a macro. Amended on 2026-10-20: this bullet named only a dependency's macro.
+  `#[macro_export]` macro is another crate's macro to every target outside its library: doctests,
+  integration tests, binaries, examples and benches, which compile as separate crates. So a macro
+  whose body holds `unsafe` runs there with no refusal and no safety comment, while a call inside
+  the library is refused. The reviewer reads the body of such a macro. Amended on 2026-10-20: this
+  bullet named only a dependency's macro.
 - **Build settings that weaken lints.** `--cap-lints` in rustflags silences both the forbid and
   clippy. `-A` in rustflags silences the two clippy lints but not the forbid. Cargo places rustflags
   after the manifest's `--forbid=unsafe_code`, and rustc keeps a forbidden level, so with
@@ -449,7 +450,7 @@ when Q1 is answered. It never names a route nobody receives.
 | An unlisted licence | Reviewer at PR time; release step at release | Below the bar until something ships (Q8) |
 | `unsafe` in a forbid package or outside an allowed item; a missing `// SAFETY:` comment or `# Safety` section | The compiler and clippy, through declared lint levels. In doctests, only a forbid package's library-root attribute declares a level, and clippy never runs | Not a guard. See the spec 013 amendment. Corrected on 2026-10-20: this row did not say that doctests are reached only through that attribute. |
 | A forbid package's library root without `#![doc(test(attr(forbid(unsafe_code))))]`; in a register package, an `unsafe` block in a doctest without the `allow(unsafe_code)` and `// SAFETY:` comment that library code needs | Reviewer | Judgement. Each change shows in the diff: the deleted or misspelled attribute, and the `unsafe` block in the example. Section 8 reads the attribute as code. Amended on 2026-10-20: this row is new. |
-| `unsafe` expanded from a dependency's macro, or from a forbid package's own exported macro in its doctests and integration tests | The record's `expands_unsafe` field and the reviewer; for a package's own macro, the reviewer alone | Judgement, because no lint sees it. Amended on 2026-10-20: this row named only a dependency's macro. |
+| `unsafe` expanded from a dependency's macro, or from a forbid package's own exported macro in any target outside its library: doctests, integration tests, binaries, examples and benches | The record's `expands_unsafe` field and the reviewer; for a package's own macro, the reviewer alone | Judgement, because no lint sees it. Amended on 2026-10-20: this row named only a dependency's macro. |
 | An `allow(unsafe_code)` wider than an item or a named FFI module; an undocumented `unsafe extern` declaration; joining the register without both lints or a reason | Reviewer | Judgement |
 | Native code in a forbid package | The compiler, for linked code; the reviewer, for test-built programs | Judgement for the second |
 | A dependency rule that is a judgement: the thousand-line rule, the narrowest crate, features, record contents, release age, a stale record, an approval link, a copied crate | Reviewer | Judgement |
