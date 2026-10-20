@@ -56,7 +56,8 @@ When the key is absent, the controller behaves as if the file existed and listed
 ### 2. When it is read, and what never reads it
 
 The file is read once per resolving request, at the start of resolution. One read serves every
-member of that request's closure. Each later request reads it again.
+member of that request's closure. That read also resolves each attachment's lifetime (spec 028).
+Each later request reads it again.
 
 Startup, recovery, `plasmosome.status`, `plasmosome.recovery`, `cell.list`, `cell.status`,
 `plasmid.list`, `plasmid.remove`, `cell.kill` and every withdrawal never open it. A missing,
@@ -132,6 +133,8 @@ sources for its cell.
 - `declaration` is optional: the absolute path of the plasmid's declaration file, for local
   selection (§5).
 - `proxy_maps` and `mounts` are required arrays and may be empty.
+- `lifetime` is optional: `{"lease_ms": N}` with an optional `"idle_ms": N`, each 1,000 to
+  2,592,000,000 (30 days), or the string `"until_revoked"` (spec 028).
 - A ProxyMap entry has exactly `host`, `port`, `modes`, `route`, `transport`, `destination` and
   `allow_private`. `host` follows spec 001's proxy host rule (a lower-case DNS name). `modes` is a
   nonempty set over `simulate | capture | passthrough` with no repeats. `route` is a nonempty,
@@ -192,7 +195,7 @@ attached are not resolved again.
 covers a port that is not an integer from 1 to 65535, a repeated port, hosts with no ports, a host
 that is not a lower-case DNS name, a repeated host, a CIDR that does not parse or has host bits set,
 a `[workspace]` with no `mount`, and a `dst` that is relative, has a trailing slash, contains `.`,
-`..` or NUL, or is `/`. Port faults follow spec 011 (`011:230-232`) and name the entry by its index
+`..` or NUL, or is `/`. Port faults follow spec 011 (`011:231-233`) and name the entry by its index
 in its own section, such as `network.ports[i]`. A repeated port is the repeat, with `fix` exactly
 `remove this entry`. An entry that is not an integer from 1 to 65535 has `fix` the port the entry
 evidently means when the list does not already declare it, and otherwise `remove this entry`. Hosts
@@ -225,10 +228,10 @@ destination is not eligible, since its addresses are unknown until connection. W
 entry, the result is the 103 above.
 
 **One meaning per host and port in a cell.** The guest's network is per cell, and a new flow
-selects among the cell's grants for its host. So the controller compares every new ProxyMap with
-the others and with every ProxyMap the cell holds, leaving out the holdings this same reload
-replaces. For one host, port and transport, all must come from the same mode and carry the same
-recipe:
+selects among the cell's grants for its host, port and transport (spec 001 §4.2). So the controller
+compares every new ProxyMap with the others and with every ProxyMap the cell holds, leaving out the
+holdings this same reload replaces. For one host, port and transport, all must come from the same
+mode and carry the same recipe:
 
 - different modes refuse with 104: `node` the plasmid with the other mode, `modes` both modes,
   `plasmids` both plasmids, `resolutions` `["remove_plasmid"]`;
@@ -238,9 +241,8 @@ recipe:
 So two attached plasmids that share a host cannot move it to a new destination by reload: each
 reload meets the other's held recipe. The operator removes one, reloads the other, and re-adds.
 
-Spec 001 §4.2 selects among a host's grants by host alone, so a host held on two ports, or over
-TCP and UDP, always selects one grant and the other's flows refuse. That defect predates this
-spec and is tracked in task plasmosome-e6m.
+Spec 001 §4.2 selects a new flow's grant by its host, port and transport, so a host held on two
+ports, or over TCP and UDP, serves each flow from the grant for its own port and transport.
 
 **A mode never changes after attach** (the default pending owner question 6). A mode now selects
 which entries realize a plasmid's hosts, so changing it would change a grant. When D2b
@@ -298,9 +300,10 @@ several apply, which one is returned is not part of the contract.
 ### 8. Reload
 
 Nothing watches the file, and an attach never re-resolves an attached plasmid. `plasmid.reload`
-re-resolves the plasmid at its held mode against the file as it is then. A local member re-reads
-its declaration at the path the file lists now. A registry member keeps its exact imported
-declaration (spec 001 §3.12); only its entries are re-read.
+re-resolves the plasmid at its held mode against the file as it is then. It does not re-resolve or
+change the plasmid's lifetime (spec 028). A local member re-reads its declaration at the path the
+file lists now. A registry member keeps its exact imported declaration (spec 001 §3.12); only its
+entries are re-read.
 
 **A reload never widens.** It refuses with 109 `widening_forbidden`, `plasmid` the plasmid,
 before prepare, when the re-resolved set has any of these against what the plasmid holds:
@@ -585,7 +588,7 @@ ProxyMap (O-11) or Mount (O-7).
 ## Out of scope
 
 - How ProxyMap and Mount are enforced. That is spec 017 and spec 001 §4.2.
-- Selecting a proxy grant by port and transport, which is task plasmosome-e6m.
+- Selecting a proxy grant by port and transport, which spec 001 §4.2 does.
 - The approval gate for a declaration. That is open in spec 011 and intent 010.
 - Credential custody, command subjects and attestation.
 - A local genome grammar.

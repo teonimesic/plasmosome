@@ -1,5 +1,6 @@
 use plasmosome_backend::{
-    CellId, CellOwner, Diff, EnforcementBackend, FakeBackend, GrantId, PluginId, UniverseOp,
+    Capability, CellId, CellOwner, Diff, EnforcementBackend, FakeBackend, GrantId, PluginId,
+    UniverseOp,
 };
 use plasmosome_ledger::{Closure, Effect, Force, InverseVia, Ledger};
 use proptest::prelude::*;
@@ -12,6 +13,44 @@ fn generated_owner() -> CellOwner {
     CellOwner {
         cell: generated_cell(),
         plugin: PluginId::from("generated"),
+    }
+}
+
+fn session_file(path: &str) -> Capability {
+    Capability::SessionFile {
+        path: path.to_string(),
+    }
+}
+
+fn proxy_map(host: &str, route: &str) -> Capability {
+    Capability::ProxyMap {
+        host: host.to_string(),
+        route: route.to_string(),
+    }
+}
+
+fn op(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
+    match capability {
+        Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
+        Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
+        Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
+            id,
+            host,
+            route,
+            owner,
+        },
+        Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
+            id,
+            pid,
+            name,
+            owner,
+        },
+        Capability::Mount { source, target } => UniverseOp::AddMount {
+            id,
+            source,
+            target,
+            owner,
+        },
     }
 }
 
@@ -49,11 +88,11 @@ impl GeneratedEffect {
     fn setup_and_effect(&self) -> (Option<UniverseOp>, Effect) {
         match self {
             GeneratedEffect::ExactFile { index } => {
-                let op = UniverseOp::WriteSessionFile {
-                    id: GrantId::new(),
-                    path: format!("/skills/generated-{index}.md"),
-                    owner: generated_owner(),
-                };
+                let op = op(
+                    GrantId::new(),
+                    generated_owner(),
+                    session_file(&format!("/skills/generated-{index}.md")),
+                );
                 let effect = Effect::exact(
                     format!("exact file {index}"),
                     InverseVia::Universe(op.removal()),
@@ -61,12 +100,11 @@ impl GeneratedEffect {
                 (Some(op), effect)
             }
             GeneratedEffect::CompensatingProxy { index } => {
-                let op = UniverseOp::SetProxyMap {
-                    id: GrantId::new(),
-                    host: format!("host-{index}.example.test"),
-                    route: "staged".to_string(),
-                    owner: generated_owner(),
-                };
+                let op = op(
+                    GrantId::new(),
+                    generated_owner(),
+                    proxy_map(&format!("host-{index}.example.test"), "staged"),
+                );
                 let effect =
                     Effect::compensating(format!("compensating proxy {index}"), op.removal());
                 (Some(op), effect)
