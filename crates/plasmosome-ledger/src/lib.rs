@@ -347,12 +347,17 @@ impl DetachReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetachError {
     Backend(BackendError),
+    CellChanged { began: CellId, requested: CellId },
 }
 
 impl fmt::Display for DetachError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DetachError::Backend(e) => write!(f, "ledger replay failed: {e}"),
+            DetachError::CellChanged { began, requested } => write!(
+                f,
+                "ledger detach began in cell {began} and cannot resume in cell {requested}"
+            ),
         }
     }
 }
