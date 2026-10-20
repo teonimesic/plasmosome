@@ -784,11 +784,13 @@ fn a_record_with_a_repeated_key_at_any_depth_is_refused() {
     }
 }
 
-const REFUSED_TARGET_NAMES: [&str; 23] = [
+const REFUSED_TARGET_NAMES: [&str; 25] = [
     "an unversioned record",
     "the format before the current one",
     "the format after the current one",
     "a format 2 record whose only inverse is a session file removal",
+    "a format 2 record whose only inverse is a broker removal by pid",
+    "a format number too large for a byte",
     "a format 1 record",
     "a numeric backend handle",
     "a universe inverse without its id",
@@ -813,7 +815,7 @@ const REFUSED_TARGET_NAMES: [&str; 23] = [
 struct RefusedTarget {
     name: &'static str,
     bytes: Vec<u8>,
-    open_refuses_on_line: Option<usize>,
+    open_refuses: Option<(usize, &'static str)>,
 }
 
 fn one_effect_ledger(plugin: &str, description: &str, path: &str) -> Ledger {
@@ -895,10 +897,10 @@ fn refused_targets() -> Vec<RefusedTarget> {
     invalid_utf8.extend_from_slice(before_description.as_bytes());
     invalid_utf8.extend_from_slice(b"entry \xff");
     invalid_utf8.extend_from_slice(after_description.as_bytes());
-    let row = |name, text: String, line| RefusedTarget {
+    let row = |name, text: String, refusal| RefusedTarget {
         name,
         bytes: text.into_bytes(),
-        open_refuses_on_line: line,
+        open_refuses: refusal,
     };
     vec![
         row(
@@ -906,31 +908,48 @@ fn refused_targets() -> Vec<RefusedTarget> {
             changed(&first, |record| {
                 record.as_object_mut().unwrap().remove("format");
             }),
-            Some(1),
+            Some((1, "missing field `format`")),
         ),
         row(
             "the format before the current one",
             changed(&first, |record| {
                 record["format"] = serde_json::json!(format - 1)
             }),
-            Some(1),
+            Some((1, "unsupported ledger format 2; expected 3")),
         ),
         row(
             "the format after the current one",
             unsupported_later.clone(),
-            Some(1),
+            Some((1, "unsupported ledger format 4; expected 3")),
         ),
         row(
             "a format 2 record whose only inverse is a session file removal",
             changed(&without(&first, &session_file, "recipe"), |record| {
                 record["format"] = serde_json::json!(2)
             }),
-            Some(1),
+            Some((1, "unsupported ledger format 2; expected 3")),
+        ),
+        row(
+            "a format 2 record whose only inverse is a broker removal by pid",
+            changed(&without(&broker_line, &broker_at, "launch"), |record| {
+                record
+                    .pointer_mut(&broker_at)
+                    .and_then(serde_json::Value::as_object_mut)
+                    .unwrap()
+                    .insert("pid".to_string(), serde_json::json!(31337));
+                record["format"] = serde_json::json!(2);
+            }),
+            Some((1, "unsupported ledger format 2; expected 3")),
+        ),
+        row(
+            "a format number too large for a byte",
+            changed(&first, |record| record["format"] = serde_json::json!(256)),
+            Some((1, "unsupported ledger format 256; expected 3")),
         ),
         row(
             "a format 1 record",
             changed(&first, |record| record["format"] = serde_json::json!(1)),
-            Some(1),
+            Some((1, "unsupported ledger format 1; expected 3")),
         ),
         row(
             "a numeric backend handle",
@@ -938,7 +957,7 @@ fn refused_targets() -> Vec<RefusedTarget> {
                 record["effect"]["reversibility"]["Exact"]["via"] =
                     serde_json::json!({"Backend": 7})
             }),
-            Some(1),
+            Some((1, "invalid type: integer `7`")),
         ),
         row(
             "a universe inverse without its id",
@@ -949,7 +968,7 @@ fn refused_targets() -> Vec<RefusedTarget> {
                     .unwrap()
                     .remove("id");
             }),
-            Some(1),
+            Some((1, "missing field `id`")),
         ),
         row(
             "an unknown field nested in a capability",
@@ -962,7 +981,7 @@ fn refused_targets() -> Vec<RefusedTarget> {
                     .unwrap()
                     .insert("obsolete".to_string(), serde_json::json!("discarded"));
             }),
-            Some(1),
+            Some((1, "unknown field `obsolete`")),
         ),
         row(
             "an unknown field in a delayed outbox",
@@ -970,7 +989,7 @@ fn refused_targets() -> Vec<RefusedTarget> {
                 &effect_line(Effect::delayed_unpublished("outbox/github", "payload")),
                 "/effect/reversibility/Delayed",
             ),
-            Some(1),
+            Some((1, "unknown field `obsolete`")),
         ),
         row(
             "an unknown field in an external policy",
@@ -978,7 +997,7 @@ fn refused_targets() -> Vec<RefusedTarget> {
                 &effect_line(Effect::external("the comment left the host")),
                 "/effect/reversibility/External",
             ),
-            Some(1),
+            Some((1, "unknown field `obsolete`")),
         ),
         row(
             "a broker carrying a pid",
@@ -989,47 +1008,47 @@ fn refused_targets() -> Vec<RefusedTarget> {
                     .unwrap()
                     .insert("pid".to_string(), serde_json::json!(31337));
             }),
-            Some(1),
+            Some((1, "unknown field `pid`")),
         ),
         row(
             "a capability without its recipe",
             without(&first, &session_file, "recipe"),
-            Some(1),
+            Some((1, "missing field `recipe`")),
         ),
         row(
             "a broker launch without data_socket",
             without(&broker_line, &format!("{broker_at}/launch"), "data_socket"),
-            Some(1),
+            Some((1, "missing field `data_socket`")),
         ),
         row(
             "an unknown field inside a recipe",
             with_unknown_field(&first, &format!("{session_file}/recipe")),
-            Some(1),
+            Some((1, "unknown field `obsolete`")),
         ),
         row(
             "a key repeated with its own value",
             first.replacen(path_once, &format!("{path_once},{path_once}"), 1),
-            Some(1),
+            Some((1, "duplicate field `path`")),
         ),
         RefusedTarget {
             name: "invalid UTF-8 in a complete line",
             bytes: invalid_utf8,
-            open_refuses_on_line: Some(2),
+            open_refuses: Some((2, "invalid utf-8 sequence")),
         },
         row(
             "a malformed line between two valid records",
             format!("{first}{}\n{second}", &first[..first.len() / 2]),
-            Some(2),
+            Some((2, "EOF while parsing")),
         ),
         row(
             "an empty line between two valid records",
             format!("{first}\n{second}"),
-            Some(2),
+            Some((2, "EOF while parsing a value")),
         ),
         row(
             "a complete final record of an unsupported format without LF",
             format!("{first}{}", unsupported_later.trim_end()),
-            Some(2),
+            Some((2, "unsupported ledger format 4; expected 3")),
         ),
         row(
             "two valid records naming different plugins",
@@ -1037,12 +1056,12 @@ fn refused_targets() -> Vec<RefusedTarget> {
                 "{first}{}",
                 encoded_line("audit", "entry two", "/skills/b.md")
             ),
-            Some(2),
+            Some((2, "`github-pr` and `audit`")),
         ),
         row(
             "a torn final record that ends with LF",
             format!("{first}{}\n", &second[..second.len() - 12]),
-            Some(2),
+            Some((2, "EOF while parsing")),
         ),
         row(
             "a valid record followed by a torn final fragment",
@@ -1066,18 +1085,20 @@ fn open_file_refuses_each_refused_target_on_its_line_and_keeps_its_bytes() {
     for target in refused_targets() {
         checked.push(target.name);
         std::fs::write(&log, &target.bytes).unwrap();
-        match (Ledger::open_file(&log), target.open_refuses_on_line) {
-            (Err(error), Some(line))
+        match (Ledger::open_file(&log), target.open_refuses) {
+            (Err(error), Some((line, reason)))
                 if error.kind() == std::io::ErrorKind::InvalidData
-                    && error.to_string().contains(&format!("on line {line}:")) => {}
+                    && error
+                        .to_string()
+                        .contains(&format!("on line {line}: {reason}")) => {}
             (Ok(ledger), None)
                 if ledger
                     .effects()
                     .iter()
                     .map(|effect| effect.description.as_str())
                     .eq(["entry one"]) => {}
-            (outcome, line) => problems.push(format!(
-                "{}: {outcome:?}, expected a refusal on line {line:?}",
+            (outcome, refusal) => problems.push(format!(
+                "{}: {outcome:?}, expected the refusal {refusal:?}",
                 target.name
             )),
         }
