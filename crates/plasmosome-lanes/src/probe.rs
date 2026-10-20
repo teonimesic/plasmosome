@@ -193,6 +193,11 @@ pub fn holder_name_ok(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// The virtio devices and block devices under the sysfs root `sys`.
+pub fn devices(_sys: &Path) -> Value {
+    json!({"probe": "devices", "ok": false, "error": "not written yet"})
+}
+
 /// Resolve `path` without following a final symlink.
 pub fn lookup(path: &Path) -> Value {
     line(

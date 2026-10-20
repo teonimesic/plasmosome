@@ -346,3 +346,8 @@ pub fn unverified_images(
         .cloned()
         .collect()
 }
+
+/// True when `path` resolves to a file inside `dir`.
+pub fn is_inside(_dir: &Path, _path: &Path) -> bool {
+    false
+}
