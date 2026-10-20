@@ -295,18 +295,20 @@ impl InstanceRoot {
     /// Retires a cell (spec 023 §7 step 5, and §8): renames `cells/<cell>` to `retired/<cell>`
     /// and unlinks nothing, so the journal, the markers, a stale `membrane.uds` and `runtime/`
     /// all move with it. It needs this root's writer lock; a lock taken on another root is
-    /// `ForeignLock` and nothing is created or moved.
+    /// `ForeignLock` and nothing is created or moved. The caller must also hold the cell's
+    /// `supervisor.lock`, as spec 023 requires, which shows that no `membraned` still runs in
+    /// the directory; this call does not take or check that lock.
     ///
     /// `retired` is created when it is missing. Every call sets it to mode 0700 and syncs the
-    /// root, as [`InstanceRoot::create_cell_dir`] does for `cells`. A symlink or anything but a
-    /// directory there is `RetiredNotADirectory`. The name `cells/<cell>` must still be the
-    /// directory `cell` holds, by device and inode, or the call is `Moved`. The rename never
-    /// replaces: an existing `retired/<cell>` is `AlreadyRetired`. On Linux that needs a
-    /// filesystem with `RENAME_NOREPLACE`; on one without it the rename is an `Io` error and
-    /// nothing is replaced. After the rename, `cells` and then `retired` are synced; if either
-    /// sync fails, the cell is already under `retired` and the error names the directory that
-    /// failed. The identity check and the rename are two steps, so this relies on the controller
-    /// being the only writer of `cells`.
+    /// root, as [`InstanceRoot::create_cell_dir`] does for `cells`; if that sync fails, nothing
+    /// is moved. A symlink or anything but a directory there is `RetiredNotADirectory`. The name
+    /// `cells/<cell>` must still be the directory `cell` holds, by device and inode, or the call
+    /// is `Moved`. The rename never replaces: an existing `retired/<cell>` is `AlreadyRetired`.
+    /// On Linux that needs a filesystem with `RENAME_NOREPLACE`; on one without it the rename is
+    /// an `Io` error and nothing is replaced. After the rename, `cells` and then `retired` are
+    /// synced; if either sync fails, the cell is already under `retired` and the error names the
+    /// directory that failed. The identity check and the rename are two steps, so this relies on
+    /// the controller being the only writer of `cells`.
     pub fn retire(&self, lock: &WriterLock, cell: CellDir) -> Result<(), RetireError> {
         if lock.root != self.identity {
             return Err(RetireError::ForeignLock {
@@ -330,7 +332,7 @@ impl InstanceRoot {
             Naming::Exact => {}
             Naming::Alias | Naming::Gone => return Err(RetireError::Moved { path: cell_path }),
         }
-        rename_no_replace(cells.as_fd(), &name, retired.as_fd()).map_err(|source| {
+        rename_no_replace(cells.as_fd(), &name, retired.as_fd(), &name).map_err(|source| {
             if source.raw_os_error() == Some(libc::EEXIST) {
                 RetireError::AlreadyRetired {
                     path: retired_path.join(cell.cell.as_str()),
@@ -568,12 +570,19 @@ impl CellDir {
     }
 
     /// Creates spec 023 §3's `launched` marker, which records this cell and `boot_session` and
-    /// no clean stop. It is created exclusively, without following a symlink, with mode 0600
-    /// whatever the umask; then the file is synced, and then this directory. Any existing entry
-    /// named `launched` is `AlreadyExists` and is left as it was. A cell ID that is not spec
-    /// 023's `cell-<n>` is `InvalidCell` and nothing is created, since
-    /// [`LaunchedMarker::decode`] would refuse its record. A failure after the create leaves
-    /// the file, which [`CellDir::read_launched`] then reports as `Unreadable`.
+    /// no clean stop. The record is written to `launched.tmp`, created exclusively without
+    /// following a symlink, with mode 0600 whatever the umask, and synced. It is then renamed to
+    /// `launched` without replacing anything, and this directory is synced. A reader sees no
+    /// marker or the whole record, never part of it. Any `launched.tmp` left by an earlier call
+    /// is removed first. An existing entry named `launched`, a symlink included, is
+    /// `AlreadyExists`: it is left as it was, and the temporary is removed. A cell ID that is not
+    /// spec 023's `cell-<n>` is `InvalidCell` and nothing is written, since
+    /// [`CellDir::read_launched`] would refuse its record.
+    ///
+    /// A failure before the rename leaves no `launched`, so `read_launched` reports `Absent`; it
+    /// may leave `launched.tmp`, which the next call removes. If the directory sync fails, the
+    /// marker is already in place: `read_launched` reports it as `Present`, a retry is
+    /// `AlreadyExists`, and [`CellDir::sync`] completes the sync.
     pub fn create_launched(&self, boot_session: BootSession) -> Result<(), CellDirError> {
         if parse_cell_id(self.cell.as_str()).is_none() {
             return Err(CellDirError::InvalidCell(CellPathError::NotACellName(
@@ -585,7 +594,21 @@ impl CellDir {
             boot_session,
             stopped: false,
         };
-        self.write_new_file(LAUNCHED_FILE, &marker.encode())?;
+        let path = self.entry_path(LAUNCHED_FILE);
+        self.write_temporary(&marker.encode())?;
+        match rename_no_replace(
+            self.dir.as_fd(),
+            LAUNCHED_TEMPORARY,
+            self.dir.as_fd(),
+            LAUNCHED_FILE,
+        ) {
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+                remove_at(self.dir.as_fd(), LAUNCHED_TEMPORARY)
+                    .map_err(cell_dir_io(&self.entry_path(LAUNCHED_TEMPORARY)))?;
+                return Err(CellDirError::AlreadyExists { path });
+            }
+            renamed => renamed.map_err(cell_dir_io(&path))?,
+        }
         self.sync_dir()
     }
 
@@ -636,6 +659,10 @@ impl CellDir {
     /// never part of either. It needs this cell's marker: with none it is `Missing`, and an
     /// unreadable one is `MarkerUnreadable`; either way nothing is written. A stopped marker is
     /// written again unchanged.
+    ///
+    /// A failure before the rename leaves the old record, and may leave `launched.tmp`, which the
+    /// next call removes. If the directory sync fails, the new record is already in place, and a
+    /// retry writes it again and syncs.
     pub fn mark_launched_stopped(&self) -> Result<(), CellDirError> {
         let path = self.entry_path(LAUNCHED_FILE);
         let marker = match self.read_launched() {
@@ -649,11 +676,7 @@ impl CellDir {
             stopped: true,
             ..marker
         };
-        match remove_at(self.dir.as_fd(), LAUNCHED_TEMPORARY) {
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
-            removed => removed.map_err(cell_dir_io(&self.entry_path(LAUNCHED_TEMPORARY)))?,
-        }
-        self.write_new_file(LAUNCHED_TEMPORARY, &stopped.encode())?;
+        self.write_temporary(&stopped.encode())?;
         rename_at(self.dir.as_fd(), LAUNCHED_TEMPORARY, LAUNCHED_FILE)
             .map_err(cell_dir_io(&path))?;
         self.sync_dir()
@@ -708,7 +731,9 @@ impl CellDir {
     /// is created exclusively, without following a symlink, with mode 0600 whatever the umask;
     /// then the file is synced, and then this directory. It needs the writer lock of the root
     /// this directory was opened from; another root's lock is `ForeignLock` and nothing is
-    /// created. Any existing entry named `created` is `AlreadyExists`.
+    /// created. Any existing entry named `created` is `AlreadyExists`. If either sync fails,
+    /// `created` is already in place: [`CellDir::has_created`] reports `true`, and a retry is
+    /// `AlreadyExists`.
     pub fn create_created(&self, lock: &WriterLock) -> Result<(), CellDirError> {
         if lock.root != self.root {
             return Err(CellDirError::ForeignLock {
@@ -729,6 +754,14 @@ impl CellDir {
             .parent()
             .map_or_else(PathBuf::new, Path::to_path_buf);
         self.sync().map_err(cell_dir_io(&path))
+    }
+
+    fn write_temporary(&self, contents: &[u8]) -> Result<(), CellDirError> {
+        match remove_at(self.dir.as_fd(), LAUNCHED_TEMPORARY) {
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+            removed => removed.map_err(cell_dir_io(&self.entry_path(LAUNCHED_TEMPORARY)))?,
+        }
+        self.write_new_file(LAUNCHED_TEMPORARY, contents)
     }
 
     fn write_new_file(&self, name: &CStr, contents: &[u8]) -> Result<(), CellDirError> {
@@ -1530,16 +1563,21 @@ fn rename_at(dir: BorrowedFd<'_>, from: &CStr, to: &CStr) -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn rename_no_replace(from: BorrowedFd<'_>, name: &CStr, to: BorrowedFd<'_>) -> io::Result<()> {
-    // SAFETY: `name` is a CStr that outlives the call, and the two BorrowedFds keep both
-    // directories open for it. renameatx_np keeps no pointer to the name, and RENAME_EXCL makes
-    // it fail with EEXIST rather than replace an existing entry.
+fn rename_no_replace(
+    from: BorrowedFd<'_>,
+    from_name: &CStr,
+    to: BorrowedFd<'_>,
+    to_name: &CStr,
+) -> io::Result<()> {
+    // SAFETY: both names are CStrs that outlive the call, and the two BorrowedFds keep both
+    // directories open for it. renameatx_np keeps no pointer to either name, and RENAME_EXCL
+    // makes it fail with EEXIST rather than replace an existing entry.
     let renamed = unsafe {
         libc::renameatx_np(
             from.as_raw_fd(),
-            name.as_ptr(),
+            from_name.as_ptr(),
             to.as_raw_fd(),
-            name.as_ptr(),
+            to_name.as_ptr(),
             libc::RENAME_EXCL,
         )
     };
@@ -1551,16 +1589,21 @@ fn rename_no_replace(from: BorrowedFd<'_>, name: &CStr, to: BorrowedFd<'_>) -> i
 
 #[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
-fn rename_no_replace(from: BorrowedFd<'_>, name: &CStr, to: BorrowedFd<'_>) -> io::Result<()> {
-    // SAFETY: `name` is a CStr that outlives the call, and the two BorrowedFds keep both
-    // directories open for it. renameat2 keeps no pointer to the name, and RENAME_NOREPLACE
+fn rename_no_replace(
+    from: BorrowedFd<'_>,
+    from_name: &CStr,
+    to: BorrowedFd<'_>,
+    to_name: &CStr,
+) -> io::Result<()> {
+    // SAFETY: both names are CStrs that outlive the call, and the two BorrowedFds keep both
+    // directories open for it. renameat2 keeps no pointer to either name, and RENAME_NOREPLACE
     // makes it fail with EEXIST rather than replace an existing entry.
     let renamed = unsafe {
         libc::renameat2(
             from.as_raw_fd(),
-            name.as_ptr(),
+            from_name.as_ptr(),
             to.as_raw_fd(),
-            name.as_ptr(),
+            to_name.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
     };
