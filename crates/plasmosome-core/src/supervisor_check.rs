@@ -116,8 +116,9 @@ pub enum QueryResult {
 /// What the controller does after one query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryOutcome {
-    /// The supervisor is live: attach it to the cell. This does not promise the cell is served:
-    /// spec 008's journal replay can still quarantine it.
+    /// The supervisor is live: adopt the cell as spec 023 §8 says. That does not promise the
+    /// cell is served: its journal can still quarantine it under spec 008, and the no-`created`
+    /// rule can end it.
     Adopt,
     /// Query again before the cap.
     KeepWaiting,
@@ -128,10 +129,11 @@ pub enum QueryOutcome {
 /// Decides what one query's result means. `cap_reached` is true once the answer cap has passed.
 /// A supervisor that answers any lifecycle but `germinating` is adopted, `dead` included.
 ///
-/// Pass only an answer that arrived within the cap. Once the cap has passed, send no new query:
-/// call this once more with the last result that arrived within the cap, or `NoAnswer` if there
-/// was none, and `cap_reached` true. A germinating cell whose cap passes between two queries is
-/// then set aside as `germinating`, not `unresponsive`.
+/// Pass only an answer that arrived within the cap. A query the cap cuts off gives no result:
+/// pass the result before it. Once the cap has passed, send no new query: call this once more
+/// with the last result that arrived within the cap, or `NoAnswer` if there was none, and
+/// `cap_reached` true. A cell that kept answering `germinating` is then set aside as
+/// `germinating`, not `unresponsive`, whether the cap passed between two queries or during one.
 pub const fn after_query(result: QueryResult, cap_reached: bool) -> QueryOutcome {
     match (result, cap_reached) {
         (
