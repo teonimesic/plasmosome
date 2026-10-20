@@ -13,12 +13,12 @@ serde = { workspace = true }
 serde_core = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
-toml_edit = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
+toml_edit = { workspace = true, features = ["parse"] }
 
 [lib]
 name = "plasmosome_core"

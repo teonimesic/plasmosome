@@ -54,7 +54,7 @@ impl.wasm = "github-pr.wasm"
 }
 ```
 
-Missing or invalid purpose, tool declarations and missing/non-string IDs return
+Missing or invalid purpose, tool declarations and missing, empty or non-string IDs return
 `ManifestError::Field` with the declaration ID when available, a TOML field path and a suggested
 repair. Credential-reference refusals use that same form, including the indexed reference and,
 for command credentials, the quoted command key. So does a `ports` value that is not a list, or an
@@ -65,8 +65,45 @@ otherwise `remove this entry`. A value that is not a list is named `network.port
 `ports = [P]` or `remove this entry`. Following a fix never drops a valid declared port, repeats
 one, or adds one the author did not evidently write. A port inside a nested array, an inline table
 or a string such as `"443, 8080"` is removed, not unwrapped. The parser itself never drops or
-wraps an entry. Other manifest errors retain their existing forms. `ToolDeclaration` lives in
-`plasmosome_core::manifest`; `RegistryEntry` includes the tool's description.
+wraps an entry.
+
+Every other refusal of what a declaration says takes the same form, naming the plasmid: a network
+section that is not a table; a top-level `[network]` that names no host (a command's own network
+section with no host still parses); `hosts`, `pin_cidrs` or `[mock]` `hosts` that are not lists
+of strings; a declaration with no capability and no implementation, or whose only capability is
+an empty commands table; `[commands]`, its commands table or a command that is not a table, or
+`[commands]` with no commands table; a command whose `exec` is missing, is not a list or names no
+program; and a `[mock]` with no `[network]`, or naming a host `[network]` does not declare. In
+`hosts`, `pin_cidrs` and `[mock]` `hosts`, an entry that is not a string is named by its index.
+Its fix is `remove this entry`, except in a pin list with no string entry, where it is the
+example pin `"192.0.2.0/24"`: removing the last pin would leave egress unpinned.
+
+For a network section that is not a table, or a `hosts` that is not a list, the fix uses the
+string the author wrote there. For the top-level `[network]`, it then uses the `[mock]` hosts.
+The `[mock]` check also runs before the no-host check, so an empty top-level `hosts` is offered
+the `[mock]` hosts. Only after those does a fix name the example `api.example.com`. A `[mock]`
+`hosts` with no string in it, and a `[mock]` with no host and no `[network]`, get
+`remove this entry`. A command fix runs the program the author wrote, else the command's key,
+else `command-name`.
+
+A fix built from a list the author wrote names each entry once, keeping the first:
+`commands = ["gh", "gh"]` gets one `[commands.commands.gh]` section, since TOML refuses a
+repeated key, and repeated `[mock]` hosts give one host. A fix applies when the field's parents
+are tables, not inline tables: a section fix cannot extend a command written as an inline table,
+which already holds for a `[provides]` binding written that way. A refused `scope.path_scope`
+gets `scope = { path_scope = [...] }`, written in place of `scope`, not of the field.
+
+Paths, the plasmid ID, refused values and fixes are written as TOML: a key that is not bare, and
+every string, is a basic string on one line. Every control character is escaped, and so are the
+line and paragraph separators U+2028 and U+2029 and the bidi controls U+200E, U+200F, U+202A to
+U+202E and U+2066 to U+2069, which a client can read as a line break or a reordering. A command's
+refusals name it by its TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file
+could not be read) and `ManifestError::Parse` (the text is not TOML) carry no field: the TOML
+parser reports a position, not a field path, and naming one would be a guess. A `Parse` error
+quotes the source line, and its text is written with the same escapes, keeping its line breaks.
+`WireError::manifest_refusal` turns any of them into code 108, carrying the fix when there is one.
+`ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
+description.
 
 Credential `delivery` is optional in both `[secrets]` and command-local refs. Omission derives one
 mode: `handle` for `wasm`, `helper` for `git`, and `inject` for `http` or `process` that declare
@@ -120,6 +157,28 @@ there with a composed non-ASCII ID such as `café` is stored as other bytes, and
 that ID every time. APFS and ext4 keep the bytes a name was created with. Spec 023
 allocates ASCII `cell-<n>` IDs, which are stored as given everywhere; nothing here refuses a
 non-ASCII ID on HFS+ at creation.
+
+## Configuration
+
+`plasmosomed` takes one JSON object, read by `parse_config`:
+
+```json
+{"control_socket": "/private/path/control.uds", "name": "work",
+ "instance_root": "/private/path/instance", "recovery_deadline_ms": 5000,
+ "registry_root": "/private/path/imports"}
+```
+
+- `control_socket` is the path the daemon binds, and `name` is the instance it answers for.
+- `instance_root` is required and absolute. The trusted operator supplies it (spec 008); it is
+  never inferred from `control_socket`, even when the socket sits in the usual instance layout.
+- `recovery_deadline_ms` is required: a whole number of milliseconds, at least 1.
+- `registry_root` is optional and absolute when given. Without it the daemon is purely local;
+  no other path, `HOME` or request supplies a default.
+
+The config must be one JSON object: an array is refused rather than read by position. An unknown
+key, a key given twice, or an explicit `null` refuses the config, and the refusal names the key.
+The binary prints it and exits 2. This build checks these keys for shape only: it does not open
+the instance root, recover cells or read registry imports (spec 001 §6, item 7).
 
 ## Socket ownership
 
