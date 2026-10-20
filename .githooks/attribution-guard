@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # A person is accountable for every commit here. A model is a tool that was used, the way an
-# editor or a compiler is, and tools do not co-author. A `Co-Authored-By` trailer naming one
-# puts it in the repository's contributor list and in the blame of anyone reading later.
+# editor or a compiler is, and tools do not co-author. A `Co-authored-by` trailer naming one puts
+# it on main as a co-author, and a `Signed-off-by` naming one certifies what a tool cannot.
+#
+# It also refuses either trailer when it names somebody no reader can trace: a value with no
+# address, or an address on a domain no account can sit on, such as `.local`, which is what git
+# falls back to on a machine with no `user.email`. A model is still found by a vendor's name
+# anywhere in a trailer's value, so a person whose name or address holds one is refused too. It
+# reads trailers only, not a commit's author or committer (spec 029 section 4).
 #
 # Runs as a pre-push hook AND as a CI gate, because a hook is bypassable and a gate is not.
 # Fails closed: anything it cannot read is a refusal, never a pass.
