@@ -3735,6 +3735,72 @@ mod tests {
     }
 
     #[test]
+    fn a_socket_named_launched_is_unreadable() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let _socket =
+            UnixListener::bind(root.join("cells/cell-1/launched")).expect("the socket binds");
+        expect_match!(dir.read_launched(), MarkerRead::Unreadable(MarkerFault::NotRegular) => ());
+    }
+
+    #[test]
+    fn has_created_reports_a_directory_it_cannot_search_as_io() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let restore = restrict(&root.join("cells/cell-1"), 0o000);
+        let result = dir.has_created();
+        drop(restore);
+        expect_match!(result, Err(CellDirError::Io { path, source }) => {
+            assert_eq!(path, root.join("cells/cell-1/created"));
+            assert_eq!(source.raw_os_error(), Some(libc::EACCES));
+        });
+    }
+
+    #[test]
+    fn retire_of_a_cell_whose_cells_directory_is_gone_is_moved() {
+        let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
+        let dir = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
+            .expect("the cell is created");
+        fs::rename(root.join("cells"), root.join("aside")).expect("cells is moved aside");
+        expect_match!(instance.retire(&lock, dir), Err(RetireError::Moved { path }) => {
+            assert_eq!(path, root.join("cells/cell-1"))
+        });
+        assert!(exists(&root.join("aside/cell-1")));
+    }
+
+    #[test]
+    fn retire_reports_io_failures_and_moves_nothing() {
+        assert_not_root();
+        for (blocked, mode, failed_at) in [
+            ("cells", 0o000, "cells"),
+            ("cells", 0o500, "cells/cell-1"),
+            ("retired", 0o000, "retired"),
+        ] {
+            let (_dir, root) = temp_root();
+            let (instance, lock) = locked(&root);
+            let dir = instance
+                .create_cell_dir(&lock, &cell("cell-1"))
+                .expect("the cell is created");
+            fs::create_dir_all(root.join("retired")).expect("retired is made");
+            let restore = restrict(&root.join(blocked), mode);
+            let result = instance.retire(&lock, dir);
+            drop(restore);
+            expect_match!(result, Err(RetireError::Io { path, source }) => {
+                assert_eq!(path, root.join(failed_at), "{blocked} at {mode:o}");
+                assert_eq!(source.raw_os_error(), Some(libc::EACCES), "{blocked} at {mode:o}");
+            });
+            assert!(exists(&root.join("cells/cell-1")), "{blocked} at {mode:o}");
+            assert!(
+                !exists(&root.join("retired/cell-1")),
+                "{blocked} at {mode:o}"
+            );
+        }
+    }
+
+    #[test]
     fn every_marker_and_retirement_error_names_what_it_refused_and_keeps_its_cause() {
         let cause = Some(eio().to_string());
         let fault = MarkerFault::Symlink.to_string();
