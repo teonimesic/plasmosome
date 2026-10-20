@@ -16,6 +16,9 @@ pub mod software;
 pub mod universe;
 mod wire;
 
+#[cfg(test)]
+mod fixtures;
+
 pub use backend::{
     BackendError, Capability, DrainSpec, EnforcementBackend, Grant, GrantKind, Handle, LedgerEntry,
     RevokePolicy,
