@@ -247,9 +247,9 @@ benches, examples and build script. A `#![forbid(unsafe_code)]` in `lib.rs` alon
 this rule, because it leaves tests, benches and binaries open.
 
 **The register** is the set of packages whose own `[lints]` table sets `unsafe_code = "deny"`.
-Today it holds `plasmosome-membrane` and `plasmosome-core`. Cargo does not let a package mix
-`lints.workspace = true` with local keys, so a register package repeats both clippy safety lints at
-`deny` in its own table.
+Today it holds `plasmosome-membrane`, `plasmosome-core` and `plasmosome-lanes`. Cargo does not let
+a package mix `lints.workspace = true` with local keys, so a register package repeats both clippy
+safety lints at `deny` in its own table.
 
 Inside a register package, `#[allow(unsafe_code)]` goes on each item that needs `unsafe`. It goes on
 a whole module only when the crate's `AGENTS.md` names that module as an FFI module. The crate root

@@ -145,7 +145,7 @@ impl Mapping {
     }
 
     /// Copy the mapped bytes out one volatile read at a time, so the bytes are never borrowed
-    /// as a Rust slice while the file under them can change. A page the file no longer backs
+    /// as a `&[u8]` while the file under them can change. A page the file no longer backs
     /// raises SIGBUS, which ends the process.
     pub fn copy_out(&self) -> Vec<u8> {
         let base = self.address.cast::<u8>();
