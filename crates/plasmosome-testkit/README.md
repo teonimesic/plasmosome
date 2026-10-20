@@ -88,9 +88,14 @@ test data directly; it is not a second TOML validator. The description scenario 
 descriptions through `ToolRegistry::lookup`, then verifies withdrawal removes them.
 
 `session_file`, `uds_socket`, `proxy_map`, `broker` and `mount` return the capability of their
-class with exactly the values given and check nothing, and the suite's fixtures build every
-capability through them, so a change to a capability's fields changes these five bodies, not
-every fixture. `plasmosome-backend` cannot depend on this crate and keeps a test-only `fixtures`
-module with the same five functions and `op`.
+class with exactly the values given, and neither check nor normalize them. The suite's fixtures
+build every capability through them, and every universe operation through the private `op_for`,
+so adding a recipe changes these five bodies and `op_for`, not every fixture. Changing
+`broker(pid, name)` to `broker(name)` also changes each call that passes a pid.
+
+`plasmosome-backend`'s unit tests cannot use these. A dev-dependency on this crate links a second
+build of the backend, and its `Capability` is a different type from the one those tests see
+(E0308, "multiple different versions of crate"). So the backend keeps a test-only `fixtures`
+module with the same five functions and `op`, the twin of `op_for`. Change both copies together.
 
 Tests: `cargo test -p plasmosome-testkit`

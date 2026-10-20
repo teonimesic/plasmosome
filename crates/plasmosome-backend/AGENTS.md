@@ -28,3 +28,7 @@ makes the kernel testable without a VM.
 ## Testing
 
 `cargo test -p plasmosome-backend`.
+
+`src/fixtures.rs` is a test-only copy of the capability factories in `plasmosome_testkit::builders`,
+and its `op` is the twin of the testkit's private `op_for`. The unit tests here cannot use the
+testkit's copy, because it links a second build of this crate. Change the two copies together.

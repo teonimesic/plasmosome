@@ -143,27 +143,27 @@ pub fn exact_backend_effect(entry: &LedgerEntry) -> Effect {
     )
 }
 
-/// Returns `Capability::SessionFile` holding exactly `path`. Nothing is checked, so a test may
-/// pass an invalid path. Test support only: production capabilities come from the manifest
-/// resolver.
+/// Returns `Capability::SessionFile` holding exactly `path`. Nothing is checked or normalized,
+/// so a test may pass an invalid path.
+/// Test support only: production capabilities will come from spec 017's manifest resolver.
 pub fn session_file(path: &str) -> Capability {
     Capability::SessionFile {
         path: path.to_string(),
     }
 }
 
-/// Returns `Capability::UdsSocket` holding exactly `path`. Nothing is checked, so a test may
-/// pass an invalid path. Test support only: production capabilities come from the manifest
-/// resolver.
+/// Returns `Capability::UdsSocket` holding exactly `path`. Nothing is checked or normalized, so
+/// a test may pass an invalid path.
+/// Test support only: production capabilities will come from spec 017's manifest resolver.
 pub fn uds_socket(path: &str) -> Capability {
     Capability::UdsSocket {
         path: path.to_string(),
     }
 }
 
-/// Returns `Capability::ProxyMap` holding exactly `host` and `route`. Nothing is checked, so a
-/// test may pass an invalid name. Test support only: production capabilities come from the
-/// manifest resolver.
+/// Returns `Capability::ProxyMap` holding exactly `host` and `route`. Nothing is checked or
+/// normalized, so a test may pass an invalid name.
+/// Test support only: production capabilities will come from spec 017's manifest resolver.
 pub fn proxy_map(host: &str, route: &str) -> Capability {
     Capability::ProxyMap {
         host: host.to_string(),
@@ -171,9 +171,9 @@ pub fn proxy_map(host: &str, route: &str) -> Capability {
     }
 }
 
-/// Returns `Capability::Broker` holding exactly `pid` and `name`. Nothing is checked, so a test
-/// may pass an invalid name. Test support only: production capabilities come from the manifest
-/// resolver.
+/// Returns `Capability::Broker` holding exactly `pid` and `name`. Nothing is checked or
+/// normalized, so a test may pass an invalid name.
+/// Test support only: production capabilities will come from spec 017's manifest resolver.
 pub fn broker(pid: u32, name: &str) -> Capability {
     Capability::Broker {
         pid,
@@ -181,9 +181,9 @@ pub fn broker(pid: u32, name: &str) -> Capability {
     }
 }
 
-/// Returns `Capability::Mount` holding exactly `source` and `target`. Nothing is checked, so a
-/// test may pass an invalid path. Test support only: production capabilities come from the
-/// manifest resolver.
+/// Returns `Capability::Mount` holding exactly `source` and `target`. Nothing is checked or
+/// normalized, so a test may pass an invalid path.
+/// Test support only: production capabilities will come from spec 017's manifest resolver.
 pub fn mount(source: &str, target: &str) -> Capability {
     Capability::Mount {
         source: source.to_string(),
