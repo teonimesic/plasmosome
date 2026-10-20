@@ -397,7 +397,7 @@ fn set_nonblocking(fd: &OwnedFd) -> Result<(), LaunchRefusal> {
 fn preload(write_end: OwnedFd, line: &[u8]) -> Result<(), LaunchRefusal> {
     let mut accepted = 0;
     while let Some(rest) = line.get(accepted..).filter(|rest| !rest.is_empty()) {
-        // SAFETY: `rest` is a live slice of `rest.len()` bytes, and write reads at most that many.
+        // SAFETY: `rest` borrows `rest.len()` live bytes of `line`, and write reads at most that many.
         // `write_end` keeps its descriptor open.
         let wrote = unsafe { libc::write(write_end.as_raw_fd(), rest.as_ptr().cast(), rest.len()) };
         match usize::try_from(wrote) {
