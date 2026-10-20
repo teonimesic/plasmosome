@@ -71,6 +71,34 @@ pub(crate) fn member<'a>(members: &'a [(String, Json)], key: &str) -> Option<&'a
         .map(|(_, value)| value)
 }
 
+pub(crate) fn repeats_a_key(value: &Json) -> bool {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            Json::Array(items) => pending.extend(items),
+            Json::Object(members) => {
+                if repeats(members) {
+                    return true;
+                }
+                pending.extend(members.iter().map(|(_, value)| value));
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn repeats(members: &[(String, Json)]) -> bool {
+    if members.len() <= LINEAR_KEYS {
+        return members
+            .iter()
+            .enumerate()
+            .any(|(index, (key, _))| member(&members[..index], key).is_some());
+    }
+    let mut seen = HashSet::new();
+    members.iter().any(|(key, _)| !seen.insert(key.as_str()))
+}
+
 impl Drop for Json {
     fn drop(&mut self) {
         let mut pending = Vec::new();

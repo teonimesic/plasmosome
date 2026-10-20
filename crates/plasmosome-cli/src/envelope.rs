@@ -42,15 +42,17 @@ pub struct ClientError {
 impl ClientError {
     /// Takes the code, prose for a person, and the structured fields spec 025 names for `code` in
     /// the order to write them. Hands `fields` back when a key repeats or is `domain`, `code` or
-    /// `message`, since writing it would repeat a key.
+    /// `message`, or when a field's value repeats a key at any depth, since writing it would
+    /// repeat a key.
     pub fn new(
         code: ClientCode,
         message: String,
         fields: Vec<(String, Json)>,
     ) -> Result<ClientError, Vec<(String, Json)>> {
-        let clashes = fields.iter().enumerate().any(|(index, (key, _))| {
+        let clashes = fields.iter().enumerate().any(|(index, (key, value))| {
             matches!(key.as_str(), "domain" | "code" | "message")
                 || json::member(&fields[..index], key).is_some()
+                || json::repeats_a_key(value)
         });
         if clashes {
             return Err(fields);
@@ -86,8 +88,12 @@ pub struct KernelError {
 
 impl KernelError {
     /// Takes the daemon's `error` value. Hands it back when it is not an object or already has a
-    /// `domain` key, since relaying either would change what the daemon sent.
+    /// `domain` key, since relaying either would change what the daemon sent, and when it repeats
+    /// a key at any depth, which the envelope must never write.
     pub fn new(mut error: Json) -> Result<KernelError, Json> {
+        if json::repeats_a_key(&error) {
+            return Err(error);
+        }
         if let Json::Object(members) = &mut error
             && json::member(members, "domain").is_none()
         {
