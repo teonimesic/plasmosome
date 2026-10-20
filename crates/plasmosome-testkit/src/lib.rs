@@ -2,5 +2,8 @@
 //! conformance suite every `EnforcementBackend` implementation must pass. Reach
 //! it only from `[dev-dependencies]` — a guard fails the build otherwise.
 
+#![doc(test(attr(forbid(unsafe_code))))]
+
 pub mod builders;
 pub mod conformance;
+pub mod differential;
