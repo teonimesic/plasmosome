@@ -5,8 +5,9 @@ The checks that have nowhere else to run, written as tests that fail the build.
 Each one refuses a mistake you cannot take back, or one the tree would have to carry an apology
 for: a crate reaching a registry under a name nobody claimed, two packages answering to the same
 binary name, test scaffolding shipping outside `[dev-dependencies]`, a commit crediting a model as
-an author, the private research corpus reaching a public tree, and a skill Claude Code cannot
-find.
+an author, the private research corpus reaching a public tree, a commit that swaps or wraps what
+cargo builds through committed Cargo configuration or a toolchain file, and a skill Claude Code
+cannot find.
 
 Nothing here pins a design. A guard is worth its cost when the thing it prevents is permanent or
 public, or when [spec 013](../../docs/specs/013-what-earns-a-guard.md)'s operational carve-out
@@ -25,6 +26,7 @@ each crate's `AGENTS.md`, where it can be argued with.
 | `attribution_guard` | A model co-author trailer at any position in a commit message, including the middle of a body a squash merge composed |
 | `provenance_guard` | The private research corpus reaching this public tree — and it refuses when the search it depends on cannot run |
 | `skill_discovery` | A skill under `.agents/skills/` with no committed symlink under `.claude/skills/`, which no tool then lists |
+| `build_input_guard` | A commit that swaps or wraps what cargo builds through committed Cargo configuration or a toolchain file, judged from the object store before anything runs; any submodule, whose files the commit does not hold; and any tracked `.gitattributes`, through which checkout could write a file other than the blob the step judged, which a maintainer lifts only by changing the step. It tests `.githooks/build-input-guard`, spec 026's git-only step, which `gates` runs first. A clean verdict does not yet cover `[patch]`, `[replace]`, path dependencies outside the repository, symlinks that leave it, or lockfile sources other than crates.io: a reviewer reads those by hand until plasmosome-jfm2 |
 
 Tests: `cargo test -p plasmosome-guards`
 
