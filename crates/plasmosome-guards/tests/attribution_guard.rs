@@ -125,6 +125,35 @@ fn run_guard_shadowed(root: &Path, repository: &Path, shadow: &Path) -> Output {
         .expect("the guard runs")
 }
 
+fn real_git() -> PathBuf {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .map(|directory| directory.join("git"))
+        .find(|candidate| {
+            std::fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+        .expect("git is on PATH")
+}
+
+fn shell_quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+fn git_refusing(fragment: &str) -> TempDir {
+    let git = real_git();
+    let git = git.to_str().expect("the path to git is UTF-8");
+    directory_shadowing(
+        "git",
+        &format!(
+            "#!/bin/sh\ncase \" $* \" in\n  *{}*)\n    echo \"stub: refusing $*\" >&2\n    exit 128\n    ;;\nesac\nexec {} \"$@\"\n",
+            shell_quoted(fragment),
+            shell_quoted(git)
+        ),
+    )
+}
+
 fn said(output: &Output) -> String {
     format!(
         "{}{}",
@@ -346,6 +375,34 @@ fn refuses_when_the_tool_it_matches_with_cannot_answer() {
             &run_guard_shadowed(root, repository.path(), shadow.path()),
             "grep exited",
             "a commit carrying a model trailer while grep fails (`grep -q` exits 1 for no match and 2 or more for an error, and reading an error as either answer is how a guard decides without having looked)",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_commit_whose_message_it_cannot_read() {
+    check_workspace(|root| {
+        let repository = repository_with_commit("docs: a change\n");
+        let shadow = git_refusing("--format=%B");
+        assert_refused_saying(
+            &run_guard_shadowed(root, repository.path(), shadow.path()),
+            "cannot read the message of",
+            "a commit while `git show` cannot read its message, which is a message it cannot clear",
+        );
+    });
+}
+
+#[test]
+fn refuses_a_message_whose_trailers_it_cannot_parse() {
+    check_workspace(|root| {
+        let repository = repository_with_commit(
+            "docs: a change\n\nSome body prose.\n\nCo-Authored-By: A Colleague <colleague@corp.locale.io>\n",
+        );
+        let shadow = git_refusing("interpret-trailers");
+        assert_refused_saying(
+            &run_guard_shadowed(root, repository.path(), shadow.path()),
+            "cannot parse the trailers",
+            "a commit crediting a person while `git interpret-trailers` cannot parse its trailers, which are trailers it cannot clear",
         );
     });
 }
