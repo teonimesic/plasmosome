@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use plasmosome_lanes::config::{
     Confinement, GuestConfig, GuestMount, LaneConfig, MountOption, Probe, Semantics, Share,
@@ -193,11 +195,43 @@ pub fn guest_config(run_id: &str, probe_ids: &[&str]) -> GuestConfig {
     }
 }
 
+const LAUNCHER: &str = "#!/bin/sh\nexec /bin/sh \"$0.sh\"\n";
+
+fn shared_launcher() -> &'static Path {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("plasmosome-lanes-launcher");
+        fs::create_dir_all(&dir).expect("the shared launcher directory is created");
+        let path = dir.join("launcher");
+        if fs::read_to_string(&path).ok().as_deref() != Some(LAUNCHER) {
+            let staged = dir.join(format!("launcher.{}", std::process::id()));
+            fs::write(&staged, LAUNCHER).expect("the shared launcher is written");
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))
+                .expect("the shared launcher is made executable");
+            fs::rename(&staged, &path).expect("the shared launcher is put in place");
+        }
+        fs::write(dir.join("launcher.sh"), ":\n").expect("the warm-up body is written");
+        let warm = Command::new(&path)
+            .env_clear()
+            .stdin(Stdio::null())
+            .status()
+            .expect("the shared launcher runs once");
+        assert!(
+            warm.success(),
+            "the shared launcher's warm-up run exited {warm}"
+        );
+        path
+    })
+}
+
+/// A launcher at `dir/name` that runs `body` with `/bin/sh`. It is a link to one shared script,
+/// run once before any test uses it, because macOS assesses each new executable file the first
+/// time it runs, and that took seconds per file on a busy machine.
 pub fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("the launcher script is written");
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
-        .expect("the launcher script is made executable");
+    fs::write(dir.join(format!("{name}.sh")), format!("{body}\n"))
+        .expect("the launcher body is written");
+    symlink(shared_launcher(), &path).expect("the launcher link is made");
     path
 }
 
