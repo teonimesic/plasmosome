@@ -470,3 +470,7 @@ fn a_member_whose_manifest_is_not_valid_toml_is_refused_not_skipped() {
         "an invalid member manifest must not be skipped"
     );
 }
+
+#[test]
+#[ignore = "needs a hypervisor"]
+fn throwaway_boots_a_guest() {}
