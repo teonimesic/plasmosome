@@ -1,10 +1,15 @@
 //! The enforcement seam: the only vocabulary allowed to cross between the
 //! controller and whatever enforces capabilities (`Handle`, `Capability`,
 //! `GrantKind::{Hot, GenerationBound}`, `DrainSpec`, `OsState`/`Diff`).
+//!
+//! It also holds two pieces of vocabulary that guest, membrane and controller
+//! share: the SHA-256 [`Digest`] and spec 001's observation pages in [`paging`].
 
 pub mod backend;
 pub mod composite;
+pub mod digest;
 pub mod fake;
+pub mod paging;
 pub mod recipe;
 pub mod universe;
 mod wire;
@@ -14,7 +19,9 @@ pub use backend::{
     RevokePolicy,
 };
 pub use composite::{CompositeBackend, Leaf};
+pub use digest::{Digest, DigestError};
 pub use fake::FakeBackend;
+pub use paging::{ObservationPage, PageAssembler, PageCursor};
 pub use recipe::{
     BrokerLaunch, FileAccess, MAX_SESSION_FILE_BYTES, MountRecipe, ProxyRecipe, ProxyTransport,
     RecipeError, SessionFileRecipe, UdsRecipe,
