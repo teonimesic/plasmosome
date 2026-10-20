@@ -1,8 +1,7 @@
 pub use plasmosome_backend::digest;
 pub mod hello;
-pub mod path;
-pub mod recipe;
-pub(crate) mod strict_json;
+pub(crate) use plasmosome_core::runtime::strict_json;
+pub use plasmosome_core::runtime::{path, recipe};
 
 /// The result of removing a path the runtime created, after checking that the
 /// path still names the object the runtime made.
