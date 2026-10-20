@@ -38,6 +38,10 @@ METADATA = json.dumps({
 NONE = "Every test step succeeded and no test was ignored."
 COVERS = "covers only the tests that ran"
 HEADER = "| Crate | Test | Reason |"
+REFUSED = "The report cannot vouch for its list"
+ARGS_HINT = "check that the `ignored tests` step passes the same package arguments as that test step"
+TEE_HINT = "check the step's `tee -a` path"
+TESTS_FAILED_HINT = "`tests` failed; a failing test that prints cargo output can cause this, so read that step first"
 ESC = chr(27)
 BACKSLASH = chr(92)
 
@@ -72,6 +76,7 @@ GUARDS_BUILD = [
     artifact(GUARDS_ID, "plasmosome_guards", "lib", test=False),
     artifact(GUARDS_ID, "plasmosome_guards", "lib", "/w/target/debug/deps/plasmosome_guards-6a71"),
     artifact(GUARDS_ID, "workspace_guards", "test", "/w/target/debug/deps/workspace_guards-6a72"),
+    artifact(GUARDS_ID, "workspace_roots", "test", "/w/target/debug/deps/workspace_roots-6a73"),
     FINISHED,
 ]
 
@@ -106,9 +111,33 @@ MEMBRANE_UNIT = (running("unittests src/lib.rs", "target/debug/deps/plasmosome_m
                  + tests("test vmm::tests::reaps_the_child ... ok"))
 MEMBRANE_CLI = (running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-3e32")
                 + tests("test answers_usage ... ok"))
+CORE_DOCS = doctests("plasmosome_core") + tests()
+GUARDS_UNIT = (running("unittests src/lib.rs", "target/debug/deps/plasmosome_guards-6a71")
+               + tests("test workspace::tests::finds_the_root ... ok"))
 GUARDS_RUN = (running("tests/workspace_guards.rs", "target/debug/deps/workspace_guards-6a72")
               + tests("test ci_matrix_matches_workspace_members ... ok"))
-CLEAN = CORE_UNIT + CORE_CLI + MEMBRANE_UNIT + MEMBRANE_CLI + doctests("plasmosome_core") + tests() + GUARDS_RUN
+GUARDS_ROOTS = (running("tests/workspace_roots.rs", "target/debug/deps/workspace_roots-6a73")
+                + tests("test prebuilt_consumers_cannot_certify_a_copy ... ok"))
+GUARDS_DOCS = doctests("plasmosome_guards") + tests()
+
+
+def tests_log(core_unit=CORE_UNIT, core_cli=CORE_CLI, membrane_unit=MEMBRANE_UNIT, membrane_cli=MEMBRANE_CLI,
+              core_docs=CORE_DOCS):
+    """The tests step's whole output, every block clean unless named."""
+    return core_unit + core_cli + membrane_unit + membrane_cli + core_docs
+
+
+def guards_log(roots=GUARDS_ROOTS):
+    """The workspace guards step's whole output, the workspace_roots block clean unless given."""
+    return GUARDS_UNIT + GUARDS_RUN + roots + GUARDS_DOCS
+
+
+def log_of(roots=GUARDS_ROOTS, **blocks):
+    """Both steps' output in one log, as the two tee -a pipelines leave it."""
+    return tests_log(**blocks) + guards_log(roots)
+
+
+CLEAN = log_of()
 
 FAILING_CORE_UNIT = (running("unittests src/lib.rs", "target/debug/deps/plasmosome_core-c0e1") + [
     "running 2 tests",
@@ -129,6 +158,71 @@ FAILING_CORE_UNIT = (running("unittests src/lib.rs", "target/debug/deps/plasmoso
     "",
     "error: test failed, to rerun pass `-p plasmosome-core --lib`",
 ])
+
+FAILING_CORE_CLI_MISCOUNTED = (running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2") + [
+    "running 3 tests",
+    "test boots ... ignored, needs a hypervisor",
+    "test answers_usage ... FAILED",
+    "",
+    "failures:",
+    "",
+    "---- answers_usage stdout ----",
+    "",
+    "thread 'answers_usage' panicked at crates/core/tests/daemon_cli.rs:12:5:",
+    "usage missing",
+    "",
+    "failures:",
+    "    answers_usage",
+    "",
+    result_line(0, 1, 2),
+    "",
+    "error: test failed, to rerun pass `-p plasmosome-core --test daemon_cli`",
+])
+
+
+def nested_failure(executable):
+    """workspace_roots failing with a nested cargo run in its panic message, cut from a real red run.
+
+    The nested run's stdout comes first and ends with its own result line. Its stderr follows,
+    with a Running line naming EXECUTABLE. The outer block's own result line comes after that.
+    """
+    return running("tests/workspace_roots.rs", "target/debug/deps/workspace_roots-6a73") + [
+        "running 2 tests",
+        "test held_names_stay_held ... ignored, needs a registry",
+        "test prebuilt_consumers_cannot_certify_a_copy ... FAILED",
+        "",
+        "failures:",
+        "",
+        "---- prebuilt_consumers_cannot_certify_a_copy stdout ----",
+        "workspace roots: copy-only violation: only_the_held_names_are_publishable_to_a_registry: observed",
+        "",
+        "thread 'prebuilt_consumers_cannot_certify_a_copy' (25089997) panicked at "
+        "crates/plasmosome-guards/tests/workspace_roots.rs:506:9:",
+        "outside Cargo manifest selection after B rebuild: only_the_held_names_are_publishable_to_a_registry",
+        "",
+        "running 1 test",
+        "test only_the_held_names_are_publishable_to_a_registry ... ok",
+        "",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.10s",
+        "",
+        "",
+        "    Blocking waiting for file lock on package cache",
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s",
+        f"     Running tests/workspace_guards.rs ({executable})",
+        "",
+        "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+        "",
+        "",
+        "failures:",
+        "    prebuilt_consumers_cannot_certify_a_copy",
+        "",
+        result_line(0, 1, 1),
+        "",
+        "error: test failed, to rerun pass `-p plasmosome-guards --test workspace_roots`",
+    ]
+
+
+NESTED = "/private/var/folders/9h/T/.tmpL9n6pT/b/target/rebuilt/debug/deps"
 
 
 class Outcome:
@@ -183,12 +277,10 @@ def report(log, outcomes=("success", "success"), builds=None, metadata=(0, METAD
 
 def one_file_name_in_two_crates_lists_each_under_its_own_crate():
     """Case 1. Catches keying by source path: there are two tests/daemon_cli.rs files."""
-    log = (CORE_UNIT
-           + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
-           + tests("test boots ... ignored, needs a hypervisor", "test answers_usage ... ok")
-           + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-3e32")
-           + tests("test boots ... ignored, needs a hypervisor")
-           + GUARDS_RUN)
+    log = log_of(core_cli=(running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
+                           + tests("test boots ... ignored, needs a hypervisor", "test answers_usage ... ok")),
+                 membrane_cli=(running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-3e32")
+                               + tests("test boots ... ignored, needs a hypervisor")))
     result = report(log)
     assert result.code == 0, result
     assert "| plasmosome-core | boots | needs a hypervisor |" in result.summary, result
@@ -197,10 +289,8 @@ def one_file_name_in_two_crates_lists_each_under_its_own_crate():
 
 def a_doctest_is_listed_under_its_own_crate_with_no_reason_given():
     """Case 2. Catches a doctest given the previous binary's crate, and dropping a reasonless line."""
-    log = (CORE_UNIT + MEMBRANE_UNIT
-           + doctests("plasmosome_core")
-           + tests("test crates/core/src/lib.rs - parse (line 7) ... ignored")
-           + GUARDS_RUN)
+    log = log_of(core_docs=doctests("plasmosome_core")
+                 + tests("test crates/core/src/lib.rs - parse (line 7) ... ignored"))
     result = report(log)
     assert result.code == 0, result
     assert "| plasmosome-core | crates/core/src/lib.rs - parse (line 7) | no reason given |" in result.summary, result
@@ -210,10 +300,8 @@ def a_doctest_is_listed_under_its_own_crate_with_no_reason_given():
 def a_reason_is_kept_verbatim():
     """Case 3. Catches splitting the reason on its commas or dots."""
     reason = "needs a booted cell, a signed kernel... and, later, a network"
-    log = (CORE_UNIT
-           + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
-           + tests(f"test boots ... ignored, {reason}")
-           + GUARDS_RUN)
+    log = log_of(core_cli=running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
+                 + tests(f"test boots ... ignored, {reason}"))
     result = report(log)
     assert result.code == 0, result
     assert f"| plasmosome-core | boots | {reason} |" in result.summary, result
@@ -221,11 +309,10 @@ def a_reason_is_kept_verbatim():
 
 def package_names_come_from_metadata_not_from_the_id():
     """Case 4. CORE's id names a directory, MEMBRANE's carries #name@version. Catches splitting the id."""
-    log = (running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
-           + tests("test boots ... ignored, needs a hypervisor")
-           + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-3e32")
-           + tests("test boots ... ignored, needs a hypervisor")
-           + GUARDS_RUN)
+    log = log_of(core_cli=(running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
+                           + tests("test boots ... ignored, needs a hypervisor")),
+                 membrane_cli=(running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-3e32")
+                               + tests("test boots ... ignored, needs a hypervisor")))
     result = report(log)
     assert result.code == 0, result
     assert "| plasmosome-core | boots |" in result.summary, result
@@ -234,19 +321,19 @@ def package_names_come_from_metadata_not_from_the_id():
 
     stranger = "path+file:///w/crates/stranger#0.1.0"
     build = TESTS_BUILD + [artifact(stranger, "stranger", "test", "/w/target/debug/deps/stranger-5a51")]
-    log = CORE_UNIT + running("tests/stranger.rs", "target/debug/deps/stranger-5a51") + tests("test x ... ok") + GUARDS_RUN
+    log = log_of(core_unit=CORE_UNIT + running("tests/stranger.rs", "target/debug/deps/stranger-5a51")
+                 + tests("test x ... ok"))
     unnamed = report(log, builds={TESTS: (0, build), GUARDS: (0, GUARDS_BUILD)})
     assert unnamed.code == 1, unnamed
-    assert "stranger" in unnamed.stderr, unnamed
+    assert "stranger-5a51 (tests/stranger.rs) is in the log, but no step's cargo listing has it" in unnamed.stderr, unnamed
 
 
 def relative_and_absolute_running_paths_both_map():
     """Case 5. Catches matching the whole path, which cargo prints either way."""
-    log = (running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
-           + tests("test boots ... ignored, needs a hypervisor")
-           + running("tests/daemon_cli.rs", "/w/target/debug/deps/daemon_cli-3e32")
-           + tests("test boots ... ignored, needs a hypervisor")
-           + GUARDS_RUN)
+    log = log_of(core_cli=(running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
+                           + tests("test boots ... ignored, needs a hypervisor")),
+                 membrane_cli=(running("tests/daemon_cli.rs", "/w/target/debug/deps/daemon_cli-3e32")
+                               + tests("test boots ... ignored, needs a hypervisor")))
     result = report(log)
     assert result.code == 0, result
     assert "| plasmosome-core | boots |" in result.summary, result
@@ -260,19 +347,16 @@ def the_status_sentence_says_none_or_counts():
     assert NONE in clean.summary, clean
     assert HEADER not in clean.summary, clean
 
-    two = report(CORE_UNIT
-                 + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
-                 + tests("test boots ... ignored, needs a hypervisor", "test halts ... ignored, needs a hypervisor")
-                 + GUARDS_RUN)
+    two = report(log_of(core_cli=running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
+                        + tests("test boots ... ignored, needs a hypervisor",
+                                "test halts ... ignored, needs a hypervisor")))
     assert two.code == 0, two
     assert "Every test step succeeded; 2 tests were ignored." in two.summary, two
     assert NONE not in two.summary, two
     assert HEADER in two.summary, two
 
-    one = report(CORE_UNIT
-                 + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
-                 + tests("test boots ... ignored, needs a hypervisor")
-                 + GUARDS_RUN)
+    one = report(log_of(core_cli=running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
+                        + tests("test boots ... ignored, needs a hypervisor")))
     assert "Every test step succeeded; 1 test was ignored." in one.summary, one
 
 
@@ -304,38 +388,50 @@ def a_successful_step_whose_output_is_not_in_the_log_is_refused():
     missing = report(None)
     assert missing.code == 1, missing
     assert "cargo-test.log does not exist" in missing.stderr, missing
+    assert TEE_HINT in missing.stderr, missing
 
     no_running = report(["   Compiling plasmosome-core v0.1.0 (/w/crates/core)",
                          "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s"])
     assert no_running.code == 1, no_running
+    assert TEE_HINT in no_running.stderr, no_running
 
-    no_guards = report(CORE_UNIT + CORE_CLI + MEMBRANE_UNIT + MEMBRANE_CLI)
+    no_guards = report(tests_log())
     assert no_guards.code == 1, no_guards
-    assert "workspace guards" in no_guards.stderr, no_guards
+    assert "`workspace guards` succeeded" in no_guards.stderr, no_guards
+    assert TEE_HINT in no_guards.stderr, no_guards
 
 
 def an_executable_or_library_missing_from_the_map_is_refused():
     """Case 10. Catches a map built with other package arguments than the step used."""
-    log = CORE_UNIT + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-0dd0") + tests("test x ... ok") + GUARDS_RUN
+    log = log_of(core_cli=CORE_CLI + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-0dd0")
+                 + tests("test x ... ok"))
     result = report(log)
     assert result.code == 1, result
-    assert "daemon_cli-0dd0" in result.stderr, result
+    assert f"daemon_cli-0dd0 (tests/daemon_cli.rs) is in the log, but no step's cargo listing has it; {ARGS_HINT}" \
+        in result.stderr, result
 
-    log = CORE_UNIT + GUARDS_RUN + doctests("plasmid_sdk") + tests()
+    log = CLEAN + doctests("plasmid_sdk") + tests()
     library = report(log)
     assert library.code == 1, library
-    assert "plasmid_sdk" in library.stderr, library
+    assert f"plasmid_sdk is in the log, but no step's cargo listing has it; {ARGS_HINT}" in library.stderr, library
 
 
 def a_result_count_that_disagrees_with_the_listed_lines_is_refused():
     """Case 11. Catches a libtest format change that would silently drop ignored tests."""
-    log = (CORE_UNIT
-           + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
-           + tests("test boots ... ignored, needs a hypervisor", "test answers_usage ... ok", ignored=2)
-           + GUARDS_RUN)
+    log = log_of(core_cli=running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
+                 + tests("test boots ... ignored, needs a hypervisor", "test answers_usage ... ok", ignored=2))
     result = report(log)
     assert result.code == 1, result
     assert "daemon_cli-c0e2" in result.stderr, result
+    assert "lists 1 ignored tests, but its result lines count 2" in result.stderr, result
+    assert "read that step first" not in result.stderr, result
+
+    phantom = log_of(core_cli=running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
+                     + tests("test boots ... ignored, needs a hypervisor",
+                             "test halts ... ignored, needs a hypervisor", ignored=1))
+    more = report(phantom)
+    assert more.code == 1, more
+    assert "lists 2 ignored tests, but its result lines count 1" in more.stderr, more
 
 
 def an_ignored_test_after_a_failing_binary_is_still_listed():
@@ -365,9 +461,9 @@ def an_unknown_outcome_or_malformed_step_is_a_usage_error():
 
 def colored_cargo_and_libtest_lines_still_parse():
     """Case 14. Catches a parser that a CARGO_TERM_COLOR=always or a colored harness would blind."""
-    log = ([f"{ESC}[1m{ESC}[92m     Running{ESC}[0m tests/daemon_cli.rs (target/debug/deps/daemon_cli-c0e2)", ""]
-           + tests(f"test boots ... {ESC}[33mignored{ESC}[0m, needs a hypervisor", ignored=1)
-           + GUARDS_RUN)
+    log = log_of(core_cli=[f"{ESC}[1m{ESC}[92m     Running{ESC}[0m tests/daemon_cli.rs "
+                           "(target/debug/deps/daemon_cli-c0e2)", ""]
+                 + tests(f"test boots ... {ESC}[33mignored{ESC}[0m, needs a hypervisor", ignored=1))
     result = report(log)
     assert result.code == 0, result
     assert "| plasmosome-core | boots | needs a hypervisor |" in result.summary, result
@@ -375,7 +471,7 @@ def colored_cargo_and_libtest_lines_still_parse():
 
 def a_doctest_block_with_two_result_lines_sums_them():
     """Case 15. Merged and standalone doctests each print a result line in one Doc-tests block."""
-    log = (CORE_UNIT + doctests("plasmosome_core") + [
+    log = log_of(core_docs=doctests("plasmosome_core") + [
         "running 2 tests",
         "test crates/core/src/lib.rs - parse (line 7) ... ignored",
         "test crates/core/src/lib.rs - Kind (line 30) ... ok",
@@ -389,7 +485,7 @@ def a_doctest_block_with_two_result_lines_sums_them():
         "",
         "all doctests ran in 0.31s; merged doctests compilation took 0.29s",
         "",
-    ] + GUARDS_RUN)
+    ])
     result = report(log)
     assert result.code == 0, result
     assert "Every test step succeeded; 2 tests were ignored." in result.summary, result
@@ -397,10 +493,8 @@ def a_doctest_block_with_two_result_lines_sums_them():
 
 def a_block_with_no_result_line_is_refused_only_when_its_step_succeeded():
     """Case 16. Catches a result line the parser no longer recognizes, which would skip the count."""
-    cut = (CORE_UNIT
-           + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
-           + ["running 1 test", "test boots ... ignored, needs a hypervisor", ""]
-           + GUARDS_RUN)
+    cut = log_of(core_cli=running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
+                 + ["running 1 test", "test boots ... ignored, needs a hypervisor", ""])
     refused = report(cut)
     assert refused.code == 1, refused
     assert "daemon_cli-c0e2" in refused.stderr, refused
@@ -449,10 +543,8 @@ def the_summary_is_appended_and_printed_under_the_job_name():
 
 def a_name_containing_ignored_is_not_an_ignored_test():
     """Case 20. Catches matching the word anywhere in the line."""
-    log = (CORE_UNIT
-           + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
-           + tests("test a_volume_mounted_with_ownership_ignored_is_refused ... ok")
-           + GUARDS_RUN)
+    log = log_of(core_cli=running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
+                 + tests("test a_volume_mounted_with_ownership_ignored_is_refused ... ok"))
     result = report(log)
     assert result.code == 0, result
     assert NONE in result.summary, result
@@ -460,10 +552,8 @@ def a_name_containing_ignored_is_not_an_ignored_test():
 
 def a_pipe_in_a_reason_does_not_break_the_table():
     """Case 21. Catches a reason that splits its row into extra cells."""
-    log = (CORE_UNIT
-           + running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
-           + tests("test boots ... ignored, needs a guest | or a host")
-           + GUARDS_RUN)
+    log = log_of(core_cli=running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
+                 + tests("test boots ... ignored, needs a guest | or a host"))
     result = report(log)
     assert result.code == 0, result
     assert f"| plasmosome-core | boots | needs a guest {BACKSLASH}| or a host |" in result.summary, result
@@ -515,6 +605,95 @@ def unparseable_step_arguments_are_a_usage_error():
     assert result.calls == [], result
 
 
+def a_refused_run_writes_its_refusal_to_the_step_summary():
+    """Case 27. Catches a refusal that exits 1 but leaves the summary saying nothing was ignored."""
+    result = report(tests_log())
+    assert result.code == 1, result
+    assert result.summary.startswith(EARLIER), result
+    written = result.summary[len(EARLIER):]
+    assert REFUSED in written, result
+    assert "`workspace guards` succeeded" in written, result
+    assert NONE not in written, result
+    assert "Every test step succeeded" not in written, result
+    assert written == result.stdout, result
+
+
+def a_cancelled_step_is_named_as_cancelled():
+    """Case 28. A superseded run cancels a step, and the report still runs under if: always()."""
+    log = tests_log() + running("unittests src/lib.rs", "target/debug/deps/plasmosome_guards-6a71") + ["running 1 test"]
+    result = report(log, outcomes=("success", "cancelled"))
+    assert result.code == 0, result
+    assert "`workspace guards` was cancelled" in result.summary, result
+    assert "never ran" not in result.summary, result
+    assert COVERS in result.summary, result
+    assert NONE not in result.summary, result
+
+
+def a_count_mismatch_in_a_failed_step_is_refused_and_points_at_that_step():
+    """Case 29. Catches counting only ok result lines, or checking counts only when a step succeeded."""
+    result = report(log_of(core_cli=FAILING_CORE_CLI_MISCOUNTED), outcomes=("failure", "success"))
+    assert result.code == 1, result
+    assert "daemon_cli-c0e2" in result.stderr, result
+    assert "lists 1 ignored tests, but its result lines count 2" in result.stderr, result
+    assert TESTS_FAILED_HINT in result.stderr, result
+    assert TESTS_FAILED_HINT in result.summary, result
+
+
+def a_block_two_listings_share_needs_a_result_line_only_when_both_steps_succeeded():
+    """Case 30. The guards listing names plasmosome_core's library too. Catches all() turned into any()."""
+    log = log_of(core_docs=doctests("plasmosome_core")
+                 + ["running 1 test", "test crates/core/src/lib.rs - parse (line 7) ... ignored"])
+    crashed = report(log, outcomes=("failure", "success"))
+    assert crashed.code == 0, crashed
+    assert "| plasmosome-core | crates/core/src/lib.rs - parse (line 7) | no reason given |" in crashed.summary, crashed
+    assert "`tests` failed" in crashed.summary, crashed
+
+    refused = report(log)
+    assert refused.code == 1, refused
+    assert "plasmosome_core has no `test result:` line" in refused.stderr, refused
+
+
+def a_log_missing_whole_blocks_of_a_successful_step_is_refused():
+    """Case 31. Catches a cut log, or report arguments wider than the step's, that ends between blocks."""
+    cut = report(tests_log(membrane_unit=[], membrane_cli=[]) + guards_log())
+    assert cut.code == 1, cut
+    assert "plasmosome_membrane-3e31" in cut.stderr, cut
+    assert "daemon_cli-3e32" in cut.stderr, cut
+    assert TEE_HINT in cut.stderr, cut
+    assert "daemon_cli-c0e2" not in cut.stderr, cut
+
+    guards = report(log_of(roots=[]))
+    assert guards.code == 1, guards
+    assert "`workspace guards` succeeded" in guards.stderr, guards
+    assert "workspace_roots-6a73" in guards.stderr, guards
+
+
+def a_failing_guard_test_that_prints_a_nested_cargo_run_keeps_the_list():
+    """Case 32. workspace_roots puts a nested cargo run's output in its panic message.
+
+    Its Running line names either the real workspace_guards file again or one rebuilt elsewhere.
+    Catches a red guard test turning the report red too, and losing the list for that run.
+    """
+    for nested, why in [(f"{NESTED}/workspace_guards-6a72", "appears a second time"),
+                        (f"{NESTED}/workspace_guards-9f9f", "is in the log, but no step's cargo listing has it")]:
+        log = log_of(core_cli=(running("tests/daemon_cli.rs", "target/debug/deps/daemon_cli-c0e2")
+                               + tests("test boots ... ignored, needs a hypervisor", "test answers_usage ... ok")),
+                     roots=nested_failure(nested))
+        result = report(log, outcomes=("success", "failure"))
+        assert result.code == 0, result
+        assert REFUSED not in result.summary, result
+        assert "| plasmosome-core | boots | needs a hypervisor |" in result.summary, result
+        assert "| plasmosome-guards | held_names_stay_held | needs a registry |" in result.summary, result
+        assert "`workspace guards` failed" in result.summary, result
+        assert COVERS in result.summary, result
+        key = nested.rsplit("/", 1)[-1]
+        assert f"{key} (tests/workspace_guards.rs) {why}" in result.summary, result
+        assert "output from a failing test" in result.summary, result
+
+        vouched = report(log)
+        assert vouched.code == 1, vouched
+
+
 CASES = [
     one_file_name_in_two_crates_lists_each_under_its_own_crate,
     a_doctest_is_listed_under_its_own_crate_with_no_reason_given,
@@ -542,6 +721,12 @@ CASES = [
     a_metadata_failure_after_a_failed_compile_is_named_not_fatal,
     an_executable_claimed_by_two_packages_is_refused,
     unparseable_step_arguments_are_a_usage_error,
+    a_refused_run_writes_its_refusal_to_the_step_summary,
+    a_cancelled_step_is_named_as_cancelled,
+    a_count_mismatch_in_a_failed_step_is_refused_and_points_at_that_step,
+    a_block_two_listings_share_needs_a_result_line_only_when_both_steps_succeeded,
+    a_log_missing_whole_blocks_of_a_successful_step_is_refused,
+    a_failing_guard_test_that_prints_a_nested_cargo_run_keeps_the_list,
 ]
 
 
@@ -557,7 +742,8 @@ def main():
     if failed:
         sys.exit(f"{len(failed)} of {len(CASES)} ignored-test report cases failed: {', '.join(failed)}")
     print(f"PASS: {len(CASES)} ignored-test report cases: crates by executable, doctests, verbatim "
-          "reasons, metadata names, status sentences, failed and skipped steps, refusals, colored lines")
+          "reasons, metadata names, status sentences, failed, cancelled and skipped steps, refusals and "
+          "their hints, cut logs, nested cargo output, colored lines")
 
 
 if __name__ == "__main__":
