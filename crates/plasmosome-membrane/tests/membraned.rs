@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 #[path = "support/fixture.rs"]
 mod fixture;
+#[path = "support/fixture_cache.rs"]
+mod fixture_cache;
 #[path = "support/warm_up.rs"]
 mod warm_up;
 
