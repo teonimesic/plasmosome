@@ -2,8 +2,9 @@ use serde_core::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 use std::cell::RefCell;
 
+/// Why bytes are not one strict JSON value.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StrictJsonError {
+pub enum StrictJsonError {
     NotJson {
         line: usize,
         column: usize,
@@ -35,7 +36,13 @@ impl std::fmt::Display for StrictJsonError {
 
 impl std::error::Error for StrictJsonError {}
 
-pub(crate) fn parse_value(bytes: &[u8]) -> Result<Value, StrictJsonError> {
+/// Reads `bytes` as exactly one JSON value, as `serde_json` reads it, but
+/// refuses a key repeated in one object at any depth, text after the value
+/// other than whitespace, and a number that is not finite. `NotJson` keeps
+/// `serde_json`'s line, column and reason. `DuplicateKey` names the repeated
+/// key by JSON pointer, `path`, and by dotted name, `field`, such as
+/// `libraries[0].sha256`.
+pub fn parse_value(bytes: &[u8]) -> Result<Value, StrictJsonError> {
     let duplicate = RefCell::new(None);
     let mut reader = serde_json::Deserializer::from_slice(bytes);
     let read = Strict {
