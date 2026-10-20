@@ -282,10 +282,8 @@ impl InstanceRoot {
             }
             made => made.map_err(io_error)?,
         }
-        let dir = open_at(cells.as_fd(), &name, DIRECTORY_FLAGS, 0).map_err(|error| {
-            directory_refusal(cells.as_fd(), &name, error).into_cell_dir_error(cell_path.clone())
-        })?;
-        change_mode(dir.as_fd(), PRIVATE_DIRECTORY).map_err(io_error)?;
+        let dir = open_private_directory(cells.as_fd(), &name)
+            .map_err(|refusal| refusal.into_cell_dir_error(cell_path.clone()))?;
         sync_cells()?;
         Ok(self.cell_dir_from(dir, cell.clone(), journal_path))
     }
@@ -349,8 +347,8 @@ impl InstanceRoot {
             made => made.map_err(retire_io(retired_path))?,
         }
         let retired =
-            open_at(self.dir.as_fd(), RETIRED_DIR, DIRECTORY_FLAGS, 0).map_err(|error| {
-                match directory_refusal(self.dir.as_fd(), RETIRED_DIR, error) {
+            open_private_directory(self.dir.as_fd(), RETIRED_DIR).map_err(
+                |refusal| match refusal {
                     DirectoryRefusal::Symlink | DirectoryRefusal::NotADirectory => {
                         RetireError::RetiredNotADirectory {
                             path: retired_path.to_path_buf(),
@@ -360,9 +358,8 @@ impl InstanceRoot {
                         retire_io(retired_path)(io::Error::from_raw_os_error(libc::ENOENT))
                     }
                     DirectoryRefusal::Io(source) => retire_io(retired_path)(source),
-                }
-            })?;
-        change_mode(retired.as_fd(), PRIVATE_DIRECTORY).map_err(retire_io(retired_path))?;
+                },
+            )?;
         (self.sync)(self.dir.as_fd()).map_err(retire_io(&self.path))?;
         Ok(retired)
     }
@@ -377,10 +374,8 @@ impl InstanceRoot {
             Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {}
             made => made.map_err(io_error)?,
         }
-        let cells = self
-            .open_cells()
+        let cells = open_private_directory(self.dir.as_fd(), &name)
             .map_err(|refusal| refusal.into_cell_dir_error(cells_path.to_path_buf()))?;
-        change_mode(cells.as_fd(), PRIVATE_DIRECTORY).map_err(io_error)?;
         (self.sync)(self.dir.as_fd()).map_err(|source| CellDirError::Io {
             path: self.path.clone(),
             source,
@@ -715,12 +710,8 @@ impl CellDir {
             }
             made => made.map_err(cell_dir_io(&path))?,
         }
-        let runtime =
-            open_at(self.dir.as_fd(), RUNTIME_DIR, DIRECTORY_FLAGS, 0).map_err(|error| {
-                directory_refusal(self.dir.as_fd(), RUNTIME_DIR, error)
-                    .into_cell_dir_error(path.clone())
-            })?;
-        change_mode(runtime.as_fd(), PRIVATE_DIRECTORY).map_err(cell_dir_io(&path))?;
+        let runtime = open_private_directory(self.dir.as_fd(), RUNTIME_DIR)
+            .map_err(|refusal| refusal.into_cell_dir_error(path.clone()))?;
         self.sync_dir()?;
         Ok(runtime)
     }
@@ -1358,6 +1349,25 @@ fn directory_refusal(parent: BorrowedFd<'_>, name: &CStr, error: io::Error) -> D
     }
 }
 
+fn open_private_directory(
+    parent: BorrowedFd<'_>,
+    name: &CStr,
+) -> Result<OwnedFd, DirectoryRefusal> {
+    let opened = match open_at(parent, name, DIRECTORY_FLAGS, 0) {
+        Err(error)
+            if error.raw_os_error() == Some(libc::EACCES)
+                && kind_at(parent, name).ok() == Some(Kind::Directory) =>
+        {
+            change_mode_at(parent, name, PRIVATE_DIRECTORY)
+                .and_then(|()| open_at(parent, name, DIRECTORY_FLAGS, 0))
+        }
+        opened => opened,
+    };
+    let dir = opened.map_err(|error| directory_refusal(parent, name, error))?;
+    change_mode(dir.as_fd(), PRIVATE_DIRECTORY).map_err(DirectoryRefusal::Io)?;
+    Ok(dir)
+}
+
 fn open_journal_at(
     cell: BorrowedFd<'_>,
     access: libc::c_int,
@@ -1619,6 +1629,25 @@ fn rename_no_replace(
 fn change_mode(fd: BorrowedFd<'_>, mode: libc::mode_t) -> io::Result<()> {
     // SAFETY: fchmod takes no pointer, and the BorrowedFd keeps `fd` open for the call.
     let changed = unsafe { libc::fchmod(fd.as_raw_fd(), mode) };
+    if changed != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn change_mode_at(dir: BorrowedFd<'_>, name: &CStr, mode: libc::mode_t) -> io::Result<()> {
+    // SAFETY: `name` is a CStr that outlives the call, and the BorrowedFd keeps `dir` open for
+    // it. fchmodat keeps no pointer to the name, and AT_SYMLINK_NOFOLLOW makes it act on a
+    // symlink itself, or refuse it, never on the symlink's target.
+    let changed = unsafe {
+        libc::fchmodat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            mode,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
     if changed != 0 {
         return Err(io::Error::last_os_error());
     }
