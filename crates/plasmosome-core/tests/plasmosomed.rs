@@ -382,6 +382,28 @@ fn plasmosomed_exits_nonzero_naming_the_failure() {
         "a refused config binds no control socket"
     );
 
+    let positional = directory.path().join("positional.uds");
+    let array = directory.path().join("array.json");
+    write_config(
+        &array,
+        &json!([positional, "work", directory.path(), 5000, directory.path()]),
+    );
+    let refused = output_within(plasmosomed(&[&array]), PATIENCE);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "a config is one JSON object; an array read by position is invalid configuration"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("expected a JSON object"),
+        "the refusal says what a config must be, got: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !positional.exists(),
+        "a refused array binds no control socket"
+    );
+
     let control = directory.path().join("taken.uds");
     std::fs::write(&control, b"someone else's socket").expect("the test occupies the path");
     let occupied = directory.path().join("occupied.json");

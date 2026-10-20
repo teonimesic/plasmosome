@@ -594,6 +594,17 @@ mod tests {
                 adding("instance_root", r#""/srv/other""#),
                 "`instance_root`",
             ),
+            (
+                r#"["/tmp/c.uds", "work", "/srv/imports", 4321, "/srv/roots/r7"]"#.to_string(),
+                "sequence, expected a JSON object",
+            ),
+            ("[]".to_string(), "sequence, expected a JSON object"),
+            (
+                r#""work""#.to_string(),
+                r#"string "work", expected a JSON object"#,
+            ),
+            ("7".to_string(), "integer `7`, expected a JSON object"),
+            ("null".to_string(), "null, expected a JSON object"),
         ]);
     }
 
