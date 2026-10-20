@@ -78,15 +78,16 @@ matches() {
 #
 # `read` does the splitting and the trimming. Pattern expansions such as `${value##*<}` take time
 # that grows with the square of a value's length or worse in bash: a name padded with 5,000 spaces
-# took 18 seconds to trim. The `x` keeps a trailing `<` from being dropped as an empty field.
+# took 18 seconds to trim. The `x` keeps a `<` or `>` that ends the value from being dropped as an
+# empty last field.
 judge_trailer() {
-  local position=$1 value=$2 name=$2 address='' segments last
+  local position=$1 value=$2 name=$2 address='' segments last closed
   IFS='<' read -r -a segments <<<"${value}x"
   last=${segments[${#segments[@]}-1]}
-  last=${last%x}
-  if [ "${#segments[@]}" -gt 1 ] && [ "${last%%>*}" != "$last" ]; then
-    address=${last%%>*}
-    read -r name <<<"${value:0:${#value}-${#last}-1}"
+  IFS='>' read -r -a closed <<<"$last"
+  if [ "${#segments[@]}" -gt 1 ] && [ "${#closed[@]}" -gt 1 ]; then
+    address=${closed[0]}
+    read -r name <<<"${value:0:${#value}-${#last}}"
   fi
   if ! matches '@' "$address"; then
     if matches "$vendor_word" "$name"; then
