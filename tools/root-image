@@ -69,7 +69,10 @@ REFERENCE = re.compile(r"(?P<name>[^@\s]+)@(?P<digest>sha256:[0-9a-f]{64})\Z")
 PLATFORM = re.compile(r"[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?\Z")
 DEST = re.compile(r"(/[A-Za-z0-9._+-]+)+\Z")
 MODE = re.compile(r"[0-7]{3,4}\Z")
-STAT = re.compile(r"Type: (\w+)\s+Mode:\s+([0-7]+)\b.*?User:\s+(\d+)\s+Group:\s+(\d+)", re.S)
+STAT_TYPE = re.compile(r"Type: ([a-z]+)[ \t]+Mode:[ \t]+([0-7]{1,7})\b")
+STAT_OWNER = re.compile(r"User:[ \t]+([0-9]{1,10})[ \t]+Group:[ \t]+([0-9]{1,10})\b")
+OCTAL = re.compile(r"[0-7]{1,7}")
+DECIMAL = re.compile(r"[0-9]{1,10}")
 TAR_TYPES = {"dir": tarfile.DIRTYPE, "file": tarfile.REGTYPE, "symlink": tarfile.SYMTYPE, "hardlink": tarfile.LNKTYPE}
 
 Base = namedtuple("Base", "reference digest")
@@ -558,9 +561,15 @@ def check_text(check, name):
 
 
 def read_stat(check, name, path):
-    match = STAT.search(check_text(check, name))
-    if match:
-        return match.group(1), int(match.group(2), 8), int(match.group(3)), int(match.group(4))
+    """Return debugfs stat's type, mode, uid and gid: the first Type and Mode, then the first User and Group after them.
+
+    Each search is linear in the read-back's size, and every number is ASCII digits short enough for int().
+    """
+    text = check_text(check, name)
+    kind = STAT_TYPE.search(text)
+    owner = STAT_OWNER.search(text, kind.end()) if kind else None
+    if owner:
+        return kind.group(1), int(kind.group(2), 8), int(owner.group(1)), int(owner.group(2))
     error = check_text(check, f"{name}.err")
     if NOT_FOUND in error:
         raise Refused("check", f"{path} is missing from the image")
@@ -573,8 +582,8 @@ def read_listing(check, name, path, absent_ok):
         parts = line.split("/")
         if not line:
             continue
-        if len(parts) != 8 or parts[0] or parts[7] or not re.fullmatch(r"[0-7]+", parts[2]) or \
-                not parts[3].isdigit() or not parts[4].isdigit():
+        if len(parts) != 8 or parts[0] or parts[7] or not OCTAL.fullmatch(parts[2]) or \
+                not DECIMAL.fullmatch(parts[3]) or not DECIMAL.fullmatch(parts[4]):
             raise Refused("check", f"cannot parse the listing of {path}: {line!r}")
         rows[parts[5]] = (int(parts[2], 8), int(parts[3]), int(parts[4]))
     if rows:
