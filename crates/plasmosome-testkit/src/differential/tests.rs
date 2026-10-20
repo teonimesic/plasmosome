@@ -31,7 +31,7 @@ fn manifest_json() -> Value {
     let mut probes: Vec<Value> = REACH
         .iter()
         .map(|(id, channel, kind)| {
-            json!({"id": id, "channel": channel, "step": "after attach", "reach": kind})
+            json!({"id": id, "channel": channel, "step": "after attach", "reach": kind, "workload_set": []})
         })
         .collect();
     probes.extend(PLAIN.iter().map(|(id, channel)| {

@@ -12,16 +12,6 @@ fn probe_index(manifest: &Value, id: &str) -> usize {
         .expect("the probe is declared")
 }
 
-fn without_probe(id: &str) -> Value {
-    let mut manifest = manifest_json();
-    let index = probe_index(&manifest, id);
-    manifest["probes"]
-        .as_array_mut()
-        .expect("probes is a list")
-        .remove(index);
-    manifest
-}
-
 fn push(manifest: &mut Value, key: &str, entry: Value) {
     manifest[key].as_array_mut().expect("a list").push(entry);
 }
@@ -30,29 +20,72 @@ fn refusal(manifest: &Value) -> ManifestRefusal {
     load_value(manifest).expect_err("the manifest is refused")
 }
 
+fn malformed(text: &str) -> String {
+    match load(text) {
+        Err(ManifestRefusal::Malformed { reason }) => reason,
+        other => panic!("not refused as malformed: {other:?}"),
+    }
+}
+
+const CHANNELS: [(Channel, &str); 5] = [
+    (Channel::Refusal, "refusal"),
+    (Channel::Hint, "hint"),
+    (Channel::Operation, "operation"),
+    (Channel::Facility, "facility"),
+    (Channel::Disturbance, "disturbance"),
+];
+
+const KINDS: [(ReachKind, &str); 3] = [
+    (ReachKind::Host, "host"),
+    (ReachKind::Path, "path"),
+    (ReachKind::Facility, "facility"),
+];
+
 #[test]
-fn a_channel_one_probe_short_is_refused_naming_it() {
-    assert_eq!(
-        refusal(&without_probe("op-times")),
-        ManifestRefusal::ChannelShort {
-            channel: Channel::Operation,
-            count: 2
+fn every_channel_left_with_no_probes_or_two_is_refused_naming_it() {
+    assert_eq!(CHANNELS.map(|(channel, _)| channel), Channel::ALL);
+    for (channel, name) in CHANNELS {
+        for count in [0, 2] {
+            let mut manifest = manifest_json();
+            let mut kept = 0;
+            manifest["probes"]
+                .as_array_mut()
+                .expect("probes is a list")
+                .retain(|probe| {
+                    kept += usize::from(probe["channel"] == name);
+                    probe["channel"] != name || kept <= count
+                });
+            assert_eq!(
+                refusal(&manifest),
+                ManifestRefusal::ChannelShort { channel, count },
+                "{name} left with {count}"
+            );
         }
-    );
+    }
 }
 
 #[test]
-fn a_kind_one_reach_probe_short_is_refused_naming_it() {
-    let mut manifest = manifest_json();
-    let index = probe_index(&manifest, "refusal-host-2");
-    manifest["probes"][index]["reach"] = Value::Null;
-    assert_eq!(
-        refusal(&manifest),
-        ManifestRefusal::KindShort {
-            kind: ReachKind::Host,
-            count: 2
+fn every_kind_left_with_no_reach_probes_or_two_is_refused_naming_it() {
+    assert_eq!(KINDS.map(|(kind, _)| kind), ReachKind::ALL);
+    for (kind, name) in KINDS {
+        for count in [0, 2] {
+            let mut manifest = manifest_json();
+            let mut kept = 0;
+            for probe in manifest["probes"].as_array_mut().expect("probes is a list") {
+                if probe["reach"] == name {
+                    kept += 1;
+                    if kept > count {
+                        probe["reach"] = Value::Null;
+                    }
+                }
+            }
+            assert_eq!(
+                refusal(&manifest),
+                ManifestRefusal::KindShort { kind, count },
+                "{name} left with {count}"
+            );
         }
-    );
+    }
 }
 
 #[test]
@@ -71,6 +104,26 @@ fn a_rule_kind_spec_027_does_not_list_is_refused_naming_it() {
             kind: "hex_token".to_string()
         }
     );
+}
+
+#[test]
+fn a_rule_kind_written_in_another_case_is_refused_naming_it() {
+    for kind in ["PID", "System_Time"] {
+        let mut manifest = manifest_json();
+        push(
+            &mut manifest,
+            "rules",
+            json!({"probe": "hint-env", "field": "TOKEN", "kind": kind}),
+        );
+        assert_eq!(
+            refusal(&manifest),
+            ManifestRefusal::UnknownRuleKind {
+                probe: "hint-env".to_string(),
+                field: "TOKEN".to_string(),
+                kind: kind.to_string()
+            }
+        );
+    }
 }
 
 #[test]
@@ -134,19 +187,60 @@ fn a_rule_on_a_field_the_workload_set_is_refused_naming_it() {
 }
 
 #[test]
-fn a_duplicate_probe_is_refused_naming_it() {
+fn a_rule_on_a_probes_second_workload_set_field_is_refused_naming_it() {
     let mut manifest = manifest_json();
+    let index = probe_index(&manifest, "op-utimensat");
+    manifest["probes"][index]["workload_set"] = json!(["mtime", "atime"]);
     push(
         &mut manifest,
-        "probes",
-        json!({"id": "hint-env", "channel": "hint", "step": "before attach"}),
+        "rules",
+        json!({"probe": "op-utimensat", "field": "atime", "kind": "system_time"}),
     );
     assert_eq!(
         refusal(&manifest),
-        ManifestRefusal::DuplicateProbe {
-            id: "hint-env".to_string()
+        ManifestRefusal::RuleOnWorkloadSetField {
+            probe: "op-utimensat".to_string(),
+            field: "atime".to_string()
         }
     );
+}
+
+#[test]
+fn a_field_the_workload_set_in_one_probe_may_have_a_rule_in_another() {
+    let mut manifest = manifest_json();
+    push(
+        &mut manifest,
+        "rules",
+        json!({"probe": "op-times", "field": "mtime", "kind": "system_time"}),
+    );
+    assert!(load_value(&manifest).is_ok());
+}
+
+#[test]
+fn a_probe_that_leaves_out_its_workload_set_is_refused() {
+    let mut manifest = manifest_json();
+    let index = probe_index(&manifest, "op-times");
+    manifest["probes"][index]
+        .as_object_mut()
+        .expect("a probe is an object")
+        .remove("workload_set");
+    let reason = malformed(&manifest.to_string());
+    assert!(reason.contains("missing field `workload_set`"), "{reason}");
+}
+
+#[test]
+fn a_probe_id_used_twice_is_refused_in_the_same_channel_or_another() {
+    let same =
+        json!({"id": "hint-env", "channel": "hint", "step": "before attach", "workload_set": []});
+    let other = json!({"id": "op-times", "channel": "refusal", "step": "after attach", "reach": "host", "workload_set": []});
+    for (id, again) in [("hint-env", same), ("op-times", other)] {
+        let mut manifest = manifest_json();
+        push(&mut manifest, "probes", again);
+        assert_eq!(
+            refusal(&manifest),
+            ManifestRefusal::DuplicateProbe { id: id.to_string() }
+        );
+    }
 }
 
 #[test]
@@ -214,8 +308,25 @@ fn two_rules_or_two_allowances_on_one_field_are_refused_naming_it() {
 }
 
 #[test]
-fn neutral_names_without_opt_usr_local_bin_or_a_fuse_workspace_are_refused() {
-    for (index, mount) in [(0, "/opt"), (1, "/usr/local/bin"), (2, "a FUSE mount")] {
+fn a_rule_and_an_allowance_on_one_field_are_refused_naming_it() {
+    let mut manifest = manifest_json();
+    push(
+        &mut manifest,
+        "allowances",
+        json!({"probe": "op-times", "field": "times", "cell_value": [1, 2]}),
+    );
+    assert_eq!(
+        refusal(&manifest),
+        ManifestRefusal::RuleAndAllowance {
+            probe: "op-times".to_string(),
+            field: "times".to_string()
+        }
+    );
+}
+
+#[test]
+fn neutral_names_without_opt_or_usr_local_bin_are_refused() {
+    for (index, mount) in [(0, "/opt"), (1, "/usr/local/bin")] {
         let mut manifest = manifest_json();
         manifest["neutral"]["mounts"]
             .as_array_mut()
@@ -229,17 +340,78 @@ fn neutral_names_without_opt_usr_local_bin_or_a_fuse_workspace_are_refused() {
 }
 
 #[test]
-fn a_misspelt_key_or_text_that_is_not_json_is_refused_as_malformed() {
-    let mut manifest = manifest_json();
-    let top = manifest.as_object_mut().expect("an object");
-    let rules = top.remove("rules").expect("the fixture has rules");
-    top.insert("rule".to_string(), rules);
-    for text in [manifest.to_string(), "not json".to_string()] {
-        assert!(
-            matches!(load(&text), Err(ManifestRefusal::Malformed { .. })),
-            "{text}"
+fn neutral_names_need_a_fuse_mount_at_a_path_of_its_own() {
+    for fuse_at in [None, Some(0), Some(1)] {
+        let mut manifest = manifest_json();
+        let mounts = &mut manifest["neutral"]["mounts"];
+        mounts[2]["fstype"] = json!("virtiofs");
+        if let Some(index) = fuse_at {
+            mounts[index]["fstype"] = json!("fuse");
+        }
+        assert_eq!(
+            refusal(&manifest),
+            ManifestRefusal::NeutralMountMissing {
+                mount: "a FUSE workspace"
+            },
+            "FUSE at {fuse_at:?}"
         );
     }
+}
+
+#[test]
+fn two_neutral_mounts_at_one_path_are_refused_naming_it() {
+    let mut manifest = manifest_json();
+    let again =
+        json!({"path": "/opt", "source": "software", "fstype": "virtiofs", "options": "rw"});
+    manifest["neutral"]["mounts"]
+        .as_array_mut()
+        .expect("mounts is a list")
+        .push(again);
+    assert_eq!(
+        refusal(&manifest),
+        ManifestRefusal::DuplicateNeutralMount {
+            path: "/opt".to_string()
+        }
+    );
+}
+
+#[test]
+fn an_unknown_key_at_any_level_is_refused_naming_it() {
+    let mut top = manifest_json();
+    let object = top.as_object_mut().expect("an object");
+    let rules = object.remove("rules").expect("the fixture has rules");
+    object.insert("rule".to_string(), rules);
+    let mut probe = manifest_json();
+    probe["probes"][0]["reachh"] = json!("host");
+    let mut rule = manifest_json();
+    rule["rules"][0]["kindd"] = json!("pid");
+    let mut allowance = manifest_json();
+    allowance["allowances"][0]["cell_valu"] = json!("0600");
+    let mut neutral = manifest_json();
+    neutral["neutral"]["fuse_subtypes"] = json!("passthrough");
+    let mut mount = manifest_json();
+    mount["neutral"]["mounts"][2]["subtype"] = json!("passthrough");
+    for (manifest, key) in [
+        (top, "rule"),
+        (probe, "reachh"),
+        (rule, "kindd"),
+        (allowance, "cell_valu"),
+        (neutral, "fuse_subtypes"),
+        (mount, "subtype"),
+    ] {
+        let reason = malformed(&manifest.to_string());
+        assert!(
+            reason.contains(&format!("unknown field `{key}`")),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn text_that_is_not_json_or_has_trailing_data_is_refused_as_malformed() {
+    malformed("not json");
+    let reason = malformed(&format!("{} {{}}", manifest_json()));
+    assert!(reason.contains("trailing characters"), "{reason}");
 }
 
 #[test]
