@@ -32,10 +32,8 @@ const CREATED_FILE: &CStr = c"created";
 const RUNTIME_DIR: &CStr = c"runtime";
 const RETIRED_DIR: &CStr = c"retired";
 const MARKER_KEYS: [&str; 3] = ["cell", "boot_session", "stopped"];
+pub(crate) const MAX_MARKER_BYTES: usize = 4096;
 const MARKER_READ_LIMIT: u64 = MAX_MARKER_BYTES as u64 + 1;
-
-/// The most bytes a `launched` record may hold, its newline included.
-pub const MAX_MARKER_BYTES: usize = 4096;
 
 type SyncDirectory = fn(BorrowedFd<'_>) -> io::Result<()>;
 type Identity = (u64, u64);
@@ -614,8 +612,10 @@ impl CellDir {
 
     /// Reads the `launched` marker without following a symlink and without blocking on a FIFO.
     /// It is `Absent` only when no entry named `launched` exists. A symlink, a directory or any
-    /// other entry that is not a regular file, a record [`LaunchedMarker::decode`] refuses, a
-    /// marker naming another cell, and any error opening or reading it are `Unreadable`.
+    /// other entry that is not a regular file, a record that is not one line of strict JSON
+    /// with a `cell-<n>` cell, a lowercase hyphenated boot session and, if any,
+    /// `"stopped": true`, in 4,096 bytes or fewer with its newline, a marker naming another
+    /// cell, and any error opening or reading it are `Unreadable`.
     pub fn read_launched(&self) -> MarkerRead {
         let fd = match open_at(
             self.dir.as_fd(),
@@ -789,10 +789,7 @@ pub struct LaunchedMarker {
 }
 
 impl LaunchedMarker {
-    /// The record as one line: `{"cell":…,"boot_session":…}` and a newline, with
-    /// `,"stopped":true` before the closing brace when `stopped` is true. The boot session is
-    /// written as a lowercase hyphenated UUID.
-    pub fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let cell = Value::from(self.cell.as_str());
         let stopped = if self.stopped {
             ",\"stopped\":true"
@@ -806,12 +803,7 @@ impl LaunchedMarker {
         .into_bytes()
     }
 
-    /// Reads one record: one JSON object and a newline, at most [`MAX_MARKER_BYTES`] bytes in
-    /// all, with no other line and no carriage return. `cell` is required and is spec 023's
-    /// `cell-<n>`. `boot_session` is required and is a lowercase hyphenated UUID. `stopped` is
-    /// optional and, when present, is `true`. A repeated or unknown key is refused. A record
-    /// over the size is `TooLarge`; every other refusal is `Malformed`.
-    pub fn decode(bytes: &[u8]) -> Result<LaunchedMarker, MarkerFault> {
+    pub(crate) fn decode(bytes: &[u8]) -> Result<LaunchedMarker, MarkerFault> {
         if bytes.len() > MAX_MARKER_BYTES {
             return Err(MarkerFault::TooLarge);
         }
