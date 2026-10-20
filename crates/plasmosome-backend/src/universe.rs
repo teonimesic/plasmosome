@@ -699,7 +699,7 @@ impl fmt::Display for ResidueReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{broker, mount, proxy_map, session_file};
+    use crate::fixtures::{self, broker, mount, proxy_map, session_file};
 
     fn object(owner: &str, capability: Capability) -> OsObject {
         OsObject {
@@ -812,7 +812,7 @@ mod tests {
                 proxy_map("api.github.com", "splice"),
                 proxy_map("api.github.com", "audit"),
             ),
-            (broker(31337, "egressd"), broker(31337, "auditd")),
+            (broker("egressd"), broker("auditd")),
         ] {
             let mut left = OsState::new();
             left.insert(object("network", left_capability)).unwrap();
@@ -882,6 +882,20 @@ mod tests {
         assert!(leaked.describe().contains(&leaked.id.to_string()));
         assert!(lost.is_empty());
         assert!(assertions.is_empty());
+    }
+
+    #[test]
+    fn a_broker_description_names_its_command_and_both_endpoints() {
+        let described = object("network", broker("egressd")).describe();
+        let launch = fixtures::launch();
+        for part in [
+            "broker/egressd",
+            &launch.command[0],
+            &launch.control_socket,
+            &launch.data_socket,
+        ] {
+            assert!(described.contains(part), "{described} does not name {part}");
+        }
     }
 
     fn cell_owner(cell: &str, plugin: &str) -> CellOwner {

@@ -785,7 +785,8 @@ pub mod artifact;
 mod tests {
     use super::*;
     use plasmosome_backend::{
-        Capability, CellId, CellOwner, Diff, FakeBackend, Grant, GrantId, GrantKind, UniverseOp,
+        Capability, CellId, CellOwner, Diff, FakeBackend, FileAccess, Grant, GrantId, GrantKind,
+        ProxyRecipe, ProxyTransport, SessionFileRecipe, UdsRecipe, UniverseOp,
     };
     use std::time::Duration;
 
@@ -803,12 +804,21 @@ mod tests {
     fn session_file(path: &str) -> Capability {
         Capability::SessionFile {
             path: path.to_string(),
+            recipe: SessionFileRecipe {
+                contents: Vec::new(),
+                mode: FileAccess::ReadOnly,
+                guest_path: "/run/plasmosome/session".to_string(),
+            },
         }
     }
 
     fn uds_socket(path: &str) -> Capability {
         Capability::UdsSocket {
             path: path.to_string(),
+            recipe: UdsRecipe {
+                upstream: "/run/plasmosome/upstream.sock".to_string(),
+                guest_path: "/run/plasmosome/guest.sock".to_string(),
+            },
         }
     }
 
@@ -816,29 +826,55 @@ mod tests {
         Capability::ProxyMap {
             host: host.to_string(),
             route: route.to_string(),
+            recipe: ProxyRecipe {
+                transport: ProxyTransport::Tcp,
+                destination: "upstream.plasmosome.test".to_string(),
+                port: 443,
+                allow_private: false,
+            },
         }
     }
 
     fn op(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
         match capability {
-            Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
-            Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
-            Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
+            Capability::SessionFile { path, recipe } => UniverseOp::WriteSessionFile {
+                id,
+                path,
+                recipe,
+                owner,
+            },
+            Capability::UdsSocket { path, recipe } => UniverseOp::BindUds {
+                id,
+                path,
+                recipe,
+                owner,
+            },
+            Capability::ProxyMap {
+                host,
+                route,
+                recipe,
+            } => UniverseOp::SetProxyMap {
                 id,
                 host,
                 route,
+                recipe,
                 owner,
             },
-            Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
+            Capability::Broker { name, launch } => UniverseOp::SpawnBroker {
                 id,
-                pid,
                 name,
+                launch,
                 owner,
             },
-            Capability::Mount { source, target } => UniverseOp::AddMount {
+            Capability::Mount {
+                source,
+                target,
+                recipe,
+            } => UniverseOp::AddMount {
                 id,
                 source,
                 target,
+                recipe,
                 owner,
             },
         }

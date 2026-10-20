@@ -2,8 +2,9 @@ use std::io::Write;
 use std::time::Duration;
 
 use plasmosome_backend::{
-    Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, Grant,
-    GrantId, GrantKind, LedgerEntry, PluginId, UniverseClass, UniverseOp, UniverseRemoval,
+    BrokerLaunch, Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend,
+    FileAccess, Grant, GrantId, GrantKind, LedgerEntry, MountRecipe, PluginId, ProxyRecipe,
+    ProxyTransport, SessionFileRecipe, UdsRecipe, UniverseClass, UniverseOp, UniverseRemoval,
 };
 use plasmosome_ledger::{Closure, Effect, Inverse, InverseVia, Ledger, LogRecord, Reversibility};
 
@@ -21,12 +22,21 @@ fn cell_owner(plugin: &str) -> CellOwner {
 fn session_file(path: &str) -> Capability {
     Capability::SessionFile {
         path: path.to_string(),
+        recipe: SessionFileRecipe {
+            contents: Vec::new(),
+            mode: FileAccess::ReadOnly,
+            guest_path: "/run/plasmosome/session".to_string(),
+        },
     }
 }
 
 fn uds_socket(path: &str) -> Capability {
     Capability::UdsSocket {
         path: path.to_string(),
+        recipe: UdsRecipe {
+            upstream: "/run/plasmosome/upstream.sock".to_string(),
+            guest_path: "/run/plasmosome/guest.sock".to_string(),
+        },
     }
 }
 
@@ -34,13 +44,23 @@ fn proxy_map(host: &str, route: &str) -> Capability {
     Capability::ProxyMap {
         host: host.to_string(),
         route: route.to_string(),
+        recipe: ProxyRecipe {
+            transport: ProxyTransport::Tcp,
+            destination: "upstream.plasmosome.test".to_string(),
+            port: 443,
+            allow_private: false,
+        },
     }
 }
 
-fn broker(pid: u32, name: &str) -> Capability {
+fn broker(name: &str) -> Capability {
     Capability::Broker {
-        pid,
         name: name.to_string(),
+        launch: BrokerLaunch {
+            command: vec!["/usr/libexec/plasmosome-broker".to_string()],
+            control_socket: "/run/plasmosome/broker.control".to_string(),
+            data_socket: "/run/plasmosome/broker.data".to_string(),
+        },
     }
 }
 
@@ -48,29 +68,52 @@ fn mount(source: &str, target: &str) -> Capability {
     Capability::Mount {
         source: source.to_string(),
         target: target.to_string(),
+        recipe: MountRecipe {
+            access: FileAccess::ReadOnly,
+        },
     }
 }
 
 fn op(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
     match capability {
-        Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
-        Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
-        Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
+        Capability::SessionFile { path, recipe } => UniverseOp::WriteSessionFile {
+            id,
+            path,
+            recipe,
+            owner,
+        },
+        Capability::UdsSocket { path, recipe } => UniverseOp::BindUds {
+            id,
+            path,
+            recipe,
+            owner,
+        },
+        Capability::ProxyMap {
+            host,
+            route,
+            recipe,
+        } => UniverseOp::SetProxyMap {
             id,
             host,
             route,
+            recipe,
             owner,
         },
-        Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
+        Capability::Broker { name, launch } => UniverseOp::SpawnBroker {
             id,
-            pid,
             name,
+            launch,
             owner,
         },
-        Capability::Mount { source, target } => UniverseOp::AddMount {
+        Capability::Mount {
+            source,
+            target,
+            recipe,
+        } => UniverseOp::AddMount {
             id,
             source,
             target,
+            recipe,
             owner,
         },
     }
@@ -88,7 +131,7 @@ fn wire_capabilities() -> Vec<Capability> {
         session_file("/skills/pr.md"),
         uds_socket("/run/plasmosome/egressd.uds"),
         proxy_map("api.github.com", "splice"),
-        broker(31337, "egressd"),
+        broker("egressd"),
         mount("/secrets", "/workspace"),
     ]
 }
@@ -502,7 +545,7 @@ fn exact_neighbours_survive_interrupted_logged_replay_and_resume() {
 fn serialized_observations_restore_exact_inverses_but_not_backend_handles() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("ledger.ndjson");
-    let capability = broker(31337, "egressd");
+    let capability = broker("egressd");
     let mut source = FakeBackend::new();
     let first = source.grant(Grant {
         owner: cell_owner("network"),

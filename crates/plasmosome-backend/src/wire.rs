@@ -310,27 +310,32 @@ mod tests {
                 fixtures::session_file("/skills/pr.md"),
                 "/SessionFile",
                 "/WriteSessionFile",
-                &["path"][..],
+                &["path", "recipe"][..],
             ),
             (
                 fixtures::uds_socket("/run/plasmosome/egressd.uds"),
                 "/UdsSocket",
                 "/BindUds",
-                &["path"][..],
+                &["path", "recipe"][..],
             ),
             (
                 fixtures::proxy_map("api.github.com", "splice"),
                 "/ProxyMap",
                 "/SetProxyMap",
-                &["host", "route"][..],
+                &["host", "route", "recipe"][..],
             ),
             (
-                fixtures::broker(4242, "egressd"),
+                fixtures::broker("egressd"),
                 "/Broker",
                 "/SpawnBroker",
-                &["pid", "name"][..],
+                &["name", "launch"][..],
             ),
-            (mount(), "/Mount", "/AddMount", &["source", "target"][..]),
+            (
+                mount(),
+                "/Mount",
+                "/AddMount",
+                &["source", "target", "recipe"][..],
+            ),
         ] {
             accepted.extend(sequence_accepted("Capability", &capability, at, fields));
             let operation_fields = [&["id"][..], fields, &["owner"]].concat();
@@ -517,7 +522,8 @@ mod tests {
         );
         assert_eq!(
             record::<Capability>(
-                "record = { Mount = { source = \"/srv/repo\", target = \"/workspace\" } }"
+                "record = { Mount = { source = \"/srv/repo\", target = \"/workspace\", \
+                 recipe = { access = \"read_only\" } } }"
             ),
             Ok(mount())
         );
