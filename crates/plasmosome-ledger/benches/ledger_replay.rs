@@ -1,13 +1,18 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use plasmosome_backend::{
-    Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, FakeBackend, Grant, GrantKind,
-    PluginId,
+    Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, FakeBackend, FileAccess, Grant,
+    GrantKind, PluginId, SessionFileRecipe,
 };
 use plasmosome_ledger::{Effect, InverseVia, Ledger};
 
 fn session_file(path: &str) -> Capability {
     Capability::SessionFile {
         path: path.to_string(),
+        recipe: SessionFileRecipe {
+            contents: Vec::new(),
+            mode: FileAccess::ReadOnly,
+            guest_path: "/run/plasmosome/session".to_string(),
+        },
     }
 }
 

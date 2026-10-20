@@ -75,6 +75,36 @@ under `RUSTUP_HOME`; both remain after the example.
 The checkout is trusted host code: putting build output under the temporary directory does not
 isolate an untrusted build.
 
+The example makes a fresh 0700 directory inside a base directory and keeps its files, its
+sockets and its build there, about 240 MB, so you must be able to write the base. `plasmosomed`
+refuses a control socket unless every directory above the socket is owned by you or by root, is
+not a symlink, and is writable by neither group nor other (on macOS, nor through an ACL entry).
+On macOS it also refuses when `/` or any directory on the way down to the socket is on a volume
+mounted with ownership ignored, which `mount` lists as `noowners`, because there the owner and
+mode it reads do not keep other users out.
+Before it builds, the example checks the type, owner and mode of the base and of each directory
+above it, and that you can write the base, and stops with one line naming the first that fails.
+It does not check for ignored ownership, which Python's `os` module cannot read, so on such a
+volume the build runs and then `plasmosomed` refuses to start, naming the first directory on
+that volume.
+`plasmosomed` makes the full check, ACL entries and ignored ownership included, when it starts.
+
+The base is `PLASMOSOME_QUICKSTART_DIR` when that is set, and otherwise Python's temporary
+directory, spelled by its real path. On macOS that is the per-user temporary directory,
+`/private/var/folders/...`, which passes. On Linux, Python's temporary directory is the first of
+`TMPDIR`, `TEMP`, `TMP`, `/tmp`, `/var/tmp`, `/usr/tmp` and the current directory in which it can
+create a file. With none of the three variables set, that is usually `/tmp`, which everyone can
+write, so the check fails. `XDG_RUNTIME_DIR` passes the check where logind makes it, but it is
+held in memory, logind caps it at 10% of RAM by default, and containers and some SSH sessions do
+not set it. On Linux, make a base on disk under your home before you run the block:
+
+```shell
+mkdir -p -m 700 "$HOME/.plasmosome-quickstart"
+export PLASMOSOME_QUICKSTART_DIR="$HOME/.plasmosome-quickstart"
+```
+
+The example removes what it makes inside the base; the base itself stays.
+
 ```shell
 python3 - <<'PY'
 import errno
@@ -84,6 +114,7 @@ from pathlib import Path
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -112,9 +143,41 @@ for required in required_paths:
 for executable in ("cargo", "rustc"):
     require(shutil.which(executable), f"required executable is not on PATH: {executable}")
 
+BASE_RULE = (
+    "choose a base you can write whose directories are each owned by you or by root and "
+    "writable by neither group nor other, such as a 0700 directory under your home, and name "
+    "it in PLASMOSOME_QUICKSTART_DIR"
+)
+
+
+def refuse_base(reason):
+    sys.exit(f"quickstart: {reason}; {BASE_RULE}")
+
+
+private_base = Path(
+    os.path.realpath(os.environ.get("PLASMOSOME_QUICKSTART_DIR") or tempfile.gettempdir())
+)
+for directory in [*reversed(private_base.parents), private_base]:
+    try:
+        info = os.lstat(directory)
+    except OSError as error:
+        refuse_base(f"cannot inspect {directory}: {error.strerror}")
+    if not stat.S_ISDIR(info.st_mode):
+        refuse_base(f"{directory} is not a directory")
+    if info.st_uid not in (0, os.geteuid()):
+        refuse_base(f"{directory} is owned by uid {info.st_uid}, not by you or root")
+    if info.st_mode & 0o022:
+        refuse_base(
+            f"{directory} has mode {stat.S_IMODE(info.st_mode):04o}: group or other can replace "
+            "entries in it"
+        )
+if not os.access(private_base, os.W_OK | os.X_OK):
+    refuse_base(f"you cannot create entries in {private_base}")
+print(f"private base: {private_base}")
+
 failure = None
 scratch_path = None
-with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir="/tmp") as scratch_text:
+with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir=private_base) as scratch_text:
     scratch_path = Path(scratch_text).resolve()
     require(
         scratch_path.stat().st_mode & 0o077 == 0,
@@ -328,6 +391,12 @@ with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir="/tmp") as scr
             type(uptime) is int and uptime >= 0,
             f"controller uptime is not a nonnegative integer: {result}",
         )
+        controller_mode = stat.S_IMODE(os.lstat(controller_socket).st_mode)
+        require(
+            controller_mode == 0o600,
+            f"controller socket mode is {controller_mode:04o}, not 0600",
+        )
+        print(f"controller socket mode: {controller_mode:04o}")
 
         membrane_request = {"id": 2, "method": "membrane.status", "params": {}}
         membrane_response = request_status(membrane, membrane_socket, membrane_request)
@@ -483,6 +552,7 @@ that its complete runtime role is delivered.
 | `plasmosome-membrane` | Per-cell host supervisor for the VMM, network path and broker processes |
 | `plasmosome-ledger` | Typed reversibility: effects and their inverses; spec 020's registry IDs and release references |
 | `plasmosome-backend` | Enforcement interface, currently including a fake in-memory backend for tests |
+| `plasmosome-cli` | Client logic of the `plasmosome` command line: spec 025's JSON scanner and writers, envelopes and client codes; never shipped |
 | `plasmid` | Reserved plasmid-author command line |
 | `plasmid-sdk` | Reserved stability boundary for plasmid authors |
 | `plasmosome-guards` | Repository policy checks |
