@@ -422,12 +422,13 @@ impl SealedLedger {
     /// effect. A graceful call that timed out on its first inverse undid nothing, but a later call
     /// on the same ledger may have. Once any call has, the new detach replays the undone effects
     /// first, and the first inverse it runs again fails, for example with `UnknownHandle` for a
-    /// handle already revoked. A ledger bound to a wrong cell is then stuck. On it, every call
-    /// under the bound cell fails at the first remaining removal of an object that cell does not
-    /// own, and any other cell gets `DetachError::CellChanged`. On the reclosed one, every call
-    /// fails at the first undone effect. The objects of the effects not yet undone stay until the
-    /// caller removes them through the backend, or builds by hand a new ledger of those effects,
-    /// with no cursor to say which they are. `ForcedLedger::unseal` behaves the same.
+    /// handle already revoked. A ledger bound to a wrong cell is then stuck, and every later call
+    /// fails. On it, a call under the bound cell fails at the first remaining removal of an object
+    /// that cell does not own, or sooner when a graceful drain times out, and any other cell gets
+    /// `DetachError::CellChanged`. On the reclosed one, every call fails at the first undone
+    /// effect. The objects of the effects not yet undone stay until the caller removes them
+    /// through the backend, or builds by hand a new ledger of those effects, with no cursor to say
+    /// which they are. `ForcedLedger::unseal` behaves the same.
     pub fn unseal(self) -> Ledger {
         Ledger {
             plugin: self.plugin,
