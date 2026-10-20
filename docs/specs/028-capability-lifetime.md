@@ -213,8 +213,9 @@ fenced throughout, even for a holding that stays standing. Before a removal comm
 `lifetime` record (spec 008's `Replacement.lifetime`, section 10), and every publication carries it:
 for a lease its bound has passed, and for another cause the permanent fence holds and observation
 shows it. A removal stuck after commit (`timed_out` or `incomplete`) stays committed without finish
-(spec 008, publication step 5) until a retry finishes it. While any expiry is unfinished past its H,
-`plasmosome.status` reports `ready: false`. A `cell.kill` resumes an unfinished expiry before its
+(spec 008, publication step 5) until a retry, or a `cell.kill` with `now`, finishes it. While any
+expiry is unfinished past its H, `plasmosome.status` reports `ready: false`. A `cell.kill` resumes
+an unfinished expiry before its
 own withdrawal, and with `now` goes past one that does not finish (section 10). Forced and clean
 removals by the existing verbs still render alike, outside this spec; expiry records differ.
 
@@ -337,6 +338,11 @@ are this spec's.
   - Startup (`008:558-559`): after "The controller reconnects to surviving supervisors and retains
     exact inverses for subsequent ordinary revocation.", add "Before any other mutation of a cell,
     it expires every attachment whose spec 028 bound has passed, with the bound from the journal."
+  - Publication (`008:237-238`): after "it does not yet permit a client result or the next
+    transaction.", add "The one exception is spec 023 §7 step 2's `cell.kill` with `now` past a
+    resumed transaction: the controller holds the lock of a cell whose supervisor exited after a
+    clean teardown, so nothing remains to publish to, and a finish there admits the next
+    transaction and the kill's reply without step 6 (spec 028)."
 - **Spec 011, declaration.** Replace "- **How long it may take to stop** — a drain budget."
   (`011:57`) with "- **How long it may hold its grants, and how long it may take to stop** — a
   lifetime and a drain budget. `[lifecycle]` takes optional `lease_ms` and `idle_ms`, each 1,000 ms
@@ -415,9 +421,10 @@ are this spec's.
     > lock, the controller finishes the resumed transaction on that observation, with no Force,
     > then prepares the kill's own withdrawal with its Force assertion, appends its `force` event,
     > and commits and finishes it on the same observation, before step 5. Neither is published,
-    > since no supervisor remains to hold a DesiredCell. A teardown that is not clean finishes
-    > neither: the cell stays `dead` and listed, with `teardown` in `incomplete` and the resumed
-    > generation named, for a later kill. Without `now`, the reply stays 106.
+    > since no supervisor remains to hold a DesiredCell; spec 008 step 5 allows this one case. A
+    > teardown that is not clean finishes neither: the cell stays `dead` and listed, with
+    > `teardown` in `incomplete`, for a later kill, and the resumed generation stays unfinished in
+    > the journal. Without `now`, the reply stays 106.
   - Acceptance item 13 (`023:603-604`): replace "Catches: ending the guest before withdrawing,"
     with "Catches: ending the guest before withdrawing, other than past a resumed transaction under
     `now` (§7 step 2),".
@@ -588,13 +595,14 @@ injected clock, and none sleeps for the duration it tests.
     `drain` after B, so the expiry is `timed_out`. A `cell.kill` without `now` replies 106, the
     cell stays `draining`, and the expiry stays unfinished. A `cell.kill` with `now`, an operator
     and a reason sends no withdrawal of its own before `membrane.cell.kill`, writes its session
-    log line before it, and retires the cell. After the lock wait, the journal shows the expiry's
-    finish and only then the kill's prepare, commit and finish, with the kill's `force` event in
-    the session log before that commit. With the teardown unclean, the cell stays `dead` and
-    listed, with `teardown` in `incomplete` and the expiry's generation named, and neither
-    transaction finishes. Catches: a `now` kill that still waits on the resumed expiry, the kill's
-    own transaction prepared before the resumed one finishes, and a finish without the teardown's
-    observation.
+    log line before it, and retires the cell. With the session log append failing, it replies 106,
+    sends no `membrane.cell.kill`, and the cell stays `draining`. After the lock wait, the journal
+    shows the expiry's finish and only then the kill's prepare, commit and finish, with the kill's
+    `force` event in the session log before that commit. With the teardown unclean, the cell stays
+    `dead` and listed, with `teardown` in `incomplete` and the expiry still unfinished in
+    `cell.status`, and neither transaction finishes. Catches: a `now` kill that still waits on the
+    resumed expiry, a teardown with no recorded authority, the kill's own transaction prepared
+    before the resumed one finishes, and a finish without the teardown's observation.
 
 ## Out of scope
 
