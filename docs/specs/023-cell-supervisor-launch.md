@@ -302,10 +302,12 @@ The controller marks the cell `draining`, then:
    `retired/<cell>`, sync both parent directories, and release the lock; if the rename fails,
    release the lock and reply 105 `{from: "dead", to: "retired", cell}`, and the cell stays listed
    `dead` until a later check retires it. If the check fails, do not retire: decide the cell at
-   once by §8's table, with the lock still held, as §6 does when `membraned` exits during a start.
-   Reply with `teardown` in `incomplete` unless the table retires the cell. A cell the table sets
-   aside or quarantines leaves `cell.list`, and `plasmosome.recovery` names it. Amended on
-   2026-10-20: this gave no outcome for a failed check or a failed rename.
+   once by §8's table, as §6 does when `membraned` exits during a start. The lock the kill holds
+   counts as the table's `free` row, and the check does not test it again. Reply with `teardown`
+   in `incomplete` unless the table retires the cell. If §8's retirement then fails, the cell is
+   set aside as §8 says, as `retire_unlogged` or `retire_failed`, and the reply lists `teardown`.
+   A cell the table sets aside or quarantines leaves `cell.list`, and `plasmosome.recovery` names
+   it. Amended on 2026-10-20: this gave no outcome for a failed check or a failed rename.
 6. **Reply** `{cell, state: "dead", drained, residue}` as spec 001 §3.7 shows, with the residue
    from step 3. When a step fell short, the reply adds `incomplete`, a list over a closed set:
    `workload_stop` (it failed, was refused, timed out or had no budget, or was skipped because the
@@ -469,16 +471,18 @@ drift, unmatched, incomplete, pending, quarantined, set_aside}`", and after that
 > pending transaction in this section's projection, omitted when it has none. Both are omitted
 > when the cell's journal is corrupt, which happens only when the lock is held, since a free lock
 > with a corrupt journal quarantines; spec 008 then reports that journal under `quarantined`. A
-> cell appears in `set_aside` once. A set-aside cell's records appear only in its entry, never in
-> the top-level `desired`, `observed_cells`, `pending`, `expected`, `drift`, `unmatched`,
-> `incomplete` or `tombstones`. `set_aside` belongs to the outcome, like every other key: it names
-> the cells set aside when that outcome completed. A supervisor check while serving that changes
-> `set_aside`, by setting a cell aside, changing its entry, or adopting, retiring or quarantining
-> a set-aside cell, completes a new outcome in which only that cell's records change. So a new
-> capture shows the current list, and a capture already pinned keeps its outcome. `set_aside` is
-> not added to §4.1's stderr diagnostic, since a set-aside cell never refuses startup; the
-> quarantine reports in that diagnostic carry `lock` and `marker` when spec 023's check
-> quarantined their cell (spec 008's amendment below).
+> cell appears in `set_aside` once. A set-aside cell's records appear only in its entry, apart from
+> a corrupt journal's report under `quarantined`, and never in the top-level `desired`,
+> `observed_cells`, `pending`, `expected`, `drift`, `unmatched`, `incomplete` or `tombstones`.
+> Its tombstones stay in its journal and are not reported until it is adopted. `set_aside`
+> belongs to the outcome, like every other key: it names the cells set aside when that outcome
+> completed. A supervisor check while serving that sets a cell aside, changes its entry,
+> quarantines a cell, or adopts or retires a set-aside cell, completes a new outcome in which
+> only that cell's records change and `ledger_generation` is recomputed over the adopted cells.
+> So a new capture shows the current list, and a capture already pinned keeps its outcome.
+> `set_aside` is not added to §4.1's stderr diagnostic, since a set-aside cell never refuses
+> startup; the quarantine reports in that diagnostic carry `lock` and `marker` when spec 023's
+> check quarantined their cell (spec 008's amendment below).
 
 Amended on 2026-10-20: this item is new. Spec 023 §8 said `plasmosome.recovery` lists set-aside
 cells, but no amendment gave them a key, and spec 001 fixes the result's keys.
@@ -528,8 +532,8 @@ operator assertion.", add:
 > §8's table: unless the table retires it, the reply lists `teardown` in `incomplete`, and the
 > cell is set aside or quarantined and leaves `cell.list`; a later `cell.kill` of it is 101, since
 > clearing it is spec 023's owner question 3, or for a quarantined cell outside spec 008. A guest
-> not stopped or a supervisor not gone within the deadline, or a retirement rename that fails, is
-> 105 naming the cell.
+> not stopped or a supervisor not gone within the deadline, or a rename that fails after the
+> retire check passed, is 105 naming the cell.
 
 Amended on 2026-10-20: this did not name the reply's field for the assertion or say when the
 reply carries it, did not say what every 106 of a kill carries in `handle` and `deadline_ms`, and
@@ -565,8 +569,10 @@ gave the result as `{state, clean, residue}`, without `cell`, `residue_items` or
 Spec 022 inserts after the same paragraph; whichever lands second goes after the other's.
 
 > The same configuration admits optional `cell_runtime: {membraned: Artifact, template,
-> start_deadline_ms, stop_deadline_ms?}`, spec 023's deployment input for new cells. Recovery
-> never reads it.
+> start_deadline_ms, stop_deadline_ms}`, spec 023's deployment input for new cells, in which
+> `stop_deadline_ms` is optional. Recovery never reads it.
+
+Corrected on 2026-10-20: this said `stop_deadline_ms?`, a notation spec 001 never uses.
 
 In the same section, after "its publication exchange gets one recovery_deadline_ms budget,
 likewise not reset on retry.", add "Under `cell.kill`, that exchange also ends within the kill's
@@ -717,10 +723,13 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
    Startup serves within `recovery_deadline_ms`, with F adopted and published. A, D and E are absent
    from `cell.list`, listed by `plasmosome.recovery` as `supervisor_lost`,
    `holdings_without_supervisor` and `unresponsive`, E with its transaction left uncleaned, and
-   readiness is false. B and C are under `retired/`, and the session log names C's holding as
-   residue. A retired directory with a corrupt journal is ignored. Catches: deciding from socket
-   existence, one hung supervisor spending the startup deadline, and a cell from before a host
-   restart blocking forever.
+   readiness is false. D's `set_aside` entry carries its settled attachment, with its `lifetime`,
+   in `desired`, and E's carries its prepared transaction in `pending`; neither appears in the
+   top-level `desired` or `pending`. B and C are under `retired/`, and the session log names C's
+   holding as residue. A retired directory with a corrupt journal is ignored. Catches: deciding
+   from socket existence, one hung supervisor spending the startup deadline, a cell from before a
+   host restart blocking forever, and a set-aside entry with an empty `desired` or no `pending`.
+   Amended on 2026-10-20: this did not check a set-aside entry's holdings.
 10. The same set, plus an invalid configuration that makes startup refuse after discovery: nothing
     is retired. Catches: acting before every cell is classified.
 11. While serving, SIGTERM the `membraned` of a cell with an attachment: it stops the guest,
@@ -746,10 +755,12 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     ID. With `deadline_ms` 1, and queued behind a held `cell.new` until D is spent, every deadline
     sent is positive, the reply is 106 and the cell stays `draining`. With `now`, no workload stop
     is sent, the cell is retired, and the reply has no `incomplete` and carries `force` with the
-    request's `operator` and `reason`. Catches: ending the guest before withdrawing, other than
-    past a resumed transaction under `now` (§7 step 2), a zero deadline, residue from controller
-    memory, ID reuse, and a `now` reply without its assertion. Amended on 2026-10-20: this did not
-    check that the reply carries `force`.
+    request's `operator` and `reason`. A kill without `now` that passes `operator` and `reason`
+    replies with no `force`. Catches: ending the guest before withdrawing, other than past a
+    resumed transaction under `now` (§7 step 2), a zero deadline, residue from controller memory,
+    ID reuse, a `now` reply without its assertion, and a `force` echoed without `now`. Amended on
+    2026-10-20: this did not check that the reply carries `force`, or that it carries none without
+    `now`.
 14. A guest that ignores `shutdown`: with `deadline_ms` 10,000, `cell.kill` replies within 10
     seconds, the helper is gone and `incomplete` lists `shutdown`. A crashed guest: no workload stop
     is sent and the cell is retired. A workload stop refused with `workload_remains`, or never
