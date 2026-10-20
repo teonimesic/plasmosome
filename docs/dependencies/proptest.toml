@@ -6,21 +6,21 @@ reason = """\
   """
 write_it_instead.lines = 1840
 write_it_instead.how = """\
-  On 2026-10-20, at main ec4603c, `git grep -l proptest -- '*.rs' | wc -l` gives 5 files: two \
-  integration tests and three unit-test modules. \
+  On 2026-10-20, at main 1d93c81, `git grep -l proptest -- '*.rs' | wc -l` gives 7 files: two \
+  integration tests and five unit-test modules. \
   `git grep -h -o -E '(proptest|prop_assert_eq|prop_assert|prop_oneof)!' -- '*.rs' | sort | \
-  uniq -c` gives prop_assert_eq! 11, prop_assert! 7, prop_oneof! 7 and proptest! 5. \
+  uniq -c` gives prop_assert_eq! 15, prop_assert! 7, prop_oneof! 8 and proptest! 7. \
   `git grep -h -o -E 'prop_(map|flat_map|filter|recursive)' -- '*.rs' | sort | uniq -c` gives \
-  prop_filter 2, prop_flat_map 2, prop_map 11 and prop_recursive 1. \
-  `git grep -h -o -E 'any::<[A-Za-z0-9:]+>' -- '*.rs' | sort | uniq -c` gives any::<char> 2, \
+  prop_filter 4, prop_flat_map 2, prop_map 12 and prop_recursive 1. \
+  `git grep -h -o -E 'any::<[A-Za-z0-9:]+>' -- '*.rs' | sort | uniq -c` gives any::<char> 3, \
   any::<i64> 1, any::<prop::sample::Index> 2 and any::<u8> 1. \
   `git grep -h -o -E '(collection::vec|sample::select|option::of)' -- '*.rs' | sort | uniq -c` \
-  gives collection::vec 8, option::of 1 and sample::select 3, and \
-  `git grep -h -o -F 'Just(' -- '*.rs' | wc -l` gives 10. Two regular expressions serve as \
+  gives collection::vec 10, option::of 1 and sample::select 3, and \
+  `git grep -h -o -F 'Just(' -- '*.rs' | wc -l` gives 16. Two regular expressions serve as \
   string strategies: `git grep -h -o -F '[a-z0-9]{1,8}(-[a-z0-9]{1,8}){0,3}' -- '*.rs' | wc -l` \
-  gives 3, and `git grep -h -o -F '\\PC{0,8}' -- '*.rs' | wc -l` gives 2. Reading the five \
+  gives 3, and `git grep -h -o -F '\\PC{0,8}' -- '*.rs' | wc -l` gives 2. Reading the seven \
   files adds ProptestConfig::with_cases, a struct update of ProptestConfig::default, integer \
-  ranges of u8, u32 and usize, and tuples of up to four strategies. Both proptest and its \
+  ranges of u8, u32, u64 and usize, and tuples of up to four strategies. Both proptest and its \
   replacement serve tests only, so the replacement would be a module or crate that only test \
   builds link, and the scale counts its lines all the same. It needs: the proptest! macro, with \
   an optional #![proptest_config] and pattern-in-strategy arguments, tuple patterns included \
