@@ -207,7 +207,8 @@ Read the crate at its locked version, in `~/.cargo/registry/src/*/<name>-<versio
 `.crate` file in `~/.cargo/registry/cache/*/` has the lockfile's `checksum` as its SHA-256, which
 ties what you read to what is locked.
 
-- **`reason`.** What the crate does for us, in a sentence or two.
+- **`reason`.** What the crate does for us, in a sentence or two. Say what it provides, not which
+  of our crates use it, because the record does not keep that.
 - **`write_it_instead`.** Every record uses one scale: the lines of non-test Rust that a
   replacement would need for the parts this workspace uses. Tests and test vectors are not
   counted. Uses in our own tests are, because the replacement must serve them too. A replacement
@@ -242,16 +243,18 @@ ties what you read to what is locked.
 
 ## When a record changes
 
-Derive a record again, at the head of the PR, whenever that PR's Cargo.lock changes the crate's
-range or its closure:
+Run the block again, at the head of the PR, whenever that PR's Cargo.lock changes the version of
+the crate or of any package in its `brings`, or the packages they depend on. Update every derived
+field to what the block prints. A version can change a record without changing its range or its
+closure: quote 1.0.40 has no build script and quote 1.0.45 has one, so a move between them
+changes `build_time_code` in every record whose `brings` holds `quote@1`.
 
-- The crate, or a package in its `brings`, moves to a new range. That is new code: read what
-  changed as well.
-- The closure changes, for example because a compatible bump adds a package, or a feature turns
-  on another dependency.
+- Read the diff between the two locked versions of each package that moved, as spec 026's "What
+  the review checks" says. Update `native_code` and `expands_unsafe` when the diff adds or removes
+  native code, or a macro whose expansion holds `unsafe`.
+- A package that moves to a new range is new code: read it as well as the diff.
 - A PR that removes the last direct use of a crate deletes its record, so the record stops
   vouching for its `brings`.
 
-A compatible bump that leaves the range and the closure alone changes no record. The reviewer
-still reads the diff between the two locked versions, as spec 026's "What the review checks"
-says.
+A PR whose Cargo.lock changes no version in the crate's closure, and no package in it, leaves the
+record's derived fields as they are.
