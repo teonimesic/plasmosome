@@ -163,19 +163,19 @@ nonempty and sorted by PluginId, names each plugin once, and never names the req
 requirer requires every provider its records name. When several provided one key, the journal
 cannot tell which one the requirer used, so the end of any of them reaches it. The prepare that
 adds the plasmid writes `requires` from the declarations that request admitted, in spec 022's
-single read or from the imported graph. No later replacement changes it: a reload or a renewal
-carries it unchanged, as it carries the source and the lifetime. Recovery, expiry, renewal and
-withdrawal read the requires graph from the journal, never from a declaration, which can change
-on disk after the add. So after a restart a provider's end still reaches its requirers (spec
-028), and spec 011's detach can still tell who requires whom. Journal reading refuses a blank or
-repeated key, an empty or unsorted provider list, a repeated provider, a requirer naming itself,
-and a replacement of an attached plugin whose `requires` differs from the recorded one, each as
-InvalidRequirement. A replacement without `requires` is refused as one without a source is, and
-its cell quarantines. It is never read as `[]`: that says the plasmid requires nothing, so a
-provider's end would miss it after a restart. Format 1 has no writer yet, so no journal lacks
-the field. Amended on 2026-10-20, as
-[spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default) requires. Until then the
-journal recorded no requires edges.
+single read or from the imported graph. No later replacement changes it. A reload or a renewal
+carries it unchanged, as a reload carries the source and the lifetime. Recovery, expiry, renewal
+and withdrawal read the requires graph from the journal, never from a declaration, which can
+change on disk after the add. So after a restart a provider's end still reaches its requirers
+(spec 028), and spec 011's detach can still tell who requires whom. Journal reading refuses a
+blank or repeated key, an empty or unsorted provider list, a repeated provider, a requirer naming
+itself, and a replacement of an attached plugin whose `requires` differs from the recorded one,
+each as InvalidRequirement. A replacement without `requires` is refused as one without a source
+is, and its cell quarantines. It is never read as `[]`: that says the plasmid requires nothing,
+so a provider's end would miss it after a restart. Format 1 has no writer yet, so no journal
+lacks the field.
+Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#2-who-declares-it-and-the-default)
+requires. Until then the journal recorded no requires edges.
 
 Forensic replay can encounter an `Exact(Backend(handle))`, `External`, or `Delayed` effect with
 null operation. The reader retains it rather than pretending it is a universe operation. A
