@@ -29,8 +29,14 @@ fn track(change: isize) {
     }
 }
 
+#[allow(unsafe_code)]
+// SAFETY: Every method forwards its arguments unchanged to System, so the caller's obligations
+// under GlobalAlloc pass straight through and every guarantee System gives holds here. The counters
+// are atomics, and track neither allocates nor panics.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: The caller meets GlobalAlloc::alloc's contract, and `layout` reaches System
+        // unchanged.
         let block = unsafe { System.alloc(layout) };
         if !block.is_null() {
             track(layout.size() as isize);
@@ -39,6 +45,8 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: The caller meets GlobalAlloc::alloc_zeroed's contract, and `layout` reaches
+        // System unchanged.
         let block = unsafe { System.alloc_zeroed(layout) };
         if !block.is_null() {
             track(layout.size() as isize);
@@ -47,11 +55,15 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
+        // SAFETY: The caller meets GlobalAlloc::dealloc's contract: `block` came from this
+        // allocator, which got it from System, with this `layout`.
         unsafe { System.dealloc(block, layout) };
         track(-(layout.size() as isize));
     }
 
     unsafe fn realloc(&self, block: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        // SAFETY: The caller meets GlobalAlloc::realloc's contract: `block` came from this
+        // allocator, which got it from System, with this `layout`.
         let moved = unsafe { System.realloc(block, layout, size) };
         if !moved.is_null() {
             track(size as isize);
