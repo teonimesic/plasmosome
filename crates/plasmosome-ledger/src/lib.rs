@@ -63,7 +63,7 @@ pub struct Outbox {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "Outbox")]
+#[serde(remote = "Outbox", deny_unknown_fields)]
 struct OutboxShape {
     channel: String,
     payload: String,
@@ -76,7 +76,7 @@ pub struct Policy {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "Policy")]
+#[serde(remote = "Policy", deny_unknown_fields)]
 struct PolicyShape {
     assertion: String,
 }
@@ -294,7 +294,7 @@ pub struct DetachReport {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "DetachReport")]
+#[serde(remote = "DetachReport", deny_unknown_fields)]
 struct DetachReportShape {
     plugin: PluginId,
     replayed: Vec<String>,

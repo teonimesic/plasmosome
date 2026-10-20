@@ -124,7 +124,7 @@ pub struct Grant {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "Grant")]
+#[serde(remote = "Grant", deny_unknown_fields)]
 struct GrantShape {
     owner: CellOwner,
     capability: Capability,
@@ -227,7 +227,7 @@ pub struct DrainSpec {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(remote = "DrainSpec")]
+#[serde(remote = "DrainSpec", deny_unknown_fields)]
 struct DrainSpecShape {
     #[serde(deserialize_with = "crate::wire::object")]
     deadline: Duration,
