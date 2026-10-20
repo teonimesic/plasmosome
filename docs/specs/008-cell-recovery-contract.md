@@ -522,9 +522,11 @@ per-entry quarantine. A symlink/non-regular journal, per-cell open/read/permissi
 strict-reader fault quarantines that cell while good siblings remain recoverable. A missing
 journal is empty, but never implies that independently observed holdings are absent or revocable.
 An instance identity collision is `RecoveryError::IdentityConflict { class, id, paths }` and
-aborts the account rather than merging objects. Observe all valid cell directories, including
-ones whose journals quarantine, not just the adopted subset. Unknown names remain reported
-without being turned into requests to arbitrary socket paths.
+aborts the account rather than merging objects. Observe every valid cell directory whose
+`supervisor.lock` is held, including ones whose journals quarantine, not just the adopted subset.
+Amended on 2026-10-20: this observed every valid cell directory; spec 023's supervisor check
+decides a cell whose lock is free without observing it. Unknown names remain reported without
+being turned into requests to arbitrary socket paths.
 
 ### Quarantine and startup integration
 
@@ -551,8 +553,10 @@ paths as arrays of byte values, not lossy strings. `cell` and `line` are omitted
 A quarantine report with unavailable observation says so; an unknown found set is not `[]`.
 
 Startup holds the instance lock, binds the configured control socket without replacing an
-existing path, discovers every entry, and queries every validated cell's
-`<root>/cells/<cell>/membrane.uds` using spec001's live recovery observation contract. Only
+existing path, discovers every entry, and queries `<root>/cells/<cell>/membrane.uds` only for
+validated cells whose `supervisor.lock` is held, using spec001's live recovery observation
+contract. Amended on 2026-10-20: this queried every validated cell, so after a reboot, with every
+lock free, each dead socket was an observation failure that refused startup (spec 023 §8). Only
 socket paths under validated no-follow directories are used. A missing/failed/timed-out or
 malformed live response is an observation failure, not an empty cell. A cell's supervisor is
 allowed to report an observed dead cell; the controller must not derive that state from a PID

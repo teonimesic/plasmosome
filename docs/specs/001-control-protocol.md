@@ -283,7 +283,7 @@ that cell's records change and `ledger_generation` is recomputed over the adopte
 capture shows the current list, and a capture already pinned keeps its outcome. `set_aside` is not
 added to §4.1's stderr diagnostic, since a set-aside cell never refuses startup; the quarantine
 reports in that diagnostic carry `lock` and `marker` when spec 023's check quarantined their cell
-(spec 008's amendment below). `incomplete` is the required
+(spec 008). `incomplete` is the required
 `[IncompleteEffect, ...]`, preserving every complete operation and its original cell/plugin owner;
 it is not coerced into drift, unmatched or an OsObject. `desired`, exact objects, pending transactions and quarantine
 reports use spec008's typed records with this wire projection: absent genome/cell/line,
@@ -423,7 +423,10 @@ requires `operator` and `reason`, nonblank strings: that assertion, which the re
 withdraws every attachment, sends `membrane.cell.kill`, waits for the supervisor to exit, and moves
 the directory to `<instance>/retired/<cell>` before replying (spec 023). A step that falls short is
 listed in `incomplete`, over the closed set `workload_stop`, `shutdown` and `teardown`; a failed
-workload stop never blocks. Every 106 a kill sends, for a drain or publication timeout, a resumed
+workload stop never blocks. `incomplete` is present only when a step fell short (spec 023 §7,
+step 6), as §1 allows for a collection whose text says when it is present, so the clean kill above
+has none. Amended on 2026-10-20: this did not say when `incomplete` is present, so §1 would have
+sent `[]` on a clean kill. Every 106 a kill sends, for a drain or publication timeout, a resumed
 transaction that does not finish without `now`, or a `now` kill whose session log line cannot be
 appended, is `{handle, deadline_ms}` with `handle` the cell ID and `deadline_ms` the kill's
 deadline. An unclean teardown replies `"state": "dead"` with its residue and `teardown` in
@@ -1105,7 +1108,7 @@ Connection-local data-handle loss remains distinct from the original grant/resou
 | `drain` | `{grant:GrantId, deadline_ms}` | `{boot, grant, drained:true}` |
 | `remove` | `{inverse:UniverseRemoval, owner:CellOwner, force:bool, deadline_ms}` | `{boot, grant, guest_removed:true}` |
 | `shutdown` | `{deadline_ms}` | `{boot, shutdown_requested:true}` |
-| `exec` | `{argv:[String], request_key:String\|null, deadline_ms}` | `{boot, exec_id:String, state:ExecState}` |
+| `exec` | `{argv:[String], request_key:String\|null, deadline_ms}` | `{boot, exec_id:String, state:ExecState}`, where `ExecState` is `running \| exited \| signaled` (spec 024) |
 | `exec_status` | `{exec_id:String, wait:bool, deadline_ms}` | `ExecStatus` (spec 024) |
 | `exec_output` | `{exec_id:String, deadline_ms}` | `{boot, exec_id, stdout:Stream, stderr:Stream}` (spec 024) |
 | `workload_stop` | `{deadline_ms}` | `{boot, stopped:true}` |
@@ -1160,7 +1163,7 @@ healthy stream merely because this observation timed out. The outstanding drain 
 request ID until its eventual reply is discarded; later normal-lane mutations wait for that
 request to settle or return a bounded refusal without effects. `exec_status` and `exec_output` are
 not mutations; they and `workload_stop` never wait for one, and `exec` waits within its deadline and
-then refuses as busy (spec 024). They do not block Force's
+then refuses as busy (spec 024). Later normal-lane mutations do not block Force's
 independent host transition or the withdrawal lane. Actual stream loss is the
 separate incomplete transition above, not an unproved remote-restoration result relabelled as
 a timeout. This preserves spec017 A4 and spec008 R7 rather than weakening their pure-timeout rule.
