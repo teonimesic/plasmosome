@@ -735,26 +735,44 @@ fn assembler_refuses_a_first_page_not_at_zero() {
     let (_, _, pages) = ten_bytes_in_pages_of_four();
     let fault = refused_after(&[], pages[1].clone());
     assert_eq!(fault, AssemblyFault::FirstPageNotAtZero { offset: 4 });
+    let mut assembler = PageAssembler::new();
+    assert!(assembler.accept(pages[1].clone()).is_err());
+    for page in pages {
+        assembler
+            .accept(page)
+            .expect("a refused first page kept no bytes");
+    }
+    assert_eq!(assembler.finish::<Account>(), Ok(Account { a: 1234 }));
 }
 
 #[test]
 fn assembler_refuses_a_mixed_snapshot() {
     let (mut slot, t, pages) = ten_bytes_in_pages_of_four();
-    start(&mut slot, account(), t, t + 10 * SECOND);
+    let first = start(&mut slot, account(), t, t + 10 * SECOND);
     let other = read(&mut slot, 2, 4, t).expect("the second capture serves its page");
     let (expected, found) = (1, 2);
     let fault = refused_after(&pages[..1], other);
+    assert_eq!(fault, AssemblyFault::SnapshotChanged { expected, found });
+    let (expected, found) = (2, 1);
+    let fault = refused_after(&[first], pages[1].clone());
     assert_eq!(fault, AssemblyFault::SnapshotChanged { expected, found });
 }
 
 #[test]
 fn assembler_refuses_a_changed_total() {
     let (_, _, pages) = ten_bytes_in_pages_of_four();
-    let mut longer = pages[1].clone();
-    longer.total = 12;
-    let (expected, found) = (10, 12);
-    let fault = refused_after(&pages[..1], longer);
-    assert_eq!(fault, AssemblyFault::TotalChanged { expected, found });
+    for (found, complete) in [(12, false), (8, true)] {
+        let mut changed = pages[1].clone();
+        (changed.total, changed.complete) = (found, complete);
+        let fault = refused_after(&pages[..1], changed);
+        assert_eq!(
+            fault,
+            AssemblyFault::TotalChanged {
+                expected: 10,
+                found
+            }
+        );
+    }
 }
 
 #[test]
