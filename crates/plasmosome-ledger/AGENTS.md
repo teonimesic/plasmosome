@@ -16,7 +16,11 @@ as values that only parse, print and compare.
 - **Replay must be idempotent and resumable.** Detach can be interrupted; running it again must
   converge, not double-undo.
 - **The log is the truth, not the in-memory state.** The ledger is replayable from its written
-  record — that property is what lets a controller restart and still finish a teardown.
+  record — that property is what lets a controller restart and still finish a teardown. A closed
+  ledger's pending cursor and the cell its first detach bound are the deliberate exception: they
+  live only in memory, because spec 017 limits the cursor to one ledger instance (line 321) and
+  keeps the cell out of single-plugin logs (lines 583-584). Durable cell identity belongs to the
+  per-cell journal of spec 008.
 
 ## Conventions
 

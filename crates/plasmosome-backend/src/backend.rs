@@ -362,6 +362,7 @@ pub(crate) mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::fixtures::{self, mount, proxy_map};
     use crate::recipe::RecipeError;
     use crate::universe::{CellId, PluginId};
 
@@ -459,29 +460,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn operation(id: GrantId, capability: Capability) -> UniverseOp {
-        let owner = owner();
-        match capability {
-            Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
-            Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
-            Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
-                id,
-                host,
-                route,
-                owner,
-            },
-            Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
-                id,
-                pid,
-                name,
-                owner,
-            },
-            Capability::Mount { source, target } => UniverseOp::AddMount {
-                id,
-                source,
-                target,
-                owner,
-            },
-        }
+        fixtures::op(id, owner(), capability)
     }
 
     fn operation_json(id: GrantId, capability: &Capability) -> Value {
@@ -554,20 +533,14 @@ pub(crate) mod tests {
     fn validate_reports_the_first_broken_field_in_field_order() {
         for (capability, first) in [
             (
-                Capability::Mount {
-                    source: "srv/repo".to_string(),
-                    target: "/workspace/".to_string(),
-                },
+                mount("srv/repo", "/workspace/"),
                 RecipeError::NotAbsolute {
                     field: "source",
                     value: "srv/repo".to_string(),
                 },
             ),
             (
-                Capability::ProxyMap {
-                    host: "api.github\0.com".to_string(),
-                    route: "spl\0ice".to_string(),
-                },
+                proxy_map("api.github\0.com", "spl\0ice"),
                 RecipeError::ContainsNul { field: "host" },
             ),
         ] {
