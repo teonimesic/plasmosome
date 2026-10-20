@@ -33,6 +33,7 @@ PASSWD_LINE = b"workload:x:1000:1000::/home/workload:/bin/bash"
 GROUP_LINE = b"workload:x:1000:"
 SOFTWARE_DIRS = ("opt", "usr/local/bin")
 EMPTIED_DIRS = ("dev", "proc", "sys")
+SKEL = "etc/skel/"
 CREATE_TIMED = ("dev", "proc", "sys", "etc", "etc/mtab")
 PROTECTED = ("opt", "usr/local/bin", "proc", "dev", "sys", "tmp", "home/workload")
 ACCOUNT_FILES = (("etc/passwd", 2), ("etc/group", 2), ("etc/shadow", None), ("etc/gshadow", None))
@@ -322,7 +323,7 @@ def check_layout(members, adds):
                 raise Refused("stage", f"/{name} is under /{directory}, which spec 027 requires empty in the image")
         if name.startswith("tmp/") or under(name, "home/workload"):
             raise Refused("stage", f"the base already holds /{name}")
-        if name.startswith("etc/skel/") and ("/" in name[9:] or kind_of(member) != "file"):
+        if name.startswith(SKEL) and ("/" in name.removeprefix(SKEL) or kind_of(member) != "file"):
             raise Refused("stage", f"/{name} in /etc/skel is not a regular file, which is all the tool copies")
         if member.islnk() and member.linkname in (*NETWORK_FILES, *(n for n, _ in ACCOUNT_FILES)):
             raise Refused("stage", f"/{name} is a hard link to /{member.linkname}, which the tool rewrites")
@@ -381,15 +382,14 @@ def stage(base_tar, stage_tar, adds, epoch, limit):
 
 def write_stage_tar(source, members, adds, epoch, stage_tar):
     rewritten = accounts(source, members, epoch)
-    rewritten.update(NETWORK_FILES)
-    skel = [name for name in members if name.startswith("etc/skel/")]
+    skel = [name for name in members if name.startswith(SKEL)]
     entries = []
     for name, member in members.items():
         kind = kind_of(member)
-        if name in rewritten:
-            entries.append((tar_info(name, "file", 0o644 if name in NETWORK_FILES else member.mode,
-                                     0 if name in NETWORK_FILES else member.uid,
-                                     0 if name in NETWORK_FILES else member.gid, epoch, len(rewritten[name])),
+        if name in NETWORK_FILES:
+            entries.append((tar_info(name, "file", 0o644, 0, 0, epoch, len(NETWORK_FILES[name])), NETWORK_FILES[name]))
+        elif name in rewritten:
+            entries.append((tar_info(name, "file", member.mode, member.uid, member.gid, epoch, len(rewritten[name])),
                             rewritten[name]))
         elif name in EMPTIED_DIRS:
             entries.append((tar_info(name, "dir", 0o755, 0, 0, epoch), None))
@@ -409,8 +409,8 @@ def write_stage_tar(source, members, adds, epoch, stage_tar):
     entries.append((tar_info("home/workload", "dir", 0o700, 1000, 1000, epoch), None))
     for name in skel:
         data = read_member(source, members[name], MAX_ACCOUNT_FILE_BYTES)
-        entries.append((tar_info("home/workload/" + name[9:], "file", members[name].mode, 1000, 1000, epoch,
-                                 len(data)), data))
+        entries.append((tar_info("home/workload/" + name.removeprefix(SKEL), "file", members[name].mode,
+                                 1000, 1000, epoch, len(data)), data))
     added, names = [], {info.name for info, _ in entries}
     for add in adds:
         if add.dest[1:] in names:
@@ -429,9 +429,10 @@ def write_stage_tar(source, members, adds, epoch, stage_tar):
             else:
                 out.addfile(info, source.extractfile(data) if data is not None else None)
     version = members.get("etc/debian_version")
-    return {"debian_version": read_member(source, version, MAX_ACCOUNT_FILE_BYTES).decode(errors="replace").strip()
-            if version is not None and kind_of(version) == "file" else None,
-            "skel": sorted(name[9:] for name in skel), "added": added}
+    if version is not None and kind_of(version) == "file":
+        version = read_member(source, version, MAX_ACCOUNT_FILE_BYTES).decode(errors="replace").strip()
+    return {"debian_version": version if isinstance(version, str) else None,
+            "skel": sorted(name.removeprefix(SKEL) for name in skel), "added": added}
 
 
 def content_listing(stage_tar):
@@ -526,8 +527,8 @@ def judge_accounts(passwd, group, step="check"):
                                 f"the contract needs {line.decode()!r}")
 
 
-def check_text(check, name, what=None, limit=MAX_OUTPUT_BYTES):
-    return read_bounded(check / name, "check", limit, what or f"check/{name}").decode("utf-8", "replace")
+def check_text(check, name):
+    return read_bounded(check / name, "check", MAX_OUTPUT_BYTES, f"check/{name}").decode("utf-8", "replace")
 
 
 def read_stat(check, name, path):
@@ -611,7 +612,8 @@ def write_stage(images_root, work, fields):
     try:
         for name in ("rootfs.raw", "content.jsonl"):
             shutil.copyfile(work / name, stage_dir / name)
-        files = {name: hash_bounded(stage_dir / name, "publish", 1 << 40, name) for name in ("content.jsonl", "rootfs.raw")}
+        files = {name: hash_bounded(stage_dir / name, "publish", 1 << 40, name)
+                 for name in ("content.jsonl", "rootfs.raw")}
         sums = "".join(f"{digest}  {name}\n" for name, digest in sorted(files.items())).encode()
         (stage_dir / "SHA256SUMS").write_bytes(sums)
         manifest = {**fields, "files": files, "sha256sums_sha256": sha256(sums)}
@@ -662,14 +664,15 @@ def build(args, run, now, environ):
     facts = stage(work / "base.tar", work / "stage.tar", adds, epoch, args.size_mib << 20)
     listing = content_listing(work / "stage.tar")
     (work / "content.jsonl").write_bytes(listing)
-    uuid = fs_uuid(sha256(listing))
+    content_sha256 = sha256(listing)
+    uuid = fs_uuid(content_sha256)
     filesystem(run, env, base, args.platform, work, uuid, args.size_mib, adds)
     fs = check_image(work / "check", facts, uuid)
     kind = "test" if adds else "product"
     stage_dir, manifest = write_stage(images_root, work, {
         "image_format": IMAGE_FORMAT, "task": TASK, "kind": kind, "created_unix": created,
         "source_date_epoch": epoch, "base": {**record, "debian_version": facts["debian_version"]},
-        "workload": WORKLOAD, "added": facts["added"], "content_sha256": sha256(listing), "limits": LIMITS,
+        "workload": WORKLOAD, "added": facts["added"], "content_sha256": content_sha256, "limits": LIMITS,
         "fs": {"type": "ext4", "block_size": BLOCK_SIZE, "size_mib": args.size_mib, "uuid": uuid,
                "e2fsck": "clean", **fs},
     })
@@ -680,7 +683,7 @@ def build(args, run, now, environ):
             shutil.rmtree(stage_dir)
         raise
     return {"image_dir": str(image_dir), "image_id16": id16, "manifest_sha256": manifest_sha256,
-            "rootfs_sha256": manifest["files"]["rootfs.raw"], "content_sha256": sha256(listing), "kind": kind}
+            "rootfs_sha256": manifest["files"]["rootfs.raw"], "content_sha256": content_sha256, "kind": kind}
 
 
 def bounded_text(handle, argv):
