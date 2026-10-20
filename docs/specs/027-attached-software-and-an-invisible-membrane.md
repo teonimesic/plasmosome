@@ -55,10 +55,11 @@ Draft 028 is cited at `78d62c5` (#138); specs 022, 023 and 024 as accepted on ma
 Two guards hold whatever the layout: an attach never hides a file the root image has, and never
 makes a name the image already resolves run different bytes.
 
-- Before hello, PID1 makes `/opt` and `/usr/local/bin` in the workload root directories the kernel
-  owns: empty at readiness, owned by root, mode 0755, with a mount source, type and options that
-  name nothing about Plasmosome. They are slaves of PID1's side under spec 024 §5's propagation,
-  and neither is shared. Propagation is fixed when the namespace is made and cannot be added later.
+- Before hello, PID1 makes the guest's **software directories**, `/opt` and `/usr/local/bin` in the
+  workload root, directories the kernel owns: empty at readiness, owned by root, mode 0755, with a
+  mount source, type and options that name nothing about Plasmosome. They are slaves of PID1's
+  side under spec 024 §5's propagation, and neither is shared. Propagation is fixed when the
+  namespace is made and cannot be added later.
 - The kernel adds and removes entries through handles it keeps, without entering the workload
   namespace. A running process sees a subtree created inside a filesystem it already has mounted,
   with no new mount (80 of 80, measured outside this repository in a privileged container,
@@ -75,9 +76,9 @@ makes a name the image already resolves run different bytes.
    code 102 with `target` the command's path; its message names the plasmid that holds it, and its
    `fix` names the field. A command name the root image already resolves on `PATH` is refused the
    same way. A file whose bytes do not match its recorded digest is code 108.
-2. The bytes a name or a surviving reference reads are the bytes the journal's digests name. The
-   workload cannot change them. A change on the host side is prevented under Q1(b) and detected
-   under Q1(a).
+2. Under Q1(b), the bytes a name or a surviving reference reads are always the bytes the
+   journal's digests name. Under Q1(a) the workload cannot change them, and a host-side change to a
+   placed or held file is detected at the next observation, not prevented (Q1).
 3. The kernel places the tree at `/opt/<plasmid>`, and one entry per command in `/usr/local/bin`
    that resolves to the command's file in the tree.
 4. Attach is not complete until the kernel has probed from inside the workload namespace: each
@@ -95,8 +96,8 @@ makes a name the image already resolves run different bytes.
 - **Detach looks like an uninstall.** It removes every entry of the tree, as `rm -rf` does, and
   returns only after the kernel has probed from inside the workload namespace that no lookup of a
   name the plasmid placed succeeds. Each fails with `ENOENT`, as for software never installed; a
-  shell that cached a command's path exits 127; and a working directory inside the tree lists
-  nothing, with every lookup relative to it failing with `ENOENT`. So no new reference can be
+  shell that cached a command's path exits 127; and a working directory inside the tree gives an
+  empty listing, with every lookup relative to it failing with `ENOENT`. So no new reference can be
   obtained once detach returns (spec 011).
 - **Detach revokes the name, not the object.** An open descriptor, a mapping or a running
   executable keeps the bytes it had, and no holder is killed (spec 024 §10). Descriptors and
@@ -105,20 +106,24 @@ makes a name the image already resolves run different bytes.
 - **A detach completes when the names are gone.** That is the tree effect's observed absence for
   spec 008's finish. A surviving reference is reported, not residue: it never holds the journal
   pending, never sets `ready: false`, and no workload can veto or delay a detach with one.
-- **Host bytes are kept while referenced**, so a reference never sees its file change or vanish.
-  Under Q1(b) the guest removes the entries, and its kernel keeps open or mapped inodes alive. Under
-  Q1(a) the host moves each file to a holding directory and removes the tree's directories. That
-  directory is on the share's volume, because libkrun's macOS server reaches an inode through
-  `/.vol/<dev>/<ino>`, which resolves only while the inode has a directory entry; inside the
-  directory the helper's policy allows; and outside the exported share, so no guest path reaches
-  it. Held files stay until the cell stops, since no guest signal proves the last reference gone.
+- **Host bytes are kept while referenced**, so a reference never sees its file vanish, and a
+  host-side change under Q1(a) fails the next observation. Under Q1(b) the guest removes the
+  entries, and its kernel keeps open or mapped inodes alive. Under Q1(a) the host moves every entry
+  of the tree to a holding directory, deepest first and directories included, so every held inode
+  keeps a directory entry and a held directory is empty. The holding directory is on the share's
+  volume, because libkrun's macOS server reaches an inode through `/.vol/<dev>/<ino>`, which
+  resolves only while the inode has a directory entry; inside the cell's software directory, the
+  host directory the helper's policy allows, which holds the exported share and the holding
+  directory side by side; and outside the exported share, so no guest path reaches it. Held
+  entries stay until the cell stops, since no guest signal proves the last reference gone.
 - **The cache window under Q1(a).** libkrun v1.19.4 fixes the guest's entry and attribute cache
   timeouts at 5 s under `LINUX_COMPLETE`, and its API cannot change them, so under (a) a detach or
   reload probes and returns only once 5 s have passed since the host's last removal. Spec 017's
   zero timeouts protect revocable files and are not needed here: a file's bytes and attributes
-  never change while it has a name, and a failed lookup is not cached, so an attach shows at once.
-  A directory's cached attributes can lag by up to 5 s; the differential reports any probe that
-  sees it.
+  never change while it has a name, and a failed lookup is not cached, so an attach's names
+  resolve at once. A directory's cached attributes, such as `/opt`'s link count and size, can lag
+  by up to 5 s, so an attach under (a) also returns only once 5 s have passed since its last host
+  change.
 - **References are found by identity, never by path:** the device and inode recorded at attach,
   and the mount ID where a tree is its own mount. The scan covers every mount namespace's table and
   every task's `fd`, `cwd`, `root`, `exe` and `maps` under `/proc/<pid>/task/<tid>/`, because a
@@ -264,13 +269,14 @@ These are proposed text. The PR that accepts this spec edits no other accepted d
 amendment is applied by a later reviewed change to the document it amends, before any task that
 relies on it.
 
-- **Spec 011, detach (`011:195-207`, `011:359-363`, `011:434-437`).** Draft spec 028 carries the
+- **Spec 011, detach (`011:195-207`, `011:358-363`, `011:434-437`).** Draft spec 028 carries the
   one text for these lines. It covers software-tree references as §4 does, with the `SCM_RIGHTS`
   limit, and composes spec 024's insertion. This spec proposes no text of its own there.
 - **Spec 011, out of scope (`011:489-493`).** Replace "and its spec belongs to the isolation work
   under intent 011." with "and spec 027 specifies it."
-- **Spec 001 §3.11 and §3.12.** Add `"held": []` to both example results, and after §3.11's:
-  "`held` lists each reference into the plasmid's software, or a reload's replaced tree, that the
+- **Spec 001 §3.11 and §3.12.** Add `"held": []` to both example results. In §3.11, after the
+  result example and before "Outstanding external effects refuse the safe removal", add: "`held`
+  lists each reference into the plasmid's software, or a reload's replaced tree, that the
   guest's scan saw once its names were gone, as `{path, pid, comm, exec_id}` (spec 027). It is
   not residue, so `residue` stays `"empty"`."
 - **Spec 001 §4.2, observation.** In `GuestObservation`, after `network:GuestNetworkObservation`,
@@ -293,29 +299,27 @@ relies on it.
   spec 027 specifies".
 - **Spec 020 §6.** After "Imported files are read-only and non-executable to the workload", add
   "except files a spec 027 software tree declares as commands, which are executable and read-only".
-- **Only if the owner chooses Q1(a).** In spec 001 §4.2, replace "Do not export a host directory
-  through `krun_set_root` or virtiofs." with "Do not export a host directory through
-  `krun_set_root` or virtiofs, except one read-only software share per cell (spec 027), which
-  holds only digest-checked trees and nothing revocable or secret.", and after "the two declared
-  bridge endpoints" add "and read-only access to that cell's software directory (spec 027)". In
-  spec 017, after "No host descriptor or uncontrolled host-directory export is passed to the
-  workload.", add "Spec 027's software share is a controlled export: it holds immutable trees,
-  never a managed inode." In spec 023 §9, replace "with no virtiofs export" with "with no virtiofs
-  export but spec 027's read-only software share".
-- **Only if the owner chooses Q1(b).** In spec 011's out-of-scope bullet, replace "A plasmid's
-  software is not copied into a running cell:" with "A plasmid's software is not installed into a
-  running cell, though its bytes may be copied there unchanged:".
-
-## Requests to draft specs
-
-- **028 §4.** Name the still-mounted fenced target of §7 as the one way a fence differs from a
-  withdrawal.
+- **Only once the owner answers Q1 with (a), after item 17 has passed.** In spec 001 §4.2, replace
+  "Do not export a host directory through `krun_set_root` or virtiofs." with "Do not export a host
+  directory through `krun_set_root` or virtiofs, except one read-only software share per cell
+  (spec 027), which holds only digest-checked trees and nothing revocable or secret.", and after
+  "the two declared bridge endpoints" add "and read-only access to that cell's software directory
+  (spec 027)". In spec 017, after "No host descriptor or uncontrolled host-directory export is
+  passed to the workload.", add "Spec 027's software share is a controlled export: it holds
+  immutable trees, never a managed inode." In spec 023 §9, replace "with no virtiofs export" with
+  "with no virtiofs export but spec 027's read-only software share".
+- **Only once the owner answers Q1 with (b), including after item 17 fails.** In spec 011's
+  out-of-scope bullet, replace "A plasmid's software is not copied into a running cell:" with "A
+  plasmid's software is not installed into a running cell, though its bytes may be copied there
+  unchanged:".
 
 ## Open questions
 
 These need the owner. Each has the default this spec works to until answered.
 
-1. **Q1, where the bytes come from.** Default: (a), gated on item 17; (b) if any gate fails.
+1. **Q1, where the bytes come from.** Default: (a), gated on item 17; (b) if any gate fails. The
+   default decides which tasks are planned. It applies neither conditional amendment; each waits
+   for the owner's answer.
    - **(a) A read-only virtio-fs share per cell**, empty at creation. Attach places the tree in it
      as a copy or copy-on-write clone, never a hard link into the store. It keeps live attach and
      spec 011's "not copied into a running cell". Its gate, measured by the first task on the
@@ -324,22 +328,24 @@ These need the owner. Each has the default this spec works to until answered.
        equivalent (under `LINUX_SIMPLIFIED` the workload would see itself as the owner);
      - mounted without `ro`, a workload write fails with `EACCES`, as on any root-owned 0755
        directory, and a guest-root write reaches the server and fails with `EROFS`;
-     - a held file stays readable after the host moves it to the holding directory (§4);
-     - after the cache window, a directory held inside a detached tree lists nothing and every
-       lookup in it fails with `ENOENT`;
+     - a held file stays readable after the host moves it to the holding directory (§4), with the
+       helper confined to read-only access to exactly the cell's software directory;
+     - after the cache window, a directory held inside a detached tree gives an empty listing, not
+       an error, and every lookup in it fails with `ENOENT`;
      - neither the share nor its holding directory contains a Mount source or lies inside one,
        spec 022 §3 rule 5's test applied both ways.
 
      Guards: nothing revocable or secret is placed in it; its tag and source are the manifest's
      neutral values. A same-UID host process can still write the per-cell copy, so a change is
-     detected, not prevented: the supervisor's own observation re-hashes a placed file whenever its
-     size, inode or change time differs from the one recorded at placement, which a writer cannot
-     set back without root, and a mismatch fails observation, naming the file. Costs: each detach
-     and reload keeps the old tree on the host until the cell stops, and waits out §4's 5 s. It
-     changes specs 001, 017 and 023 §9 ("Amendments"), and the helper's policy must give read-only
-     access to exactly the cell's software directory, which needs per-cell parameters (O-2): the
-     qualified policy allows writes anywhere under the work directory, and `read_only` is enforced
-     inside the process the guest drives.
+     detected, not prevented: the supervisor's own observation re-hashes a placed or held file
+     whenever its size, inode or change time differs from the one recorded at placement or at its
+     move to the holding directory, since the move changes the change time. A writer cannot set a
+     change time back without root, and a mismatch fails observation, naming the file. Costs: each
+     detach and reload keeps the old tree on the host until the cell stops, and each attach,
+     detach and reload waits out §4's 5 s. It changes specs 001, 017 and 023 §9 ("Amendments"),
+     and the helper's policy must give read-only access to exactly the cell's software directory
+     (§4), which needs per-cell parameters (O-2): the qualified policy allows writes anywhere under
+     the work directory, and `read_only` is enforced inside the process the guest drives.
    - **(b) A copy over the data channel** into storage only PID1 can reach, checked against the
      digests, then exposed. Spec 001 stays as it is, and spec 017 already lets an authorized private
      copy be mapped and executed. It costs guest memory or disk and attach time, and spec 011's
@@ -352,12 +358,12 @@ These need the owner. Each has the default this spec works to until answered.
    uid 1000 would see no `/proc/1` while an orphan's `getppid()` still returns 1. The owner also
    accepts §7's first list, which the workload can see too, by accepting spec 024. Default: item 15
    allows exactly the remaining set, and intent 011 is recorded as partly served.
-3. **Q3, which harness and image.** Default: Claude Code's native build, the harness the owner uses
-   today, run as `claude -p` because spec 024 gives no terminal, pinned by version and digest and
-   attached as one tree; on a root image built from `debian:bookworm-slim` with spec 024's
-   `workload` user, pinned by digest. That base has nothing under `/opt` or `/usr/local/bin`
-   (listed outside this repository in a container), so it passes §2's guard. The owner may change
-   either, accept the merged layout so Node images qualify, or require a second runtime to pass.
+3. **Q3, which harness and image.** Default: Claude Code's native build, run as `claude -p`
+   because spec 024 gives no terminal, pinned by version and digest and attached as one tree; on a
+   root image built from `debian:bookworm-slim` with spec 024's `workload` user, pinned by digest.
+   That base has nothing under `/opt` or `/usr/local/bin` (listed outside this repository in a
+   container), so it passes §2's guard. The owner may change either, accept the merged layout so
+   Node images qualify, or require a second runtime to pass.
 
 ## Acceptance
 
@@ -398,14 +404,14 @@ cell, not run until one boots).
    holding directory inside the share.
 9. **References, mechanism and cell.** One detach under five holders: the started process with a
    descriptor, its child running the detached binary, an orphan reparented to PID1 with its
-   directory in the tree, a thread with its own table after `unshare(CLONE_FS | CLONE_FILES)`, and
-   a descriptor in flight over `SCM_RIGHTS`. Detach returns without waiting; its report names the
-   first four, with an `exec_id` on the started process only. Then the descriptors read the
-   original bytes, the binary runs, the orphan's directory lists nothing and lookups in it fail
+   directory in the tree, a thread with its own table after `unshare(CLONE_FS | CLONE_FILES)`, and a
+   descriptor in flight over `SCM_RIGHTS`. Detach returns without waiting; its report names the
+   first four, with an `exec_id` on the started process only. Then the descriptors read the original
+   bytes, the binary runs, listing the orphan's directory succeeds and is empty, lookups in it fail
    with `ENOENT`, and the in-flight descriptor, received once the report is empty, reads the
    original bytes. A detach with no holder reports none. Catches: a detach that waits or can be
-   vetoed, a per-process scan, a descendant given an `exec_id`, a held directory that still
-   resolves files, bytes deleted when the report empties, and invented references.
+   vetoed, a per-process scan, a descendant given an `exec_id`, a held directory that still resolves
+   files, bytes deleted when the report empties, and invented references.
 10. **Report lifetime, cell.** A holder that closes before detach returns is never reported. One
     that keeps its reference is in every observation until it closes, and in none after. While it
     holds, the journal has finished, `ready` is true and residue lists nothing. A detach whose name
@@ -449,8 +455,9 @@ cell, not run until one boots).
     mutants: a share served with `LINUX_SIMPLIFIED`; one mounted `ro`, which gives the workload
     `EROFS`; one added with `read_only` false, where the guest-root write succeeds; a host that
     deletes a detached file instead of moving it; a host that leaves the tree's directories in
-    place; and a controller that accepts a Mount whose source contains the share or lies inside
-    it. Catches: adopting (a) on container evidence.
+    place; a host that removes them instead of moving them, so the listing fails with `ENOENT`;
+    and a controller that accepts a Mount whose source contains the share or lies inside it.
+    Catches: adopting (a) on container evidence.
 
 ## Blocked on
 
