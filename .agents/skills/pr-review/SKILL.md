@@ -37,9 +37,9 @@ the push: report it rather than silently defer validation to CI. Do not bypass t
 by opening an unvalidated draft.
 
 - **Intent- or spec-filing PR:** it has no task, `task:` footer or Beads external reference.
-  `docs/intents/README.md` and `docs/specs/README.md` give its template and when it leaves
-  draft. An intent PR stays draft until the owner reads and approves it on GitHub, and filing a
-  spec approves no intent.
+  `docs/intents/README.md` and `docs/specs/README.md` give its template and `status:` rules.
+  An intent PR stays draft until the owner reads and approves it on GitHub, and filing a spec
+  approves no intent.
 - **Work PR:** start from the claimed Beads task, using `./tools/work-state show ID`. Open a
   draft whose body ends with `task: BEADS_ID` on its own line. Link the record once; do not
   duplicate its plan, description or acceptance as another task authority.
@@ -172,7 +172,7 @@ only inline threads. “Real, but later” is not resolution.
 
 Take a model tool's suggestion, CodeRabbit's included, as your own commit: by hand, or from
 GitHub's suggestion button and then reworded to remove the `Co-authored-by` line GitHub added.
-Re-commit a commit a model tool's account pushed under your identity, with
+Re-commit a commit a model tool's account pushed under your identity before merge, with
 `git commit --amend --reset-author` or
 `git rebase --exec 'git commit --amend --no-edit --reset-author' <base>`. Otherwise the squash
 credits the tool, as #114's credited a session name. A person's suggestion from the button
@@ -190,12 +190,14 @@ Before merging, require all of:
 - `gates` counts only if the PR leaves `.github/workflows/` and `.githooks/` unchanged
   ([spec 029 section 6](../../../docs/specs/029-the-contribution-record.md)). A PR that changes
   them is read as code before its green counts, since its own edit can turn `gates` green
-  unread. [Spec 026](../../../docs/specs/026-security-standard.md) holds its git-only step to
-  the same condition.
+  without the guard reading its commits.
+  [Spec 026](../../../docs/specs/026-security-standard.md) holds its git-only step to the same
+  condition.
 - Every commit's author and committer names a person or a bot (spec 029 section 5), never a
   model, an identity with no address or one on an untraceable domain such as `.local`
-  (section 4). Every author other than the PR's becomes a co-author on `main`, as #114's agent
-  session name did. `gh pr view --json commits` has no committer field; use the command below.
+  (spec 029 section 4). Every author other than the PR's becomes a co-author on `main`, as
+  #114's agent session name did. `gh pr view --json commits` has no committer field; use the
+  command below.
 - Every `Co-authored-by` and `Signed-off-by` in those commits' messages (`.commit.message`)
   names a person or a bot, since the squash keeps them. A Dependabot PR's author, sign-off and
   GitHub's co-author line for it all pass (spec 029 section 5).
