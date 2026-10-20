@@ -455,6 +455,9 @@ impl VmmChild {
 
     #[allow(unsafe_code)]
     fn signal_leader(&self) -> Result<(), SupervisionError> {
+        if leader_signal_withheld(self.pid) {
+            return Ok(());
+        }
         // SAFETY: kill takes no pointer, so the call is memory-safe whatever `self.pid` names. Its
         // callers reach it only after observe found the child running. The pid still names the
         // child then only while this handle is the only consuming waiter, as `VmmChild`'s doc
@@ -633,6 +636,16 @@ std::thread_local! {
 #[cfg(test)]
 fn withhold_leader_signal(pid: libc::pid_t) {
     WITHHELD_LEADER_SIGNAL.set(pid);
+}
+
+#[cfg(test)]
+fn leader_signal_withheld(pid: libc::pid_t) -> bool {
+    WITHHELD_LEADER_SIGNAL.get() == pid
+}
+
+#[cfg(not(test))]
+fn leader_signal_withheld(_pid: libc::pid_t) -> bool {
+    false
 }
 
 #[cfg(test)]
