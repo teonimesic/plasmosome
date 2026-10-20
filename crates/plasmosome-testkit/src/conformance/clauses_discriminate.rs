@@ -60,6 +60,7 @@ enum Defect {
     ApplyRemovalLeavesAStaleHandle,
     StallKeyedByPluginAboveZero,
     ForcedApplyRemovalLeavesAStaleHandle,
+    GracefulApplyRemovalLeavesAStaleHandle,
     ForceRefusedWhileANeighbourStands,
     ForceRefusedWhileThePluginStandsElsewhere,
 }
@@ -579,8 +580,14 @@ impl EnforcementBackend for DefectiveBackend {
         let removed = self.drained(owner, &removal.capability, address, drain, |backend| {
             backend.remove_exact(&removal, owner)
         });
-        if self.defect == Defect::ForcedApplyRemovalLeavesAStaleHandle
-            && drain.policy == RevokePolicy::Force
+        let keeps_the_record = match self.defect {
+            Defect::ForcedApplyRemovalLeavesAStaleHandle => drain.policy == RevokePolicy::Force,
+            Defect::GracefulApplyRemovalLeavesAStaleHandle => {
+                drain.policy == RevokePolicy::Graceful
+            }
+            _ => false,
+        };
+        if keeps_the_record
             && removed.is_ok()
             && let Some(record) = record
         {
@@ -1119,6 +1126,62 @@ fn forced_granted_removal_step_rejects_a_stale_handle() {
             Defect::ForcedApplyRemovalLeavesAStaleHandle,
         ))
     });
+}
+
+#[test]
+fn peer_removal_step_rejects_a_graceful_stale_handle() {
+    assert_rejected(|| {
+        conformance::graceful_timeouts_preserve_the_selected_holding(carrying(
+            Defect::GracefulApplyRemovalLeavesAStaleHandle,
+        ))
+    });
+}
+
+#[test]
+fn graceful_granted_removal_step_rejects_a_stale_handle() {
+    assert_rejected(|| {
+        conformance::repeated_grants_are_independently_removable(carrying(
+            Defect::GracefulApplyRemovalLeavesAStaleHandle,
+        ))
+    });
+}
+
+fn revoke_after_one_removal(
+    defect: Defect,
+    drain: DrainSpec,
+) -> (Handle, Result<LedgerEntry, BackendError>) {
+    let mut backend = DefectiveBackend::carrying(defect);
+    let entry = backend.grant(Grant {
+        owner: conformance::conformance_owner(),
+        capability: Capability::Broker {
+            pid: 7,
+            name: "egressd".to_string(),
+        },
+        kind: GrantKind::Hot,
+    });
+    backend
+        .apply_removal(entry.removal(), &entry.owner, drain)
+        .unwrap();
+    let revoked = backend.revoke(entry.handle, DrainSpec::forcing());
+    (entry.handle, revoked)
+}
+
+#[test]
+fn graceful_stale_handle_defect_spares_a_forced_removal() {
+    let (handle, revoked) = revoke_after_one_removal(
+        Defect::GracefulApplyRemovalLeavesAStaleHandle,
+        DrainSpec::forcing(),
+    );
+    assert_eq!(revoked, Err(BackendError::UnknownHandle { handle }));
+}
+
+#[test]
+fn forced_stale_handle_defect_spares_a_graceful_removal() {
+    let (handle, revoked) = revoke_after_one_removal(
+        Defect::ForcedApplyRemovalLeavesAStaleHandle,
+        DrainSpec::graceful(conformance::DRAIN),
+    );
+    assert_eq!(revoked, Err(BackendError::UnknownHandle { handle }));
 }
 
 #[test]
