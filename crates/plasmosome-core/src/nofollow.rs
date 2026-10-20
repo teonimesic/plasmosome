@@ -845,14 +845,14 @@ pub(crate) mod darwin_acl {
 pub(crate) mod fixtures {
     use std::fs;
     use std::os::fd::OwnedFd;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::time::Duration;
 
     use tempfile::TempDir;
 
-    use super::Walk;
+    use super::{DirIdentity, Facts, Kind, Walk};
 
     pub(crate) struct TestRoot {
         path: PathBuf,
@@ -904,6 +904,24 @@ pub(crate) mod fixtures {
         };
         for entry in entries.flatten() {
             open_up(&entry.path());
+        }
+    }
+
+    pub(crate) fn facts(kind: Kind, uid: u32, mode: u32) -> Facts {
+        Facts {
+            kind,
+            uid,
+            mode,
+            dev: 1,
+            ino: 2,
+        }
+    }
+
+    pub(crate) fn identity_of(path: &Path) -> DirIdentity {
+        let metadata = fs::symlink_metadata(path).expect("stat");
+        DirIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
         }
     }
 
@@ -1019,33 +1037,17 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use super::fixtures::{TestRoot, make_dir, make_fifo, set_mode, within_a_second, write_file};
+    use super::fixtures::{
+        TestRoot, facts, identity_of, make_dir, make_fifo, set_mode, within_a_second, write_file,
+    };
     use super::*;
     use crate::private_socket::PrivateSocketError;
     use std::fs;
     use std::os::fd::AsFd;
-    use std::os::unix::fs::{MetadataExt, symlink};
+    use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
 
     const EUID: u32 = 501;
-
-    fn facts(kind: Kind, uid: u32, mode: u32) -> Facts {
-        Facts {
-            kind,
-            uid,
-            mode,
-            dev: 1,
-            ino: 2,
-        }
-    }
-
-    fn identity_of(path: &Path) -> DirIdentity {
-        let metadata = fs::symlink_metadata(path).expect("stat");
-        DirIdentity {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-        }
-    }
 
     fn by_the_ancestor_rule(reached: &Reached<'_>) -> Result<(), WalkRefusal> {
         judge_ancestor(&reached.facts, effective_uid(), reached.path)

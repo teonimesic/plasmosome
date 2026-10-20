@@ -261,11 +261,11 @@ fn io_fault(op: &'static str, path: &Path, error: &std::io::Error) -> Fault {
 mod tests {
     use super::*;
     use crate::nofollow::fixtures::{
-        TestRoot, make_dir, make_fifo, set_mode, within_a_second, write_file,
+        TestRoot, facts, identity_of, make_dir, make_fifo, set_mode, within_a_second, write_file,
     };
-    use crate::nofollow::{DirIdentity, Facts, Kind, Reached, effective_uid};
+    use crate::nofollow::{Facts, Kind, Reached, effective_uid};
     use std::fs;
-    use std::os::unix::fs::{MetadataExt, symlink};
+    use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
 
@@ -285,24 +285,6 @@ mod tests {
     fn check_of(outcome: Result<TrustedFile, TrustRefusal>) -> (PathBuf, TrustCheck) {
         let refusal = refused(outcome);
         (refusal.path, refusal.check)
-    }
-
-    fn identity_of(path: &Path) -> DirIdentity {
-        let metadata = fs::symlink_metadata(path).expect("stat");
-        DirIdentity {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-        }
-    }
-
-    fn facts(kind: Kind, uid: u32, mode: u32) -> Facts {
-        Facts {
-            kind,
-            uid,
-            mode,
-            dev: 1,
-            ino: 2,
-        }
     }
 
     #[test]
