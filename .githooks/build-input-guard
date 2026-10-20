@@ -204,7 +204,9 @@ class Tree:
             parts = [folded(part) for part in entry.path.split("/")]
             self.found.setdefault("/".join(parts), []).append(entry)
             if entry.path.casefold().split("/")[-1] == "cargo.toml":
-                self.holding_a_manifest.update("/".join(parts[:depth]) for depth in range(len(parts)))
+                self.holding_a_manifest.update(
+                    "/".join(parts[:depth]) for depth in range(len(parts))
+                )
 
     def target(self, entry):
         if entry.oid not in self.targets:
@@ -499,7 +501,9 @@ def manifest(entry, tree):
     document, problem = read_toml(entry)
     if problem:
         return [(entry.path, "(file)", problem)]
-    found = [(entry.path, key, reason) for key, reason in TOP_LEVEL_REFUSED.items() if key in document]
+    found = [
+        (entry.path, key, reason) for key, reason in TOP_LEVEL_REFUSED.items() if key in document
+    ]
     base = entry.path.split("/")[:-1]
     values = [(keys, value, directory, False) for keys, value, directory in path_values(document)]
     workspace = table_at(document, "workspace")
@@ -519,13 +523,15 @@ def locked_source(keys, package):
         return (key_name(keys), "must be a table")
     if "source" not in package or package["source"] in CRATES_IO:
         return None
-    name, version, source = (package.get(key) for key in ("name", "version", "source"))
-    named = " ".join(
-        printable(value) if isinstance(value, str) else f"(no {key})"
-        for key, value in (("name", name), ("version", version))
+    which = " ".join(
+        printable(package[key]) if isinstance(package.get(key), str) else f"(no {key})"
+        for key in ("name", "version")
     )
-    origin = f'"{printable(source)}"' if isinstance(source, str) else "a source that is not a string"
-    return (key_name([*keys, "source"]), f"{named} is locked from {origin}; {SOURCE_REFUSED}")
+    source = package["source"]
+    origin = (
+        f'"{printable(source)}"' if isinstance(source, str) else "a source that is not a string"
+    )
+    return (key_name([*keys, "source"]), f"{which} is locked from {origin}; {SOURCE_REFUSED}")
 
 
 def lockfile(entry):
@@ -544,7 +550,9 @@ def lockfile(entry):
         if not isinstance(packages, list):
             found.append((key_name(keys), "must be an array of tables"))
             continue
-        found.extend(locked_source([*keys, index], package) for index, package in enumerate(packages))
+        found.extend(
+            locked_source([*keys, index], package) for index, package in enumerate(packages)
+        )
     if "root" in document:
         found.append(locked_source(["root"], document["root"]))
     return [(entry.path, key, reason) for key, reason in filter(None, found)]
