@@ -11,6 +11,7 @@ pub(crate) enum StrictJsonError {
     },
     DuplicateKey {
         path: String,
+        field: String,
     },
 }
 
@@ -25,7 +26,7 @@ impl std::fmt::Display for StrictJsonError {
                 f,
                 "refused as JSON at line {line}, column {column}: {reason}"
             ),
-            StrictJsonError::DuplicateKey { path } => {
+            StrictJsonError::DuplicateKey { path, .. } => {
                 write!(f, "duplicate object key at {path:?}")
             }
         }
@@ -44,7 +45,7 @@ pub(crate) fn parse_value(bytes: &[u8]) -> Result<Value, StrictJsonError> {
     .deserialize(&mut reader)
     .and_then(|value| reader.end().map(|()| value));
     read.map_err(|error| match duplicate.into_inner() {
-        Some(path) => StrictJsonError::DuplicateKey { path },
+        Some((path, field)) => StrictJsonError::DuplicateKey { path, field },
         None => StrictJsonError::NotJson {
             line: error.line(),
             column: error.column(),
@@ -81,11 +82,20 @@ impl Location<'_> {
             Location::Index(parent, index) => format!("{}/{index}", parent.pointer()),
         }
     }
+
+    fn dotted(&self) -> String {
+        match self {
+            Location::Root => String::new(),
+            Location::Key(Location::Root, key) => (*key).to_owned(),
+            Location::Key(parent, key) => format!("{}.{key}", parent.dotted()),
+            Location::Index(parent, index) => format!("{}[{index}]", parent.dotted()),
+        }
+    }
 }
 
 struct Strict<'a> {
     at: Location<'a>,
-    duplicate: &'a RefCell<Option<String>>,
+    duplicate: &'a RefCell<Option<(String, String)>>,
 }
 
 impl<'de> DeserializeSeed<'de> for Strict<'_> {
@@ -145,7 +155,7 @@ impl<'de> Visitor<'de> for Strict<'_> {
         while let Some(key) = entries.next_key::<String>()? {
             let at = Location::Key(&self.at, &key);
             if read.contains_key(&key) {
-                self.duplicate.replace(Some(at.pointer()));
+                self.duplicate.replace(Some((at.pointer(), at.dotted())));
                 return Err(de::Error::custom("duplicate object key"));
             }
             let value = entries.next_value_seed(Strict {

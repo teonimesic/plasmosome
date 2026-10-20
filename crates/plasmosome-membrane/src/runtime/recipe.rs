@@ -7,6 +7,10 @@ use std::collections::hash_map::Entry;
 
 const MAX_RECORD_BYTES: usize = 1_048_576;
 
+const VCPUS_RANGE: &str = "an integer from 1 to 255";
+
+const MEMORY_RANGE: &str = "an integer from 1 to 4294967295";
+
 const RECIPE_FIELDS: [&str; 15] = [
     "version",
     "vcpus",
@@ -116,8 +120,7 @@ impl Architecture {
         }
     }
 
-    /// The architecture this binary was built for, or `None` for any other.
-    pub fn host() -> Option<Architecture> {
+    fn host() -> Option<Architecture> {
         if cfg!(target_arch = "aarch64") {
             Some(Architecture::Aarch64)
         } else if cfg!(target_arch = "x86_64") {
@@ -130,22 +133,53 @@ impl Architecture {
 
 /// What a host admits. A recipe asking for more refuses before launch.
 ///
-/// Product code takes these from [`PlatformLimits::host`]; the fields are
-/// public so tests can state limits that do not depend on the machine.
+/// Outside tests the only way to get one is [`PlatformLimits::host`], so a
+/// caller cannot raise a limit above what the machine reports.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PlatformLimits {
-    /// The only architecture a recipe may name.
-    pub architecture: Architecture,
-    /// The most vCPUs a recipe may request.
-    pub max_vcpus: u8,
-    /// The most guest memory, in MiB, a recipe may request.
-    pub max_memory_mib: u32,
-    /// The longest control or data socket path, in bytes, that fits
-    /// `sockaddr_un.sun_path` with its terminating NUL.
-    pub max_socket_path_bytes: usize,
+    architecture: Architecture,
+    max_vcpus: u8,
+    max_memory_mib: u32,
+    max_socket_path_bytes: usize,
 }
 
 impl PlatformLimits {
+    #[cfg(test)]
+    pub(crate) const fn new(
+        architecture: Architecture,
+        max_vcpus: u8,
+        max_memory_mib: u32,
+        max_socket_path_bytes: usize,
+    ) -> PlatformLimits {
+        PlatformLimits {
+            architecture,
+            max_vcpus,
+            max_memory_mib,
+            max_socket_path_bytes,
+        }
+    }
+
+    /// The only architecture a recipe may name.
+    pub fn architecture(&self) -> Architecture {
+        self.architecture
+    }
+
+    /// The most vCPUs a recipe may request.
+    pub fn max_vcpus(&self) -> u8 {
+        self.max_vcpus
+    }
+
+    /// The most guest memory, in MiB, a recipe may request.
+    pub fn max_memory_mib(&self) -> u32 {
+        self.max_memory_mib
+    }
+
+    /// The longest control or data socket path, in bytes, that fits
+    /// `sockaddr_un.sun_path` with its terminating NUL.
+    pub fn max_socket_path_bytes(&self) -> usize {
+        self.max_socket_path_bytes
+    }
+
     /// Reads this machine's limits: its architecture, its available
     /// parallelism capped at 255 vCPUs, its physical memory in MiB capped at
     /// `u32::MAX`, and the `sun_path` capacity less one byte.
@@ -254,8 +288,9 @@ pub enum RecipeRefusal {
     NotJson { detail: String },
     /// `field` is not a JSON object; an empty `field` is the record itself.
     NotAnObject { field: String },
-    /// An object key appears twice, at this JSON pointer.
-    DuplicateField { path: String },
+    /// A key appears twice in one object; `field` is its dotted name, such
+    /// as `libraries[0].sha256`.
+    DuplicateField { field: String },
     /// `field` is not part of a recipe.
     UnknownField { field: String },
     /// `field` is required and absent.
@@ -292,7 +327,9 @@ pub enum RecipeRefusal {
         recipe: Architecture,
         host: Architecture,
     },
-    /// `control_path` and `data_path` are the same path.
+    /// `control_path` and `data_path` have the same spelling. Paths spelled
+    /// differently may still name one file, for example on a case-insensitive
+    /// file system.
     SocketPathsEqual,
     /// `field`, a socket path, is `bytes` long; `max` fit `sun_path`.
     SocketPathTooLong {
@@ -300,7 +337,8 @@ pub enum RecipeRefusal {
         bytes: usize,
         max: usize,
     },
-    /// One path fills two roles; `first` comes before `second` in field order.
+    /// One spelling fills two path roles; `first` comes before `second` in
+    /// field order. Paths spelled differently may still name one file.
     PathReused { first: PathRole, second: PathRole },
     /// The host would not report `limit`.
     HostLimitUnavailable { limit: &'static str },
@@ -313,9 +351,10 @@ impl RuntimeRecipe {
     /// the recipe must fit `limits`.
     ///
     /// Rules are checked in a fixed order and the first broken one is
-    /// returned: framing, JSON, unknown then missing keys, field values in
-    /// spec order, then the rules that compare fields with each other and
-    /// with `limits`.
+    /// returned: framing, JSON, the recipe's unknown then missing keys, each
+    /// field's value in spec order, then the rules that compare fields with
+    /// each other and with `limits`. An artifact's own unknown and missing
+    /// keys are checked when the value pass reaches its field.
     pub fn parse(record: &[u8], limits: &PlatformLimits) -> Result<RuntimeRecipe, RecipeRefusal> {
         let value = strict_json::parse_value(one_line(record)?).map_err(refused_json)?;
         let [
@@ -337,8 +376,8 @@ impl RuntimeRecipe {
         ] = fields(&value, RECIPE_FIELDS, "")?;
         check_version(version)?;
         let recipe = RuntimeRecipe {
-            vcpus: whole(vcpus, "vcpus", "an integer from 0 to 255")?,
-            memory_mib: whole(memory_mib, "memory_mib", "an integer from 0 to 4294967295")?,
+            vcpus: whole(vcpus, "vcpus", VCPUS_RANGE)?,
+            memory_mib: whole(memory_mib, "memory_mib", MEMORY_RANGE)?,
             kernel: artifact(kernel, "kernel")?,
             kernel_format: spelled(
                 kernel_format,
@@ -372,8 +411,13 @@ impl RuntimeRecipe {
     /// spec order, artifacts as `{"path":..,"sha256":..}`, strings escaped
     /// as `serde_json` escapes them.
     ///
-    /// The layout is fixed. The VMM helper and test runtimes read exactly
-    /// this form, so a change to it is a protocol change.
+    /// The layout is fixed so that a test runtime may find keys by fixed
+    /// search; the pinned VMM helper parses the line as JSON in any key
+    /// order. That helper counts the newline against its 1,048,576-byte
+    /// bound, so it refuses a line whose body is exactly 1,048,576 bytes,
+    /// which [`RuntimeRecipe::parse`] accepts. A launcher must refuse a line
+    /// longer than 1,048,576 bytes, newline included, before it starts the
+    /// helper.
     pub fn to_ndjson(&self) -> Vec<u8> {
         let libraries: Vec<String> = self.libraries.iter().map(artifact_json).collect();
         format!(
@@ -583,7 +627,7 @@ fn one_line(record: &[u8]) -> Result<&[u8], RecipeRefusal> {
 
 fn refused_json(error: StrictJsonError) -> RecipeRefusal {
     match error {
-        StrictJsonError::DuplicateKey { path } => RecipeRefusal::DuplicateField { path },
+        StrictJsonError::DuplicateKey { field, .. } => RecipeRefusal::DuplicateField { field },
         StrictJsonError::NotJson {
             line,
             column,
@@ -777,8 +821,8 @@ impl std::fmt::Display for RecipeRefusal {
                 f.write_str("the recipe is not a JSON object")
             }
             RecipeRefusal::NotAnObject { field } => write!(f, "`{field}` must be a JSON object"),
-            RecipeRefusal::DuplicateField { path } => {
-                write!(f, "the recipe repeats the key at {path:?}")
+            RecipeRefusal::DuplicateField { field } => {
+                write!(f, "the recipe repeats the field {field:?}")
             }
             RecipeRefusal::UnknownField { field } => {
                 write!(f, "the recipe carries an unknown field {field:?}")
@@ -798,8 +842,8 @@ impl std::fmt::Display for RecipeRefusal {
             RecipeRefusal::UnknownArchitecture { found } => {
                 write!(f, "architecture {found:?} is neither aarch64 nor x86_64")
             }
-            RecipeRefusal::ZeroVcpus => f.write_str("`vcpus` must be at least 1"),
-            RecipeRefusal::ZeroMemory => f.write_str("`memory_mib` must be at least 1"),
+            RecipeRefusal::ZeroVcpus => write!(f, "`vcpus` must be {VCPUS_RANGE}"),
+            RecipeRefusal::ZeroMemory => write!(f, "`memory_mib` must be {MEMORY_RANGE}"),
             RecipeRefusal::VcpusAboveLimit { requested, limit } => write!(
                 f,
                 "`vcpus` is {requested}; this host admits at most {limit}"
