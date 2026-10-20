@@ -172,6 +172,16 @@ fn page_record_is_strict() {
 }
 
 #[test]
+fn every_served_page_survives_json_text() {
+    let (_, _, pages) = ten_bytes_in_pages_of_four();
+    for page in &pages {
+        let text = serde_json::to_string(page).expect("a page encodes");
+        let decoded: ObservationPage = serde_json::from_str(&text).expect("it decodes back");
+        assert_eq!(&decoded, page);
+    }
+}
+
+#[test]
 fn page_check_refuses_each_fault() {
     let mut zero_snapshot = page(0, 1, 1);
     zero_snapshot.snapshot = 0;
@@ -473,6 +483,51 @@ fn a_request_past_its_own_deadline_gets_no_page() {
     let refused = slot.page(&SCOPE, cursor(1, 4), t + SECOND, t + SECOND);
     assert_eq!(refused, Err(PagingError::Expired));
     assert!(!slot.is_holding());
+}
+
+#[test]
+fn a_refused_request_leaves_the_capture_and_its_deadline_alone() {
+    let refusals = [
+        ("cell-2", 1, PagingError::ScopeChanged { snapshot: 1 }),
+        (SCOPE, 2, PagingError::UnknownSnapshot { snapshot: 2 }),
+        (
+            SCOPE,
+            0,
+            PagingError::InvalidCursor {
+                snapshot: 0,
+                offset: 4,
+            },
+        ),
+    ];
+    for (scope, snapshot, refusal) in refusals {
+        let (mut slot, t, pages) = ten_bytes_in_pages_of_four();
+        let now = t + SECOND;
+        assert_eq!(
+            slot.page(&scope, cursor(snapshot, 4), now, now),
+            Err(refusal)
+        );
+        assert_eq!(
+            read(&mut slot, 1, 4, t + 9 * SECOND).as_ref(),
+            Ok(&pages[1])
+        );
+    }
+}
+
+#[test]
+fn an_out_of_range_request_still_shortens_the_deadline() {
+    let (mut slot, t, _) = ten_bytes_in_pages_of_four();
+    let refused = slot.page(&SCOPE, cursor(1, 10), t + 2 * SECOND, t + SECOND);
+    assert_eq!(
+        refused,
+        Err(PagingError::OffsetOutOfRange {
+            offset: 10,
+            total: 10
+        })
+    );
+    assert_eq!(
+        read(&mut slot, 1, 4, t + 3 * SECOND),
+        Err(PagingError::Expired)
+    );
 }
 
 #[test]

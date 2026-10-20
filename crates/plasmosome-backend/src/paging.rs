@@ -756,4 +756,20 @@ mod tests {
         );
         assert!(!slot.is_holding());
     }
+
+    #[test]
+    fn a_stated_total_reserves_nothing() {
+        let mut assembler = PageAssembler::new();
+        let first = ObservationPage {
+            snapshot: 1,
+            offset: 0,
+            total: u64::MAX,
+            sha256: Digest::of(b"x"),
+            bytes: vec![b'{'],
+            complete: false,
+        };
+        assembler.accept(first).expect("a first page is accepted");
+        let capacity = assembler.buffer.capacity();
+        assert!(capacity <= MAX_PAGE_BYTES, "{capacity}");
+    }
 }
