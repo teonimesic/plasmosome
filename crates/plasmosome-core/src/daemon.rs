@@ -1,7 +1,7 @@
 use std::io::{BufReader, ErrorKind, Read};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -9,7 +9,10 @@ use serde::de::value::MapAccessDeserializer;
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
-use crate::control::{Controller, serve_connection};
+use crate::control::{Controller, Handler, serve_connection};
+use crate::private_socket::{
+    Accepted, PrivateDir, PrivateListener, PrivateSocketError, effective_uid,
+};
 use crate::state::{ControllerState, InstanceName, InstanceNameError};
 
 const ACCEPT_POLL: Duration = Duration::from_millis(25);
@@ -182,36 +185,22 @@ fn registry_root<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Pa
     unusable::<D, _>("registry_root", PathBuf::deserialize(deserializer)).map(Some)
 }
 
-/// Why the daemon could not start, or could not keep serving.
+/// Why the daemon could not start, or could not keep serving. `Boundary` is the private-socket
+/// boundary's refusal of the control socket path, or a failed bind under it: the daemon served
+/// nothing.
 #[derive(Debug)]
 pub enum DaemonError {
-    Bind {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    Boundary(PrivateSocketError),
     Listener(std::io::Error),
-    SocketIdentity {
-        path: PathBuf,
-        source: std::io::Error,
-    },
 }
 
 impl std::fmt::Display for DaemonError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DaemonError::Bind { path, source } => write!(
-                f,
-                "cannot bind the control socket {}: {source}",
-                path.display()
-            ),
+            DaemonError::Boundary(refusal) => write!(f, "{refusal}"),
             DaemonError::Listener(source) => write!(
                 f,
                 "the control socket stopped accepting connections: {source}"
-            ),
-            DaemonError::SocketIdentity { path, source } => write!(
-                f,
-                "cannot inspect the control socket {}: {source}",
-                path.display()
             ),
         }
     }
@@ -220,9 +209,8 @@ impl std::fmt::Display for DaemonError {
 impl std::error::Error for DaemonError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            DaemonError::Bind { source, .. } => Some(source),
+            DaemonError::Boundary(refusal) => Some(refusal),
             DaemonError::Listener(source) => Some(source),
-            DaemonError::SocketIdentity { source, .. } => Some(source),
         }
     }
 }
@@ -242,86 +230,78 @@ fn accept_outcome(error: &std::io::Error) -> Next {
     }
 }
 
-#[derive(Debug)]
-struct BoundSocket {
-    path: PathBuf,
-    dev: u64,
-    ino: u64,
-}
-impl BoundSocket {
-    fn capture(path: PathBuf) -> Result<Self, DaemonError> {
-        let metadata =
-            std::fs::symlink_metadata(&path).map_err(|source| DaemonError::SocketIdentity {
-                path: path.clone(),
-                source,
-            })?;
-        if !metadata.file_type().is_socket() {
-            return Err(DaemonError::SocketIdentity {
-                path,
-                source: std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "the entry at the pathname is not a socket",
-                ),
-            });
-        }
-        Ok(Self {
-            path,
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-        })
-    }
-}
-
-impl Drop for BoundSocket {
-    fn drop(&mut self) {
-        if let Ok(metadata) = std::fs::symlink_metadata(&self.path)
-            && metadata.file_type().is_socket()
-            && metadata.dev() == self.dev
-            && metadata.ino() == self.ino
-        {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+fn split_socket_path(path: &Path) -> Result<(&Path, &str), PrivateSocketError> {
+    let normal = path
+        .as_os_str()
+        .as_bytes()
+        .strip_prefix(b"/")
+        .is_some_and(|relative| {
+            relative
+                .split(|byte| *byte == b'/')
+                .all(|component| !matches!(component, b"" | b"." | b".."))
+        });
+    let (true, Some(parent), Some(name)) = (normal, path.parent(), path.file_name()) else {
+        return Err(PrivateSocketError::BadPath {
+            path: path.to_path_buf(),
+        });
+    };
+    let name = name.to_str().ok_or_else(|| PrivateSocketError::BadName {
+        name: name.to_string_lossy().into_owned(),
+    })?;
+    Ok((parent, name))
 }
 
 /// Runs the controller daemon until `shutdown` is set, then tears it down.
 /// Binds the control socket named by `config` first, so a start that cannot
-/// bind has done nothing else. A path already there is refused, whether it
-/// holds a live daemon's socket or a stale file; the daemon never unlinks a
-/// path it did not create, so clearing a stale path is the caller's job.
-/// Right after binding, the daemon records the socket's device and inode; a
-/// start that cannot capture that identity refuses without unlinking
-/// anything, leaving any residue for the operator.
+/// bind has done nothing else. The path is held to spec 001 §4.1's boundary
+/// for private sockets: it must be absolute with no empty, `.` or `..`
+/// component and pass through no symlink. Its ancestors must be owned by root
+/// or the effective UID, and neither group, other nor an ACL entry may let
+/// another user replace them. Its directory must be owned by the effective
+/// UID, with no group or other permission and no ACL. A path that fails is
+/// refused as `DaemonError::Boundary`, naming the failing component, and
+/// nothing is bound. A path already there is refused too, whether it holds a live
+/// daemon's socket or a stale file; the daemon never unlinks a path it did not
+/// create, so clearing a stale path is the caller's job. The socket is set to
+/// mode 0600 before it listens, whatever the umask. A connection whose kernel
+/// peer UID is not the effective UID is closed before a byte is read or
+/// written, and the daemon goes on to the next one.
 /// Returning — cleanly, on an error raised after the bind, or through an
-/// unwinding panic — removes the socket path only when the entry still at
-/// that name is the socket this daemon bound: a no-follow device-and-inode
-/// match. A replacement a caller settles at the pathname in the meantime — a
-/// regular file or a symlink — is left exactly as it was, and so is the
-/// original socket once renamed elsewhere. The check and the unlink are two
-/// steps, not one atomic one: a writer with authority over the directory can
-/// still substitute a victim between them, so this is ownership-correct
-/// cleanup under a coordinated namespace, not race-free protection. A
-/// `SIGKILL` runs no destructor, so callers must not read the path's absence
-/// as the daemon being gone.
+/// unwinding panic — removes the socket only while the entry at that name in
+/// the directory opened at start is still the socket this daemon bound, by
+/// device and inode, without following a symlink. A replacement a caller
+/// settles at the name in the meantime — a regular file or a symlink — is
+/// left exactly as it was, and so is the original socket once renamed
+/// elsewhere. The check and the unlink are two steps, not one atomic one: a
+/// writer with authority over the directory can still substitute a victim
+/// between them, so this is ownership-correct cleanup under a coordinated
+/// namespace, not race-free protection. A `SIGKILL` runs no destructor, so
+/// callers must not read the path's absence as the daemon being gone.
 /// Requests on a connection are answered in order, and `shutdown` is honored
 /// against a client that stops reading its replies. The instance starts with
 /// no cells at ledger generation zero. A handler panic answers `-32603` and
 /// then unwinds out of this function.
 pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonError> {
+    let (parent, name) =
+        split_socket_path(&config.control_socket).map_err(DaemonError::Boundary)?;
+    let directory = PrivateDir::open(parent).map_err(DaemonError::Boundary)?;
     let listener =
-        UnixListener::bind(&config.control_socket).map_err(|source| DaemonError::Bind {
-            path: config.control_socket.clone(),
-            source,
-        })?;
-    let _bound = BoundSocket::capture(config.control_socket.clone())?;
-    listener
-        .set_nonblocking(true)
-        .map_err(DaemonError::Listener)?;
+        PrivateListener::bind(directory, name, effective_uid()).map_err(DaemonError::Boundary)?;
 
     let mut controller = Controller::new(config.name, ControllerState::default(), NO_LEDGER_YET);
+    serve(listener, shutdown, &mut controller)
+}
+
+fn serve(
+    listener: PrivateListener,
+    shutdown: &AtomicBool,
+    handler: &mut impl Handler,
+) -> Result<(), DaemonError> {
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept() {
-            Ok((stream, _)) => converse(stream, shutdown, &mut controller),
+            Ok(Some(Accepted::Trusted(stream))) => converse(stream, shutdown, handler),
+            Ok(Some(Accepted::Refused(_))) => {}
+            Ok(None) => std::thread::sleep(ACCEPT_POLL),
             Err(error) => match accept_outcome(&error) {
                 Next::Poll => std::thread::sleep(ACCEPT_POLL),
                 Next::Retry => {}
@@ -332,7 +312,7 @@ pub fn run(config: DaemonConfig, shutdown: &AtomicBool) -> Result<(), DaemonErro
     Ok(())
 }
 
-fn converse(stream: UnixStream, shutdown: &AtomicBool, controller: &mut Controller) {
+fn converse(stream: UnixStream, shutdown: &AtomicBool, handler: &mut impl Handler) {
     if stream.set_nonblocking(false).is_err()
         || stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err()
@@ -343,7 +323,7 @@ fn converse(stream: UnixStream, shutdown: &AtomicBool, controller: &mut Controll
         return;
     };
     let reader = BufReader::new(FlaggedReads { stream, shutdown });
-    let _ = serve_connection(reader, writer, controller);
+    let _ = serve_connection(reader, writer, handler);
 }
 
 struct FlaggedReads<'a> {
@@ -375,9 +355,13 @@ fn waiting(error: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::Handler;
+    use crate::private_socket::{PrivateDir, PrivateListener, PrivateSocketError, effective_uid};
+    use crate::protocol::WireError;
     use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, ErrorKind, Write};
-    use std::os::unix::net::UnixStream;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -387,6 +371,82 @@ mod tests {
 
     const STATUS_REQUEST: &str = r#"{"id":1,"method":"plasmosome.status","params":{}}"#;
     const PATIENCE: Duration = Duration::from_secs(10);
+
+    #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
+    fn root_bases() -> Vec<PathBuf> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+        // SAFETY: `buffer` is a live Vec of buffer.len() bytes, and confstr writes at most that
+        // many.
+        let length = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        assert!(
+            length > 1 && length <= buffer.len(),
+            "confstr(_CS_DARWIN_USER_TEMP_DIR) returned {length}"
+        );
+        buffer.truncate(length - 1);
+        let base = PathBuf::from(OsStr::from_bytes(&buffer));
+        vec![
+            base.canonicalize()
+                .unwrap_or_else(|error| panic!("{} does not resolve: {error}", base.display())),
+        ]
+    }
+
+    #[cfg(target_os = "linux")]
+    fn root_bases() -> Vec<PathBuf> {
+        let mut bases: Vec<PathBuf> = std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|base| !base.is_empty())
+            .map(PathBuf::from)
+            .into_iter()
+            .collect();
+        let binary = std::env::current_exe().expect("the test binary knows its own path");
+        bases.extend(binary.parent().map(Path::to_path_buf));
+        bases
+    }
+
+    #[cfg(target_os = "macos")]
+    const SUN_PATH_MAX: usize = 103;
+    #[cfg(target_os = "linux")]
+    const SUN_PATH_MAX: usize = 107;
+
+    const NAME_ROOM: usize = 16;
+
+    fn private_root() -> tempfile::TempDir {
+        let mut refusals = Vec::new();
+        for base in root_bases() {
+            let root = match tempfile::Builder::new().prefix("pd").tempdir_in(&base) {
+                Ok(root) => root,
+                Err(error) => {
+                    refusals.push(format!("{}: {error}", base.display()));
+                    continue;
+                }
+            };
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("the test root is made private");
+            let length = root.path().as_os_str().len();
+            match PrivateDir::open(root.path()) {
+                Err(refusal) => refusals.push(format!("{}: {refusal}", base.display())),
+                Ok(_) if length + 1 + NAME_ROOM > SUN_PATH_MAX => refusals.push(format!(
+                    "{}: a {length}-byte root leaves fewer than {NAME_ROOM} bytes for a socket name",
+                    base.display()
+                )),
+                Ok(_) => return root,
+            }
+        }
+        panic!(
+            "no base can hold a private test root; on macOS the base is the canonical per-user \
+             temp directory, on Linux XDG_RUNTIME_DIR, else the test binary's directory:\n{}",
+            refusals.join("\n")
+        );
+    }
 
     fn config(directory: &Path, control_socket: &Path, name: &str) -> DaemonConfig {
         DaemonConfig {
@@ -487,12 +547,14 @@ mod tests {
         }
     }
 
-    fn start(config: DaemonConfig) -> Running {
+    fn spawned(
+        work: impl FnOnce(&AtomicBool) -> Result<(), DaemonError> + Send + 'static,
+    ) -> Running {
         let shutdown = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&shutdown);
         let (done, finished) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let outcome = run(config, &flag);
+            let outcome = work(&flag);
             let _ = done.send(());
             outcome
         });
@@ -500,6 +562,30 @@ mod tests {
             shutdown,
             finished,
             handle: Some(handle),
+        }
+    }
+
+    fn start(config: DaemonConfig) -> Running {
+        spawned(move |flag| run(config, flag))
+    }
+
+    fn serving(listener: PrivateListener, name: &str) -> Running {
+        let name = InstanceName::parse(name).expect("the test names a valid instance");
+        spawned(move |flag| {
+            let mut controller = Controller::new(name, ControllerState::default(), NO_LEDGER_YET);
+            serve(listener, flag, &mut controller)
+        })
+    }
+
+    struct Panicking;
+
+    impl Handler for Panicking {
+        fn handle(
+            &mut self,
+            _method: &str,
+            _params: &serde_json::Map<String, Value>,
+        ) -> Result<Value, WireError> {
+            panic!("the handler fails while answering");
         }
     }
 
@@ -530,8 +616,7 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "the daemon is addressable on {} within five seconds",
-                socket.display()
+                "the daemon is addressable within five seconds"
             );
             thread::sleep(Duration::from_millis(25));
         }
@@ -744,7 +829,7 @@ mod tests {
 
     #[test]
     fn the_daemon_serves_without_creating_its_instance_root() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let configured = config(directory.path(), &control, "work");
         let root = configured.instance_root.clone();
@@ -767,7 +852,7 @@ mod tests {
 
     #[test]
     fn the_daemon_answers_status_with_an_empty_cell_registry() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let daemon = start(config(directory.path(), &control, "work"));
 
@@ -819,7 +904,7 @@ mod tests {
 
     #[test]
     fn a_status_for_a_name_this_daemon_is_not_is_refused_on_the_wire() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let _daemon = start(config(directory.path(), &control, "work"));
 
@@ -853,15 +938,17 @@ mod tests {
 
     #[test]
     fn an_existing_control_socket_path_is_refused_and_the_path_is_not_unlinked() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         std::fs::write(&control, b"someone else's socket").expect("the test occupies the path");
 
         let refusal = refuses(config(directory.path(), &control, "work"));
 
         match &refusal {
-            DaemonError::Bind { path, .. } => assert_eq!(path, &control),
-            other => panic!("an occupied path is a bind failure, got {other:?}"),
+            DaemonError::Boundary(PrivateSocketError::AddressInUse { path }) => {
+                assert_eq!(path, &control)
+            }
+            other => panic!("an occupied path is refused as in use, got {other:?}"),
         }
         assert!(
             control.exists(),
@@ -872,7 +959,7 @@ mod tests {
 
     #[test]
     fn shutdown_stops_serve_even_with_an_idle_connection_open() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let daemon = start(config(directory.path(), &control, "work"));
 
@@ -890,7 +977,7 @@ mod tests {
 
     #[test]
     fn shutdown_stops_serve_even_with_a_client_that_never_reads_its_replies() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let daemon = start(config(directory.path(), &control, "work"));
 
@@ -918,7 +1005,7 @@ mod tests {
 
     #[test]
     fn a_connection_survives_a_parse_error_and_a_second_connection_is_served() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let _daemon = start(config(directory.path(), &control, "work"));
 
@@ -966,7 +1053,7 @@ mod tests {
 
     #[test]
     fn shutdown_leaves_a_later_socket_settled_at_the_pathname_alone() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let directory = private_root();
         let control = directory.path().join("control.uds");
         let daemon = start(config(directory.path(), &control, "work"));
 
@@ -1036,109 +1123,230 @@ mod tests {
     }
 
     #[test]
-    fn an_unwinding_guard_removes_its_own_socket_and_leaves_a_settled_replacement_alone() {
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+    fn another_uid_gets_no_reply_and_the_loop_goes_on() {
+        let root = private_root();
+        let euid = effective_uid();
+        let foreign = PrivateListener::bind(
+            PrivateDir::open(root.path()).expect("the test root is private"),
+            "foreign.uds",
+            euid.wrapping_add(1),
+        )
+        .expect("a listener trusting another UID binds");
+        let clients: Vec<UnixStream> = (0..2)
+            .map(|_| {
+                let mut client = UnixStream::connect(&foreign.entry().path)
+                    .expect("the listener queues the connection");
+                client
+                    .set_read_timeout(Some(PATIENCE))
+                    .expect("the test client bounds its own reads");
+                writeln!(client, "{STATUS_REQUEST}")
+                    .expect("the request is queued before the daemon accepts");
+                client
+            })
+            .collect();
+        let daemon = serving(foreign, "work");
 
-        let control = directory.path().join("control.uds");
-        let bound = UnixListener::bind(&control).expect("the fixture binds a real socket");
-        let guard = BoundSocket::capture(control.clone()).expect("the guard captures its socket");
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _guard = guard;
-            let _still_bound = bound;
-            panic!("the daemon unwinds through the guard");
-        }));
+        for (attempt, mut client) in ["first", "second"].into_iter().zip(clients) {
+            let mut reply = Vec::new();
+            let end = client.read_to_end(&mut reply);
+            assert!(
+                reply.is_empty(),
+                "the {attempt} connection from an untrusted UID got a reply: {:?}",
+                String::from_utf8_lossy(&reply)
+            );
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                end.expect("macOS ends a refused connection with end of file"),
+                0,
+                "the {attempt} untrusted connection is closed"
+            );
+            #[cfg(target_os = "linux")]
+            assert_eq!(
+                end.expect_err("the daemon closed the connection with its request unread")
+                    .kind(),
+                ErrorKind::ConnectionReset,
+                "the {attempt} untrusted connection is reset: its request was never read"
+            );
+        }
         assert!(
-            !control.exists(),
-            "an unchanged socket the guard owns is removed even on an unwinding exit"
+            daemon
+                .finished
+                .recv_timeout(Duration::from_millis(200))
+                .is_err(),
+            "the loop is still serving after it refused two peers"
         );
+        daemon
+            .stop()
+            .expect("refusing a peer is not a listener failure: the loop keeps serving");
 
-        let control = directory.path().join("control.uds");
-        let bound = UnixListener::bind(&control).expect("the fixture binds a real socket");
-        let guard = BoundSocket::capture(control.clone()).expect("the guard captures its socket");
-        let saved = directory.path().join("saved.uds");
-        std::fs::rename(&control, &saved).expect("the original socket is renamed");
-        std::fs::write(&control, b"a settled replacement").expect("the sentinel is written");
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _guard = guard;
-            let _still_bound = bound;
-            panic!("the daemon unwinds through the guard");
-        }));
-        let left = std::fs::symlink_metadata(&control).expect("the sentinel survives the unwind");
-        assert!(
-            left.file_type().is_file(),
-            "a replacement settled after capture is not the guard's socket, so an unwinding \
-             teardown leaves it standing"
-        );
-        assert!(
-            std::fs::symlink_metadata(&saved)
-                .expect("the renamed original is retained")
-                .file_type()
-                .is_socket(),
-            "the renamed original socket stays allocated at its new name"
+        let own = PrivateListener::bind(
+            PrivateDir::open(root.path()).expect("the test root is private"),
+            "own.uds",
+            euid,
+        )
+        .expect("a listener trusting this UID binds");
+        let path = own.entry().path.clone();
+        let _daemon = serving(own, "work");
+        let mut client = addressable(&path);
+        assert_eq!(
+            ask(&mut client, STATUS_REQUEST).pointer("/result/name"),
+            Some(&json!("work")),
+            "a loop serving this UID answers it"
         );
     }
 
     #[test]
-    fn capture_refuses_a_non_socket_or_missing_entry_and_leaves_it_alone() {
+    fn an_unwinding_panic_removes_the_socket_and_leaves_a_settled_replacement_alone() {
+        let root = private_root();
+        let own = |name: &str| {
+            PrivateListener::bind(
+                PrivateDir::open(root.path()).expect("the test root is private"),
+                name,
+                effective_uid(),
+            )
+            .expect("a listener trusting this UID binds")
+        };
+        let unwinding =
+            |listener: PrivateListener| spawned(move |flag| serve(listener, flag, &mut Panicking));
+        let unwound = |mut serving: Running| {
+            assert_eq!(
+                serving.finished.recv_timeout(PATIENCE),
+                Err(mpsc::RecvTimeoutError::Disconnected),
+                "the panic unwinds out of the accept loop within ten seconds"
+            );
+            assert!(
+                serving
+                    .handle
+                    .take()
+                    .expect("the loop thread is joined once")
+                    .join()
+                    .is_err(),
+                "the loop thread ends in the handler's panic"
+            );
+        };
+
+        let listener = own("control.uds");
+        let control = listener.entry().path.clone();
+        let serving = unwinding(listener);
+        let mut client = addressable(&control);
+        assert_eq!(
+            ask(&mut client, STATUS_REQUEST)
+                .pointer("/error/code")
+                .and_then(Value::as_i64),
+            Some(-32603),
+            "a handler panic is answered before it unwinds"
+        );
+        unwound(serving);
+        assert!(
+            std::fs::symlink_metadata(&control).is_err(),
+            "the socket is removed on the unwinding route out"
+        );
+
+        let listener = own("settled.uds");
+        let settled = listener.entry().path.clone();
+        let saved = root.path().join("saved.uds");
+        let serving = unwinding(listener);
+        let mut client = addressable(&settled);
+        std::fs::rename(&settled, &saved).expect("the socket is renamed away");
+        std::fs::write(&settled, b"a settled replacement").expect("the sentinel is written");
+        let _ = ask(&mut client, STATUS_REQUEST);
+        unwound(serving);
+        assert_eq!(
+            std::fs::read(&settled).expect("the replacement survives the unwind"),
+            b"a settled replacement",
+            "an unwinding teardown leaves a replacement at the name alone"
+        );
+        assert!(
+            std::fs::symlink_metadata(&saved)
+                .expect("the renamed original survives")
+                .file_type()
+                .is_socket(),
+            "the renamed original stays at its new name"
+        );
+    }
+
+    #[test]
+    fn a_control_socket_path_that_is_not_absolute_and_normal_is_refused_as_written() {
+        for written in [
+            "",
+            "control.uds",
+            "relative/control.uds",
+            "/",
+            "/a/b/",
+            "/a//b",
+            "/a/./b",
+            "/a/../b",
+            "/a/b/.",
+            "/a/b/..",
+        ] {
+            assert_eq!(
+                split_socket_path(Path::new(written)),
+                Err(PrivateSocketError::BadPath {
+                    path: PathBuf::from(written)
+                }),
+                "{written:?} is refused before any directory is opened"
+            );
+        }
+        assert_eq!(
+            split_socket_path(Path::new("/a/b/control.uds")),
+            Ok((Path::new("/a/b"), "control.uds"))
+        );
+        assert_eq!(
+            split_socket_path(Path::new("/control.uds")),
+            Ok((Path::new("/"), "control.uds"))
+        );
+
+        use std::os::unix::ffi::OsStrExt;
+        let raw = Path::new(std::ffi::OsStr::from_bytes(b"/a/\xffcontrol.uds"));
+        assert_eq!(
+            split_socket_path(raw),
+            Err(PrivateSocketError::BadName {
+                name: "\u{fffd}control.uds".to_string()
+            }),
+            "a socket name that is not UTF-8 cannot be bound by name"
+        );
+    }
+
+    #[test]
+    fn a_boundary_refusal_reads_as_the_refusal_itself() {
         use std::error::Error as _;
 
-        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
-
-        let control = directory.path().join("control.uds");
-        std::fs::write(&control, b"someone else's socket").expect("the test occupies the path");
-        let refusal =
-            BoundSocket::capture(control.clone()).expect_err("a regular file is not a socket");
-        match &refusal {
-            DaemonError::SocketIdentity { path, .. } => assert_eq!(path, &control),
-            other => panic!("a non-socket entry is an identity failure, got {other:?}"),
-        }
-        let source = refusal
-            .source()
-            .and_then(|source| source.downcast_ref::<std::io::Error>())
-            .expect("the identity refusal carries the actual I/O error");
+        let refusal = PrivateSocketError::SymlinkInPath {
+            path: PathBuf::from("/var"),
+        };
+        let error = DaemonError::Boundary(refusal.clone());
         assert_eq!(
-            source.kind(),
-            std::io::ErrorKind::InvalidData,
-            "a non-socket entry is invalid data, not a missing one: {source}"
+            error.to_string(),
+            refusal.to_string(),
+            "the operator reads the failing component and the rule it broke"
         );
         assert_eq!(
-            std::fs::read(&control)
-                .expect("the occupied file is readable")
-                .as_slice(),
-            b"someone else's socket".as_slice(),
-            "capture inspects the namespace, it never clears it: the entry is left for its owner"
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<PrivateSocketError>()),
+            Some(&refusal),
+            "the refusal is kept as the cause"
         );
+    }
 
-        let link = directory.path().join("link.uds");
-        std::os::unix::fs::symlink("nowhere.uds", &link)
-            .expect("the test plants a dangling leaf symlink");
-        let refusal = BoundSocket::capture(link.clone())
-            .expect_err("a leaf symlink is not a socket, even dangling");
+    #[test]
+    fn a_listener_failure_reads_as_one_and_keeps_its_cause() {
+        use std::error::Error as _;
+
+        let error = DaemonError::Listener(std::io::Error::from_raw_os_error(libc::EMFILE));
         assert!(
-            matches!(&refusal, DaemonError::SocketIdentity { path, .. } if path == &link),
-            "the refusal names the symlink, not its target: {refusal:?}"
+            error
+                .to_string()
+                .starts_with("the control socket stopped accepting connections: "),
+            "{error}"
         );
         assert_eq!(
-            std::fs::read_link(&link).expect("the symlink target is readable"),
-            PathBuf::from("nowhere.uds"),
-            "the no-follow inspection preserves the symlink and its exact target"
-        );
-
-        let missing = directory.path().join("absent.uds");
-        let refusal = BoundSocket::capture(missing.clone())
-            .expect_err("a missing path has no identity to capture");
-        let source = refusal
-            .source()
-            .and_then(|source| source.downcast_ref::<std::io::Error>())
-            .expect("the identity refusal carries the actual I/O error");
-        assert_eq!(
-            source.kind(),
-            std::io::ErrorKind::NotFound,
-            "a missing path is a not-found inspection error: {source}"
-        );
-        assert!(
-            !missing.exists(),
-            "a failed capture creates nothing and removes nothing"
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .and_then(std::io::Error::raw_os_error),
+            Some(libc::EMFILE),
+            "the accept failure is kept as the cause"
         );
     }
 }
