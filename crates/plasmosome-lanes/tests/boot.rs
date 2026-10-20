@@ -398,8 +398,9 @@ fn confined_lane(run_id: &str, allow_writes_outside: bool) -> Lane {
         format!("(deny file-write* (subpath \"{}\"))", allowed.display())
     } else {
         format!(
-            "(deny file-write*)\n(allow file-write* (literal \"{}\"))",
-            lane.lane.console.display()
+            "(deny file-write*)\n(allow file-write* (literal \"{}\") (literal \"{}\"))",
+            lane.lane.console.display(),
+            lane.lane.root_image.display()
         )
     };
     let profile = format!(
