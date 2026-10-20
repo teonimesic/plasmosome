@@ -4,8 +4,8 @@
 
 Shared test support: builders for the noisy kernel types, the backend conformance suite every
 `EnforcementBackend` implementation must pass, the cross-crate scenarios, and the membrane
-differential's manifest (spec 027 §6). It is where the rules that span crates live; each
-crate's own `AGENTS.md` stays authoritative for that crate.
+differential's manifest and comparator (spec 027 §6). It is where the rules that span crates
+live; each crate's own `AGENTS.md` stays authoritative for that crate.
 
 Nothing here ships. The crate is `publish = false`, and the guard `testkit_is_dev_only` in
 `plasmosome-guards` fails the build if another workspace crate names it outside
@@ -90,7 +90,7 @@ mocks it in the test.
 ## Testing
 
 `cargo test -p plasmosome-testkit`. That runs the conformance suite against `FakeBackend` and
-`CompositeBackend`, plus the cross-crate scenarios and the differential's manifest tests. A new
-backend proves itself by calling the same `conformance::` functions with its own constructor, in
-its own `tests/` file. The differential's tests alone run with
+`CompositeBackend`, plus the cross-crate scenarios and the differential's manifest and comparator
+tests. A new backend proves itself by calling the same `conformance::` functions with its own
+constructor, in its own `tests/` file. The differential's tests alone run with
 `cargo test -p plasmosome-testkit --lib differential`.
