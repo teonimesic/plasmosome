@@ -55,6 +55,7 @@ Every place the kernel touches the world outside the process, and the trait that
 | Durable appends that can fail (session log) | `LogStore` and `LogFile` (`plasmosome-core::session_log`) | `FaultLogStore` in core's unit tests |
 | Directory syncs that can fail (instance root) | the private `SyncDirectory` function that `InstanceRoot` and `CellDir` carry (`plasmosome-core::instance`) | `recording_sync` in core's unit tests |
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
+| Time (lifetime bounds, the fence, expiry scheduling) | `Clock` (`plasmosome-backend::clock`), `SystemClock` in `plasmosome-core::clock` | `ManualClock` |
 
 Both forms in that table are seams. Which one a contact gets is decided by what varies between
 the real thing and the test. When the *behavior* varies — enforcement that really grants and
@@ -73,17 +74,20 @@ There is deliberately no mocking-framework dependency. Expectation-style mocks c
 call sequences; a fake that models the contract couples tests to behavior. Hand-built fakes
 only.
 
-There is still no clock trait. Durations are passed in as arguments. Four decisions read elapsed
-time. `VmmChild::wait_terminal` spends a fixed child-termination allowance with no seam. Two serve
-one shared readiness budget (spec001 §4): `BrokerSet::status_with` runs the set-level `ProbeBudget`
+Spec 028 requires one injected clock for every lifetime decision, with three readings that tests
+set independently: the wall clock, a continuous clock with its boot session, and the clock waits
+use. That clock is `Clock` in `plasmosome-backend::clock`. Production passes `SystemClock` from
+`plasmosome-core::clock`, and tests pass `ManualClock`. Four earlier decisions read elapsed time
+outside it, and stay that way until a task moves them. Durations are passed in as arguments.
+`VmmChild::wait_terminal` spends a fixed child-termination allowance with no seam. Two serve one
+shared readiness budget (spec001 §4): `BrokerSet::status_with` runs the set-level `ProbeBudget`
 checks and `readiness::probe_with` the socket-operation checks, and each takes its own injected
 clock seam — production supplies `Instant::now` at both, and the 9z0 deterministic boundary tests
 inject a fake at each. The fourth is the capture deadline of a paged observation (spec001 §4.1).
 `CaptureSlot` in `plasmosome-backend::paging` decides it in `capture`, `page` and `expire`:
 `capture` takes an injected clock and reads it before and after collection, and `page` and `expire`
 take the current instant. Each server that pages a result passes its clock in and counts no decision
-of its own. If more decision sites appear, that is the moment to weigh a shared clock trait — not
-before.
+of its own.
 
 ### Workspace files belong to the invocation
 

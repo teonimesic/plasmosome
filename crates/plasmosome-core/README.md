@@ -23,6 +23,7 @@ one.
 | `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode`; the one constructor for a cell's journal and socket paths |
 | `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
+| `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends |
 
 ## Use
