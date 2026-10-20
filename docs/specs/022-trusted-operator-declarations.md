@@ -225,10 +225,10 @@ destination is not eligible, since its addresses are unknown until connection. W
 entry, the result is the 103 above.
 
 **One meaning per host and port in a cell.** The guest's network is per cell, and a new flow
-selects among the cell's grants for its host. So the controller compares every new ProxyMap with
-the others and with every ProxyMap the cell holds, leaving out the holdings this same reload
-replaces. For one host, port and transport, all must come from the same mode and carry the same
-recipe:
+selects among the cell's grants for its host, port and transport (spec 001 §4.2). So the controller
+compares every new ProxyMap with the others and with every ProxyMap the cell holds, leaving out the
+holdings this same reload replaces. For one host, port and transport, all must come from the same
+mode and carry the same recipe:
 
 - different modes refuse with 104: `node` the plasmid with the other mode, `modes` both modes,
   `plasmids` both plasmids, `resolutions` `["remove_plasmid"]`;
@@ -238,9 +238,8 @@ recipe:
 So two attached plasmids that share a host cannot move it to a new destination by reload: each
 reload meets the other's held recipe. The operator removes one, reloads the other, and re-adds.
 
-Spec 001 §4.2 selects among a host's grants by host alone, so a host held on two ports, or over
-TCP and UDP, always selects one grant and the other's flows refuse. That defect predates this
-spec and is tracked in task plasmosome-e6m.
+Spec 001 §4.2 selects a new flow's grant by its host, port and transport, so a host held on two
+ports, or over TCP and UDP, serves each flow from the grant for its own port and transport.
 
 **A mode never changes after attach** (the default pending owner question 6). A mode now selects
 which entries realize a plasmid's hosts, so changing it would change a grant. When D2b
@@ -585,7 +584,7 @@ ProxyMap (O-11) or Mount (O-7).
 ## Out of scope
 
 - How ProxyMap and Mount are enforced. That is spec 017 and spec 001 §4.2.
-- Selecting a proxy grant by port and transport, which is task plasmosome-e6m.
+- Selecting a proxy grant by port and transport, which spec 001 §4.2 does.
 - The approval gate for a declaration. That is open in spec 011 and intent 010.
 - Credential custody, command subjects and attestation.
 - A local genome grammar.

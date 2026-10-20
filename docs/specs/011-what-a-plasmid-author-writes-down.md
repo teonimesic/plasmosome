@@ -164,12 +164,12 @@ the scaffold writes the declaration now and still refuses the component, saying 
   has not attached.
 - **Attach widens the cell and does nothing else.** It does not restart the cell, does not
   interrupt what is running in it, and does not change what any already-attached plasmid was
-  **granted**. It does change one thing about them: a mock mode propagates across the dependency
-  closure exactly as spec 001 §3.10 froze it. A mode decides whether a granted call reaches a live
-  service or a recording; it is not itself a grant, and that propagation is untouched here. No
-  restart is a promise the kernel keeps when the cell is made rather than when a plasmid arrives:
-  a cell is created already arranged so that what is attached later can be reached from inside it,
-  and that arrangement cannot be established in a cell that is already running.
+  **granted**. Nor does it change their mock modes: under spec 022 a mode selects which operator
+  entries realize a plasmid's hosts, so an attach whose propagation would change an attached
+  plasmid's mode is refused with 104. No restart is a promise the kernel keeps when the cell is
+  made rather than when a plasmid arrives: a cell is created already arranged so that what is
+  attached later can be reached from inside it, and that arrangement cannot be established in a
+  cell that is already running.
 - **Attach never rounds up.** One attach grants across the required closure: the named plasmid
   and every provider it transitively requires each receive exactly what their own declaration
   names, and no plasmid in the closure receives anything from outside its own. A requirer gains
@@ -180,9 +180,8 @@ the scaffold writes the declaration now and still refuses the component, saying 
   needs.** Grants are held per declaration, so detaching a plasmid revokes its own grants and
   unregisters its own tools. A provider that arrived as part of a closure stays while any
   attached plasmid still requires it and goes with its last requirer; a detach that would strand
-  an attached requirer is refused, naming the requirers. A mode the detached plasmid had
-  declared stops propagating with it; what the remaining declarations propagate is governed by
-  spec 001 §3.10, unchanged.
+  an attached requirer is refused, naming the requirers. A detach changes no remaining plasmid's
+  mock mode: each keeps the mode it attached at (spec 022).
 - **Revocation is enforcement, not erasure.** After detach, no tool of the plasmid resolves and
   nothing its grants allowed passes the boundary — for processes that were already running when
   it happened, not only for ones started after. What detach does not claim is what had already
@@ -271,7 +270,8 @@ Because the kernel grants exactly what is declared, that closure is what a plasm
 a reviewer who reads it knows the worst case without reading a line of code. The single
 declaration is not enough on its own: a plasmid requiring a capability reaches, through its
 provider's tools, whatever that provider's declaration grants, and attach brings the whole closure
-with it.
+with it. Since spec 022, the closure bounds which needs a plasmid has; the trusted operator
+declarations file bounds where each one leads on the host, so a reviewer reads both.
 
 **Reading bounds reach, not conduct.** A plasmid granted a repository can do anything to that
 repository. The credential grammar's scopes narrow part of the gap and do not close it.
@@ -297,7 +297,10 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 ## Contract
 
 - **A plasmid is one declaration file plus the implementation it names.** The declaration is the
-  only thing the kernel reads to decide what the plasmid may reach.
+  only thing the kernel reads to decide what the plasmid may reach: which hosts and ports, which
+  workspace path, which tools. Spec 022's trusted operator declarations decide only where each
+  declared need leads on this host (the real destination, the host directory and its access), and
+  can leave a need unmet, never add one.
 - **The declaration carries a required `description`** — one or two plain sentences saying what
   the plasmid is for. A declaration without one does not parse, and the error names the field.
 - **Every declared tool carries a required description.** The `[provides]` binding's `tools` is a
@@ -328,11 +331,13 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   relative path-scope entry — is refused with the same named error an explicit `inject` gets.
 - **Every refusal an author can cause carries the field path in the declaration and a `fix`
   sentence** holding the line the author would write, or exactly `remove this entry` where the
-  repair is a deletion, and carries the plasmid id wherever the declaration supplies one. A
-  declaration with no `id` is the single case that cannot name a plasmid; it names the missing `id`
-  instead. Where a refusal must name more than one plasmid — the requirers a detach would strand —
-  it names them in the message and the `fix`, not in a new structured field: §1's assertion carries
-  a single plasmid, and adding a field to it would be a fourth amendment this spec does not make.
+  repair is a deletion, and carries the plasmid id wherever the declaration supplies one. A refusal
+  that names no field, such as a syntax error the parser reports by line and column or a file over
+  the size bound, carries no fix. A declaration with no `id` is the single case that cannot name a
+  plasmid; it names the missing `id` instead. Where a refusal must name more than one plasmid — the
+  requirers a detach would strand — it names them in the message and the `fix`, not in a new
+  structured field: §1's assertion carries a single plasmid, and adding a field to it would be a
+  fourth amendment this spec does not make.
 - **A capability denied at the boundary is reported as a missing declaration.** The report names
   what was denied and the declaration field it belongs in, and names nothing that was granted or
   would have been. It is written to the cell's session log, one line per denial, and to the
@@ -345,8 +350,8 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   closure — the one named and every provider it transitively requires — is granted exactly what
   its own declaration names; a requirer gains its provider's tools, never its provider's grants;
   and attach refuses rather than granting more to any of them. It changes no already-attached
-  plasmid's grants; mock-mode propagation across the dependency closure is unchanged from spec
-  001 §3.10.
+  plasmid's grants or mock mode; propagation that would change an attached plasmid's mode refuses
+  with 104 (spec 022).
 - **Detach requires nothing from the plasmid** and cannot be refused or failed by it. It revokes
   every grant the plasmid's own declaration held and unregisters its tools. A provider is
   revoked only with its last requirer; a detach that would strand an attached requirer is
@@ -374,8 +379,9 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   `fix` field in §1, and the `denials` field on the per-plasmid objects of §3.9 and §3.6 — and
   nowhere else. No error code is added, removed or renumbered.
 - **Nothing here decides the gate.** Two properties hold whatever it turns out to be: the approval
-  is not the cell's to give, and the declarations of a plasmid and its required closure are
-  sufficient for a reviewer to bound its reach. Neither limits what else a gate may read.
+  is not the cell's to give, and the declarations of a plasmid and its required closure, read with
+  spec 022's operator declarations file, are sufficient for a reviewer to bound its reach. Neither
+  limits what else a gate may read.
 
 ## Acceptance
 
@@ -418,8 +424,8 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   the requirer holds none of its providers' grants, and a refusal at the deepest provider leaves
   no record, tool or grant for any of the three.
 - An attach leaves every already-attached plasmid's grants unchanged, asserted by comparing the
-  cell's grants before and after; a mock mode propagating across the closure in the same attach is
-  asserted separately and is not counted as a change of grant.
+  cell's grants before and after; an attach whose mock-mode propagation would change an attached
+  plasmid's mode is refused with 104 and changes nothing (spec 022).
 - A plasmid one of whose declared tools does not resolve is not reported active.
 - A plasmid whose code is unresponsive still detaches: the cell reports it gone, the registry
   holds none of its tools, and the ledger records the reverse of every grant its own declaration
@@ -476,8 +482,8 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 - **The skill an agent inside a cell invokes to generate one.** Intent 010 names that path as the
   common case; what the skill is made of is downstream of this contract rather than part of it.
 - **Mock modes and their layering.** The three modes, their propagation across a dependency
-  closure, and the conflict rules are frozen in spec 001 §3.10 and untouched. The only thing said
-  about them here is that propagation is not a change of grant.
+  closure, and the conflict rules are in spec 001 §3.10, as spec 022 amends it: propagation never
+  changes an attached plasmid's mode.
 - **The delivery modes, the consumer set and the pairing rules.** Unchanged. What this spec
   changes about the credential grammar is one thing only — that `delivery` may be omitted — and
   that change is named as an amendment above rather than claimed as untouched.
