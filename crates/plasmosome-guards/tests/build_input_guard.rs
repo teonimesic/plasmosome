@@ -1870,6 +1870,11 @@ fn refuses_patch_replace_and_cargo_features() {
                     vec![file("crates/a/Cargo.toml", "[package\nname = \n")],
                     vec![("crates/a/Cargo.toml", "(file)")],
                 ),
+                (
+                    "[patch] in a manifest three levels down",
+                    vec![package("tools/x/y/Cargo.toml", "y", patch)],
+                    vec![("tools/x/y/Cargo.toml", "patch")],
+                ),
             ],
         );
         assert_says(
@@ -1992,6 +1997,16 @@ fn a_path_dependency_resolves_to_a_tracked_directory_inside() {
                 "a target's dev-dependencies",
                 vec![in_table("target.'cfg(unix)'.dev-dependencies")],
                 at("target.\"cfg(unix)\".dev-dependencies.x.path"),
+            ),
+            (
+                "a target's build-dependencies",
+                vec![in_table("target.'cfg(unix)'.build-dependencies")],
+                at("target.\"cfg(unix)\".build-dependencies.x.path"),
+            ),
+            (
+                "a path beside a version",
+                vec![dependency("\"../../../outside\", version = \"1\"")],
+                at("dependencies.x.path"),
             ),
             (
                 "[workspace.dependencies]",
@@ -2133,6 +2148,11 @@ fn a_symlink_to_a_directory_holding_a_manifest_is_refused() {
                     vec![("all", "(symlink)")],
                 ),
                 (
+                    "a symlink to a directory holding a lower-case cargo.toml",
+                    vec![symlink("docs/w", "../w"), package("w/cargo.toml", "w", "")],
+                    vec![("docs/w", "(symlink)")],
+                ),
+                (
                     "a member reached by stepping back out of .git",
                     vec![
                         file(
@@ -2200,6 +2220,23 @@ fn symlink_targets_are_compared_as_a_mac_compares_names() {
                     vec![("crates/l", "(symlink)")],
                 ),
                 (
+                    "a target in lower case, to a directory tracked in upper case",
+                    vec![
+                        file(
+                            "Cargo.toml",
+                            "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+                        ),
+                        symlink("crates/q", "../q/r"),
+                        package(
+                            "Q/R/Cargo.toml",
+                            "deep",
+                            "\n[dependencies]\nleaf = { path = \"../../leaf\" }\n",
+                        ),
+                        package("leaf/Cargo.toml", "leaf", ""),
+                    ],
+                    vec![("crates/q", "(symlink)")],
+                ),
+                (
                     "a target in another Unicode normalization",
                     vec![
                         symlink("n", &decomposed),
@@ -2265,6 +2302,16 @@ fn a_symlink_leaving_the_repository_is_refused() {
                     "a target longer than any path",
                     vec![symlink("long", &"x/".repeat(3_000))],
                     vec![("long", "(symlink)")],
+                ),
+                (
+                    "a target one byte over the bound",
+                    vec![symlink("over", &format!("{}x", "x/".repeat(2_048)))],
+                    vec![("over", "(symlink)")],
+                ),
+                (
+                    "a skill symlink that leaves",
+                    vec![symlink(".claude/skills/evil", "../../../outside")],
+                    vec![(".claude/skills/evil", "(symlink)")],
                 ),
                 (
                     "a source directory that steps back out of .git",
@@ -2335,6 +2382,14 @@ fn a_symlink_leaving_the_repository_is_refused() {
                 "long: (symlink): a symlink to a target longer than 4096 bytes; this step cannot read its target as a path",
             ],
         );
+        assert_says(
+            &outputs,
+            "a target one byte over the bound",
+            &[
+                "over: (symlink): a symlink to a target longer than 4096 bytes; this step cannot read its target as a path",
+            ],
+        );
+        assert_passes(root, &[symlink("docs/at-the-bound", &"x/".repeat(2_048))]);
 
         let loops = [
             (
