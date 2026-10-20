@@ -423,7 +423,10 @@ selected access gate, then releases only original resources; outstanding uninter
 IO remains owned/incomplete until actually terminal. Dropping a future is not cancellation.
 Last removal additionally tears down the shared backing only after actual peers are absent.
 For mounts, lazy detach alone does not establish absent connections/handles or closed host
-access. For sockets, closed pathnames do not establish closed established transports.
+access. A Mount grant whose backing is revoked does count as absent, even while workload references
+to it remain: every use of them fails with one ordinary error, no host access remains, and
+observation reports it as revoked (spec 024). For sockets, closed pathnames do not
+establish closed established transports.
 
 ### Managed files, mappings and acquired data
 
