@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, FileType, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::digest::Digest;
@@ -121,7 +121,8 @@ pub enum PinRefusal {
     /// The entry is neither a regular file nor a directory: a FIFO, a socket or a device.
     NotRegular { path: String },
     /// The entry is a symbolic link, wherever it points. On macOS it is also a file or directory
-    /// that pin reached through a link.
+    /// that pin reached through a link. For the root, `.`, it is also a root replaced between
+    /// its check and its resolution.
     Link { path: String },
     /// A listed path breaks spec 020 §2's file path rule; [`TreePath`] says what it allows.
     InvalidPath { path: String },
@@ -204,6 +205,7 @@ impl std::error::Error for PinRefusal {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
+    RootChecked,
     Listed,
     Opened,
 }
@@ -221,7 +223,8 @@ enum Step {
 /// names the first path at fault.
 ///
 /// A root that is itself a link is refused. The root is then resolved once to its canonical
-/// path, so a link swapped in for it between that check and the resolution is followed. Every
+/// path, which is opened without following a link; it must be the directory the first check
+/// saw, by device and inode, so a root swapped for a link in between is refused. Every
 /// directory is opened before it is listed, and every file before it is read, with a flag that
 /// refuses links. What that flag covers differs:
 ///
@@ -260,12 +263,13 @@ fn pin_observed(
             name: command.0.clone(),
         });
     }
+    let root = resolve(root, observe)?;
     let mut walk = Walk {
         listed: &listed,
         files: Vec::new(),
         observe,
     };
-    walk.directory(&resolve(root)?, "")?;
+    walk.directory(&root, "")?;
     let mut files = walk.files;
     let seen: BTreeSet<&str> = files.iter().map(|file| file.path.as_str()).collect();
     if let Some(path) = listed.keys().find(|path| !seen.contains(*path)) {
@@ -311,13 +315,21 @@ fn follows_path_rule(path: &str) -> bool {
         && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
 }
 
-fn resolve(root: &Path) -> Result<PathBuf, PinRefusal> {
+fn resolve(root: &Path, observe: &mut dyn FnMut(Step, &str)) -> Result<PathBuf, PinRefusal> {
     let unreadable = || PinRefusal::Unreadable { path: ".".into() };
     let metadata = fs::symlink_metadata(root).map_err(|_| unreadable())?;
     if metadata.file_type().is_symlink() {
         return Err(PinRefusal::Link { path: ".".into() });
     }
-    fs::canonicalize(root).map_err(|_| unreadable())
+    observe(Step::RootChecked, ".");
+    let canonical = fs::canonicalize(root).map_err(|_| unreadable())?;
+    let resolved = open_without_links(&canonical, ".")?
+        .metadata()
+        .map_err(|_| unreadable())?;
+    if (resolved.dev(), resolved.ino()) != (metadata.dev(), metadata.ino()) {
+        return Err(PinRefusal::Link { path: ".".into() });
+    }
+    Ok(canonical)
 }
 
 fn open_without_links(at: &Path, path: &str) -> Result<File, PinRefusal> {
