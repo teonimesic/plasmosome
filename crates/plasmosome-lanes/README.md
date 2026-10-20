@@ -24,7 +24,7 @@ run's results come only from the guest console, and anything short of a complete
 | `config` | host and guest | `LaneConfig` and `GuestConfig`, strict JSON: unknown and missing fields refuse |
 | `bundle` | host | `verify_bundle` with the bundle pin, and the check of the images `lane-vmm` has loaded |
 | `dyld` | host | The paths dyld tries for libkrun's `libkrunfw` load, and the inherited `DYLD_` variables |
-| `cpio` | host | A newc writer and reader, and the lane initramfs |
+| `cpio` | host | A newc writer and reader, and the lane initramfs. A name has one spelling: no `.`, `..`, empty part or trailing `/` |
 | `ext4` | host | `ext4_from_dir` and `ext4_read`, through e2fsprogs in a tool directory the caller names |
 | `console` | host | The framing parser |
 | `run` | host | `run_lane`: spawn in a new process group, wait up to a timeout, kill the group and reap, parse |
@@ -85,11 +85,13 @@ The product helper's sequence is in spec 001 §4.2. These lanes differ on purpos
 
 `lane-init` writes `LANE-BEGIN <run-id>`, one `LANE-RESULT <json>` line per configured probe in
 order, and `LANE-END <run-id> <count>`, to `/dev/hvc0`. Each result is
-`{"probe", "uid", "exit", "result"}`, where `result` is the probe's one JSON line, or `null` if it
-did not print exactly one JSON object line. `parse_console` returns `NotRun` for a transcript with
-no `LANE-BEGIN` or `LANE-END`, a run ID that differs, a count that differs from the lines seen,
-any line between the markers that is not a result, a result out of order or for no configured
-probe, and a probe with no result or a `null` one. Lines before `LANE-BEGIN` and after `LANE-END`
+`{"probe", "uid", "exit", "result"}`, where `exit` is `null` for a probe a signal ended, and
+`result` is the probe's one JSON line, or `null` if it did not print exactly one JSON object line.
+`parse_console` returns `NotRun` for a transcript with no `LANE-BEGIN` or `LANE-END`, a run ID that
+differs, a count that differs from the lines seen, any line between the markers that is not a
+result, a result line missing one of the four keys, a `result` that is neither an object nor
+`null`, a result out of order or for no configured probe, and a probe with no result or a `null`
+one. Lines before `LANE-BEGIN` and after `LANE-END`
 are ignored.
 
 `run_lane` opens the console without following a final symlink and without blocking, and checks
@@ -113,18 +115,19 @@ errno symbolically, such as `"errno": "EACCES"`.
 | `stat <path>` | owner, mode, kind, size, links, device and inode, following symlinks |
 | `write <path>` | append one line to an existing file |
 | `create <path>` | create a new file exclusively and write one line |
-| `list <dir>` | the sorted names in a directory |
+| `list <dir>` | the sorted names in a directory; a name that is not UTF-8 fails the listing |
 | `lookup <path>` | resolve a name without following a final symlink |
 | `hold-fd <name> <path>` | start a holder with the file open |
 | `hold-map <name> <path>` | start a holder with the file mapped private and read-only, and its descriptor closed |
 | `hold-exec <name> <path>` | execute `path`, a copy of `lane-probe`, as a holder |
 | `release <name>` | ask holder `name` to read its object back, then exit; reports its SHA-256 |
-| `mountinfo` | each mount's point, type, source and options |
+| `mountinfo` | each mount's point, root within its filesystem, optional fields such as `shared:N`, type, source and options |
 | `id` | real and effective uid and gid, and the supplementary groups |
 | `filesystems` | the names in `/proc/filesystems` |
 | `uname` | the kernel's `uname` fields |
 
-A holder listens on `/run/lane-hold/<name>.sock`. A `release` whose holder died while reading,
+A holder listens on `/run/lane-hold/<name>.sock`. Its name starts with a letter or digit and holds
+only letters, digits, `.`, `_` and `-`, so the socket stays in that directory. A `release` whose holder died while reading,
 for example from `SIGBUS` on a mapping the file no longer backs, reports that the holder closed
 without a reply. `lane-init` kills every remaining process before it powers off.
 
