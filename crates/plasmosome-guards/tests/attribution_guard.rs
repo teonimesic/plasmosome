@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -103,22 +104,65 @@ fn run_guard_over(root: &Path, message: &str) -> Output {
     run_guard_in(root, repository.path(), "HEAD")
 }
 
-const OFFENCE: &str = "credits a model as an author";
+fn directory_shadowing(tool: &str, script: &str) -> TempDir {
+    let shadow = tempfile::tempdir().expect("a scratch directory is created");
+    let stub = shadow.path().join(tool);
+    std::fs::write(&stub, script).expect("the stub is written");
+    let mut permissions = std::fs::metadata(&stub)
+        .expect("the stub is readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&stub, permissions).expect("the stub is made executable");
+    shadow
+}
 
-fn assert_refused(root: &Path, message: &str, why: &str) {
-    let output = run_guard_over(root, message);
-    let said = format!(
+fn run_guard_shadowed(root: &Path, repository: &Path, shadow: &Path) -> Output {
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    guard_command(root, repository)
+        .env("PATH", format!("{}:{inherited}", shadow.to_string_lossy()))
+        .arg("HEAD")
+        .output()
+        .expect("the guard runs")
+}
+
+fn said(output: &Output) -> String {
+    format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    );
+    )
+}
+
+const OFFENCE: &str = "credits a model as an author";
+
+const MODEL_CO_AUTHOR: &str =
+    "docs: a change\n\nSome body prose.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n";
+
+fn assert_refused_saying(output: &Output, reason: &str, what: &str) {
+    let said = said(output);
+    let refused = !output.status.success();
+    let named = said.contains(reason);
     assert!(
-        !output.status.success(),
-        "the guard passed a commit that {why}; its purpose is to stop exactly this from reaching main.\nmessage:\n{message}\nguard said:\n{said}"
+        refused && named,
+        "{}\nAn exit status alone proves nothing: a refusal for another reason satisfies it, and a reason printed over a successful exit still lets the commit through.\nguard said:\n{said}",
+        match (refused, named) {
+            (false, false) =>
+                format!("the guard passed {what}; it must refuse it and say `{reason}`."),
+            (false, true) => format!(
+                "the guard said `{reason}` about {what}, but exited successfully, which lets it through."
+            ),
+            _ => format!(
+                "the guard refused {what} without saying `{reason}`, so nothing shows it refused for that reason."
+            ),
+        }
     );
-    assert!(
-        said.contains(OFFENCE),
-        "the guard refused a commit that {why}, but not by naming the trailer it found; a guard that refuses for some other reason would satisfy an assertion on the exit status alone, so the exit status is not enough to prove it saw anything.\nmessage:\n{message}\nguard said:\n{said}"
+}
+
+fn assert_refused(root: &Path, message: &str, why: &str) {
+    assert_refused_saying(
+        &run_guard_over(root, message),
+        OFFENCE,
+        &format!("a commit that {why} (message {message:?})"),
     );
 }
 
@@ -137,7 +181,7 @@ fn refuses_a_model_trailer_in_the_closing_trailer_block() {
     check_workspace(|root| {
         assert_refused(
             root,
-            "docs: a change\n\nSome body prose.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
+            MODEL_CO_AUTHOR,
             "closes with a trailer block naming a model",
         );
     });
@@ -252,19 +296,10 @@ fn clears_a_body_whose_only_co_authors_are_people() {
 fn refuses_a_range_it_cannot_read() {
     check_workspace(|root| {
         let repository = repository_with_commit("docs: a change\n");
-        let output = run_guard_in(root, repository.path(), "no-such-ref..HEAD");
-        let said = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            !output.status.success(),
-            "the guard cleared a range it could not read; a range it cannot read is a range it cannot clear.\nguard said:\n{said}"
-        );
-        assert!(
-            said.contains("cannot read the range"),
-            "the guard refused an unreadable range without saying that is why, so its output does not tell a caller what to fix.\nguard said:\n{said}"
+        assert_refused_saying(
+            &run_guard_in(root, repository.path(), "no-such-ref..HEAD"),
+            "cannot read the range",
+            "a range it cannot read, which is a range it cannot clear",
         );
     });
 }
@@ -272,36 +307,12 @@ fn refuses_a_range_it_cannot_read() {
 #[test]
 fn refuses_when_the_tool_it_matches_with_cannot_answer() {
     check_workspace(|root| {
-        let repository = repository_with_commit(
-            "docs: a change\n\nSome body prose.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
-        );
-        let shadow = tempfile::tempdir().expect("a scratch directory is created");
-        let stub = shadow.path().join("grep");
-        std::fs::write(&stub, "#!/bin/sh\nexit 2\n").expect("the stub is written");
-        let mut permissions = std::fs::metadata(&stub)
-            .expect("the stub is readable")
-            .permissions();
-        use std::os::unix::fs::PermissionsExt;
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&stub, permissions).expect("the stub is made executable");
-
-        let inherited = std::env::var("PATH").unwrap_or_default();
-        let output = guard_command(root, repository.path())
-            .env(
-                "PATH",
-                format!("{}:{inherited}", shadow.path().to_string_lossy()),
-            )
-            .arg("HEAD")
-            .output()
-            .expect("the guard runs");
-        let said = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            !output.status.success(),
-            "the guard cleared a commit carrying a model trailer while the tool it matches with was failing; `grep -q` exits 1 for no match and 2 or more for an error, and reading an error as no match is how a guard reports clean because its own tooling broke.\nguard said:\n{said}"
+        let repository = repository_with_commit(MODEL_CO_AUTHOR);
+        let shadow = directory_shadowing("grep", "#!/bin/sh\nexit 2\n");
+        assert_refused_saying(
+            &run_guard_shadowed(root, repository.path(), shadow.path()),
+            "grep exited",
+            "a commit carrying a model trailer while grep fails (`grep -q` exits 1 for no match and 2 or more for an error, and reading an error as either answer is how a guard decides without having looked)",
         );
     });
 }
