@@ -488,6 +488,8 @@ pub fn repeated_grants_are_independently_removable<B: EnforcementBackend>(make: 
     let mut relaunched = broker("egressd");
     if let Capability::Broker { launch, .. } = &mut relaunched {
         launch.command.push("--audit".to_string());
+        launch.control_socket = "/run/plasmosome/audit.control".to_string();
+        launch.data_socket = "/run/plasmosome/audit.data".to_string();
     }
     pairs.push((broker("egressd"), relaunched));
 
