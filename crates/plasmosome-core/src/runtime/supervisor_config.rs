@@ -472,14 +472,33 @@ mod tests {
     }
 
     #[test]
-    fn framing_is_checked_line_then_size_then_encoding() {
-        let mut oversized = vec![b' '; BOUND + 1];
+    fn framing_is_checked_size_then_line_then_encoding() {
+        let mut oversized = vec![b' '; BOUND + 2];
         oversized[0] = 0xff;
-        assert_eq!(refused(&oversized), NotOneLine);
-        oversized.push(b'\n');
+        oversized[1] = b'\r';
+        assert_eq!(refused(&oversized), TooLarge { bytes: BOUND + 2 });
+        oversized[BOUND + 1] = b'\n';
         assert_eq!(refused(&oversized), TooLarge { bytes: BOUND + 1 });
-        oversized[0] = b'\r';
+        oversized.pop();
         assert_eq!(refused(&oversized), NotOneLine);
+        oversized[BOUND] = b'\n';
+        assert_eq!(refused(&oversized), NotOneLine);
+        oversized[1] = b' ';
+        assert_eq!(refused(&oversized), NotUtf8);
+    }
+
+    #[test]
+    fn a_read_stopped_one_byte_past_the_largest_record_is_too_large() {
+        let cap = BOUND + 2;
+        let junk = vec![b'x'; 8 << 20];
+        let mut record_then_junk = encoded(&config());
+        record_then_junk.extend_from_slice(&junk);
+        let mut largest_then_more = encoded(&config_with_record_bytes(BOUND));
+        largest_then_more.extend_from_slice(b"{}\n");
+        for stream in [junk, record_then_junk, largest_then_more] {
+            let read = &stream[..cap];
+            assert_eq!(refused(read), TooLarge { bytes: cap });
+        }
     }
 
     #[test]
@@ -552,6 +571,18 @@ mod tests {
         let two_missing = record(&[("/boot_deadline_ms", None), ("/instance_root", None)]);
         let field = "instance_root";
         assert_eq!(refused(&two_missing), MissingField { field });
+        let all_missing = record(&[
+            ("/boot_deadline_ms", None),
+            ("/runtime_recipe", None),
+            ("/instance_root", None),
+            ("/cell", None),
+        ]);
+        let field = "cell";
+        assert_eq!(refused(&all_missing), MissingField { field });
+        assert_eq!(refused(b"{}\n"), MissingField { field });
+        let last_two = record(&[("/boot_deadline_ms", None), ("/runtime_recipe", None)]);
+        let field = "runtime_recipe";
+        assert_eq!(refused(&last_two), MissingField { field });
     }
 
     #[test]
@@ -704,7 +735,7 @@ mod tests {
             ),
             (
                 TooLarge { bytes: 1_048_577 },
-                "the config record is 1048577 bytes before its newline; at most 1048576 are allowed",
+                "the config record is 1048577 bytes, not counting a final newline; at most 1048576 are allowed",
             ),
             (NotUtf8, "the config record is not UTF-8"),
             (
