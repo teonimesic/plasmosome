@@ -765,6 +765,7 @@ const IDENTITIES: &[(&str, Verdict)] = &[
         "Jane Doe <jane@laptop.local> <jane@corp.locale.io>",
         Verdict::Cleared,
     ),
+    ("Jane Doe <jane@corp.locale.io> <", Verdict::Untraceable),
     ("QA <qa@ci.tests.org>", Verdict::Cleared),
     ("Jane Doe <jane@corp.locale.io>", Verdict::Cleared),
     ("Probe <probe@notlocal>", Verdict::Cleared),
