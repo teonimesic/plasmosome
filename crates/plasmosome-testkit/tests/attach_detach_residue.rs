@@ -1,14 +1,15 @@
 use std::time::Duration;
 
 use plasmosome_backend::{
-    Capability, CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, MockMode,
-    PluginId, ResidueReport,
+    CellId, CellOwner, Diff, DrainSpec, EnforcementBackend, FakeBackend, MockMode, PluginId,
+    ResidueReport,
 };
 use plasmosome_core::ToolRegistry;
 use plasmosome_core::manifest::PlasmidManifest;
 use plasmosome_ledger::{Closure, Ledger};
 use plasmosome_testkit::builders::{
-    DesiredStateBuilder, GrantSequence, ManifestBuilder, exact_backend_effect,
+    DesiredStateBuilder, GrantSequence, ManifestBuilder, exact_backend_effect, mount, proxy_map,
+    uds_socket,
 };
 
 #[test]
@@ -47,17 +48,12 @@ fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
         cell: cell_id.clone(),
         plugin: plugin.clone(),
     })
-    .hot(Capability::Mount {
-        source: "/src/repo".to_string(),
-        target: "/workspace".to_string(),
-    })
-    .hot(Capability::UdsSocket {
-        path: "/workspace/run/egressd.uds".to_string(),
-    })
-    .hot(Capability::ProxyMap {
-        host: manifest.network.as_ref().expect("a host").hosts[0].clone(),
-        route: "splice".to_string(),
-    })
+    .hot(mount("/src/repo", "/workspace"))
+    .hot(uds_socket("/workspace/run/egressd.uds"))
+    .hot(proxy_map(
+        &manifest.network.as_ref().expect("a host").hosts[0],
+        "splice",
+    ))
     .into_grants()
     {
         let effect = exact_backend_effect(&backend.grant(grant));

@@ -429,7 +429,8 @@ On the wire, `artifact` is `{registry_id,release:ReleaseRef}` with a required di
 `plasmid.add` it must be a plasmid whose declared ID equals `plasmid`; for `cell.new` it must
 be a genome whose ID equals `genome`, which is required when artifact is present. The host CLI
 requires the graph already imported; it does not fetch inside the controller request. Requests
-without `artifact` retain existing local selection semantics. Responses retain their existing
+without `artifact` use spec 022's local selection: a plasmid through the operator declarations
+file, and no genome until a local genome grammar exists. Responses retain their existing
 shapes; this spec adds no application error number. Reload keeps its request shape but its
 source-selection semantics are pinned as described below.
 Missing import is code101 with target naming the full reference; corrupt or mismatched imported

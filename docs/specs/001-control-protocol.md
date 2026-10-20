@@ -96,13 +96,37 @@ Application error codes (closed set; additions are a contract change):
 | 101 | `unknown_target` | `target` — the noun+name asked for |
 | 102 | `already_exists` / `already_attached` | `target` |
 | 103 | `unresolved_requirement` | `capability`, `plasmid` |
-| 104 | `mock_mode_conflict` | `node`, `modes`, `plasmids`, `resolutions` — per D2b rule 3 |
+| 104 | `mock_mode_conflict` | `node`, `modes`, `plasmids`, `resolutions` — per D2b rule 3, or per spec 022 when a mutation would change an attached plasmid's mode or serve one host, port and transport at two modes in a cell; spec 022's cases name one plasmid as `node` and offer only `remove_plasmid` |
 | 105 | `illegal_state` | `from`, `to`; private recovery methods additionally carry the typed `recovery` refusal in §4.1 |
 | 106 | `drain_timeout` | `handle`, `deadline_ms` |
 | 107 | `not_running` | `target` — the named instance is not up |
-| 108 | `manifest_invalid` | `detail`, `path` |
+| 108 | `manifest_invalid` | `detail`, `path`; `fix` when the refusal names a declaration field |
 | 109 | `widening_forbidden` | `plasmid` |
 | 110 | `attestation_required` | `verb` — the E13b residual: subject spawn needs host-side attestation |
+
+The 108 `fix` is spec 011's amendment to this table. A 108 whose refusal names a declaration
+field carries a `fix` in one of three forms:
+
+- TOML to write in place of that field: a line such as `hosts = ["api.github.com"]`, or a
+  section such as `[impl]` followed by `wasm = "component.wasm"`;
+- a bare entry, such as `"api.github.example"`, added to the list the field names, or written in
+  place of the entry when the field ends in an index, such as `network.pin_cidrs[0]`;
+- exactly `remove this entry`, which deletes the entry or key the field names.
+
+One fix writes the field's parent instead: a credential whose `scope.path_scope` is refused gets
+`scope = { path_scope = ["/required/path/"] }`, written in place of `scope`. A fix applies when
+the field's parents are tables, not inline tables: a section such as
+`[commands.commands.git.network]` cannot be added to a command written as
+`git = { exec = ["git"], network = 443 }`, and TOML refuses the result.
+
+Exactly two refusals an author can cause name no declaration field and carry no `fix`:
+
+1. a TOML syntax error, which the parser reports by line and column;
+2. a declaration over 1 MiB, the maximum accepted size spec 020 §2 gives each declaration.
+
+An unknown key is not one of them. Every other refusal an author can cause carries a field and a
+`fix`. A 108 the author did not cause carries no `fix` either: a file that cannot be read, or a
+fault in the file rather than in what it declares, such as spec 022's trust checks.
 
 **Control-socket lifecycle, as delivered (both daemons).** Each daemon binds the control socket
 named by its config and never unlinks a path it did not create. A start whose path already
@@ -138,10 +162,14 @@ next start's refusal, not prevented, and no verb observes or repairs it.
   code `107`, it never boots one.
 - A **cell** is a running session: one plasmosome + its attached plasmids + the workload (D1c).
   Its declarative definition is a **genome**, `~/.plasmosome`-relative to the project:
-  `.plasmosome/genomes/<name>.toml`; the share/export form is `*.genome.toml`.
+  `.plasmosome/genomes/<name>.toml`; the share/export form is `*.genome.toml`. That file is not yet
+  a selection source: until a local genome grammar exists, `cell.new` selects a genome only by
+  `artifact` (spec 022).
 - Addressing chains down `(kernel, cell, plasmid)`. `--kernel` / `--cell` are optional **only
   when unambiguous**. One running instance → default; otherwise code `100` with the candidate
-  list. The server resolves; the client never guesses.
+  list. The server resolves; the client never guesses. The results of `plasmid.list`,
+  `plasmid.add`, `plasmid.remove` and `plasmid.reload` each carry `cell`, the cell the verb acted
+  on, whether the request named it or the server resolved it.
 
 ## 3. Verb schemas (the v1 set)
 
@@ -187,7 +215,7 @@ observed by probing control-`status`, not by reading a pidfile).
   "controller": {"uptime_ms": 9142, "ledger_generation": 4},
   "cells": [
     {"id": "cell-1", "genome": "researcher", "state": "ready",
-     "plasmids": ["github-pr [mock:simulate]", "model-provider [real]"]},
+     "plasmids": ["github-pr [mock:simulate]", "workspace [real]"]},
     {"id": "cell-2", "genome": "researcher", "state": "draining",
      "plasmids": []}
   ]}}
@@ -278,24 +306,30 @@ or authorize removing a different holding with an equal resource description.
 
 ```json
 {"id": 5, "method": "cell.new",
- "params": {"kernel": "work", "genome": "researcher", "mock": "simulate"}}
+ "params": {"kernel": "work", "genome": "researcher", "mock": "simulate",
+  "artifact": {"registry_id": "6f1c2a9e-4b7d-4e3a-9f20-8d5b1c7e0a43",
+   "release": {"kind": "genome", "population": "user", "publisher": "acme",
+    "name": "researcher", "version": "1.0.0",
+    "digest": "sha256:e2ddc2cb169322884a76554796ab8cc32f23231e90e50799ed8a25e13b2b9a48"}}}}
 ```
 
 ```json
-{"id": 5, "result": {"cell": "cell-3", "state": "germinating",
-  "plasmids": ["github-pr [mock:simulate]", "workspace [real]", "model-provider [simulate]"]}}
+{"id": 5, "result": {"cell": "cell-3", "state": "ready",
+  "plasmids": ["github-pr [mock:simulate]", "workspace [mock:simulate]"]}}
 ```
 
 - `genome` is optional; without it the cell starts empty (plasmids attach later).
 - Optional `artifact: {registry_id,release:ReleaseRef}` selects the exact already imported
   spec020 genome, with required digest and a matching required `genome` name. It does not fetch,
   authorize widening or bypass normal closure checks. Missing import is101; corrupt/mismatched
-  content is108. An absent artifact preserves local selection. Spec008 journals each attached
+  content is108. An absent artifact with a named genome refuses with 101 until a local genome
+  grammar exists (spec 022). Spec008 journals each attached
   member's source as part of the same transaction; it does not infer a cell-level genome label.
 - `mock` is optional; **bare `--mock` ⇒ `simulate`** (D2). When a genome is named, its
   `[plasmids.X] mock = …` table is the default layer; the request-level `mock` overrides it
-  per D2's layering (genome table → `plasmid add --mock` → `plasmid reload --mock`).
+  per D2's layering (genome table → `plasmid add --mock`; a reload keeps the held mode, spec 022).
 - `plasmosome germinate <genome>` is the documented alias of `cell.new --genome <name>` (D1c).
+  Until a local genome grammar exists, it also needs the genome's `artifact` (spec 022).
 - The controller resolves the genome's plasmid set through **D2b** before any cell exists:
   closure-wide propagation, explicit beats inherited, explicit-vs-explicit on the same node at
   different modes → error `104` naming the node, both modes, both plasmids, and the
@@ -375,11 +409,11 @@ Completion is asynchronous; `exec.status` (companion, same envelope) polls:
 ```
 
 ```json
-{"id": 11, "result": {"plasmids": [
+{"id": 11, "result": {"cell": "cell-1", "plasmids": [
   {"plasmid": "github-pr", "mock": "simulate", "generation": 3, "state": "active",
    "label": "github-pr [mock:simulate]"},
-  {"plasmid": "model-provider", "mock": "passthrough", "generation": 3, "state": "active",
-   "label": "model-provider [real]"}
+  {"plasmid": "workspace", "mock": "passthrough", "generation": 3, "state": "active",
+   "label": "workspace [real]"}
 ]}}
 ```
 
@@ -394,7 +428,7 @@ contract change. Absent declarations mean `passthrough`.
 ```
 
 ```json
-{"id": 12, "result": {"plasmid": "github-pr", "mock": "capture", "generation": 4,
+{"id": 12, "result": {"cell": "cell-1", "plasmid": "github-pr", "mock": "capture", "generation": 4,
   "propagated": {"mode": "capture", "closure": ["github-pr"]},
   "attach": {"attach_to_first_allowed_ms": 57}}}
 ```
@@ -410,8 +444,10 @@ contract change. Absent declarations mean `passthrough`.
   naming the host, never a silent acceptance. That is what keeps the two lists from drifting, and
   it is checked when the manifest is read rather than asserted here. A mode still propagates across
   a closure exactly as above — what it never lands on is a node whose only content is a mock.
-- Inherited levels yield to the new explicit declaration (D2b rule 2). An explicit-vs-explicit
-  conflict on the same node at different modes → code `104` with
+- Inherited levels yield to the new explicit declaration (D2b rule 2). No level, inherited or
+  explicit, changes a plasmid already attached: an attach that would change an attached plasmid's
+  mode refuses with 104 naming it, with `resolutions: ["remove_plasmid"]` (spec 022). An
+  explicit-vs-explicit conflict at different modes on a node not yet attached → code `104` with
   `resolutions: ["force_simulate", "force_passthrough", "remove_plasmid"]` (D2b rule 3 — never
   last-write-wins), the same three names §3.5 gives. `remove_plasmid` drops one of the two
   plasmids that declared a mode on the shared node, which is what makes it reachable without a
@@ -425,13 +461,17 @@ contract change. Absent declarations mean `passthrough`.
   (`handle⇔wasm`, `helper⇔git`, `inject/mint⇒http/process`, `mint` legal as the git fallback),
   `inject` requires an absolute `path_scope`, and `[commands.<id>]` refs gain exactly one
   extra field, `subject`. A mismatch is a named attach-time error (code `108`), never a silent
-  downgrade.
+  downgrade. Until credential custody exists, a reference that passes this validation still refuses
+  the attach with 103 `unsupported:credential:<ref>` (spec 022).
 - Optional `artifact: {registry_id,release:ReleaseRef}` selects an already imported spec020
   plasmid whose name matches `plasmid`; the digest is required. Missing import is101 and
   corrupt/mismatched content is108, without local fallback. Normal authority/mock/closure
   refusal codes remain unchanged. Every attached closure member carries spec008's durable
   AttachmentSource, and existing shared providers retain their original matching source.
-  Without artifact, existing local selection remains unchanged.
+  Without artifact, the plasmid and its local providers are selected through spec 022's operator
+  declarations file: an unlisted ID is 101, and an unsafe or mismatched declaration is 108. Every
+  closure member's declared network and workspace needs are resolved into complete capabilities
+  through that file before prepare; an uncovered need is 103 naming the capability and plasmid.
 
 ### 3.11 `plasmid.remove`
 
@@ -443,7 +483,7 @@ never punishes detachment). `--now` is the authority-class immediate removal.
 ```
 
 ```json
-{"id": 13, "result": {"plasmid": "github-pr", "state": "removed", "drained": true,
+{"id": 13, "result": {"cell": "cell-1", "plasmid": "github-pr", "state": "removed", "drained": true,
   "replayed": 2, "delayed_discarded": 1, "residue": "empty"}}
 ```
 
@@ -452,22 +492,25 @@ list; force requires the operator/reason pair exactly as `plasmosome.stop`.
 
 ### 3.12 `plasmid.reload`
 
-Generation swap of an attached plasmid (reload = new generation, not remove+add); mock mode may
-be changed in the same swap (D2's third layer).
+Generation swap of an attached plasmid (reload = new generation, not remove+add); the swap keeps
+the plasmid's mock mode, and a `mock` that differs from it refuses with 104 (spec 022).
 
 ```json
 {"id": 14, "method": "plasmid.reload",
- "params": {"kernel": "work", "cell": "cell-1", "plasmid": "github-pr", "mock": "simulate"}}
+ "params": {"kernel": "work", "cell": "cell-1", "plasmid": "github-pr"}}
 ```
 
 ```json
-{"id": 14, "result": {"plasmid": "github-pr", "mock": "simulate", "generation": 5, "state": "active"}}
+{"id": 14, "result": {"cell": "cell-1", "plasmid": "github-pr", "mock": "capture", "generation": 5, "state": "active"}}
 ```
 
 Reload preserves the attachment's spec008 AttachmentSource. A registry source reuses the exact
 saved registry/root/member graph and verified imported bytes, including provider bindings;
 it never picks the newest version or a local namesake. No artifact parameter is accepted here.
-Mock overrides and ordinary generation-swap checks are unchanged. Selecting a different release
+Ordinary generation-swap checks are unchanged. Reload re-resolves the plasmid's capabilities at its
+held mode against the operator declarations file as it is at reload time; a registry member keeps
+its exact imported declaration. A reload whose new capabilities would widen what the plasmid holds
+refuses with 109 before prepare (spec 022). Selecting a different release
 requires an explicit permitted detach/add or a separate new cell, not an implicit source switch.
 Missing/corrupt imported bytes use101/108 before effects and leave the old attachment intact.
 
@@ -588,6 +631,12 @@ the full artifact reference as target; unsafe/corrupt imported content refuses w
 A settled recovered registry source with no configured root, missing bytes or failed validation
 refuses startup with ArtifactSource/artifact_source as below, without fallback. If no root was
 configured, that diagnostic omits path_bytes; it still includes the complete recorded references.
+
+The same strict JSON configuration also admits optional `operator_declarations`, an explicitly
+supplied absolute path to spec 022's operator declarations file. Nothing supplies a default; a
+relative or non-string value is invalid configuration. Only the resolving mutations of spec 022
+read it. Startup, recovery, status and every withdrawal never open it, and its absence or
+corruption never blocks them.
 
 The controller holds spec008's instance writer lock and discovers validated cell directories
 before sending requests to their membrane sockets. A membrane is configured for one validated

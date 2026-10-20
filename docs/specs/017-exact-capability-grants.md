@@ -116,8 +116,12 @@ The operator is responsible for authorizing these nonsecret inputs; the parser c
 whether arbitrary bytes contain a secret. Credential material must not be placed in contents,
 arguments or recipes. Existing credential references and core custody remain separate.
 
-The manifest resolver produces these complete capabilities before durable prepare; this is not
-a new user-editable manifest grammar. An unavailable declaration, unsupported operation or
+The manifest resolver produces these complete capabilities before durable prepare; this is not a
+new manifest grammar for plasmid authors. Spec 022 defines the operator declarations file this
+resolver reads, and the resolution of ProxyMap and Mount; Broker, UdsSocket and SessionFile have no
+declaration source yet. The Mount adapter opens a recorded source root itself, walking each
+component from `/` without following a symlink, so a symlink swapped in after resolution refuses at
+apply. An unavailable declaration, unsupported operation or
 unsafe/non-stageable target refuses before prepare. A resource race after preflight remains a
 fallible grant/apply result, including the incomplete-effect transition after any actual effect.
 The model, all concrete adapters, builders, custom serde and embedded inverses use the same

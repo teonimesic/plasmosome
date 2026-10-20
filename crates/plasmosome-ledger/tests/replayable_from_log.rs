@@ -18,51 +18,92 @@ fn cell_owner(plugin: &str) -> CellOwner {
     }
 }
 
+fn session_file(path: &str) -> Capability {
+    Capability::SessionFile {
+        path: path.to_string(),
+    }
+}
+
+fn uds_socket(path: &str) -> Capability {
+    Capability::UdsSocket {
+        path: path.to_string(),
+    }
+}
+
+fn proxy_map(host: &str, route: &str) -> Capability {
+    Capability::ProxyMap {
+        host: host.to_string(),
+        route: route.to_string(),
+    }
+}
+
+fn broker(pid: u32, name: &str) -> Capability {
+    Capability::Broker {
+        pid,
+        name: name.to_string(),
+    }
+}
+
+fn mount(source: &str, target: &str) -> Capability {
+    Capability::Mount {
+        source: source.to_string(),
+        target: target.to_string(),
+    }
+}
+
+fn op(id: GrantId, owner: CellOwner, capability: Capability) -> UniverseOp {
+    match capability {
+        Capability::SessionFile { path } => UniverseOp::WriteSessionFile { id, path, owner },
+        Capability::UdsSocket { path } => UniverseOp::BindUds { id, path, owner },
+        Capability::ProxyMap { host, route } => UniverseOp::SetProxyMap {
+            id,
+            host,
+            route,
+            owner,
+        },
+        Capability::Broker { pid, name } => UniverseOp::SpawnBroker {
+            id,
+            pid,
+            name,
+            owner,
+        },
+        Capability::Mount { source, target } => UniverseOp::AddMount {
+            id,
+            source,
+            target,
+            owner,
+        },
+    }
+}
+
 fn file_removal(path: &str) -> UniverseRemoval {
     UniverseRemoval {
         id: GrantId::new(),
-        capability: Capability::SessionFile {
-            path: path.to_string(),
-        },
+        capability: session_file(path),
     }
 }
 
 fn wire_capabilities() -> Vec<Capability> {
     vec![
-        Capability::SessionFile {
-            path: "/skills/pr.md".to_string(),
-        },
-        Capability::UdsSocket {
-            path: "/run/plasmosome/egressd.uds".to_string(),
-        },
-        Capability::ProxyMap {
-            host: "api.github.com".to_string(),
-            route: "splice".to_string(),
-        },
-        Capability::Broker {
-            pid: 31337,
-            name: "egressd".to_string(),
-        },
-        Capability::Mount {
-            source: "/secrets".to_string(),
-            target: "/workspace".to_string(),
-        },
+        session_file("/skills/pr.md"),
+        uds_socket("/run/plasmosome/egressd.uds"),
+        proxy_map("api.github.com", "splice"),
+        broker(31337, "egressd"),
+        mount("/secrets", "/workspace"),
     ]
 }
 
 fn populate(backend: &mut FakeBackend) -> (PluginId, Vec<Effect>) {
-    let op = UniverseOp::WriteSessionFile {
-        id: GrantId::new(),
-        path: "/skills/pr.md".to_string(),
-        owner: cell_owner("github-pr"),
-    };
+    let op = op(
+        GrantId::new(),
+        cell_owner("github-pr"),
+        session_file("/skills/pr.md"),
+    );
     let removal = op.removal();
     backend.apply(op).unwrap();
     let entry = backend.grant(Grant {
         owner: cell_owner("network"),
-        capability: Capability::UdsSocket {
-            path: "/run/plasmosome/egressd.uds".to_string(),
-        },
+        capability: uds_socket("/run/plasmosome/egressd.uds"),
         kind: GrantKind::Hot,
     });
     let effects = vec![
@@ -157,10 +198,7 @@ fn exact_state_wire_preserves_identity_and_refuses_ambiguous_rows() {
     let mut backend = FakeBackend::new();
     backend.grant(Grant {
         owner: cell_owner("network"),
-        capability: Capability::ProxyMap {
-            host: "api.github.com".to_string(),
-            route: "splice".to_string(),
-        },
+        capability: proxy_map("api.github.com", "splice"),
         kind: GrantKind::Hot,
     });
     let state = backend.snapshot_os_state();
@@ -216,9 +254,7 @@ fn ledger_entry_refuses_serializing_a_class_capability_mismatch() {
     let mut backend = FakeBackend::new();
     let entry = backend.grant(Grant {
         owner: cell_owner("network"),
-        capability: Capability::SessionFile {
-            path: "/skills/pr.md".to_string(),
-        },
+        capability: session_file("/skills/pr.md"),
         kind: GrantKind::Hot,
     });
     let encoded = serde_json::to_string(&entry).unwrap();
@@ -415,9 +451,7 @@ fn a_log_whose_lines_disagree_on_the_plugin_is_a_named_error() {
 fn exact_neighbours_survive_interrupted_logged_replay_and_resume() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("ledger.ndjson");
-    let capability = Capability::UdsSocket {
-        path: "/run/plasmosome/egressd.uds".to_string(),
-    };
+    let capability = uds_socket("/run/plasmosome/egressd.uds");
     let mut backend = FakeBackend::new();
     let first = backend.grant(Grant {
         owner: cell_owner("network"),
@@ -468,10 +502,7 @@ fn exact_neighbours_survive_interrupted_logged_replay_and_resume() {
 fn serialized_observations_restore_exact_inverses_but_not_backend_handles() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("ledger.ndjson");
-    let capability = Capability::Broker {
-        pid: 31337,
-        name: "egressd".to_string(),
-    };
+    let capability = broker(31337, "egressd");
     let mut source = FakeBackend::new();
     let first = source.grant(Grant {
         owner: cell_owner("network"),
@@ -692,4 +723,360 @@ fn a_record_with_a_repeated_key_at_any_depth_is_refused() {
         );
         assert_eq!(std::fs::read_to_string(&log).unwrap(), doubled);
     }
+}
+
+const REFUSED_TARGET_NAMES: [&str; 15] = [
+    "an unversioned record",
+    "the format before the current one",
+    "the format after the current one",
+    "a numeric backend handle",
+    "a universe inverse without its id",
+    "an unknown field nested in a capability",
+    "a key repeated with its own value",
+    "invalid UTF-8 in a complete line",
+    "a malformed line between two valid records",
+    "an empty line between two valid records",
+    "a complete final record of an unsupported format without LF",
+    "two valid records naming different plugins",
+    "a torn final record that ends with LF",
+    "a valid record followed by a torn final fragment",
+    "one complete valid record without LF",
+];
+
+struct RefusedTarget {
+    name: &'static str,
+    bytes: Vec<u8>,
+    open_refuses_on_line: Option<usize>,
+}
+
+fn one_effect_ledger(plugin: &str, description: &str, path: &str) -> Ledger {
+    let mut ledger = Ledger::new(plugin);
+    ledger.push(Effect::exact(
+        description,
+        InverseVia::Universe(file_removal(path)),
+    ));
+    ledger
+}
+
+fn encoded_line(plugin: &str, description: &str, path: &str) -> String {
+    let mut encoded = Vec::new();
+    one_effect_ledger(plugin, description, path)
+        .write_to(&mut encoded)
+        .unwrap();
+    String::from_utf8(encoded).unwrap()
+}
+
+fn changed(line: &str, change: impl FnOnce(&mut serde_json::Value)) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+    change(&mut value);
+    serde_json::to_string(&value).unwrap() + "\n"
+}
+
+fn current_format(line: &str) -> u64 {
+    let value: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+    value["format"].as_u64().expect("a record names its format")
+}
+
+fn refused_targets() -> Vec<RefusedTarget> {
+    let first = encoded_line("github-pr", "entry one", "/skills/a.md");
+    let second = encoded_line("github-pr", "entry two", "/skills/b.md");
+    let format = current_format(&first);
+    let universe = "/effect/reversibility/Exact/via/Universe";
+    let unsupported_later = changed(&first, |record| {
+        record["format"] = serde_json::json!(format + 1)
+    });
+    let path_once = r#""path":"/skills/a.md""#;
+    assert_eq!(first.matches(path_once).count(), 1, "{first}");
+    let (before_description, after_description) = first.split_once("entry one").unwrap();
+    let mut invalid_utf8 = first.as_bytes().to_vec();
+    invalid_utf8.extend_from_slice(before_description.as_bytes());
+    invalid_utf8.extend_from_slice(b"entry \xff");
+    invalid_utf8.extend_from_slice(after_description.as_bytes());
+    let row = |name, text: String, line| RefusedTarget {
+        name,
+        bytes: text.into_bytes(),
+        open_refuses_on_line: line,
+    };
+    vec![
+        row(
+            "an unversioned record",
+            changed(&first, |record| {
+                record.as_object_mut().unwrap().remove("format");
+            }),
+            Some(1),
+        ),
+        row(
+            "the format before the current one",
+            changed(&first, |record| {
+                record["format"] = serde_json::json!(format - 1)
+            }),
+            Some(1),
+        ),
+        row(
+            "the format after the current one",
+            unsupported_later.clone(),
+            Some(1),
+        ),
+        row(
+            "a numeric backend handle",
+            changed(&first, |record| {
+                record["effect"]["reversibility"]["Exact"]["via"] =
+                    serde_json::json!({"Backend": 7})
+            }),
+            Some(1),
+        ),
+        row(
+            "a universe inverse without its id",
+            changed(&first, |record| {
+                record
+                    .pointer_mut(universe)
+                    .and_then(serde_json::Value::as_object_mut)
+                    .unwrap()
+                    .remove("id");
+            }),
+            Some(1),
+        ),
+        row(
+            "an unknown field nested in a capability",
+            changed(&first, |record| {
+                record
+                    .pointer_mut(&format!("{universe}/capability"))
+                    .and_then(serde_json::Value::as_object_mut)
+                    .and_then(|variants| variants.values_mut().next())
+                    .and_then(serde_json::Value::as_object_mut)
+                    .unwrap()
+                    .insert("obsolete".to_string(), serde_json::json!("discarded"));
+            }),
+            Some(1),
+        ),
+        row(
+            "a key repeated with its own value",
+            first.replacen(path_once, &format!("{path_once},{path_once}"), 1),
+            Some(1),
+        ),
+        RefusedTarget {
+            name: "invalid UTF-8 in a complete line",
+            bytes: invalid_utf8,
+            open_refuses_on_line: Some(2),
+        },
+        row(
+            "a malformed line between two valid records",
+            format!("{first}{}\n{second}", &first[..first.len() / 2]),
+            Some(2),
+        ),
+        row(
+            "an empty line between two valid records",
+            format!("{first}\n{second}"),
+            Some(2),
+        ),
+        row(
+            "a complete final record of an unsupported format without LF",
+            format!("{first}{}", unsupported_later.trim_end()),
+            Some(2),
+        ),
+        row(
+            "two valid records naming different plugins",
+            format!(
+                "{first}{}",
+                encoded_line("audit", "entry two", "/skills/b.md")
+            ),
+            Some(2),
+        ),
+        row(
+            "a torn final record that ends with LF",
+            format!("{first}{}\n", &second[..second.len() - 12]),
+            Some(2),
+        ),
+        row(
+            "a valid record followed by a torn final fragment",
+            format!("{first}{}", &second[..second.len() - 12]),
+            None,
+        ),
+        row(
+            "one complete valid record without LF",
+            first.trim_end().to_string(),
+            None,
+        ),
+    ]
+}
+
+#[test]
+fn open_file_refuses_each_refused_target_on_its_line_and_keeps_its_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+    let mut problems = Vec::new();
+    let mut checked = Vec::new();
+    for target in refused_targets() {
+        checked.push(target.name);
+        std::fs::write(&log, &target.bytes).unwrap();
+        match (Ledger::open_file(&log), target.open_refuses_on_line) {
+            (Err(error), Some(line))
+                if error.kind() == std::io::ErrorKind::InvalidData
+                    && error.to_string().contains(&format!("on line {line}:")) => {}
+            (Ok(ledger), None)
+                if ledger
+                    .effects()
+                    .iter()
+                    .map(|effect| effect.description.as_str())
+                    .eq(["entry one"]) => {}
+            (outcome, line) => problems.push(format!(
+                "{}: {outcome:?}, expected a refusal on line {line:?}",
+                target.name
+            )),
+        }
+        if std::fs::read(&log).unwrap() != target.bytes {
+            problems.push(format!("{}: open_file changed the bytes", target.name));
+        }
+    }
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(checked, REFUSED_TARGET_NAMES);
+}
+
+#[test]
+fn append_to_file_refuses_each_refused_target_and_keeps_its_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+    let appended = one_effect_ledger("github-pr", "appended", "/skills/c.md");
+    let mut problems = Vec::new();
+    let mut checked = Vec::new();
+    for target in refused_targets() {
+        checked.push(target.name);
+        std::fs::write(&log, &target.bytes).unwrap();
+        let expected = if target.bytes.ends_with(b"\n") {
+            Ledger::open_file(&log).expect_err(target.name).to_string()
+        } else {
+            "ledger log does not end with a newline; refusing to append".to_string()
+        };
+        match appended.append_to_file(&log) {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::InvalidData
+                    && error.to_string() == expected => {}
+            outcome => problems.push(format!(
+                "{}: {outcome:?}, expected InvalidData: {expected}",
+                target.name
+            )),
+        }
+        if std::fs::read(&log).unwrap() != target.bytes {
+            problems.push(format!("{}: append_to_file changed the bytes", target.name));
+        }
+    }
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(checked, REFUSED_TARGET_NAMES);
+}
+
+#[test]
+fn append_to_file_refuses_another_plugins_log_and_names_both_plugins() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+    let existing = encoded_line("audit", "entry one", "/skills/a.md");
+    std::fs::write(&log, &existing).unwrap();
+    assert_eq!(
+        Ledger::open_file(&log).unwrap().plugin(),
+        &PluginId::from("audit")
+    );
+
+    let error = one_effect_ledger("github-pr", "appended", "/skills/c.md")
+        .append_to_file(&log)
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(
+        error.to_string(),
+        "ledger log belongs to plugin `audit`; refusing to append plugin `github-pr`"
+    );
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), existing);
+}
+
+#[test]
+fn append_to_file_creates_a_missing_target_and_extends_an_empty_or_valid_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut new = one_effect_ledger("github-pr", "new one", "/skills/c.md");
+    new.push(Effect::exact(
+        "new two",
+        InverseVia::Universe(file_removal("/skills/d.md")),
+    ));
+    let mut old = one_effect_ledger("github-pr", "old one", "/skills/a.md");
+    old.push(Effect::exact(
+        "old two",
+        InverseVia::Universe(file_removal("/skills/b.md")),
+    ));
+    let mut old_bytes = Vec::new();
+    old.write_to(&mut old_bytes).unwrap();
+
+    let missing = dir.path().join("cell").join("plugin").join("ledger.ndjson");
+    let empty = dir.path().join("empty.ndjson");
+    std::fs::write(&empty, b"").unwrap();
+    let valid = dir.path().join("valid.ndjson");
+    std::fs::write(&valid, &old_bytes).unwrap();
+
+    for (target, before) in [
+        (&missing, &[][..]),
+        (&empty, &[][..]),
+        (&valid, old.effects()),
+    ] {
+        assert_eq!(
+            new.append_to_file(target).unwrap(),
+            2,
+            "{}",
+            target.display()
+        );
+        let reopened = Ledger::open_file(target).unwrap();
+        let expected: Vec<Effect> = before.iter().chain(new.effects()).cloned().collect();
+        assert_eq!(reopened.effects(), expected, "{}", target.display());
+        assert_eq!(reopened.plugin(), &PluginId::from("github-pr"));
+    }
+}
+
+#[test]
+fn open_file_refuses_an_empty_log_or_one_holding_only_a_torn_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ledger.ndjson");
+    let line = encoded_line("github-pr", "entry one", "/skills/a.md");
+    for bytes in [&[][..], &line.as_bytes()[..line.len() - 12]] {
+        std::fs::write(&log, bytes).unwrap();
+        let error = Ledger::open_file(&log).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "ledger log holds no record");
+        assert_eq!(std::fs::read(&log).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn append_to_file_reads_and_checks_the_whole_of_a_long_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut long = Ledger::new("github-pr");
+    for index in 0..1000 {
+        long.push(Effect::exact(
+            format!("entry {index}"),
+            InverseVia::Universe(file_removal(&format!("/skills/{index}.md"))),
+        ));
+    }
+    let mut valid = Vec::new();
+    long.write_to(&mut valid).unwrap();
+    assert!(valid.len() > 64 * 1024, "{}", valid.len());
+    let appended = one_effect_ledger("github-pr", "appended", "/skills/c.md");
+
+    let extended = dir.path().join("extended.ndjson");
+    std::fs::write(&extended, &valid).unwrap();
+    assert_eq!(appended.append_to_file(&extended).unwrap(), 1);
+    let expected: Vec<Effect> = long
+        .effects()
+        .iter()
+        .chain(appended.effects())
+        .cloned()
+        .collect();
+    assert_eq!(Ledger::open_file(&extended).unwrap().effects(), expected);
+
+    let refused = dir.path().join("refused.ndjson");
+    let unversioned = changed(
+        &encoded_line("github-pr", "entry one", "/skills/a.md"),
+        |record| {
+            record.as_object_mut().unwrap().remove("format");
+        },
+    );
+    let bytes = [unversioned.into_bytes(), valid].concat();
+    std::fs::write(&refused, &bytes).unwrap();
+    let error = appended.append_to_file(&refused).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("on line 1:"), "{error}");
+    assert_eq!(std::fs::read(&refused).unwrap(), bytes);
 }
