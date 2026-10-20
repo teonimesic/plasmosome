@@ -68,11 +68,13 @@ Some words are worth naming because they keep coming back. Do not write **load-b
 means four different things depending on who is reading. Say what you actually mean: what breaks
 if it changes, what exactly is equal, what the unit of work is.
 
-**Code.** No inline `//` comments. Documentation is `///` on public items: what a caller must
-pass, what it gets back, what it must not do. If deleting a doc block costs a caller nothing,
-delete it. `//!` is allowed in one place only — the root of a library crate, saying in a sentence
-or two what the crate is for and how a caller reaches it. Background belongs in the crate's
-`README.md`, not there.
+**Code.** No inline `//` comments, with one exception: a `// SAFETY:` comment directly above an
+`unsafe` block or `unsafe impl`, or above the statement that holds it, saying why it is sound there.
+Clippy requires it ([spec 026](docs/specs/026-security-standard.md#2-unsafe-code)). Documentation is
+`///` on public items: what a caller must pass, what it gets back, what it must not do. If deleting
+a doc block costs a caller nothing, delete it. `//!` is allowed in one place only — the root of a
+library crate, saying in a sentence or two what the crate is for and how a caller reaches it.
+Background belongs in the crate's `README.md`, not there.
 
 **Seams.** Accept dependencies, do not create them. If a test has to drive the real operating
 system to observe a behavior, the seam is in the wrong place. The brake on this: two adapters
@@ -82,7 +84,7 @@ means a real seam, one means a hypothetical one — do not abstract until someth
 
 ```shell
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings -D clippy::ignore_without_reason
 cargo fmt --all -- --check
 ./.githooks/provenance-guard
 ./.githooks/attribution-guard
