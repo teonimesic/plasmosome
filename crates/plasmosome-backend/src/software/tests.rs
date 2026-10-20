@@ -238,6 +238,27 @@ fn a_root_reached_through_a_linked_ancestor_pins() {
 }
 
 #[test]
+fn the_root_is_resolved_once_so_retargeting_a_linked_ancestor_does_not_move_it() {
+    let tree = Tree::new().file("a", b"a").file("sub/f", b"f");
+    let elsewhere = tree.dir.path().join("elsewhere");
+    fs::create_dir_all(elsewhere.join("tree/sub")).expect("another tree");
+    fs::write(elsewhere.join("tree/a"), b"a").expect("the same first file");
+    fs::write(elsewhere.join("tree/sub/f"), b"g").expect("other bytes");
+    let via = tree.dir.path().join("via");
+    symlink(tree.dir.path(), &via).expect("a link to the tree's parent");
+    let mut retarget = |step: Step, path: &str| {
+        if step == Step::Listed && path == "a" {
+            fs::remove_file(&via).expect("remove the link");
+            symlink(&elsewhere, &via).expect("the link now names another parent");
+        }
+    };
+    assert_eq!(
+        pin_observed(&via.join("tree"), &tree.listed, &[], &mut retarget),
+        Ok(tree.pin(&[]).expect("the tree pins"))
+    );
+}
+
+#[test]
 fn a_fifo_is_refused_as_not_regular_without_waiting_for_a_writer() {
     let tree = Tree::new().file("tool", b"tool").listed_only("pipe", b"");
     mkfifo(&tree.at("pipe"));
