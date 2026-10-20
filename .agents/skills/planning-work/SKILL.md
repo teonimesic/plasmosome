@@ -107,6 +107,9 @@ Use one worktree per author under `.worktrees/`, with a unique branch and direct
 git worktree add .worktrees/beads-ID-agent -b beads-ID-agent main
 ```
 
+An outside PR's steward writes code only in
+[spec030](../../../docs/specs/030-outside-contributions.md) §3's separate clone, never a worktree.
+
 The worktree isolates code only. Every invocation of its `./tools/work-state` discovers the same
 absolute Git common directory and therefore the same native task database and command lock.
 Never copy the database, tasks or plans into a worktree to make a private queue. Independent
