@@ -459,6 +459,7 @@ dependencies = [
  "criterion",
  "libc",
  "plasmosome-backend",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",
