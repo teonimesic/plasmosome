@@ -3,11 +3,15 @@
 
 #![doc(test(attr(forbid(unsafe_code))))]
 
+mod cli;
 mod codes;
+mod commands;
 mod envelope;
 pub mod json;
 
+pub use cli::{Invocation, Reading, handle, main_with, read};
 pub use codes::{ClientCode, Exit};
+pub use commands::{COMMANDS, Command};
 pub use envelope::{
     ClientError, EmitError, Envelope, ErrorBody, Form, Instance, KernelError, Stream, emit,
 };
