@@ -803,10 +803,16 @@ mod tests {
             assert_ne!(duplicated, text);
             cases.push((duplicated, "duplicate field `name`".to_string()));
             let positional: Vec<Value> = fields.iter().map(|field| value[*field].clone()).collect();
-            cases.push((
-                Value::Array(positional).to_string(),
-                "invalid type: sequence".to_string(),
-            ));
+            for (shape, unexpected) in [
+                (Value::Array(positional), "sequence"),
+                (Value::Null, "null"),
+                (json!(7), "integer `7`"),
+            ] {
+                cases.push((
+                    shape.to_string(),
+                    format!("invalid type: {unexpected}, expected a {record} object"),
+                ));
+            }
             for (text, reason) in cases {
                 let error = refuse(&text);
                 assert!(error.contains(&reason), "{record} {text}: {error}");
@@ -883,19 +889,27 @@ mod tests {
             assert_eq!(member.mock, "simulate");
         }
         let member = |release: &str| {
-            format!(
-                "{header}\n[plasmids.github-pr]\nrelease = {{ {release} }}\nmock = \"simulate\"\n"
-            )
+            format!("{header}\n[plasmids.github-pr]\nrelease = {release}\nmock = \"simulate\"\n")
         };
-        assert!(toml::from_str::<GenomeFile>(&member(&six)).is_ok());
+        let swapped = format!(
+            "[\"plasmid\", \"curated\", \"github-pr\", \"plasmosome\", \"1.2.0\", \"{}\"]",
+            digest_text()
+        );
         for (release, reason) in [
             (
-                six.split(", digest").next().unwrap().to_string(),
+                format!("{{ {} }}", six.split(", digest").next().unwrap()),
                 "missing field `digest`",
             ),
             (
-                six.replace("kind = \"plasmid\"", "kind = { plasmid = {} }"),
+                format!(
+                    "{{ {} }}",
+                    six.replace("kind = \"plasmid\"", "kind = { plasmid = {} }")
+                ),
                 "invalid type: map",
+            ),
+            (
+                swapped,
+                "invalid type: sequence, expected a ReleaseRef object",
             ),
         ] {
             let error = toml::from_str::<GenomeFile>(&member(&release)).unwrap_err();
