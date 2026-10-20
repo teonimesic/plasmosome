@@ -234,6 +234,19 @@ mod tests {
                 other => accepted.push(format!("{record} at {at:?} through {path}: {other:?}")),
             }
         }
+        let mut extended = encoded.clone();
+        extended
+            .pointer_mut(at)
+            .and_then(Value::as_object_mut)
+            .expect("the record sits at its pointer")
+            .insert("unknown".to_string(), Value::Bool(true));
+        let by_value = serde_json::from_value::<T>(extended.clone()).map(drop);
+        let by_text = serde_json::from_str::<T>(&extended.to_string()).map(drop);
+        if [by_value, by_text].iter().any(|outcome| {
+            !matches!(outcome, Err(error) if error.to_string().contains("unknown field `unknown`"))
+        }) {
+            accepted.push(format!("{record} accepts an unknown field"));
+        }
         accepted
     }
 
@@ -411,10 +424,13 @@ mod tests {
             "",
             &["command", "control_socket", "data_socket"],
         ));
-        assert!(
-            accepted.is_empty(),
-            "these positional arrays decoded:\n{}",
-            accepted.join("\n")
+        assert_eq!(
+            accepted,
+            [
+                "Grant accepts an unknown field",
+                "DrainSpec accepts an unknown field"
+            ],
+            "only the two records whose unknown fields plasmosome-8pr4 decides may accept one"
         );
     }
 
@@ -449,6 +465,12 @@ mod tests {
                 );
             }
         }
+        let [through_text, _] = refusals::<Capability>(json!({ "Mount": ["/a", "/b"] }));
+        assert!(
+            through_text
+                .contains("invalid type: sequence, expected struct variant Capability::Mount"),
+            "{through_text}"
+        );
     }
 
     #[test]
