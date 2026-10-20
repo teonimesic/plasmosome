@@ -173,8 +173,7 @@ request named.
 The prepare that adds the plasmid writes `named` and `requires` from that request and the
 declarations it admitted, in spec 022's single read or from the imported graph. No later
 replacement changes them. A reload or a renewal carries them unchanged, as a reload carries the
-source and the lifetime, so a reload whose re-read declaration requires other keys is refused
-before prepare. Recovery, expiry, renewal and withdrawal read the requires graph from the
+source and the lifetime. Recovery, expiry, renewal and withdrawal read the requires graph from the
 journal, never from a declaration, which can change on disk after the add. So after a restart a
 provider's end still reaches its requirers (spec 028), and spec 011's detach still knows who
 requires whom and which providers the request named. Journal reading refuses a blank or repeated
