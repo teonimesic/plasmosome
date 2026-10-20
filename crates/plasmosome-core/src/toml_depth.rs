@@ -1,10 +1,260 @@
+const BYTE_ORDER_MARK: &[u8] = &[0xef, 0xbb, 0xbf];
+
 /// Whether `text` nests deeper than `limit` levels anywhere, counted as
 /// `MAX_MANIFEST_DEPTH` says. It reads each byte once, without recursion,
 /// holds at most `limit` open arrays and inline tables, and stops at the first
 /// level past `limit`. Text toml rejects may count deeper than any tree toml
 /// builds from it.
-pub(crate) fn deeper_than(_text: &str, _limit: usize) -> bool {
-    false
+pub(crate) fn deeper_than(text: &str, limit: usize) -> bool {
+    Count::new(text.as_bytes(), limit).walk().is_err()
+}
+
+struct PastLimit;
+
+enum Container {
+    Array,
+    InlineTable { in_key: bool },
+}
+
+struct Open {
+    container: Container,
+    level: usize,
+}
+
+struct Count<'a> {
+    bytes: &'a [u8],
+    at: usize,
+    limit: usize,
+    table_level: usize,
+    key_dots: usize,
+    line_start: bool,
+    top_in_key: bool,
+    open: Vec<Open>,
+}
+
+impl<'a> Count<'a> {
+    fn new(bytes: &'a [u8], limit: usize) -> Self {
+        let at = if bytes.starts_with(BYTE_ORDER_MARK) {
+            BYTE_ORDER_MARK.len()
+        } else {
+            0
+        };
+        Count {
+            bytes,
+            at,
+            limit,
+            table_level: 1,
+            key_dots: 0,
+            line_start: true,
+            top_in_key: true,
+            open: Vec::new(),
+        }
+    }
+
+    fn walk(mut self) -> Result<(), PastLimit> {
+        self.reach(self.table_level)?;
+        while let Some(&byte) = self.bytes.get(self.at) {
+            match byte {
+                b'\n' => self.end_line(),
+                b' ' | b'\t' | b'\r' => self.at += 1,
+                b'#' => self.skip_comment(),
+                b'"' | b'\'' => self.skip_string(),
+                b'[' if self.line_start && self.open.is_empty() => self.header()?,
+                b'[' | b'{' => self.open_container(byte)?,
+                b']' | b'}' => self.close_container(),
+                b',' => self.next_entry(),
+                b'=' => self.start_value(),
+                b'.' => self.dot()?,
+                _ => self.step(),
+            }
+        }
+        Ok(())
+    }
+
+    fn reach(&self, level: usize) -> Result<(), PastLimit> {
+        if level > self.limit {
+            Err(PastLimit)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn level(&self) -> usize {
+        self.open.last().map_or(self.table_level, |open| open.level)
+    }
+
+    fn in_key(&self) -> bool {
+        match self.open.last() {
+            Some(Open {
+                container: Container::InlineTable { in_key },
+                ..
+            }) => *in_key,
+            Some(Open {
+                container: Container::Array,
+                ..
+            }) => false,
+            None => self.top_in_key,
+        }
+    }
+
+    fn step(&mut self) {
+        self.line_start = false;
+        self.at += 1;
+    }
+
+    fn end_line(&mut self) {
+        self.at += 1;
+        if self.open.is_empty() {
+            self.line_start = true;
+            self.top_in_key = true;
+            self.key_dots = 0;
+        }
+    }
+
+    fn skip_comment(&mut self) {
+        self.at = self.bytes[self.at..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(self.bytes.len(), |line| self.at + line);
+    }
+
+    fn skip_string(&mut self) {
+        self.at = string_end(self.bytes, self.at);
+        self.line_start = false;
+    }
+
+    fn header(&mut self) -> Result<(), PastLimit> {
+        self.at += 1;
+        if self.bytes.get(self.at) == Some(&b'[') {
+            self.at += 1;
+        }
+        let mut parts = 1;
+        self.reach(1 + 2 * parts)?;
+        while let Some(&byte) = self.bytes.get(self.at) {
+            match byte {
+                b']' | b'\n' => break,
+                b'"' | b'\'' => self.at = string_end(self.bytes, self.at),
+                b'.' => {
+                    parts += 1;
+                    self.reach(1 + 2 * parts)?;
+                    self.at += 1;
+                }
+                _ => self.at += 1,
+            }
+        }
+        while self.bytes.get(self.at) == Some(&b']') {
+            self.at += 1;
+        }
+        self.table_level = 1 + 2 * parts;
+        self.key_dots = 0;
+        self.line_start = false;
+        self.top_in_key = true;
+        Ok(())
+    }
+
+    fn open_container(&mut self, byte: u8) -> Result<(), PastLimit> {
+        let level = self.level() + self.key_dots + 1;
+        self.reach(level)?;
+        let container = if byte == b'[' {
+            Container::Array
+        } else {
+            Container::InlineTable { in_key: true }
+        };
+        self.open.push(Open { container, level });
+        self.key_dots = 0;
+        self.step();
+        Ok(())
+    }
+
+    fn close_container(&mut self) {
+        self.open.pop();
+        self.key_dots = 0;
+        self.step();
+    }
+
+    fn next_entry(&mut self) {
+        if let Some(Open {
+            container: Container::InlineTable { in_key },
+            ..
+        }) = self.open.last_mut()
+        {
+            *in_key = true;
+        }
+        self.key_dots = 0;
+        self.step();
+    }
+
+    fn start_value(&mut self) {
+        match self.open.last_mut() {
+            Some(Open {
+                container: Container::InlineTable { in_key },
+                ..
+            }) => *in_key = false,
+            Some(Open {
+                container: Container::Array,
+                ..
+            }) => {}
+            None => self.top_in_key = false,
+        }
+        self.step();
+    }
+
+    fn dot(&mut self) -> Result<(), PastLimit> {
+        if self.in_key() {
+            self.key_dots += 1;
+            self.reach(self.level() + self.key_dots)?;
+        }
+        self.step();
+        Ok(())
+    }
+}
+
+fn string_end(bytes: &[u8], start: usize) -> usize {
+    let quote = bytes[start];
+    let escapes = quote == b'"';
+    if bytes[start..].starts_with(&[quote; 3]) {
+        multi_line_string_end(bytes, start + 3, quote, escapes)
+    } else {
+        single_line_string_end(bytes, start + 1, quote, escapes)
+    }
+}
+
+fn single_line_string_end(bytes: &[u8], mut at: usize, quote: u8, escapes: bool) -> usize {
+    while let Some(&byte) = bytes.get(at) {
+        if byte == b'\n' {
+            return at;
+        }
+        if byte == quote {
+            return at + 1;
+        }
+        let escaped_line_end = bytes.get(at + 1) == Some(&b'\n');
+        at += if escapes && byte == b'\\' && !escaped_line_end {
+            2
+        } else {
+            1
+        };
+    }
+    bytes.len()
+}
+
+fn multi_line_string_end(bytes: &[u8], mut at: usize, quote: u8, escapes: bool) -> usize {
+    while let Some(&byte) = bytes.get(at) {
+        if escapes && byte == b'\\' {
+            at += 2;
+        } else if byte == quote {
+            let run = bytes[at..]
+                .iter()
+                .take_while(|&&next| next == quote)
+                .count();
+            if run >= 3 {
+                return at + run;
+            }
+            at += run;
+        } else {
+            at += 1;
+        }
+    }
+    bytes.len()
 }
 
 #[cfg(test)]
