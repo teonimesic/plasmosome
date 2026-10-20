@@ -56,7 +56,8 @@ When the key is absent, the controller behaves as if the file existed and listed
 ### 2. When it is read, and what never reads it
 
 The file is read once per resolving request, at the start of resolution. One read serves every
-member of that request's closure. Each later request reads it again.
+member of that request's closure. That read also resolves each attachment's lifetime (spec 028).
+Each later request reads it again.
 
 Startup, recovery, `plasmosome.status`, `plasmosome.recovery`, `cell.list`, `cell.status`,
 `plasmid.list`, `plasmid.remove`, `cell.kill` and every withdrawal never open it. A missing,
@@ -132,6 +133,8 @@ sources for its cell.
 - `declaration` is optional: the absolute path of the plasmid's declaration file, for local
   selection (§5).
 - `proxy_maps` and `mounts` are required arrays and may be empty.
+- `lifetime` is optional: `{"lease_ms": N}` with an optional `"idle_ms": N`, each 1,000 to
+  2,592,000,000 (30 days), or the string `"until_revoked"` (spec 028).
 - A ProxyMap entry has exactly `host`, `port`, `modes`, `route`, `transport`, `destination` and
   `allow_private`. `host` follows spec 001's proxy host rule (a lower-case DNS name). `modes` is a
   nonempty set over `simulate | capture | passthrough` with no repeats. `route` is a nonempty,
@@ -297,9 +300,10 @@ several apply, which one is returned is not part of the contract.
 ### 8. Reload
 
 Nothing watches the file, and an attach never re-resolves an attached plasmid. `plasmid.reload`
-re-resolves the plasmid at its held mode against the file as it is then. A local member re-reads
-its declaration at the path the file lists now. A registry member keeps its exact imported
-declaration (spec 001 §3.12); only its entries are re-read.
+re-resolves the plasmid at its held mode against the file as it is then. It does not re-resolve or
+change the plasmid's lifetime (spec 028). A local member re-reads its declaration at the path the
+file lists now. A registry member keeps its exact imported declaration (spec 001 §3.12); only its
+entries are re-read.
 
 **A reload never widens.** It refuses with 109 `widening_forbidden`, `plasmid` the plasmid,
 before prepare, when the re-resolved set has any of these against what the plasmid holds:

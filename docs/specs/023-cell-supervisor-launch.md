@@ -242,9 +242,27 @@ nonblank strings, required when `now` is true: they are spec 008's Force asserti
    helper's process group anyway. A stop that fails, is refused (`workload_remains`) or times out
    never blocks the kill: the kill continues and the reply reports it.
 2. **Withdraw** every attachment, if there is any, in one removal transaction under spec 008:
-   safe removal, or Force when `now` is set. A drain that times out, or a withdrawal whose
+   safe removal, or Force when `now` is set. Before it, the kill resumes any committed but
+   unfinished transaction of the cell, such as a spec 028 expiry, since spec 008 starts no later
+   transaction until that one finishes. A drain that times out, or a withdrawal whose
    publication does not settle within D, replies 106 `{handle, deadline_ms}`, and the cell stays
    `draining` for a later `cell.kill`, which publishes first (spec 008).
+
+   With `now`, a resumed transaction that has not finished within step 2's share of D does not
+   stop the kill. This is the one case in which the guest ends before withdrawal finishes. The
+   kill's own withdrawal is not prepared, since spec 008 starts it only after the resumed one
+   finishes. The controller writes a session log line naming the cell, the resumed generation
+   and the kill's operator and reason, then goes on to step 3 under that assertion; if the line
+   cannot be appended, the reply is 106. When the teardown is clean, its residue `empty`, and
+   step 4 holds the lock, so that `membraned` and every child it reaped are gone, that is the
+   fresh observation spec 008 requires: every recorded effect of the cell is absent. Holding the
+   lock, the controller finishes the resumed transaction on that observation, with no Force,
+   then prepares the kill's own withdrawal with its Force assertion, appends its `force` event,
+   and commits and finishes it on the same observation, before step 5. Neither is published,
+   since no supervisor remains to hold a DesiredCell; spec 008 step 5 allows this one case. A
+   teardown that is not clean finishes neither: the cell stays `dead` and listed, with
+   `teardown` in `incomplete`, for a later kill, and the resumed generation stays unfinished in
+   the journal. Without `now`, the reply stays 106.
 3. **Stop the guest** with `membrane.cell.kill` and `DrainSpec {deadline, policy}`, policy `Safe`,
    or `Force` with `now`. `membraned` sends the 4090 `shutdown` with a smaller positive deadline,
    or none with `Force`. When that passes and the helper still runs, it kills the helper's process
@@ -601,7 +619,8 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     ID. With `deadline_ms` 1, and queued behind a held `cell.new` until D is spent, every deadline
     sent is positive, the reply is 106 and the cell stays `draining`. With `now`, no workload stop
     is sent, the cell is retired and the reply has no `incomplete`. Catches: ending the guest
-    before withdrawing, a zero deadline, residue from controller memory, and ID reuse.
+    before withdrawing, other than past a resumed transaction under `now` (§7 step 2), a zero
+    deadline, residue from controller memory, and ID reuse.
 14. A guest that ignores `shutdown`: with `deadline_ms` 10,000, `cell.kill` replies within 10
     seconds, the helper is gone and `incomplete` lists `shutdown`. A crashed guest: no workload stop
     is sent and the cell is retired. A workload stop refused with `workload_remains`, or never
