@@ -574,6 +574,58 @@ impl<'de> Deserialize<'de> for LogRecord {
     }
 }
 
+fn read_records(bytes: &[u8]) -> std::io::Result<(Option<PluginId>, Vec<Effect>)> {
+    let mut plugin: Option<PluginId> = None;
+    let mut effects = Vec::new();
+    for (index, framed) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+        let newline_ended = framed.ends_with(b"\n");
+        let line = framed.strip_suffix(b"\n").unwrap_or(framed);
+        let parsed = match std::str::from_utf8(line) {
+            Ok(text) => serde_json::from_str::<LogRecord>(text),
+            Err(error) if !newline_ended && error.error_len().is_none() => {
+                serde_json::from_slice::<LogRecord>(line)
+            }
+            Err(error) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid UTF-8 in ledger record on line {}: {error}",
+                        index + 1
+                    ),
+                ));
+            }
+        };
+        let record = match parsed {
+            Ok(record) => record,
+            Err(error) if !newline_ended && error.is_eof() => break,
+            Err(error) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid ledger record on line {}: {error}", index + 1),
+                ));
+            }
+        };
+        match &plugin {
+            Some(existing) if *existing != record.plugin => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "ledger log mixes plugins on line {}: `{existing}` and `{}`",
+                        index + 1,
+                        record.plugin
+                    ),
+                ));
+            }
+            Some(_) | None => {}
+        }
+        if plugin.is_none() {
+            plugin = Some(record.plugin.clone());
+        }
+        effects.push(record.effect);
+    }
+    Ok((plugin, effects))
+}
+
 impl Ledger {
     pub fn effects(&self) -> &[Effect] {
         &self.effects
@@ -632,55 +684,7 @@ impl Ledger {
     }
 
     pub fn open_file(path: &Path) -> std::io::Result<Ledger> {
-        let bytes = std::fs::read(path)?;
-        let mut plugin: Option<PluginId> = None;
-        let mut effects = Vec::new();
-        for (index, framed) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
-            let newline_ended = framed.ends_with(b"\n");
-            let line = framed.strip_suffix(b"\n").unwrap_or(framed);
-            let parsed = match std::str::from_utf8(line) {
-                Ok(text) => serde_json::from_str::<LogRecord>(text),
-                Err(error) if !newline_ended && error.error_len().is_none() => {
-                    serde_json::from_slice::<LogRecord>(line)
-                }
-                Err(error) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "invalid UTF-8 in ledger record on line {}: {error}",
-                            index + 1
-                        ),
-                    ));
-                }
-            };
-            let record = match parsed {
-                Ok(record) => record,
-                Err(error) if !newline_ended && error.is_eof() => break,
-                Err(error) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("invalid ledger record on line {}: {error}", index + 1),
-                    ));
-                }
-            };
-            match &plugin {
-                Some(existing) if *existing != record.plugin => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "ledger log mixes plugins on line {}: `{existing}` and `{}`",
-                            index + 1,
-                            record.plugin
-                        ),
-                    ));
-                }
-                Some(_) | None => {}
-            }
-            if plugin.is_none() {
-                plugin = Some(record.plugin.clone());
-            }
-            effects.push(record.effect);
-        }
+        let (plugin, effects) = read_records(&std::fs::read(path)?)?;
         let plugin = plugin.ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
