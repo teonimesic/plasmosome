@@ -626,7 +626,10 @@ mod tests {
                 rlim_max: 0,
             };
             // SAFETY: `limit` is a local rlimit that getrlimit may write.
-            assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+                0
+            );
             let wanted = HIGH_TARGET as libc::rlim_t + 1;
             if limit.rlim_cur < wanted {
                 limit.rlim_cur = wanted.min(limit.rlim_max);
@@ -751,7 +754,11 @@ mod tests {
         }
         value["libraries"] = serde_json::Value::Array(libraries);
         let built = recipe(&value);
-        assert_eq!(built.to_ndjson().len(), length, "the recipe line is {length} bytes");
+        assert_eq!(
+            built.to_ndjson().len(),
+            length,
+            "the recipe line is {length} bytes"
+        );
         built
     }
 
@@ -766,7 +773,13 @@ mod tests {
         let mut child = std::process::Command::new(
             std::env::current_exe().expect("the test executable has a path"),
         )
-        .args(["--exact", test, "--ignored", "--test-threads=1", "--nocapture"])
+        .args([
+            "--exact",
+            test,
+            "--ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ])
         .env(PROBE, "1")
         .stdin(Stdio::null())
         .stdout(output.try_clone().expect("the output file is shared"))
@@ -888,7 +901,10 @@ mod tests {
         match received.recv_timeout(Duration::from_secs(5)) {
             Ok(Some(LaunchRefusal::RecipeExceedsPipe { bytes, accepted })) => {
                 assert_eq!(bytes, HELPER_LINE_BOUND + 1);
-                assert!(accepted < bytes, "the pipe took {accepted} of {bytes} bytes");
+                assert!(
+                    accepted < bytes,
+                    "the pipe took {accepted} of {bytes} bytes"
+                );
             }
             Ok(other) => panic!("a line the pipe cannot take refuses, got {other:?}"),
             Err(RecvTimeoutError::Timeout) => {
@@ -1020,10 +1036,13 @@ mod tests {
         let plain = dir.path().join("null");
         std::fs::write(&plain, "").expect("the test writes a plain file");
         let plain = CString::new(plain.to_str().expect("UTF-8")).expect("no NUL");
-        let missing = CString::new(dir.path().join("missing").to_str().expect("UTF-8"))
-            .expect("no NUL");
+        let missing =
+            CString::new(dir.path().join("missing").to_str().expect("UTF-8")).expect("no NUL");
         assert!(open_null(c"/dev/null").is_ok());
-        assert_eq!(open_null(c"/dev/zero").err(), Some(LaunchRefusal::NotDevNull));
+        assert_eq!(
+            open_null(c"/dev/zero").err(),
+            Some(LaunchRefusal::NotDevNull)
+        );
         assert_eq!(open_null(&plain).err(), Some(LaunchRefusal::NotDevNull));
         assert_eq!(
             open_null(&missing).err(),
