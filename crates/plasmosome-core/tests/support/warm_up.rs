@@ -196,11 +196,14 @@ fn a_failed_warm_up_reports_its_stderr_up_to_4096_bytes() {
 }
 
 #[test]
+#[allow(unsafe_code)]
 fn an_unreadable_child_state_is_reported_without_a_panic() {
     let mut child = Command::new("true").spawn().expect("true starts");
     let pid = child.id() as libc::pid_t;
     let mut raw = 0;
     assert_eq!(
+        // SAFETY: `raw` is a local the call may write, and `pid` is the child this test just
+        // spawned, which nothing has reaped yet, so the pid still names it.
         unsafe { libc::waitpid(pid, &mut raw, 0) },
         pid,
         "the test reaps the child behind its handle's back"
