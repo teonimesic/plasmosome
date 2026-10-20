@@ -24,6 +24,7 @@ one.
 | `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends |
+| `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
 ## Use
 
@@ -85,6 +86,31 @@ Registration preserves last-registration-wins behavior; withdrawal removes the o
 and their descriptions. `list()` still returns sorted names.
 
 Tests: `cargo test -p plasmosome-core`
+
+## The runtime recipe and the config record
+
+`runtime` holds the input that launches one hardware cell, so that the controller and the cell
+supervisor read it with the same rules. It lives here, not in `plasmosome-membrane`, because the
+controller must build it and this crate never depends on membrane; membrane depends on this
+crate and re-exports `runtime::path` and `runtime::recipe`. It is not in `plasmosome-backend`
+because `PlatformLimits::host` reads the machine's memory through `sysconf`, which is `unsafe`,
+and spec 026 §2 allows `unsafe` only in register packages.
+
+- `RuntimeRecipe::parse` reads a whole recipe line. `RuntimeRecipe::from_value` applies the same
+  rules, after framing and JSON, to a recipe nested in a larger record. Its value must come from
+  `strict_json::parse_value`, which refuses a repeated key at any depth; `serde_json` would keep
+  the last one.
+- `RuntimeTemplate` is spec 023 §1's template: a recipe without `writable_root`, `control_path`
+  and `data_path`. Reading one refuses any of those three by name, then an unknown or missing key.
+  Its values are checked only when `complete` adds one cell's three paths and reads the result as
+  a recipe, so a caller that must refuse a bad template at startup completes it once there.
+- `cell_id::parse_cell_id` accepts exactly `cell-` and one to ten ASCII digits, the first not `0`.
+- `SupervisorConfig` is spec 023 §4's record, one line:
+  `{"cell":…,"instance_root":…,"runtime_recipe":{…},"boot_deadline_ms":…}` and a newline. The
+  recipe is a nested object, not a string holding JSON, so its escapes are not doubled. `decode`
+  refuses the whole record at the first broken rule, with at most 1,048,576 bytes before the
+  newline. `encode` refuses a larger line, and a cell or a zero deadline that `decode` would
+  refuse.
 
 ## Cell IDs on a normalizing filesystem
 

@@ -290,10 +290,11 @@ pub enum PathRole {
 /// The deployment input that launches one hardware cell, as spec 001 §4.2
 /// defines it.
 ///
-/// A value exists only after [`RuntimeRecipe::parse`] accepted every
-/// structural rule; there is no other constructor and no setter. Parsing
-/// touches no file: whether the artifacts exist and hash to their digests is
-/// for the caller to check before launch.
+/// A value exists only after [`RuntimeRecipe::parse`],
+/// [`RuntimeRecipe::from_value`] or [`RuntimeTemplate::complete`] accepted
+/// every structural rule; there is no other constructor and no setter.
+/// Reading touches no file: whether the artifacts exist and hash to their
+/// digests is for the caller to check before launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeRecipe {
     vcpus: u8,
