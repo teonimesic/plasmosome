@@ -133,6 +133,16 @@ DEPENDENCY_TABLES = (
 )
 TARGET_KINDS = ("bin", "example", "test", "bench")
 GLOB = re.compile(r"[*?\[]")
+SYMLINK_PROBLEMS = {
+    OUTSIDE: "it leads outside the repository, so cargo could build what this commit does not hold",
+    LOOP: f"it goes through more than {MAX_SYMLINKS} symlinks",
+    AMBIGUOUS: "it reaches tracked paths that a case-insensitive filesystem treats as one",
+    UNREADABLE_TARGET: "this step cannot read its target as a path",
+}
+LEADS_TO_A_MANIFEST = (
+    "it leads to a directory holding a Cargo.toml, and cargo reads a manifest reached through "
+    "a symlink as if it sat at the symlink's path"
+)
 
 HARM = (
     "A program nobody reviewed runs at the first cargo command on every machine that builds main, "
@@ -498,10 +508,19 @@ def manifest(entry, tree):
     return found
 
 
+def symlink(entry, tree):
+    kind, reached = tree.walk(entry.path.split("/"))
+    if kind in SYMLINK_PROBLEMS:
+        return [whole(entry, SYMLINK_PROBLEMS[kind])]
+    if kind == DIRECTORY and reached in tree.holding_a_manifest:
+        return [whole(entry, LEADS_TO_A_MANIFEST)]
+    return []
+
+
 def check(entry, tree):
     if entry.kind == "commit":
         return [(entry.path, "(submodule)", SUBMODULE_REFUSED)]
-    return named(entry, tree)
+    return named(entry, tree) + (symlink(entry, tree) if entry.mode == SYMLINK else [])
 
 
 def named(entry, tree):
