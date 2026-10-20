@@ -2048,4 +2048,205 @@ mod tests {
             }
         );
     }
+
+    const PER_CELL: [&str; 3] = ["writable_root", "control_path", "data_path"];
+
+    const CONTROL: &str = "/var/cell/c1/control.sock";
+
+    const DATA: &str = "/var/cell/c1/data.sock";
+
+    fn template_with(edits: &[(&str, Option<Value>)]) -> Value {
+        let mut template = valid();
+        let fields = template
+            .as_object_mut()
+            .expect("the valid recipe is an object");
+        for key in PER_CELL {
+            fields.remove(key);
+        }
+        for (key, replacement) in edits {
+            match replacement {
+                Some(value) => fields.insert((*key).to_owned(), value.clone()),
+                None => fields.remove(*key),
+            };
+        }
+        template
+    }
+
+    fn template_read(value: &Value) -> RuntimeTemplate {
+        RuntimeTemplate::from_value(value)
+            .unwrap_or_else(|refusal| panic!("{value} refused as a template: {refusal:?}"))
+    }
+
+    fn template_refused(value: &Value) -> TemplateRefusal {
+        match RuntimeTemplate::from_value(value) {
+            Err(refusal) => {
+                let shown = refusal.to_string();
+                assert!(!shown.contains(['\n', '\r']), "{shown:?} is one line");
+                let names = match &refusal {
+                    TemplateRefusal::PerCellField { field } => vec![format!("`{field}`")],
+                    TemplateRefusal::Recipe(inner) => names_shown_by(inner),
+                };
+                for name in names {
+                    assert!(shown.contains(&name), "{shown:?} names {name}");
+                }
+                refusal
+            }
+            Ok(template) => panic!("{value} read as a template: {template:?}"),
+        }
+    }
+
+    fn per_cell(field: &'static str) -> TemplateRefusal {
+        TemplateRefusal::PerCellField { field }
+    }
+
+    fn recipe_path(text: &str) -> RecipePath {
+        RecipePath::parse(text).unwrap_or_else(|fault| panic!("{text:?} parses, got {fault:?}"))
+    }
+
+    fn completed(
+        template: &RuntimeTemplate,
+        writable_root: &str,
+        control_path: &str,
+        data_path: &str,
+    ) -> Result<RuntimeRecipe, RecipeRefusal> {
+        template.complete(
+            &recipe_path(writable_root),
+            &recipe_path(control_path),
+            &recipe_path(data_path),
+            &LIMITS,
+        )
+    }
+
+    #[test]
+    fn template_refuses_each_per_cell_key() {
+        for field in PER_CELL {
+            let path = json!("/var/cell/c1/elsewhere");
+            let carrying = template_with(&[(field, Some(path.clone()))]);
+            assert_eq!(template_refused(&carrying), per_cell(field));
+            let also_missing = template_with(&[(field, Some(path.clone())), ("vcpus", None)]);
+            assert_eq!(template_refused(&also_missing), per_cell(field));
+            let also_unknown = template_with(&[(field, Some(path)), ("extra", Some(json!(1)))]);
+            assert_eq!(template_refused(&also_unknown), per_cell(field));
+            let not_a_path = template_with(&[(field, Some(json!(null)))]);
+            assert_eq!(template_refused(&not_a_path), per_cell(field));
+        }
+        let two = template_with(&[
+            ("data_path", Some(json!("/var/cell/d"))),
+            ("control_path", Some(json!("/var/cell/c"))),
+        ]);
+        assert_eq!(template_refused(&two), per_cell("control_path"));
+        assert_eq!(template_refused(&valid()), per_cell("writable_root"));
+    }
+
+    #[test]
+    fn template_refuses_a_missing_or_unknown_key() {
+        let kept: Vec<&str> = FIELDS
+            .into_iter()
+            .filter(|field| !PER_CELL.contains(field))
+            .collect();
+        assert_eq!(kept.len(), 12);
+        for field in kept {
+            let refusal = template_refused(&template_with(&[(field, None)]));
+            assert_eq!(refusal, TemplateRefusal::Recipe(missing(field)), "{field}");
+        }
+        let extra = template_with(&[("extra", Some(json!(1)))]);
+        assert_eq!(
+            template_refused(&extra),
+            TemplateRefusal::Recipe(unknown("extra"))
+        );
+        let missing_and_unknown = template_with(&[("vcpus", None), ("extra", Some(json!(1)))]);
+        assert_eq!(
+            template_refused(&missing_and_unknown),
+            TemplateRefusal::Recipe(unknown("extra"))
+        );
+        let two_missing = template_with(&[("architecture", None), ("memory_mib", None)]);
+        assert_eq!(
+            template_refused(&two_missing),
+            TemplateRefusal::Recipe(missing("memory_mib"))
+        );
+        for value in [json!([]), json!("template"), json!(null)] {
+            assert_eq!(
+                template_refused(&value),
+                TemplateRefusal::Recipe(not_an_object("")),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_applies_admit() {
+        let template = template_read(&template_with(&[]));
+        assert_eq!(
+            completed(&template, "/var/cell/c1/root.raw", CONTROL, DATA),
+            Ok(parsed(&record(&[])))
+        );
+        let over = template_read(&template_with(&[("vcpus", Some(json!(9)))]));
+        assert_eq!(
+            completed(&over, "/var/cell/c1/root.raw", CONTROL, DATA),
+            Err(VcpusAboveLimit {
+                requested: 9,
+                limit: 8
+            })
+        );
+        assert_eq!(
+            completed(&template, "/var/cell/c1/root.raw", CONTROL, CONTROL),
+            Err(SocketPathsEqual)
+        );
+        let long = path_of_length(104);
+        let long = long.as_str().expect("a path is a string");
+        assert_eq!(
+            completed(&template, "/var/cell/c1/root.raw", long, DATA),
+            Err(SocketPathTooLong {
+                field: "control_path",
+                bytes: 104,
+                max: 103
+            })
+        );
+        assert_eq!(
+            completed(&template, "/opt/cell/root.raw", CONTROL, DATA),
+            Err(PathReused {
+                first: PathRole::Artifact(ArtifactRole::RootImage),
+                second: PathRole::WritableRoot
+            })
+        );
+    }
+
+    #[test]
+    fn complete_applies_every_value_rule_the_template_deferred() {
+        for (key, value, refusal) in [
+            ("vcpus", json!("2"), wrong_type("vcpus", VCPUS_RANGE)),
+            ("version", json!(2), UnsupportedVersion { found: 2 }),
+            (
+                "kernel_format",
+                json!("bzImage"),
+                UnknownKernelFormat {
+                    found: "bzImage".to_owned(),
+                },
+            ),
+            (
+                "helper",
+                json!({"path": "/opt/cell/krun-helper"}),
+                missing("helper.sha256"),
+            ),
+        ] {
+            let template = template_read(&template_with(&[(key, Some(value))]));
+            assert_eq!(
+                completed(&template, "/var/cell/c1/root.raw", CONTROL, DATA),
+                Err(refusal),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn template_refusals_describe_themselves() {
+        assert_eq!(
+            per_cell("control_path").to_string(),
+            "the template carries `control_path`, which the controller sets for each cell"
+        );
+        assert_eq!(
+            TemplateRefusal::Recipe(missing("vcpus")).to_string(),
+            "the recipe is missing `vcpus`"
+        );
+    }
 }
