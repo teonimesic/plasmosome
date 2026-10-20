@@ -385,7 +385,7 @@ Completion is asynchronous; `exec.status` (companion, same envelope) polls:
 ```
 
 ```json
-{"id": 11, "result": {"plasmids": [
+{"id": 11, "result": {"cell": "cell-1", "plasmids": [
   {"plasmid": "github-pr", "mock": "simulate", "generation": 3, "state": "active",
    "label": "github-pr [mock:simulate]"},
   {"plasmid": "workspace", "mock": "passthrough", "generation": 3, "state": "active",
@@ -404,7 +404,7 @@ contract change. Absent declarations mean `passthrough`.
 ```
 
 ```json
-{"id": 12, "result": {"plasmid": "github-pr", "mock": "capture", "generation": 4,
+{"id": 12, "result": {"cell": "cell-1", "plasmid": "github-pr", "mock": "capture", "generation": 4,
   "propagated": {"mode": "capture", "closure": ["github-pr"]},
   "attach": {"attach_to_first_allowed_ms": 57}}}
 ```
@@ -459,7 +459,7 @@ never punishes detachment). `--now` is the authority-class immediate removal.
 ```
 
 ```json
-{"id": 13, "result": {"plasmid": "github-pr", "state": "removed", "drained": true,
+{"id": 13, "result": {"cell": "cell-1", "plasmid": "github-pr", "state": "removed", "drained": true,
   "replayed": 2, "delayed_discarded": 1, "residue": "empty"}}
 ```
 
@@ -477,7 +477,7 @@ the plasmid's mock mode, and a `mock` that differs from it refuses with 104 (spe
 ```
 
 ```json
-{"id": 14, "result": {"plasmid": "github-pr", "mock": "capture", "generation": 5, "state": "active"}}
+{"id": 14, "result": {"cell": "cell-1", "plasmid": "github-pr", "mock": "capture", "generation": 5, "state": "active"}}
 ```
 
 Reload preserves the attachment's spec008 AttachmentSource. A registry source reuses the exact

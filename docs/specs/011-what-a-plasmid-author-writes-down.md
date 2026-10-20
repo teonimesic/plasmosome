@@ -265,7 +265,8 @@ on — it reads untrusted text all day, and a poisoned one is following instruct
 gate operated by the party requesting it is not a gate. So the request leaves the cell and the
 decision is made outside it, whatever the gate turns out to be.
 
-**A declaration is enough to bound reach — the plasmid's own, and every declaration it requires.**
+**Declarations are enough to bound reach — the plasmid's own, every declaration it requires, and
+the operator's declarations file.**
 Because the kernel grants exactly what is declared, that closure is what a plasmid can touch, and
 a reviewer who reads it knows the worst case without reading a line of code. The single
 declaration is not enough on its own: a plasmid requiring a capability reaches, through its
@@ -331,11 +332,13 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   relative path-scope entry — is refused with the same named error an explicit `inject` gets.
 - **Every refusal an author can cause carries the field path in the declaration and a `fix`
   sentence** holding the line the author would write, or exactly `remove this entry` where the
-  repair is a deletion, and carries the plasmid id wherever the declaration supplies one. A refusal
-  that names no field, such as a syntax error the parser reports by line and column or a file over
-  the size bound, carries no fix. A declaration with no `id` is the single case that cannot name a
-  plasmid; it names the missing `id` instead. Where a refusal must name more than one plasmid — the
-  requirers a detach would strand — it names them in the message and the `fix`, not in a new
+  repair is a deletion, and carries the plasmid id wherever the declaration supplies one. Two
+  refusals concern the file as a whole and are the only exceptions: a TOML syntax error, which the
+  parser reports by line and column, and a declaration over 1 MiB, the maximum accepted size
+  spec 020 §2 gives each declaration. They name no field and carry no `fix`. An unknown key is not
+  one of them. Apart from those two, a declaration with no `id` is the single case that cannot name
+  a plasmid; it names the missing `id` instead. Where a refusal must name more than one plasmid —
+  the requirers a detach would strand — it names them in the message and the `fix`, not in a new
   structured field: §1's assertion carries a single plasmid, and adding a field to it would be a
   fourth amendment this spec does not make.
 - **A capability denied at the boundary is reported as a missing declaration.** The report names
