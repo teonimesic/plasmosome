@@ -15,9 +15,9 @@ fn git(repository: &Path, arguments: &[&str], stdin: Option<&str>) -> Output {
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_AUTHOR_NAME", "A Person")
-        .env("GIT_AUTHOR_EMAIL", "person@example.com")
+        .env("GIT_AUTHOR_EMAIL", "person@corp.locale.io")
         .env("GIT_COMMITTER_NAME", "A Person")
-        .env("GIT_COMMITTER_EMAIL", "person@example.com")
+        .env("GIT_COMMITTER_EMAIL", "person@corp.locale.io")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -159,7 +159,7 @@ fn refuses_a_model_trailer_a_squash_merge_left_before_a_human_trailer_block() {
     check_workspace(|root| {
         assert_refused(
             root,
-            "docs: a squashed change (#2)\n\n* docs: the first commit\n\nCo-Authored-By: Claude (Fable 5)\n\n* docs: the second commit\n\nCo-Authored-By: A Colleague <colleague@example.com>\n",
+            "docs: a squashed change (#2)\n\n* docs: the first commit\n\nCo-Authored-By: Claude (Fable 5)\n\n* docs: the second commit\n\nCo-Authored-By: A Colleague <colleague@corp.locale.io>\n",
             "credits a model mid-body and a person at the end, so only the person is visible to a parser that reads the last paragraph",
         );
     });
@@ -242,7 +242,7 @@ fn clears_a_body_whose_only_co_authors_are_people() {
     check_workspace(|root| {
         assert_cleared(
             root,
-            "feat: a change\n\n* feat: the first commit\n\nCo-Authored-By: A Colleague <colleague@example.com>\n\n* feat: the second commit\n\nCo-Authored-By: Another Colleague <another@example.com>\n",
+            "feat: a change\n\n* feat: the first commit\n\nCo-Authored-By: A Colleague <colleague@corp.locale.io>\n\n* feat: the second commit\n\nCo-Authored-By: Another Colleague <another@corp.locale.io>\n",
             "credits two people and no model",
         );
     });
@@ -310,7 +310,7 @@ fn refuses_when_the_tool_it_matches_with_cannot_answer() {
 fn clears_a_body_larger_than_a_pipe_buffer_whose_first_line_is_trailer_shaped() {
     check_workspace(|root| {
         let mut message = String::from("ci(guard): a body that outgrows a pipe buffer\n\n");
-        message.push_str("Co-Authored-By: A Person <person@example.com>\n");
+        message.push_str("Co-Authored-By: A Person <person@corp.locale.io>\n");
         for _ in 0..20_000 {
             message.push_str("padding that carries the body past the pipe buffer\n");
         }
