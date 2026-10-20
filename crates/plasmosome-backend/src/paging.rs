@@ -199,12 +199,18 @@ impl FrozenAccount {
     }
 }
 
-/// The responder's half of one paged method on one connection: at most one frozen capture,
-/// served in pages until its deadline.
+/// The responder's half of paging on one connection: at most one frozen capture, served in
+/// pages until its deadline.
 ///
-/// Keep one slot per connection and per paged method, and drop it when the connection closes,
-/// which discards the capture. `S` is the capture's scope, such as the resolved cell: a page
-/// request with a different scope is refused. The slot reads no clock; the caller passes `now`.
+/// Keep one slot per connection, shared by every paged method served on it, and drop it when
+/// the connection closes, which discards the capture. Spec 001 numbers snapshots per connection
+/// and keeps at most one capture on it, so a second slot on the same connection would reuse
+/// snapshot IDs. `S` is what the request names: the method, and the resolved cell or instance.
+/// A page request with a different scope is refused with `ScopeChanged`, which is -32602.
+///
+/// Keep the supervisor or guest association out of `S`. Losing it is not a bad request: the
+/// caller checks the association itself, calls [`CaptureSlot::discard`] and answers -32603. The
+/// slot reads no clock; the caller passes `now`.
 pub struct CaptureSlot<S> {
     page_bytes: usize,
     last_snapshot: u64,
@@ -298,11 +304,12 @@ impl<S: PartialEq> CaptureSlot<S> {
     /// Answers a request for a page of the capture this slot holds.
     ///
     /// Refuses a zero snapshot (`InvalidCursor`), a snapshot other than the one held
-    /// (`UnknownSnapshot`), a `scope` other than the capture's (`ScopeChanged`), a capture whose
-    /// deadline is at or before `now` (`Expired`, which also drops it) and an offset at or past
-    /// the account's end (`OffsetOutOfRange`). Otherwise it lowers the capture's deadline to
-    /// `request_expires` when that is earlier, never raising it, and returns up to the slot's
-    /// page size of bytes from `cursor.offset`. The same offset always returns the same page.
+    /// (`UnknownSnapshot`) and a `scope` other than the capture's (`ScopeChanged`). Then it lowers
+    /// the capture's deadline to `request_expires` when that is earlier, never raising it. If the
+    /// deadline is now at or before `now`, the result is `Expired` and the capture is dropped, so
+    /// a request whose own deadline has passed gets no page. An offset at or past the account's
+    /// end is `OffsetOutOfRange`. Otherwise it returns up to the slot's page size of bytes from
+    /// `cursor.offset`. The same offset always returns the same page.
     pub fn page(
         &mut self,
         scope: &S,
@@ -324,6 +331,7 @@ impl<S: PartialEq> CaptureSlot<S> {
         if capture.scope != *scope {
             return Err(PagingError::ScopeChanged { snapshot });
         }
+        capture.expires = capture.expires.min(request_expires);
         if now >= capture.expires {
             self.current = None;
             return Err(PagingError::Expired);
@@ -332,7 +340,6 @@ impl<S: PartialEq> CaptureSlot<S> {
         if offset >= total {
             return Err(PagingError::OffsetOutOfRange { offset, total });
         }
-        capture.expires = capture.expires.min(request_expires);
         Ok(capture.page_at(offset, self.page_bytes))
     }
 
@@ -425,6 +432,12 @@ pub enum CaptureError<E> {
 /// Ask [`PageAssembler::next`] which cursor to request, pass each reply to
 /// [`PageAssembler::accept`] and call [`PageAssembler::finish`] once `next` is `None`. A refused
 /// page changes nothing, and spec 001 makes any refusal fail the whole transfer.
+///
+/// The assembler has no memory ceiling of its own. A responder that states a large total and
+/// keeps sending full pages grows the buffer until the caller's deadline ends the transfer. The
+/// offset of each cursor `next` returns is the number of bytes received so far, so a caller
+/// can stop at a ceiling before it sends the next request. Whether there is a ceiling, and how
+/// large, is the caller's decision.
 pub struct PageAssembler {
     started: Option<Started>,
     buffer: Vec<u8>,
