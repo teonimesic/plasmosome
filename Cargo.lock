@@ -496,6 +496,7 @@ dependencies = [
  "cc",
  "libc",
  "plasmosome-backend",
+ "proptest",
  "serde_core",
  "serde_json",
  "tempfile",
