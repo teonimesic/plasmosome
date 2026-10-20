@@ -881,43 +881,29 @@ fn refused_targets() -> Vec<RefusedTarget> {
 fn open_file_refuses_each_refused_target_on_its_line_and_keeps_its_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("ledger.ndjson");
+    let mut problems = Vec::new();
     for target in refused_targets() {
         std::fs::write(&log, &target.bytes).unwrap();
-        let outcome = Ledger::open_file(&log);
-        match target.open_refuses_on_line {
-            Some(line) => {
-                let error = outcome.expect_err(target.name);
-                assert_eq!(
-                    error.kind(),
-                    std::io::ErrorKind::InvalidData,
-                    "{}",
-                    target.name
-                );
-                assert!(
-                    error.to_string().contains(&format!("on line {line}:")),
-                    "{}: {error}",
-                    target.name
-                );
-            }
-            None => assert_eq!(
-                outcome
-                    .expect(target.name)
+        match (Ledger::open_file(&log), target.open_refuses_on_line) {
+            (Err(error), Some(line))
+                if error.kind() == std::io::ErrorKind::InvalidData
+                    && error.to_string().contains(&format!("on line {line}:")) => {}
+            (Ok(ledger), None)
+                if ledger
                     .effects()
                     .iter()
                     .map(|effect| effect.description.as_str())
-                    .collect::<Vec<_>>(),
-                ["entry one"],
-                "{} is refused only by append",
+                    .eq(["entry one"]) => {}
+            (outcome, line) => problems.push(format!(
+                "{}: {outcome:?}, expected a refusal on line {line:?}",
                 target.name
-            ),
+            )),
         }
-        assert_eq!(
-            std::fs::read(&log).unwrap(),
-            target.bytes,
-            "{}",
-            target.name
-        );
+        if std::fs::read(&log).unwrap() != target.bytes {
+            problems.push(format!("{}: open_file changed the bytes", target.name));
+        }
     }
+    assert_eq!(problems, Vec::<String>::new());
 }
 
 #[test]
@@ -925,38 +911,28 @@ fn append_to_file_refuses_each_refused_target_and_keeps_its_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("ledger.ndjson");
     let appended = one_effect_ledger("github-pr", "appended", "/skills/c.md");
+    let mut problems = Vec::new();
     for target in refused_targets() {
         std::fs::write(&log, &target.bytes).unwrap();
-        let error = appended.append_to_file(&log).expect_err(target.name);
-        assert_eq!(
-            error.kind(),
-            std::io::ErrorKind::InvalidData,
-            "{}",
-            target.name
-        );
-        if target.bytes.ends_with(b"\n") {
-            let refused_by_open = Ledger::open_file(&log).expect_err(target.name);
-            assert_eq!(
-                error.to_string(),
-                refused_by_open.to_string(),
-                "{}",
-                target.name
-            );
+        let expected = if target.bytes.ends_with(b"\n") {
+            Ledger::open_file(&log).expect_err(target.name).to_string()
         } else {
-            assert_eq!(
-                error.to_string(),
-                "ledger log does not end with a newline; refusing to append",
-                "{}",
+            "ledger log does not end with a newline; refusing to append".to_string()
+        };
+        match appended.append_to_file(&log) {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::InvalidData
+                    && error.to_string() == expected => {}
+            outcome => problems.push(format!(
+                "{}: {outcome:?}, expected InvalidData: {expected}",
                 target.name
-            );
+            )),
         }
-        assert_eq!(
-            std::fs::read(&log).unwrap(),
-            target.bytes,
-            "{}",
-            target.name
-        );
+        if std::fs::read(&log).unwrap() != target.bytes {
+            problems.push(format!("{}: append_to_file changed the bytes", target.name));
+        }
     }
+    assert_eq!(problems, Vec::<String>::new());
 }
 
 #[test]
