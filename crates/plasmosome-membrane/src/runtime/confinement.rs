@@ -898,7 +898,7 @@ mod tests {
             prop::collection::vec(prop::option::weighted(0.95, answer(1)), 5),
             prop::collection::vec(
                 (
-                    prop::sample::select([FIVE.as_slice(), OTHER_NAMES.as_slice()].concat()),
+                    prop::sample::select(FIVE.into_iter().chain(OTHER_NAMES).collect::<Vec<_>>()),
                     answer(1),
                 ),
                 0..4,
