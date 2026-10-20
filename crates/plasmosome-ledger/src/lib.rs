@@ -1727,7 +1727,7 @@ mod tests {
         accepted.extend(sequence_accepted(
             "LogRecord",
             &LogRecord {
-                format: 2,
+                format: 3,
                 plugin: PluginId::from("github-pr"),
                 effect: exact,
             },

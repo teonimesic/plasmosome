@@ -227,7 +227,7 @@ fn a_log_rebuilt_in_a_fresh_process_round_trips_through_serde_only() {
     );
     for line in text.lines() {
         let record: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert_eq!(record["format"], 2);
+        assert_eq!(record["format"], 3);
     }
     drop(text);
 
@@ -314,20 +314,32 @@ fn ledger_entry_refuses_serializing_a_class_capability_mismatch() {
 #[test]
 fn log_record_refuses_serializing_an_unsupported_format() {
     let record = LogRecord {
-        format: 2,
+        format: 3,
         plugin: PluginId::from("network"),
         effect: Effect::exact("wire", InverseVia::Universe(file_removal("/skills/pr.md"))),
     };
     let encoded = serde_json::to_string(&record).unwrap();
+    assert!(encoded.starts_with(r#"{"format":3,"#), "{encoded}");
     assert_eq!(serde_json::from_str::<LogRecord>(&encoded).unwrap(), record);
 
-    let mut invalid = record;
-    invalid.format = 1;
-    assert!(serde_json::to_string(&invalid).is_err());
+    for format in [1, 2, 4] {
+        let expected = format!("unsupported ledger format {format}; expected 3");
+        let invalid = LogRecord {
+            format,
+            ..record.clone()
+        };
+        assert_eq!(
+            serde_json::to_string(&invalid).unwrap_err().to_string(),
+            expected
+        );
+        let decoded = encoded.replacen(r#""format":3"#, &format!(r#""format":{format}"#), 1);
+        let error = serde_json::from_str::<LogRecord>(&decoded).unwrap_err();
+        assert!(error.to_string().contains(&expected), "{error}");
+    }
 }
 
 #[test]
-fn format_two_refuses_unknown_fields_in_every_nested_capability() {
+fn format_three_refuses_unknown_fields_in_every_nested_capability() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("ledger.ndjson");
 
@@ -445,7 +457,7 @@ fn invalid_utf8_and_complete_final_records_cannot_be_discarded() {
     ));
     let mut valid = Vec::new();
     ledger.write_to(&mut valid).unwrap();
-    let prefix = br#"{"format":2,"plugin":"github-pr","effect":{"description":""#;
+    let prefix = br#"{"format":3,"plugin":"github-pr","effect":{"description":""#;
     let mut invalid_byte = prefix.to_vec();
     invalid_byte.push(0xff);
     let mut terminated_sequence = prefix.to_vec();
@@ -659,7 +671,7 @@ fn malformed_middle_and_complete_final_records_never_disappear() {
     ledger.write_to(&mut encoded).unwrap();
     let valid = String::from_utf8(encoded).unwrap();
 
-    let middle = format!("{valid}{{\"format\":2}}\n{valid}");
+    let middle = format!("{valid}{{\"format\":3}}\n{valid}");
     std::fs::write(&log, &middle).unwrap();
     let error = Ledger::open_file(&log).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
@@ -772,15 +784,21 @@ fn a_record_with_a_repeated_key_at_any_depth_is_refused() {
     }
 }
 
-const REFUSED_TARGET_NAMES: [&str; 17] = [
+const REFUSED_TARGET_NAMES: [&str; 23] = [
     "an unversioned record",
     "the format before the current one",
     "the format after the current one",
+    "a format 2 record whose only inverse is a session file removal",
+    "a format 1 record",
     "a numeric backend handle",
     "a universe inverse without its id",
     "an unknown field nested in a capability",
     "an unknown field in a delayed outbox",
     "an unknown field in an external policy",
+    "a broker carrying a pid",
+    "a capability without its recipe",
+    "a broker launch without data_socket",
+    "an unknown field inside a recipe",
     "a key repeated with its own value",
     "invalid UTF-8 in a complete line",
     "a malformed line between two valid records",
@@ -849,6 +867,24 @@ fn refused_targets() -> Vec<RefusedTarget> {
     let second = encoded_line("github-pr", "entry two", "/skills/b.md");
     let format = current_format(&first);
     let universe = "/effect/reversibility/Exact/via/Universe";
+    let session_file = format!("{universe}/capability/SessionFile");
+    let broker_line = effect_line(Effect::exact(
+        "broker",
+        InverseVia::Universe(UniverseRemoval {
+            id: GrantId::new(),
+            capability: broker("egressd"),
+        }),
+    ));
+    let broker_at = format!("{universe}/capability/Broker");
+    let without = |line: &str, pointer: &str, field: &str| {
+        changed(line, |record| {
+            record
+                .pointer_mut(pointer)
+                .and_then(serde_json::Value::as_object_mut)
+                .unwrap()
+                .remove(field);
+        })
+    };
     let unsupported_later = changed(&first, |record| {
         record["format"] = serde_json::json!(format + 1)
     });
@@ -882,6 +918,18 @@ fn refused_targets() -> Vec<RefusedTarget> {
         row(
             "the format after the current one",
             unsupported_later.clone(),
+            Some(1),
+        ),
+        row(
+            "a format 2 record whose only inverse is a session file removal",
+            changed(&without(&first, &session_file, "recipe"), |record| {
+                record["format"] = serde_json::json!(2)
+            }),
+            Some(1),
+        ),
+        row(
+            "a format 1 record",
+            changed(&first, |record| record["format"] = serde_json::json!(1)),
             Some(1),
         ),
         row(
@@ -930,6 +978,32 @@ fn refused_targets() -> Vec<RefusedTarget> {
                 &effect_line(Effect::external("the comment left the host")),
                 "/effect/reversibility/External",
             ),
+            Some(1),
+        ),
+        row(
+            "a broker carrying a pid",
+            changed(&broker_line, |record| {
+                record
+                    .pointer_mut(&broker_at)
+                    .and_then(serde_json::Value::as_object_mut)
+                    .unwrap()
+                    .insert("pid".to_string(), serde_json::json!(31337));
+            }),
+            Some(1),
+        ),
+        row(
+            "a capability without its recipe",
+            without(&first, &session_file, "recipe"),
+            Some(1),
+        ),
+        row(
+            "a broker launch without data_socket",
+            without(&broker_line, &format!("{broker_at}/launch"), "data_socket"),
+            Some(1),
+        ),
+        row(
+            "an unknown field inside a recipe",
+            with_unknown_field(&first, &format!("{session_file}/recipe")),
             Some(1),
         ),
         row(
