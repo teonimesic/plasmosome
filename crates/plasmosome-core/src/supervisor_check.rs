@@ -40,7 +40,7 @@ pub enum JournalFact {
     Holdings { external_obligation: bool },
 }
 
-/// Why a cell is set aside. Serializes as the name spec 023 gives it.
+/// Why a cell is set aside. Serializes in snake case, such as `supervisor_lost`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SetAsideReason {
