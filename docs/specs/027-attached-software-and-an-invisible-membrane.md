@@ -311,11 +311,12 @@ relies on it.
   "with no virtiofs export but spec 027's read-only software share". In spec 028 §6, after "While
   any expiry is unfinished past its H, `plasmosome.status` reports `ready: false`."
   (`028:216-217`), add "For a plasmid with a spec 027 software tree under spec 027 Q1(a), the
-  expiry is reported overdue only once H + 5 s has passed, the 5 s being spec 027 §4's cache
-  window." In the text spec 028 gives spec 001 §3.3 (`028:281-284`), replace "or while a spec 028
-  expiry is unfinished past its H." with "or while a spec 028 expiry is unfinished past its H
-  (past H + 5 s for a plasmid with a spec 027 software tree under spec 027 Q1(a))." H itself, which
-  bounds grant references, is unchanged.
+  expiry is reported overdue at H if a grant reference is still effective past H, and otherwise
+  only once H + 5 s has passed, the 5 s being spec 027 §4's cache window." In the text spec 028
+  gives spec 001 §3.3 (`028:281-284`), replace "or while a spec 028 expiry is unfinished past its
+  H." with "or while a spec 028 expiry is unfinished past its H (or, for a plasmid with a spec 027
+  software tree under spec 027 Q1(a) whose grant references all ended by H, past H + 5 s)." H
+  itself, which bounds grant references, is unchanged.
 - **Only once the owner answers Q1 with (b), including after item 17 fails.** In spec 011's
   out-of-scope bullet, replace "A plasmid's software is not copied into a running cell:" with "A
   plasmid's software is not installed into a running cell, though its bytes may be copied there
@@ -350,11 +351,12 @@ These need the owner. Each has the default this spec works to until answered.
      move to the holding directory, since the move changes the change time. A writer cannot set a
      change time back without root, and a mismatch fails observation, naming the file. Costs: each
      detach and reload keeps the old tree on the host until the cell stops; each attach, detach
-     and reload waits out §4's 5 s; and an expiry of a plasmid with software is reported overdue
-     5 s later (spec 028). It changes specs 001, 017, 023 §9 and 028 §6 ("Amendments"), and the
-     helper's policy must give read-only access to exactly the cell's software directory (§4),
-     which needs per-cell parameters (O-2): the qualified policy allows writes anywhere under the
-     work directory, and `read_only` is enforced inside the process the guest drives.
+     and reload waits out §4's 5 s; and an expiry of a plasmid with software whose grant
+     references all ended by H is reported overdue 5 s later (spec 028). It changes specs 001, 017,
+     023 §9 and 028 §6 ("Amendments"), and the helper's policy must give read-only access to
+     exactly the cell's software directory (§4), which needs per-cell parameters (O-2): the
+     qualified policy allows writes anywhere under the work directory, and `read_only` is enforced
+     inside the process the guest drives.
    - **(b) A copy over the data channel** into storage only PID1 can reach, checked against the
      digests, then exposed. Spec 001 stays as it is, and spec 017 already lets an authorized private
      copy be mapped and executed. It costs guest memory or disk and attach time, and spec 011's
