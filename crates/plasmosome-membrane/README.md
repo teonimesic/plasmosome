@@ -133,8 +133,9 @@ about 680 ms under heavy load.
 An empty environment and the working directory `/` mean no `DYLD_*` or `LD_*` variable and no
 relative path can add to where the helper's loader looks for libraries. They do not remove a search
 path built into the helper or its libraries, such as the one owner gate O-6 of `plasmosome-qep`
-names in the qualified libkrun. The launch checks no artifact either: the cell verifies the helper
-and its libraries before it prepares the launch.
+names in the qualified libkrun. The launch checks no artifact either, and nothing in this crate
+verifies one yet: the cell, plasmosome-7em, which is not built yet, must verify the helper and its
+libraries before it prepares the launch.
 
 ## Control-socket ownership
 
