@@ -1015,6 +1015,7 @@ mod tests {
     use super::RecipeRefusal::*;
     use super::*;
     use crate::runtime::fixtures::{LIMITS, artifact, digest, valid_recipe as valid};
+    use crate::runtime::strict_json;
     use proptest::prelude::*;
     use serde_json::{Value, json};
 
