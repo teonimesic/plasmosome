@@ -41,15 +41,14 @@ in `src/lib.rs`, or on a single item:
 - `src/guest_sys.rs` (Linux): `mount`, `sync`, `reboot`, `waitpid`, `kill`, `uname`, and a
   private read-only `mmap` read with `read_volatile` and released with `munmap`.
 
-Two items outside them carry the allow:
+These are the FFI modules spec 026 §2 lets this file name for a module-wide allow. Everything
+else takes the per-item allow that `plasmosome-core` and `plasmosome-membrane` use. Two items
+outside the modules carry it:
 
 - `images` in `src/bin/lane_vmm.rs` calls the unsafe `krun::loaded_images`, whose caller must
   promise no image is unloaded during the call.
 - `kill_group` in `src/run.rs` calls `kill(-group, SIGKILL)` on the launcher's process group.
   std kills one process only.
-
-These are the FFI modules spec 026 §2 lets this file name for a module-wide allow. Everything
-else takes the per-item allow that `plasmosome-core` and `plasmosome-membrane` use.
 
 Every `unsafe` block has a `// SAFETY:` comment, every `unsafe fn` a `# Safety` section, private
 ones included, and the `unsafe extern` block documents what each declaration assumes. No safe
