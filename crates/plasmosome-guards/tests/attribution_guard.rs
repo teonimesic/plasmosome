@@ -199,7 +199,7 @@ fn assert_cleared(root: &Path, message: &str, why: &str) {
     let output = run_guard_over(root, message);
     assert!(
         output.status.success(),
-        "the guard refused a commit that {why}; a guard that flags prose about attribution makes writing about the rule impossible.\nmessage:\n{message}\nguard said:\n{}",
+        "the guard refused a commit that {why}. A guard that refuses what the rule permits, such as prose about attribution or a person's credit, blocks work it has no reason to block.\nmessage:\n{message}\nguard said:\n{}",
         said(&output)
     );
 }
@@ -394,6 +394,28 @@ fn clears_a_body_whose_only_co_authors_are_people() {
             root,
             "feat: a change\n\n* feat: the first commit\n\nCo-Authored-By: A Colleague <colleague@corp.locale.io>\n\n* feat: the second commit\n\nCo-Authored-By: Another Colleague <another@corp.locale.io>\n",
             "credits two people and no model",
+        );
+    });
+}
+
+#[test]
+fn clears_a_persons_sign_off() {
+    check_workspace(|root| {
+        assert_cleared(
+            root,
+            "docs: a change\n\nSome body prose.\n\nSigned-off-by: A Colleague <colleague@corp.locale.io>\n",
+            "carries a person's sign-off, which spec 029 section 6 accepts",
+        );
+    });
+}
+
+#[test]
+fn clears_an_assisted_by_disclosure_beside_a_persons_sign_off() {
+    check_workspace(|root| {
+        assert_cleared(
+            root,
+            "docs: a change\n\nSome body prose.\n\nAssisted-by: Claude <noreply@anthropic.com>\nSigned-off-by: A Colleague <colleague@corp.locale.io>\n",
+            "discloses a model under Assisted-by, a key the guard does not read, in the trailer block that holds a person's sign-off",
         );
     });
 }
