@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use plasmosome_lanes::bundle::{PINNED_BUNDLE_ID, verify_bundle};
 use plasmosome_lanes::config::{
-    Confinement, GuestConfig, GuestMount, LaneConfig, Probe, Semantics, Share,
+    Confinement, GuestConfig, GuestMount, LaneConfig, MountOption, Probe, Semantics, Share,
 };
 use plasmosome_lanes::console::ProbeResult;
 use plasmosome_lanes::cpio::lane_initramfs;
@@ -221,11 +221,16 @@ fn lane(run_id: &str, probes: Vec<Probe>) -> Lane {
         mounts: Vec::new(),
         probes,
     };
+    let root_image = root.join("rootfs.raw");
+    let mut from =
+        fs::File::open(bundle.join("base/rootfs.raw")).expect("the bundle's image opens");
+    let mut to = fs::File::create(&root_image).expect("the lane's root image is created");
+    std::io::copy(&mut from, &mut to).expect("the root image is copied without its flags");
     let lane = LaneConfig {
         run_id: run_id.to_string(),
         bundle: bundle.clone(),
         initramfs: root.join("initramfs.cpio"),
-        root_image: bundle.join("base/rootfs.raw"),
+        root_image,
         vcpus: 1,
         memory_mib: 512,
         console: root.join("console.log"),
@@ -582,4 +587,135 @@ fn a_held_descriptor_mapping_and_executable_are_read_back_on_release() {
         assert_eq!(released["bytes"], bytes.len(), "{released}");
     }
     assert_eq!(line(results, "release-none")["errno"], "ENOENT");
+}
+
+fn writable_share(
+    lane: &mut Lane,
+    tag: &str,
+    guest_path: &str,
+    options: Vec<MountOption>,
+) -> PathBuf {
+    let host = lane.lane.console.with_file_name(tag);
+    common::write_file(&host, "placed", b"placed by the host\n");
+    lane.lane.shares.push(Share {
+        tag: tag.to_string(),
+        path: host.clone(),
+        shm_size: 0,
+        read_only: false,
+        semantics: Semantics::Complete,
+    });
+    lane.guest.mounts.push(GuestMount {
+        tag: tag.to_string(),
+        path: PathBuf::from(guest_path),
+        options,
+    });
+    host
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn a_writable_share_the_guest_mounts_ro_refuses_writes_with_erofs() {
+    let mut lane = lane(
+        "boot-ro",
+        vec![
+            probe("create-rw", 0, &["create", "/mnt/rw/from-guest"]),
+            probe("create-ro", 0, &["create", "/mnt/ro/from-guest"]),
+            probe("mountinfo", 1000, &["mountinfo"]),
+        ],
+    );
+    let rw = writable_share(&mut lane, "lanes0", "/mnt/rw", Vec::new());
+    let ro = writable_share(&mut lane, "lanes1", "/mnt/ro", vec![MountOption::Ro]);
+
+    let run = boot(&lane);
+
+    let results = finished(&run);
+    assert_eq!(
+        line(results, "create-rw")["ok"],
+        true,
+        "the control: the host shares are writable"
+    );
+    assert!(rw.join("from-guest").exists());
+    let refused = line(results, "create-ro");
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(refused["errno"], "EROFS", "{refused}");
+    assert!(!ro.join("from-guest").exists());
+    let mountinfo = line(results, "mountinfo");
+    let mount = mountinfo["mounts"]
+        .as_array()
+        .expect("a mount list")
+        .iter()
+        .find(|mount| mount["mount_point"] == "/mnt/ro")
+        .unwrap_or_else(|| panic!("nothing is mounted at /mnt/ro: {mountinfo}"))
+        .clone();
+    let options = mount["mount_options"].as_str().expect("options");
+    assert!(options.split(',').any(|option| option == "ro"), "{options}");
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn lane_init_kills_and_reaps_a_holder_left_running_before_it_powers_off() {
+    let mut lane = lane(
+        "boot-reap",
+        vec![
+            probe("hold-fd", 1000, &["hold-fd", "left", "/mnt/share/placed"]),
+            probe("id", 1000, &["id"]),
+        ],
+    );
+    writable_share(&mut lane, "lanes0", "/mnt/share", vec![MountOption::Ro]);
+
+    let run = boot(&lane);
+
+    let results = finished(&run);
+    assert_eq!(line(results, "hold-fd")["ok"], true);
+    assert!(run.status.is_some_and(|status| status.success()));
+    let after_end = run
+        .console
+        .lines()
+        .skip_while(|row| !row.starts_with("LANE-END "))
+        .collect::<Vec<_>>();
+    let reaped: usize = after_end
+        .iter()
+        .find_map(|row| {
+            row.trim_end_matches('\r')
+                .strip_prefix("lane-init: killed what remained and reaped ")
+        })
+        .unwrap_or_else(|| panic!("lane-init reported no final reap: {after_end:?}"))
+        .parse()
+        .expect("a count");
+    assert!(
+        reaped >= 1,
+        "the holder left running was not reaped: {reaped}"
+    );
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn the_lane_has_a_vsock_device_a_writable_root_disk_a_console_and_virtio_fs() {
+    let mut lane = lane("boot-devices", vec![probe("devices", 1000, &["devices"])]);
+    writable_share(&mut lane, "lanes0", "/mnt/share", vec![MountOption::Ro]);
+
+    let run = boot(&lane);
+
+    let results = finished(&run);
+    let devices = line(results, "devices");
+    assert_eq!(devices["ok"], true, "{devices}");
+    let ids: Vec<&str> = devices["virtio"]
+        .as_array()
+        .expect("a virtio list")
+        .iter()
+        .filter_map(|device| device["device"].as_str())
+        .collect();
+    for (id, what) in [
+        ("0x0013", "vsock"),
+        ("0x0002", "block"),
+        ("0x0003", "console"),
+        ("0x001a", "virtio-fs"),
+    ] {
+        assert!(ids.contains(&id), "no {what} device ({id}): {devices}");
+    }
+    assert_eq!(
+        devices["block"],
+        serde_json::json!([{"name": "vda", "read_only": false}]),
+        "{devices}"
+    );
 }

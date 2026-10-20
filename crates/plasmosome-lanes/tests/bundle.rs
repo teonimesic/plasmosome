@@ -7,7 +7,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use plasmosome_lanes::bundle::{
-    BundleError, KERNEL, LIBKRUN, PINNED_BUNDLE_ID, sha256_hex, unverified_images, verify_bundle,
+    BundleError, KERNEL, LIBKRUN, PINNED_BUNDLE_ID, is_inside, sha256_hex, unverified_images,
+    verify_bundle,
 };
 use serde_json::json;
 
@@ -440,4 +441,27 @@ fn a_path_that_only_starts_like_usr_lib_is_reported() {
     images.extend(lookalikes.iter().cloned());
 
     assert_eq!(unverified(&images, &libkrun), lookalikes.to_vec());
+}
+
+#[test]
+fn a_file_in_the_bundle_is_inside_it_by_any_spelling_and_one_outside_is_not() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let bundle = scratch.path().join("bundle");
+    let image = common::write_file(&bundle, "base/rootfs.raw", b"disk");
+    let outside = common::write_file(scratch.path(), "copy/rootfs.raw", b"disk");
+    let link = scratch.path().join("link.raw");
+    symlink(&image, &link).expect("a symlink to the bundle's image");
+
+    assert!(is_inside(&bundle, &image));
+    assert!(is_inside(&bundle, &bundle.join("base/../base/rootfs.raw")));
+    assert!(
+        is_inside(&bundle, &link),
+        "a symlink into the bundle is inside it"
+    );
+    assert!(!is_inside(&bundle, &outside));
+    assert!(!is_inside(&bundle, &scratch.path().join("missing.raw")));
+    assert!(
+        !is_inside(&bundle, &scratch.path().join("bundle-other/rootfs.raw")),
+        "a sibling whose name starts with the bundle's is not inside it"
+    );
 }

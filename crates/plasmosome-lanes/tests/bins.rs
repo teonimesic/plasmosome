@@ -107,6 +107,21 @@ fn lane_vmm_refuses_a_libkrunfw_in_its_working_directory_before_checking_the_bun
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn lane_vmm_refuses_a_root_image_inside_the_bundle_before_checking_the_bundle() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let mut lane = common::lane_config(scratch.path(), "run-1");
+    lane.root_image = common::write_file(&lane.bundle, "base/rootfs.raw", b"disk");
+
+    let output = run_with_stdin(
+        env!("CARGO_BIN_EXE_lane-vmm"),
+        &lane.to_json().expect("the lane serializes"),
+    );
+
+    assert_refused_naming(&output, 64, "root_image");
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn lane_vmm_refuses_to_run_off_macos() {

@@ -194,3 +194,16 @@ fn a_guest_configuration_that_cannot_serialize_is_refused_naming_the_mount() {
     let error = lane_initramfs(b"init", b"probe", &guest).expect_err("not UTF-8");
     assert!(error.to_string().contains("mount"), "{error}");
 }
+
+#[test]
+fn the_lane_initramfs_has_a_sys_directory_for_sysfs() {
+    let guest = common::guest_config("run-1", &["id"]);
+    let archive = lane_initramfs(b"init", b"probe", &guest).expect("written");
+    let entries = read_newc(&archive).expect("the initramfs reads back");
+
+    let sys = entries
+        .iter()
+        .find(|entry| entry.name == "sys")
+        .unwrap_or_else(|| panic!("the initramfs has no `sys`: {entries:?}"));
+    assert_eq!(sys.mode, S_IFDIR | 0o555);
+}

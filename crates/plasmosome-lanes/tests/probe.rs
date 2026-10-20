@@ -268,3 +268,50 @@ fn a_failure_line_names_the_probe_and_the_symbolic_errno() {
         json!({"probe": "create", "ok": false, "errno": "EROFS"})
     );
 }
+
+fn sysfs(root: &std::path::Path) {
+    common::write_file(root, "bus/virtio/devices/virtio1/device", b"0x0002\n");
+    common::write_file(root, "bus/virtio/devices/virtio0/device", b"0x0013\n");
+    common::write_file(root, "block/vda/ro", b"0\n");
+    common::write_file(root, "block/vdb/ro", b"1\n");
+}
+
+#[test]
+fn devices_reports_each_virtio_device_id_and_whether_each_block_device_is_read_only() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    sysfs(dir.path());
+
+    assert_eq!(
+        probe::devices(dir.path()),
+        json!({"probe": "devices", "ok": true,
+               "virtio": [{"name": "virtio0", "device": "0x0013"}, {"name": "virtio1", "device": "0x0002"}],
+               "block": [{"name": "vda", "read_only": false}, {"name": "vdb", "read_only": true}]})
+    );
+}
+
+#[test]
+fn devices_without_sysfs_names_enoent() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+
+    let line = probe::devices(&dir.path().join("missing"));
+
+    assert_eq!(line["ok"], false, "{line}");
+    assert_eq!(line["errno"], "ENOENT", "{line}");
+}
+
+#[test]
+fn a_read_only_flag_that_is_neither_0_nor_1_fails_the_probe() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    sysfs(dir.path());
+    common::write_file(dir.path(), "block/vda/ro", b"maybe\n");
+
+    let line = probe::devices(dir.path());
+
+    assert_eq!(line["ok"], false, "{line}");
+    assert!(
+        line["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("vda")),
+        "{line}"
+    );
+}
