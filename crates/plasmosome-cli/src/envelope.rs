@@ -194,7 +194,8 @@ impl ErrorBody {
 fn plain(value: Option<&Json>) -> String {
     match value {
         None => String::new(),
-        Some(Json::String(text) | Json::Number(text)) => json::show(text),
+        Some(Json::String(text)) => json::show(text),
+        Some(Json::Number(number)) => number.as_str().to_string(),
         Some(other) => json::write_human(other),
     }
 }

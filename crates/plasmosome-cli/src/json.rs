@@ -21,9 +21,8 @@ pub enum Json {
     #[default]
     Null,
     Bool(bool),
-    /// The number's text as it arrived, never decoded. A caller building one passes text that
-    /// RFC 8259's number grammar accepts.
-    Number(String),
+    /// The number's text as it arrived, never decoded.
+    Number(Number),
     /// The decoded string.
     String(String),
     Array(Vec<Json>),
@@ -39,6 +38,29 @@ impl Json {
             Json::Object(members) => member(members, key),
             _ => None,
         }
+    }
+}
+
+/// A number's text, which RFC 8259's number grammar accepts in full. A value written from it is
+/// therefore valid JSON and holds no terminal control.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Number(String);
+
+impl Number {
+    /// Takes `text` when RFC 8259's number grammar accepts all of it, and hands it back otherwise.
+    pub fn new(text: String) -> Result<Number, String> {
+        let mut scanner = Scanner {
+            text: &text,
+            bytes: text.as_bytes(),
+            at: 0,
+        };
+        let whole = scanner.number().is_ok() && scanner.at == text.len();
+        if whole { Ok(Number(text)) } else { Err(text) }
+    }
+
+    /// Returns the number's text.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -318,7 +340,7 @@ impl Scanner<'_> {
     fn scalar(&mut self) -> Result<Json, ScanError> {
         match self.peek() {
             Some(b'"') => self.string().map(Json::String),
-            Some(b'-' | b'0'..=b'9') => self.number(),
+            Some(b'-' | b'0'..=b'9') => self.number().map(Json::Number),
             Some(b't') => self.literal("true", Json::Bool(true)),
             Some(b'f') => self.literal("false", Json::Bool(false)),
             Some(b'n') => self.literal("null", Json::Null),
@@ -334,7 +356,7 @@ impl Scanner<'_> {
         Ok(value)
     }
 
-    fn number(&mut self) -> Result<Json, ScanError> {
+    fn number(&mut self) -> Result<Number, ScanError> {
         let start = self.at;
         self.eat(b'-');
         match self.peek() {
@@ -356,7 +378,7 @@ impl Scanner<'_> {
             }
             self.required_digits()?;
         }
-        Ok(Json::Number(self.text[start..self.at].to_string()))
+        Ok(Number(self.text[start..self.at].to_string()))
     }
 
     fn required_digits(&mut self) -> Result<(), ScanError> {
@@ -565,7 +587,7 @@ pub(crate) fn write_value(out: &mut String, value: &Json, style: Style, depth: u
                 Json::Null => out.push_str("null"),
                 Json::Bool(true) => out.push_str("true"),
                 Json::Bool(false) => out.push_str("false"),
-                Json::Number(text) => out.push_str(text),
+                Json::Number(number) => out.push_str(number.as_str()),
                 Json::String(text) => write_string(out, text, style),
                 Json::Array(items) if items.is_empty() => out.push_str("[]"),
                 Json::Object(members) if members.is_empty() => out.push_str("{}"),
