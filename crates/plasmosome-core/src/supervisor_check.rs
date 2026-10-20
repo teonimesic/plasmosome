@@ -157,6 +157,9 @@ pub const fn after_query(result: &QueryResult, cap_reached: bool) -> QueryOutcom
 mod tests {
     use super::*;
 
+    const _: CheckOutcome = decide(LockFact::Free, MarkerFact::Absent, JournalFact::Empty);
+    const _: QueryOutcome = after_query(QueryResult::NoAnswer, true);
+
     const HELD: LockFact = LockFact::Held;
     const FREE: LockFact = LockFact::Free;
 
@@ -331,7 +334,7 @@ mod tests {
         for lifecycle in [CellStatus::Ready, CellStatus::Draining, CellStatus::Dead] {
             for cap_reached in [false, true] {
                 assert_eq!(
-                    after_query(&answered(lifecycle), cap_reached),
+                    after_query(answered(lifecycle), cap_reached),
                     QueryOutcome::Adopt,
                     "{lifecycle:?}, cap reached {cap_reached}"
                 );
@@ -342,11 +345,11 @@ mod tests {
     #[test]
     fn germinating_keeps_waiting_until_the_cap() {
         assert_eq!(
-            after_query(&answered(CellStatus::Germinating), false),
+            after_query(answered(CellStatus::Germinating), false),
             QueryOutcome::KeepWaiting
         );
         assert_eq!(
-            after_query(&answered(CellStatus::Germinating), true),
+            after_query(answered(CellStatus::Germinating), true),
             QueryOutcome::SetAside(SetAsideReason::Germinating)
         );
     }
@@ -354,11 +357,11 @@ mod tests {
     #[test]
     fn no_answer_keeps_waiting_until_the_cap() {
         assert_eq!(
-            after_query(&QueryResult::NoAnswer, false),
+            after_query(QueryResult::NoAnswer, false),
             QueryOutcome::KeepWaiting
         );
         assert_eq!(
-            after_query(&QueryResult::NoAnswer, true),
+            after_query(QueryResult::NoAnswer, true),
             QueryOutcome::SetAside(SetAsideReason::Unresponsive)
         );
     }
@@ -371,7 +374,6 @@ mod tests {
             SetAsideReason::ExternalObligations,
             SetAsideReason::SupervisorLost,
             SetAsideReason::HoldingsWithoutSupervisor,
-            SetAsideReason::RetireUnlogged,
         ]
         .iter()
         .map(|reason| serde_json::to_value(reason).expect("a reason serializes"))
@@ -384,7 +386,6 @@ mod tests {
                 "external_obligations",
                 "supervisor_lost",
                 "holdings_without_supervisor",
-                "retire_unlogged",
             ]
         );
     }
