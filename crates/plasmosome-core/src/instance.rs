@@ -752,16 +752,21 @@ fn c_name(name: &[u8]) -> io::Result<CString> {
     CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
+#[allow(unsafe_code)]
 fn open_at(
     dir: BorrowedFd<'_>,
     name: &CStr,
     flags: libc::c_int,
     mode: libc::mode_t,
 ) -> io::Result<OwnedFd> {
+    // SAFETY: `name` is a CStr that outlives the call, and the BorrowedFd keeps `dir` open for it.
+    // openat keeps no pointer to the name.
     let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, mode as libc::c_uint) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: openat returned a non-negative descriptor just above, which nothing else owns, so
+    // this OwnedFd becomes its only owner.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
@@ -892,8 +897,11 @@ fn file_refusal(parent: BorrowedFd<'_>, name: &CStr, error: io::Error) -> FileRe
     }
 }
 
+#[allow(unsafe_code)]
 fn stat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::stat> {
     let mut status = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `name` is a CStr that outlives the call, the BorrowedFd keeps `dir` open for it, and
+    // `status` points to writable space for one libc::stat.
     let found = unsafe {
         libc::fstatat(
             dir.as_raw_fd(),
@@ -905,14 +913,19 @@ fn stat_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<libc::stat> {
     if found != 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: fstatat returned 0 above, so it filled every field of `status`.
     Ok(unsafe { status.assume_init() })
 }
 
+#[allow(unsafe_code)]
 fn stat_of(fd: BorrowedFd<'_>) -> io::Result<libc::stat> {
     let mut status = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: The BorrowedFd keeps `fd` open for the call, and `status` points to writable space
+    // for one libc::stat.
     if unsafe { libc::fstat(fd.as_raw_fd(), status.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: fstat returned 0 above, so it filled every field of `status`.
     Ok(unsafe { status.assume_init() })
 }
 
@@ -926,11 +939,16 @@ fn kind_at(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<Kind> {
     })
 }
 
+#[allow(unsafe_code)]
 fn clear_nonblocking(file: BorrowedFd<'_>) -> io::Result<()> {
+    // SAFETY: fcntl with F_GETFL takes no pointer, and the BorrowedFd keeps `file` open for the
+    // call.
     let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
     if flags < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: fcntl with F_SETFL takes an integer flag set, not a pointer, and the BorrowedFd keeps
+    // `file` open for the call.
     let set = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) };
     if set < 0 {
         return Err(io::Error::last_os_error());
@@ -941,8 +959,12 @@ fn clear_nonblocking(file: BorrowedFd<'_>) -> io::Result<()> {
 struct DirectoryStream(NonNull<libc::DIR>);
 
 impl DirectoryStream {
+    #[allow(unsafe_code)]
     fn open(dir: BorrowedFd<'_>) -> io::Result<DirectoryStream> {
         let owned = dir.try_clone_to_owned()?;
+        // SAFETY: `owned` is a descriptor this function owns. On success fdopendir takes it over,
+        // and into_raw_fd below gives up the OwnedFd, so only closedir closes it. On failure the
+        // OwnedFd still owns it and closes it.
         let stream = unsafe { libc::fdopendir(owned.as_raw_fd()) };
         let stream = NonNull::new(stream).ok_or_else(io::Error::last_os_error)?;
         let _owned_by_stream = owned.into_raw_fd();
@@ -953,14 +975,20 @@ impl DirectoryStream {
 impl Iterator for DirectoryStream {
     type Item = io::Result<Vec<u8>>;
 
+    #[allow(unsafe_code)]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             clear_errno();
+            // SAFETY: `self.0` is the non-null stream fdopendir returned, which only closedir in
+            // Drop releases.
             let entry = unsafe { libc::readdir(self.0.as_ptr()) };
             if entry.is_null() {
                 let error = io::Error::last_os_error();
                 return (error.raw_os_error() != Some(0)).then_some(Err(error));
             }
+            // SAFETY: readdir returned a non-null entry, which stays valid until the next readdir
+            // or closedir on this stream. Its d_name is NUL-terminated, and to_vec copies the bytes
+            // before either can run.
             let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
             if name != b"." && name != b".." {
                 return Some(Ok(name.to_vec()));
@@ -970,22 +998,33 @@ impl Iterator for DirectoryStream {
 }
 
 impl Drop for DirectoryStream {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
+        // SAFETY: `self.0` came from fdopendir, and Drop runs once, so this closes the stream
+        // exactly once.
         unsafe { libc::closedir(self.0.as_ptr()) };
     }
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 fn clear_errno() {
+    // SAFETY: __error returns a valid pointer to this thread's errno, which the thread may write.
     unsafe { *libc::__error() = 0 };
 }
 
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
 fn clear_errno() {
+    // SAFETY: __errno_location returns a valid pointer to this thread's errno, which the thread may
+    // write.
     unsafe { *libc::__errno_location() = 0 };
 }
 
+#[allow(unsafe_code)]
 fn make_directory_at(parent: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
+    // SAFETY: `name` is a CStr that outlives the call, and the BorrowedFd keeps `parent` open for
+    // it. mkdirat keeps no pointer to the name.
     let made = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), PRIVATE_DIRECTORY) };
     if made != 0 {
         return Err(io::Error::last_os_error());
@@ -993,7 +1032,9 @@ fn make_directory_at(parent: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
     Ok(())
 }
 
+#[allow(unsafe_code)]
 fn change_mode(fd: BorrowedFd<'_>, mode: libc::mode_t) -> io::Result<()> {
+    // SAFETY: fchmod takes no pointer, and the BorrowedFd keeps `fd` open for the call.
     let changed = unsafe { libc::fchmod(fd.as_raw_fd(), mode) };
     if changed != 0 {
         return Err(io::Error::last_os_error());
@@ -1001,7 +1042,9 @@ fn change_mode(fd: BorrowedFd<'_>, mode: libc::mode_t) -> io::Result<()> {
     Ok(())
 }
 
+#[allow(unsafe_code)]
 fn lock_exclusive_nonblocking(file: BorrowedFd<'_>) -> io::Result<()> {
+    // SAFETY: flock takes no pointer, and the BorrowedFd keeps `file` open for the call.
     let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if locked != 0 {
         return Err(io::Error::last_os_error());
@@ -1069,14 +1112,19 @@ mod tests {
         }
     }
 
+    #[allow(unsafe_code)]
     fn a_separate_open_can_lock(path: &Path) -> bool {
         let file = fs::File::open(path).expect("the file opens for a lock attempt");
+        // SAFETY: flock takes no pointer, and `file` stays open until this function returns.
         let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         taken == 0
     }
 
+    #[allow(unsafe_code)]
     fn make_fifo(path: &Path) {
         let name = CString::new(path.as_os_str().as_bytes()).expect("a path without NUL");
+        // SAFETY: `name` is a CString that lives until this function returns, and mkfifo keeps no
+        // pointer to it.
         let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
         assert_eq!(
             made,
@@ -1113,8 +1161,10 @@ mod tests {
         RestoreMode(path.to_path_buf())
     }
 
+    #[allow(unsafe_code)]
     fn assert_not_root() {
         assert_ne!(
+            // SAFETY: geteuid takes no arguments and cannot fail.
             unsafe { libc::geteuid() },
             0,
             "this test needs a user the kernel refuses for mode 000; root bypasses it"
@@ -1204,6 +1254,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn the_root_and_lock_descriptors_are_close_on_exec() {
         let (_dir, root) = temp_root();
         let instance = open_root(&root);
@@ -1212,6 +1263,8 @@ mod tests {
             ("root", instance.dir.as_raw_fd()),
             ("lock", lock.file.as_raw_fd()),
         ] {
+            // SAFETY: fcntl with F_GETFD takes no pointer, and `instance` and `lock` keep both
+            // descriptors open through the loop.
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
             assert!(
                 flags >= 0 && flags & libc::FD_CLOEXEC != 0,
@@ -1544,6 +1597,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn a_discovered_journal_is_left_blocking() {
         let (_dir, root) = temp_root();
         make_cell(&root, "cell-1", Some(b"{}\n"));
@@ -1555,6 +1609,8 @@ mod tests {
         else {
             panic!("the journal opens: {discovery:?}");
         };
+        // SAFETY: fcntl with F_GETFL takes no pointer, and `discovery` keeps `file` open for the
+        // call.
         let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
         assert!(flags >= 0, "F_GETFL: {}", io::Error::last_os_error());
         assert_eq!(flags & libc::O_NONBLOCK, 0, "O_NONBLOCK was left set");
@@ -2024,6 +2080,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn the_cell_and_journal_descriptors_are_close_on_exec() {
         let (_dir, root) = temp_root();
         let (instance, lock) = locked(&root);
@@ -2035,6 +2092,8 @@ mod tests {
             ("cell", created.dir.as_raw_fd()),
             ("journal", handle.file.as_raw_fd()),
         ] {
+            // SAFETY: fcntl with F_GETFD takes no pointer, and `created` and `handle` keep both
+            // descriptors open through the loop.
             let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
             assert!(
                 flags >= 0 && flags & libc::FD_CLOEXEC != 0,
