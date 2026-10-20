@@ -575,7 +575,7 @@ pub struct LogRecord {
     pub effect: Effect,
 }
 
-fn unsupported(format: u8) -> String {
+fn unsupported(format: u64) -> String {
     format!("unsupported ledger format {format}; expected {FORMAT}")
 }
 
@@ -585,7 +585,7 @@ impl Serialize for LogRecord {
         S: Serializer,
     {
         if self.format != FORMAT {
-            return Err(S::Error::custom(unsupported(self.format)));
+            return Err(S::Error::custom(unsupported(self.format.into())));
         }
 
         #[derive(Serialize)]
@@ -619,7 +619,7 @@ impl<'de> Deserialize<'de> for LogRecord {
 
         let wire = Wire::deserialize(ObjectOnly::new(deserializer))?;
         if wire.format != FORMAT {
-            return Err(D::Error::custom(unsupported(wire.format)));
+            return Err(D::Error::custom(unsupported(wire.format.into())));
         }
         Ok(LogRecord {
             format: wire.format,
@@ -629,27 +629,40 @@ impl<'de> Deserialize<'de> for LogRecord {
     }
 }
 
+fn decode_record(line: &[u8]) -> serde_json::Result<LogRecord> {
+    #[derive(Deserialize)]
+    struct Version {
+        format: u64,
+    }
+
+    if let Ok(Version { format }) = serde_json::from_slice::<Version>(line)
+        && format != u64::from(FORMAT)
+    {
+        return Err(<serde_json::Error as serde::de::Error>::custom(
+            unsupported(format),
+        ));
+    }
+    serde_json::from_slice::<LogRecord>(line)
+}
+
 fn read_plugin_log(bytes: &[u8]) -> std::io::Result<(Option<PluginId>, Vec<Effect>)> {
     let mut plugin: Option<PluginId> = None;
     let mut effects = Vec::new();
     for (index, framed) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
         let newline_ended = framed.ends_with(b"\n");
         let line = framed.strip_suffix(b"\n").unwrap_or(framed);
-        let parsed = match std::str::from_utf8(line) {
-            Ok(text) => serde_json::from_str::<LogRecord>(text),
-            Err(error) if !newline_ended && error.error_len().is_none() => {
-                serde_json::from_slice::<LogRecord>(line)
-            }
-            Err(error) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "invalid UTF-8 in ledger record on line {}: {error}",
-                        index + 1
-                    ),
-                ));
-            }
-        };
+        if let Err(error) = std::str::from_utf8(line)
+            && (newline_ended || error.error_len().is_some())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid UTF-8 in ledger record on line {}: {error}",
+                    index + 1
+                ),
+            ));
+        }
+        let parsed = decode_record(line);
         let record = match parsed {
             Ok(record) => record,
             Err(error) if !newline_ended && error.is_eof() => break,
