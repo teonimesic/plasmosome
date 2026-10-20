@@ -1,5 +1,9 @@
 # Every gate is its own step: a `run: |` block reports only its last command's exit status,
 # so a multi-command step can pass while a gate inside it failed. One command per step.
+# The exception is a captured test step: one pipeline, `cargo test ... 2>&1 | tee -a FILE`, under
+# `shell: bash`. GitHub runs that as `bash --noprofile --norc -eo pipefail`, so the step fails when
+# any command in the pipeline fails. The default shell has no pipefail, and the step would pass
+# because tee succeeded.
 name: ci
 
 on:
@@ -112,14 +116,29 @@ jobs:
         if: github.event_name == 'pull_request'
         run: python3 tools/cargo-deny-check licenses --changed-since HEAD^1
 
+      - name: ignored tests regression
+        run: python3 tools/ignored-tests-regression.py
+
+      # `macos` runs these four steps too, from clippy to the ignored-test report. Change both jobs.
       - name: clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings -D clippy::ignore_without_reason
 
       - name: tests
-        run: cargo test --locked --workspace --exclude plasmosome-guards
+        id: tests
+        shell: bash
+        run: cargo test --locked --workspace --exclude plasmosome-guards --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/cargo-test.log"
 
       - name: workspace guards
-        run: cargo test --locked -p plasmosome-guards
+        id: guards
+        shell: bash
+        run: cargo test --locked -p plasmosome-guards --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/cargo-test.log"
+
+      - name: ignored tests
+        if: always()
+        env:
+          TESTS: ${{ steps.tests.outcome }}
+          GUARDS: ${{ steps.guards.outcome }}
+        run: python3 tools/ignored_tests.py "$RUNNER_TEMP/cargo-test.log" "tests=$TESTS=--workspace --exclude plasmosome-guards" "workspace guards=$GUARDS=-p plasmosome-guards"
 
       - name: provenance guard
         run: ./.githooks/provenance-guard
@@ -192,6 +211,44 @@ jobs:
           ARCHIVE: ${{ steps.beads.outputs.archive }}
           BINARY: ${{ steps.beads.outputs.binary }}
         run: python3 tools/work-state-regression.py --archive "$ARCHIVE" --bd "$BINARY"
+
+  macos:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: install the pinned toolchain
+        run: rustup toolchain install --no-self-update
+
+      - name: toolchain in use
+        run: rustup show active-toolchain --verbose
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # These four steps match the four in `gates`, from clippy to the ignored-test report. Change both jobs.
+      - name: clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings -D clippy::ignore_without_reason
+
+      - name: tests
+        id: tests
+        shell: bash
+        run: cargo test --locked --workspace --exclude plasmosome-guards --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/cargo-test.log"
+
+      - name: workspace guards
+        id: guards
+        shell: bash
+        run: cargo test --locked -p plasmosome-guards --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/cargo-test.log"
+
+      - name: ignored tests
+        if: always()
+        env:
+          TESTS: ${{ steps.tests.outcome }}
+          GUARDS: ${{ steps.guards.outcome }}
+        run: python3 tools/ignored_tests.py "$RUNNER_TEMP/cargo-test.log" "tests=$TESTS=--workspace --exclude plasmosome-guards" "workspace guards=$GUARDS=-p plasmosome-guards"
 
   coverage:
     runs-on: ubuntu-latest

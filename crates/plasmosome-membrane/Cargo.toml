@@ -7,10 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
-serde_core = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }
 plasmosome-backend = { workspace = true }
+plasmosome-core = { workspace = true }
 
 [build-dependencies]
 cc = { workspace = true }
@@ -28,3 +28,10 @@ bench = false
 name = "membraned"
 path = "src/main.rs"
 bench = false
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"

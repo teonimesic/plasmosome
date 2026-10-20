@@ -208,6 +208,7 @@ impl std::io::Read for OsLogFile {
     }
 }
 
+#[allow(unsafe_code)]
 fn open_regular(options: &mut std::fs::OpenOptions, path: &Path) -> std::io::Result<std::fs::File> {
     let file = options
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -219,8 +220,12 @@ fn open_regular(options: &mut std::fs::OpenOptions, path: &Path) -> std::io::Res
         ));
     }
     let descriptor = std::os::fd::AsRawFd::as_raw_fd(&file);
+    // SAFETY: fcntl with F_GETFL takes no pointer, and `file` keeps `descriptor` open until this
+    // function returns.
     let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
     if flags == -1
+        // SAFETY: fcntl with F_SETFL takes an integer flag set, not a pointer, and `file` keeps
+        // `descriptor` open until this function returns.
         || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags & !libc::O_NONBLOCK) } == -1
     {
         return Err(std::io::Error::last_os_error());
@@ -1322,9 +1327,12 @@ mod tests {
         assert_eq!(log.append("k", json!({})).unwrap(), 5);
     }
 
+    #[allow(unsafe_code)]
     fn mkfifo(path: &Path) {
         use std::os::unix::ffi::OsStrExt;
         let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `name` is a CString that lives until this function returns, and mkfifo keeps no
+        // pointer to it.
         let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
         assert_eq!(
             made,
@@ -1381,8 +1389,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn an_unreadable_ancestor_refuses_open_at_its_sync() {
         use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid takes no arguments and cannot fail.
         if unsafe { libc::geteuid() } == 0 {
             let reason = "skipped an_unreadable_ancestor_refuses_open_at_its_sync: root opens a \
                           directory whatever its mode\n";
@@ -1407,6 +1417,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn an_opened_log_blocks_once_it_is_known_to_be_a_regular_file() {
         use std::os::fd::AsRawFd;
         let dir = tempfile::tempdir().unwrap();
@@ -1418,6 +1429,8 @@ mod tests {
         reader.read(true);
         for (case, options) in [("writer", &mut writer), ("reader", &mut reader)] {
             let file = open_regular(options, &path).unwrap();
+            // SAFETY: fcntl with F_GETFL takes no pointer, and `file` keeps its descriptor open for
+            // the call.
             let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
             assert_ne!(flags, -1, "{case}: {}", std::io::Error::last_os_error());
             assert_eq!(
