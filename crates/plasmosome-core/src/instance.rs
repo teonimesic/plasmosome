@@ -2177,154 +2177,77 @@ mod tests {
         io::Error::from_raw_os_error(libc::EIO)
     }
 
+    macro_rules! refused_at {
+        ($($variant:ident)::+) => {
+            Box::new($($variant)::+ {
+                path: PathBuf::from("/inst/x"),
+            }) as Box<dyn Error>
+        };
+    }
+
+    macro_rules! failed_at {
+        ($($variant:ident)::+) => {
+            Box::new($($variant)::+ {
+                path: PathBuf::from("/inst/x"),
+                source: eio(),
+            }) as Box<dyn Error>
+        };
+    }
+
     #[test]
     fn every_error_names_what_it_refused_and_keeps_its_cause() {
-        let path = || PathBuf::from("/inst/x");
-        let lock = || PathBuf::from("/other/controller.lock");
         let cause = Some(eio().to_string());
-        let invalid = CellPathError::NotACellName("..".to_string());
-        let invalid_text = Some(invalid.to_string());
-        let rows: Vec<(Box<dyn Error>, &str, Option<String>)> = vec![
-            (Box::new(LockError::Busy { path: path() }), "/inst/x", None),
+        let invalid = || CellPathError::NotACellName("..".to_string());
+        let refused = [
+            refused_at!(LockError::Busy),
+            refused_at!(LockError::Symlink),
+            refused_at!(LockError::NotRegular),
+            refused_at!(InstanceRootError::NotAbsolute),
+            refused_at!(DiscoveryError::CellsSymlink),
+            refused_at!(DiscoveryError::CellsNotADirectory),
+            refused_at!(DiscoveryError::ForeignLock),
+            refused_at!(CellDirError::Missing),
+            refused_at!(CellDirError::Alias),
+            refused_at!(CellDirError::Symlink),
+            refused_at!(CellDirError::NotADirectory),
+            refused_at!(CellDirError::AlreadyExists),
+            refused_at!(CellDirError::ForeignLock),
+            refused_at!(JournalRefusal::ForeignLock),
+        ];
+        let failed = [
+            failed_at!(LockError::Io),
+            failed_at!(InstanceRootError::Open),
+            failed_at!(DiscoveryError::Open),
+            failed_at!(DiscoveryError::Listing),
+            failed_at!(DiscoveryError::Classify),
+            failed_at!(DiscoveryError::OutOfDescriptors),
+            failed_at!(CellDirError::Io),
+        ];
+        let mut rows: Vec<(Box<dyn Error>, &str, Option<String>)> = vec![
             (
-                Box::new(LockError::Symlink { path: path() }),
-                "/inst/x",
-                None,
-            ),
-            (
-                Box::new(LockError::NotRegular { path: path() }),
-                "/inst/x",
-                None,
-            ),
-            (
-                Box::new(LockError::Io {
-                    path: path(),
-                    source: eio(),
-                }),
-                "/inst/x",
-                cause.clone(),
-            ),
-            (
-                Box::new(InstanceRootError::NotAbsolute { path: path() }),
-                "/inst/x",
-                None,
-            ),
-            (
-                Box::new(InstanceRootError::Open {
-                    path: path(),
-                    source: eio(),
-                }),
-                "/inst/x",
-                cause.clone(),
-            ),
-            (
-                Box::new(DiscoveryError::CellsSymlink { path: path() }),
-                "/inst/x",
-                None,
-            ),
-            (
-                Box::new(DiscoveryError::CellsNotADirectory { path: path() }),
-                "/inst/x",
-                None,
-            ),
-            (
-                Box::new(DiscoveryError::Open {
-                    path: path(),
-                    source: eio(),
-                }),
-                "/inst/x",
-                cause.clone(),
-            ),
-            (
-                Box::new(DiscoveryError::Listing {
-                    path: path(),
-                    source: eio(),
-                }),
-                "/inst/x",
-                cause.clone(),
-            ),
-            (
-                Box::new(DiscoveryError::Classify {
-                    path: path(),
-                    source: eio(),
-                }),
-                "/inst/x",
-                cause.clone(),
-            ),
-            (
-                Box::new(DiscoveryError::OutOfDescriptors {
-                    path: path(),
-                    source: eio(),
-                }),
-                "/inst/x",
-                cause.clone(),
-            ),
-            (
-                Box::new(DiscoveryError::ForeignLock { path: lock() }),
-                "/other/controller.lock",
-                None,
-            ),
-            (
-                Box::new(CellDirError::InvalidCell(invalid)),
+                Box::new(CellDirError::InvalidCell(invalid())),
                 "..",
-                invalid_text,
-            ),
-            (
-                Box::new(CellDirError::Missing { path: path() }),
-                "/inst/x",
-                None,
-            ),
-            (
-                Box::new(CellDirError::Alias { path: path() }),
-                "/inst/x",
-                None,
-            ),
-            (
-                Box::new(CellDirError::Symlink { path: path() }),
-                "/inst/x",
-                None,
-            ),
-            (
-                Box::new(CellDirError::NotADirectory { path: path() }),
-                "/inst/x",
-                None,
-            ),
-            (
-                Box::new(CellDirError::AlreadyExists { path: path() }),
-                "/inst/x",
-                None,
-            ),
-            (
-                Box::new(CellDirError::Io {
-                    path: path(),
-                    source: eio(),
-                }),
-                "/inst/x",
-                cause.clone(),
-            ),
-            (
-                Box::new(CellDirError::ForeignLock { path: lock() }),
-                "/other/controller.lock",
-                None,
+                Some(invalid().to_string()),
             ),
             (
                 Box::new(JournalRefusal::CellDirectory(eio())),
                 "cell directory",
                 cause.clone(),
             ),
-            (Box::new(JournalRefusal::Symlink), "journal", None),
-            (Box::new(JournalRefusal::NotRegular), "journal", None),
             (
                 Box::new(JournalRefusal::Io(eio())),
                 "journal",
                 cause.clone(),
             ),
-            (
-                Box::new(JournalRefusal::ForeignLock { path: lock() }),
-                "/other/controller.lock",
-                None,
-            ),
+            (Box::new(JournalRefusal::Symlink), "journal", None),
+            (Box::new(JournalRefusal::NotRegular), "journal", None),
         ];
+        rows.extend(refused.into_iter().map(|error| (error, "/inst/x", None)));
+        rows.extend(
+            failed
+                .into_iter()
+                .map(|error| (error, "/inst/x", cause.clone())),
+        );
         for (error, names, source) in rows {
             let text = error.to_string();
             assert!(text.contains(names), "{text:?} does not name {names:?}");
