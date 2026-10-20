@@ -192,6 +192,42 @@ fn a_non_neutral_name_in_one_run_only_is_listed_beside_its_noise() {
 }
 
 #[test]
+fn non_neutral_names_are_listed_in_the_manifests_order_whichever_run_showed_them() {
+    for swapped in [false, true] {
+        let mut runs = runs();
+        for (run, path) in [(0, "/usr/local/bin"), (1, "/opt")] {
+            let mounts = &mut observation(&mut runs, Lane::Cell, run, "hint-mounts").fields;
+            mounts[path]["source"] = json!("plasmosome");
+        }
+        if swapped {
+            runs.swap(0, 1);
+        }
+        let noise = |field: &str| {
+            let field = field.to_string();
+            finding(
+                "hint-mounts",
+                Reason::Noise {
+                    lane: Lane::Cell,
+                    field,
+                },
+            )
+        };
+        assert_eq!(
+            verdict(&manifest(), &runs),
+            Verdict::Fail(vec![
+                not_neutral(Lane::Cell, "/opt", MountKey::Source),
+                not_neutral(Lane::Cell, "/usr/local/bin", MountKey::Source),
+                noise("/opt"),
+                noise("/usr/local/bin"),
+                differs("hint-mounts", "/opt"),
+                differs("hint-mounts", "/usr/local/bin"),
+            ]),
+            "cell runs swapped: {swapped}"
+        );
+    }
+}
+
+#[test]
 fn names_in_an_observation_that_did_not_complete_are_not_checked() {
     for failed_before_step in [false, true] {
         let mut runs = runs();
