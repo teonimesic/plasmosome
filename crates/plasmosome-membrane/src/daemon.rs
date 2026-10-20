@@ -689,20 +689,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let control = dir.path().join("c.uds");
         std::fs::write(&control, b"someone else's socket").unwrap();
-        let pidfile = dir.path().join("b0.pid");
-
         let shutdown = AtomicBool::new(false);
-        let refusal = run(
+        let mut forked = Vec::new();
+
+        let refusal = run_with(
             DaemonConfig {
                 control_socket: control.clone(),
                 status_deadline: Duration::from_millis(500),
                 brokers: vec![BrokerConfig {
                     name: "egressd".to_string(),
                     control_socket: dir.path().join("b0.uds"),
-                    command: sleeping_broker(&pidfile),
+                    command: vec!["sleep".to_string(), "300".to_string()],
                 }],
             },
             &shutdown,
+            |command| {
+                let child = VmmChild::spawn(command)?;
+                forked.push(child.pid());
+                Ok(child)
+            },
         )
         .expect_err("an occupied control socket path refuses the start");
 
@@ -711,8 +716,8 @@ mod tests {
             other => panic!("an occupied path is a bind failure, got {other:?}"),
         }
         assert!(
-            !pidfile.exists(),
-            "run returned before spawning, so no broker was ever forked"
+            forked.is_empty(),
+            "nothing is forked before the bind, got {forked:?}"
         );
         assert!(
             control.exists(),
