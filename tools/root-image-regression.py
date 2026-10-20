@@ -1086,9 +1086,6 @@ class Failing:
 
 
 class FullDisk(io.RawIOBase):
-    def writable(self):
-        return True
-
     def tell(self):
         return 0
 
