@@ -5,6 +5,8 @@
 //! It also holds two pieces of vocabulary that guest, membrane and controller
 //! share: the SHA-256 [`Digest`] and spec 001's observation pages in [`paging`].
 
+#![doc(test(attr(forbid(unsafe_code))))]
+
 pub mod backend;
 pub mod composite;
 pub mod digest;
