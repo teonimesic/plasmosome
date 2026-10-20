@@ -27,6 +27,8 @@ pub enum ClockError {
     BeforeEpoch,
     /// `clock_gettime` refused the continuous clock with this `errno`.
     Continuous { errno: i32 },
+    /// The continuous clock gave a negative time.
+    ContinuousNegative,
     /// The boot session could not be read, or what was read is not a UUID.
     BootSession { detail: String },
 }
@@ -137,8 +139,13 @@ fn continuous_ns() -> Result<u64, ClockError> {
             errno: io::Error::last_os_error().raw_os_error().unwrap_or(0),
         });
     }
-    let seconds = u64::try_from(now.tv_sec).unwrap_or(0);
-    let nanos = u64::try_from(now.tv_nsec).unwrap_or(0);
+    continuous_from(now.tv_sec, now.tv_nsec)
+}
+
+fn continuous_from(seconds: libc::time_t, nanos: libc::c_long) -> Result<u64, ClockError> {
+    let (Ok(seconds), Ok(nanos)) = (u64::try_from(seconds), u64::try_from(nanos)) else {
+        return Err(ClockError::ContinuousNegative);
+    };
     Ok(seconds.saturating_mul(1_000_000_000).saturating_add(nanos))
 }
 
@@ -160,6 +167,9 @@ impl fmt::Display for ClockError {
             }
             ClockError::Continuous { errno } => {
                 write!(f, "the continuous clock could not be read: errno {errno}")
+            }
+            ClockError::ContinuousNegative => {
+                f.write_str("the continuous clock read a negative time")
             }
             ClockError::BootSession { detail } => {
                 write!(f, "the boot session could not be read: {detail}")
