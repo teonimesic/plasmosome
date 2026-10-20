@@ -598,6 +598,27 @@ def stable_comparison():
             assert [item["kind"] for item in found] == ["tool-failure"], (text, found)
         found = API["stable_findings"](PIN, (Path(directory) / "absent.toml").as_uri())
         assert [item["kind"] for item in found] == ["tool-failure"], found
+        namespace = API["stable_findings"].__globals__
+        saved = namespace["CHANNEL_LIMIT"]
+        namespace["CHANNEL_LIMIT"] = 16
+        try:
+            found = API["stable_findings"](PIN, channel(directory, "1.100.0"))
+        finally:
+            namespace["CHANNEL_LIMIT"] = saved
+        assert [item["kind"] for item in found] == ["tool-failure"] and "over 16 bytes" in found[0]["title"], found
+
+
+def report_arguments():
+    with tempfile.TemporaryDirectory(prefix="cargo-deny-check-report-arguments-") as directory:
+        repository = Repository(directory, BASE)
+        output = Path(directory) / "findings.json"
+        for args in (("report", "--json-out", str(output)), ("report", "--event", "push"),
+                     ("report", "--json-out", str(output), "--event", "push", "--changed-since", "HEAD"),
+                     ("sources", "--event", "push"), ("advisories", "--json-out", str(output)),
+                     ("report", "--json-out", str(output), "--event", "pull_request")):
+            result, calls, summary = repository.run(*args, plan=QUIET)
+            assert result.returncode == 2 and "usage:" in result.stderr, (args, result.stdout, result.stderr)
+            assert calls == [] and not output.exists(), (args, calls)
 
 
 def main():
@@ -606,6 +627,7 @@ def main():
     report_covers_every_lockfile_with_warnings()
     report_tool_failures()
     report_weekly_checks()
+    report_arguments()
     classification()
     single_rules()
     timeout()

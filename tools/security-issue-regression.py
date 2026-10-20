@@ -36,6 +36,9 @@ command = " ".join(args[:2])
 if command in state.get("fail", []):
     print(f"fake gh: {command} refused", file=sys.stderr)
     sys.exit(1)
+if command in state.get("garbage", []):
+    print("fake gh: not JSON")
+    sys.exit(0)
 if value("--repo") != "example/repo":
     print("fake gh: no --repo example/repo", file=sys.stderr)
     sys.exit(1)
@@ -107,25 +110,26 @@ def fake_bin():
 
 
 class Forge:
-    def __init__(self, directory, issues=(), labels=(), fail=()):
+    def __init__(self, directory, issues=(), labels=(), fail=(), garbage=()):
         self.directory = Path(directory)
         self.bin = fake_bin()
         self.state = self.directory / "state.json"
         self.log = self.directory / "gh.log"
         self.findings = self.directory / "findings.json"
-        self.state.write_text(json.dumps({"issues": list(issues), "labels": list(labels), "fail": list(fail)}))
+        self.state.write_text(json.dumps({"issues": list(issues), "labels": list(labels), "fail": list(fail),
+                                          "garbage": list(garbage)}))
 
-    def run(self, report=None, *extra, mode="write", findings=None):
+    def run(self, report=None, *extra, mode="write", findings=None, path=None, repo="example/repo"):
         if self.log.exists():
             self.log.unlink()
         if report is not None:
             self.findings.write_text(json.dumps(report))
         environment = {
-            "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", os.defpath),
+            "PATH": path if path is not None else str(self.bin) + os.pathsep + os.environ.get("PATH", os.defpath),
             "HOME": str(self.directory), "GH_TOKEN": "fixture-token", "FAKE_GH_STATE": str(self.state),
             "FAKE_GH_LOG": str(self.log), "PYTHONDONTWRITEBYTECODE": "1",
         }
-        argv = [sys.executable, str(SOURCE), "--findings", str(findings or self.findings), "--repo", "example/repo",
+        argv = [sys.executable, str(SOURCE), "--findings", str(findings or self.findings), "--repo", repo,
                 "--run-url", RUN_URL, "--mode", mode, *extra]
         result = subprocess.run(argv, env=environment, capture_output=True, text=True, timeout=60)
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
@@ -265,6 +269,31 @@ def tool_failures():
             assert [tuple(call["args"][:2]) for call in writes(calls)] == expected, (fail, calls)
 
 
+def gh_answers_that_cannot_be_trusted():
+    crowded = [issue(number, "a person's report") for number in range(1, 1001)]
+    with tempfile.TemporaryDirectory(prefix="security-issue-gh-answers-") as directory:
+        for name, options, message in (
+            ("crowded", {"issues": crowded, "labels": ["security"]}, "1000 or more open security issues"),
+            ("issue-list-garbage", {"garbage": ["issue list"]}, "gh issue list returned invalid JSON"),
+            ("label-list-garbage", {"garbage": ["label list"]}, "gh label list returned invalid JSON"),
+        ):
+            path = Path(directory) / name
+            path.mkdir()
+            forge = Forge(path, **options)
+            result, calls = forge.run(document(VULNERABILITY))
+            assert result.returncode == 2 and message in result.stderr, (name, result.stdout, result.stderr)
+            assert writes(calls) == [], (name, calls)
+
+        empty = Path(directory) / "empty-bin"
+        empty.mkdir()
+        forge = Forge(Path(directory) / "crowded")
+        result, calls = forge.run(document(VULNERABILITY), path=str(empty))
+        assert result.returncode == 2 and "gh issue list could not run" in result.stderr, (result.stdout, result.stderr)
+
+        result, calls = forge.run(document(VULNERABILITY), repo="https://github.com/example/repo")
+        assert result.returncode == 2 and "--repo must be OWNER/REPO" in result.stderr and calls == [], result.stderr
+
+
 def dry_run():
     with tempfile.TemporaryDirectory(prefix="security-issue-dry-run-") as directory:
         forge = Forge(directory)
@@ -292,6 +321,12 @@ def long_body():
         body = forge.issues()[1]["body"]
         assert len(body) <= 65536 and body.startswith(MARKER) and "seven days" in body, len(body)
         assert "crate0 1.0.0" in body and "crate399 1.0.0" not in body and "more findings" in body, body[-400:]
+
+    with tempfile.TemporaryDirectory(prefix="security-issue-long-title-") as directory:
+        forge = Forge(directory, labels=["security"])
+        result, calls = forge.run(document({**VULNERABILITY, "title": "y" * 600}))
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert "`" + "y" * 500 + "...`" in forge.issues()[1]["body"], forge.issues()[1]["body"]
 
 
 def findings_are_not_markup():
@@ -368,6 +403,7 @@ def main():
     a_persons_issue_is_untouched()
     duplicates()
     tool_failures()
+    gh_answers_that_cannot_be_trusted()
     dry_run()
     long_body()
     findings_are_not_markup()

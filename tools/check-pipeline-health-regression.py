@@ -239,6 +239,9 @@ def security_issues():
         (issues_page([{**security_issue(4, week), "number": "4"}], 1),),
         (issues_page([security_issue(4, week)], 2, "next"), issues_page([security_issue(9, hour)], 2, "next")),
         ({"data": {"repository": {"pullRequests": {}}}},),
+        (["not an object"],),
+        ({"data": {"repository": {"issues": {"nodes": "x", "totalCount": 1, "pageInfo": {}}}}},),
+        ({"data": {"repository": {"issues": {"nodes": [], "totalCount": 0, "pageInfo": {"endCursor": None}}}}},),
     ):
         partial, errors, calls = security(*pages)
         assert partial["collection_status"] in {"partial", "unavailable"}, (pages, partial)
