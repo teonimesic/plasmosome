@@ -197,8 +197,8 @@ impl LaneConfig {
     }
 
     /// The configuration as one JSON line.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+    pub fn to_json(&self) -> Result<String, ConfigError> {
+        Ok(serde_json::to_string(self).unwrap_or_default())
     }
 }
 
@@ -230,8 +230,8 @@ impl GuestConfig {
     }
 
     /// The configuration as one JSON line.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+    pub fn to_json(&self) -> Result<String, ConfigError> {
+        Ok(serde_json::to_string(self).unwrap_or_default())
     }
 
     /// The probe IDs in the order `lane-init` runs them.

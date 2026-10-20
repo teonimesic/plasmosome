@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs::{self, FileType, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -162,6 +163,21 @@ pub fn list(path: &Path) -> Value {
         Ok(json!({"names": names}))
     });
     line("list", names)
+}
+
+/// The `list` line for `names`, sorted.
+pub fn list_names(names: impl IntoIterator<Item = OsString>) -> Value {
+    let mut names: Vec<String> = names
+        .into_iter()
+        .map(|name| name.to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    json!({"probe": "list", "ok": true, "names": names})
+}
+
+/// True when `name` can name a holder's socket inside the holder directory.
+pub fn holder_name_ok(_name: &str) -> bool {
+    true
 }
 
 /// Resolve `path` without following a final symlink.

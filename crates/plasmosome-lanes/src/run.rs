@@ -201,7 +201,7 @@ pub fn run_lane(
     let pid = child.id();
     let stderr_reader = StderrReader::start(child.stderr.take());
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(lane.to_json().as_bytes());
+        let _ = stdin.write_all(lane.to_json().unwrap_or_default().as_bytes());
     }
     let status = match wait_until(&mut child, deadline) {
         Ok(Some(status)) => {

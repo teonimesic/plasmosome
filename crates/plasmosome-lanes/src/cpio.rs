@@ -246,7 +246,11 @@ pub fn lane_initramfs(
         Entry::dir("run", 0o755),
         Entry::dir("bin", 0o755),
         Entry::file("bin/lane-probe", 0o755, probe.to_vec()),
-        Entry::file("lane.json", 0o644, guest.to_json().into_bytes()),
+        Entry::file(
+            "lane.json",
+            0o644,
+            guest.to_json().unwrap_or_default().into_bytes(),
+        ),
         Entry::file("init", 0o755, init.to_vec()),
     ])
 }
