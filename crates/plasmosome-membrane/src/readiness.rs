@@ -124,6 +124,9 @@ impl<'a> ProbeBudget<'a> {
 /// newline-terminated frame within [`MAX_RESPONSE_BYTES`], everything after
 /// that first newline is ignored, and no verdict that finished after the
 /// allowance is accepted — a late answer reports as timed out, never ready.
+/// The budget is checked once more when the exchange with the broker ends,
+/// however it ended. A shutdown seen then is `Err(Cancelled)`, whatever the
+/// broker answered.
 pub fn probe(socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
     probe_with(
         socket,
@@ -168,9 +171,6 @@ where
         Err(ProbeStopped::TimedOut) => return Ok(spent()),
     }
     let verdict = exchange(stream, STATUS_REQUEST, budget, &now, wait);
-    // One gate before anything leaves the probe, whichever path produced it:
-    // cancellation wins over expiry and over every verdict, and nothing
-    // survives an allowance it outlived.
     match budget.remaining_at(now()) {
         Err(ProbeStopped::Cancelled) => Err(Cancelled),
         Err(ProbeStopped::TimedOut) => Ok(spent()),
