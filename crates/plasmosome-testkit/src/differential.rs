@@ -206,6 +206,13 @@ pub enum ManifestRefusal {
         probe: String,
         field: String,
     },
+    RuleAndAllowance {
+        probe: String,
+        field: String,
+    },
+    DuplicateNeutralMount {
+        path: String,
+    },
     NeutralMountMissing {
         mount: &'static str,
     },
