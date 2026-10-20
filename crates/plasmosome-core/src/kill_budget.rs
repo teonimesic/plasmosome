@@ -224,8 +224,6 @@ mod tests {
     use proptest::prelude::*;
     use std::cell::Cell;
 
-    const MS: Duration = Duration::from_millis(1);
-
     fn ms(count: u64) -> Duration {
         Duration::from_millis(count)
     }
@@ -251,7 +249,7 @@ mod tests {
     }
 
     fn is_whole_ms(duration: Duration) -> bool {
-        duration.subsec_nanos() % 1_000_000 == 0
+        duration.subsec_nanos().is_multiple_of(1_000_000)
     }
 
     #[test]
