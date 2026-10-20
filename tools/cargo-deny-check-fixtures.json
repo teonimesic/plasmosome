@@ -164,10 +164,10 @@
   ]
  },
  "error-log-with-summary": {
-  "origin": "synthesized: an ERROR log record beside a clean summary, with exit status 0",
+  "origin": "synthesized: the ERROR log cargo-deny 0.20.2 writes and then continues past (src/cargo-deny/common.rs:332), with an invented reason, beside a clean summary and exit status 0",
   "exit": 0,
   "stderr": [
-   "{\"fields\":{\"level\":\"ERROR\",\"message\":\"failed to load advisory database\",\"timestamp\":\"2026-10-20T08:00:00.000000Z\"},\"type\":\"log\"}",
+   "{\"fields\":{\"level\":\"ERROR\",\"message\":\"failed to open the local crates.io index, feature sets for crates may not be correct: an invented reason\",\"timestamp\":\"2026-10-20T08:00:00.000000Z\"},\"type\":\"log\"}",
    "{\"fields\":{\"advisories\":{\"errors\":0,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
   ]
  },
@@ -177,6 +177,14 @@
   "stderr": [
    "thread 'main' panicked at src/cargo-deny/main.rs:1:1:",
    "a line that is not JSON"
+  ]
+ },
+ "stray-line": {
+  "origin": "synthesized: one line that is not JSON beside a clean advisories summary, with exit status 0",
+  "exit": 0,
+  "stderr": [
+   "    Updating crates.io index",
+   "{\"fields\":{\"advisories\":{\"errors\":0,\"helps\":0,\"notes\":0,\"warnings\":0}},\"type\":\"summary\"}"
   ]
  },
  "nonzero-without-diagnostic": {

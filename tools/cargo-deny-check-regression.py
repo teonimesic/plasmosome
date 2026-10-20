@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Defend which lockfiles cargo-deny-check reads, when it runs, and how it classifies cargo-deny."""
 
+import contextlib
+import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import runpy
 import shlex
 import shutil
@@ -48,6 +51,58 @@ def classified(fixture, check):
     return API["classify"](check, entry["stderr"], entry["exit"])
 
 
+def records(fixture, kind):
+    return [line for line in FIXTURES[fixture]["stderr"] if json.loads(line)["type"] == kind]
+
+
+def single_rules():
+    for name, check, lines, returncode, fragment in (
+        ("only another check's summary", "advisories", FIXTURES["clean-sources"]["stderr"], 0,
+         "a summary for another check"),
+        ("a refusing code of another check", "sources",
+         records("vulnerability", "diagnostic") + records("clean-sources", "summary"), 1,
+         "a code this wrapper does not know: error vulnerability RUSTSEC-2021-0003"),
+        ("a reported code of another check", "advisories",
+         records("licence-rejected", "diagnostic")[:1] + records("clean-advisories", "summary"), 4,
+         "a code this wrapper does not know: error rejected"),
+        ("a nonzero exit with only a warning", "advisories", FIXTURES["notice-warned"]["stderr"], 1, "exited 1"),
+        ("a signal kill", "advisories", FIXTURES["clean-advisories"]["stderr"], -9, "exited -9"),
+    ):
+        outcome = API["classify"](check, lines, returncode)
+        assert outcome["status"] == "tool failure" and outcome["refusals"] == [], (name, outcome)
+        assert len(outcome["failures"]) == 1 and fragment in outcome["failures"][0], (name, outcome)
+
+    both = API["classify"]("advisories", FIXTURES["vulnerability"]["stderr"] + FIXTURES["db-unreachable"]["stderr"], 1)
+    assert both["status"] == "tool failure" and both["refusals"] and both["failures"], both
+
+
+def timeout():
+    with tempfile.TemporaryDirectory(prefix="cargo-deny-check-timeout-") as directory:
+        sleeper = Path(directory) / "cargo-deny"
+        write(sleeper, f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
+        sleeper.chmod(0o755)
+        namespace = API["run"].__globals__
+        saved = namespace["TIMEOUT"], os.environ["PATH"]
+        namespace["TIMEOUT"] = 0.5
+        os.environ["PATH"] = directory + os.pathsep + saved[1]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                outcome = API["run"](Path(directory), "advisories", PurePosixPath("Cargo.lock"))
+        finally:
+            namespace["TIMEOUT"], os.environ["PATH"] = saved
+        assert outcome["status"] == "tool failure" and outcome["code"] == 2, outcome
+        assert "could not complete" in outcome["failures"][0] and "timed out" in outcome["failures"][0], outcome
+
+
+def cache_key_names_installed_version():
+    workflow = (SOURCE.parent.parent / ".github" / "workflows" / "ci.yml").read_text()
+    versions = re.findall(r"cargo install cargo-deny --version (\S+) --locked", workflow)
+    assert len(versions) == 1, versions
+    job = next(block for block in re.split(r"(?m)^(?=  [\w-]+:\s*$)", workflow) if "cargo install cargo-deny" in block)
+    keys = re.findall(r"(?m)^\s+key:\s*(\S+)\s*$", job)
+    assert len(keys) == 1 and versions[0] in re.split(r"[^0-9A-Za-z.]+", keys[0]), (versions, keys)
+
+
 def classification():
     cases = [
         ("clean-sources", "sources", "pass", []),
@@ -72,8 +127,9 @@ def classification():
         ("licence-rejected", "licenses", "pass", ["rejected", "m 0.1.0", "GPL-3.0-only"]),
         ("unknown-error-code", "advisories", "tool failure", ["a-code-cargo-deny-0-20-2-never-writes"]),
         ("index-failure", "advisories", "tool failure", ["index-failure"]),
-        ("error-log-with-summary", "advisories", "tool failure", ["failed to load advisory database"]),
+        ("error-log-with-summary", "advisories", "tool failure", ["feature sets for crates may not be correct"]),
         ("not-json", "advisories", "tool failure", ["thread 'main' panicked"]),
+        ("stray-line", "advisories", "tool failure", ["a line that is not JSON: Updating crates.io index"]),
         ("nonzero-without-diagnostic", "advisories", "tool failure", ["exited 1"]),
         ("silent", "advisories", "tool failure", ["no advisories summary"]),
         ("unknown-record-type", "advisories", "tool failure", ["finding"]),
@@ -185,6 +241,7 @@ BASE = {
     "fuzz/Cargo.lock": "version = 4\n",
     "README.md": "readme\n",
     "docs/Cargo.toml.md": "notes\n",
+    "vendor/Cargo.lock.orig": "version = 4\n",
 }
 
 
@@ -197,7 +254,6 @@ def tracked_lockfiles_and_invocation():
         repository = Repository(directory, BASE)
         write(repository.root / "scratch/Cargo.lock", "version = 4\n")
         write(repository.root / "scratch/Cargo.toml", "[package]\nname = \"scratch\"\n")
-        write(repository.root / "vendor/Cargo.lock.orig", "version = 4\n")
         for check, extra in (("sources", []), ("advisories", ["-W", "notice", "-W", "unmaintained"]), ("licenses", [])):
             result, calls, summary = repository.run(check, plan=plan(check))
             assert result.returncode == 0, (check, result.stdout, result.stderr)
@@ -328,10 +384,13 @@ def outcomes():
 
 def main():
     classification()
+    single_rules()
+    timeout()
     tracked_lockfiles_and_invocation()
     logged_command()
     trigger()
     outcomes()
+    cache_key_names_installed_version()
     print("PASS: cargo-deny output classified by code, tracked lockfiles at any depth, manifest trigger, worst outcome wins")
 
 
