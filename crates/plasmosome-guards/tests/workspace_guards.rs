@@ -6,6 +6,10 @@ use plasmosome_guards::check_workspace;
 
 const TESTKIT: &str = "plasmosome-testkit";
 
+const BACKEND: &str = "plasmosome-backend";
+
+const TEST_FIXTURE: &str = "test-fixture";
+
 const HELD_NAMES: &[&str] = &["plasmosome", "plasmid"];
 
 const HELD_REGISTRIES: &[&str] = &["crates-io"];
@@ -480,6 +484,66 @@ fn only_the_testkit_enables_the_backend_test_fixture() {
             "{outside:?} enable `{BACKEND}/{TEST_FIXTURE}` outside `[dev-dependencies]`. That feature lets code build a `CommandName` from text, so test scaffolding would ship to a consumer, which spec 013 puts in a guard's scope as \"test scaffolding leaving `[dev-dependencies]`\". Only `{TESTKIT}`, which `testkit_is_dev_only` keeps dev-only, may enable it"
         );
     });
+}
+
+fn test_fixture_enablers(root: &Path) -> Vec<String> {
+    let output = cargo_in(root)
+        .args([
+            "tree",
+            "--locked",
+            "--workspace",
+            "--edges",
+            "normal,build,features",
+            "--invert",
+            BACKEND,
+            "--target",
+            "all",
+            "--prefix",
+            "depth",
+        ])
+        .output()
+        .expect("cargo tree runs");
+    assert!(
+        output.status.success(),
+        "cargo tree --invert {BACKEND} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let graph = String::from_utf8_lossy(&output.stdout);
+    let nodes: Vec<(usize, &str)> = graph
+        .lines()
+        .filter_map(|line| {
+            let text = line.trim_start_matches(|character: char| character.is_ascii_digit());
+            let depth = line[..line.len() - text.len()].parse().ok()?;
+            Some((depth, text))
+        })
+        .collect();
+    assert!(
+        nodes
+            .first()
+            .is_some_and(|(depth, text)| *depth == 0 && text.starts_with(&format!("{BACKEND} v"))),
+        "the inverted graph is not rooted at `{BACKEND}`, so this guard would read nothing: {graph}"
+    );
+    let feature = format!("{BACKEND} feature \"{TEST_FIXTURE}\"");
+    let mut enablers = std::collections::BTreeSet::new();
+    for (at, (depth, text)) in nodes.iter().enumerate() {
+        if text.starts_with(&feature) {
+            enablers.extend(
+                nodes[at + 1..]
+                    .iter()
+                    .take_while(|(below, _)| below > depth)
+                    .filter(|(below, _)| *below == depth + 1)
+                    .map(|(_, text)| text.split(' ').next().unwrap_or_default().to_string()),
+            );
+        }
+    }
+    enablers.into_iter().collect()
+}
+
+fn test_fixture_enablers_outside_the_testkit(root: &Path) -> Vec<String> {
+    test_fixture_enablers(root)
+        .into_iter()
+        .filter(|enabler| enabler != TESTKIT)
+        .collect()
 }
 
 fn fixture_feature_workspace(consumer: &str, workspace_dependencies: &str) -> tempfile::TempDir {
