@@ -1,6 +1,8 @@
 use crate::lifetime::{BootSession, Continuous, WallMs};
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+const NS_PER_MS: u64 = 1_000_000;
 
 /// One reading of the three clocks a lifetime decision uses, taken together (spec 028 §3).
 #[derive(Clone, Copy, Debug)]
@@ -32,44 +34,72 @@ impl ManualClock {
     /// Starts with the wall reading at `wall`, the continuous reading at `continuous_ns` in
     /// `boot`, and the wait reading at the real `Instant::now()`.
     pub fn new(wall: WallMs, boot: BootSession, continuous_ns: u64) -> ManualClock {
-        let _ = (wall, boot, continuous_ns);
-        unimplemented!()
+        ManualClock {
+            reading: Mutex::new(ClockReading {
+                wall,
+                continuous: Continuous {
+                    boot,
+                    ns: continuous_ns,
+                },
+                wait: Instant::now(),
+            }),
+        }
     }
 
     /// Steps the wall reading by `ms`, back when negative. It stops at 1970-01-01T00:00:00Z.
     pub fn advance_wall_ms(&self, ms: i64) {
-        let _ = ms;
-        unimplemented!()
+        step_wall(&mut self.reading(), ms);
     }
 
-    /// Moves the continuous reading forward by `ms`.
+    /// Moves the continuous reading forward by `ms`. It stops at `u64::MAX` nanoseconds.
     pub fn advance_continuous_ms(&self, ms: u64) {
-        let _ = ms;
-        unimplemented!()
+        step_continuous(&mut self.reading(), ms);
     }
 
     /// Moves the wait reading forward by `ms`. Panics past what an `Instant` holds.
     pub fn advance_wait_ms(&self, ms: u64) {
-        let _ = ms;
-        unimplemented!()
+        step_wait(&mut self.reading(), ms);
     }
 
-    /// Moves all three readings forward by `ms`, as time passing on an awake host does.
+    /// Moves all three readings forward by `ms` at once, as time passing on an awake host does.
     pub fn advance_all_ms(&self, ms: u64) {
-        let _ = ms;
-        unimplemented!()
+        let mut reading = self.reading();
+        reading.wall = WallMs::from_unix_ms(reading.wall.unix_ms().saturating_add(ms));
+        step_continuous(&mut reading, ms);
+        step_wait(&mut reading, ms);
     }
 
     /// Starts a new boot session, with the continuous reading at `continuous_ns`.
     pub fn set_boot(&self, boot: BootSession, continuous_ns: u64) {
-        let _ = (boot, continuous_ns);
-        unimplemented!()
+        self.reading().continuous = Continuous {
+            boot,
+            ns: continuous_ns,
+        };
     }
+
+    fn reading(&self) -> MutexGuard<'_, ClockReading> {
+        self.reading.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+fn step_wall(reading: &mut ClockReading, ms: i64) {
+    reading.wall = WallMs::from_unix_ms(reading.wall.unix_ms().saturating_add_signed(ms));
+}
+
+fn step_continuous(reading: &mut ClockReading, ms: u64) {
+    reading.continuous.ns = reading
+        .continuous
+        .ns
+        .saturating_add(ms.saturating_mul(NS_PER_MS));
+}
+
+fn step_wait(reading: &mut ClockReading, ms: u64) {
+    reading.wait += Duration::from_millis(ms);
 }
 
 impl Clock for ManualClock {
     fn now(&self) -> ClockReading {
-        unimplemented!()
+        *self.reading()
     }
 }
 

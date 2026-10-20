@@ -1,8 +1,14 @@
-use plasmosome_backend::{BootSession, Clock, ClockReading};
+use plasmosome_backend::{BootSession, Clock, ClockReading, Continuous, WallMs};
 use std::fmt;
-use std::time::SystemTime;
+use std::io;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-const CONTINUOUS_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
+#[cfg(target_os = "macos")]
+const CONTINUOUS_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC_RAW;
+#[cfg(target_os = "linux")]
+const CONTINUOUS_CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
+#[cfg(target_os = "linux")]
+const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 
 /// The production clock (spec 028 §3). The wall reading is the system's UTC time. The
 /// continuous reading counts while the host sleeps and a wall-clock step does not move it:
@@ -32,37 +38,119 @@ impl SystemClock {
     /// continuous clock that refuses a read gives `u64::MAX`, so every bound of this boot
     /// session reads as passed.
     pub fn new() -> Result<SystemClock, ClockError> {
-        unimplemented!()
+        wall_ms_at(SystemTime::now())?;
+        continuous_ns()?;
+        Ok(SystemClock {
+            boot: boot_session()?,
+        })
     }
 }
 
 impl Clock for SystemClock {
     fn now(&self) -> ClockReading {
-        unimplemented!()
+        let wall = WallMs::from_unix_ms(wall_ms_at(SystemTime::now()).unwrap_or(0));
+        let ns = continuous_ns().unwrap_or(u64::MAX);
+        ClockReading {
+            wall,
+            continuous: Continuous {
+                boot: self.boot,
+                ns,
+            },
+            wait: Instant::now(),
+        }
     }
 }
 
 /// The host boot session: `kern.bootsessionuuid` on macOS and
 /// `/proc/sys/kernel/random/boot_id` on Linux, read now. It does not change while a process
 /// runs.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 pub fn boot_session() -> Result<BootSession, ClockError> {
-    unimplemented!()
+    let mut text = [0u8; 64];
+    let mut length = text.len();
+    // SAFETY: the name is a NUL-terminated literal. `text` and `length` are live locals that
+    // outlive the call, and `length` holds the size of `text`, so the kernel writes at most
+    // that many bytes. The new-value pointer is null with length 0, so nothing is set.
+    let read = unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            text.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return Err(ClockError::BootSession {
+            detail: format!(
+                "sysctl kern.bootsessionuuid: {}",
+                io::Error::last_os_error()
+            ),
+        });
+    }
+    boot_from(&text[..length.min(text.len())], b"\0")
+}
+
+/// The host boot session: `kern.bootsessionuuid` on macOS and
+/// `/proc/sys/kernel/random/boot_id` on Linux, read now. It does not change while a process
+/// runs.
+#[cfg(target_os = "linux")]
+pub fn boot_session() -> Result<BootSession, ClockError> {
+    let text = std::fs::read(BOOT_ID_PATH).map_err(|error| ClockError::BootSession {
+        detail: format!("{BOOT_ID_PATH}: {error}"),
+    })?;
+    boot_from(&text, b"\n")
 }
 
 fn wall_ms_at(now: SystemTime) -> Result<u64, ClockError> {
-    let _ = now;
-    unimplemented!()
+    let since = now
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ClockError::BeforeEpoch)?;
+    Ok(u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+#[allow(unsafe_code)]
+fn continuous_ns() -> Result<u64, ClockError> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a live, writable `timespec` that outlives the call, and
+    // `CONTINUOUS_CLOCK` is a clock this target defines.
+    if unsafe { libc::clock_gettime(CONTINUOUS_CLOCK, &mut now) } != 0 {
+        return Err(ClockError::Continuous {
+            errno: io::Error::last_os_error().raw_os_error().unwrap_or(0),
+        });
+    }
+    let seconds = u64::try_from(now.tv_sec).unwrap_or(0);
+    let nanos = u64::try_from(now.tv_nsec).unwrap_or(0);
+    Ok(seconds.saturating_mul(1_000_000_000).saturating_add(nanos))
 }
 
 fn boot_from(value: &[u8], terminator: &[u8]) -> Result<BootSession, ClockError> {
-    let _ = (value, terminator);
-    unimplemented!()
+    let line = value.strip_suffix(terminator).unwrap_or(value);
+    std::str::from_utf8(line)
+        .ok()
+        .and_then(BootSession::parse)
+        .ok_or_else(|| ClockError::BootSession {
+            detail: format!("{:?} is not a UUID", String::from_utf8_lossy(value)),
+        })
 }
 
 impl fmt::Display for ClockError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        unimplemented!()
+        match self {
+            ClockError::BeforeEpoch => {
+                f.write_str("the wall clock reads before 1970-01-01T00:00:00Z")
+            }
+            ClockError::Continuous { errno } => {
+                write!(f, "the continuous clock could not be read: errno {errno}")
+            }
+            ClockError::BootSession { detail } => {
+                write!(f, "the boot session could not be read: {detail}")
+            }
+        }
     }
 }
 

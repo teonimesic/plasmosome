@@ -1,5 +1,5 @@
 use crate::clock::ClockReading;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// The shortest lease or idle limit, in milliseconds (spec 028 §1).
@@ -17,6 +17,10 @@ pub const DEFAULT_LEASE_MS: u64 = 900_000;
 /// The 2 s in H = B + 2 s + D. It is also how long after B the controller may take to start an
 /// expiry's removal.
 pub const REFERENCE_GRACE_MS: u64 = 2_000;
+
+const NS_PER_MS: u64 = 1_000_000;
+const MS_PER_DAY: u64 = 86_400_000;
+const EPOCH_YEAR: u64 = 1970;
 
 /// A UTC wall-clock instant, in milliseconds since 1970-01-01T00:00:00Z.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -50,20 +54,76 @@ impl WallMs {
     /// than three fraction digits, surrounding space, a leap second, a year past 9999 and an
     /// instant before 1970 are refused.
     pub fn parse_rfc3339(text: &str) -> Result<WallMs, TimeTextError> {
-        let _ = text;
-        unimplemented!()
+        let bytes = text.as_bytes();
+        let fraction = match bytes.len() {
+            20 => &[][..],
+            22..=24 if bytes[19] == b'.' => &bytes[20..bytes.len() - 1],
+            _ => return Err(TimeTextError::Form),
+        };
+        let separators = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':')];
+        if separators.iter().any(|&(at, byte)| bytes[at] != byte) || bytes[bytes.len() - 1] != b'Z'
+        {
+            return Err(TimeTextError::Form);
+        }
+        let number = |digits: &[u8]| {
+            digits.iter().try_fold(0u64, |value, &digit| {
+                digit
+                    .is_ascii_digit()
+                    .then(|| value * 10 + u64::from(digit - b'0'))
+            })
+        };
+        let field = |from: usize, to: usize| number(&bytes[from..to]).ok_or(TimeTextError::Form);
+        let year = field(0, 4)?;
+        let month = field(5, 7)?;
+        let day = field(8, 10)?;
+        let hour = field(11, 13)?;
+        let minute = field(14, 16)?;
+        let second = field(17, 19)?;
+        let mut millis = number(fraction).ok_or(TimeTextError::Form)?;
+        for _ in fraction.len()..3 {
+            millis *= 10;
+        }
+        let out_of_range = |name| Err(TimeTextError::Field { name });
+        if !(1..=12).contains(&month) {
+            return out_of_range("month");
+        }
+        if !(1..=days_in_month(year, month)).contains(&day) {
+            return out_of_range("day");
+        }
+        if hour > 23 {
+            return out_of_range("hour");
+        }
+        if minute > 59 {
+            return out_of_range("minute");
+        }
+        if second > 59 {
+            return out_of_range("second");
+        }
+        if year < EPOCH_YEAR {
+            return Err(TimeTextError::BeforeEpoch);
+        }
+        let seconds =
+            days_since_epoch(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second;
+        Ok(WallMs(seconds * 1_000 + millis))
     }
 
     /// Writes `YYYY-MM-DDTHH:MM:SS.sssZ`, always with three fraction digits. A year past 9999
     /// is written with more digits, which [`WallMs::parse_rfc3339`] refuses.
     pub fn to_rfc3339(self) -> String {
-        unimplemented!()
+        let (year, month, day) = civil_from_days(self.0 / MS_PER_DAY);
+        let of_day = self.0 % MS_PER_DAY;
+        format!(
+            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+            of_day / 3_600_000,
+            of_day / 60_000 % 60,
+            of_day / 1_000 % 60,
+            of_day % 1_000
+        )
     }
 
     /// The instant `ms` later, or `None` past what a `u64` of milliseconds holds.
     pub fn checked_add_ms(self, ms: u64) -> Option<WallMs> {
-        let _ = ms;
-        unimplemented!()
+        self.0.checked_add(ms).map(WallMs)
     }
 }
 
@@ -81,8 +141,10 @@ impl BootSession {
 
     /// Reads a hyphenated UUID of 36 characters, in either case. Any other text is `None`.
     pub fn parse(text: &str) -> Option<BootSession> {
-        let _ = text;
-        unimplemented!()
+        if text.len() != 36 {
+            return None;
+        }
+        Uuid::try_parse(text).ok().map(BootSession)
     }
 
     /// The identity.
@@ -93,8 +155,7 @@ impl BootSession {
 
 impl std::fmt::Display for BootSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        unimplemented!()
+        write!(f, "{}", self.0.hyphenated())
     }
 }
 
@@ -118,30 +179,53 @@ impl Bound {
     /// The bound `ms` after `now`, with both readings taken from that one reading. `None` when
     /// either reading would overflow.
     pub fn after(now: &ClockReading, ms: u64) -> Option<Bound> {
-        let _ = (now, ms);
-        unimplemented!()
+        let ns = now.continuous.ns.checked_add(ms.checked_mul(NS_PER_MS)?)?;
+        Some(Bound {
+            not_after: now.wall.checked_add_ms(ms)?,
+            continuous: Continuous {
+                boot: now.continuous.boot,
+                ns,
+            },
+        })
     }
 
     /// True once the wall reading reaches `not_after`, or the continuous reading of the same
     /// boot session reaches the continuous deadline. At B itself it has passed.
     pub fn passed(&self, now: &ClockReading) -> bool {
-        let _ = now;
-        unimplemented!()
+        now.wall >= self.not_after
+            || (now.continuous.boot == self.continuous.boot
+                && now.continuous.ns >= self.continuous.ns)
     }
 
     /// Whole milliseconds left on the reading with less time left, and 0 once that one has
     /// passed. With another boot session it is the wall reading's.
     pub fn remaining_ms(&self, now: &ClockReading) -> u64 {
-        let _ = now;
-        unimplemented!()
+        let wall = self.not_after.0.saturating_sub(now.wall.0);
+        if now.continuous.boot != self.continuous.boot {
+            return wall;
+        }
+        let continuous = self.continuous.ns.saturating_sub(now.continuous.ns) / NS_PER_MS;
+        wall.min(continuous)
     }
 
     /// The earlier of two bounds, each reading taken separately. When the two continuous
     /// deadlines are from different boot sessions they cannot be compared, so the result is
     /// `other` whole when its wall reading is earlier, and `self` otherwise.
     pub fn earlier(self, other: Bound) -> Bound {
-        let _ = other;
-        unimplemented!()
+        if self.continuous.boot != other.continuous.boot {
+            return if other.not_after < self.not_after {
+                other
+            } else {
+                self
+            };
+        }
+        Bound {
+            not_after: self.not_after.min(other.not_after),
+            continuous: Continuous {
+                boot: self.continuous.boot,
+                ns: self.continuous.ns.min(other.continuous.ns),
+            },
+        }
     }
 
     /// Where the bound plus `extra_ms` falls on the wait clock, from this one reading:
@@ -150,8 +234,10 @@ impl Bound {
     /// The sum saturates at `u64::MAX` milliseconds, which an `Instant` on macOS and Linux
     /// holds; where one cannot, the deadline is `now.wait`.
     pub fn wait_deadline(&self, now: &ClockReading, extra_ms: u64) -> Instant {
-        let _ = (now, extra_ms);
-        unimplemented!()
+        let ms = self.remaining_ms(now).saturating_add(extra_ms);
+        now.wait
+            .checked_add(Duration::from_millis(ms))
+            .unwrap_or(now.wait)
     }
 }
 
@@ -167,20 +253,76 @@ pub struct RangeError {
 
 /// Returns `ms` when it is a lease or idle limit spec 028 allows: 1,000 ms to 30 days, inclusive.
 pub fn check_limit_ms(ms: u64) -> Result<u64, RangeError> {
-    let _ = ms;
-    unimplemented!()
+    check_range(ms, "a lease or idle limit", MIN_LIMIT_MS, MAX_LIMIT_MS)
 }
 
 /// Returns `ms` when it is a drain budget spec 028 allows: 1 to 30,000 ms, inclusive.
 pub fn check_drain_ms(ms: u64) -> Result<u64, RangeError> {
-    let _ = ms;
-    unimplemented!()
+    check_range(ms, "a drain budget", MIN_DRAIN_MS, MAX_DRAIN_MS)
+}
+
+fn check_range(value: u64, limit: &'static str, min: u64, max: u64) -> Result<u64, RangeError> {
+    if (min..=max).contains(&value) {
+        Ok(value)
+    } else {
+        Err(RangeError {
+            limit,
+            value,
+            min,
+            max,
+        })
+    }
+}
+
+fn is_leap(year: u64) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
+fn days_in_month(year: u64, month: u64) -> u64 {
+    match month {
+        2 if is_leap(year) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+fn days_since_epoch(year: u64, month: u64, day: u64) -> u64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year / 400;
+    let year_of_era = year % 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn civil_from_days(days: u64) -> (u64, u64, u64) {
+    let days = days + 719_468;
+    let era = days / 146_097;
+    let day_of_era = days % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = era * 400 + year_of_era + u64::from(month <= 2);
+    (year, month, day)
 }
 
 impl std::fmt::Display for TimeTextError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        unimplemented!()
+        match self {
+            TimeTextError::Form => {
+                f.write_str("not an RFC 3339 UTC instant of the form YYYY-MM-DDTHH:MM:SS[.sss]Z")
+            }
+            TimeTextError::Field { name } => write!(f, "the {name} is out of range"),
+            TimeTextError::BeforeEpoch => f.write_str("before 1970-01-01T00:00:00Z"),
+        }
     }
 }
 
@@ -188,8 +330,11 @@ impl std::error::Error for TimeTextError {}
 
 impl std::fmt::Display for RangeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        unimplemented!()
+        write!(
+            f,
+            "{} ms is not {}, which is {} to {} ms",
+            self.value, self.limit, self.min, self.max
+        )
     }
 }
 
