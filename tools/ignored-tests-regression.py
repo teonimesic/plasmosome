@@ -737,6 +737,8 @@ def a_block_no_listing_has_after_a_passing_block_is_refused_on_a_red_run():
     core test failed. In the second, the guards step succeeded and its first block is one no
     listing has; it follows the failed tests step's last block, which passed. Catches folding a
     block into one that holds no failing test, which lists a membrane test under plasmosome-core.
+    In the third, the outcomes are swapped, so the failing block's own step reads as a success.
+    Catches folding because some other step failed.
     """
     drifted = (running("unittests src/lib.rs", "target/debug/deps/plasmosome_membrane-d1f7")
                + tests("test vmm::tests::reaps_the_child ... ok")
@@ -754,6 +756,11 @@ def a_block_no_listing_has_after_a_passing_block_is_refused_on_a_red_run():
     assert f"boots-7b7b (tests/boots.rs) is in the log, but no step's cargo listing has it; {ARGS_HINT}" \
         in across.stderr, across
     assert "| plasmosome-core | boots_a_cell |" not in across.summary, across
+
+    swapped = report(tests_log(core_unit=FAILING_CORE_UNIT + stray) + guards_log(), outcomes=("success", "failure"))
+    assert swapped.code == 1, swapped
+    assert f"boots-7b7b (tests/boots.rs) is in the log, but no step's cargo listing has it; {ARGS_HINT}" \
+        in swapped.stderr, swapped
 
 
 def failure_output_folds_into_a_failing_block_with_no_result_line_yet():
