@@ -15,6 +15,9 @@ runs at once could lose a section. This tool's own findings, an unreadable findi
 second marked issue, form the security-issue section, which every run that writes replaces. An
 unreadable findings file replaces no other section.
 
+audit.yml passes `--handover` with the outcome of the step that handed the findings file over. Unless
+it is success the file is not read, and the run writes a tool failure that says why.
+
 - No findings: nothing happens. The issue is never closed here; closing it is Main's decision.
 - Findings: the open `security` issue whose body carries MARKER gets the new body. It gets a
   comment only when the findings of a section the run rewrote changed, and the comment carries
@@ -53,6 +56,7 @@ BLOCK = re.compile(r"(?ms)^<!-- spec026-section ([a-z][a-z0-9-]*) ([0-9a-f]{64})
 ISSUE_LIMIT = 1000
 BODY_LIMIT = 60000
 SECTION_LIMIT = 20000
+HANDOVER_LIMIT = 100000
 NOTE_RESERVE = 100
 TEXT_LIMIT = 500
 TIMEOUT = 120
@@ -92,13 +96,22 @@ def problem(document):
     return None
 
 
-def load(path):
-    """Read a findings file into its sections; anything else is a tool failure, never "no findings"."""
+def load(path, handover="success"):
+    """Read a findings file into its sections; anything else is a tool failure, never "no findings".
+
+    handover is the outcome of the step that handed the file over. Unless it is success, the file is not
+    read, so a run whose hand-over failed is never taken for the report's findings.
+    """
+    if handover == "failure":
+        return {}, {}, [tool_failure(f"the findings file was over the {HANDOVER_LIMIT} bytes the issue job can read, so "
+                                     "the report job did not hand it over; that job's log lists every finding")]
+    if handover != "success":
+        return {}, {}, [tool_failure("the report job handed over no findings, because one of its steps failed; see the run")]
     try:
         with open(path) as source:
             document = json.load(source)
     except FileNotFoundError:
-        return {}, {}, [tool_failure(f"the report wrote no findings file at {path}; an earlier step failed, see the run")]
+        return {}, {}, [tool_failure(f"there is no findings file at {path}; see the run")]
     except (OSError, ValueError) as error:
         return {}, {}, [tool_failure(f"the findings file {path} could not be read: {error}")]
     reason = problem(document)
@@ -272,6 +285,9 @@ def publish(gh, document, sections, own, run_url):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--findings", required=True, metavar="FILE", help="the file cargo-deny-check report wrote")
+    parser.add_argument("--handover", default="success", metavar="OUTCOME",
+                        help="the outcome of the step that handed the file over; the file is read only on success, "
+                             f"and failure means it was over {HANDOVER_LIMIT} bytes")
     parser.add_argument("--repo", required=True, metavar="OWNER/REPO")
     parser.add_argument("--run-url", required=True, metavar="URL", help="the workflow run, linked from the issue")
     parser.add_argument("--mode", required=True, choices=("write", "dry-run"),
@@ -279,7 +295,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not REPOSITORY.fullmatch(args.repo):
         parser.error("--repo must be OWNER/REPO")
-    document, sections, own = load(args.findings)
+    document, sections, own = load(args.findings, args.handover)
     if not own and not any(sections.values()):
         print("no findings: the security issue is left as it is")
         return 0
