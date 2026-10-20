@@ -56,7 +56,11 @@ fn refused(input: &[u8]) -> ScanError {
 #[test]
 fn every_terminal_control_is_escaped() {
     let controls = terminal_controls();
-    assert_eq!(controls.len(), 74, "025:226-227 names 74 code points");
+    assert_eq!(
+        controls.len(),
+        74,
+        "spec 025 section 3 names 74 code points"
+    );
     for &control in &controls {
         let key = format!("k{control}k");
         let text = format!("v{control}v");
@@ -432,6 +436,19 @@ fn a_scan_error_shows_each_control_in_a_repeated_key() {
 }
 
 #[test]
+fn a_repeated_key_shows_every_control_by_its_code_point() {
+    for control in terminal_controls() {
+        let point = u32::from(control);
+        let key = format!("k{}", escaped(&format!("{point:04x}")));
+        let error = refused(format!(r#"{{"{key}":1,"{key}":2}}"#).as_bytes());
+        assert_eq!(
+            error.to_string(),
+            format!("the key /k<U+{point:04X}> repeats at byte 13")
+        );
+    }
+}
+
+#[test]
 fn every_reason_reads_as_prose() {
     let cases = [
         (Reason::NotUtf8, "the text is not UTF-8"),
@@ -467,6 +484,14 @@ fn values_compare_by_structure_and_text() {
     assert_ne!(
         object(vec![("a", number("1"))]),
         object(vec![("a", number("2"))])
+    );
+    assert_ne!(
+        object(vec![("a", number("1"))]),
+        object(vec![("a", number("1")), ("b", number("2"))])
+    );
+    assert_ne!(
+        object(vec![("a", number("1")), ("b", number("2"))]),
+        object(vec![("a", number("1"))])
     );
     assert_ne!(number("1"), number("1.0"));
     assert_ne!(number("1"), string("1"));

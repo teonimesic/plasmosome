@@ -30,6 +30,7 @@ fn deep_nesting_does_not_overflow() {
     let value = scan(text.as_bytes()).expect("a million nested arrays are valid JSON");
     assert_eq!(array_depth(&value), DEPTH);
     assert_eq!(write_compact(&value), text);
+    assert_eq!(format!("{value:?}"), text);
     drop(value);
 }
 

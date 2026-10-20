@@ -631,3 +631,129 @@ fn nothing_is_written_after_a_failed_piece() {
     );
     assert!(stderr.is_empty());
 }
+
+fn terminal_controls() -> Vec<char> {
+    [
+        (0x00, 0x1f),
+        (0x7f, 0x9f),
+        (0x202a, 0x202e),
+        (0x2066, 0x2069),
+    ]
+    .into_iter()
+    .flat_map(|(first, last)| first..=last)
+    .map(character)
+    .collect()
+}
+
+fn through_every_field(text: &str, outcome: Result<Json, ErrorBody>) -> Envelope {
+    Envelope {
+        command: text.to_string(),
+        instance: Some(Instance {
+            name: Some(text.to_string()),
+            socket: text.to_string(),
+        }),
+        outcome,
+    }
+}
+
+#[test]
+fn every_control_is_escaped_or_shown_on_every_output_path() {
+    let controls = terminal_controls();
+    assert_eq!(
+        controls.len(),
+        74,
+        "spec 025 section 3 names 74 code points"
+    );
+    for control in controls {
+        let point = u32::from(control);
+        let text = format!("a{control}b");
+        let shown = format!("a<U+{point:04X}>b");
+        let string = |text: &str| Json::String(text.to_string());
+        let kernel = |text: &str| {
+            Err(ErrorBody::Kernel(
+                KernelError::new(Json::Object(vec![
+                    ("code".to_string(), string(text)),
+                    ("message".to_string(), string(text)),
+                    ("fix".to_string(), string(text)),
+                    (text.to_string(), string(text)),
+                ]))
+                .expect("an object without domain"),
+            ))
+        };
+        let client = |text: &str| {
+            Err(ErrorBody::Client(
+                ClientError::new(
+                    ClientCode::BadReply,
+                    text.to_string(),
+                    vec![
+                        ("detail".to_string(), string(text)),
+                        ("fix".to_string(), string(text)),
+                    ],
+                )
+                .expect("distinct fields that are not reserved"),
+            ))
+        };
+        let success = |text: &str| Ok(Json::Object(vec![(text.to_string(), string(text))]));
+
+        assert_eq!(
+            emitted(&through_every_field(&text, kernel(&text)), Form::Human),
+            (
+                String::new(),
+                format!("{shown}\nfix: {shown}\n(kernel {shown})\n")
+            ),
+            "U+{point:04X} in a kernel error's human form"
+        );
+        assert_eq!(
+            emitted(&through_every_field(&text, client(&text)), Form::Human),
+            (
+                String::new(),
+                format!("{shown}\nfix: {shown}\n(client bad_reply)\n")
+            ),
+            "U+{point:04X} in a client error's human form"
+        );
+        assert_eq!(
+            emitted(&through_every_field(&text, success(&text)), Form::Human),
+            emitted(&through_every_field(&shown, success(&shown)), Form::Human),
+            "U+{point:04X} in the human form of a success"
+        );
+
+        let expected = [
+            serde_json::json!({
+                "domain": "kernel", "code": text, "message": text, "fix": text, text.clone(): text,
+            }),
+            serde_json::json!({
+                "domain": "client", "code": "bad_reply", "message": text, "detail": text, "fix": text,
+            }),
+        ];
+        for (outcome, error) in [kernel(&text), client(&text)].into_iter().zip(expected) {
+            let (stdout, stderr) = emitted(&through_every_field(&text, outcome), Form::Json);
+            assert_eq!(stdout, "");
+            assert!(
+                !stderr.trim_end_matches('\n').contains(control),
+                "U+{point:04X} reached the JSON form raw"
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&stderr).expect("valid JSON"),
+                serde_json::json!({
+                    "schema": 1,
+                    "command": text,
+                    "instance": {"name": text, "socket": text},
+                    "error": error,
+                }),
+                "U+{point:04X} parses back from the JSON form of a failure"
+            );
+        }
+        let (stdout, _) = emitted(&through_every_field(&text, success(&text)), Form::Json);
+        assert!(!stdout.trim_end_matches('\n').contains(control));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stdout).expect("valid JSON"),
+            serde_json::json!({
+                "schema": 1,
+                "command": text,
+                "instance": {"name": text, "socket": text},
+                "result": {text.clone(): text},
+            }),
+            "U+{point:04X} parses back from the JSON form of a success"
+        );
+    }
+}
