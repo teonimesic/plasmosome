@@ -227,6 +227,20 @@ fn assert_refused(root: &Path, message: &str, why: &str) {
     );
 }
 
+fn assert_refused_crediting_each(root: &Path, key: &str, values: &[&str], why: &str) {
+    std::thread::scope(|scope| {
+        for value in values {
+            scope.spawn(move || {
+                assert_refused(
+                    root,
+                    &format!("docs: a change\n\nSome body prose.\n\n{key}: {value}\n"),
+                    why,
+                )
+            });
+        }
+    });
+}
+
 fn assert_cleared(root: &Path, message: &str, why: &str) {
     let output = run_guard_over(root, message);
     assert!(
@@ -360,62 +374,59 @@ fn clears_a_paragraph_that_mixes_prose_with_a_quoted_trailer() {
 #[test]
 fn refuses_a_trailer_naming_a_vendor_whose_name_no_person_carries() {
     check_workspace(|root| {
-        for value in [
-            "Cursor Agent <cursoragent@cursor.com>",
-            "Devin <devin@cognition.ai>",
-            "Grok <noreply@x.ai>",
-        ] {
-            assert_refused(
-                root,
-                &format!("docs: a change\n\nSome body prose.\n\nCo-Authored-By: {value}\n"),
-                "credits a coding agent this guard did not name before",
-            );
-        }
+        assert_refused_crediting_each(
+            root,
+            "Co-Authored-By",
+            &[
+                "Cursor Agent <cursoragent@cursor.com>",
+                "Devin <devin@cognition.ai>",
+                "Grok <noreply@x.ai>",
+            ],
+            "credits a coding agent this guard did not name before",
+        );
     });
 }
 
 #[test]
 fn refuses_a_trailer_with_no_address_for_each_model_word() {
     check_workspace(|root| {
-        for value in [
-            "Claude",
-            "Anthropic",
-            "ChatGPT",
-            "OpenAI",
-            "Copilot",
-            "Codex",
-            "Gemini",
-            "Llama",
-            "Mistral",
-            "Cursor",
-            "Devin (cognition.ai)",
-            "Grok",
-            "Agent (x.ai)",
-        ] {
-            assert_refused(
-                root,
-                &format!("docs: a change\n\nSome body prose.\n\nCo-authored-by: {value}\n"),
-                "credits a model by a name with no address, holding one word of the guard's vendor list and no other",
-            );
-        }
+        assert_refused_crediting_each(
+            root,
+            "Co-authored-by",
+            &[
+                "Claude",
+                "Anthropic",
+                "ChatGPT",
+                "OpenAI",
+                "Copilot",
+                "Codex",
+                "Gemini",
+                "Llama",
+                "Mistral",
+                "Cursor",
+                "Devin (cognition.ai)",
+                "Grok",
+                "Agent (x.ai)",
+            ],
+            "credits a model by a name with no address, holding one word of the guard's vendor list and no other",
+        );
     });
 }
 
 #[test]
 fn refuses_a_tool_identity_under_a_neutral_name() {
     check_workspace(|root| {
-        for value in [
-            "Probe <noreply@anthropic.com>",
-            "Probe <198982749+Copilot@users.noreply.github.com>",
-            "Probe <176961590+gemini-code-assist[bot]@users.noreply.github.com>",
-            "Probe <noreply@x.ai>",
-        ] {
-            assert_refused(
-                root,
-                &format!("docs: a change\n\nSome body prose.\n\nCo-authored-by: {value}\n"),
-                "credits a model's own address under a name that holds no vendor word",
-            );
-        }
+        assert_refused_crediting_each(
+            root,
+            "Co-authored-by",
+            &[
+                "Probe <noreply@anthropic.com>",
+                "Probe <198982749+Copilot@users.noreply.github.com>",
+                "Probe <176961590+gemini-code-assist[bot]@users.noreply.github.com>",
+                "Probe <noreply@x.ai>",
+            ],
+            "credits a model's own address under a name that holds no vendor word",
+        );
     });
 }
 
