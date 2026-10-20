@@ -602,7 +602,7 @@ fn a_member_that_forwards_the_test_fixture_through_its_own_features_is_reported(
         "",
     );
     assert_eq!(
-        test_fixture_enablers_outside_the_testkit(workspace.path()),
+        test_fixture_enablers(workspace.path()),
         ["plasmosome-membrane"]
     );
 }
@@ -625,7 +625,7 @@ fn a_crate_that_only_depends_on_the_enabler_is_not_named() {
         "",
     );
     assert_eq!(
-        test_fixture_enablers_outside_the_testkit(workspace.path()),
+        test_fixture_enablers(workspace.path()),
         ["plasmosome-membrane"]
     );
 }
@@ -639,10 +639,7 @@ fn a_workspace_dependency_that_enables_the_test_fixture_is_reported() {
         ),
         "\n[workspace.dependencies]\nplasmosome-backend = { path = \"crates/backend\", features = [\"test-fixture\"] }\n",
     );
-    assert_eq!(
-        test_fixture_enablers_outside_the_testkit(workspace.path()),
-        ["plasmosome-core"]
-    );
+    assert_eq!(test_fixture_enablers(workspace.path()), ["plasmosome-core"]);
 }
 
 #[test]
@@ -662,7 +659,7 @@ fn a_dependency_for_one_target_that_enables_the_test_fixture_is_reported() {
             "",
         );
         assert_eq!(
-            test_fixture_enablers_outside_the_testkit(workspace.path()),
+            test_fixture_enablers(workspace.path()),
             ["plasmosome-ledger"],
             "a dependency for {target} is missed"
         );
@@ -685,7 +682,22 @@ fn a_dev_dependency_that_enables_the_test_fixture_is_not_reported() {
 }
 
 #[test]
-fn the_testkit_enabling_the_test_fixture_is_not_reported() {
+fn a_build_dependency_that_enables_the_test_fixture_is_reported() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            "plasmosome-ledger",
+            "[build-dependencies]\nplasmosome-backend = { path = \"../backend\", features = [\"test-fixture\"] }\n",
+        ),
+        "",
+    );
+    assert_eq!(
+        test_fixture_enablers(workspace.path()),
+        ["plasmosome-ledger"]
+    );
+}
+
+#[test]
+fn the_testkit_enabling_the_test_fixture_is_refused_like_any_crate() {
     let workspace = fixture_feature_workspace(
         &consumer(
             TESTKIT,
@@ -693,6 +705,21 @@ fn the_testkit_enabling_the_test_fixture_is_not_reported() {
         ),
         "",
     );
-    assert_eq!(test_fixture_enablers(workspace.path()), [TESTKIT]);
-    assert!(test_fixture_enablers_outside_the_testkit(workspace.path()).is_empty());
+    let refusal = test_fixture_refusal(workspace.path())
+        .expect("a testkit edge turns the feature on for every member of a workspace build");
+    assert!(refusal.contains(&format!("[\"{TESTKIT}\"]")), "{refusal}");
+    assert!(refusal.contains("`CommandName` from text"), "{refusal}");
+    assert!(refusal.contains("`cargo check -p`"), "{refusal}");
+}
+
+#[test]
+fn a_workspace_where_no_crate_enables_the_test_fixture_is_not_refused() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            "plasmosome-core",
+            "[dependencies]\nplasmosome-backend = { path = \"../backend\" }\n",
+        ),
+        "",
+    );
+    assert_eq!(test_fixture_refusal(workspace.path()), None);
 }
