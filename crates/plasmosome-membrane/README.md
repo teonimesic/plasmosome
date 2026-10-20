@@ -125,10 +125,15 @@ kernel does not offer it. Darwin has no such call, so the child closes each numb
 of `getdtablesize()` and `kern.maxfilesperproc`. `getdtablesize()` is the smaller of the soft
 `RLIMIT_NOFILE` and `kern.maxfilesperproc`, so the loop always runs to `kern.maxfilesperproc`, and a
 soft limit lowered below a descriptor the process still holds does not let that descriptor through;
-a test holds one above a soft limit lowered to 1,024. Only a descriptor made before root lowered
-`kern.maxfilesperproc` can survive. On an Apple Silicon Mac with `kern.maxfilesperproc` at
-245,760, measured on 2026-10-20, the loop took about 31 ms with the machine lightly loaded and up to
-about 680 ms under heavy load.
+a test holds one above a soft limit lowered to 1,024. `prepare` reads `kern.maxfilesperproc` and the
+child closes up to that value later, so only a descriptor at or above the value `prepare` read can
+survive: one made before root lowered the sysctl, or one made after root raised it once `prepare`
+had run. Those two cases are reasoned, not measured, because measuring them means changing the
+sysctl. What was measured, on an Apple Silicon Mac with `kern.maxfilesperproc` at 245,760 on
+2026-10-20, is that the sysctl, not the soft limit, bounds the descriptor numbers: under soft limits
+of 345,760, 1,048,576 and unlimited, `dup2` onto 245,759 succeeded and onto 245,760 failed with
+`EBADF`. A test holds the last descriptor the table allows. On that Mac the loop took about 31 ms
+with the machine lightly loaded and up to about 680 ms under heavy load.
 
 An empty environment and the working directory `/` mean no `DYLD_*` or `LD_*` variable and no
 relative path can add to where the helper's loader looks for libraries. They do not remove a search
