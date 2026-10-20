@@ -181,8 +181,15 @@ spec link to accepted main content and checks its approved intent chain. Native 
 dependencies; native claim checks status and assignee, not dependencies or Markdown admission.
 The implementation author rechecks the record, `planned`, governing main revisions and all
 active implementation prerequisites before taking `in_progress` or opening its code worktree.
-An existing planning claim is not permission to skip that check. Intent approval remains the
-owner's instruction under `docs/intents/README.md`, never something the launcher infers.
+An existing planning claim is not permission to skip that check. An outside PR's task is the
+one exception to the `planned` check. Its steward files it with no label (spec 030 §2), and may
+take `in_progress` without `planned` while it writes code, because the steward's admission under
+spec 030 stands in for planning. The steward still rechecks the record, governing main revisions
+and prerequisites. Intent approval remains the owner's instruction under `docs/intents/README.md`,
+never something the launcher infers.
+
+Amended on 2026-10-20: this paragraph had no exception, so a steward taking over an outside PR
+could not take `in_progress` as spec 030 §2 says.
 
 For an unowned open task, a unique session actor acquires planning with
 `update ID --claim --status planning`; implementation uses `update ID --claim`. Native claim

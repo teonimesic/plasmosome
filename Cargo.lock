@@ -444,10 +444,12 @@ version = "0.0.0"
 name = "plasmosome-backend"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "proptest",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "toml",
  "uuid",
 ]
@@ -475,6 +477,17 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "plasmosome-lanes"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

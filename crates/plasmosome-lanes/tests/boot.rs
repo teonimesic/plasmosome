@@ -1,0 +1,722 @@
+#![cfg(target_os = "macos")]
+
+mod common;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use plasmosome_lanes::bundle::{PINNED_BUNDLE_ID, verify_bundle};
+use plasmosome_lanes::config::{
+    Confinement, GuestConfig, GuestMount, LaneConfig, MountOption, Probe, Semantics, Share,
+};
+use plasmosome_lanes::console::ProbeResult;
+use plasmosome_lanes::cpio::lane_initramfs;
+use plasmosome_lanes::run::{LaneRun, Outcome, run_lane};
+use serde_json::Value;
+use tempfile::TempDir;
+
+const BUNDLE: &str = "/usr/local/var/plasmosome/runtime/bundles/eed141b574337d99";
+const BUNDLE_KERNEL_RELEASE: &str = "6.12.91";
+const TIMEOUT: Duration = Duration::from_secs(90);
+const EM_AARCH64: u16 = 183;
+
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn bundle_dir() -> PathBuf {
+    let dir = std::env::var_os("LANES_BUNDLE").map_or_else(|| PathBuf::from(BUNDLE), PathBuf::from);
+    verify_bundle(&dir, PINNED_BUNDLE_ID).unwrap_or_else(|error| {
+        panic!(
+            "this test needs the pinned bundle at {}: {error}",
+            dir.display()
+        )
+    });
+    dir
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).expect("the copy's directory is created");
+    for entry in fs::read_dir(from).expect("the bundle is listed") {
+        let entry = entry.expect("a bundle entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("a file type").is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            let bytes = fs::read(entry.path()).expect("a bundle file is read");
+            fs::write(&target, bytes).expect("a bundle file is copied without its flags");
+        }
+    }
+}
+
+fn bundle_copy() -> (TempDir, PathBuf) {
+    let parent = tempfile::tempdir().expect("a directory for the bundle copy");
+    let copy = fs::canonicalize(parent.path())
+        .expect("the copy's parent resolves")
+        .join(PINNED_BUNDLE_ID);
+    copy_tree(&bundle_dir(), &copy);
+    verify_bundle(&copy, PINNED_BUNDLE_ID).expect("an unchanged copy verifies");
+    (parent, copy)
+}
+
+fn refused_copy(copy: &Path) -> LaneRun {
+    let mut lane = lane("copy", vec![probe("uname", 1000, &["uname"])]);
+    lane.lane.bundle = copy.to_path_buf();
+    run_lane(signed_vmm(), &lane.lane, &lane.guest, TIMEOUT).expect("lane-vmm starts")
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn lane_vmm_refuses_a_changed_kernel_in_a_copy_of_the_pinned_bundle() {
+    let (_parent, copy) = bundle_copy();
+    let kernel = copy.join("boot/kernel");
+    let mut bytes = fs::read(&kernel).expect("the copied kernel is readable");
+    bytes[0] ^= 1;
+    fs::write(&kernel, bytes).expect("the copied kernel is changed");
+
+    let run = refused_copy(&copy);
+
+    assert_eq!(run.status.and_then(|status| status.code()), Some(65));
+    assert!(run.stderr.contains("boot/kernel"), "{}", run.stderr);
+    assert!(!run.stderr.contains("images loaded"), "{}", run.stderr);
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn lane_vmm_refuses_an_extra_file_under_lib_in_a_copy_of_the_pinned_bundle() {
+    let (_parent, copy) = bundle_copy();
+    fs::write(copy.join("lib/libkrunfw.5.dylib"), b"unlisted").expect("the extra file is written");
+
+    let run = refused_copy(&copy);
+
+    assert_eq!(run.status.and_then(|status| status.code()), Some(65));
+    assert!(
+        run.stderr.contains("lib/libkrunfw.5.dylib"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn a_libkrunfw_planted_in_the_working_directory_is_refused_and_never_runs() {
+    let mut lane = lane("planted", vec![probe("uname", 1000, &["uname"])]);
+    let cwd = lane
+        .lane
+        .console
+        .parent()
+        .expect("a lane directory")
+        .to_path_buf();
+    fs::write(
+        cwd.join("planted.c"),
+        "#include <stdio.h>\n__attribute__((constructor)) static void planted(void) {\n  FILE *f = fopen(\"planted-ran\", \"w\");\n  if (f) fclose(f);\n}\n",
+    )
+    .expect("the planted library's source is written");
+    let built = Command::new("cc")
+        .args(["-dynamiclib", "-o", "libkrunfw.5.dylib", "planted.c"])
+        .current_dir(&cwd)
+        .output()
+        .expect("this test needs cc to build a harmless library");
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    lane.lane.initramfs = cwd.join("unused.cpio");
+
+    let mut child = Command::new(signed_vmm())
+        .env_clear()
+        .current_dir(&cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("lane-vmm starts");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(lane.lane.to_json().expect("the lane serializes").as_bytes())
+            .expect("the configuration is written");
+    }
+    let output = child.wait_with_output().expect("lane-vmm exits");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("{stderr}");
+    assert_eq!(output.status.code(), Some(69), "{stderr}");
+    assert!(stderr.contains("libkrunfw.5.dylib"), "{stderr}");
+    assert!(
+        !cwd.join("planted-ran").exists(),
+        "the planted library's constructor ran"
+    );
+}
+
+fn guest_binary(name: &str) -> Vec<u8> {
+    let dir = std::env::var_os("LANES_GUEST_DIR").map_or_else(
+        || manifest_dir().join("../../target/aarch64-unknown-linux-musl/release"),
+        PathBuf::from,
+    );
+    let path = dir.join(name);
+    let bytes = fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "this test needs the guest binary {} ({error}); build it as the crate README says",
+            path.display()
+        )
+    });
+    assert_eq!(&bytes[..4], b"\x7fELF", "{} is not ELF", path.display());
+    assert_eq!(bytes[4], 2, "{} is not a 64-bit ELF", path.display());
+    assert_eq!(
+        u16::from_le_bytes([bytes[18], bytes[19]]),
+        EM_AARCH64,
+        "{} is not an aarch64 executable",
+        path.display()
+    );
+    bytes
+}
+
+fn signed_vmm() -> &'static Path {
+    static SIGNED: OnceLock<PathBuf> = OnceLock::new();
+    SIGNED.get_or_init(|| {
+        let vmm = PathBuf::from(env!("CARGO_BIN_EXE_lane-vmm"));
+        let output = Command::new("codesign")
+            .args(["--sign", "-", "--force", "--entitlements"])
+            .arg(manifest_dir().join("lane-vmm.entitlements"))
+            .arg(&vmm)
+            .output()
+            .expect("codesign runs");
+        assert!(
+            output.status.success(),
+            "ad hoc signing with the hypervisor entitlement failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        vmm
+    })
+}
+
+struct Lane {
+    dir: TempDir,
+    lane: LaneConfig,
+    guest: GuestConfig,
+}
+
+fn probe(id: &str, uid: u32, args: &[&str]) -> Probe {
+    Probe {
+        id: id.to_string(),
+        uid,
+        args: args.iter().map(|arg| arg.to_string()).collect(),
+    }
+}
+
+fn lane(run_id: &str, probes: Vec<Probe>) -> Lane {
+    let dir = tempfile::tempdir().expect("a scratch directory for the lane");
+    let root = fs::canonicalize(dir.path()).expect("the scratch directory resolves");
+    let bundle = bundle_dir();
+    let guest = GuestConfig {
+        run_id: run_id.to_string(),
+        mounts: Vec::new(),
+        probes,
+    };
+    let root_image = root.join("rootfs.raw");
+    let mut from =
+        fs::File::open(bundle.join("base/rootfs.raw")).expect("the bundle's image opens");
+    let mut to = fs::File::create(&root_image).expect("the lane's root image is created");
+    std::io::copy(&mut from, &mut to).expect("the root image is copied without its flags");
+    let lane = LaneConfig {
+        run_id: run_id.to_string(),
+        bundle: bundle.clone(),
+        initramfs: root.join("initramfs.cpio"),
+        root_image,
+        vcpus: 1,
+        memory_mib: 512,
+        console: root.join("console.log"),
+        shares: Vec::new(),
+        confinement: None,
+    };
+    Lane { dir, lane, guest }
+}
+
+fn boot(lane: &Lane) -> LaneRun {
+    let initramfs = lane_initramfs(
+        &guest_binary("lane-init"),
+        &guest_binary("lane-probe"),
+        &lane.guest,
+    )
+    .expect("the initramfs is written");
+    fs::write(&lane.lane.initramfs, initramfs).expect("the initramfs is saved");
+    let run = run_lane(signed_vmm(), &lane.lane, &lane.guest, TIMEOUT).expect("lane-vmm starts");
+    eprintln!(
+        "--- lane-vmm stderr ---\n{}--- console ---\n{}--- outcome: {:?}, status {:?}",
+        run.stderr, run.console, run.outcome, run.status
+    );
+    run
+}
+
+fn finished(run: &LaneRun) -> &[ProbeResult] {
+    match &run.outcome {
+        Outcome::Finished(results) => results,
+        other => panic!("the lane did not finish: {other:?}"),
+    }
+}
+
+fn line(results: &[ProbeResult], id: &str) -> Value {
+    results
+        .iter()
+        .find(|result| result.probe == id)
+        .and_then(|result| result.result.clone())
+        .unwrap_or_else(|| panic!("no result for probe `{id}`"))
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn the_bundle_kernel_boots_lane_init_and_lists_virtiofs() {
+    let lane = lane(
+        "boot-a",
+        vec![
+            probe("uname", 1000, &["uname"]),
+            probe("filesystems", 1000, &["filesystems"]),
+        ],
+    );
+
+    let run = boot(&lane);
+
+    let results = finished(&run);
+    let uname = line(results, "uname");
+    assert_eq!(uname["ok"], true, "{uname}");
+    assert_eq!(uname["sysname"], "Linux");
+    assert_eq!(uname["release"], BUNDLE_KERNEL_RELEASE);
+    assert_eq!(uname["machine"], "aarch64");
+    let filesystems = line(results, "filesystems");
+    let names = filesystems["names"].as_array().expect("a name list");
+    assert!(
+        names.iter().any(|name| name == "virtiofs"),
+        "/proc/filesystems lists no virtiofs: {filesystems}"
+    );
+    assert!(lane.dir.path().exists());
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn a_read_only_complete_share_is_mounted_at_its_path_and_lists_the_hosts_file() {
+    let mut lane = lane(
+        "boot-b",
+        vec![
+            probe("list", 1000, &["list", "/mnt/share"]),
+            probe("mountinfo", 1000, &["mountinfo"]),
+            probe("create-as-root", 0, &["create", "/mnt/share/from-guest"]),
+            probe("write-as-root", 0, &["write", "/mnt/share/hello.txt"]),
+        ],
+    );
+    let share = lane.lane.console.with_file_name("share");
+    common::write_file(&share, "hello.txt", b"placed by the host\n");
+    lane.lane.shares.push(Share {
+        tag: "lanes0".to_string(),
+        path: share.clone(),
+        shm_size: 0,
+        read_only: true,
+        semantics: Semantics::Complete,
+    });
+    lane.guest.mounts.push(GuestMount {
+        tag: "lanes0".to_string(),
+        path: PathBuf::from("/mnt/share"),
+        options: Vec::new(),
+    });
+
+    let run = boot(&lane);
+
+    let results = finished(&run);
+    let list = line(results, "list");
+    assert_eq!(list["ok"], true, "{list}");
+    assert_eq!(list["names"], serde_json::json!(["hello.txt"]));
+    let mountinfo = line(results, "mountinfo");
+    let mounts = mountinfo["mounts"].as_array().expect("a mount list");
+    let share_mount = mounts
+        .iter()
+        .find(|mount| mount["mount_point"] == "/mnt/share")
+        .unwrap_or_else(|| panic!("nothing is mounted at /mnt/share: {mountinfo}"));
+    assert_eq!(share_mount["fstype"], "virtiofs");
+    assert_eq!(share_mount["source"], "lanes0");
+    for id in ["create-as-root", "write-as-root"] {
+        let refused = line(results, id);
+        assert_eq!(
+            refused["ok"], false,
+            "{id} changed the read-only share: {refused}"
+        );
+        assert_eq!(refused["errno"], "EROFS", "{refused}");
+    }
+    assert!(
+        !share.join("from-guest").exists(),
+        "the guest created a file in the read-only share"
+    );
+    assert_eq!(
+        fs::read(share.join("hello.txt")).expect("the host file is still there"),
+        b"placed by the host\n"
+    );
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn a_probe_configured_as_uid_1000_reports_uid_1000_and_one_as_0_reports_0() {
+    let lane = lane(
+        "boot-c",
+        vec![probe("workload", 1000, &["id"]), probe("root", 0, &["id"])],
+    );
+
+    let run = boot(&lane);
+
+    let results = finished(&run);
+    let workload = line(results, "workload");
+    assert_eq!(
+        (&workload["uid"], &workload["euid"], &workload["gid"]),
+        (&Value::from(1000), &Value::from(1000), &Value::from(1000)),
+        "{workload}"
+    );
+    assert_eq!(workload["groups"], serde_json::json!([]));
+    let root = line(results, "root");
+    assert_eq!(root["uid"], 0, "{root}");
+    assert_eq!(results[0].uid, 1000);
+    assert_eq!(results[1].uid, 0);
+}
+
+fn confined_lane(run_id: &str, allow_writes_outside: bool) -> Lane {
+    let mut lane = lane(run_id, vec![probe("uname", 1000, &["uname"])]);
+    let root = lane
+        .lane
+        .console
+        .parent()
+        .expect("a lane directory")
+        .to_path_buf();
+    let allowed = root.join("allowed");
+    let outside = root.join("outside");
+    common::write_file(&allowed, "placed", b"placed\n");
+    common::write_file(&outside, "secret", b"secret\n");
+    let writes = if allow_writes_outside {
+        format!("(deny file-write* (subpath \"{}\"))", allowed.display())
+    } else {
+        format!(
+            "(deny file-write*)\n(allow file-write* (literal \"{}\") (literal \"{}\"))",
+            lane.lane.console.display(),
+            lane.lane.root_image.display()
+        )
+    };
+    let profile = format!(
+        "(version 1)\n(allow default)\n{writes}\n(deny file-read* (subpath \"{}\"))\n",
+        outside.display()
+    );
+    let profile_path = root.join("lane.sb");
+    fs::write(&profile_path, profile).expect("the profile is saved");
+    lane.lane.confinement = Some(Confinement {
+        profile: profile_path,
+        allowed,
+        outside,
+    });
+    lane
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn the_sbpl_self_check_passes_with_the_profile_and_the_confined_lane_boots() {
+    let lane = confined_lane("boot-d", false);
+
+    let run = boot(&lane);
+
+    let results = finished(&run);
+    assert_eq!(line(results, "uname")["ok"], true);
+    for check in [
+        "read inside",
+        "write inside",
+        "read outside",
+        "write outside",
+    ] {
+        assert!(
+            run.stderr
+                .lines()
+                .any(|row| row.contains(&format!("self-check {check}:")) && row.ends_with("holds")),
+            "the self-check line for `{check}` is missing or fails: {}",
+            run.stderr
+        );
+    }
+}
+
+fn lane_with_profile(run_id: &str, profile: &str) -> Lane {
+    let mut lane = lane(run_id, vec![probe("uname", 1000, &["uname"])]);
+    let root = lane
+        .lane
+        .console
+        .parent()
+        .expect("a lane directory")
+        .to_path_buf();
+    let allowed = root.join("allowed");
+    let outside = root.join("outside");
+    common::write_file(&allowed, "placed", b"placed\n");
+    common::write_file(&outside, "secret", b"secret\n");
+    let profile_path = root.join("lane.sb");
+    fs::write(&profile_path, profile).expect("the profile is saved");
+    lane.lane.confinement = Some(Confinement {
+        profile: profile_path,
+        allowed,
+        outside,
+    });
+    lane
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("the mode is set");
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn the_control_exits_70_when_file_modes_refuse_without_a_sandbox() {
+    let lane = lane_with_profile("boot-control", "(version 1)\n(allow default)\n");
+    let confinement = lane.lane.confinement.clone().expect("a confinement");
+    set_mode(&confinement.allowed, 0o555);
+    set_mode(&confinement.outside, 0o000);
+
+    let run = boot(&lane);
+
+    set_mode(&confinement.allowed, 0o755);
+    set_mode(&confinement.outside, 0o755);
+    assert_eq!(run.status.and_then(|status| status.code()), Some(70));
+    assert_eq!(run.console, "", "the VM must not have started");
+    assert!(
+        run.stderr
+            .lines()
+            .any(|row| row.contains("control write inside:") && row.ends_with("FAILS")),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("self-check"),
+        "the sandbox must not be applied after a failed control: {}",
+        run.stderr
+    );
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn a_profile_sandbox_init_refuses_exits_71() {
+    let lane = lane_with_profile("boot-71", "(version 1)\n(this is not sbpl\n");
+
+    let run = boot(&lane);
+
+    assert_eq!(run.status.and_then(|status| status.code()), Some(71));
+    assert_eq!(run.console, "", "the VM must not have started");
+    assert!(run.stderr.contains("sandbox_init"), "{}", run.stderr);
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn the_sbpl_self_check_exits_70_when_the_profile_allows_writes_outside_the_directory() {
+    let lane = confined_lane("boot-e", true);
+
+    let run = boot(&lane);
+
+    assert_eq!(run.status.and_then(|status| status.code()), Some(70));
+    assert!(
+        matches!(run.outcome, Outcome::NotRun(_)),
+        "{:?}",
+        run.outcome
+    );
+    assert_eq!(run.console, "", "the VM must not have started");
+    assert!(
+        run.stderr
+            .lines()
+            .any(|row| row.contains("self-check write outside:") && row.ends_with("FAILS")),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn a_held_descriptor_mapping_and_executable_are_read_back_on_release() {
+    let mut lane = lane(
+        "boot-f",
+        vec![
+            probe("hold-fd", 1000, &["hold-fd", "fd", "/mnt/share/hello.txt"]),
+            probe(
+                "hold-map",
+                1000,
+                &["hold-map", "map", "/mnt/share/hello.txt"],
+            ),
+            probe("hold-exec", 1000, &["hold-exec", "exec", "/mnt/share/tool"]),
+            probe("release-fd", 1000, &["release", "fd"]),
+            probe("release-map", 1000, &["release", "map"]),
+            probe("release-exec", 1000, &["release", "exec"]),
+            probe("release-none", 1000, &["release", "none"]),
+        ],
+    );
+    let share = lane.lane.console.with_file_name("share");
+    let placed = b"placed by the host\n";
+    common::write_file(&share, "hello.txt", placed);
+    let tool_bytes = guest_binary("lane-probe");
+    let tool = common::write_file(&share, "tool", &tool_bytes);
+    fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("the tool is made executable");
+    lane.lane.shares.push(Share {
+        tag: "lanes0".to_string(),
+        path: share,
+        shm_size: 0,
+        read_only: true,
+        semantics: Semantics::Complete,
+    });
+    lane.guest.mounts.push(GuestMount {
+        tag: "lanes0".to_string(),
+        path: PathBuf::from("/mnt/share"),
+        options: Vec::new(),
+    });
+
+    let run = boot(&lane);
+
+    let results = finished(&run);
+    for id in ["hold-fd", "hold-map", "hold-exec"] {
+        assert_eq!(line(results, id)["ok"], true, "{}", line(results, id));
+    }
+    for (id, bytes) in [
+        ("release-fd", placed.as_slice()),
+        ("release-map", placed.as_slice()),
+        ("release-exec", tool_bytes.as_slice()),
+    ] {
+        let released = line(results, id);
+        assert_eq!(released["ok"], true, "{released}");
+        assert_eq!(released["sha256"], common::sha256(bytes), "{released}");
+        assert_eq!(released["bytes"], bytes.len(), "{released}");
+    }
+    assert_eq!(line(results, "release-none")["errno"], "ENOENT");
+}
+
+fn writable_share(
+    lane: &mut Lane,
+    tag: &str,
+    guest_path: &str,
+    options: Vec<MountOption>,
+) -> PathBuf {
+    let host = lane.lane.console.with_file_name(tag);
+    common::write_file(&host, "placed", b"placed by the host\n");
+    lane.lane.shares.push(Share {
+        tag: tag.to_string(),
+        path: host.clone(),
+        shm_size: 0,
+        read_only: false,
+        semantics: Semantics::Complete,
+    });
+    lane.guest.mounts.push(GuestMount {
+        tag: tag.to_string(),
+        path: PathBuf::from(guest_path),
+        options,
+    });
+    host
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn a_writable_share_the_guest_mounts_ro_refuses_writes_with_erofs() {
+    let mut lane = lane(
+        "boot-ro",
+        vec![
+            probe("create-rw", 0, &["create", "/mnt/rw/from-guest"]),
+            probe("create-ro", 0, &["create", "/mnt/ro/from-guest"]),
+            probe("mountinfo", 1000, &["mountinfo"]),
+        ],
+    );
+    let rw = writable_share(&mut lane, "lanes0", "/mnt/rw", Vec::new());
+    let ro = writable_share(&mut lane, "lanes1", "/mnt/ro", vec![MountOption::Ro]);
+
+    let run = boot(&lane);
+
+    let results = finished(&run);
+    assert_eq!(
+        line(results, "create-rw")["ok"],
+        true,
+        "the control: the host shares are writable"
+    );
+    assert!(rw.join("from-guest").exists());
+    let refused = line(results, "create-ro");
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(refused["errno"], "EROFS", "{refused}");
+    assert!(!ro.join("from-guest").exists());
+    let mountinfo = line(results, "mountinfo");
+    let mount = mountinfo["mounts"]
+        .as_array()
+        .expect("a mount list")
+        .iter()
+        .find(|mount| mount["mount_point"] == "/mnt/ro")
+        .unwrap_or_else(|| panic!("nothing is mounted at /mnt/ro: {mountinfo}"))
+        .clone();
+    let options = mount["mount_options"].as_str().expect("options");
+    assert!(options.split(',').any(|option| option == "ro"), "{options}");
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn lane_init_kills_and_reaps_a_holder_left_running_before_it_powers_off() {
+    let mut lane = lane(
+        "boot-reap",
+        vec![
+            probe("hold-fd", 1000, &["hold-fd", "left", "/mnt/share/placed"]),
+            probe("id", 1000, &["id"]),
+        ],
+    );
+    writable_share(&mut lane, "lanes0", "/mnt/share", vec![MountOption::Ro]);
+
+    let run = boot(&lane);
+
+    let results = finished(&run);
+    assert_eq!(line(results, "hold-fd")["ok"], true);
+    assert!(run.status.is_some_and(|status| status.success()));
+    let after_end = run
+        .console
+        .lines()
+        .skip_while(|row| !row.starts_with("LANE-END "))
+        .collect::<Vec<_>>();
+    let reaped: usize = after_end
+        .iter()
+        .find_map(|row| {
+            row.trim_end_matches('\r')
+                .strip_prefix("lane-init: killed what remained and reaped ")
+        })
+        .unwrap_or_else(|| panic!("lane-init reported no final reap: {after_end:?}"))
+        .parse()
+        .expect("a count");
+    assert!(
+        reaped >= 1,
+        "the holder left running was not reaped: {reaped}"
+    );
+}
+
+#[test]
+#[ignore = "needs the pinned bundle and the hypervisor entitlement"]
+fn the_lane_has_a_vsock_device_a_writable_root_disk_a_console_and_virtio_fs() {
+    let mut lane = lane("boot-devices", vec![probe("devices", 1000, &["devices"])]);
+    writable_share(&mut lane, "lanes0", "/mnt/share", vec![MountOption::Ro]);
+
+    let run = boot(&lane);
+
+    let results = finished(&run);
+    let devices = line(results, "devices");
+    assert_eq!(devices["ok"], true, "{devices}");
+    let ids: Vec<&str> = devices["virtio"]
+        .as_array()
+        .expect("a virtio list")
+        .iter()
+        .filter_map(|device| device["device"].as_str())
+        .collect();
+    for (id, what) in [
+        ("0x0013", "vsock"),
+        ("0x0002", "block"),
+        ("0x0003", "console"),
+        ("0x001a", "virtio-fs"),
+    ] {
+        assert!(ids.contains(&id), "no {what} device ({id}): {devices}");
+    }
+    assert_eq!(
+        devices["block"],
+        serde_json::json!([{"name": "vda", "read_only": false}]),
+        "{devices}"
+    );
+}

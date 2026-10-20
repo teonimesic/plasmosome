@@ -4,8 +4,8 @@
 
 Shared test support: builders for the noisy kernel types, the backend conformance suite every
 `EnforcementBackend` implementation must pass, the cross-crate scenarios, and the membrane
-differential's manifest (spec 027 §6). It is where the rules that span crates live; each
-crate's own `AGENTS.md` stays authoritative for that crate.
+differential's manifest and comparator (spec 027 §6). It is where the rules that span crates
+live; each crate's own `AGENTS.md` stays authoritative for that crate.
 
 Nothing here ships. The crate is `publish = false`, and the guard `testkit_is_dev_only` in
 `plasmosome-guards` fails the build if another workspace crate names it outside
@@ -36,7 +36,9 @@ Every place the kernel touches the world outside the process, and the seam that 
 | Filesystem (session log, state) | paths injected as arguments | `tempfile::TempDir` |
 | Durable appends that can fail (session log) | `LogStore` and `LogFile` (`plasmosome-core::session_log`) | `FaultLogStore` in core's unit tests |
 | Directory syncs that can fail (instance root) | the private `SyncDirectory` function that `InstanceRoot` and `CellDir` carry (`plasmosome-core::instance`) | `recording_sync` in core's unit tests |
+| Directory reads that can fail (cell discovery, the trusted-directory listing) | the private name iterator that `collect_names` (`plasmosome-core::instance`) and `listed_from` (`plasmosome-core::private_socket`) take | a `Vec` of names and read errors in core's unit tests |
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
+| The pinned guest (`plasmosome-lanes`) | the bundle directory and the e2fsprogs tool directory injected as paths, and the VMM launcher path given to `run_lane` | a `TempDir` bundle, and launcher scripts that hang or write a console |
 
 **The seam rule.** Both forms in that table are seams. Which one a contact gets is decided by
 what varies between the real thing and the test. When the *behavior* varies — enforcement that
@@ -89,7 +91,7 @@ mocks it in the test.
 ## Testing
 
 `cargo test -p plasmosome-testkit`. That runs the conformance suite against `FakeBackend` and
-`CompositeBackend`, plus the cross-crate scenarios and the differential's manifest tests. A new
-backend proves itself by calling the same `conformance::` functions with its own constructor, in
-its own `tests/` file. The differential's tests alone run with
+`CompositeBackend`, plus the cross-crate scenarios and the differential's manifest and comparator
+tests. A new backend proves itself by calling the same `conformance::` functions with its own
+constructor, in its own `tests/` file. The differential's tests alone run with
 `cargo test -p plasmosome-testkit --lib differential`.

@@ -6,6 +6,12 @@ use plasmosome_guards::check_workspace;
 
 const TESTKIT: &str = "plasmosome-testkit";
 
+const LANES: &str = "plasmosome-lanes";
+
+const BACKEND: &str = "plasmosome-backend";
+
+const TEST_FIXTURE: &str = "test-fixture";
+
 const HELD_NAMES: &[&str] = &["plasmosome", "plasmid"];
 
 const HELD_REGISTRIES: &[&str] = &["crates-io"];
@@ -273,40 +279,181 @@ fn a_binary_taking_another_packages_name_is_still_reported() {
     );
 }
 
+fn shipping_graph(root: &Path, member: &str) -> String {
+    let output = cargo_in(root)
+        .args([
+            "tree",
+            "--locked",
+            "-p",
+            member,
+            "--edges",
+            "normal,build",
+            "--all-features",
+            "--prefix",
+            "none",
+            "--target",
+            "all",
+        ])
+        .output()
+        .expect("cargo tree runs");
+    assert!(
+        output.status.success(),
+        "cargo tree -p {member} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn members_shipping(root: &Path, members: &[String], package: &str) -> Vec<String> {
+    let node = format!("{package} ");
+    members
+        .iter()
+        .filter(|member| *member != package)
+        .filter(|member| {
+            shipping_graph(root, member)
+                .lines()
+                .any(|line| line.starts_with(&node))
+        })
+        .cloned()
+        .collect()
+}
+
+fn testkit_refusals(root: &Path, members: &[String]) -> Vec<String> {
+    members_shipping(root, members, TESTKIT)
+        .into_iter()
+        .map(|member| {
+            format!(
+                "`{member}` has a non-dev dependency path to `{TESTKIT}`; the testkit is test support and reaches a kernel crate only through `[dev-dependencies]`, or it ships"
+            )
+        })
+        .collect()
+}
+
+fn lanes_refusals(root: &Path, members: &[String]) -> Vec<String> {
+    members_shipping(root, members, LANES)
+        .into_iter()
+        .map(|member| {
+            format!(
+                "`{member}` has a non-dev dependency path to `{LANES}`. The lanes are a test fixture that loads libkrun and boots a guest, so their code would ship inside a product binary (spec 013). Reach them only through `[dev-dependencies]`, never through a normal, build or optional dependency."
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn testkit_is_dev_only() {
     check_workspace(|root| {
-        for member in workspace_members(root) {
-            if member == TESTKIT {
-                continue;
-            }
-            let output = cargo_in(root)
-                .args([
-                    "tree",
-                    "--locked",
-                    "-p",
-                    &member,
-                    "--edges",
-                    "normal,build",
-                    "--prefix",
-                    "none",
-                    "--target",
-                    "all",
-                ])
-                .output()
-                .expect("cargo tree runs");
-            assert!(
-                output.status.success(),
-                "cargo tree -p {member} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let graph = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                !graph.lines().any(|line| line.starts_with(TESTKIT)),
-                "`{member}` has a non-dev dependency path to `{TESTKIT}`; the testkit is test support and reaches a kernel crate only through `[dev-dependencies]`, or it ships"
-            );
-        }
+        let refusals = testkit_refusals(root, &workspace_members(root));
+        assert!(refusals.is_empty(), "{}", refusals.join("\n"));
     });
+}
+
+#[test]
+fn lanes_are_dev_only() {
+    check_workspace(|root| {
+        let members = workspace_members(root);
+        assert!(
+            members.iter().any(|member| member == LANES),
+            "`{LANES}` is no longer a workspace member, so this guard checks nothing: {members:?}"
+        );
+        let refusals = lanes_refusals(root, &members);
+        assert!(refusals.is_empty(), "{}", refusals.join("\n"));
+    });
+}
+
+fn membrane_workspace(sections: &str) -> tempfile::TempDir {
+    fixture_feature_workspace_of(
+        &[
+            (
+                "crates/membrane",
+                &consumer("plasmosome-membrane", sections),
+            ),
+            ("crates/lanes", &member_manifest(LANES)),
+            ("crates/testkit", &member_manifest(TESTKIT)),
+        ],
+        "",
+    )
+}
+
+fn refusals_for(sections: &str) -> (Vec<String>, Vec<String>) {
+    let workspace = membrane_workspace(sections);
+    let members = workspace_members_in(workspace.path());
+    (
+        lanes_refusals(workspace.path(), &members),
+        testkit_refusals(workspace.path(), &members),
+    )
+}
+
+#[test]
+fn a_normal_dependency_on_the_lanes_or_the_testkit_is_refused() {
+    let (lanes, testkit) = refusals_for(
+        "[dependencies]\nplasmosome-lanes = { path = \"../lanes\" }\nplasmosome-testkit = { path = \"../testkit\" }\n",
+    );
+
+    assert_eq!(lanes.len(), 1, "{lanes:?}");
+    assert!(
+        lanes[0].starts_with(
+            "`plasmosome-membrane` has a non-dev dependency path to `plasmosome-lanes`"
+        ),
+        "{lanes:?}"
+    );
+    assert_eq!(testkit.len(), 1, "{testkit:?}");
+    assert!(
+        testkit[0].starts_with(
+            "`plasmosome-membrane` has a non-dev dependency path to `plasmosome-testkit`"
+        ),
+        "{testkit:?}"
+    );
+}
+
+#[test]
+fn an_optional_lanes_dependency_behind_a_feature_is_refused() {
+    let (lanes, testkit) = refusals_for(
+        "[features]\nlanes = [\"dep:plasmosome-lanes\"]\n\n[dependencies]\nplasmosome-lanes = { path = \"../lanes\", optional = true }\n",
+    );
+
+    assert_eq!(
+        lanes.len(),
+        1,
+        "a feature that links the lanes into the membrane is missed: {lanes:?}"
+    );
+    assert!(
+        lanes[0].starts_with(
+            "`plasmosome-membrane` has a non-dev dependency path to `plasmosome-lanes`"
+        ),
+        "{lanes:?}"
+    );
+    assert!(testkit.is_empty(), "{testkit:?}");
+}
+
+#[test]
+fn an_optional_testkit_dependency_behind_a_feature_is_refused() {
+    let (lanes, testkit) = refusals_for(
+        "[features]\nfixtures = [\"dep:plasmosome-testkit\"]\n\n[dependencies]\nplasmosome-testkit = { path = \"../testkit\", optional = true }\n",
+    );
+
+    assert_eq!(
+        testkit.len(),
+        1,
+        "a feature that links the testkit into the membrane is missed: {testkit:?}"
+    );
+    assert!(
+        testkit[0].starts_with(
+            "`plasmosome-membrane` has a non-dev dependency path to `plasmosome-testkit`"
+        ),
+        "{testkit:?}"
+    );
+    assert!(lanes.is_empty(), "{lanes:?}");
+}
+
+#[test]
+fn dev_dependencies_and_a_feature_that_turns_on_no_dependency_are_not_refused() {
+    let (lanes, testkit) = refusals_for(
+        "[features]\ntest-fixture = []\n\n[dev-dependencies]\nplasmosome-lanes = { path = \"../lanes\" }\nplasmosome-testkit = { path = \"../testkit\" }\n",
+    );
+
+    assert!(lanes.is_empty(), "{lanes:?}");
+    assert!(testkit.is_empty(), "{testkit:?}");
 }
 
 fn write_member(root: &Path, directory: &str, manifest: &str) {
@@ -469,4 +616,253 @@ fn a_member_whose_manifest_is_not_valid_toml_is_refused_not_skipped() {
         result.is_err(),
         "an invalid member manifest must not be skipped"
     );
+}
+
+#[test]
+fn no_crate_enables_the_backend_test_fixture() {
+    check_workspace(|root| {
+        if let Some(refusal) = test_fixture_refusal(root) {
+            panic!("{refusal}");
+        }
+    });
+}
+
+fn test_fixture_refusal(root: &Path) -> Option<String> {
+    let enablers = test_fixture_enablers(root);
+    (!enablers.is_empty()).then(|| {
+        format!(
+            "{enablers:?} enable `{BACKEND}/{TEST_FIXTURE}` outside `[dev-dependencies]`. That feature lets code build a `CommandName` from text, so test scaffolding would ship to a consumer, which spec 013 puts in a guard's scope as \"test scaffolding leaving `[dev-dependencies]`\". No crate may enable it, `{TESTKIT}` included: a `--workspace` build merges the features of every member it selects, so one crate's edge turns the feature on for all of them, and every gate here builds that way. A crate that needs the fixture must, in the same PR, add a `cargo check -p` for each product crate and change this guard"
+        )
+    })
+}
+
+fn test_fixture_enablers(root: &Path) -> Vec<String> {
+    let output = cargo_in(root)
+        .args([
+            "tree",
+            "--locked",
+            "--workspace",
+            "--edges",
+            "normal,build,features",
+            "--invert",
+            BACKEND,
+            "--target",
+            "all",
+            "--prefix",
+            "depth",
+        ])
+        .output()
+        .expect("cargo tree runs");
+    assert!(
+        output.status.success(),
+        "cargo tree --invert {BACKEND} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let graph = String::from_utf8_lossy(&output.stdout);
+    let nodes: Vec<(usize, &str)> = graph
+        .lines()
+        .filter_map(|line| {
+            let text = line.trim_start_matches(|character: char| character.is_ascii_digit());
+            let depth = line[..line.len() - text.len()].parse().ok()?;
+            Some((depth, text))
+        })
+        .collect();
+    assert!(
+        nodes
+            .first()
+            .is_some_and(|(depth, text)| *depth == 0 && text.starts_with(&format!("{BACKEND} v"))),
+        "the inverted graph is not rooted at `{BACKEND}`, so this guard would read nothing: {graph}"
+    );
+    let feature = format!("{BACKEND} feature \"{TEST_FIXTURE}\"");
+    let mut enablers = std::collections::BTreeSet::new();
+    for (at, (depth, text)) in nodes.iter().enumerate() {
+        if text.starts_with(&feature) {
+            enablers.extend(
+                nodes[at + 1..]
+                    .iter()
+                    .take_while(|(below, _)| below > depth)
+                    .filter(|(below, _)| *below == depth + 1)
+                    .map(|(_, text)| text.split(' ').next().unwrap_or_default().to_string()),
+            );
+        }
+    }
+    enablers.into_iter().collect()
+}
+
+fn fixture_feature_workspace(consumer: &str, workspace_dependencies: &str) -> tempfile::TempDir {
+    fixture_feature_workspace_of(&[("crates/consumer", consumer)], workspace_dependencies)
+}
+
+fn fixture_feature_workspace_of(
+    consumers: &[(&str, &str)],
+    workspace_dependencies: &str,
+) -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("a scratch directory is created");
+    let root = directory.path();
+    let mut members = vec!["crates/backend"];
+    members.extend(consumers.iter().map(|(path, _)| *path));
+    write_workspace_manifest(root, &members);
+    if !workspace_dependencies.is_empty() {
+        let mut manifest =
+            std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest reads back");
+        manifest.push_str(workspace_dependencies);
+        std::fs::write(root.join("Cargo.toml"), manifest).expect("the manifest is rewritten");
+    }
+    write_member(
+        root,
+        "crates/backend",
+        &format!(
+            "{}\n[features]\n{TEST_FIXTURE} = []\n",
+            member_manifest(BACKEND)
+        ),
+    );
+    for (path, manifest) in consumers {
+        write_member(root, path, manifest);
+    }
+    let locked = cargo_in(root)
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .expect("cargo generate-lockfile runs");
+    assert!(
+        locked.status.success(),
+        "the fixture workspace cannot be locked: {}",
+        String::from_utf8_lossy(&locked.stderr)
+    );
+    directory
+}
+
+fn consumer(name: &str, sections: &str) -> String {
+    format!("{}\n{sections}", member_manifest(name))
+}
+
+#[test]
+fn a_member_that_forwards_the_test_fixture_through_its_own_features_is_reported() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            "plasmosome-membrane",
+            "[features]\ndefault = [\"fixtures\"]\nfixtures = [\"plasmosome-backend/test-fixture\"]\n\n[dependencies]\nplasmosome-backend = { path = \"../backend\" }\n",
+        ),
+        "",
+    );
+    assert_eq!(
+        test_fixture_enablers(workspace.path()),
+        ["plasmosome-membrane"]
+    );
+}
+
+#[test]
+fn a_crate_that_only_depends_on_the_enabler_is_not_named() {
+    let enabler = consumer(
+        "plasmosome-membrane",
+        "[dependencies]\nplasmosome-backend = { path = \"../backend\", default-features = false, features = [\"test-fixture\"] }\n",
+    );
+    let dependent = consumer(
+        "plasmosome-controller",
+        "[dependencies]\nplasmosome-membrane = { path = \"../membrane\" }\n",
+    );
+    let workspace = fixture_feature_workspace_of(
+        &[
+            ("crates/membrane", &enabler),
+            ("crates/controller", &dependent),
+        ],
+        "",
+    );
+    assert_eq!(
+        test_fixture_enablers(workspace.path()),
+        ["plasmosome-membrane"]
+    );
+}
+
+#[test]
+fn a_workspace_dependency_that_enables_the_test_fixture_is_reported() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            "plasmosome-core",
+            "[dependencies]\nplasmosome-backend = { workspace = true }\n",
+        ),
+        "\n[workspace.dependencies]\nplasmosome-backend = { path = \"crates/backend\", features = [\"test-fixture\"] }\n",
+    );
+    assert_eq!(test_fixture_enablers(workspace.path()), ["plasmosome-core"]);
+}
+
+#[test]
+fn a_dependency_for_one_target_that_enables_the_test_fixture_is_reported() {
+    for target in [
+        "cfg(target_os = \"linux\")",
+        "cfg(target_os = \"macos\")",
+        "cfg(windows)",
+    ] {
+        let workspace = fixture_feature_workspace(
+            &consumer(
+                "plasmosome-ledger",
+                &format!(
+                    "[target.'{target}'.dependencies]\nplasmosome-backend = {{ path = \"../backend\", features = [\"test-fixture\"] }}\n"
+                ),
+            ),
+            "",
+        );
+        assert_eq!(
+            test_fixture_enablers(workspace.path()),
+            ["plasmosome-ledger"],
+            "a dependency for {target} is missed"
+        );
+    }
+}
+
+#[test]
+fn a_dev_dependency_that_enables_the_test_fixture_is_not_reported() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            "plasmosome-core",
+            "[dependencies]\nplasmosome-backend = { path = \"../backend\" }\n\n[dev-dependencies]\nplasmosome-backend = { path = \"../backend\", features = [\"test-fixture\"] }\n",
+        ),
+        "",
+    );
+    assert_eq!(
+        test_fixture_enablers(workspace.path()),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_build_dependency_that_enables_the_test_fixture_is_reported() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            "plasmosome-ledger",
+            "[build-dependencies]\nplasmosome-backend = { path = \"../backend\", features = [\"test-fixture\"] }\n",
+        ),
+        "",
+    );
+    assert_eq!(
+        test_fixture_enablers(workspace.path()),
+        ["plasmosome-ledger"]
+    );
+}
+
+#[test]
+fn the_testkit_enabling_the_test_fixture_is_refused_like_any_crate() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            TESTKIT,
+            "[dependencies]\nplasmosome-backend = { path = \"../backend\", features = [\"test-fixture\"] }\n",
+        ),
+        "",
+    );
+    let refusal = test_fixture_refusal(workspace.path())
+        .expect("a testkit edge turns the feature on for every member of a workspace build");
+    assert!(refusal.contains(&format!("[\"{TESTKIT}\"]")), "{refusal}");
+    assert!(refusal.contains("`CommandName` from text"), "{refusal}");
+    assert!(refusal.contains("`cargo check -p`"), "{refusal}");
+}
+
+#[test]
+fn a_workspace_where_no_crate_enables_the_test_fixture_is_not_refused() {
+    let workspace = fixture_feature_workspace(
+        &consumer(
+            "plasmosome-core",
+            "[dependencies]\nplasmosome-backend = { path = \"../backend\" }\n",
+        ),
+        "",
+    );
+    assert_eq!(test_fixture_refusal(workspace.path()), None);
 }
