@@ -15,12 +15,16 @@ fn quoted(path: &Path) -> String {
     format!("'{}'", path.display())
 }
 
+fn result_line(probe: &str) -> String {
+    format!("LANE-RESULT {}", common::result_json(probe, 1000))
+}
+
 fn waits_for(flag: &Path, console: &Path, after: &str) -> String {
     format!(
         "n=0\nwhile [ ! -e {flag} ]; do n=$((n+1)); [ $n -gt 1000 ] && exit 9; sleep 0.01; done\nprintf '%s\\n' '{line}' >> {console}\n",
         flag = quoted(flag),
         console = quoted(console),
-        line = format!("LANE-RESULT {}", common::result_json(after, 1000)),
+        line = result_line(after),
     )
 }
 
@@ -28,7 +32,7 @@ fn header(console: &Path, first: &str) -> String {
     format!(
         "cat > /dev/null\nprintf '%s\\n' 'LANE-BEGIN run-1' '{line}' > {console}\n",
         console = quoted(console),
-        line = format!("LANE-RESULT {}", common::result_json(first, 1000)),
+        line = result_line(first),
     )
 }
 
@@ -195,7 +199,7 @@ fn a_result_line_still_being_written_does_not_start_a_step() {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let console = dir.path().join("console.log");
     let flag = dir.path().join("flag-a");
-    let partial = format!("LANE-RESULT {}", common::result_json("a", 1000));
+    let partial = result_line("a");
     let (head, tail) = partial.split_at(partial.len() / 2);
     let body = format!(
         "cat > /dev/null\nprintf '%s\\n' 'LANE-BEGIN run-1' > {console}\nprintf '%s' '{head}' >> {console}\nsleep 1\n[ -e {flag} ] && exit 8\nprintf '%s\\n' '{tail}' >> {console}\n{wait}{end}",
