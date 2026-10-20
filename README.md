@@ -486,7 +486,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Rust stable, edition 2024. macOS (Apple Silicon) is the first target; Linux follows.
+Edition 2024. `rust-toolchain.toml` pins the compiler to one exact stable release, and rustup
+installs it, with clippy and rustfmt, on the first cargo command in a checkout. macOS (Apple
+Silicon) is the first target; Linux follows.
 
 ## Development work
 
