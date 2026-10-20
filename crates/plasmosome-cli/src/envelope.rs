@@ -1,7 +1,9 @@
 use std::io::{self, Write};
 
 use crate::codes::ClientCode;
-use crate::json::{self, Json, Style};
+use crate::json::{self, Json, Sink, Style};
+
+const PIECE: usize = 64 * 1024;
 
 /// What one command prints: spec 025's success or failure envelope.
 #[derive(Debug, PartialEq, Eq)]
@@ -126,30 +128,69 @@ pub struct EmitError {
     pub error: io::Error,
 }
 
-/// Writes `envelope` in `form`, ending with a newline. A success goes to `stdout` and a failure
-/// to `stderr`; the other stream receives nothing.
+/// Writes `envelope` in `form`, ending with a newline, then flushes. A success goes to `stdout`
+/// and a failure to `stderr`; the other stream receives nothing. The text goes out in pieces of
+/// about 64 KiB, so a large reply is never held twice.
 pub fn emit(
     envelope: &Envelope,
     form: Form,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<(), EmitError> {
-    let mut text = match (form, &envelope.outcome) {
-        (Form::Json, _) => written(&envelope.view(), Style::Compact),
-        (Form::Human, Ok(_)) => written(&envelope.view(), Style::Human),
-        (Form::Human, Err(error)) => error.human(),
-    };
-    text.push('\n');
     let (stream, written) = match envelope.outcome {
-        Ok(_) => (Stream::Stdout, write_line(stdout, &text)),
-        Err(_) => (Stream::Stderr, write_line(stderr, &text)),
+        Ok(_) => (Stream::Stdout, write_envelope(envelope, form, stdout)),
+        Err(_) => (Stream::Stderr, write_envelope(envelope, form, stderr)),
     };
     written.map_err(|error| EmitError { stream, error })
 }
 
-fn write_line(writer: &mut dyn Write, text: &str) -> io::Result<()> {
-    writer.write_all(text.as_bytes())?;
-    writer.flush()
+fn write_envelope(envelope: &Envelope, form: Form, writer: &mut dyn Write) -> io::Result<()> {
+    let mut out = Pieces {
+        text: String::with_capacity(PIECE),
+        writer,
+        failed: None,
+    };
+    match (form, &envelope.outcome) {
+        (Form::Json, _) => write_view(&mut out, &envelope.view(), Style::Compact, 0),
+        (Form::Human, Ok(_)) => write_view(&mut out, &envelope.view(), Style::Human, 0),
+        (Form::Human, Err(error)) => error.write_human(&mut out),
+    }
+    out.push('\n');
+    out.finish()
+}
+
+struct Pieces<'a> {
+    text: String,
+    writer: &'a mut dyn Write,
+    failed: Option<io::Error>,
+}
+
+impl Sink for Pieces<'_> {
+    fn push_str(&mut self, text: &str) {
+        self.text.push_str(text);
+        if self.text.len() >= PIECE {
+            self.spill();
+        }
+    }
+}
+
+impl Pieces<'_> {
+    fn spill(&mut self) {
+        if self.failed.is_none()
+            && let Err(error) = self.writer.write_all(self.text.as_bytes())
+        {
+            self.failed = Some(error);
+        }
+        self.text.clear();
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.spill();
+        match self.failed.take() {
+            Some(error) => Err(error),
+            None => self.writer.flush(),
+        }
+    }
 }
 
 enum View<'a> {
@@ -202,47 +243,42 @@ impl ErrorBody {
         View::Object(members)
     }
 
-    fn human(&self) -> String {
-        let (domain, code, message, fields) = match self {
-            ErrorBody::Client(error) => (
-                "client",
-                error.code.as_str().to_string(),
-                json::show(&error.message),
-                &error.fields,
-            ),
-            ErrorBody::Kernel(error) => (
-                "kernel",
-                plain(json::member(&error.members, "code")),
-                plain(json::member(&error.members, "message")),
-                &error.members,
-            ),
-        };
-        let mut text = message;
-        if let Some(fix) = json::member(fields, "fix") {
-            text.push_str("\nfix: ");
-            text.push_str(&plain(Some(fix)));
+    fn write_human(&self, out: &mut impl Sink) {
+        match self {
+            ErrorBody::Client(error) => {
+                json::show(out, &error.message);
+                write_fix(out, &error.fields);
+                out.push_str("\n(client ");
+                out.push_str(error.code.as_str());
+            }
+            ErrorBody::Kernel(error) => {
+                plain(out, json::member(&error.members, "message"));
+                write_fix(out, &error.members);
+                out.push_str("\n(kernel ");
+                plain(out, json::member(&error.members, "code"));
+            }
         }
-        text.push_str(&format!("\n({domain} {code})"));
-        text
+        out.push(')');
     }
 }
 
-fn plain(value: Option<&Json>) -> String {
+fn write_fix(out: &mut impl Sink, fields: &[(String, Json)]) {
+    if let Some(fix) = json::member(fields, "fix") {
+        out.push_str("\nfix: ");
+        plain(out, Some(fix));
+    }
+}
+
+fn plain(out: &mut impl Sink, value: Option<&Json>) {
     match value {
-        None => String::new(),
-        Some(Json::String(text)) => json::show(text),
-        Some(Json::Number(number)) => number.as_str().to_string(),
-        Some(other) => json::write_human(other),
+        None => {}
+        Some(Json::String(text)) => json::show(out, text),
+        Some(Json::Number(number)) => out.push_str(number.as_str()),
+        Some(other) => json::write_value(out, other, Style::Human, 0),
     }
 }
 
-fn written(view: &View<'_>, style: Style) -> String {
-    let mut out = String::new();
-    write_view(&mut out, view, style, 0);
-    out
-}
-
-fn write_view(out: &mut String, view: &View<'_>, style: Style, depth: usize) {
+fn write_view(out: &mut impl Sink, view: &View<'_>, style: Style, depth: usize) {
     match view {
         View::Json(value) => json::write_value(out, value, style, depth),
         View::Text(text) => json::write_string(out, text, style),

@@ -170,7 +170,11 @@ impl fmt::Display for Reason {
             Reason::LoneSurrogate => f.write_str("a string escapes a lone surrogate"),
             Reason::Trailing => f.write_str("more text follows the value"),
             Reason::TooLarge => write!(f, "the text is longer than {MAX_REPLY_BYTES} bytes"),
-            Reason::DuplicateKey { path } => write!(f, "the key {} repeats", show(path)),
+            Reason::DuplicateKey { path } => {
+                let mut shown = String::new();
+                show(&mut shown, path);
+                write!(f, "the key {shown} repeats")
+            }
         }
     }
 }
@@ -543,6 +547,24 @@ fn push_pointer_segment(path: &mut String, key: &str) {
     }
 }
 
+pub(crate) trait Sink {
+    fn push_str(&mut self, text: &str);
+
+    fn push(&mut self, character: char) {
+        self.push_str(character.encode_utf8(&mut [0; 4]));
+    }
+}
+
+impl Sink for String {
+    fn push_str(&mut self, text: &str) {
+        String::push_str(self, text);
+    }
+
+    fn push(&mut self, character: char) {
+        String::push(self, character);
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Style {
     Compact,
@@ -578,7 +600,7 @@ struct Level<'a> {
     next: usize,
 }
 
-pub(crate) fn write_value(out: &mut String, value: &Json, style: Style, depth: usize) {
+pub(crate) fn write_value(out: &mut impl Sink, value: &Json, style: Style, depth: usize) {
     let mut levels: Vec<Level<'_>> = Vec::new();
     let mut next = Some(value);
     loop {
@@ -638,7 +660,7 @@ pub(crate) fn write_value(out: &mut String, value: &Json, style: Style, depth: u
     }
 }
 
-pub(crate) fn separator(out: &mut String, first: bool, style: Style, depth: usize) {
+pub(crate) fn separator(out: &mut impl Sink, first: bool, style: Style, depth: usize) {
     if !first {
         out.push(',');
     }
@@ -650,14 +672,14 @@ pub(crate) fn separator(out: &mut String, first: bool, style: Style, depth: usiz
     }
 }
 
-pub(crate) fn close_container(out: &mut String, close: char, style: Style, depth: usize) {
+pub(crate) fn close_container(out: &mut impl Sink, close: char, style: Style, depth: usize) {
     if style == Style::Human {
         separator(out, true, style, depth);
     }
     out.push(close);
 }
 
-pub(crate) fn write_key(out: &mut String, key: &str, style: Style) {
+pub(crate) fn write_key(out: &mut impl Sink, key: &str, style: Style) {
     write_string(out, key, style);
     out.push(':');
     if style == Style::Human {
@@ -665,7 +687,7 @@ pub(crate) fn write_key(out: &mut String, key: &str, style: Style) {
     }
 }
 
-pub(crate) fn write_string(out: &mut String, text: &str, style: Style) {
+pub(crate) fn write_string(out: &mut impl Sink, text: &str, style: Style) {
     out.push('"');
     for character in text.chars() {
         match character {
@@ -680,19 +702,17 @@ pub(crate) fn write_string(out: &mut String, text: &str, style: Style) {
     out.push('"');
 }
 
-pub(crate) fn show(text: &str) -> String {
-    let mut out = String::new();
+pub(crate) fn show(out: &mut impl Sink, text: &str) {
     for character in text.chars() {
         if is_terminal_control(character) {
-            write_control(&mut out, character, Style::Human);
+            write_control(out, character, Style::Human);
         } else {
             out.push(character);
         }
     }
-    out
 }
 
-fn write_control(out: &mut String, control: char, style: Style) {
+fn write_control(out: &mut impl Sink, control: char, style: Style) {
     let code_point = u32::from(control);
     match style {
         Style::Compact => {
