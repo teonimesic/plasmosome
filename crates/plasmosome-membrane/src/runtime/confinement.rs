@@ -326,6 +326,14 @@ mod tests {
     use proptest::prelude::*;
 
     const PID: libc::pid_t = 4242;
+    const FIVE: [&str; 5] = [
+        "process-fork",
+        "network-outbound",
+        "network-inbound",
+        "network-bind",
+        "file-write-create",
+    ];
+    const OTHER_NAMES: [&str; 3] = ["file-read-data", "process-exec", "mach-lookup"];
     const STARTED: (u64, u64) = (1_792_518_707, 399_673);
 
     fn answering(answer: Answer) -> Vec<(&'static str, Answer)> {
@@ -372,7 +380,7 @@ mod tests {
             panic!("every rule holds, so the process is confined");
         };
         assert_eq!(evidence.pid(), PID);
-        assert_eq!(evidence.denied(), REQUIRED_DENIALS);
+        assert_eq!(evidence.denied(), FIVE);
         assert_eq!(evidence.binding(), PolicyBinding::PropertiesObserved);
     }
 
@@ -384,14 +392,14 @@ mod tests {
         };
         assert_eq!(
             judge(PID, &readings),
-            unconfined(true, &REQUIRED_DENIALS),
+            unconfined(true, &FIVE),
             "allow-default answers sandboxed and allows all five"
         );
     }
 
     #[test]
     fn each_required_operation_left_allowed_is_unconfined_and_named() {
-        for operation in REQUIRED_DENIALS {
+        for operation in FIVE {
             assert_eq!(
                 judge(PID, &with_operation(operation, Ok(0))),
                 unconfined(true, &[operation]),
@@ -422,7 +430,7 @@ mod tests {
             unconfined(true, &["network-inbound"])
         );
         readings.operations.clear();
-        assert_eq!(judge(PID, &readings), unconfined(true, &REQUIRED_DENIALS));
+        assert_eq!(judge(PID, &readings), unconfined(true, &FIVE));
     }
 
     #[test]
@@ -445,9 +453,31 @@ mod tests {
             operations: answering(Ok(0)),
             ..confined()
         };
+        assert_eq!(judge(PID, &unsandboxed), unconfined(false, &FIVE));
+    }
+
+    #[test]
+    fn any_allowed_answer_for_a_required_operation_is_not_a_denial() {
+        let mut readings = confined();
+        readings.operations.push(("process-fork", Ok(0)));
         assert_eq!(
-            judge(PID, &unsandboxed),
-            unconfined(false, &REQUIRED_DENIALS)
+            judge(PID, &readings),
+            unconfined(true, &["process-fork"]),
+            "a second, allowed answer for process-fork after its denial"
+        );
+        let mut readings = confined();
+        readings.operations.insert(0, ("network-bind", Ok(0)));
+        assert_eq!(
+            judge(PID, &readings),
+            unconfined(true, &["network-bind"]),
+            "an allowed answer for network-bind before its denial"
+        );
+        let mut readings = confined();
+        readings.operations.reverse();
+        readings.operations.push(("file-read-data", Ok(0)));
+        assert!(
+            matches!(judge(PID, &readings), Confinement::Confined(_)),
+            "the order of the answers and an answer for another operation change nothing"
         );
     }
 
@@ -479,7 +509,7 @@ mod tests {
                 errno: libc::EPERM,
             })
         );
-        for operation in REQUIRED_DENIALS {
+        for operation in FIVE {
             assert_eq!(
                 judge(PID, &with_operation(operation, Err(libc::EINVAL))),
                 unverifiable(Unverifiable::CheckFailed {
@@ -581,25 +611,37 @@ mod tests {
         ]
     }
 
-    fn readings() -> impl Strategy<Value = Readings> {
+    fn operations() -> impl Strategy<Value = Vec<(&'static str, Answer)>> {
         (
-            answer(0),
-            started(),
-            answer(1),
             prop::collection::vec(prop::option::weighted(0.95, answer(1)), 5),
-            started(),
+            prop::collection::vec(
+                (
+                    prop::sample::select([FIVE.as_slice(), OTHER_NAMES.as_slice()].concat()),
+                    answer(1),
+                ),
+                0..4,
+            ),
         )
-            .prop_map(|(own, before, sandboxed, answers, after)| Readings {
+            .prop_map(|(required, extra)| {
+                FIVE.into_iter()
+                    .zip(required)
+                    .filter_map(|(operation, answer)| answer.map(|answer| (operation, answer)))
+                    .chain(extra)
+                    .collect::<Vec<_>>()
+            })
+            .prop_shuffle()
+    }
+
+    fn readings() -> impl Strategy<Value = Readings> {
+        (answer(0), started(), answer(1), operations(), started()).prop_map(
+            |(own, before, sandboxed, operations, after)| Readings {
                 own,
                 before,
                 sandboxed,
-                operations: REQUIRED_DENIALS
-                    .iter()
-                    .zip(answers)
-                    .filter_map(|(operation, answer)| answer.map(|answer| (*operation, answer)))
-                    .collect(),
+                operations,
                 after,
-            })
+            },
+        )
     }
 
     proptest! {
@@ -609,8 +651,16 @@ mod tests {
                 && readings.before.is_ok()
                 && readings.before == readings.after
                 && readings.sandboxed == Ok(1)
-                && readings.operations.len() == REQUIRED_DENIALS.len()
-                && readings.operations.iter().all(|(_, answer)| *answer == Ok(1));
+                && readings.operations.iter().all(|(_, answer)| answer.is_ok())
+                && FIVE.iter().all(|required| {
+                    let mut answers = readings
+                        .operations
+                        .iter()
+                        .filter(|(operation, _)| operation == required)
+                        .map(|(_, answer)| *answer)
+                        .peekable();
+                    answers.peek().is_some() && answers.all(|answer| answer == Ok(1))
+                });
             prop_assert_eq!(
                 matches!(judge(PID, &readings), Confinement::Confined(_)),
                 every_rule_holds,

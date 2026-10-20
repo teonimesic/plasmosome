@@ -51,11 +51,21 @@ fn off_darwin_every_pid_is_unverifiable() {
 #[cfg(target_os = "macos")]
 mod darwin {
     use super::*;
-    use plasmosome_membrane::runtime::confinement::{PolicyBinding, REQUIRED_DENIALS};
+    use plasmosome_membrane::runtime::confinement::PolicyBinding;
     use std::io::{BufRead, BufReader, Read};
     use std::path::{Path, PathBuf};
     use std::process::{Child, ChildStdin, Command, Stdio};
     use std::sync::LazyLock;
+
+    const FIVE: [&str; 5] = [
+        "process-fork",
+        "network-outbound",
+        "network-inbound",
+        "network-bind",
+        "file-write-create",
+    ];
+    const SANDBOXED_OBSERVER: &str = "PLASMOSOME_TEST_SANDBOXED_OBSERVER";
+    const OBSERVED_TWICE: &str = "observed twice from inside a sandbox";
 
     static SLEEPER: LazyLock<PathBuf> = LazyLock::new(|| {
         let executable = std::env::current_exe().expect("the running test executable has a path");
@@ -123,7 +133,20 @@ mod darwin {
     fn allowing_every_required_operation(sandboxed: bool) -> Confinement {
         Confinement::Unconfined {
             sandboxed,
-            allowed: REQUIRED_DENIALS.to_vec(),
+            allowed: FIVE.to_vec(),
+        }
+    }
+
+    fn allowing_only(operation: &str) -> Confinement {
+        observed_under(&format!(
+            "(version 1)(deny default)(allow file-read*)(allow {operation})"
+        ))
+    }
+
+    fn sandboxed_allowing(allowed: &[&'static str]) -> Confinement {
+        Confinement::Unconfined {
+            sandboxed: true,
+            allowed: allowed.to_vec(),
         }
     }
 
@@ -169,7 +192,7 @@ mod darwin {
         match observe(sleeper.pid()) {
             Confinement::Confined(evidence) => {
                 assert_eq!(evidence.pid(), sleeper.pid());
-                assert_eq!(evidence.denied(), REQUIRED_DENIALS);
+                assert_eq!(evidence.denied(), FIVE);
                 assert_eq!(evidence.binding(), PolicyBinding::PropertiesObserved);
             }
             other => panic!("the qualified host policy is confined, not {other:?}"),
@@ -181,6 +204,47 @@ mod darwin {
         assert_eq!(
             observed_under("(version 1)(allow default)"),
             allowing_every_required_operation(true)
+        );
+    }
+
+    #[test]
+    fn a_sandbox_allowing_process_fork_is_unconfined() {
+        assert_eq!(
+            allowing_only("process-fork"),
+            sandboxed_allowing(&["process-fork"])
+        );
+    }
+
+    #[test]
+    fn a_sandbox_allowing_network_outbound_is_unconfined() {
+        assert_eq!(
+            allowing_only("network-outbound"),
+            sandboxed_allowing(&["network-outbound"])
+        );
+    }
+
+    #[test]
+    fn a_sandbox_allowing_network_inbound_is_unconfined_and_allows_network_bind_too() {
+        assert_eq!(
+            allowing_only("network-inbound"),
+            sandboxed_allowing(&["network-inbound", "network-bind"]),
+            "the sandbox answers network-bind allowed whenever network-inbound is allowed"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_allowing_network_bind_is_unconfined() {
+        assert_eq!(
+            allowing_only("network-bind"),
+            sandboxed_allowing(&["network-bind"])
+        );
+    }
+
+    #[test]
+    fn a_sandbox_allowing_file_write_create_is_unconfined() {
+        assert_eq!(
+            allowing_only("file-write-create"),
+            sandboxed_allowing(&["file-write-create"])
         );
     }
 
@@ -232,6 +296,55 @@ mod darwin {
             observe(own_pid()),
             allowing_every_required_operation(false),
             "these tests must run outside any sandbox"
+        );
+    }
+
+    #[test]
+    #[ignore = "run inside sandbox-exec by a_sandboxed_observer_trusts_no_answer_on_any_call"]
+    fn observe_twice_from_inside_a_sandbox() {
+        let Some(helper) = std::env::var_os(SANDBOXED_OBSERVER) else {
+            return;
+        };
+        let helper: libc::pid_t = helper
+            .to_str()
+            .and_then(|helper| helper.parse().ok())
+            .expect("the outer test passes the helper's pid");
+        for call in ["first", "second"] {
+            for pid in [own_pid(), helper] {
+                assert_eq!(
+                    observe(pid),
+                    Confinement::Unverifiable {
+                        reason: Unverifiable::SupervisorSandboxed,
+                    },
+                    "the {call} observation of pid {pid}"
+                );
+            }
+        }
+        println!("{OBSERVED_TWICE}");
+    }
+
+    #[test]
+    fn a_sandboxed_observer_trusts_no_answer_on_any_call() {
+        let helper = Sleeper::start("(version 1)(deny default)");
+        let output = Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", "(version 1)(allow default)"])
+            .arg(std::env::current_exe().expect("the running test executable has a path"))
+            .args([
+                "--exact",
+                "darwin::observe_twice_from_inside_a_sandbox",
+                "--include-ignored",
+                "--nocapture",
+            ])
+            .env(SANDBOXED_OBSERVER, helper.pid().to_string())
+            .stdin(Stdio::null())
+            .output()
+            .expect("sandbox-exec runs this test executable");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(OBSERVED_TWICE),
+            "the observation inside sandbox-exec ended {}; stdout {stdout:?}; stderr {:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }
