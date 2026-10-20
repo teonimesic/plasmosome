@@ -132,7 +132,8 @@ impl Libkrun {
         let c_name = c_path("the libkrun path", path)?;
         // SAFETY: `bundle` is a VerifiedBundle, which only verify_bundle makes: its directory is
         // absolute, and when it was checked the file at this path was a regular file, with no
-        // symlink on the way, whose bytes matched the pinned bundle's SHA256SUMS, checked above.
+        // symlink inside the bundle and none at the bundle directory itself, whose bytes matched
+        // the pinned bundle's SHA256SUMS, checked above.
         // An absolute path makes dlopen search nothing. Loading runs that file's initializers;
         // a writer that replaces it after the check is the limit the crate README names.
         let handle = unsafe { libc::dlopen(c_name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };

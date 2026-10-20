@@ -173,10 +173,12 @@ fn wait_until(child: &mut Child, deadline: Instant) -> io::Result<Option<ExitSta
     }
 }
 
-/// Spawn `launcher` (normally `lane-vmm`) in a new process group, with `lane` on its standard
-/// input, an empty environment and `/` as its directory. Wait up to `timeout`; past it, kill the
-/// group, reap the launcher and return `TimedOut`. When the launcher exits first, kill whatever is
-/// left in its group. Either way, stop reading stderr `STDERR_GRACE` after that kill.
+/// Spawn `launcher` (normally `lane-vmm`) in a new process group, with an empty environment and
+/// `/` as its directory, and write `lane` to its standard input from a thread, so the timeout holds
+/// while the launcher does not read it. Wait up to `timeout`; past it, kill the group, reap the
+/// launcher and return `TimedOut`. When the launcher exits first, kill whatever is left in its
+/// group. Once the launcher is reaped, a group left holding only zombies counts as empty. Either
+/// way, stop reading stderr `STDERR_GRACE` after that kill.
 ///
 /// Then parse `lane.console` against `guest`'s run ID and probes. The console is opened without
 /// following a final symlink and without blocking. A console that cannot be opened that way, is

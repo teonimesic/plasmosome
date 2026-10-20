@@ -1,8 +1,8 @@
 # plasmosome-lanes
 
 Test lanes that boot the pinned libkrun guest with no cell. A lane is one VM: the runtime
-bundle's libkrun v1.19.4 and kernel, an initramfs whose PID1 is `lane-init`, read-only virtio-fs
-shares, and probes that report what the guest sees on its console. No product path builds, links
+bundle's libkrun v1.19.4 and kernel, an initramfs whose PID1 is `lane-init`, virtio-fs shares,
+and probes that report what the guest sees on its console. No product path builds, links
 or launches this package. It is a test fixture, so owner gates O-1, O-6 and O-7 do not gate it.
 
 It exists because every cell path waits on those gates, while spec 027 needs a booted pinned
@@ -40,7 +40,9 @@ run's results come only from the guest console, and anything short of a complete
 2. Refuse what would change which libraries load. Exit 69 if any `DYLD_` variable is set, or if
    anything named `libkrunfw.5.dylib`, a dangling symlink included, exists where dyld looks for
    libkrun's leaf-name load of it: the working directory, the libkrun's `LC_RPATH`
-   `/opt/homebrew/opt/llvm/lib`, `/usr/local/lib` and `/usr/lib`. Nothing is loaded yet.
+   `/opt/homebrew/opt/llvm/lib`, `/usr/local/lib` and `/usr/lib`. Nothing from the bundle has
+   loaded yet. A library named in `DYLD_INSERT_LIBRARIES` has, though: dyld loads it before
+   `main`, so its constructor has run by the time this step refuses it (see Limits).
 3. Exit 64 if `root_image` resolves to a file inside the bundle. The root disk is writable, as
    the cell's is, so each lane gives its own copy of the image.
 4. Check the bundle with `verify_bundle`. The directory's name must be the first 16 hex digits
@@ -109,8 +111,11 @@ with `fstat` that it is a regular file before reading it. A FIFO, a symlink or a
 `NotRun`, naming the path. It reads the console through a limit of 16 MiB (`MAX_CONSOLE_BYTES`),
 and a longer console is `NotRun` whatever it holds, as spec 026 §5 asks of bytes a guest writes.
 
-`run_lane` starts the VMM in its own process group. At the timeout it kills the group, then reaps
-the VMM. After a normal exit it kills whatever is left in the group. It keeps the first MiB of
+`run_lane` starts the VMM in its own process group, and writes the configuration to its stdin
+from a thread, so a VMM that never reads stdin still times out. At the timeout it kills the
+group, then reaps the VMM. After a normal exit it kills whatever is left in the group. Once the
+VMM is reaped, an `EPERM` from that kill counts as nothing left: macOS refuses to signal a group
+whose only members are zombies. It keeps the first MiB of
 the VMM's stderr and reads and drops the rest, so the VMM never blocks on the pipe. It stops
 reading one second (`STDERR_GRACE`) after it kills the group, so a process that holds stderr
 cannot keep it waiting.
@@ -184,12 +189,20 @@ the bundle's `base/rootfs.raw` as its writable root image.
 - The bundle's libkrun carries a leftover library search path, `LC_RPATH /opt/homebrew/opt/llvm/lib`,
   and `krun_create_ctx` calls `dlopen("libkrunfw.5.dylib")` by leaf name, which searches it. The
   lanes load the library as shipped. Step 2 refuses the run when that name exists anywhere dyld
-  would look, before anything loads. A process running as the same user can still place the
+  would look, before libkrun loads. A process running as the same user can still place the
   file after step 2 and before `krun_create_ctx`. Step 6 then refuses the run, but the library's
   initializers have already run.
 - A process that leaves the VMM's process group escapes the kill. `lane-vmm` starts no children,
   so only a launcher other than `lane-vmm` can leave one. Its stderr reader thread then stays
-  blocked until that process closes the pipe.
+  blocked until that process closes the pipe. So does the stdin writer thread, if the
+  configuration is larger than the pipe holds and that process keeps stdin open unread.
+  `run_lane` waits for neither.
+- dyld loads a library named in an inherited `DYLD_INSERT_LIBRARIES` before `main`, because
+  `lane-vmm` is ad hoc signed without the hardened runtime, and the boot tests sign it the same
+  way. Its constructor has run by the time step 2 refuses the variable with exit 69. It runs
+  even when step 1 refuses the configuration with exit 64. Both were measured with a library
+  whose constructor writes a file. `DYLD_LIBRARY_PATH` loaded nothing before its refusal.
+  `run_lane` clears the environment, so no lane passes either.
 - After a normal exit, `run_lane` reaps the VMM before it kills the group. If the group is empty
   by then, a new process could take its ID in between, but only if the system's process IDs
   wrap around in that moment.

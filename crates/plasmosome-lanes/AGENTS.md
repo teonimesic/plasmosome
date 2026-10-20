@@ -8,15 +8,19 @@ for what each piece does.
 
 ## Hard rules
 
-- **No product package depends on this one.** `cargo tree -i plasmosome-lanes` lists no other
-  workspace member. A lane that a product path could launch would be an unreviewed VMM.
+- **No product package ships this one.** Another member may reach it only through
+  `[dev-dependencies]`. The guard `lanes_are_dev_only` in `plasmosome-guards` refuses a normal or
+  build dependency, because lanes code would then ship inside a product binary. A lane that a
+  product path could launch would be an unreviewed VMM. Today nothing depends on it at all.
 - **Results come only from the guest console.** A probe outcome is what `lane-init` framed on
   `/dev/hvc0`, never something the host inferred. A run with no complete framing is `NotRun`,
   and so is a probe with no result line; neither is ever a pass.
 - **Check the bundle before loading it.** `lane-vmm` refuses `DYLD_` variables and any
   `libkrunfw.5.dylib` on dyld's search list, then calls `verify_bundle` with the pinned bundle
   ID, all before `dlopen`. It checks the loaded images after `krun_create_ctx`. Moving any of
-  these later lets unverified code run first.
+  these later lets unverified code run first. None of them stops a library an inherited
+  `DYLD_INSERT_LIBRARIES` names: dyld runs it before `main`, which is why `run_lane` clears the
+  environment.
 - **The bundle is pinned.** `PINNED_BUNDLE_ID` names the one bundle these lanes load, and
   `Libkrun::open` takes only a `VerifiedBundle`. A self-consistent bundle with another ID is
   refused. A symlink or FIFO anywhere in the bundle tree is refused, because each lets a path
