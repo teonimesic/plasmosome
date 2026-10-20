@@ -20,6 +20,9 @@ pub mod manifest;
 /// hands the object it reaches to the caller's judge.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod nofollow;
+/// Spec 022's operator declarations: the trusted files the controller reads them from.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod operator;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod private_socket;
 pub mod protocol;
