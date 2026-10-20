@@ -264,6 +264,14 @@ impl DrainSpec {
     pub fn deadline_ms(&self) -> u64 {
         u64::try_from(self.deadline.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX)
     }
+
+    /// The deadline `membraned` sends with the 4090 `shutdown` when it stops a guest under this
+    /// drain (spec 023 §7). It is whole milliseconds, at least 1 ms, and strictly below the
+    /// drain's deadline. `None` with `RevokePolicy::Force`, and when under 1 ms would be left:
+    /// then no `shutdown` is sent, and the helper is killed at the drain deadline.
+    pub fn shutdown_deadline(&self) -> Option<Duration> {
+        unimplemented!()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
