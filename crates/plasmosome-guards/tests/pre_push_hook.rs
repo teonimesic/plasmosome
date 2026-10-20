@@ -31,6 +31,9 @@ fn git(directory: &Path, arguments: &[&str]) -> Output {
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_OBJECT_DIRECTORY")
         .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_TEMPLATE_DIR")
         .args(arguments)
         .output()
         .expect("git runs")
@@ -55,6 +58,14 @@ fn set_up(directory: &Path, arguments: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+fn link_checkout_hooks(root: &Path, hooks: &Path) {
+    fs::create_dir(hooks).expect("setup: the scratch hooks directory is created");
+    for name in HOOKS {
+        symlink(root.join(".githooks").join(name), hooks.join(name))
+            .expect("setup: the checkout's hook is linked into the scratch repository");
+    }
+}
+
 struct Scratch {
     _directory: TempDir,
     work: PathBuf,
@@ -73,12 +84,7 @@ impl Scratch {
             .to_owned();
         set_up(directory.path(), &["init", "--quiet", "--bare", &remote]);
         set_up(directory.path(), &["init", "--quiet", "work"]);
-        let hooks = work.join(".githooks");
-        fs::create_dir(&hooks).expect("setup: the scratch hooks directory is created");
-        for name in HOOKS {
-            symlink(root.join(".githooks").join(name), hooks.join(name))
-                .expect("setup: the workspace hook is linked into the scratch repository");
-        }
+        link_checkout_hooks(root, &work.join(".githooks"));
         for arguments in [
             &["config", "core.hooksPath", ".githooks"][..],
             &["config", "commit.gpgsign", "false"],
