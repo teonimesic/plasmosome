@@ -308,6 +308,15 @@ fn a_key_repeated_inside_an_allowed_value_is_refused_at_any_depth_naming_it() {
 }
 
 #[test]
+fn an_allowed_value_that_is_not_json_is_refused_as_malformed() {
+    let text = manifest_json().to_string();
+    let once = r#""cell_value":"0600""#;
+    assert_eq!(text.matches(once).count(), 1);
+    let reason = malformed(&text.replacen(once, r#""cell_value":}"#, 1));
+    assert!(reason.contains("expected value"), "{reason}");
+}
+
+#[test]
 fn an_allowed_value_of_any_json_type_loads_unchanged() {
     let value = json!({
         "stat": {"mode": "0600", "uid": 1000, "offset": -1, "ratio": 0.5, "size": u64::MAX},
