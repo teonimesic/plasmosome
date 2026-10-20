@@ -115,6 +115,17 @@ nothing. The option does not catch the second or third looser profile: for a fil
 tree, both answer denied, as the host policy does. The network operations have no filter like
 that.
 
+For an existing file inside the work tree, the host policy answers allowed, while the second and
+third looser profiles and `(deny default)` answer denied. Of the six profiles measured here (the
+host policy, the three looser ones, `(allow default)` and `(deny default)`), only the host policy
+gives that pair of answers, denied outside and allowed inside. A reviewer then measured two
+profiles written to match it, and both were reproduced here:
+`(version 1)(allow default)(deny process-fork)(deny network*)(deny file-write*)(allow file-write* (subpath W))`,
+with `W` the work tree, and the same rules with the `allow` first. Each answered as the host
+policy does to the sandboxed query, to the five, and to `file-write-create` for an existing and a
+missing file both inside and outside the work tree. Yet its child still ran `/bin/echo`. So no
+fixed set of queries, path-filtered ones included, settles O-3.
+
 It also says nothing about descriptors the helper already holds, or about the images it loaded
 (owner gate O-5).
 
