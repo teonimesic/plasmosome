@@ -152,8 +152,9 @@ withdraws only this attachment's holdings; spec 017 keeps every equal peer.
 returned `DrainTimedOut` keeps its fence and stays standing, named `timed_out` (section 6); the
 removal stays committed without finish, and a retry tries the drain again. Spec 008 records `force`
 in the prepare and defines no way to add it to a committed removal, the same gap any safe removal
-has when it times out after commit, so until a retry drains the holding nothing finishes the
-removal. A bound never discharges an external assertion: an attachment with one outstanding is not
+has when it times out after commit, so only a retry that drains the holding, or a `cell.kill` with
+`now` that tears the cell down (section 10's 023 change), finishes the removal. A bound never
+discharges an external assertion: an attachment with one outstanding is not
 prepared, and stays fenced as `external_pending` until an operator removes it with Force (spec 001
 §3.11). Only records carried forward can hold one, since spec 008's writer refuses new external
 effects.
@@ -174,7 +175,7 @@ file, mount, stream and flow passes a host check on every request, and managed f
 mapped (O-7), so after the fence every request on a reference opened before B is refused. The
 contract term is **until the last reference goes**: IO admitted before B may finish within D, and by
 H what remains is named (section 6). IO the operating system cannot interrupt keeps its holding
-unfinished until it ends, `timed_out` or, once forced, an `IncompleteEffect`, named with its owner
+unfinished until it ends, `timed_out` or an `IncompleteEffect`, named with its owner
 `{cell, plugin}` and its `GrantId`. A grant reference effective after H is **residue**: the expiry's
 record names it, the journal keeps the removal unfinished until fresh observation proves it absent
 (spec 008), and the cell's observation names it until it goes.
@@ -206,16 +207,16 @@ what is fixed is that none reads as success, and every `GrantId` that did not dr
 | `incomplete` | a withdrawal left an `IncompleteEffect`, a reference survives H, or a software name could not be removed (draft 027); each is named, a name by its path |
 | `failed` | the transaction was refused (spec 008); the refusal is named |
 
-The plasmid's state is `draining`. Failure never keeps or restores a grant, and its gates stay
-fenced throughout. Before a removal commits (`fenced`, `external_pending` or a refusal), the
-committed desired state still holds the attachment's `lifetime` record (spec 008's
-`Replacement.lifetime`, section 10), and every publication carries it: for a lease its bound has
-passed, and for another cause the permanent fence holds and observation shows it. A removal stuck
-after commit (`timed_out` or `incomplete`) stays committed without finish (spec 008, publication
-step 5) until a retry finishes it. While any expiry is unfinished past its H, `plasmosome.status`
-reports `ready: false`. A `cell.kill` resumes an unfinished expiry before its own withdrawal
-(section 10). Forced and clean removals by the existing verbs still render alike, outside this spec;
-expiry records differ.
+The plasmid's state is `draining`. Failure never restores a grant's access, and its gates stay
+fenced throughout, even for a holding that stays standing. Before a removal commits (`fenced`,
+`external_pending` or a refusal), the committed desired state still holds the attachment's
+`lifetime` record (spec 008's `Replacement.lifetime`, section 10), and every publication carries it:
+for a lease its bound has passed, and for another cause the permanent fence holds and observation
+shows it. A removal stuck after commit (`timed_out` or `incomplete`) stays committed without finish
+(spec 008, publication step 5) until a retry finishes it. While any expiry is unfinished past its H,
+`plasmosome.status` reports `ready: false`. A `cell.kill` resumes an unfinished expiry before its
+own withdrawal, and with `now` goes past one that does not finish (section 10). Forced and clean
+removals by the existing verbs still render alike, outside this spec; expiry records differ.
 
 ### 7. Restarts, and a missing supervisor
 
@@ -289,21 +290,22 @@ are this spec's.
     it."
   - §3.9 (`001:387`): after "Absent declarations mean `passthrough`.", add "Each object carries
     `lifetime`, as in §3.6."
-  - §3.10 (`001:434`): after "Without artifact, existing local selection remains unchanged.", add
-    "- Optional `lease_ms`, `idle_ms` and `exec_id` only shorten the lifetime of every attachment
-    the request creates, providers it pulls in included (spec 028). An `exec_id` whose exec is not
-    `running` is `105` `{from: <state>, to: "running"}`, and an unknown one `101` `exec <id>`;
-    neither prepares anything."
+  - §3.10 (`001:429-434`): after the bullet that begins "Optional `artifact:
+    {registry_id,release:ReleaseRef}` selects an already imported spec020 plasmid", whose last
+    sentence spec 022 replaces, add "- Optional `lease_ms`, `idle_ms` and `exec_id` only shorten the
+    lifetime of every attachment the request creates, providers it pulls in included (spec 028). An
+    `exec_id` whose exec is not `running` is `105` `{from: <state>, to: "running"}`, and an unknown
+    one `101` `exec <id>`; neither prepares anything."
   - §3 (`001:472`): after §3.12's last sentence, "Missing/corrupt imported bytes use101/108 before
     effects and leave the old attachment intact.", add a section `### 3.13 plasmid.renew` whose text
     is section 8's first two paragraphs. It adds no error code: a renewal past a provider's bound is
     the existing `103`.
-  - §4.1, observe (`001:640`, `001:643`): replace "`{cell, state, supervisor, generation,
-    desired}`" with "`{cell, state, supervisor, generation, desired, gates}`", and after "with
-    `generation == desired.generation`.", add "`gates` lists, for each grant, its `GrantId`, both
-    readings of its bound, its idle deadline and whether its gate has fenced (spec 028). It is
-    host-gate state the supervisor observes itself, never a `GuestObservation` or `GuestBinding`
-    field."
+  - §4.1, observe (`001:640`, `001:643`): replace "`{cell, state, supervisor, generation, desired}`"
+    with "`{cell, state, supervisor, generation, desired, gates}`", and after "with `generation ==
+    desired.generation`.", add "`gates` lists, for each grant, its `GrantId`, both readings of its
+    bound, its idle deadline and whether its gate has fenced (spec 028). It is host-gate state the
+    supervisor observes itself, never a `GuestObservation` or `GuestBinding` field. It is read fresh
+    at each call, not retained."
   - §4.1, apply (`001:670`): replace "`membrane.effect.apply` params are `{cell, generation,
     operation, deadline_ms}`." with "`membrane.effect.apply` params are `{cell, generation,
     operation, lifetime, deadline_ms}`, where `lifetime` is the attachment's bound, in both
@@ -312,9 +314,10 @@ are this spec's.
   - §4.1, lowering (`001:689`): after "Neither PID backfill nor adoption of a matching process name
     is an alternative implementation.", add "- `membrane.lifetime.lower` params are `{cell, plugin,
     bound, deadline_ms}`. The supervisor takes `bound` for every grant of that attachment only when
-    it is earlier than the bound it holds, and fences at once when it has passed; it takes a later
-    bound only from a published DesiredCell. Result is `{cell, plugin, bound}`, with the bound now
-    held (spec 028)."
+    it is earlier than the bound it holds, and fences at once when it has passed; the controller
+    sends only a bound that has passed, since the journal does not record a lowered bound; the
+    supervisor takes a later bound only from a published DesiredCell. Result is `{cell, plugin,
+    bound}`, with the bound now held (spec 028)."
   - §4.2 (`001:1000`): after "Guest drain and host drain share the one remaining budget.", add, as
     a paragraph headed **Lifetime fence (spec 028)**, section 4's first two paragraphs and the
     first three sentences of its third.
@@ -395,12 +398,39 @@ are this spec's.
   - §8 (`022:300-301`): after "`plasmid.reload` re-resolves the plasmid at its held mode against
     the file as it is then.", add "It does not re-resolve or change the plasmid's lifetime (spec
     028)."
-- **Spec 023.** In §7 step 2 (`023:245`), after "safe removal, or Force when `now` is set.", add
-  "Before it, the kill resumes any committed but unfinished transaction of the cell, such as a spec
-  028 expiry, since spec 008 starts no later transaction until that one finishes." A prepare that a
-  failed Force audit stopped is resolved only at startup (spec 008), so a kill cannot resume it.
-  That gap is already in spec 008 and spec 023 for any failed Force audit, and this change leaves
-  it; under question 2's default an expiry has no Force audit.
+- **Spec 023.** Three changes. The second is new behavior in the kill path.
+  - §7 step 2 (`023:245`): after "safe removal, or Force when `now` is set.", add "Before it, the
+    kill resumes any committed but unfinished transaction of the cell, such as a spec 028 expiry,
+    since spec 008 starts no later transaction until that one finishes."
+  - §7 step 2 (`023:246-247`): after "and the cell stays `draining` for a later `cell.kill`, which
+    publishes first (spec 008).", add:
+    > With `now`, a resumed transaction that has not finished within step 2's share of D does not
+    > stop the kill. This is the one case in which the guest ends before withdrawal finishes. The
+    > kill's own withdrawal is not prepared, since spec 008 starts it only after the resumed one
+    > finishes. The controller writes a session log line naming the cell, the resumed generation
+    > and the kill's operator and reason, then goes on to step 3 under that assertion; if the line
+    > cannot be appended, the reply is 106. When the teardown is clean, its residue `empty`, and
+    > step 4 holds the lock, so that `membraned` and every child it reaped are gone, that is the
+    > fresh observation spec 008 requires: every recorded effect of the cell is absent. Holding the
+    > lock, the controller finishes the resumed transaction on that observation, with no Force,
+    > then prepares the kill's own withdrawal with its Force assertion, appends its `force` event,
+    > and commits and finishes it on the same observation, before step 5. Neither is published,
+    > since no supervisor remains to hold a DesiredCell. A teardown that is not clean finishes
+    > neither: the cell stays `dead` and listed, with `teardown` in `incomplete` and the resumed
+    > generation named, for a later kill. Without `now`, the reply stays 106.
+  - Acceptance item 13 (`023:603-604`): replace "Catches: ending the guest before withdrawing,"
+    with "Catches: ending the guest before withdrawing, other than past a resumed transaction under
+    `now` (§7 step 2),".
+
+  Checked against spec 008: no second transaction starts before the resumed one finishes
+  (`008:70-71`); the resumed one keeps its null `force` (`008:96`) and finishes as a commit without
+  finish does, once its cleanup is observed complete (`008:257`); and Force covers only the kill's
+  own prepared obligations (`008:303`). A controller that dies after the teardown and before both
+  finishes leaves a cell with a free lock, no marker and a pending operation, which §8 sets aside as
+  `holdings_without_supervisor`. A prepare that a failed Force audit stopped is resolved only at
+  startup (spec 008), so a kill cannot resume it. That gap is already in spec 008 and spec 023 for
+  any failed Force audit, and this change leaves it; under question 2's default an expiry has no
+  Force audit.
 - **Spec 025.** After the row "| `plasmid reload` | `plasmid.reload` | yes | no |" (`025:128`), add
   the row "| `plasmid renew` | `plasmid.renew` | yes | no |". After "a mode is written
   `--mock=MODE`." (`025:81`), add "A boolean parameter is a bare flag, such as `--until-revoked`."
@@ -421,8 +451,9 @@ Each has the default this spec uses until the owner answers.
    whose drain timed out stays standing, fenced and `timed_out`, and an external assertion waits for
    an operator's Force. This costs cleanup, not access: spec 008 records `force` in the prepare and
    defines no way to add it to a committed removal, the same gap any safe removal has when it times
-   out after commit, so a `timed_out` holding finishes only when a retry drains it, and until then a
-   `cell.kill`, even with `now`, replies 106 (section 10's 023 change). (a) A bound forces exactly
+   out after commit, so a `timed_out` holding finishes only when a retry drains it or a `cell.kill`
+   with `now` tears the cell down (section 10's 023 change); a `cell.kill` without `now` replies 106
+   until then. (a) A bound forces exactly
    the holdings whose drain timed out. The prepare records `force: {"expiry": {plugin, cause,
    bound}}` instead of an operator assertion, spec 008's audited `force` event comes before Force is
    used, and the supervisor accepts an expiry Force only for a grant its own gate fenced and whose
@@ -553,6 +584,17 @@ injected clock, and none sleeps for the duration it tests.
     `mountinfo` until removal finishes. Killing `membraned` leaves no grant reachable. Catches:
     revocation by name only, a fence that only removal provides, a hung call, tree references as
     residue.
+16. **A kill past a stuck expiry (model with a membrane double).** The 4090 double never answers
+    `drain` after B, so the expiry is `timed_out`. A `cell.kill` without `now` replies 106, the
+    cell stays `draining`, and the expiry stays unfinished. A `cell.kill` with `now`, an operator
+    and a reason sends no withdrawal of its own before `membrane.cell.kill`, writes its session
+    log line before it, and retires the cell. After the lock wait, the journal shows the expiry's
+    finish and only then the kill's prepare, commit and finish, with the kill's `force` event in
+    the session log before that commit. With the teardown unclean, the cell stays `dead` and
+    listed, with `teardown` in `incomplete` and the expiry's generation named, and neither
+    transaction finishes. Catches: a `now` kill that still waits on the resumed expiry, the kill's
+    own transaction prepared before the resumed one finishes, and a finish without the teardown's
+    observation.
 
 ## Out of scope
 
