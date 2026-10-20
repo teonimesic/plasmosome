@@ -356,8 +356,16 @@ def check_layout(members, adds):
                 raise Refused("stage", f"--add {add.dest} needs /{'/'.join(parts[:depth])} to be a directory in the base")
 
 
+def listed(field):
+    """Return a member list's names as glibc's files backend reads them: comma separated, leading blanks skipped."""
+    return [name.lstrip() for name in field.split(b",")]
+
+
 def accounts(source, members, epoch):
-    """Return the four account files with the workload account appended, refusing a collision."""
+    """Return the four account files with the workload account appended, refusing a collision.
+
+    glibc's files backend skips blanks at the start of a line, so a name is compared after them.
+    """
     days = epoch // 86400
     lines = {"etc/passwd": PASSWD_LINE + b"\n", "etc/group": GROUP_LINE + b"\n",
              "etc/shadow": b"workload:!:%d:0:99999:7:::\n" % days, "etc/gshadow": b"workload:!::\n"}
@@ -368,12 +376,12 @@ def accounts(source, members, epoch):
             raise Refused("stage", f"the base has no regular /{name}")
         data = read_member(source, member, MAX_ACCOUNT_FILE_BYTES)
         for number, line in enumerate(data.split(b"\n"), 1):
-            fields = line.split(b":")
+            fields = line.lstrip().split(b":")
             if fields[0] == b"workload":
                 raise Refused("stage", f"/{name} line {number} already names workload")
-            if any(len(fields) > i and fields[i].isdigit() and int(fields[i]) == 1000 for i in id_fields):
+            if any(len(fields) > i and fields[i].isdigit() and fields[i].lstrip(b"0") == b"1000" for i in id_fields):
                 raise Refused("stage", f"/{name} line {number} already has id 1000")
-            if any(len(fields) > i and b"workload" in fields[i].split(b",") for i in list_fields):
+            if any(len(fields) > i and b"workload" in listed(fields[i]) for i in list_fields):
                 raise Refused("stage", f"/{name} line {number} already lists workload as a member")
         rewritten[name] = data + (b"\n" if data and not data.endswith(b"\n") else b"") + lines[name]
     judge_accounts(rewritten["etc/passwd"], rewritten["etc/group"], step="stage")
@@ -527,7 +535,7 @@ def judge_accounts(passwd, group, step="check"):
         rows = []
         for number, text in enumerate(lines, 1):
             fields = text.split(b":")
-            if not text or text[:1] in (b"+", b"-") or len(fields) != width or not canonical(fields[2]) or \
+            if not text or text.lstrip()[:1] in (b"+", b"-") or len(fields) != width or not canonical(fields[2]) or \
                     (width == 7 and not canonical(fields[3])):
                 raise Refused(step, f"{path} line {number} is malformed")
             rows.append((number, fields))
@@ -536,7 +544,7 @@ def judge_accounts(passwd, group, step="check"):
             raise Refused(step, f"{path} has no line with {kind} 1000")
         if len(ids) > 1:
             raise Refused(step, f"{path} lines {', '.join(map(str, ids))} have {kind} 1000; the contract needs one")
-        named = [number for number, fields in rows if fields[0] == b"workload" and number != ids[0]]
+        named = [number for number, fields in rows if fields[0].lstrip() == b"workload" and number != ids[0]]
         if named:
             raise Refused(step, f"{path} line {named[0]} names workload with another {kind}")
         found = b":".join(rows[ids[0] - 1][1])
