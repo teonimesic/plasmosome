@@ -407,7 +407,8 @@ controller's trusted local `registry_root` is configured explicitly; the host im
 the lock/descriptors/files again and installs the complete immutable graph under that root by
 digest with atomic no-replace publication. This is a second verification boundary, not trust in
 an arbitrary client-supplied path. The directory must be owned by the host operator and not be
-writable by the workload. Imported files are read-only and non-executable to the workload; package
+writable by the workload. Imported files are read-only and non-executable to the workload except
+files a spec 027 software tree declares as commands, which are executable and read-only; package
 bytes are not an instruction to run a host executable. Import reports `imported` and the root
 reference; it is not a successful cell operation. Existing equal imports are idempotent.
 Import uses the explicitly selected client `--registry-root`; the intended controller must be
