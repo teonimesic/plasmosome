@@ -1700,12 +1700,8 @@ mod tests {
         ));
         assert_eq!(
             accepted,
-            [
-                "Outbox accepts an unknown field",
-                "Policy accepts an unknown field",
-                "DetachReport accepts an unknown field"
-            ],
-            "only the three records whose unknown fields plasmosome-8pr4 decides may accept one"
+            Vec::<String>::new(),
+            "every record refuses a positional array and an unknown field"
         );
     }
 }

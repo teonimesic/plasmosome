@@ -416,11 +416,8 @@ mod tests {
         ));
         assert_eq!(
             accepted,
-            [
-                "Grant accepts an unknown field",
-                "DrainSpec accepts an unknown field"
-            ],
-            "only the two records whose unknown fields plasmosome-8pr4 decides may accept one"
+            Vec::<String>::new(),
+            "every record refuses a positional array and an unknown field"
         );
     }
 

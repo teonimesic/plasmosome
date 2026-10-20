@@ -729,13 +729,15 @@ fn a_record_with_a_repeated_key_at_any_depth_is_refused() {
     }
 }
 
-const REFUSED_TARGET_NAMES: [&str; 15] = [
+const REFUSED_TARGET_NAMES: [&str; 17] = [
     "an unversioned record",
     "the format before the current one",
     "the format after the current one",
     "a numeric backend handle",
     "a universe inverse without its id",
     "an unknown field nested in a capability",
+    "an unknown field in a delayed outbox",
+    "an unknown field in an external policy",
     "a key repeated with its own value",
     "invalid UTF-8 in a complete line",
     "a malformed line between two valid records",
@@ -768,6 +770,24 @@ fn encoded_line(plugin: &str, description: &str, path: &str) -> String {
         .write_to(&mut encoded)
         .unwrap();
     String::from_utf8(encoded).unwrap()
+}
+
+fn effect_line(effect: Effect) -> String {
+    let mut ledger = Ledger::new("github-pr");
+    ledger.push(effect);
+    let mut encoded = Vec::new();
+    ledger.write_to(&mut encoded).unwrap();
+    String::from_utf8(encoded).unwrap()
+}
+
+fn with_unknown_field(line: &str, pointer: &str) -> String {
+    changed(line, |record| {
+        record
+            .pointer_mut(pointer)
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .insert("obsolete".to_string(), serde_json::json!("discarded"));
+    })
 }
 
 fn changed(line: &str, change: impl FnOnce(&mut serde_json::Value)) -> String {
@@ -851,6 +871,22 @@ fn refused_targets() -> Vec<RefusedTarget> {
                     .unwrap()
                     .insert("obsolete".to_string(), serde_json::json!("discarded"));
             }),
+            Some(1),
+        ),
+        row(
+            "an unknown field in a delayed outbox",
+            with_unknown_field(
+                &effect_line(Effect::delayed_unpublished("outbox/github", "payload")),
+                "/effect/reversibility/Delayed",
+            ),
+            Some(1),
+        ),
+        row(
+            "an unknown field in an external policy",
+            with_unknown_field(
+                &effect_line(Effect::external("the comment left the host")),
+                "/effect/reversibility/External",
+            ),
             Some(1),
         ),
         row(
