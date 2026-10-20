@@ -21,7 +21,7 @@ one.
 | `gatekeeper` | Credential custody — the cell receives handles, never secrets |
 | `session_log` | Append-only, synced audit record shared by an instance's cells through one locked writer; an IO error stops all later appends |
 | `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode`; the one constructor for a cell's journal and socket paths |
-| `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens |
+| `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens, spec 023's `launched` and `created` markers and `runtime/`, and retirement into `retired/` |
 | `supervisor_check` | Spec 023 §8's supervisor check, with no IO: `decide` gives the outcome of the first table row a cell's lock, marker and journal match, and `after_query` says whether one answer from a held lock's supervisor, given within the answer cap, adopts the cell, waits, or sets it aside once the cap passes. Adopting does not promise the cell is served: spec 008's journal replay can still quarantine it, and spec 023's no-`created` rule can end it. Callers gather the facts and carry out the outcome |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
 | `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
@@ -172,6 +172,38 @@ there with a composed non-ASCII ID such as `café` is stored as other bytes, and
 that ID every time. APFS and ext4 keep the bytes a name was created with. Spec 023
 allocates ASCII `cell-<n>` IDs, which are stored as given everywhere; nothing here refuses a
 non-ASCII ID on HFS+ at creation.
+
+## Cell markers and retirement
+
+Spec 023 §3 puts two marker files and a runtime directory in a cell directory, beside the
+journal, and §7 moves an ended cell out of `cells/`. `CellDir` and `InstanceRoot` create, read
+and move them through the opened cell directory, never by path and never through a symlink.
+Nothing calls them yet.
+
+- `launched` is one line, `{"cell":"cell-3","boot_session":"<uuid>"}` and a newline, with
+  `,"stopped":true` before the closing brace after a clean stop. `LaunchedMarker::decode` refuses
+  anything else: a second line, a carriage return, a repeated or unknown key, `"stopped": false`,
+  a cell that is not `cell-<n>`, a boot session that is not a lowercase hyphenated UUID, or more
+  than 4,096 bytes. The boot session is `plasmosome_backend::BootSession`, and `clock`'s
+  `boot_session()` reads the host's.
+- `create_launched` creates the marker exclusively with mode 0600, then syncs the file and then
+  the directory. `mark_launched_stopped` writes the stopped record to `launched.tmp`, syncs it,
+  renames it over `launched` and syncs the directory, so a reader sees one whole record or the
+  other. `remove_launched` removes it, and a missing marker is not an error.
+- `read_launched` is `Absent` only when no entry named `launched` exists. A symlink, a
+  directory, a FIFO or a socket, a record `decode` refuses, a marker naming another cell, and an
+  error opening or reading it are `Unreadable`. An error never reads as absence, because an
+  absent marker lets spec 023's supervisor check retire the cell.
+- `create_created` needs the writer lock and creates the empty `created` file the same way.
+  `has_created` refuses an entry that is not a regular file rather than reading it as true.
+  `create_runtime_dir` creates `runtime/` exclusively with mode 0700 and returns it opened.
+- `InstanceRoot::retire` takes the writer lock and consumes the `CellDir`. It creates `retired/`
+  with mode 0700 when it is missing, checks that `cells/<cell>` is still the opened directory by
+  device and inode, renames it to `retired/<cell>`, and syncs `cells/` and then `retired/`. The
+  rename never replaces an entry: macOS uses `renameatx_np` with `RENAME_EXCL` and Linux
+  `renameat2` with `RENAME_NOREPLACE`, so an existing `retired/<cell>` is `AlreadyRetired`.
+  Nothing is unlinked: the journal, the markers, a stale `membrane.uds` and `runtime/root.img`
+  move with the directory.
 
 ## Configuration
 
