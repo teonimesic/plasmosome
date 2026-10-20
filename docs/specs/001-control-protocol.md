@@ -250,8 +250,9 @@ Spec008 defines recovered `ledger_generation` as the maximum adopted cell genera
 It is not a cross-cell acknowledgement watermark. Recovered cells retain their actual observed
 supervisor state; replay does not prove readiness. After successful recovery startup, `ready`
 is false while the account contains drift, quarantine, unmatched effects or any incomplete
-effect. Quarantined cells are absent from `cells` and remain named in `plasmosome.recovery`. A recovered unknown genome
-is omitted, as §1 requires.
+effect, or while a spec 028 expiry is unfinished past its H. Quarantined cells are absent from
+`cells` and remain named in `plasmosome.recovery`. A recovered unknown genome is omitted, as §1
+requires.
 
 ### 3.3a `plasmosome.recovery`
 
@@ -365,6 +366,8 @@ or authorize removing a different holding with an equal resource description.
 ```
 
 - `genome` is optional; without it the cell starts empty (plasmids attach later).
+- With a genome, optional `lease_ms` and `idle_ms` only shorten the lifetime of each attachment
+  the request creates (spec 028). `exec_id` is `-32602`.
 - The controller allocates the cell ID and starts its supervisor as spec 023 says. It replies only
   when the guest is up and the genome is attached; until then the cell is `germinating` and refuses
   `cell.exec`. Resolution refusals come before any cell directory exists; every later refusal
@@ -418,6 +421,7 @@ or authorize removing a different holding with an equal resource description.
   controller reports what the supervisor *answered*, never process-alive heuristics).
 - `subjects` are the E13 child-domain subjects: per-tool netns, address from the frozen
   `10.29.0.0/24` compiler constant, per-subject attach state.
+- Each object in `plasmids` carries `lifetime`, always present, as spec 028 section 9 defines it.
 
 ### 3.7 `cell.kill`
 
@@ -503,7 +507,8 @@ Completion is asynchronous; `exec.status` (companion, same envelope) polls:
 ```
 
 `mock` ∈ `simulate | capture | passthrough` — the D2 vocabulary, closed; an addition to it is a
-contract change. Absent declarations mean `passthrough`.
+contract change. Absent declarations mean `passthrough`. Each object carries `lifetime`, as in
+§3.6.
 
 ### 3.10 `plasmid.add`
 
@@ -557,6 +562,10 @@ contract change. Absent declarations mean `passthrough`.
   declarations file: an unlisted ID is 101, and an unsafe or mismatched declaration is 108. Every
   closure member's declared network and workspace needs are resolved into complete capabilities
   through that file before prepare; an uncovered need is 103 naming the capability and plasmid.
+- Optional `lease_ms`, `idle_ms` and `exec_id` only shorten the lifetime of every attachment the
+  request creates, providers it pulls in included (spec 028). An `exec_id` whose exec is not
+  `running` is `105` `{from: <state>, to: "running"}`, and an unknown one `101` `exec <id>`;
+  neither prepares anything.
 
 ### 3.11 `plasmid.remove`
 
@@ -602,6 +611,29 @@ its exact imported declaration. A reload whose new capabilities would widen what
 refuses with 109 before prepare (spec 022). Selecting a different release
 requires an explicit permitted detach/add or a separate new cell, not an implicit source switch.
 Missing/corrupt imported bytes use101/108 before effects and leave the old attachment intact.
+
+### 3.13 `plasmid.renew`
+
+`plasmid.renew` takes `kernel`, `cell`, `plasmid`, exactly one of `not_after` (an RFC 3339 UTC
+instant) or `until_revoked: true`, and `operator` and `reason`, nonblank as for Force. A renewal
+only moves the bound later, and never past the ceiling recorded at attach: `not_after` is at most
+that ceiling from now, and `until_revoked` needs an `until_revoked` ceiling. Anything else, or a
+bound earlier than the one in force, is `-32602` naming the limit. A requirer is never renewed past
+a provider's bound: that is 103, with the provider in `plasmid` and the capability it provides in
+`capability`. The result is `{cell, plasmid, lifetime}`, with `cell` the cell the verb acted on
+and `lifetime` the renewed lifetime in the shape `plasmid.list` gives it (spec 028 section 9). A
+`not_after` equal to the bound in force writes nothing and replies as before, so a repeat after
+spec 025's exit 3 is safe.
+
+A renewal is a spec 008 transaction whose replacement changes only the lease; an idle limit or exec
+scope stays. After its prepare is durable, a session-log `renew` event records operator, reason,
+and old and new bounds; like `force`, it records authorization, not completion. Then come commit,
+finish and publication. The supervisor raises a gate only from a published DesiredCell, so a raise
+always follows a durable commit and no gate is later than the journal. If B passes before the
+commit, the controller appends abort and replies 105 `{from: "draining", to: "active"}`. If a gate
+fences between commit and publication, the fence stays, and the controller expires the attachment
+with cause `lease` and replies the same 105. Renewal and expiry share spec 023's arrival order: a
+renewal arriving after B gets that 105 before prepare, and one still running at B fails.
 
 ## 4. Controller ⇄ membrane (the supervisor side of the contract)
 
@@ -793,10 +825,14 @@ selected record's observation semantics; it does not stop resources changing dur
 
 - `membrane.cell.observe` params are `{cell, deadline_ms, snapshot, offset}`. `deadline_ms` is a positive
   remaining budget capped by the controller's recovery deadline. Its assembled logical result is
-  `{cell, state, supervisor, generation, desired}`: `state` is the existing closed cell lifecycle
+  `{cell, state, supervisor, generation, desired, gates}`: `state` is the existing closed cell lifecycle
   enum from actual child/supervisor observation, `supervisor` is the current `membrane.status`
   result, and `desired` is the complete last published DesiredCell retained by this supervisor,
-  with `generation == desired.generation`. Generation and content are retained atomically.
+  with `generation == desired.generation`. `gates` lists, for each grant, its `GrantId`, both
+  readings of its bound, its idle deadline and whether its gate has fenced (spec 028). It is
+  host-gate state the supervisor observes itself, never a `GuestObservation` or `GuestBinding`
+  field. It is read fresh at each call, not retained. Generation and content are retained
+  atomically.
   A fresh supervisor starts with the empty generation-0 record. Missing retained content is an
   observation failure, not permission to reconstruct it from the requesting controller.
   This publication record is not evidence of liveness or holdings: those still require actual
@@ -823,7 +859,11 @@ selected record's observation semantics; it does not stop resources changing dur
   whole response. Post-side-effect failure is represented in incomplete, not hidden because no
   complete object was published. Empty state alone never establishes cleanup: the exact address
   must be absent from state AND incomplete. Lost authority is a failure, not an empty collection.
-- `membrane.effect.apply` params are `{cell, generation, operation, deadline_ms}`.
+- `membrane.effect.apply` params are `{cell, generation, operation, lifetime, deadline_ms}`,
+  where `lifetime` is the attachment's bound, in both readings, and its idle limit, which the
+  operation's host gate enforces from activation (spec 028). `lifetime` also carries `drain_ms`,
+  the attachment's drain budget D, because from activation the gate caps each admitted request's
+  work at the bound plus D (spec 028 section 4).
   `operation` is a fully predeclared spec017 UniverseOp with spec008 owner. The trusted
   controller sends it only after that generation's prepare is durable. Result is
   `{cell, generation, id, applied: true}` after enforcement accepted the exact operation.
@@ -843,6 +883,11 @@ selected record's observation semantics; it does not stop resources changing dur
   Partial application returns the typed incomplete_effect refusal and retains original cleanup
   authority; grant/apply retry at that incomplete address cannot launch again or complete access.
   Neither PID backfill nor adoption of a matching process name is an alternative implementation.
+- `membrane.lifetime.lower` params are `{cell, plugin, bound, deadline_ms}`. The supervisor takes
+  `bound` for every grant of that attachment only when it is earlier than the bound it holds, and
+  fences at once when it has passed; the controller sends only a bound that has passed, since the
+  journal does not record a lowered bound; the supervisor takes a later bound only from a
+  published DesiredCell. Result is `{cell, plugin, bound}`, with the bound now held (spec 028).
 - `membrane.effect.withdraw` params are `{cell, generation, removal, owner, drain, deadline_ms}`.
   `removal` is the exact spec017 UniverseRemoval, `owner` is CellOwner, and `drain` is the
   existing DrainSpec serde value. Result is `{cell, generation, id, withdrawn: true}`.
@@ -1167,6 +1212,25 @@ paused and waits for already-admitted host work. `drain` only observes/waits for
 requests pending when that control request arrived; it neither closes a guest gate nor destroys,
 rebinds or forgets any resource. Later attempts cannot perform host effects through the paused
 gate. Guest drain and host drain share the one remaining budget.
+
+**Lifetime fence (spec 028).** The supervisor gets each grant's bound and idle limit with its
+apply (spec 001 §4.1), before activation. It takes an earlier bound at any time, and a later one
+only from a published DesiredCell (spec 028 section 8). From B on, the host gate of every grant in
+the attachment admits no request, on any reference, opened before B or after. The gate reads the
+supervisor's clock at every admission, as spec 001 §4.2's graceful pause does, so the fence needs
+no timer and no controller. It refuses before any OS effect, with spec 001's `grant_inactive`. It
+caps each admitted request's work at B + D, and when B moves earlier, work already admitted is
+cut to the new B + D.
+
+For the idle limit, the gate keeps the continuous time of the last request it admitted for the
+attachment; a request still in flight is not use, and sleep counts as idle. It fences once that time
+plus `idle_ms` has passed, checked at each admission and each observation, and the supervisor's
+observation reports the idle deadline. With equal peers, fresh use goes to the smallest admitting
+`GrantId` (spec 001), so the other can go idle.
+
+The fence is permanent: no restored pause, late drain reply, renewal, publication or use reopens
+it. `grant.select` treats a fenced grant as closed, so an equal peer of another attachment serves
+fresh lookups (spec 017). The fence withdraws and finishes nothing, so it is not a removal path.
 
 If the deadline expires before destructive progress, restore the local pause and return
 DrainTimedOut with original objects, handles, guest admission and peers unchanged. A delayed
