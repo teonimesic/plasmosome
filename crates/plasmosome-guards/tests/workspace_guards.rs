@@ -547,9 +547,18 @@ fn test_fixture_enablers_outside_the_testkit(root: &Path) -> Vec<String> {
 }
 
 fn fixture_feature_workspace(consumer: &str, workspace_dependencies: &str) -> tempfile::TempDir {
+    fixture_feature_workspace_of(&[("crates/consumer", consumer)], workspace_dependencies)
+}
+
+fn fixture_feature_workspace_of(
+    consumers: &[(&str, &str)],
+    workspace_dependencies: &str,
+) -> tempfile::TempDir {
     let directory = tempfile::tempdir().expect("a scratch directory is created");
     let root = directory.path();
-    write_workspace_manifest(root, &["crates/backend", "crates/consumer"]);
+    let mut members = vec!["crates/backend"];
+    members.extend(consumers.iter().map(|(path, _)| *path));
+    write_workspace_manifest(root, &members);
     if !workspace_dependencies.is_empty() {
         let mut manifest =
             std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest reads back");
@@ -564,7 +573,9 @@ fn fixture_feature_workspace(consumer: &str, workspace_dependencies: &str) -> te
             member_manifest(BACKEND)
         ),
     );
-    write_member(root, "crates/consumer", consumer);
+    for (path, manifest) in consumers {
+        write_member(root, path, manifest);
+    }
     let locked = cargo_in(root)
         .args(["generate-lockfile", "--offline"])
         .output()
@@ -588,6 +599,29 @@ fn a_member_that_forwards_the_test_fixture_through_its_own_features_is_reported(
             "plasmosome-membrane",
             "[features]\ndefault = [\"fixtures\"]\nfixtures = [\"plasmosome-backend/test-fixture\"]\n\n[dependencies]\nplasmosome-backend = { path = \"../backend\" }\n",
         ),
+        "",
+    );
+    assert_eq!(
+        test_fixture_enablers_outside_the_testkit(workspace.path()),
+        ["plasmosome-membrane"]
+    );
+}
+
+#[test]
+fn a_crate_that_only_depends_on_a_forwarding_member_is_not_named() {
+    let forwarding = consumer(
+        "plasmosome-membrane",
+        "[features]\ndefault = [\"fixtures\"]\nfixtures = [\"plasmosome-backend/test-fixture\"]\n\n[dependencies]\nplasmosome-backend = { path = \"../backend\" }\n",
+    );
+    let dependent = consumer(
+        "plasmosome-controller",
+        "[dependencies]\nplasmosome-membrane = { path = \"../membrane\" }\n",
+    );
+    let workspace = fixture_feature_workspace_of(
+        &[
+            ("crates/membrane", &forwarding),
+            ("crates/controller", &dependent),
+        ],
         "",
     );
     assert_eq!(

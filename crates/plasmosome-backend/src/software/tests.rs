@@ -289,6 +289,22 @@ fn a_root_swapped_for_a_link_after_its_check_is_refused_as_the_tree_itself() {
 }
 
 #[test]
+fn a_root_swapped_for_a_fifo_after_its_check_is_refused_without_blocking() {
+    let tree = Tree::new().file("tool", b"tool");
+    let result = within_patience(move || {
+        let (root, moved) = (tree.root(), tree.dir.path().join("moved"));
+        let mut swap = |step: Step, path: &str| {
+            if step == Step::RootChecked && path == "." {
+                fs::rename(&root, &moved).expect("move the root away");
+                mkfifo(&root);
+            }
+        };
+        tree.observed(&mut swap)
+    });
+    assert_eq!(result, Err(PinRefusal::Link { path: ".".into() }));
+}
+
+#[test]
 fn a_fifo_is_refused_as_not_regular_without_waiting_for_a_writer() {
     let tree = Tree::new().file("tool", b"tool").listed_only("pipe", b"");
     mkfifo(&tree.at("pipe"));
