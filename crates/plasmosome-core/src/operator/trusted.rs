@@ -1,3 +1,262 @@
+use std::fmt;
+use std::fs::File;
+use std::io::Read;
+use std::os::fd::AsFd;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+
+use crate::nofollow::{
+    DirIdentity, Kind, Reached, Walk, WalkRefusal, acl_grants_write, effective_uid,
+};
+
+/// The most bytes a trusted file may hold.
+pub const MAX_TRUSTED_BYTES: usize = 1_048_576;
+
+/// Which of spec 022 §3's checks a file failed. [`TrustCheck::as_str`] is the name the refusal's
+/// `detail` carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustCheck {
+    Path,
+    Ancestor,
+    Parent,
+    NotRegular,
+    Owner,
+    Links,
+    Mode,
+    Size,
+}
+
+impl TrustCheck {
+    /// The check's name in spec 022: `path`, `ancestor`, `parent`, `not_regular`, `owner`,
+    /// `links`, `mode` or `size`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrustCheck::Path => "path",
+            TrustCheck::Ancestor => "ancestor",
+            TrustCheck::Parent => "parent",
+            TrustCheck::NotRegular => "not_regular",
+            TrustCheck::Owner => "owner",
+            TrustCheck::Links => "links",
+            TrustCheck::Mode => "mode",
+            TrustCheck::Size => "size",
+        }
+    }
+}
+
+impl fmt::Display for TrustCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Why a file is not trusted: the file's path as given, the check it failed, and a short sentence
+/// naming the component or the value found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustRefusal {
+    pub path: PathBuf,
+    pub check: TrustCheck,
+    pub reason: String,
+}
+
+impl fmt::Display for TrustRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} fails the {} check: {}",
+            self.path.display(),
+            self.check,
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for TrustRefusal {}
+
+/// A file read under spec 022 §3 rules 1 to 4: the operator declarations file, or a declaration
+/// it lists. It holds the bytes read through the descriptor that was checked, and the identity of
+/// `/` and of every directory down to the file's parent.
+#[derive(Debug)]
+pub struct TrustedFile {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    chain: Vec<DirIdentity>,
+}
+
+impl TrustedFile {
+    /// Walks `path` from "/" one component at a time without following a symlink, and refuses
+    /// unless every directory above the file is owned by root or the effective UID, writable by
+    /// neither group nor other and, on macOS, carries no ACL entry that lets another principal
+    /// replace its entries; the file's own directory is owned by the effective UID; and the file,
+    /// opened without following and without blocking, is a regular file the effective UID owns,
+    /// with exactly one link, no write for group or other, no ACL entry granting write, and at
+    /// most [`MAX_TRUSTED_BYTES`] bytes. `path` must be absolute and normal; on macOS that is
+    /// `/private/var/...`, not `/var/...`. The file is read once, through the checked descriptor.
+    pub fn open(path: &Path) -> Result<TrustedFile, TrustRefusal> {
+        let walk = Walk::from_root(path).map_err(|refusal| refuse(path, refusal.into()))?;
+        Self::from_walk(walk)
+    }
+
+    fn from_walk(walk: Walk) -> Result<TrustedFile, TrustRefusal> {
+        let path = walk.path();
+        let euid = effective_uid();
+        let opened = walk
+            .open_file(|reached| judge_file(reached, euid))
+            .map_err(|fault| refuse(&path, fault))?;
+        let file = File::from(opened.fd);
+        let bytes = read_checked(&file, &path).map_err(|fault| refuse(&path, fault))?;
+        Ok(TrustedFile {
+            path,
+            bytes,
+            chain: opened.chain,
+        })
+    }
+
+    /// The path the file was opened at.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The file's bytes, read through the descriptor that passed the checks.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The device and inode of `/` and of every directory down to the file's parent, in order.
+    pub fn chain(&self) -> &[DirIdentity] {
+        &self.chain
+    }
+}
+
+#[derive(Debug)]
+enum Fault {
+    Walk(WalkRefusal),
+    Check(TrustCheck, String),
+}
+
+impl From<WalkRefusal> for Fault {
+    fn from(refusal: WalkRefusal) -> Self {
+        Fault::Walk(refusal)
+    }
+}
+
+fn refuse(path: &Path, fault: Fault) -> TrustRefusal {
+    let (check, reason) = match fault {
+        Fault::Check(check, reason) => (check, reason),
+        Fault::Walk(refusal) => (check_of(&refusal), refusal.to_string()),
+    };
+    TrustRefusal {
+        path: path.to_path_buf(),
+        check,
+        reason,
+    }
+}
+
+fn check_of(refusal: &WalkRefusal) -> TrustCheck {
+    match refusal {
+        WalkRefusal::NotNormal { .. }
+        | WalkRefusal::Symlink { .. }
+        | WalkRefusal::Missing { .. }
+        | WalkRefusal::Io { .. } => TrustCheck::Path,
+        WalkRefusal::NotDirectory { .. }
+        | WalkRefusal::ForeignOwner { .. }
+        | WalkRefusal::Replaceable { .. }
+        | WalkRefusal::ReplaceableByAcl { .. }
+        | WalkRefusal::OwnershipIgnored { .. } => TrustCheck::Ancestor,
+    }
+}
+
+fn judge_file(reached: &Reached<'_>, euid: u32) -> Result<(), Fault> {
+    let path = reached.path.display();
+    if let Some(parent) = reached.parent
+        && parent.uid != euid
+    {
+        let holder = reached.path.parent().unwrap_or(reached.path);
+        return Err(Fault::Check(
+            TrustCheck::Parent,
+            format!(
+                "{} is owned by uid {}, not the controller's uid {euid}",
+                holder.display(),
+                parent.uid
+            ),
+        ));
+    }
+    let facts = reached.facts;
+    if facts.kind != Kind::Regular {
+        return Err(Fault::Check(
+            TrustCheck::NotRegular,
+            format!("{path} is {}, not a regular file", kind_name(facts.kind)),
+        ));
+    }
+    if facts.uid != euid {
+        return Err(Fault::Check(
+            TrustCheck::Owner,
+            format!(
+                "{path} is owned by uid {}, not the controller's uid {euid}",
+                facts.uid
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Directory => "a directory",
+        Kind::Regular => "a regular file",
+        Kind::Socket => "a socket",
+        Kind::Symlink => "a symlink",
+        Kind::Other => "a FIFO, a device or another special file",
+    }
+}
+
+fn read_checked(file: &File, path: &Path) -> Result<Vec<u8>, Fault> {
+    let shown = path.display();
+    let metadata = file
+        .metadata()
+        .map_err(|error| io_fault("fstat", path, &error))?;
+    if metadata.nlink() != 1 {
+        return Err(Fault::Check(
+            TrustCheck::Links,
+            format!(
+                "{shown} has {} links; a trusted file has exactly one",
+                metadata.nlink()
+            ),
+        ));
+    }
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o022 != 0 {
+        return Err(Fault::Check(
+            TrustCheck::Mode,
+            format!("{shown} has mode {mode:04o}: group or other can write it"),
+        ));
+    }
+    if acl_grants_write(file.as_fd()).map_err(|error| io_fault("acl", path, &error))? {
+        return Err(Fault::Check(
+            TrustCheck::Mode,
+            format!("{shown} carries an ACL allow entry that grants write"),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_TRUSTED_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| io_fault("read", path, &error))?;
+    if bytes.len() > MAX_TRUSTED_BYTES {
+        return Err(Fault::Check(
+            TrustCheck::Size,
+            format!("{shown} holds more than {MAX_TRUSTED_BYTES} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn io_fault(op: &'static str, path: &Path, error: &std::io::Error) -> Fault {
+    Fault::Walk(WalkRefusal::Io {
+        op,
+        path: path.to_path_buf(),
+        errno: error.raw_os_error().unwrap_or(libc::EIO),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
