@@ -76,6 +76,7 @@ and verifies the backend snapshot shows no residue.
 | `builders` | `PlasmidManifest`, capabilities, `Grant` sequences, `Effect`s and `DesiredState` — a test states only what it is about |
 | `conformance` | Eleven clauses of the backend contract, each generic over `EnforcementBackend` |
 | `src/conformance/clauses_discriminate.rs` | Private defective backends shown failing the clause that names each fault |
+| `differential` | Spec 027 §6's probe manifest for the membrane differential, and the refusals that keep a suite from dropping probes |
 | `tests/` | The cross-crate scenarios, and where end-to-end tests will go once a cell boots |
 
 Nothing here ships: the crate is `publish = false`, and a guard keeps it out of every other
@@ -97,5 +98,14 @@ so adding a recipe changes these five bodies and `op_for`, not every fixture. Ch
 build of the backend, and its `Capability` is a different type from the one those tests see
 (E0308, "multiple different versions of crate"). So the backend keeps a test-only `fixtures`
 module with the same five functions and `op`, the twin of `op_for`. Change both copies together.
+
+`differential::load` reads the differential's manifest from JSON. It refuses the manifest, naming
+what is wrong, before anything is compared: a channel of spec 027 §5 with fewer than three
+probes, a reach kind with fewer than three reach probes, a rule kind §6 does not list, a rule on
+a field the probe marks as set by the workload, a duplicate probe, two rules or two allowances
+on one field, a rule, allowance or neutral name for an undeclared probe, neutral names without
+`/opt`, `/usr/local/bin` and a FUSE workspace, and a key it does not know, since a misspelt
+`rules` or `allowances` would otherwise load as an empty table. A manifest built by hand goes
+through `Manifest::validate`, which checks the same rules.
 
 Tests: `cargo test -p plasmosome-testkit`
