@@ -190,8 +190,13 @@ fn padded_status(total: usize) -> (String, String) {
     (line, id)
 }
 
-fn one_instance(control: &Path, name: &str) -> Value {
-    json!({"control_socket": control, "name": name})
+fn one_instance(directory: &Path, control: &Path, name: &str) -> Value {
+    json!({
+        "control_socket": control,
+        "name": name,
+        "instance_root": directory.join("instance"),
+        "recovery_deadline_ms": 5000,
+    })
 }
 
 #[test]
@@ -199,7 +204,7 @@ fn the_envelope_edges_hold_on_the_wire() {
     let directory = tempfile::tempdir().expect("the test owns a temporary directory");
     let control = directory.path().join("control.uds");
     let config = directory.path().join("config.json");
-    write_config(&config, &one_instance(&control, "work"));
+    write_config(&config, &one_instance(directory.path(), &control, "work"));
 
     let _daemon = start(&config);
     let mut client = addressable(&control);
@@ -286,7 +291,7 @@ fn plasmosomed_serves_status_and_dies_cleanly_on_sigterm() {
     let directory = tempfile::tempdir().expect("the test owns a temporary directory");
     let control = directory.path().join("control.uds");
     let config = directory.path().join("config.json");
-    write_config(&config, &one_instance(&control, "work"));
+    write_config(&config, &one_instance(directory.path(), &control, "work"));
 
     let mut daemon = start(&config);
     let mut client = addressable(&control);
@@ -352,10 +357,57 @@ fn plasmosomed_exits_nonzero_naming_the_failure() {
         "a config that is not JSON is refused"
     );
 
+    let unbound = directory.path().join("rootless.uds");
+    let mut rootless_config = one_instance(directory.path(), &unbound, "work");
+    rootless_config
+        .as_object_mut()
+        .expect("the config is a JSON object")
+        .remove("instance_root");
+    let rootless = directory.path().join("rootless.json");
+    write_config(&rootless, &rootless_config);
+    let refused = output_within(plasmosomed(&[&rootless]), PATIENCE);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "a config without instance_root is invalid configuration, not a start with an implicit \
+         root"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("instance_root"),
+        "the refusal names the missing key, got: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !unbound.exists(),
+        "a refused config binds no control socket"
+    );
+
+    let positional = directory.path().join("positional.uds");
+    let array = directory.path().join("array.json");
+    write_config(
+        &array,
+        &json!([positional, "work", directory.path(), 5000, directory.path()]),
+    );
+    let refused = output_within(plasmosomed(&[&array]), PATIENCE);
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "a config is one JSON object; an array read by position is invalid configuration"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("expected a JSON object"),
+        "the refusal says what a config must be, got: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !positional.exists(),
+        "a refused array binds no control socket"
+    );
+
     let control = directory.path().join("taken.uds");
     std::fs::write(&control, b"someone else's socket").expect("the test occupies the path");
     let occupied = directory.path().join("occupied.json");
-    write_config(&occupied, &one_instance(&control, "work"));
+    write_config(&occupied, &one_instance(directory.path(), &control, "work"));
     let refused = output_within(plasmosomed(&[&occupied]), PATIENCE);
     assert_eq!(
         refused.status.code(),
@@ -371,7 +423,7 @@ fn plasmosomed_exits_nonzero_naming_the_failure() {
     let live = directory.path().join("live.uds");
     let holder = UnixListener::bind(&live).expect("the test binds a live control socket");
     let held = directory.path().join("live.json");
-    write_config(&held, &one_instance(&live, "work"));
+    write_config(&held, &one_instance(directory.path(), &live, "work"));
     let refused = output_within(plasmosomed(&[&held]), PATIENCE);
     assert_eq!(
         refused.status.code(),
@@ -388,7 +440,7 @@ fn plasmosomed_exits_nonzero_naming_the_failure() {
     std::os::unix::fs::symlink("nowhere.uds", &link)
         .expect("the test plants a dangling leaf symlink");
     let linked = directory.path().join("link.json");
-    write_config(&linked, &one_instance(&link, "work"));
+    write_config(&linked, &one_instance(directory.path(), &link, "work"));
     let refused = output_within(plasmosomed(&[&linked]), PATIENCE);
     assert_eq!(
         refused.status.code(),
@@ -409,7 +461,7 @@ fn plasmosomed_leaves_a_replacement_settled_at_its_socket_path_alone() {
     let directory = tempfile::tempdir().expect("the test owns a temporary directory");
     let control = directory.path().join("control.uds");
     let config = directory.path().join("config.json");
-    write_config(&config, &one_instance(&control, "work"));
+    write_config(&config, &one_instance(directory.path(), &control, "work"));
 
     let mut daemon = start(&config);
     let mut client = addressable(&control);
@@ -462,7 +514,7 @@ fn plasmosomed_leaves_a_symlink_settled_at_its_socket_path_alone() {
     let directory = tempfile::tempdir().expect("the test owns a temporary directory");
     let control = directory.path().join("control.uds");
     let config = directory.path().join("config.json");
-    write_config(&config, &one_instance(&control, "work"));
+    write_config(&config, &one_instance(directory.path(), &control, "work"));
 
     let mut daemon = start(&config);
     let mut client = addressable(&control);
@@ -509,7 +561,7 @@ fn plasmosomed_leaves_a_dangling_symlink_settled_at_its_socket_path_alone() {
     let directory = tempfile::tempdir().expect("the test owns a temporary directory");
     let control = directory.path().join("control.uds");
     let config = directory.path().join("config.json");
-    write_config(&config, &one_instance(&control, "work"));
+    write_config(&config, &one_instance(directory.path(), &control, "work"));
 
     let mut daemon = start(&config);
     let mut client = addressable(&control);

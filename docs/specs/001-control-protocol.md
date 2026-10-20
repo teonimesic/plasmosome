@@ -100,9 +100,33 @@ Application error codes (closed set; additions are a contract change):
 | 105 | `illegal_state` | `from`, `to`; private recovery methods additionally carry the typed `recovery` refusal in §4.1 |
 | 106 | `drain_timeout` | `handle`, `deadline_ms` |
 | 107 | `not_running` | `target` — the named instance is not up |
-| 108 | `manifest_invalid` | `detail`, `path` |
+| 108 | `manifest_invalid` | `detail`, `path`; `fix` when the refusal names a declaration field |
 | 109 | `widening_forbidden` | `plasmid` |
 | 110 | `attestation_required` | `verb` — the E13b residual: subject spawn needs host-side attestation |
+
+The 108 `fix` is spec 011's amendment to this table. A 108 whose refusal names a declaration
+field carries a `fix` in one of three forms:
+
+- TOML to write in place of that field: a line such as `hosts = ["api.github.com"]`, or a
+  section such as `[impl]` followed by `wasm = "component.wasm"`;
+- a bare entry, such as `"api.github.example"`, added to the list the field names, or written in
+  place of the entry when the field ends in an index, such as `network.pin_cidrs[0]`;
+- exactly `remove this entry`, which deletes the entry or key the field names.
+
+One fix writes the field's parent instead: a credential whose `scope.path_scope` is refused gets
+`scope = { path_scope = ["/required/path/"] }`, written in place of `scope`. A fix applies when
+the field's parents are tables, not inline tables: a section such as
+`[commands.commands.git.network]` cannot be added to a command written as
+`git = { exec = ["git"], network = 443 }`, and TOML refuses the result.
+
+Exactly two refusals an author can cause name no declaration field and carry no `fix`:
+
+1. a TOML syntax error, which the parser reports by line and column;
+2. a declaration over 1 MiB, the maximum accepted size spec 020 §2 gives each declaration.
+
+An unknown key is not one of them. Every other refusal an author can cause carries a field and a
+`fix`. A 108 the author did not cause carries no `fix` either: a file that cannot be read, or a
+fault in the file rather than in what it declares, such as spec 022's trust checks.
 
 **Control-socket lifecycle, as delivered (both daemons).** Each daemon binds the control socket
 named by its config and never unlinks a path it did not create. A start whose path already
