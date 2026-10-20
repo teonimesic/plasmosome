@@ -147,6 +147,39 @@ fn a_console_past_the_bound_is_not_run_even_after_a_complete_run() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sparse_console_of_a_pebibyte_is_refused_at_the_bound_without_reading_it_all() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let lane = common::lane_config(dir.path(), "run-1");
+    let body = format!(
+        "cat > /dev/null\nprintf 'LANE-BEGIN run-1\\n' > '{console}'\nperl -e 'truncate($ARGV[0], 2**50) or die \"truncate: $!\"' '{console}'\nexit 0",
+        console = lane.console.display()
+    );
+    let launcher = common::script(dir.path(), "sparse", &body);
+    let guest = common::guest_config("run-1", &["id"]);
+
+    let run = run_lane(&launcher, &lane, &guest, Duration::from_secs(30)).expect("spawned");
+
+    assert_eq!(
+        fs::metadata(&lane.console)
+            .expect("the console exists")
+            .len(),
+        1 << 50,
+        "the launcher did not extend the console; stderr: {:?}",
+        run.stderr
+    );
+    match &run.outcome {
+        Outcome::NotRun(reason) => {
+            assert!(
+                reason.contains(&format!("passed {CONSOLE_BOUND} bytes")),
+                "{reason}"
+            )
+        }
+        other => panic!("a console past the bound must be not run, it was {other:?}"),
+    }
+}
+
 #[test]
 fn stderr_past_its_bound_keeps_the_first_mebibyte_and_the_launcher_keeps_writing() {
     let dir = tempfile::tempdir().expect("a scratch directory");
