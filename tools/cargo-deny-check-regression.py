@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,8 @@ SKIPPED = "skipped: this change touches no Cargo.toml or Cargo.lock"
 TOOL_FAILURE = "cargo-deny tool failure (not a finding):"
 REFUSAL = "cargo-deny refusal:"
 IGNORE_FORM = '{ id = "RUSTSEC-2021-0003", reason = "until YYYY-MM-DD; <link>; <why>" }'
+LOCK_HINT = "Cargo.lock does not match the manifests: run `cargo update --workspace` (or any cargo build) and commit Cargo.lock"
+CARGO_HINT = "remove the --locked flag"
 
 FAKE_CARGO_DENY = """\
 import json, os, sys
@@ -64,7 +67,7 @@ def classification():
          ["RUSTSEC-2021-0003", "unknown-advisory", "RUSTSEC-2099-9999", "advisory-not-detected", "RUSTSEC-2021-0145"]),
         ("ignore-bad-form", "advisories", "tool failure", ["unexpected keys", "expires"]),
         ("db-unreachable", "advisories", "tool failure", ["failed to fetch advisory database"]),
-        ("stale-lockfile", "sources", "tool failure", ["because --locked was passed to prevent this"]),
+        ("stale-lockfile", "sources", "refusal", ["because --locked was passed to prevent this", LOCK_HINT]),
         ("git-source", "sources", "refusal", ["source-not-allowed", "gitdep 0.1.0", "git+file:///work/gitsrc"]),
         ("licence-rejected", "licenses", "pass", ["rejected", "m 0.1.0", "GPL-3.0-only"]),
         ("unknown-error-code", "advisories", "tool failure", ["a-code-cargo-deny-0-20-2-never-writes"]),
@@ -93,6 +96,13 @@ def classification():
     for fixture in ("notice-unwarned", "unmaintained-unwarned", "yanked-denied", "licence-rejected"):
         assert FIXTURES[fixture]["exit"] != 0, fixture
     assert classified("db-unreachable", "advisories")["refusals"] == []
+
+    stale = classified("stale-lockfile", "sources")
+    assert len(stale["refusals"]) == 1 and stale["refusals"][0].splitlines()[-1].strip() == LOCK_HINT, stale
+    assert CARGO_HINT not in "\n".join(stale["refusals"] + stale["reported"]), stale
+    stale_and_broken = API["classify"](
+        "sources", FIXTURES["stale-lockfile"]["stderr"] + FIXTURES["db-unreachable"]["stderr"], 1)
+    assert stale_and_broken["status"] == "tool failure", stale_and_broken
 
     malformed = API["classify"]("advisories", ["", "[]", '{"type": "log"}'], 0)
     assert malformed["status"] == "tool failure" and len(malformed["failures"]) == 2, malformed
@@ -145,22 +155,23 @@ class Repository:
             write(self.root / name, text)
         commit(self.root, "change")
 
-    def run(self, *args, plan=None, path=None):
+    def run(self, *args, plan=None, path=None, summary=None):
         self.plan.write_text(json.dumps(plan or {}))
         for stale in (self.log, self.summary):
             if stale.exists():
                 stale.unlink()
+        target = Path(summary) if summary is not None else self.summary
         environment = {
             "PATH": path if path is not None else str(self.bin) + os.pathsep + os.environ.get("PATH", os.defpath),
             "HOME": os.environ.get("HOME", str(self.root)),
             "FAKE_PLAN": str(self.plan), "FAKE_LOG": str(self.log), "FAKE_CARGO_LOG": str(self.cargo_log),
             "FAKE_FIXTURES": str(SOURCE.with_name("cargo-deny-check-fixtures.json")),
-            "GITHUB_STEP_SUMMARY": str(self.summary), "PYTHONDONTWRITEBYTECODE": "1", "CARGO_TERM_COLOR": "always",
+            "GITHUB_STEP_SUMMARY": str(target), "PYTHONDONTWRITEBYTECODE": "1", "CARGO_TERM_COLOR": "always",
         }
         result = subprocess.run([sys.executable, str(SOURCE), *args], cwd=self.root, env=environment,
                                 capture_output=True, text=True, timeout=60)
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
-        summary = self.summary.read_text() if self.summary.exists() else ""
+        summary = target.read_text() if target.is_file() else ""
         assert not self.cargo_log.exists(), f"cargo was invoked: {self.cargo_log.read_text()}"
         return result, calls, summary
 
@@ -201,6 +212,17 @@ def tracked_lockfiles_and_invocation():
                 assert call["color"] == "never", call
             assert "`Cargo.lock`" in summary and "`fuzz/Cargo.lock`" in summary, summary
             assert "scratch" not in result.stdout + summary
+
+
+def logged_command():
+    with tempfile.TemporaryDirectory(prefix="cargo-deny-check-quoting-") as directory:
+        repository = Repository(directory, {
+            "deny.toml": "[sources]\n", "a b/Cargo.toml": "[package]\nname = \"a\"\n", "a b/Cargo.lock": "version = 4\n"})
+        result, calls, summary = repository.run("sources", plan={"a b/Cargo.toml": "clean-sources"})
+        assert result.returncode == 0 and len(calls) == 1, (result.stdout, result.stderr)
+        logged = [line[len("$ "):] for line in result.stdout.splitlines() if line.startswith("$ ")]
+        assert len(logged) == 1 and shlex.split(logged[0])[0] == "cargo-deny", logged
+        assert shlex.split(logged[0])[1:] == calls[0]["argv"][1:], (logged, calls)
 
 
 def trigger():
@@ -252,8 +274,20 @@ def outcomes():
         result, calls, summary = repository.run("advisories", plan=plan("advisories", {"Cargo.toml": "notice-unwarned"}))
         assert result.returncode == 0 and "RUSTSEC-2022-0058" in summary, (result.stdout, summary)
 
-        result, calls, summary = repository.run("sources", plan=plan("sources", {"Cargo.toml": "stale-lockfile"}))
-        assert result.returncode == 2 and "because --locked was passed to prevent this" in result.stdout, result.stdout
+        result, calls, summary = repository.run("sources", plan=plan("sources", {"fuzz/Cargo.toml": "stale-lockfile"}))
+        assert result.returncode == 1 and "because --locked was passed to prevent this" in result.stdout, result.stdout
+        assert result.stdout.splitlines()[-1].strip() == LOCK_HINT and CARGO_HINT not in result.stdout, result.stdout
+        assert REFUSAL in summary and LOCK_HINT in summary and TOOL_FAILURE not in result.stdout + summary, summary
+
+        result, calls, summary = repository.run("advisories", plan=plan("advisories", {"Cargo.toml": "malformed-graphs"}))
+        assert result.returncode == 2 and TOOL_FAILURE + " the wrapper crashed" in result.stdout, result.stdout
+        assert "Traceback" in result.stdout and "TypeError" in result.stdout, result.stdout
+
+        directory_summary = Path(directory) / "summary-directory"
+        directory_summary.mkdir()
+        result, calls, summary = repository.run("sources", plan=plan("sources"), summary=directory_summary)
+        assert result.returncode == 2 and TOOL_FAILURE + " the wrapper crashed" in result.stdout, result.stdout
+        assert "IsADirectoryError" in result.stdout, result.stdout
 
         result, calls, summary = repository.run("sources", plan=plan("sources", {"fuzz/Cargo.toml": "git-source"}))
         assert result.returncode == 1 and "gitdep 0.1.0" in result.stdout, result.stdout
@@ -295,6 +329,7 @@ def outcomes():
 def main():
     classification()
     tracked_lockfiles_and_invocation()
+    logged_command()
     trigger()
     outcomes()
     print("PASS: cargo-deny output classified by code, tracked lockfiles at any depth, manifest trigger, worst outcome wins")
