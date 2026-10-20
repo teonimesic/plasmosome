@@ -96,11 +96,15 @@ The serde envelope is `{ "format": 1, "generation": N, "event": EVENT }`. `EVENT
 `force` is required and is either null or `{ "operator": STRING, "reason": STRING }`, both
 nonblank. It is a recorded operator assertion, not authentication. Each change is
 `{ "plugin": PluginId, "replacement": Replacement-or-null }`; a replacement is
-`{ "mock": MockMode, "source": AttachmentSource, "effects": [RecordedEffect, ...] }`.
+`{ "mock": MockMode, "source": AttachmentSource, "lifetime": Lifetime, "effects": [RecordedEffect,
+...] }`, where `Lifetime` is spec 028's required record of the attachment's bound in both
+readings, its limits and ceiling, their sources, and its renewal count.
 Null removes the attachment. An empty
 effects array is a real attached plasmid with a known mode, not an accidental removal. Changes
 contain each plugin at most once, are nonempty, and carry the complete replacement for each
 changed attachment. Unmentioned attachments remain unchanged. Effect order is grant order.
+Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs)
+requires. Until then a replacement carried no `lifetime`.
 
 `RecordedEffect` is `{ "effect": Effect, "operation": UniverseOp-or-null }`. Exact universe
 inverses and compensation witnesses carry spec017's exact ID and full capability. Their operation
@@ -235,8 +239,14 @@ The sequence is:
    let startup resolve the pending prepare; do not acknowledge a rollback that is not recorded.
 5. Append and sync finish only after all required cleanup is independently observed complete.
    Finish records journal-side completion; it does not yet permit a client result or the
-   next transaction. A timeout or uncertain cleanup blocks the cell and reports the unfinished
-   generation rather than declaring success.
+   next transaction. The one exception is spec 023 §7 step 2's `cell.kill` with `now` past a
+   resumed transaction: the controller holds the lock of a cell whose supervisor exited after a
+   clean teardown, so nothing remains to publish to, and a finish there admits the next
+   transaction and the kill's reply without step 6 (spec 028).
+   A timeout or uncertain cleanup blocks the cell and reports the unfinished
+   generation rather than declaring success. Amended on 2026-10-20, as
+   [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs) requires. Until then
+   a finish admitted nothing without step 6.
 6. Send the complete settled DesiredCell to `membrane.cell.desired` at this cell generation,
    require an acknowledgement matching request ID, cell and the entire published record, then
    freshly observe that same complete record. Only then may a committed mutation return success or an
@@ -313,12 +323,16 @@ than proceeding from guessed memory. The session log is not a second recovery au
 the strict cell journal still determines exact obligations. Recovery durably appends the same
 cell/generation assertion before resuming Force; duplicate audit assertions after an uncertain
 append are allowed and do not mean the operation ran twice. They attest authorization, not
-completion. This does not require an atomic commit across the journal and session log.
+completion. Spec 028's `renew` event is appended like `force`, after its prepare is durable and
+before its commit, and its `expiry` event through the same writer.
+This does not require an atomic commit across the journal and session log.
 The shared log writer refuses every later append after an IO error until it is reopened and
 validated. Before extending an existing log, require complete LF-terminated UTF-8 JSON objects;
 a torn or malformed audit log refuses further audit rather than appending onto a corrupt suffix,
 skipping it or truncating it. Reopening re-establishes the required directory durability too.
 Quarantine is never an implicit Force and has no automatic cleanup path.
+Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs)
+requires. Until then this paragraph named no `renew` or `expiry` event.
 
 This deliberately replaces the earlier draft's boundary-free partial-reload proposal. That
 proposal could not preserve spec001's whole-closure rollback, empty attachments or durable
@@ -349,7 +363,8 @@ strict reads are never raced against another controller append.
 `DesiredState` retains `generation: u64` and `cells: BTreeMap<CellId, DesiredCell>`.
 `DesiredCell` is `{ generation: u64, genome: Option<GenomeName>,
 plasmids: Vec<DesiredPlasmid> }`. `DesiredPlasmid` is `{ plugin: PluginId, mock: MockMode,
-source: AttachmentSource, generation: u64, effects: Vec<RecordedEffect> }`. This is separate from the existing compact
+source: AttachmentSource, lifetime: Lifetime, generation: u64, effects: Vec<RecordedEffect> }`.
+This is separate from the existing compact
 status `PlasmidRecord`; a status projection cannot replace the recovered effects.
 `RecoveryOutcome.tombstones` is `BTreeMap<CellId, BTreeMap<PluginId, u64>>`, retaining removed
 attachments' last committed change generations rather than fake attached plasmids. A cell's
@@ -364,6 +379,8 @@ provenance does not infer that label. Unrecorded live metadata cannot enter the 
 and disappear on restart. Complete-content equality compares every decoded field, including
 attachment generations, source tags/full references, modes, ordered effects and exact operations,
 not JSON formatting or only OS holdings.
+Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs)
+requires. Until then `DesiredPlasmid` carried no `lifetime`.
 
 An empty journal adopts an empty generation-0 desired cell; an empty attachment remains an
 attachment. No recovered genome is invented: it is None internally and omitted on spec001's
@@ -556,12 +573,16 @@ establish equal participant generations or publication content. Matching publish
 not establish matching holdings. No journal record or recovery result by itself proves liveness.
 
 The controller reconnects to surviving supervisors and retains exact inverses for subsequent
-ordinary revocation. It does not restart those supervisors, recreate missing grants or turn
+ordinary revocation. Before any other mutation of a cell, it expires every attachment whose
+spec 028 bound has passed, with the bound from the journal.
+It does not restart those supervisors, recreate missing grants or turn
 snapshot rows into grant handles. The publication exchange above sends only complete settled
 state after durable finish and before a completed client result. Spec001 binds equal-generation
 no-op acknowledgement to identical content; older requests return the current retained record.
 Generation and complete-content comparison, not an echoed acknowledgement, decide settlement.
 An unfinished or partial desired record is never published.
+Amended on 2026-10-20, as [spec 028](028-capability-lifetime.md#10-changes-proposed-to-other-specs)
+requires. Until then startup did not first expire attachments whose bound had passed.
 
 The concrete enforcement path is the surviving membrane's exact-operation and withdrawal RPCs
 specified in spec001. Its adapters must observe and retain actual resource/holding associations,
