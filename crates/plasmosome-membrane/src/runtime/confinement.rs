@@ -353,9 +353,14 @@ mod darwin {
 
     #[allow(unsafe_code)]
     fn unique_identifier_record(pid: libc::pid_t) -> (c_int, UniqueIdentifiers, i32) {
-        // SAFETY: UniqueIdentifiers is a plain C struct of integers, for which all zeroes is a
-        // valid value.
-        let mut record: UniqueIdentifiers = unsafe { std::mem::zeroed() };
+        let mut record = UniqueIdentifiers {
+            _executable_uuid: [0; 16],
+            unique_id: 0,
+            parent_unique_id: 0,
+            _id_version: 0,
+            _original_parent_id_version: 0,
+            _reserved: [0; 2],
+        };
         // SAFETY: `record` is a local UniqueIdentifiers, laid out as XNU's struct
         // proc_uniqidentifierinfo from its private proc_info_private.h, which no SDK header
         // declares, and UNIQUE_IDENTIFIERS_SIZE is its exact size. For PROC_PIDUNIQIDENTIFIERINFO
