@@ -135,21 +135,25 @@ class Forge:
         self.state.write_text(json.dumps({"issues": list(issues), "labels": list(labels), "fail": list(fail),
                                           "garbage": list(garbage)}))
 
+    def environment(self, path=None):
+        return {
+            "PATH": path if path is not None else str(self.bin) + os.pathsep + os.environ.get("PATH", os.defpath),
+            "HOME": str(self.directory), "GH_TOKEN": "fixture-token", "FAKE_GH_STATE": str(self.state),
+            "FAKE_GH_LOG": str(self.log), "PYTHONDONTWRITEBYTECODE": "1",
+        }
+
+    def calls(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
     def run(self, report=None, *extra, mode="write", findings=None, path=None, repo="example/repo", run_url=RUN_URL):
         if self.log.exists():
             self.log.unlink()
         if report is not None:
             self.findings.write_text(json.dumps(report))
-        environment = {
-            "PATH": path if path is not None else str(self.bin) + os.pathsep + os.environ.get("PATH", os.defpath),
-            "HOME": str(self.directory), "GH_TOKEN": "fixture-token", "FAKE_GH_STATE": str(self.state),
-            "FAKE_GH_LOG": str(self.log), "PYTHONDONTWRITEBYTECODE": "1",
-        }
         argv = [sys.executable, str(SOURCE), "--findings", str(findings or self.findings), "--repo", repo,
                 "--run-url", run_url, "--mode", mode, *extra]
-        result = subprocess.run(argv, env=environment, capture_output=True, text=True, timeout=60)
-        calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
-        return result, calls
+        result = subprocess.run(argv, env=self.environment(path), capture_output=True, text=True, timeout=60)
+        return result, self.calls()
 
     def issues(self):
         return {item["number"]: item for item in json.loads(self.state.read_text())["issues"]}
@@ -502,9 +506,28 @@ def block(text, key):
     return match.group(1)
 
 
+def without_comments(text):
+    return "".join(line + "\n" for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def jobs_of(workflow):
+    return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", block(without_comments(workflow), "jobs")))
+
+
+def steps_of(job):
+    return re.split(r"(?m)^      - ", job)[1:]
+
+
+def script(step):
+    """The step's run: block, dedented, as the runner hands it to bash."""
+    match = re.search(r"(?m)^        run: \|\n((?:          [^\n]*\n)+)", step)
+    assert match, step
+    return "".join(line[10:] + "\n" for line in match.group(1).splitlines())
+
+
 def audit_workflow():
     audit = (ROOT / ".github" / "workflows" / "audit.yml").read_text()
-    code = "\n".join(line for line in audit.splitlines() if not line.lstrip().startswith("#"))
+    code = without_comments(audit)
     gates = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     triggers = block(audit, "on")
     assert re.search(r"(?m)^  push:\n    branches: \[main\]\n", triggers), triggers
@@ -512,29 +535,108 @@ def audit_workflow():
     assert re.search(r"(?m)^  workflow_dispatch:", triggers), triggers
     assert "pull_request" not in code and "paths" not in triggers, triggers
     assert re.search(r"(?m)^permissions:\n  contents: read\n(?!  )", audit), audit
-    assert len(re.findall(r"(?m)^\s+issues: write$", audit)) == 1, audit
-    jobs = block(audit, "jobs")
-    assert re.search(r"(?m)^    permissions:\n      contents: read\n      issues: write\n", jobs), jobs
-    assert re.search(r"(?m)^  cancel-in-progress: false$", block(audit, "concurrency")), audit
+    assert re.search(r"(?m)^concurrency:\n  group: audit\n  cancel-in-progress: false\n(?!  )", audit), audit
     assert "cargo-audit" not in code and "cargo audit" not in code, audit
-    versions = re.findall(r"cargo install cargo-deny --version (\S+) --locked", audit)
-    assert versions == re.findall(r"cargo install cargo-deny --version (\S+) --locked", gates) and len(versions) == 1, versions
-    assert re.findall(r"(?m)^\s+key:\s*(\S+)\s*$", jobs) == [f"cargo-deny-{versions[0]}"], jobs
-    for action in re.findall(r"(?m)^\s+(?:- )?uses: (\S+)", audit):
+
+    jobs = jobs_of(audit)
+    assert sorted(jobs) == ["issue", "report"], sorted(jobs)
+    report, issue = jobs["report"], jobs["issue"]
+    assert re.search(r"(?m)^    permissions:\n      contents: read\n(?!      )", report), report
+    assert re.search(r"(?m)^    permissions:\n      contents: read\n      issues: write\n(?!      )", issue), issue
+    assert len(re.findall(r"(?m)^\s+issues: write$", audit)) == 1, audit
+    assert re.search(r"(?m)^    needs: report$", issue) and re.search(r"(?m)^    if: \$\{\{ !cancelled\(\) \}\}$", issue), issue
+    assert re.search(r"(?m)^    outputs:\n      findings: \$\{\{ steps\.report\.outputs\.findings \}\}\n(?!      )", report), report
+
+    actions = {name: re.findall(r"(?m)^\s+(?:- )?uses: (\S+)", job) for name, job in jobs.items()}
+    for action in actions["report"] + actions["issue"]:
         assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", action), action
-    assert "persist-credentials: false" in audit, audit
-    steps = re.split(r"(?m)^      - ", jobs)
-    report = [step for step in steps if "tools/cargo-deny-check report" in step]
-    issue_step = [step for step in steps if "tools/security-issue" in step]
-    assert len(report) == 1 and "${{ github.event_name }}" in report[0] and '--event "$EVENT"' in report[0], report
-    assert len(issue_step) == 1 and "if: ${{ !cancelled() }}" in issue_step[0], issue_step
-    assert "GH_TOKEN: ${{ github.token }}" in issue_step[0], issue_step
-    assert "inputs.dry-run && 'dry-run' || 'write'" in issue_step[0], issue_step
-    assert steps.index(report[0]) < steps.index(issue_step[0]), steps
+    assert actions["issue"] == [action for action in actions["report"] if action.startswith("actions/checkout@")], actions
+    assert all(job.count("persist-credentials: false") == 1 for job in jobs.values()), jobs
+    assert "cargo" not in issue and "rustup" not in issue, issue
+    assert "token" not in report.lower(), report
+
+    versions = re.findall(r"cargo install cargo-deny --version (\S+) --locked", report)
+    assert versions == re.findall(r"cargo install cargo-deny --version (\S+) --locked", gates) and len(versions) == 1, versions
+    assert re.findall(r"(?m)^\s+key:\s*(\S+)\s*$", report) == [f"cargo-deny-{versions[0]}"], report
+
+    reporting = [step for step in steps_of(report) if "tools/cargo-deny-check report" in step]
+    assert len(reporting) == 1 and re.search(r"(?m)^        id: report$", reporting[0]), reporting
+    assert "EVENT: ${{ github.event_name }}" in reporting[0] and '--event "$EVENT"' in script(reporting[0]), reporting
+    writing = [step for step in steps_of(issue) if "tools/security-issue" in step]
+    assert len(writing) == 1 and len(steps_of(issue)) == 2, steps_of(issue)
+    for line in ("FINDINGS: ${{ needs.report.outputs.findings }}", "GH_TOKEN: ${{ github.token }}",
+                 "MODE: ${{ inputs.dry-run && 'dry-run' || 'write' }}"):
+        assert line in writing[0], (line, writing[0])
+
+    tests = [step for step in steps_of(jobs_of(gates)["gates"]) if "tools/security-issue-regression.py" in step]
+    assert len(tests) == 1 and re.search(r"(?m)^        run: python3 tools/security-issue-regression\.py$", tests[0]), tests
+
+
+def the_jobs_hand_over_the_findings():
+    """Run the report and issue steps' scripts under bash, with a fake python3 for the report and the fake gh."""
+    jobs = jobs_of((ROOT / ".github" / "workflows" / "audit.yml").read_text())
+    reporting = script(next(step for step in steps_of(jobs["report"]) if "tools/cargo-deny-check report" in step))
+    writing = script(next(step for step in steps_of(jobs["issue"]) if "tools/security-issue" in step))
+    fake_report = (f"#!{sys.executable}\nimport os, sys\nassert sys.argv[1:3] == ['tools/cargo-deny-check', 'report'], sys.argv\n"
+                   "assert sys.argv[sys.argv.index('--event') + 1] == os.environ['EVENT'], sys.argv\n"
+                   "if os.environ['FAKE_FINDINGS']:\n"
+                   "    open(sys.argv[sys.argv.index('--json-out') + 1], 'w').write(os.environ['FAKE_FINDINGS'])\n"
+                   "sys.exit(int(os.environ['FAKE_STATUS']))\n")
+    with tempfile.TemporaryDirectory(prefix="security-issue-handover-") as directory:
+        directory = Path(directory)
+        fakes = directory / "report-bin"
+        fakes.mkdir()
+        (fakes / "python3").write_text(fake_report)
+        (fakes / "python3").chmod(0o755)
+        system = os.pathsep.join(("/usr/bin", "/bin"))
+
+        def report_step(findings, status=0):
+            temp, output = directory / "report-temp", directory / "report-output"
+            shutil.rmtree(temp, ignore_errors=True)
+            temp.mkdir()
+            output.write_text("")
+            result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", reporting], cwd=ROOT,
+                                    env={"PATH": str(fakes) + os.pathsep + system, "EVENT": "schedule",
+                                         "RUNNER_TEMP": str(temp), "GITHUB_OUTPUT": str(output),
+                                         "FAKE_FINDINGS": findings, "FAKE_STATUS": str(status)},
+                                    capture_output=True, text=True, timeout=60)
+            return result, output.read_text()
+
+        def issue_step(forge, findings):
+            temp = directory / "issue-temp"
+            shutil.rmtree(temp, ignore_errors=True)
+            temp.mkdir()
+            python = forge.bin / "python3"
+            if not python.exists():
+                python.symlink_to(sys.executable)
+            environment = {**forge.environment(str(forge.bin) + os.pathsep + system), "FINDINGS": findings,
+                           "REPOSITORY": "example/repo", "RUN_URL": RUN_URL, "MODE": "write", "RUNNER_TEMP": str(temp)}
+            return subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", writing], cwd=ROOT,
+                                  env=environment, capture_output=True, text=True, timeout=60)
+
+        line = json.dumps(document(VULNERABILITY, {**EXPIRED, "title": "naïve"}), ensure_ascii=True) + "\n"
+        result, output = report_step(line)
+        assert result.returncode == 0 and output == "findings=" + line, (result.stdout, result.stderr, output)
+        forge_directory = directory / "forge"
+        forge_directory.mkdir()
+        forge = Forge(forge_directory, labels=["security"])
+        result = issue_step(forge, output.removeprefix("findings=").removesuffix("\n"))
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        body = forge.issues()[1]["body"]
+        assert "RUSTSEC-2021-0003" in body and "naïve" in body, body
+
+        for findings, status in (("", 2), ("x" * 1000001 + "\n", 0)):
+            result, output = report_step(findings, status)
+            assert result.returncode != 0 and output == "", (len(findings), result.stdout, result.stderr, output)
+        result = issue_step(forge, "")
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        body = forge.issues()[1]["body"]
+        assert "the report wrote no findings file" in body and "RUSTSEC-2021-0003" in body, body
 
 
 def main():
     audit_workflow()
+    the_jobs_hand_over_the_findings()
     create_then_edit()
     a_push_run_keeps_the_weekly_findings()
     a_later_writer_keeps_its_own_section()

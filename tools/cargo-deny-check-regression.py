@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 
 
 SOURCE = Path(__file__).resolve().with_name("cargo-deny-check")
@@ -102,6 +103,14 @@ def timeout():
             namespace["TIMEOUT"], os.environ["PATH"] = saved
         assert outcome["status"] == "tool failure" and outcome["code"] == 2, outcome
         assert "could not complete" in outcome["failures"][0] and "timed out" in outcome["failures"][0], outcome
+
+
+def unused_exceptions_are_reported():
+    """An unused licence exception stays a finding. So a dead exception leaves deny.toml rather than going quiet."""
+    licenses = tomllib.loads((SOURCE.parent.parent / "deny.toml").read_text()).get("licenses", {})
+    assert licenses.get("unused-license-exception", "warn") in ("warn", "deny"), licenses
+    found = API["classify"]("licenses", FIXTURES["clean-licenses"]["stderr"], 0)["findings"]
+    assert [(item["kind"], item["severity"]) for item in found] == [("license-exception-not-encountered", "warning")], found
 
 
 def cache_key_names_installed_version():
@@ -424,7 +433,10 @@ def report(repository, event, stable, overrides=None, path=None):
         output.unlink()
     result, calls, summary = repository.run("report", "--json-out", str(output), "--event", event, "--stable-url", stable,
                                             plan={**QUIET, **(overrides or {})}, path=path)
-    document = json.loads(output.read_text()) if output.exists() else None
+    written = output.read_text() if output.exists() else None
+    if written is not None:
+        assert written.isascii() and written.endswith("\n") and "\n" not in written[:-1], written
+    document = json.loads(written) if written is not None else None
     return result, calls, summary, document
 
 
@@ -676,6 +688,7 @@ def main():
     trigger()
     outcomes()
     cache_key_names_installed_version()
+    unused_exceptions_are_reported()
     print("PASS: cargo-deny output classified by code, tracked lockfiles at any depth, manifest trigger, worst outcome wins, "
           "report with warnings and weekly checks")
 
