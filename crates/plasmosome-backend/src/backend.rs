@@ -811,6 +811,49 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn decoding_names_a_broken_recipe_before_its_capabilitys_own_strings() {
+        for (capability, decoded_first, validated_first) in [
+            (
+                Capability::SessionFile {
+                    path: "skills/pr.md".to_string(),
+                    recipe: SessionFileRecipe {
+                        guest_path: "run/session".to_string(),
+                        ..fixtures::session_recipe()
+                    },
+                },
+                RecipeError::NotAbsolute {
+                    field: "guest_path",
+                    value: "run/session".to_string(),
+                },
+                RecipeError::NotAbsolute {
+                    field: "path",
+                    value: "skills/pr.md".to_string(),
+                },
+            ),
+            (
+                Capability::ProxyMap {
+                    host: "api.github\0.com".to_string(),
+                    route: "splice".to_string(),
+                    recipe: ProxyRecipe {
+                        port: 0,
+                        ..fixtures::proxy_recipe()
+                    },
+                },
+                RecipeError::ZeroPort,
+                RecipeError::ContainsNul { field: "host" },
+            ),
+        ] {
+            assert_eq!(capability.validate(), Err(validated_first));
+            let decoded = serde_json::from_value::<Capability>(capability_json(&capability));
+            assert_eq!(
+                decoded.unwrap_err().to_string(),
+                decoded_first.to_string(),
+                "{capability:?}"
+            );
+        }
+    }
+
+    #[test]
     fn selection_names_need_only_be_nul_free_and_valid_values_round_trip() {
         for capability in [
             session_file("/skills/.pr..md"),
