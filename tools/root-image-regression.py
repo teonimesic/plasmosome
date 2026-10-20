@@ -179,7 +179,7 @@ class FakeDocker:
         self.base = {**DEBIAN, **(base or {})}
         self.calls, self.envs = [], []
         self.missing, self.e2fsck, self.run_code, self.rootfs = False, "0", 0, ROOTFS
-        self.unshared = False
+        self.unshared, self.inspect_out, self.create_code, self.export_code, self.rm_code = False, None, 0, 0, 0
         self.repo_digests = [f"debian@sha256:{DIGEST}"]
         self.platform = {"Os": "linux", "Architecture": "arm64"}
 
@@ -193,16 +193,18 @@ class FakeDocker:
                 return Result(0, json.dumps([{**self.platform, "Descriptor": {
                     "mediaType": "application/vnd.oci.image.manifest.v1+json",
                     "digest": f"sha256:{PLATFORM_DIGEST}"}}]), "")
+            if self.inspect_out is not None:
+                return Result(0, self.inspect_out, "")
             return Result(0, json.dumps([{"Id": f"sha256:{DIGEST}", "RepoDigests": self.repo_digests,
                                           "Descriptor": {"mediaType": "application/vnd.oci.image.index.v1+json",
                                                          "digest": f"sha256:{DIGEST}"}}]), "")
         if argv[:2] == ["docker", "create"]:
-            return Result(0, CONTAINER + "\n", "")
+            return Result(self.create_code, CONTAINER + "\n" if self.create_code == 0 else "", "no create\n")
         if argv[:2] == ["docker", "export"]:
             write_tar(Path(argv[3]), self.base)
-            return Result(0, "", "")
+            return Result(self.export_code, "", "no export\n")
         if argv[:2] == ["docker", "rm"]:
-            return Result(0, CONTAINER + "\n", "")
+            return Result(self.rm_code, CONTAINER + "\n", "")
         if argv[:2] == ["docker", "run"]:
             mount = argv[argv.index("-v") + 1]
             assert mount.endswith(":/w"), mount
@@ -269,6 +271,11 @@ def stage_adds_the_workload_account_home_and_tmp():
         assert facts["skel"] == [".bashrc", ".profile"] and facts["debian_version"] == "12.15"
         assert "/tmp/leftover" in refusal("stage", stage_with, root, {"tmp/leftover": f(b"x")})
         assert "/bin/bash" in refusal("stage", stage_with, root, {"usr/bin/bash": None})
+        assert "/bin/bash" in refusal("stage", stage_with, root, {"bin": s("bin")})
+        assert "/bin/bash" in refusal("stage", stage_with, root, {"usr/bin/bash": f(b"bash", 0o644)})
+        tree, _ = staged(root, {"bin": s("./usr/../usr//libexec"), "usr/libexec": d(),
+                                "usr/libexec/bash": h("usr/bin/gunzip")})
+        assert tree["bin"].link == "./usr/../usr//libexec" and tree["usr/libexec/bash"].kind == "hardlink"
         assert "/etc/skel/.config" in refusal("stage", stage_with, root, {"etc/skel/.config": d()})
         assert "/home/workload" in refusal("stage", stage_with, root, {"home/workload": d()})
         assert "/etc/shadow" in refusal("stage", stage_with, root, {"etc/shadow": None})
@@ -330,6 +337,10 @@ def a_malformed_base_member_refuses():
             info.size = 1
             out.addfile(info, io.BytesIO(b"x"))
         assert "/etc/passwd" in refusal("stage", API["stage"], base, root / "out.tar", [], EPOCH, LIMIT)
+        assert "/usr/bin/zcat" in refusal("stage", stage_with, root, {"usr/bin/zcat": h("usr/bin/absent")})
+        assert "/etc/passwd2" in refusal("stage", stage_with, root, {"etc/passwd2": h("etc/passwd")})
+        base.write_bytes(b"not a tar archive" * 64)
+        assert "tar" in refusal("stage", API["stage"], base, root / "out.tar", [], EPOCH, LIMIT)
 
 
 def network_files_are_fixed():
@@ -381,6 +392,9 @@ def add_places_a_root_owned_file_and_refuses_bad_destinations():
         twice = [Add(str(probe), "/usr/bin/x", 0o755)] * 2
         assert "/usr/bin/x" in refusal("stage", stage_with, root, adds=twice)
         assert "absent" in refusal("stage", stage_with, root, adds=[Add(str(root / "absent"), "/usr/bin/x", 0o755)])
+        (root / "linked").symlink_to(probe)
+        tree, _ = staged(root, adds=[Add(str(root / "linked"), "/usr/bin/x", 0o755)])
+        assert tree["usr/bin/x"][:5] == ("file", 0o755, 0, 0, b"\x7fELF probe")
 
 
 def the_kind_is_test_exactly_when_add_is_given():
@@ -505,8 +519,21 @@ def contract_check_reads_debugfs_output():
                 assert "missing" in refusal("check", API["check_image"], check, facts, uuid)
         with changed(check / "opt.ls", ""), changed(check / "opt.ls.err", f"{BANNER}/opt: File not found by ext2_lookup \n"):
             assert API["check_image"](check, facts, uuid)["mke2fs_version"] == "1.47.0"
+        with changed(check / "opt.ls", "/2/040755/0/0/./\n"):
+            assert "cannot parse" in refusal("check", API["check_image"], check, facts, uuid)
+        original = TOOL["MAX_ADD_BYTES"]
+        TOOL["MAX_ADD_BYTES"] = 2
+        try:
+            assert "larger than 2 bytes" in refusal("check", API["check_image"], check, facts, uuid)
+        finally:
+            TOOL["MAX_ADD_BYTES"] = original
         (check / "group").unlink()
         assert "/etc/group" in refusal("check", API["check_image"], check, facts, uuid)
+        (check / "group").symlink_to(check / "passwd")
+        assert "cannot read /etc/group" in refusal("check", API["check_image"], check, facts, uuid)
+        (check / "group").unlink()
+        os.mkfifo(check / "group")
+        assert "not a regular file" in refusal("check", API["check_image"], check, facts, uuid)
 
 
 def judge_accounts_accepts_exactly_the_contract():
@@ -577,7 +604,7 @@ def a_base_without_a_digest_refuses_before_docker():
             assert (code, out, fake.calls) == (1, "", []), (base, err)
             assert err.startswith("root-image: refused base: ") and not work.exists(), err
         for extra, step in [(("--size-mib", "0"), "size"), (("--add", "/x:/usr/bin/x:4755"), "add"),
-                            (("--platform", "linux"), "platform")]:
+                            (("--platform", "linux"), "platform"), (("--source-date-epoch", "-1"), "source date epoch")]:
             fake = FakeDocker()
             code, out, err, work, images = built(root, fake, extra=extra)
             assert (code, fake.calls) == (1, []) and err.startswith(f"root-image: refused {step}: "), err
@@ -596,6 +623,13 @@ def a_base_that_is_not_local_or_not_pinned_refuses_before_create():
         fake.repo_digests = [f"debian@sha256:{'0' * 64}"]
         code, out, err, work, images = built(root, fake, work_name="unpinned")
         assert code == 1 and DIGEST in err and ["docker", "create"] not in [argv[:2] for argv in fake.calls], err
+        for attribute, value, needle in [("inspect_out", "[]", "no image record"), ("create_code", 125, "create"),
+                                         ("export_code", 1, "export"), ("rm_code", 1, "remains")]:
+            fake = FakeDocker()
+            setattr(fake, attribute, value)
+            code, out, err, work, images = built(root, fake, work_name=attribute)
+            assert code == 1 and err.startswith("root-image: refused export: ") and needle in err, err
+            assert attribute != "export_code" or fake.calls[-1] == ["docker", "rm", CONTAINER], fake.calls
         fake = FakeDocker()
         fake.platform = {"Os": "", "Architecture": ""}
         code, out, err, work, images = built(root, fake, work_name="platform")
@@ -724,6 +758,20 @@ def failure_before_placement_removes_the_stage_and_keeps_the_work_root():
         assert code == 1 and err == "root-image: refused place: injected\n", err
         assert list(images.iterdir()) == []
         assert {"base.tar", "stage.tar", "content.jsonl", "rootfs.raw"} <= set(os.listdir(work))
+        original = TOOL["hash_bounded"]
+
+        def interrupted(*args):
+            raise KeyboardInterrupt
+
+        TOOL["hash_bounded"] = interrupted
+        try:
+            built(root, FakeDocker(), work_name="interrupted")
+            raise AssertionError("the interrupt did not propagate")
+        except KeyboardInterrupt:
+            pass
+        finally:
+            TOOL["hash_bounded"] = original
+        assert list(images.iterdir()) == []
         fake = FakeDocker()
         fake.rootfs = None
         code, out, err, work, images = built(root, fake, work_name="no-rootfs")
@@ -744,6 +792,16 @@ def reads_from_the_base_are_bounded():
         assert "8 bytes" in detail
         result = API["run_command"]([sys.executable, "-c", "import sys; print('out'); sys.exit('err')"], dict(os.environ))
         assert result == Result(1, "out\n", "err\n")
+        assert "not installed" in refusal("command", API["run_command"], [str(root / "no-such-program")], {})
+        original = TOOL["COMMAND_TIMEOUT"]
+        TOOL["COMMAND_TIMEOUT"] = 0.1
+        try:
+            detail = refusal("command", API["run_command"], [sys.executable, "-c", "import time; time.sleep(5)"], {})
+        finally:
+            TOOL["COMMAND_TIMEOUT"] = original
+        assert "longer than" in detail
+        reader = API["LimitedReader"](io.BytesIO(b"abc"), 2, "the export")
+        assert "the export is larger than 2 bytes" in refusal("stage", reader.read)
 
 
 def work_and_images_roots_are_checked_before_docker():
@@ -759,6 +817,7 @@ def work_and_images_roots_are_checked_before_docker():
             assert API["main"](argv, run=fake, now=lambda: NOW, environ=ENVIRON) == 1
         assert fake.calls == [] and err.getvalue().startswith("root-image: refused images root: ")
         assert not (root / "fresh").exists()
+        assert "cannot create" in refusal("work root", API["make_work_root"], root / "no-parent" / "work")
         made = API["make_work_root"](root / "made")
         assert made == root / "made" and stat.S_IMODE(os.stat(made).st_mode) == 0o700
         assert API["docker_env"](ENVIRON) == ENV
