@@ -36,7 +36,7 @@ enum Defect {
     GrantSubstitutesLiveOwner,
     GrantSubstitutesMountSource,
     GrantSubstitutesProxyRoute,
-    GrantSubstitutesBrokerName,
+    GrantSubstitutesBrokerLaunch,
     GrantSubstitutesRequestedOwner,
     GrantSubstitutesRequestedCapability,
     GrantPanics,
@@ -425,7 +425,10 @@ impl EnforcementBackend for DefectiveBackend {
             (self.defect, grant.capability.class()),
             (Defect::GrantSubstitutesMountSource, UniverseClass::Mount)
                 | (Defect::GrantSubstitutesProxyRoute, UniverseClass::ProxyMap)
-                | (Defect::GrantSubstitutesBrokerName, UniverseClass::BrokerPid)
+                | (
+                    Defect::GrantSubstitutesBrokerLaunch,
+                    UniverseClass::BrokerPid
+                )
         );
         if substitutes_colliding_capability
             && let Some(capability) = self
@@ -659,7 +662,7 @@ fn substituted_capability(capability: &Capability) -> Capability {
         Capability::SessionFile { .. } => session_file("/substituted-session"),
         Capability::UdsSocket { .. } => uds_socket("/substituted.uds"),
         Capability::ProxyMap { host, .. } => proxy_map(host, "substituted-route"),
-        Capability::Broker { pid, .. } => broker(*pid, "substituted-broker"),
+        Capability::Broker { .. } => broker("substituted-broker"),
         Capability::Mount { target, .. } => mount("/substituted", target),
     }
 }
@@ -677,7 +680,7 @@ fn a_stranger(handle: Handle) -> LedgerEntry {
         UniverseClass::SessionFile => session_file("/stranger.md"),
         UniverseClass::UdsPath => uds_socket("/stranger.uds"),
         UniverseClass::ProxyMap => proxy_map("stranger.test", "stranger"),
-        UniverseClass::BrokerPid => broker(999, "stranger"),
+        UniverseClass::BrokerPid => broker("stranger"),
         UniverseClass::Mount => mount("/stranger", "/stranger"),
     };
     LedgerEntry {
@@ -889,7 +892,7 @@ fn owner_and_instance_clauses_reject_exact_selection_faults() {
     for defect in [
         Defect::GrantSubstitutesMountSource,
         Defect::GrantSubstitutesProxyRoute,
-        Defect::GrantSubstitutesBrokerName,
+        Defect::GrantSubstitutesBrokerLaunch,
     ] {
         assert_rejected(|| {
             conformance::repeated_grants_are_independently_removable(carrying(defect))
@@ -1126,7 +1129,7 @@ fn revoke_after_one_removal(
     let mut backend = DefectiveBackend::carrying(defect);
     let entry = backend.grant(Grant {
         owner: conformance::conformance_owner(),
-        capability: broker(7, "egressd"),
+        capability: broker("egressd"),
         kind: GrantKind::Hot,
     });
     backend
