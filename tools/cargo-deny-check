@@ -428,20 +428,21 @@ def line_for(finding):
 
 
 def report(args):
-    findings, commit = [], None
+    sections, commit = {"lockfiles": []}, None
     try:
         root = repository_root()
         commit = git(root, "rev-parse", "HEAD").decode().strip()
         lockfiles = lockfiles_to_check(root)
     except ToolFailure as failure:
-        findings.append(tool_failure(str(failure)))
+        sections["lockfiles"].append(tool_failure(str(failure)))
     else:
         for lockfile in lockfiles:
-            findings.extend(lockfile_findings(root, lockfile))
+            sections["lockfiles"].extend(lockfile_findings(root, lockfile))
         if args.event in WEEKLY_EVENTS:
-            findings.extend(weekly_findings(root, args.stable_url))
-    document = {"schema": 1, "event": args.event, "weekly": args.event in WEEKLY_EVENTS, "commit": commit,
-                "date": datetime.now(timezone.utc).date().isoformat(), "findings": findings}
+            sections["weekly"] = weekly_findings(root, args.stable_url)
+    findings = [{**finding, "section": name} for name, found in sections.items() for finding in found]
+    document = {"schema": 2, "event": args.event, "weekly": "weekly" in sections, "commit": commit,
+                "date": datetime.now(timezone.utc).date().isoformat(), "sections": list(sections), "findings": findings}
     Path(args.json_out).write_text(json.dumps(document, indent=1, ensure_ascii=False) + "\n")
     lines = [line_for(finding) for finding in findings]
     print(f"{len(findings)} findings, written to {args.json_out}")

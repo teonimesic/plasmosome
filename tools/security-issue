@@ -1,22 +1,35 @@
 #!/usr/bin/env python3
 """Open or update the one GitHub issue that holds the security report's findings.
 
-The findings come from `tools/cargo-deny-check report`. Spec 026 section 4, "The security issue",
-is the authority: any finding opens or updates one issue labelled `security`, and the job refuses
-nothing. Main's duty follows within seven days.
+The findings come from `tools/cargo-deny-check report`, or from a later writer of the same file,
+such as the fuzz job. Spec 026 section 4, "The security issue", is the authority: any finding opens
+or updates one issue labelled `security`, and the job refuses nothing. Main's duty follows within
+seven days.
+
+The body has one section per check. A findings file (schema 2) names the sections its run ran, and
+each finding names its section. A run rewrites only those sections and keeps every other section
+as the last run of that check wrote it. So a push run, which skips the weekly checks, keeps the
+weekly section, and the report's runs keep the fuzz job's section. A later writer names its own
+section and runs in the `audit` concurrency group: a run reads the body and writes it back, so two
+runs at once could lose a section. This tool's own findings, an unreadable findings file and a
+second marked issue, form the security-issue section, which every run that writes replaces. An
+unreadable findings file replaces no other section.
 
 - No findings: nothing happens. The issue is never closed here; closing it is Main's decision.
-- Findings: the open `security` issue whose body carries MARKER gets the new body and one comment
-  linking the run. With none, the label is created if missing and the issue is opened. With two or
-  more, the lowest number is updated and the others are reported as a finding.
+- Findings: the open `security` issue whose body carries MARKER gets the new body. It gets a
+  comment only when the findings of a section the run rewrote changed, and the comment carries
+  those sections' findings. A body edit sends no notification. With no marked issue, the label is
+  created if missing and the issue is opened. With two or more, the lowest number is updated and
+  the others are reported as a finding.
 - An issue without MARKER is never edited, because a person filed it.
 
-Exit 0 when the issue holds the findings, 1 when it does and one of them is a tool failure, and 2
-when gh failed, so a run that could not vouch for main shows red. `--mode dry-run` runs the reads
-and prints each write instead of running it.
+Exit 0 when the issue holds the findings, 1 when it does and one of this run's findings is a tool
+failure, and 2 when gh failed, so a run that could not vouch for main shows red. `--mode dry-run`
+runs the reads and prints each write instead of running it.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -31,8 +44,15 @@ LABEL = "security"
 LABEL_COLOR = "b60205"
 LABEL_DESCRIPTION = "Findings from the weekly and push security report (spec 026)"
 SPEC = "docs/specs/026-security-standard.md#4-advisories-sources-licences-and-updates"
+SCHEMA = 2
+OWN = "security-issue"
+ORDER = (OWN, "lockfiles", "weekly")
+TITLES = {OWN: "The security issue tool", "lockfiles": "Every tracked lockfile", "weekly": "Weekly checks"}
+SECTION_NAME = re.compile(r"[a-z][a-z0-9-]{0,39}", re.ASCII)
+BLOCK = re.compile(r"(?ms)^<!-- spec026-section ([a-z][a-z0-9-]*) ([0-9a-f]{64}) -->\n.*?^<!-- spec026-section-end \1 -->\n")
 ISSUE_LIMIT = 1000
 BODY_LIMIT = 60000
+SECTION_LIMIT = 20000
 NOTE_RESERVE = 100
 TEXT_LIMIT = 500
 TIMEOUT = 120
@@ -46,23 +66,48 @@ class GhFailure(Exception):
 
 def tool_failure(title):
     return {"kind": "tool-failure", "check": None, "lockfile": None, "severity": "error", "package": None,
-            "advisory": None, "title": title, "url": None}
+            "advisory": None, "title": title, "url": None, "section": OWN}
+
+
+def problem(document):
+    """Say why a findings file is not a schema 2 report, or return None."""
+    if not isinstance(document, dict):
+        return "it is not a JSON object"
+    if document.get("schema") != SCHEMA:
+        return f"it does not say schema {SCHEMA}"
+    sections = document.get("sections")
+    if not isinstance(sections, list) or not sections or not all(
+            isinstance(name, str) and SECTION_NAME.fullmatch(name) for name in sections):
+        return "it needs a sections list of lowercase names"
+    if OWN in sections:
+        return f"the {OWN} section belongs to this tool"
+    if len(set(sections)) != len(sections):
+        return "it names a section twice"
+    findings = document.get("findings")
+    if not isinstance(findings, list) or not all(isinstance(item, dict) and isinstance(item.get("kind"), str)
+                                                 for item in findings):
+        return "it needs a findings list of objects with a kind"
+    if not all(item.get("section") in sections for item in findings):
+        return "a finding names no section, or one its sections list does not hold"
+    return None
 
 
 def load(path):
-    """Read the report's findings file; anything else becomes a tool-failure finding, never "no findings"."""
+    """Read a findings file into its sections; anything else is a tool failure, never "no findings"."""
     try:
         with open(path) as source:
             document = json.load(source)
     except FileNotFoundError:
-        return {}, [tool_failure(f"the report wrote no findings file at {path}; an earlier step failed, see the run")]
+        return {}, {}, [tool_failure(f"the report wrote no findings file at {path}; an earlier step failed, see the run")]
     except (OSError, ValueError) as error:
-        return {}, [tool_failure(f"the findings file {path} could not be read: {error}")]
-    findings = document.get("findings") if isinstance(document, dict) else None
-    if not isinstance(findings, list) or not all(isinstance(item, dict) and isinstance(item.get("kind"), str)
-                                                 for item in findings):
-        return {}, [tool_failure(f"the findings file {path} is not a report: it needs a findings list of objects with a kind")]
-    return document, list(findings)
+        return {}, {}, [tool_failure(f"the findings file {path} could not be read: {error}")]
+    reason = problem(document)
+    if reason:
+        return {}, {}, [tool_failure(f"the findings file {path} is not a report: {reason}")]
+    sections = {name: [] for name in document["sections"]}
+    for finding in document["findings"]:
+        sections[finding["section"]].append(finding)
+    return document, sections, []
 
 
 def code(value):
@@ -79,23 +124,70 @@ def item(number, finding):
     return f"{number}. **{code(finding['kind'])}**{' in ' + where if where else ''}: {title}{link}\n"
 
 
-def render(document, findings, repository, run_url):
-    head = (f"{MARKER}\nThe security report found {len(findings)} finding{'s' if len(findings) != 1 else ''}.\n\n"
-            f"- Run: {run_url}\n- Commit: {code(document.get('commit') or os.environ.get('GITHUB_SHA') or 'unknown')}\n"
-            f"- Date: {code(document.get('date') or 'unknown')}\n- Trigger: {code(document.get('event') or 'unknown')}\n\n"
-            "## Findings\n\n")
-    tail = ("\n## What happens next\n\n"
-            f"Main's duty under [spec 026 section 4](https://github.com/{repository}/blob/main/{SPEC}): within seven "
-            "days, a task, a dated ignore or a bump PR, or the issue put to the owner. This job rewrites the body on "
-            "each run with findings, and never closes the issue; closing it is Main's decision.\n")
-    body = head
+def digest(findings):
+    canonical = sorted(json.dumps(finding, sort_keys=True) for finding in findings)
+    return hashlib.sha256(json.dumps(canonical).encode()).hexdigest()
+
+
+def ordered(names):
+    return sorted(names, key=lambda name: (ORDER.index(name) if name in ORDER else len(ORDER), name))
+
+
+def section(name, findings, run, limit, markers=True):
+    """Render one section within limit characters; the findings that do not fit are counted, not dropped silently."""
+    run_url, commit, day, event = run
+    head = (f"## {TITLES.get(name, name)}\n\n- Run: {run_url}\n- Commit: {code(commit)}\n- Date: {code(day)}\n"
+            f"- Trigger: {code(event)}\n\n")
+    if markers:
+        head = f"<!-- spec026-section {name} {digest(findings)} -->\n" + head
+    end = f"\n<!-- spec026-section-end {name} -->\n" if markers else "\n"
+    if not findings:
+        return head + "No findings.\n" + end
+    head += f"{len(findings)} finding{'s' if len(findings) != 1 else ''}:\n\n"
+    budget = limit - len(head) - len(end) - NOTE_RESERVE
+    listing = ""
     for index, finding in enumerate(findings):
         text = item(index + 1, finding)
-        if len(body) + len(text) + len(tail) + NOTE_RESERVE > BODY_LIMIT:
-            body += f"\n{len(findings) - index} more findings are in the run's log.\n"
+        if len(listing) + len(text) > budget:
+            listing += f"\n{len(findings) - index} more findings are in the run's log.\n"
             break
-        body += text
-    return body + tail
+        listing += text
+    return head + listing + end
+
+
+def compose(old, new, rewritten, run, repository):
+    """Return the body that keeps old's sections outside rewritten, and the rewritten sections whose findings changed."""
+    kept, digests = {}, {}
+    for match in BLOCK.finditer(old or ""):
+        if match.group(1) not in kept:
+            kept[match.group(1)], digests[match.group(1)] = match.group(0), match.group(2)
+    changed = [name for name in ordered(rewritten) if digests.get(name, digest([])) != digest(new.get(name, []))]
+    for name in rewritten:
+        kept.pop(name, None)
+    head = (f"{MARKER}\nThe security report's findings on main, one section per check. A run rewrites the sections "
+            "for the checks it ran and keeps the others, so each section shows the last run of its check.\n\n")
+    tail = ("\n## What happens next\n\n"
+            f"Main's duty under [spec 026 section 4](https://github.com/{repository}/blob/main/{SPEC}): within seven "
+            "days, a task, a dated ignore or a bump PR, or the issue put to the owner. A run with findings rewrites "
+            "its sections and comments only when their findings changed. This job never closes the issue; closing it "
+            "is Main's decision.\n")
+    blocks = dict(kept)
+    remaining = BODY_LIMIT - len(head) - len(tail) - sum(len(text) + 1 for text in kept.values())
+    for name in ordered(new):
+        blocks[name] = section(name, new[name], run, min(SECTION_LIMIT, remaining))
+        remaining -= len(blocks[name]) + 1
+    return head + "\n".join(blocks[name] for name in ordered(blocks)) + tail, changed
+
+
+def comment(changed, new, run):
+    text = (f"The security report's findings changed in {run[0]}. These are the sections whose findings changed; "
+            "the issue body lists every section.\n\n")
+    remaining = BODY_LIMIT - len(text)
+    for name in changed:
+        part = section(name, new.get(name, []), run, min(SECTION_LIMIT, remaining), markers=False)
+        text += part + "\n"
+        remaining -= len(part) + 1
+    return text
 
 
 class Gh:
@@ -132,14 +224,15 @@ class Gh:
 
 
 def marked_issues(gh):
+    """Return (number, body) for each open security issue whose body carries MARKER, lowest number first."""
     issues = gh.read(["issue", "list", "--label", LABEL, "--state", "open", "--limit", str(ISSUE_LIMIT),
                       "--json", "number,body"])
     if not isinstance(issues, list) or not all(isinstance(issue, dict) and type(issue.get("number")) is int
-                                               for issue in issues):
+                                               and isinstance(issue.get("body") or "", str) for issue in issues):
         raise GhFailure("gh issue list returned something other than a list of issues")
     if len(issues) >= ISSUE_LIMIT:
         raise GhFailure(f"{ISSUE_LIMIT} or more open {LABEL} issues; the marked one may be past the listing")
-    return sorted(issue["number"] for issue in issues if MARKER in (issue.get("body") or ""))
+    return sorted((issue["number"], issue.get("body") or "") for issue in issues if MARKER in (issue.get("body") or ""))
 
 
 def ensure_label(gh):
@@ -155,23 +248,25 @@ def ensure_label(gh):
     return LABEL
 
 
-def publish(gh, document, findings, run_url):
+def publish(gh, document, sections, own, run_url):
     marked = marked_issues(gh)
     if len(marked) > 1:
-        others = ", ".join(f"#{number}" for number in marked[1:])
-        findings.append({"kind": "duplicate-issue", "check": None, "lockfile": None, "severity": "warning",
-                         "package": None, "advisory": None, "url": None,
-                         "title": f"{others} also carry this report's marker; this issue is the one kept up to date, "
-                                  "so close the others by hand"})
-    body = render(document, findings, gh.repository, run_url)
+        others = ", ".join(f"#{number}" for number, _ in marked[1:])
+        own.append({**tool_failure(f"{others} also carry this report's marker; this issue is the one kept up to date, "
+                                   "so close the others by hand"), "kind": "duplicate-issue", "severity": "warning"})
+    new = {**sections, **({OWN: own} if own else {})}
+    run = (run_url, document.get("commit") or os.environ.get("GITHUB_SHA") or "unknown",
+           document.get("date") or "unknown", document.get("event") or "unknown")
     if not marked:
+        body, _ = compose("", new, {*sections, OWN}, run, gh.repository)
         label = ensure_label(gh)
         gh.write(["issue", "create", "--title", TITLE, "--label", label, "--body-file", "-"], body)
         return
-    target = str(marked[0])
-    gh.write(["issue", "edit", target, "--body-file", "-"], body)
-    gh.write(["issue", "comment", target, "--body-file", "-"],
-             f"The security report ran again and rewrote the findings above: {run_url}\n")
+    number, old = marked[0]
+    body, changed = compose(old, new, {*sections, OWN}, run, gh.repository)
+    gh.write(["issue", "edit", str(number), "--body-file", "-"], body)
+    if changed:
+        gh.write(["issue", "comment", str(number), "--body-file", "-"], comment(changed, new, run))
 
 
 def main(argv=None):
@@ -184,16 +279,17 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not REPOSITORY.fullmatch(args.repo):
         parser.error("--repo must be OWNER/REPO")
-    document, findings = load(args.findings)
-    if not findings:
+    document, sections, own = load(args.findings)
+    if not own and not any(sections.values()):
         print("no findings: the security issue is left as it is")
         return 0
-    failures = [finding for finding in findings if finding["kind"] == "tool-failure"]
     try:
-        publish(Gh(args.repo, args.mode == "dry-run"), document, findings, args.run_url)
+        publish(Gh(args.repo, args.mode == "dry-run"), document, sections, own, args.run_url)
     except GhFailure as failure:
         print(f"the security issue was not updated: {failure}", file=sys.stderr)
         return 2
+    findings = [finding for items in sections.values() for finding in items] + own
+    failures = [finding for finding in findings if finding["kind"] == "tool-failure"]
     for finding in failures:
         print(f"tool failure, written into the security issue: {finding.get('title')}", file=sys.stderr)
     count = f"{len(findings)} finding{'s' if len(findings) != 1 else ''}"
