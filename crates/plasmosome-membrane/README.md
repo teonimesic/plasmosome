@@ -20,7 +20,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far a JSON reader that refuses duplicate keys, the SHA-256 `Digest` (which lives in `plasmosome-backend` and is re-exported here as `runtime::digest`), the canonical absolute `RecipePath`, the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), and the `RuntimeRecipe`: the strictly parsed launch input with its typed refusals, the host's admitted limits and its one canonical ndjson line. Nothing here touches an artifact or launches a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, the exact 4090 hello requests with the strict judge of their replies (`hello`), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. Nothing here touches an artifact or launches a cell yet |
 
 ## Use
 
