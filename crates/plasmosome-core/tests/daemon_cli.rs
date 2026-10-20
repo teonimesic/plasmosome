@@ -72,6 +72,27 @@ fn exact_help_operands_succeed_before_config_reading() {
 }
 
 #[test]
+fn help_shows_a_config_the_daemon_accepts_and_says_it_recovers_no_cells() {
+    let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+    let output = output_within(plasmosomed(directory.path(), &[OsStr::new("--help")]));
+    assert!(output.status.success(), "{output:?}");
+    let help = String::from_utf8(output.stdout).expect("help is UTF-8");
+
+    let example = help
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with('{'))
+        .unwrap_or_else(|| panic!("help shows an example config: {help}"));
+    if let Err(error) = plasmosome_core::parse_config(example) {
+        panic!("the config help shows is one plasmosomed accepts, got {error}: {example}");
+    }
+    assert!(
+        help.contains("this build does not recover cells yet"),
+        "help says the recovery keys are validated but not used: {help}"
+    );
+}
+
+#[test]
 fn every_other_sole_operand_remains_a_literal_config_path() {
     let directory = tempfile::tempdir().expect("the test owns a temporary directory");
     let occupied = directory.path().join("taken.uds");
