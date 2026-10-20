@@ -219,3 +219,28 @@ fn a_result_line_still_being_written_does_not_start_a_step() {
     assert_eq!(finished(&run), ["a", "b"], "{:?}", run.run.status);
     assert_eq!(run.steps.len(), 1);
 }
+
+#[test]
+fn a_whole_result_line_with_no_newline_yet_does_not_start_a_step() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let console = dir.path().join("console.log");
+    let flag = dir.path().join("flag-a");
+    let body = format!(
+        "cat > /dev/null\nprintf '%s\\n' 'LANE-BEGIN run-1' > {console}\nprintf '%s' '{line}' >> {console}\nsleep 1\n[ -e {flag} ] && exit 8\nprintf '\\n' >> {console}\n{wait}{end}",
+        console = quoted(&console),
+        flag = quoted(&flag),
+        line = result_line("a"),
+        wait = waits_for(&flag, &console, "b"),
+        end = end(&console, 2),
+    );
+    let steps = vec![Step {
+        after: "a".to_string(),
+        flag: flag.clone(),
+        action: Box::new(|| Ok(String::new())),
+    }];
+
+    let run = run(dir.path(), &body, &["a", "b"], steps);
+
+    assert_eq!(finished(&run), ["a", "b"], "{:?}", run.run.status);
+    assert_eq!(run.steps.len(), 1);
+}

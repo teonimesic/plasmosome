@@ -91,6 +91,22 @@ fn a_symlinked_alias_of_a_sibling_does_not_overlap_the_share() {
         both_ways(&alias, &root.join("software/holding")),
         (false, false)
     );
+    assert_eq!(
+        both_ways(&alias, &root.join("software/Share")),
+        (false, false)
+    );
+}
+
+#[test]
+fn a_symlink_elsewhere_to_a_directory_inside_the_share_overlaps_it() {
+    let (_dir, root) = tree();
+    let alias = root.join("elsewhere/inner");
+    symlink(root.join("software/Share/opt/p"), &alias).expect("the alias is made");
+
+    assert_eq!(
+        both_ways(&alias, &root.join("software/Share")),
+        (true, true)
+    );
 }
 
 #[test]

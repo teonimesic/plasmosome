@@ -444,6 +444,19 @@ fn m4_is_not_run_when_probed_inside_the_window_or_with_no_former_names() {
 }
 
 #[test]
+fn m4_fails_on_a_listing_with_any_name_even_when_every_former_name_is_gone() {
+    let mut stray = detach(Some(5000));
+    replace(
+        &mut stray,
+        "m4-release-cwd",
+        1000,
+        cwd_release(listing(&["stray"]), &[("bin", gone())]),
+    );
+
+    assert!(is_fail(&judge_m4(&stray, true), "stray"));
+}
+
+#[test]
 fn m4_fails_when_directories_stay_are_removed_or_a_name_still_resolves() {
     let mut left = detach(Some(5000));
     replace(
@@ -689,6 +702,18 @@ fn r2_fails_a_configuration_the_workload_could_see_and_skips_a_failed_mount() {
 
     assert!(is_fail(&verdicts[1].1, "private"));
     assert!(is_not_run(&verdicts[2].1));
+}
+
+#[test]
+fn r2_fails_the_visible_control_when_the_workload_cannot_see_the_file() {
+    let mut results = r2(refused("stat", "ENOENT"), refused("stat", "ENOENT"));
+    results[0] = stage(
+        "visible",
+        json!({"ok": true}),
+        workload_stat(refused("stat", "ENOENT")),
+    );
+
+    assert!(is_fail(&judge_r2(&results)[0].1, "visible"));
 }
 
 #[test]
