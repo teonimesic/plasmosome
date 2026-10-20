@@ -276,6 +276,13 @@ mod tests {
             .unwrap_or(false)
     }
 
+    fn exists(pid: u32) -> bool {
+        Command::new("ps")
+            .args(["-p", &pid.to_string()])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
     #[test]
     fn stopping_a_launcher_that_exited_after_the_last_wait_is_not_an_error() {
         let mut child = Command::new("/bin/sh")
@@ -296,5 +303,10 @@ mod tests {
 
         stop(&mut child, pid)
             .expect("a group whose only member is the launcher's zombie has nothing left to kill");
+
+        assert!(
+            !exists(pid),
+            "stop returned while the launcher {pid} was still unreaped"
+        );
     }
 }
