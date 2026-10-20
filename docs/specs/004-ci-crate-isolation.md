@@ -50,9 +50,11 @@ blocked on owner decisions. This spec ships the strongest check available short 
 
   Amended on 2026-10-20, as [spec 026](026-security-standard.md#spec-004-the-msrv-job) requires.
   Until then this bullet named `dtolnay/rust-toolchain@1.96` and a bare `cargo check`. With the
-  pin in place that pair checks with the pinned release while the action's log says 1.96, so a
-  plan that follows the old text does not meet this one. `ci.yml` sets `RUSTUP_AUTO_INSTALL: "0"`,
-  so the job installs 1.96.0 by name before any cargo command, for example with
+  pin in place that pair checks with the pinned release, while the action's log says 1.96,
+  wherever the pin is installed or auto-install is on. Under the `RUSTUP_AUTO_INSTALL: "0"` that
+  `ci.yml` sets, it fails at the bare `cargo check`, because the pin is not installed. Either way
+  a plan that follows the old text does not meet this one. The job installs 1.96.0 by name before
+  any cargo command, for example with
   `rustup toolchain install 1.96.0 --profile minimal --no-self-update`.
 - **`macos`** — runs on `macos-26`, the standard arm64 runner. The label pins the major macOS
   version, not the image: GitHub updates the image about weekly, so the minor version and the
