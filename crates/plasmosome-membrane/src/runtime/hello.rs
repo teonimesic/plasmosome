@@ -831,6 +831,8 @@ mod tests {
                 json!(u64::MAX),
                 json!(BOOT),
                 json!(guest_policy().hex()),
+                json!(host_policy().hex()),
+                json!(OTHER_BOOT),
             ]),
             any::<i64>().prop_map(Value::from),
             "\\PC{0,8}".prop_map(Value::from),
@@ -844,11 +846,14 @@ mod tests {
 
     fn reply_like() -> impl Strategy<Value = Value> {
         let part = |valid: Value| prop_oneof![2 => Just(Some(valid)), 1 => guest_value().prop_map(Some), 1 => Just(None)];
-        let extra = || prop::collection::vec((guest_key(), guest_value()), 0..2);
+        let extra = || {
+            let some = prop::collection::vec((guest_key(), guest_value()), 1..2);
+            prop_oneof![3 => Just(Vec::new()), 1 => some]
+        };
         let pointers = ["/id", "/result/boot", "/result/policy", "/error"];
         let error = prop_oneof![3 => Just(None), 1 => guest_value().prop_map(Some)];
         let parts = (
-            part(json!(1)),
+            prop_oneof![Just(json!(1)), Just(json!(2))].prop_flat_map(part),
             part(json!(BOOT)),
             part(json!(guest_policy().hex())),
             error,
