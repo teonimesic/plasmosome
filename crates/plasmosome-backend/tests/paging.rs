@@ -442,10 +442,75 @@ fn expired_capture_is_internal_error_and_dropped() {
         (PagingError::Expired, -32603)
     );
     assert!(!slot.is_holding());
-    assert_eq!(
-        read(&mut slot, 1, 4, t),
-        Err(PagingError::UnknownSnapshot { snapshot: 1 })
-    );
+    assert_eq!(read(&mut slot, 1, 4, t), Err(PagingError::Expired));
+}
+
+#[test]
+fn a_capture_dropped_by_expire_still_answers_expired() {
+    let (mut slot, t, _) = ten_bytes_in_pages_of_four();
+    start(&mut slot, account(), t, t + 10 * SECOND);
+    slot.expire(t + 10 * SECOND);
+    assert!(!slot.is_holding());
+    for offset in [0, 4] {
+        let refused = read(&mut slot, 2, offset, t).expect_err("snapshot 2 expired");
+        assert_eq!((refused.code(), refused), (-32603, PagingError::Expired));
+    }
+    let moved = slot.page(&"cell-2", cursor(2, 4), t + SECOND, t);
+    assert_eq!(moved, Err(PagingError::ScopeChanged { snapshot: 2 }));
+    let refused = [1, 3, 0].map(|snapshot| read(&mut slot, snapshot, 4, t));
+    let (snapshot, offset) = (0, 4);
+    let invalid = [
+        PagingError::UnknownSnapshot { snapshot: 1 },
+        PagingError::UnknownSnapshot { snapshot: 3 },
+        PagingError::InvalidCursor { snapshot, offset },
+    ];
+    assert_eq!(refused, invalid.clone().map(Err));
+    assert!(invalid.iter().all(|error| error.code() == -32602));
+}
+
+#[test]
+fn a_discarded_capture_answers_expired_until_a_zero_zero_request_at_its_deadline() {
+    let (mut slot, t, _) = ten_bytes_in_pages_of_four();
+    slot.discard();
+    slot.discard();
+    slot.expire(t + 20 * SECOND);
+    assert_eq!(read(&mut slot, 1, 4, t), Err(PagingError::Expired));
+    let late = slot.capture(SCOPE, t, &|| t, || Ok::<_, Infallible>(account()));
+    assert!(matches!(
+        late,
+        Err(CaptureError::Paging(PagingError::Expired))
+    ));
+    let refused = read(&mut slot, 1, 4, t);
+    assert_eq!(refused, Err(PagingError::UnknownSnapshot { snapshot: 1 }));
+}
+
+#[test]
+fn a_successful_capture_forgets_the_ended_id() {
+    let (mut slot, t, _) = ten_bytes_in_pages_of_four();
+    slot.discard();
+    let next = start(&mut slot, account(), t, t + 10 * SECOND);
+    assert_eq!(next.snapshot, 2);
+    let refused = read(&mut slot, 1, 4, t);
+    assert_eq!(refused, Err(PagingError::UnknownSnapshot { snapshot: 1 }));
+}
+
+#[test]
+fn a_failed_collect_forgets_the_ended_id() {
+    let (mut slot, t, _) = ten_bytes_in_pages_of_four();
+    slot.discard();
+    let failed = slot.capture(SCOPE, t + SECOND, &|| t, || Err::<FrozenAccount, _>("gone"));
+    assert!(matches!(failed, Err(CaptureError::Collect("gone"))));
+    let refused = read(&mut slot, 1, 4, t);
+    assert_eq!(refused, Err(PagingError::UnknownSnapshot { snapshot: 1 }));
+}
+
+#[test]
+fn a_changed_scope_leaves_the_ended_id() {
+    let (mut slot, t, _) = ten_bytes_in_pages_of_four();
+    slot.discard();
+    let moved = slot.page(&"cell-2", cursor(1, 4), t + SECOND, t);
+    assert_eq!(moved, Err(PagingError::ScopeChanged { snapshot: 1 }));
+    assert_eq!(read(&mut slot, 1, 4, t), Err(PagingError::Expired));
 }
 
 #[test]
@@ -579,10 +644,7 @@ fn capture_stays_after_the_last_page_until_expiry() {
     assert!(slot.is_holding());
     slot.expire(t + 10 * SECOND);
     assert!(!slot.is_holding());
-    assert_eq!(
-        read(&mut slot, 1, 0, t),
-        Err(PagingError::UnknownSnapshot { snapshot: 1 })
-    );
+    assert_eq!(read(&mut slot, 1, 0, t), Err(PagingError::Expired));
     slot.expire(t + 11 * SECOND);
     assert!(!slot.is_holding());
 }
@@ -655,11 +717,13 @@ fn errors_describe_themselves() {
         PagingError::ScopeChanged { snapshot: 1 } => "snapshot 1 was captured for another scope";
         PagingError::OffsetOutOfRange { offset: 10, total: 10 }
             => "offset 10 is outside the 10-byte account";
-        PagingError::Expired => "the capture's deadline has passed";
+        PagingError::Expired
+            => "the capture has ended: its deadline passed or the server dropped it";
         PagingError::SnapshotsExhausted => "this connection has issued every snapshot ID";
         PagingError::BadPageSize { page_bytes: 0 } => "a page of 0 bytes is outside 1 to 65536";
         PagingError::Encode { detail: detail() } => "the account cannot be encoded as JSON: boom";
-        CaptureError::<&str>::Paging(PagingError::Expired) => "the capture's deadline has passed";
+        CaptureError::<&str>::Paging(PagingError::Expired)
+            => "the capture has ended: its deadline passed or the server dropped it";
         CaptureError::Collect("disk gone") => "collecting the account failed: disk gone";
         AssemblyFault::Page(PageFault::EmptyBytes) => "the page carries no bytes";
         AssemblyFault::FirstPageNotAtZero { offset: 4 }
@@ -735,15 +799,26 @@ fn assembler_refuses_a_first_page_not_at_zero() {
     let (_, _, pages) = ten_bytes_in_pages_of_four();
     let fault = refused_after(&[], pages[1].clone());
     assert_eq!(fault, AssemblyFault::FirstPageNotAtZero { offset: 4 });
+    let mut assembler = PageAssembler::new();
+    assert!(assembler.accept(pages[1].clone()).is_err());
+    for page in pages {
+        assembler
+            .accept(page)
+            .expect("a refused first page kept no bytes");
+    }
+    assert_eq!(assembler.finish::<Account>(), Ok(Account { a: 1234 }));
 }
 
 #[test]
 fn assembler_refuses_a_mixed_snapshot() {
     let (mut slot, t, pages) = ten_bytes_in_pages_of_four();
-    start(&mut slot, account(), t, t + 10 * SECOND);
+    let first = start(&mut slot, account(), t, t + 10 * SECOND);
     let other = read(&mut slot, 2, 4, t).expect("the second capture serves its page");
     let (expected, found) = (1, 2);
     let fault = refused_after(&pages[..1], other);
+    assert_eq!(fault, AssemblyFault::SnapshotChanged { expected, found });
+    let (expected, found) = (2, 1);
+    let fault = refused_after(&[first], pages[1].clone());
     assert_eq!(fault, AssemblyFault::SnapshotChanged { expected, found });
 }
 
@@ -755,6 +830,10 @@ fn assembler_refuses_a_changed_total() {
     let (expected, found) = (10, 12);
     let fault = refused_after(&pages[..1], longer);
     assert_eq!(fault, AssemblyFault::TotalChanged { expected, found });
+    let mut shorter = pages[1].clone();
+    (shorter.total, shorter.complete) = (8, true);
+    let fault = refused_after(&pages[..1], shorter);
+    assert_eq!(fault, AssemblyFault::TotalChanged { expected, found: 8 });
 }
 
 #[test]
