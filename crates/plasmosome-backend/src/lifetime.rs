@@ -200,12 +200,8 @@ impl Bound {
     /// Whole milliseconds left on the reading with less time left, and 0 once that one has
     /// passed. With another boot session it is the wall reading's.
     pub fn remaining_ms(&self, now: &ClockReading) -> u64 {
-        let wall = self.not_after.0.saturating_sub(now.wall.0);
-        if now.continuous.boot != self.continuous.boot {
-            return wall;
-        }
-        let continuous = self.continuous.ns.saturating_sub(now.continuous.ns) / NS_PER_MS;
-        wall.min(continuous)
+        let left = u128::try_from(self.remaining_ns(now)).unwrap_or(0);
+        u64::try_from(left.div_ceil(u128::from(NS_PER_MS))).unwrap_or(u64::MAX)
     }
 
     /// The earlier of two bounds, each reading taken separately. When the two continuous
@@ -234,11 +230,31 @@ impl Bound {
     /// The sum saturates at `u64::MAX` milliseconds, which an `Instant` on macOS and Linux
     /// holds; where one cannot, the deadline is `now.wait`.
     pub fn wait_deadline(&self, now: &ClockReading, extra_ms: u64) -> Instant {
-        let ms = self.remaining_ms(now).saturating_add(extra_ms);
-        now.wait
-            .checked_add(Duration::from_millis(ms))
-            .unwrap_or(now.wait)
+        let ns = self.remaining_ns(now) + i128::from(extra_ms) * i128::from(NS_PER_MS);
+        let shift = duration_from_ns(ns.unsigned_abs());
+        let deadline = if ns >= 0 {
+            now.wait.checked_add(shift)
+        } else {
+            now.wait.checked_sub(shift)
+        };
+        deadline.unwrap_or(now.wait)
     }
+
+    fn remaining_ns(&self, now: &ClockReading) -> i128 {
+        let ns_per_ms = i128::from(NS_PER_MS);
+        let wall = (i128::from(self.not_after.0) - i128::from(now.wall.0)) * ns_per_ms;
+        if now.continuous.boot != self.continuous.boot {
+            return wall;
+        }
+        wall.min(i128::from(self.continuous.ns) - i128::from(now.continuous.ns))
+    }
+}
+
+fn duration_from_ns(ns: u128) -> Duration {
+    let per_second = 1_000_000_000;
+    let seconds = u64::try_from(ns / per_second).unwrap_or(u64::MAX);
+    let nanos = u32::try_from(ns % per_second).unwrap_or(0);
+    Duration::new(seconds, nanos)
 }
 
 /// A lease, idle limit or drain budget outside its range.

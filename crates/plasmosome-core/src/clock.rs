@@ -48,16 +48,28 @@ impl SystemClock {
 
 impl Clock for SystemClock {
     fn now(&self) -> ClockReading {
-        let wall = WallMs::from_unix_ms(wall_ms_at(SystemTime::now()).unwrap_or(0));
-        let ns = continuous_ns().unwrap_or(u64::MAX);
-        ClockReading {
-            wall,
-            continuous: Continuous {
-                boot: self.boot,
-                ns,
-            },
-            wait: Instant::now(),
-        }
+        reading_from(
+            self.boot,
+            wall_ms_at(SystemTime::now()),
+            continuous_ns(),
+            Instant::now(),
+        )
+    }
+}
+
+fn reading_from(
+    boot: BootSession,
+    wall_ms: Result<u64, ClockError>,
+    continuous_ns: Result<u64, ClockError>,
+    wait: Instant,
+) -> ClockReading {
+    ClockReading {
+        wall: WallMs::from_unix_ms(wall_ms.unwrap_or(0)),
+        continuous: Continuous {
+            boot,
+            ns: continuous_ns.unwrap_or(u64::MAX),
+        },
+        wait,
     }
 }
 
