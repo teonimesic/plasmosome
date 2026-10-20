@@ -13,6 +13,7 @@ from collections import namedtuple
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import posixpath
@@ -62,8 +63,8 @@ FORMS = {"application/vnd.oci.image.index.v1+json": "index",
          "application/vnd.docker.distribution.manifest.v2+json": "manifest"}
 LIMITS = ["The base is spec 027 Q3's default, debian:bookworm-slim pinned by digest. "
           "The owner may change it, and a change is a new build with a new pin.",
-          "The base checks itself: mke2fs, e2fsck, dumpe2fs and debugfs come from the base image, "
-          "so the read-back reports only what that base chooses to report.",
+          "The base checks itself: its own tar and sh unpack the stage, and its mke2fs, e2fsck, dumpe2fs and debugfs "
+          "make and read back the filesystem, so the read-back reports only what that base chooses to report.",
           "content.jsonl lists the stage tar the image was made from. It is not a listing read back from rootfs.raw."]
 REFERENCE = re.compile(r"(?P<name>[^@\s]+)@(?P<digest>sha256:[0-9a-f]{64})\Z")
 PLATFORM = re.compile(r"[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?\Z")
@@ -126,7 +127,10 @@ def read_bounded(path, step, limit, what=None):
     """Return the bytes of a regular file, read through a limit of `limit` plus one byte."""
     what = what or str(path)
     with open_regular(path, step, what) as handle:
-        data = handle.read(limit + 1)
+        try:
+            data = handle.read(limit + 1)
+        except OSError as error:
+            raise Refused(step, f"cannot read {what}: {error.strerror}") from None
     if len(data) > limit:
         raise Refused(step, f"{what} is larger than {limit} bytes")
     return data
@@ -136,11 +140,14 @@ def hash_bounded(path, step, limit, what):
     """Return the SHA-256 of a regular file, refusing one larger than `limit` bytes."""
     digest, total = hashlib.sha256(), 0
     with open_regular(path, step, what) as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            total += len(chunk)
-            if total > limit:
-                raise Refused(step, f"{what} is larger than {limit} bytes")
-            digest.update(chunk)
+        try:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                total += len(chunk)
+                if total > limit:
+                    raise Refused(step, f"{what} is larger than {limit} bytes")
+                digest.update(chunk)
+        except OSError as error:
+            raise Refused(step, f"cannot read {what}: {error.strerror}") from None
     return digest.hexdigest()
 
 
@@ -204,11 +211,19 @@ def export_base(run, env, base, platform, work):
     top = inspect(run, env, ["docker", "image", "inspect", base.reference], base)
     digests = top.get("RepoDigests") or []
     descriptor = top.get("Descriptor") or {}
+    if not isinstance(digests, list) or not isinstance(descriptor, dict) or \
+            not isinstance(descriptor.get("mediaType", ""), str):
+        raise Refused("export", f"`docker image inspect {base.reference}` printed a record in a shape Docker "
+                                f"does not write")
     if not any(isinstance(d, str) and d.endswith("@" + base.digest) for d in digests) or \
             descriptor.get("digest", base.digest) != base.digest:
         raise Refused("export", f"the local {base.reference} does not carry {base.digest}; "
                                 f"its repository digests are {digests}")
     target = inspect(run, env, ["docker", "image", "inspect", "--platform", platform, base.reference], base)
+    target_descriptor = target.get("Descriptor") or {}
+    if not isinstance(target_descriptor, dict):
+        raise Refused("export", f"`docker image inspect --platform {platform}` printed a record in a shape Docker "
+                                f"does not write")
     if [target.get("Os"), target.get("Architecture")] != platform.split("/")[:2]:
         raise Refused("export", f"the local {base.reference} has no {platform} image; "
                                 f"run `docker pull --platform {platform} {base.reference}` first")
@@ -227,18 +242,18 @@ def export_base(run, env, base, platform, work):
         raise Refused("export", f"docker rm {container} exited {removed.code}, so the container remains")
     return {"reference": base.reference, "digest": base.digest,
             "digest_form": FORMS.get(descriptor.get("mediaType"), "unknown"), "platform": platform,
-            "platform_manifest_digest": (target.get("Descriptor") or {}).get("digest"), "image_id": top.get("Id")}
+            "platform_manifest_digest": target_descriptor.get("digest"), "image_id": top.get("Id")}
 
 
 class LimitedReader:
-    """A seekable view of a file that refuses any read ending past `limit` bytes."""
+    """A seekable view of a file that refuses any read ending past `limit` bytes, and never asks for more."""
 
     def __init__(self, handle, limit, what):
         self.handle, self.limit, self.what = handle, limit, what
 
     def read(self, size=-1):
-        if size is None or size < 0:
-            size = max(self.limit + 1 - self.handle.tell(), 0)
+        room = max(self.limit + 1 - self.handle.tell(), 0)
+        size = room if size is None or size < 0 else min(size, room)
         data = self.handle.read(size)
         if self.handle.tell() > self.limit:
             raise Refused("stage", f"{self.what} is larger than {self.limit} bytes")
@@ -321,6 +336,8 @@ def base_members(source):
         kind = kind_of(member)
         if kind is None:
             raise Refused("stage", f"/{name} is not a regular file, directory or link")
+        if not math.isfinite(member.mtime):
+            raise Refused("stage", f"/{name} has an mtime of {member.mtime}, not a finite number")
         target = members.get(member.linkname) if member.islnk() else None
         if member.islnk() and (target is None or kind_of(target) != "file"):
             raise Refused("stage", f"/{name} is a hard link to /{member.linkname}, which is not an earlier file")
@@ -401,6 +418,8 @@ def stage(base_tar, stage_tar, adds, epoch, limit):
                 return write_stage_tar(source, members, adds, epoch, stage_tar)
         except tarfile.TarError as error:
             raise Refused("stage", f"{base_tar} is not a readable tar archive: {error}") from None
+        except OSError as error:
+            raise Refused("stage", f"cannot stage {base_tar} into {stage_tar}: {error.strerror}") from None
 
 
 def write_stage_tar(source, members, adds, epoch, stage_tar):
@@ -723,7 +742,7 @@ def build(args, run, now, environ):
         raise Refused("images root", f"{images_root} is not a directory; create it first")
     if not os.access(images_root, os.W_OK | os.X_OK):
         raise Refused("images root", f"{images_root} is not writable by this user; the image is staged inside it")
-    tool_sha256 = sha256(read_bounded(Path(__file__), "tool", MAX_OWN_FILE_BYTES, "tools/root-image"))
+    tool_sha256 = sha256(read_bounded(Path(os.path.realpath(__file__)), "tool", MAX_OWN_FILE_BYTES, "tools/root-image"))
     created = int(now())
     epoch = created if args.source_date_epoch is None else args.source_date_epoch
     if epoch < 0:
@@ -732,8 +751,12 @@ def build(args, run, now, environ):
     work = make_work_root(Path(args.work_root))
     record = export_base(run, env, base, args.platform, work)
     facts = stage(work / "base.tar", work / "stage.tar", adds, epoch, args.size_mib << 20)
-    listing = content_listing(work / "stage.tar")
-    (work / "content.jsonl").write_bytes(listing)
+    try:
+        listing = content_listing(work / "stage.tar")
+        (work / "content.jsonl").write_bytes(listing)
+    except OSError as error:
+        raise Refused("stage", f"cannot list {work / 'stage.tar'} into {work / 'content.jsonl'}: "
+                               f"{error.strerror}") from None
     content_sha256 = sha256(listing)
     uuid = fs_uuid(content_sha256)
     filesystem(run, env, base, args.platform, work, uuid, args.size_mib, adds)
@@ -766,15 +789,18 @@ def bounded_text(handle, argv):
 
 def run_command(argv, env):
     """Run argv with env and no stdin; return its exit code and bounded output."""
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        try:
-            code = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                                  timeout=COMMAND_TIMEOUT).returncode
-        except FileNotFoundError:
-            raise Refused("command", f"{argv[0]} is not installed") from None
-        except subprocess.TimeoutExpired:
-            raise Refused("command", f"{argv[0]} ran longer than {COMMAND_TIMEOUT} s") from None
-        return Result(code, bounded_text(out, argv), bounded_text(err, argv))
+    try:
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            try:
+                code = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                      timeout=COMMAND_TIMEOUT).returncode
+            except FileNotFoundError:
+                raise Refused("command", f"{argv[0]} is not installed") from None
+            except subprocess.TimeoutExpired:
+                raise Refused("command", f"{argv[0]} ran longer than {COMMAND_TIMEOUT} s") from None
+            return Result(code, bounded_text(out, argv), bounded_text(err, argv))
+    except OSError as error:
+        raise Refused("command", f"cannot run {argv[0]}: {error.strerror}") from None
 
 
 def main(argv=None, run=run_command, now=None, environ=None):
