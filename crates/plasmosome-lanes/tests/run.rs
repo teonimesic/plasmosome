@@ -529,3 +529,38 @@ fn a_lane_that_cannot_serialize_is_refused_before_spawning() {
     assert!(error.to_string().contains("bundle"), "{error}");
     assert!(!marker.exists(), "the launcher was spawned anyway");
 }
+
+#[test]
+fn a_symlink_to_a_complete_run_elsewhere_is_not_read_as_the_console() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let lane = common::lane_config(dir.path(), "run-1");
+    let elsewhere = dir.path().join("elsewhere.log");
+    fs::write(
+        &elsewhere,
+        format!(
+            "LANE-BEGIN run-1\nLANE-RESULT {}\nLANE-END run-1 1\n",
+            common::result_json("id", 1000)
+        ),
+    )
+    .expect("a complete run is written elsewhere");
+    let body = format!(
+        "cat > /dev/null\nln -s '{}' '{}'\nexit 0",
+        elsewhere.display(),
+        lane.console.display()
+    );
+    let launcher = common::script(dir.path(), "points-elsewhere", &body);
+    let guest = common::guest_config("run-1", &["id"]);
+
+    let (run, _) = run_within(
+        Duration::from_secs(30),
+        launcher,
+        lane,
+        guest,
+        Duration::from_secs(20),
+    );
+
+    match &run.outcome {
+        Outcome::NotRun(reason) => assert!(reason.contains("link"), "{reason}"),
+        other => panic!("a console that is a symlink must be not run, it was {other:?}"),
+    }
+}

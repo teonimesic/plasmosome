@@ -449,6 +449,7 @@ fn a_file_in_the_bundle_is_inside_it_by_any_spelling_and_one_outside_is_not() {
     let bundle = scratch.path().join("bundle");
     let image = common::write_file(&bundle, "base/rootfs.raw", b"disk");
     let outside = common::write_file(scratch.path(), "copy/rootfs.raw", b"disk");
+    let sibling = common::write_file(scratch.path(), "bundle-other/rootfs.raw", b"disk");
     let link = scratch.path().join("link.raw");
     symlink(&image, &link).expect("a symlink to the bundle's image");
 
@@ -461,7 +462,7 @@ fn a_file_in_the_bundle_is_inside_it_by_any_spelling_and_one_outside_is_not() {
     assert!(!is_inside(&bundle, &outside));
     assert!(!is_inside(&bundle, &scratch.path().join("missing.raw")));
     assert!(
-        !is_inside(&bundle, &scratch.path().join("bundle-other/rootfs.raw")),
+        !is_inside(&bundle, &sibling),
         "a sibling whose name starts with the bundle's is not inside it"
     );
 }
