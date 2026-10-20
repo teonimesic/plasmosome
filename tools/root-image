@@ -417,7 +417,7 @@ def write_stage_tar(source, members, adds, epoch, stage_tar):
             raise Refused("stage", f"--add {add.dest} would replace {add.dest} in the image")
         names.add(add.dest[1:])
         try:
-            data = read_bounded(add.source, "stage", MAX_ADD_BYTES)
+            data = read_bounded(os.path.realpath(add.source), "stage", MAX_ADD_BYTES, add.source)
         except Refused as refusal:
             raise Refused("stage", f"--add {add.dest}: {refusal.detail}") from None
         entries.append((tar_info(add.dest[1:], "file", add.mode, 0, 0, epoch, len(data)), data))
