@@ -22,22 +22,35 @@ fi
 # refusing a contributor for their own name is a refusal they cannot act on.
 vendors='claude|anthropic|gpt|openai|copilot|codex|gemini|llama|mistral|cursor|cognition\.ai|grok|x\.ai'
 
+# The same words, each only as a whole word. It decides what the refusal of an identity with no
+# address says, so `Claudette Roe <>` is untraceable, not a model.
+vendor_word="(^|[^[:alnum:]])($vendors)([^[:alnum:]]|\$)"
+
+# A domain no account can sit on: the text after the address's last `@` equals a listed name, or
+# ends in `.` and one, ignoring one trailing dot. `local` is where git puts a machine with no
+# `user.email` (`<user>@<hostname>.local`), and the rest are reserved by RFC 6761 and 8375, by
+# ICANN for private use, or held by no registry (spec 029 section 4).
+untraceable_domain='@([^@]*\.)?(local|localhost|invalid|test|example|example\.com|example\.net|example\.org|home\.arpa|internal|localdomain)\.?$'
+
 # Nominates text worth parsing. Deliberately unanchored: it may only ever over-nominate, because
 # a paragraph it skips is a paragraph nothing else looks at.
 nominate='(co-authored-by|signed-off-by)[[:space:]]*:'
 
 # Reads a trailer off a line git's parser has already produced, where the key starts the line.
 attribution='^[[:space:]]*(co-authored-by|signed-off-by)[[:space:]]*:'
+co_author='^[[:space:]]*co-authored-by[[:space:]]*:'
 
 offences=()
 
 # Answers whether $2 matches $1, and exits the guard if grep could not decide.
 #
 # `grep -q` exits 0 for a match and 1 for no match; anything higher is a failure to read. Treating
-# that as "no match" is how a guard reports clean because its own tooling broke.
+# that as "no match" is how a guard reports clean because its own tooling broke. The C locale
+# keeps `-i` to ASCII case. In a UTF-8 locale GNU grep folds the long s (U+017F) onto `s`, which
+# would make a look-alike domain match a listed one.
 matches() {
   local pattern=$1 text=$2 status
-  grep -qiE "$pattern" <<<"$text"
+  LC_ALL=C grep -qiE "$pattern" <<<"$text"
   status=$?
   case $status in
     0) return 0 ;;
@@ -50,7 +63,57 @@ matches() {
   esac
 }
 
-# Adds every attribution trailer in the paragraph on $1 that names a model.
+# Prints $1 without its leading and trailing whitespace.
+trimmed() {
+  local text=$1
+  text=${text#"${text%%[![:space:]]*}"}
+  printf '%s' "${text%"${text##*[![:space:]]}"}"
+}
+
+# Judges the identity on $2, a trailer value under the key on $1, and records an offence if it
+# credits a model or names somebody no reader can trace.
+#
+# The address is the text inside the value's last `<...>`, and the name is what comes before it. An
+# identity with no address is refused whatever its name: no account can be found for it. Its name
+# decides only what the refusal says.
+judge_trailer() {
+  local position=$1 value=$2 name=$2 address='' rest
+  rest=${value##*<}
+  if [ "$rest" != "$value" ] && [ "${rest%%>*}" != "$rest" ]; then
+    address=${rest%%>*}
+    name=$(trimmed "${value%<*}")
+  fi
+  if ! matches '@' "$address"; then
+    if matches "$vendor_word" "$name"; then
+      offence "$position" "$value" model
+    else
+      offence "$position" "$value" untraceable
+    fi
+  elif matches "$vendors" "$value"; then
+    offence "$position" "$value" model
+  elif matches "$untraceable_domain" "$address"; then
+    offence "$position" "$value" untraceable
+  fi
+}
+
+# Records one refusal line: the position, the value, the stated reason, and the harm it does.
+offence() {
+  local position=$1 value=$2 verdict=$3 reason harm
+  if [ "$verdict" = model ]; then
+    reason='credits a model'
+    if [ "$position" = Co-authored-by ]; then
+      harm='GitHub shows it on main as a co-author.'
+    else
+      harm='a sign-off certifies where a change came from, which a tool cannot do.'
+    fi
+  else
+    reason='is untraceable'
+    harm='no account can be found for it, so the record on main names somebody no reader can trace.'
+  fi
+  offences+=("$position \"$value\" $reason: $harm")
+}
+
+# Adds every attribution trailer in the paragraph on $1 that credits a model or is untraceable.
 #
 # A squash merge concatenates the messages it squashes, which leaves the trailers of every commit
 # but the last one sitting mid-body. Git's trailer parser reads only the closing paragraph, so it
@@ -59,8 +122,8 @@ matches() {
 #
 # The grep only nominates a paragraph; git's parser is what decides. That is the difference
 # between this and scanning the raw message, which flagged bodies that merely quoted a trailer.
-record_model_trailers() {
-  local paragraph=$1 parsed line value
+record_offending_trailers() {
+  local paragraph=$1 parsed line position
   matches "$nominate" "$paragraph" || return 0
   if ! parsed=$(printf 'x\n\n%s' "$paragraph" | git interpret-trailers --parse 2>&1); then
     echo "attribution-guard: cannot parse the trailers of a commit message:"
@@ -70,20 +133,22 @@ record_model_trailers() {
   fi
   while IFS= read -r line; do
     matches "$attribution" "$line" || continue
-    value=${line#*:}
-    if matches "$vendors" "$value"; then
-      offences+=("$line")
+    if matches "$co_author" "$line"; then
+      position=Co-authored-by
+    else
+      position=Signed-off-by
     fi
+    judge_trailer "$position" "$(trimmed "${line#*:}")"
   done <<< "$parsed"
 }
 
-# Splits the message on $1 into paragraphs and offers each to `record_model_trailers`.
+# Splits the message on $1 into paragraphs and offers each to `record_offending_trailers`.
 #
 # A paragraph ends at any line holding no non-whitespace, not only at an empty one. Git reads a
 # break that way too, and a message written on Windows separates its paragraphs with a line that
 # still holds a carriage return. Splitting only on an empty line collapsed such a message into one
 # paragraph, which git then read as prose, so a mid-body trailer in it went unseen.
-record_model_trailers_in_message() {
+record_offending_trailers_in_message() {
   local message=$1 line paragraph=''
   matches "$nominate" "$message" || return 0
   while IFS= read -r line; do
@@ -94,10 +159,10 @@ record_model_trailers_in_message() {
         continue
         ;;
     esac
-    record_model_trailers "$paragraph"
+    record_offending_trailers "$paragraph"
     paragraph=''
   done <<< "$message"
-  record_model_trailers "$paragraph"
+  record_offending_trailers "$paragraph"
 }
 
 if ! commits=$(git log --format='%H' "${revs[@]}" 2>&1); then
@@ -115,17 +180,18 @@ for sha in $commits; do
     exit 1
   fi
   offences=()
-  record_model_trailers_in_message "$message"
-  for offence in "${offences[@]+"${offences[@]}"}"; do
-    echo "attribution-guard: ${sha:0:9} credits a model as an author: $offence"
+  record_offending_trailers_in_message "$message"
+  for refused in "${offences[@]+"${offences[@]}"}"; do
+    echo "attribution-guard: ${sha:0:9} $refused"
     status=1
   done
 done
 
 if [ "$status" -ne 0 ]; then
   echo
-  echo "A person is accountable for every commit here. Remove the trailer by rewording:"
-  echo "  git rebase -i <base>   # mark the commit 'reword', delete the trailer line"
+  echo "A person is accountable for every commit here."
+  echo "To fix a refused trailer, reword the commit and correct or remove the line:"
+  echo "  git rebase -i <base>   # mark the commit 'reword', then correct or remove the trailer line"
   echo "A model is a tool, and tools do not co-author."
   exit 1
 fi
