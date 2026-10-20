@@ -141,8 +141,8 @@ makes a name the image already resolves run different bytes.
   observation while the scan sees any reference, and stops when it sees none or the cell stops.
 - **Failure restores nothing.** If a name cannot be removed, the detach stays committed without
   finish (spec 008 step 5): the desired state already lacks the plasmid, the cell is blocked for
-  further mutation, and recovery resumes the removal. The plasmid's grants follow spec 017's
-  removal; none is kept or restored.
+  further mutation, and recovery resumes the removal, as a `cell.kill` does, which goes past it
+  with `now` (spec 028). The plasmid's grants follow spec 017's removal; none is kept or restored.
 - Detaching one plasmid leaves every other plasmid's names and trees, even with shared digests.
 
 ### 5. What "observing the membrane" means
@@ -308,7 +308,9 @@ relies on it.
   (spec 027)". In spec 017, after "No host descriptor or uncontrolled host-directory export is
   passed to the workload.", add "Spec 027's software share is a controlled export: it holds
   immutable trees, never a managed inode." In spec 023 §9, replace "with no virtiofs export" with
-  "with no virtiofs export but spec 027's read-only software share".
+  "with no virtiofs export but spec 027's read-only software share". In spec 028 §1, after
+  "**H = B + 2 s + D** bounds grant references." (`028:60`), add "For a plasmid with a spec 027
+  software tree, H is B + 2 s + D + 5 s, the 5 s being spec 027 §4's cache window."
 - **Only once the owner answers Q1 with (b), including after item 17 fails.** In spec 011's
   out-of-scope bullet, replace "A plasmid's software is not copied into a running cell:" with "A
   plasmid's software is not installed into a running cell, though its bytes may be copied there
@@ -342,11 +344,12 @@ These need the owner. Each has the default this spec works to until answered.
      whenever its size, inode or change time differs from the one recorded at placement or at its
      move to the holding directory, since the move changes the change time. A writer cannot set a
      change time back without root, and a mismatch fails observation, naming the file. Costs: each
-     detach and reload keeps the old tree on the host until the cell stops, and each attach,
-     detach and reload waits out §4's 5 s. It changes specs 001, 017 and 023 §9 ("Amendments"),
-     and the helper's policy must give read-only access to exactly the cell's software directory
-     (§4), which needs per-cell parameters (O-2): the qualified policy allows writes anywhere under
-     the work directory, and `read_only` is enforced inside the process the guest drives.
+     detach and reload keeps the old tree on the host until the cell stops; each attach, detach
+     and reload waits out §4's 5 s; and an expiry of a plasmid with software is reported overdue
+     5 s later (spec 028). It changes specs 001, 017, 023 §9 and 028 §1 ("Amendments"), and the
+     helper's policy must give read-only access to exactly the cell's software directory (§4),
+     which needs per-cell parameters (O-2): the qualified policy allows writes anywhere under the
+     work directory, and `read_only` is enforced inside the process the guest drives.
    - **(b) A copy over the data channel** into storage only PID1 can reach, checked against the
      digests, then exposed. Spec 001 stays as it is, and spec 017 already lets an authorized private
      copy be mapped and executed. It costs guest memory or disk and attach time, and spec 011's
@@ -416,10 +419,10 @@ cell, not run until one boots).
 10. **Report lifetime, cell.** A holder that closes before detach returns is never reported. One
     that keeps its reference is in every observation until it closes, and in none after. While it
     holds, the journal has finished, `ready` is true and residue lists nothing. A detach whose name
-    removal is made to fail stays committed without finish, blocks the next mutation, restores no
-    name or grant, and its leftover name does not fail observation. Catches: a report that never
-    stops or stops early, a tree reference counted as residue, a failure that restores, and a
-    pending removal that recovery cannot observe.
+    removal is made to fail stays committed without finish, blocks the next mutation other than a
+    `cell.kill` with `now` (spec 028), restores no name or grant, and its leftover name does not
+    fail observation. Catches: a report that never stops or stops early, a tree reference counted
+    as residue, a failure that restores, and a pending removal that recovery cannot observe.
 11. **Exactness, cell.** Trees A and B share every file digest and differ in command names. Detach
     A: B's names resolve to unchanged bytes, and A's are gone. Catches: sharing by digest that
     revokes both.
