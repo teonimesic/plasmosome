@@ -216,9 +216,14 @@ fn a_field_the_workload_set_in_one_probe_may_have_a_rule_in_another() {
 
 #[test]
 fn a_probe_that_leaves_out_its_workload_set_or_gives_null_is_refused_naming_it() {
-    for null in [false, true] {
+    for (id, null) in [
+        ("op-times", false),
+        ("op-times", true),
+        ("facility-2", false),
+        ("facility-2", true),
+    ] {
         let mut manifest = manifest_json();
-        let index = probe_index(&manifest, "op-times");
+        let index = probe_index(&manifest, id);
         let probe = manifest["probes"][index]
             .as_object_mut()
             .expect("a probe is an object");
@@ -229,9 +234,9 @@ fn a_probe_that_leaves_out_its_workload_set_or_gives_null_is_refused_naming_it()
         assert_eq!(
             refusal(&manifest),
             ManifestRefusal::WorkloadSetMissing {
-                probe: "op-times".to_string()
+                probe: id.to_string()
             },
-            "null: {null}"
+            "{id} null: {null}"
         );
     }
 }

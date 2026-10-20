@@ -62,6 +62,22 @@ fn ruled_list(kind: RuleKind, order: [u64; 3]) -> impl Fn(Lane, usize) -> Value 
     move |lane, run| json!(order.map(|offset| sample(kind, seed(lane, run) + offset)))
 }
 
+fn mixed_times(seed: u64, count: u64) -> Value {
+    let mut state = seed;
+    let mut offsets: Vec<u64> = (0..count).collect();
+    for index in (1..offsets.len()).rev() {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        offsets.swap(index, ((state >> 33) % (index as u64 + 1)) as usize);
+    }
+    let time = |offset: &u64| match offset % 2 {
+        0 => json!(((1_u64 << 53) + offset) as f64),
+        _ => json!((1_u64 << 53) + offset),
+    };
+    json!(offsets.iter().map(time).collect::<Vec<Value>>())
+}
+
 #[test]
 fn a_64_hex_environment_value_is_compared_exactly_and_fails() {
     let mut runs = runs();
@@ -187,6 +203,25 @@ fn time_placeholders_keep_the_order_of_the_times() {
             ([json!([0.5, 0.25]), json!([0.75, 0.5])], &fail),
             ([json!([-1, -2]), json!([-11, -12])], &fail),
             ([json!([late, late - 1]), json!([late + 1, late])], &fail),
+            (
+                [
+                    json!([u64::MAX - 3, u64::MAX - 2]),
+                    json!([u64::MAX - 1, u64::MAX]),
+                ],
+                &Verdict::Pass,
+            ),
+            (
+                [
+                    json!([u64::MAX - 2, u64::MAX - 3]),
+                    json!([u64::MAX, u64::MAX - 1]),
+                ],
+                &fail,
+            ),
+            (
+                [json!([i64::MIN, u64::MAX]), json!([-1, 0])],
+                &Verdict::Pass,
+            ),
+            ([json!([u64::MAX, i64::MIN]), json!([0, -1])], &fail),
         ] {
             let mut runs = runs();
             for (run, times) in cell.iter().enumerate() {
@@ -211,6 +246,7 @@ fn every_rule_kind_keeps_equality_and_only_times_keep_order() {
         for (cell, wanted) in [
             ([0, 1, 0], Verdict::Pass),
             ([0, 1, 1], Verdict::Fail(vec![differs("hint-env", "ruled")])),
+            ([0, 1, 2], Verdict::Fail(vec![differs("hint-env", "ruled")])),
             (
                 [1, 0, 1],
                 match ordered {
@@ -246,7 +282,7 @@ fn refused_wherever_it_is(kinds: &[RuleKind], held: &[Value], refused: &[Value])
     for &kind in kinds {
         let manifest = with_rule("hint-env", "ruled", kind);
         for value in held {
-            for shown in [value.clone(), json!([value, held[0]])] {
+            for shown in [value.clone(), json!([value, value])] {
                 let mut runs = runs();
                 set(&mut runs, Lane::Cell, "hint-env", "ruled", shown.clone());
                 set(&mut runs, Lane::Open, "hint-env", "ruled", shown.clone());
@@ -286,11 +322,70 @@ fn refused_wherever_it_is(kinds: &[RuleKind], held: &[Value], refused: &[Value])
 }
 
 #[test]
+fn an_empty_list_in_a_ruled_field_is_held_by_every_kind() {
+    for kind in RuleKind::ALL {
+        let manifest = with_rule("hint-env", "ruled", kind);
+        let mut runs = runs();
+        each_run(&mut runs, "hint-env", "ruled", |_, _| json!([]));
+        assert_eq!(
+            judge(&manifest, &runs),
+            Ok(Verdict::Pass),
+            "{}",
+            kind.name()
+        );
+    }
+}
+
+#[test]
+fn a_time_or_duration_list_that_mixes_whole_numbers_and_fractions_is_refused() {
+    for kind in [RuleKind::SystemTime, RuleKind::Duration] {
+        let mut manifest = manifest();
+        manifest.rules[5].kind = kind;
+        for (times, lane, run) in [
+            (
+                json!([9_007_199_254_740_993_u64, 9_007_199_254_740_992.0]),
+                Lane::Cell,
+                0,
+            ),
+            (json!([5, 5.0]), Lane::Open, 1),
+            (mixed_times(9, 24), Lane::Absent, 0),
+            (mixed_times(0, 1_000), Lane::Cell, 1),
+        ] {
+            let mut runs = runs();
+            let fields = &mut observation(&mut runs, lane, run, "op-times").fields;
+            fields.insert("times".to_string(), times.clone());
+            let length = times.as_array().map_or(0, Vec::len);
+            assert_eq!(
+                judge(&manifest, &runs),
+                Err(RunRefusal::RuleCannotHold {
+                    lane,
+                    probe: "op-times".to_string(),
+                    field: "times".to_string(),
+                    kind
+                }),
+                "{} with {length} times in {lane:?} run {run}",
+                kind.name()
+            );
+        }
+    }
+    let manifest = with_rule("hint-env", "ruled", RuleKind::LoadCounter);
+    let mut runs = runs();
+    each_run(&mut runs, "hint-env", "ruled", |_, _| json!([5, 5.0]));
+    assert_eq!(judge(&manifest, &runs), Ok(Verdict::Pass));
+}
+
+#[test]
 fn a_whole_number_rule_holds_no_negative_fraction_text_or_token() {
     refused_wherever_it_is(
         &WHOLE,
         &[json!(0), json!(4_242), json!(u64::MAX)],
-        &[json!(-1), json!(1.5), json!("4242"), json!(TOKEN_A)],
+        &[
+            json!(-1),
+            json!(1.5),
+            json!(300.0),
+            json!("4242"),
+            json!(TOKEN_A),
+        ],
     );
 }
 
@@ -299,7 +394,13 @@ fn an_ephemeral_port_rule_holds_only_whole_numbers_up_to_65535() {
     refused_wherever_it_is(
         &[RuleKind::EphemeralPort],
         &[json!(0), json!(49_152), json!(65_535)],
-        &[json!(65_536), json!(-1), json!(443.5), json!("443")],
+        &[
+            json!(65_536),
+            json!(-1),
+            json!(443.5),
+            json!(443.0),
+            json!("443"),
+        ],
     );
 }
 
