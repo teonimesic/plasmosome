@@ -185,9 +185,39 @@ fn section(name: &str, records: &[Record]) -> String {
     text
 }
 
-/// The results file: `preamble`, then the row verdicts, then one section per run with its
-/// configuration, digests, notes and every result line. A run a row reads with no record reads
-/// `not run`, never omitted.
+fn observation_table(rows: &[RowSpec], records: &[Record]) -> String {
+    let mut text =
+        "\n## Observations\n\n| Row | Run | Observed |\n| --- | --- | --- |\n".to_string();
+    for row in rows {
+        for spec in row
+            .runs
+            .iter()
+            .filter(|spec| spec.expect == Expect::Observe)
+        {
+            let seen = match records.iter().find(|record| record.run == spec.run) {
+                Some(record) => record
+                    .observations
+                    .get(&row.id)
+                    .cloned()
+                    .unwrap_or_default(),
+                None => vec!["not run: no record".to_string()],
+            };
+            for line in seen {
+                text.push_str(&format!(
+                    "| {} | {} | {} |\n",
+                    cell(&row.id),
+                    cell(&spec.run),
+                    cell(&line)
+                ));
+            }
+        }
+    }
+    text
+}
+
+/// The results file: `preamble`, then the row verdicts, then a table of what each observation
+/// saw, then one section per run with its configuration, digests, notes and every result line. A
+/// run a row reads with no record reads `not run`, never omitted.
 pub fn render(preamble: &str, rows: &[RowSpec], records: &[Record]) -> String {
     let mut text = preamble.to_string();
     text.push_str("\n## Verdicts\n\n| Row | Claim | Verdict |\n| --- | --- | --- |\n");
@@ -200,6 +230,7 @@ pub fn render(preamble: &str, rows: &[RowSpec], records: &[Record]) -> String {
             cell(&row_text(row, &verdict))
         ));
     }
+    text.push_str(&observation_table(rows, records));
     text.push_str(
         "\n## Each run by row\n\n| Row | Run | What it is | Expected | Observed |\n| --- | --- | --- | --- | --- |\n",
     );
