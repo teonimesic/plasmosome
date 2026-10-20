@@ -384,6 +384,7 @@ maximum size and, where it applies, a maximum nesting depth and a time budget.
 | Broker readiness reply | `plasmosome-membrane` `readiness.rs` | A plasmid's broker | 1 MiB (`MAX_RESPONSE_BYTES`) within spec 001's readiness budget; JSON depth 128 | Fuzz target |
 | Plasmid manifest | `plasmosome-core` `manifest.rs`, `load` and `parse` | A plasmid author | None: `load` reads the whole file. TOML depth 80 | A 1 MiB bound on both, read through a limit, matching spec 020's limit for a declaration; a fuzz target |
 | Membrane control request | `plasmosome-membrane` `control.rs` | The controller, under spec 001's peer-UID check | 1 MiB (`MAX_REQUEST_BYTES`), read through a limit | Bound only |
+| Git-only step | `.githooks/build-input-guard`, its TOML reading | A PR's author, through the commit the step judges | 8 MiB per file (`MAX_BYTES`), read from `git cat-file blob` through a limit; nesting bounded by Python's recursion limit; 60 s per git call. Anything it cannot read, decode or parse is refused | Bound only |
 
 The controller's own journals are not on this list: the session log, the ledger and spec 008's
 recovery journal. Only the controller writes them. Any other process that could rewrite them runs

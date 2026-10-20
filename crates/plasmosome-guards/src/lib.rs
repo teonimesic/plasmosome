@@ -3,7 +3,9 @@
 //! Each one refuses something that cannot be taken back or would be read as a promise: a crate
 //! reaching a registry under a name this project has not claimed, a binary name two packages
 //! both answer to, test scaffolding shipping outside `[dev-dependencies]`, a commit crediting a
-//! model, the private research corpus reaching a public tree, and a skill a tool cannot find.
+//! model, the private research corpus reaching a public tree, a commit that swaps or wraps what
+//! cargo builds through committed Cargo configuration or a toolchain file, judged from the object
+//! store before anything runs, and a skill a tool cannot find.
 //!
 //! Nothing here pins a design. What the kernel's crates may depend on, and what its process seam
 //! carries, are decisions this repository is still making; the place to write them down is the
