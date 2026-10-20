@@ -1,6 +1,9 @@
 //! The enforcement seam: the only vocabulary allowed to cross between the
 //! controller and whatever enforces capabilities (`Handle`, `Capability`,
 //! `GrantKind::{Hot, GenerationBound}`, `DrainSpec`, `OsState`/`Diff`).
+//!
+//! It also holds two pieces of vocabulary that guest, membrane and controller
+//! share: the SHA-256 [`Digest`] and spec 001's observation pages in [`paging`].
 
 pub mod backend;
 pub mod composite;

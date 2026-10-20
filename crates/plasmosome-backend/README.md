@@ -1,6 +1,8 @@
 # plasmosome-backend
 
-The enforcement seam. One interface between *deciding* a capability and *making it real*.
+The enforcement seam. One interface between *deciding* a capability and *making it real*. The
+crate also holds two pieces of vocabulary that guest, membrane and controller share: the SHA-256
+`Digest` and spec 001's observation pages, in the `digest` and `paging` modules.
 
 The controller says "this cell may reach api.example.com". Something must then edit a proxy's
 allowlist, mount a directory, or install a credential — and that something differs by platform
@@ -15,8 +17,10 @@ The seam also carries an honest distinction: some grants are **hot** (a proxy ma
 appear mid-run) and some are **generation-bound** (a VM's memory size cannot). The interface
 makes a backend say which, rather than letting callers assume.
 
-The seam crosses a process boundary, so its state travels as serde data: every type in that
-vocabulary implements `Serialize`/`Deserialize` and holds no shared memory. Every record decodes
+The seam crosses a process boundary, so its state travels as serde data: every type in the seam's
+vocabulary implements `Serialize`/`Deserialize` and holds no shared memory. In `paging`, only
+`ObservationPage` is wire data. `FrozenAccount`, `CaptureSlot` and `PageAssembler` stay inside one
+process, and `FrozenAccount` shares its bytes through an `Arc`. Every record decodes
 only from a JSON object. serde's derived decoders also accept a positional array and fill fields
 by position, so two paths of one type could swap unnoticed; `ObjectOnly` refuses that shape for
 each record here and in the ledger. Why the crate names no VMM or broker process is covered in
@@ -80,6 +84,6 @@ address or one owner time out.
 | Universe classes | What "system state" means for residue verification: sockets, mounts, processes, proxy entries, session files |
 | `MockMode` | How a plasmid's calls are served: `simulate`, `capture` or `passthrough`, the default. It lives here, beside `CellId`, so the ledger can record a mode without depending on core |
 | `digest` | The SHA-256 `Digest`: exactly 64 lowercase hexadecimal digits, as text and in JSON. The membrane re-exports it |
-| `paging` | Spec 001's observation pages, shared by guest, membrane and controller. A responder's `CaptureSlot` freezes one compact JSON account per connection and serves it in pages of 1 to 65,536 bytes until its deadline. A caller's `PageAssembler` yields the account only when every page arrived in order from one capture and the bytes match the stated length and hash. `ObservationPage` decodes only from an object. Callers pass the clock and own the IO |
+| `paging` | Spec 001's observation pages, shared by guest, membrane and controller. A responder's `CaptureSlot` keeps one capture per connection: the compact JSON account that the caller's `collect` froze with `FrozenAccount::freeze`, served in pages of 1 to 65,536 bytes until its deadline. A caller's `PageAssembler` yields the account only when every page arrived in order from one capture and the bytes match the stated length and hash. `ObservationPage` decodes only from an object. Callers pass the clock and own the IO |
 
 Tests: `cargo test -p plasmosome-backend`
