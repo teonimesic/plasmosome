@@ -15,7 +15,7 @@ fn array_depth(value: &Json) -> usize {
     let mut here = value;
     while let Json::Array(items) = here {
         depth += 1;
-        match items.as_slice() {
+        match &items[..] {
             [] => break,
             [only] => here = only,
             _ => panic!("level {depth} holds {} items, not one", items.len()),
