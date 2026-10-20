@@ -285,6 +285,17 @@ fn refuses_a_model_trailer_a_squash_merge_left_before_a_human_trailer_block() {
 }
 
 #[test]
+fn refuses_a_model_trailer_between_two_peoples_trailers_in_one_block() {
+    check_workspace(|root| {
+        assert_refused(
+            root,
+            "docs: a change\n\nSome body prose.\n\nReviewed-by: A Colleague <colleague@corp.locale.io>\nCo-Authored-By: Claude <noreply@anthropic.com>\nSigned-off-by: A Colleague <colleague@corp.locale.io>\n",
+            "credits a model in the middle of a trailer block whose first and last lines are people",
+        );
+    });
+}
+
+#[test]
 fn refuses_a_model_sign_off_in_the_closing_trailer_block() {
     check_workspace(|root| {
         assert_refused(
