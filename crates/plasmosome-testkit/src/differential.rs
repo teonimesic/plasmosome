@@ -191,6 +191,9 @@ pub enum ManifestRefusal {
     DuplicateProbe {
         id: String,
     },
+    WorkloadSetMissing {
+        probe: String,
+    },
     ChannelShort {
         channel: Channel,
         count: usize,

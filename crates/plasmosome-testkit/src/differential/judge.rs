@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
-use super::{FUSE, Lane, Manifest, ManifestRefusal, Observation, Run};
+use super::{FUSE, Lane, Manifest, ManifestRefusal, Observation, RuleKind, Run};
 
 /// What a finding is about: a declared probe, or the harness transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +82,14 @@ pub enum RunRefusal {
     UnknownProbe { lane: Lane, probe: String },
     /// A run observed one probe twice.
     DuplicateObservation { lane: Lane, probe: String },
+    /// A completed observation in `lane` holds, in a `field` of `probe` that a rule covers,
+    /// something other than one value of the rule's `kind` or a list of such values.
+    RuleCannotHold {
+        lane: Lane,
+        probe: String,
+        field: String,
+        kind: RuleKind,
+    },
 }
 
 /// Judges `runs` against `manifest` under spec 027 §6. A lane has no runs, which leaves every
