@@ -6,7 +6,7 @@ reason = """\
   """
 write_it_instead.lines = 550
 write_it_instead.how = """\
-  On 2026-10-20, at main 1d93c81, `git grep -l 'criterion::' -- '*.rs' | wc -l` gives 6 files, \
+  On 2026-10-20, at main 0d53c22, `git grep -l 'criterion::' -- '*.rs' | wc -l` gives 6 files, \
   one per benchmark target. \
   `git grep -h -o -E '(criterion_group|criterion_main)!' -- '*.rs' | sort | uniq -c` gives \
   criterion_group! 6 and criterion_main! 6. \
