@@ -7,6 +7,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::{Uuid, Variant, Version};
 
 use crate::backend::{BackendError, Capability};
+use crate::recipe::RecipeError;
+use crate::wire::{ObjectOnly, object_serde, validated_object_serde};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PluginId(String);
@@ -234,12 +236,19 @@ impl UniverseClass {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OsObject {
     pub id: GrantId,
     pub owner: CellOwner,
     pub capability: Capability,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "OsObject", deny_unknown_fields)]
+struct OsObjectShape {
+    id: GrantId,
+    owner: CellOwner,
+    capability: Capability,
 }
 
 impl OsObject {
@@ -385,12 +394,12 @@ impl<'de> Deserialize<'de> for OsState {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
+        #[serde(expecting = "struct OsState", deny_unknown_fields)]
         struct State {
             objects: Vec<OsObject>,
         }
 
-        let wire = State::deserialize(deserializer)?;
+        let wire = State::deserialize(ObjectOnly::new(deserializer))?;
         let mut state = OsState::new();
         for object in wire.objects {
             let address = (object.class(), object.id);
@@ -409,11 +418,17 @@ impl<'de> Deserialize<'de> for OsState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diff {
     pub added: Vec<OsObject>,
     pub removed: Vec<OsObject>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Diff", deny_unknown_fields)]
+struct DiffShape {
+    added: Vec<OsObject>,
+    removed: Vec<OsObject>,
 }
 
 impl Diff {
@@ -438,9 +453,46 @@ impl Diff {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// One recorded operation: an exact address, its owner and the capability it creates.
+///
+/// Decoding refuses a missing or unknown field and a positional array, and decoding and encoding
+/// both refuse any operation `validate` refuses. A value built in memory is not checked: call
+/// `validate` before acting on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UniverseOp {
+    WriteSessionFile {
+        id: GrantId,
+        path: String,
+        owner: CellOwner,
+    },
+    BindUds {
+        id: GrantId,
+        path: String,
+        owner: CellOwner,
+    },
+    SetProxyMap {
+        id: GrantId,
+        host: String,
+        route: String,
+        owner: CellOwner,
+    },
+    SpawnBroker {
+        id: GrantId,
+        pid: u32,
+        name: String,
+        owner: CellOwner,
+    },
+    AddMount {
+        id: GrantId,
+        source: String,
+        target: String,
+        owner: CellOwner,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "UniverseOp", deny_unknown_fields)]
+enum UniverseOpShape {
     WriteSessionFile {
         id: GrantId,
         path: String,
@@ -514,6 +566,12 @@ impl UniverseOp {
         }
     }
 
+    /// Returns the first rule the capability this operation creates breaks, as
+    /// `Capability::validate` reports it.
+    pub fn validate(&self) -> Result<(), RecipeError> {
+        self.capability().validate()
+    }
+
     fn capability(&self) -> Capability {
         match self {
             UniverseOp::WriteSessionFile { path, .. } => {
@@ -536,11 +594,17 @@ impl UniverseOp {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UniverseRemoval {
     pub id: GrantId,
     pub capability: Capability,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "UniverseRemoval", deny_unknown_fields)]
+struct UniverseRemovalShape {
+    id: GrantId,
+    capability: Capability,
 }
 
 impl UniverseRemoval {
@@ -553,8 +617,7 @@ impl UniverseRemoval {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResidueReport {
     Empty,
     Residue {
@@ -563,6 +626,25 @@ pub enum ResidueReport {
         assertions: Vec<String>,
     },
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "ResidueReport", deny_unknown_fields)]
+enum ResidueReportShape {
+    Empty,
+    Residue {
+        leaked: Vec<OsObject>,
+        lost: Vec<OsObject>,
+        assertions: Vec<String>,
+    },
+}
+
+object_serde!(
+    OsObject through OsObjectShape,
+    Diff through DiffShape,
+    UniverseRemoval through UniverseRemovalShape,
+    ResidueReport through ResidueReportShape
+);
+validated_object_serde!(UniverseOp through UniverseOpShape);
 
 impl ResidueReport {
     pub fn from_diff(diff: Diff, assertions: Vec<String>) -> ResidueReport {
@@ -780,7 +862,7 @@ mod tests {
         let baseline = object(
             "baseline",
             Capability::SessionFile {
-                path: "skills/baseline.md".to_string(),
+                path: "/skills/baseline.md".to_string(),
             },
         );
         let mut before = OsState::new();
@@ -821,7 +903,7 @@ mod tests {
         let leaked = object(
             "github",
             Capability::SessionFile {
-                path: "cache/github-tokens".to_string(),
+                path: "/cache/github-tokens".to_string(),
             },
         );
         let mut after = OsState::new();
@@ -1073,7 +1155,7 @@ mod tests {
     #[test]
     fn canonical_equivalence_distinguishes_the_same_plugin_in_another_cell() {
         let capability = Capability::SessionFile {
-            path: "skills/pr.md".to_string(),
+            path: "/skills/pr.md".to_string(),
         };
         let mut left = OsState::new();
         left.insert(OsObject {
