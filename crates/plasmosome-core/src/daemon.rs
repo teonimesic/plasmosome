@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use serde::de::Error as _;
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
 use crate::control::{Controller, serve_connection};
@@ -84,9 +85,10 @@ impl std::error::Error for ConfigError {
 /// not know, or one given twice, is refused rather than ignored, so a
 /// misspelled setting stops the daemon instead of silently not applying.
 /// `name` is parsed into an `InstanceName`, so a path-shaped name never
-/// reaches the socket layer. Nothing on disk is read or created.
+/// reaches the socket layer. The text must be one JSON object: an array is
+/// refused rather than read by position. Nothing on disk is read or created.
 pub fn parse_config(text: &str) -> Result<DaemonConfig, ConfigError> {
-    let written: Written = serde_json::from_str(text).map_err(ConfigError::NotConfig)?;
+    let written = one_object(text).map_err(ConfigError::NotConfig)?;
     let name = InstanceName::parse(&written.name).map_err(ConfigError::NotAnInstanceName)?;
     let instance_root = absolute("instance_root", written.instance_root)?;
     if written.recovery_deadline_ms == 0 {
@@ -110,6 +112,27 @@ fn absolute(key: &'static str, path: PathBuf) -> Result<PathBuf, ConfigError> {
         Ok(path)
     } else {
         Err(ConfigError::NotAbsolute { key, path })
+    }
+}
+
+fn one_object(text: &str) -> Result<Written, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let written = (&mut deserializer).deserialize_map(ObjectOnly)?;
+    deserializer.end()?;
+    Ok(written)
+}
+
+struct ObjectOnly;
+
+impl<'de> Visitor<'de> for ObjectOnly {
+    type Value = Written;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Written, A::Error> {
+        Written::deserialize(MapAccessDeserializer::new(map))
     }
 }
 
