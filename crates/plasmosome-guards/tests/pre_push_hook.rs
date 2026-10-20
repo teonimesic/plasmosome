@@ -138,6 +138,10 @@ impl Scratch {
     }
 
     fn remote_tip(&self, branch: &str) -> Option<String> {
+        self.remote_ref(&format!("refs/heads/{branch}"))
+    }
+
+    fn remote_ref(&self, reference: &str) -> Option<String> {
         let output = git(
             &self.work,
             &[
@@ -146,7 +150,7 @@ impl Scratch {
                 "rev-parse",
                 "--verify",
                 "--quiet",
-                &format!("refs/heads/{branch}"),
+                reference,
             ],
         );
         output
