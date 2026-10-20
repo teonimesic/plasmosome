@@ -16,9 +16,6 @@ use plasmosome_backend::{
     UniverseRemoval,
 };
 
-/// ```ignore
-/// boot_a_guest();
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Inverse {
     pub description: String,

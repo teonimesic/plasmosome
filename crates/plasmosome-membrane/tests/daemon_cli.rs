@@ -138,7 +138,3 @@ fn help_does_not_override_the_existing_arity_check() {
     }
     assert!(!socket.exists(), "invalid arity never starts the daemon");
 }
-
-#[test]
-#[ignore = "needs a hypervisor"]
-fn throwaway_boots_a_guest() {}
