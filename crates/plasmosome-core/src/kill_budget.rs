@@ -1,7 +1,11 @@
-use plasmosome_backend::DrainSpec;
+use plasmosome_backend::{DrainSpec, RevokePolicy};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
+
+const MS: Duration = Duration::from_millis(1);
+const MOST_LOCK_RESERVE: Duration = Duration::from_secs(3);
+const MOST_WORKLOAD_STOP: Duration = Duration::from_secs(5);
 
 /// The deadline shares of one `cell.kill` (spec 023 §7). Every share is measured from what is
 /// left of the kill's deadline D at the moment it is asked for, counted from the request's
@@ -49,43 +53,89 @@ impl<C: Fn() -> Instant> KillBudget<C> {
     /// A budget for a kill whose request arrived at `arrival` with deadline `total`, D. `now`
     /// is the request's `now`.
     pub fn new(arrival: Instant, total: Duration, now: bool, clock: C) -> Self {
-        let _ = (arrival, total, now, clock);
-        unimplemented!()
+        KillBudget {
+            arrival,
+            total,
+            now,
+            clock,
+        }
     }
 
     /// What is left of D now. Zero once D has passed.
     pub fn remaining(&self) -> Duration {
-        unimplemented!()
+        let elapsed = (self.clock)().saturating_duration_since(self.arrival);
+        self.total.saturating_sub(elapsed)
     }
 
     /// The reserve kept for the lock wait: a tenth of D, from 1 ms to 3 s. Fixed for the
     /// request.
     pub fn lock_reserve(&self) -> Duration {
-        unimplemented!()
+        (self.total / 10).clamp(MS, MOST_LOCK_RESERVE)
     }
 
     /// Step 1's share. `NoBudget` with `now`, when the caller skips the step without listing
     /// it, and when less than 1 ms is left for it, when the caller lists `workload_stop`.
     pub fn workload_stop(&self) -> Share {
-        unimplemented!()
+        if self.now {
+            return Share::NoBudget;
+        }
+        let cap = (self.total / 10).clamp(MS, MOST_WORKLOAD_STOP);
+        at_least_one_ms(cap.min(self.spendable() / 3))
     }
 
     /// Step 2's share, the publication exchange included. `NoBudget` when any of its three
     /// parts would be under 1 ms; the caller answers that as a drain timeout, 106.
     pub fn withdrawal(&self) -> Share<Withdrawal> {
-        unimplemented!()
+        let share = self.spendable() / 2;
+        let drain = share / 2;
+        let effect = share / 4;
+        match (
+            at_least_one_ms(drain),
+            at_least_one_ms(effect),
+            at_least_one_ms(share - drain - effect),
+        ) {
+            (Share::Run(drain), Share::Run(effect), Share::Run(publication)) => {
+                Share::Run(Withdrawal {
+                    share: whole_ms(share),
+                    drain,
+                    effect,
+                    publication,
+                })
+            }
+            _ => Share::NoBudget,
+        }
     }
 
     /// Step 3's deadlines. They are never under 1 ms, even after D has passed. With `now` the
     /// drain is 1 ms with `RevokePolicy::Force`; otherwise it is `RevokePolicy::Graceful`.
     pub fn guest_stop(&self) -> GuestStop {
-        unimplemented!()
+        let answer_wait = whole_ms(self.spendable().max(MS));
+        let drain = if self.now {
+            DrainSpec {
+                deadline: MS,
+                policy: RevokePolicy::Force,
+            }
+        } else {
+            let teardown = MS.max(answer_wait / 4);
+            DrainSpec::graceful(whole_ms(answer_wait.saturating_sub(teardown).max(MS)))
+        };
+        GuestStop { drain, answer_wait }
     }
 
     /// When step 4's lock wait ends: arrival plus D, or the latest instant this platform can
     /// represent before it. The caller tries the lock at least once, even when this has passed.
     pub fn lock_wait_until(&self) -> Instant {
-        unimplemented!()
+        let mut span = self.total;
+        loop {
+            if let Some(until) = self.arrival.checked_add(span) {
+                return until;
+            }
+            span /= 2;
+        }
+    }
+
+    fn spendable(&self) -> Duration {
+        self.remaining().saturating_sub(self.lock_reserve())
     }
 }
 
@@ -93,8 +143,29 @@ impl<C: Fn() -> Instant> KillBudget<C> {
 /// drain's own deadline. `None` with `RevokePolicy::Force`, and when under 1 ms would be left:
 /// then no `shutdown` is sent, and the helper is killed at the drain deadline.
 pub fn shutdown_deadline(drain: &DrainSpec) -> Option<Duration> {
-    let _ = drain;
-    unimplemented!()
+    match drain.policy {
+        RevokePolicy::Force => None,
+        RevokePolicy::Graceful => {
+            let kill_margin = MS.max(drain.deadline / 10);
+            match at_least_one_ms(drain.deadline.saturating_sub(kill_margin)) {
+                Share::Run(deadline) => Some(deadline),
+                Share::NoBudget => None,
+            }
+        }
+    }
+}
+
+fn whole_ms(duration: Duration) -> Duration {
+    Duration::new(duration.as_secs(), duration.subsec_millis() * 1_000_000)
+}
+
+fn at_least_one_ms(duration: Duration) -> Share {
+    let whole = whole_ms(duration);
+    if whole < MS {
+        Share::NoBudget
+    } else {
+        Share::Run(whole)
+    }
 }
 
 /// A step of `cell.kill` that fell short, as its reply's `incomplete` names it.
@@ -118,32 +189,31 @@ pub struct Incomplete(BTreeSet<Shortfall>);
 impl Incomplete {
     /// Records a shortfall. `Shutdown` is dropped when `now` is set.
     pub fn add(&mut self, shortfall: Shortfall, now: bool) {
-        let _ = (shortfall, now);
-        unimplemented!()
+        if !(now && shortfall == Shortfall::Shutdown) {
+            self.0.insert(shortfall);
+        }
     }
 
     /// Whether the reply is a retirement: exactly when `teardown` is absent.
     pub fn is_retirement(&self) -> bool {
-        unimplemented!()
+        !self.0.contains(&Shortfall::Teardown)
     }
 
     /// Whether no step fell short, so the reply carries no `incomplete`.
     pub fn is_empty(&self) -> bool {
-        unimplemented!()
+        self.0.is_empty()
     }
 }
 
 impl Serialize for Incomplete {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let _ = serializer;
-        unimplemented!()
+        self.0.serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for Incomplete {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let _ = deserializer;
-        unimplemented!()
+        BTreeSet::deserialize(deserializer).map(Incomplete)
     }
 }
 
