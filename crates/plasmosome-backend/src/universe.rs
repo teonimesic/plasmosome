@@ -699,6 +699,7 @@ impl fmt::Display for ResidueReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures::{broker, mount, proxy_map, session_file};
 
     fn object(owner: &str, capability: Capability) -> OsObject {
         OsObject {
@@ -709,13 +710,7 @@ mod tests {
     }
 
     fn proxy(owner: &str, route: &str) -> OsObject {
-        object(
-            owner,
-            Capability::ProxyMap {
-                host: "api.github.com".to_string(),
-                route: route.to_string(),
-            },
-        )
+        object(owner, proxy_map("api.github.com", route))
     }
 
     #[test]
@@ -784,10 +779,7 @@ mod tests {
 
     #[test]
     fn canonical_equivalence_ignores_only_identity_and_keeps_multiplicity() {
-        let capability = Capability::Mount {
-            source: "/secrets".to_string(),
-            target: "/workspace".to_string(),
-        };
+        let capability = mount("/secrets", "/workspace");
         let mut left = OsState::new();
         let mut right = OsState::new();
         for _ in 0..2 {
@@ -813,35 +805,14 @@ mod tests {
     fn canonical_equivalence_detects_complete_capability_changes() {
         for (left_capability, right_capability) in [
             (
-                Capability::Mount {
-                    source: "/source-a".to_string(),
-                    target: "/workspace".to_string(),
-                },
-                Capability::Mount {
-                    source: "/source-b".to_string(),
-                    target: "/workspace".to_string(),
-                },
+                mount("/source-a", "/workspace"),
+                mount("/source-b", "/workspace"),
             ),
             (
-                Capability::ProxyMap {
-                    host: "api.github.com".to_string(),
-                    route: "splice".to_string(),
-                },
-                Capability::ProxyMap {
-                    host: "api.github.com".to_string(),
-                    route: "audit".to_string(),
-                },
+                proxy_map("api.github.com", "splice"),
+                proxy_map("api.github.com", "audit"),
             ),
-            (
-                Capability::Broker {
-                    pid: 31337,
-                    name: "egressd".to_string(),
-                },
-                Capability::Broker {
-                    pid: 31337,
-                    name: "auditd".to_string(),
-                },
-            ),
+            (broker(31337, "egressd"), broker(31337, "auditd")),
         ] {
             let mut left = OsState::new();
             left.insert(object("network", left_capability)).unwrap();
@@ -859,12 +830,7 @@ mod tests {
             ..before_object.clone()
         };
         let after_id = after_object.id;
-        let baseline = object(
-            "baseline",
-            Capability::SessionFile {
-                path: "/skills/baseline.md".to_string(),
-            },
-        );
+        let baseline = object("baseline", session_file("/skills/baseline.md"));
         let mut before = OsState::new();
         let mut after = OsState::new();
         before.insert(baseline.clone()).unwrap();
@@ -900,12 +866,7 @@ mod tests {
 
     #[test]
     fn residue_report_names_exact_identified_objects() {
-        let leaked = object(
-            "github",
-            Capability::SessionFile {
-                path: "/cache/github-tokens".to_string(),
-            },
-        );
+        let leaked = object("github", session_file("/cache/github-tokens"));
         let mut after = OsState::new();
         after.insert(leaked.clone()).unwrap();
         let report = ResidueReport::from_diff(Diff::between(&OsState::new(), &after), vec![]);
@@ -1106,10 +1067,7 @@ mod tests {
         let held = OsObject {
             id: GrantId::new(),
             owner: cell_owner("cell-1", "deploy"),
-            capability: Capability::ProxyMap {
-                host: "api.github.com".to_string(),
-                route: "splice".to_string(),
-            },
+            capability: proxy_map("api.github.com", "splice"),
         };
         state.insert(held.clone()).unwrap();
         let elsewhere = cell_owner("cell-2", "deploy");
@@ -1127,19 +1085,13 @@ mod tests {
         let held = OsObject {
             id: GrantId::new(),
             owner: cell_owner("cell-1", "workspace"),
-            capability: Capability::Mount {
-                source: "/code".to_string(),
-                target: "/workspace".to_string(),
-            },
+            capability: mount("/code", "/workspace"),
         };
         state.insert(held.clone()).unwrap();
         let before = state.clone();
         let other_source = UniverseRemoval {
             id: held.id,
-            capability: Capability::Mount {
-                source: "/secrets".to_string(),
-                target: "/workspace".to_string(),
-            },
+            capability: mount("/secrets", "/workspace"),
         };
         let other_id = UniverseRemoval {
             id: GrantId::new(),
@@ -1154,9 +1106,7 @@ mod tests {
 
     #[test]
     fn canonical_equivalence_distinguishes_the_same_plugin_in_another_cell() {
-        let capability = Capability::SessionFile {
-            path: "/skills/pr.md".to_string(),
-        };
+        let capability = session_file("/skills/pr.md");
         let mut left = OsState::new();
         left.insert(OsObject {
             id: GrantId::new(),

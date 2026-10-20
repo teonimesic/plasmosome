@@ -170,6 +170,7 @@ fn checked(object: &OsObject) -> Result<(), BackendError> {
 mod tests {
     use super::*;
     use crate::backend::{Capability, GrantKind};
+    use crate::fixtures::{self, broker, mount, proxy_map, session_file, uds_socket};
     use crate::recipe::RecipeError;
     use crate::universe::{CellId, CellOwner, PluginId, UniverseClass};
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -185,24 +186,11 @@ mod tests {
 
     fn capabilities() -> Vec<Capability> {
         vec![
-            Capability::SessionFile {
-                path: "/skills/pr.md".to_string(),
-            },
-            Capability::UdsSocket {
-                path: "/run/ak/egressd.uds".to_string(),
-            },
-            Capability::ProxyMap {
-                host: "api.github.com".to_string(),
-                route: "splice".to_string(),
-            },
-            Capability::Broker {
-                pid: 4242,
-                name: "egressd".to_string(),
-            },
-            Capability::Mount {
-                source: "/secrets".to_string(),
-                target: "/workspace".to_string(),
-            },
+            session_file("/skills/pr.md"),
+            uds_socket("/run/ak/egressd.uds"),
+            proxy_map("api.github.com", "splice"),
+            broker(4242, "egressd"),
+            mount("/secrets", "/workspace"),
         ]
     }
 
@@ -239,34 +227,10 @@ mod tests {
     #[test]
     fn colliding_mount_targets_and_proxy_hosts_keep_complete_resources() {
         let mut backend = FakeBackend::new();
-        let first_mount = backend.grant(grant(
-            "owner",
-            Capability::Mount {
-                source: "/secrets".to_string(),
-                target: "/workspace".to_string(),
-            },
-        ));
-        let second_mount = backend.grant(grant(
-            "owner",
-            Capability::Mount {
-                source: "/code".to_string(),
-                target: "/workspace".to_string(),
-            },
-        ));
-        let first_route = backend.grant(grant(
-            "owner",
-            Capability::ProxyMap {
-                host: "api.github.com".to_string(),
-                route: "audit".to_string(),
-            },
-        ));
-        let second_route = backend.grant(grant(
-            "owner",
-            Capability::ProxyMap {
-                host: "api.github.com".to_string(),
-                route: "deploy".to_string(),
-            },
-        ));
+        let first_mount = backend.grant(grant("owner", mount("/secrets", "/workspace")));
+        let second_mount = backend.grant(grant("owner", mount("/code", "/workspace")));
+        let first_route = backend.grant(grant("owner", proxy_map("api.github.com", "audit")));
+        let second_route = backend.grant(grant("owner", proxy_map("api.github.com", "deploy")));
         assert_eq!(backend.snapshot_os_state().len(), 4);
         backend
             .revoke(second_mount.handle, DrainSpec::forcing())
@@ -283,10 +247,7 @@ mod tests {
 
     #[test]
     fn live_broker_revoke_preserves_equal_planted_residue() {
-        let capability = Capability::Broker {
-            pid: 31337,
-            name: "egressd".to_string(),
-        };
+        let capability = broker(31337, "egressd");
         let residue = OsObject {
             id: GrantId::new(),
             owner: cell_owner("cell-1", "network"),
@@ -315,20 +276,14 @@ mod tests {
 
     #[test]
     fn exact_removal_refusals_preserve_neighbouring_holdings() {
-        let capability = Capability::ProxyMap {
-            host: "api.github.com".to_string(),
-            route: "splice".to_string(),
-        };
+        let capability = proxy_map("api.github.com", "splice");
         let mut backend = FakeBackend::new();
         let first = backend.grant(grant("deploy", capability.clone()));
         let second = backend.grant(grant("deploy", capability.clone()));
         let before = backend.snapshot_os_state();
         let wrong_capability = UniverseRemoval {
             id: first.handle.id,
-            capability: Capability::ProxyMap {
-                host: "api.github.com".to_string(),
-                route: "other".to_string(),
-            },
+            capability: proxy_map("api.github.com", "other"),
         };
         for (removal, owner) in [
             (first.removal(), cell_owner("cell-1", "audit")),
@@ -360,9 +315,7 @@ mod tests {
 
     #[test]
     fn graceful_timeout_preserves_peers_and_force_takes_only_requested_grant() {
-        let capability = Capability::UdsSocket {
-            path: "/run/ak/egressd.uds".to_string(),
-        };
+        let capability = uds_socket("/run/ak/egressd.uds");
         let mut backend = FakeBackend::new();
         let stuck = backend.grant(grant("network", capability.clone()));
         let peer = backend.grant(grant("network", capability));
@@ -383,27 +336,27 @@ mod tests {
     #[test]
     fn recorded_apply_is_idempotent_and_changed_payload_conflicts() {
         let id = GrantId::new();
-        let op = UniverseOp::WriteSessionFile {
+        let op = fixtures::op(
             id,
-            path: "/skills/pr.md".to_string(),
-            owner: cell_owner("cell-1", "github-pr"),
-        };
+            cell_owner("cell-1", "github-pr"),
+            session_file("/skills/pr.md"),
+        );
         let mut backend = FakeBackend::new();
         backend.apply(op.clone()).unwrap();
         backend.apply(op.clone()).unwrap();
         assert_eq!(backend.snapshot_os_state().len(), 1);
-        let peer = UniverseOp::WriteSessionFile {
-            id: GrantId::new(),
-            path: "/skills/pr.md".to_string(),
-            owner: cell_owner("cell-1", "github-pr"),
-        };
+        let peer = fixtures::op(
+            GrantId::new(),
+            cell_owner("cell-1", "github-pr"),
+            session_file("/skills/pr.md"),
+        );
         backend.apply(peer).unwrap();
         assert_eq!(backend.snapshot_os_state().len(), 2);
-        let conflict = UniverseOp::WriteSessionFile {
+        let conflict = fixtures::op(
             id,
-            path: "/skills/pr.md".to_string(),
-            owner: cell_owner("cell-1", "audit"),
-        };
+            cell_owner("cell-1", "audit"),
+            session_file("/skills/pr.md"),
+        );
         let before = backend.snapshot_os_state();
         assert!(matches!(
             backend.apply(conflict),
@@ -415,21 +368,16 @@ mod tests {
     #[test]
     fn direct_removal_retires_handle_and_reapply_does_not_revive_it() {
         let mut backend = FakeBackend::new();
-        let entry = backend.grant(grant(
-            "github-pr",
-            Capability::SessionFile {
-                path: "/skills/pr.md".to_string(),
-            },
-        ));
+        let entry = backend.grant(grant("github-pr", session_file("/skills/pr.md")));
         backend
             .apply_removal(entry.removal(), &entry.owner, DrainSpec::forcing())
             .unwrap();
         backend
-            .apply(UniverseOp::WriteSessionFile {
-                id: entry.handle.id,
-                path: "/skills/pr.md".to_string(),
-                owner: entry.owner.clone(),
-            })
+            .apply(fixtures::op(
+                entry.handle.id,
+                entry.owner.clone(),
+                session_file("/skills/pr.md"),
+            ))
             .unwrap();
         assert!(matches!(
             backend.revoke(entry.handle, DrainSpec::forcing()),
@@ -444,26 +392,13 @@ mod tests {
     #[test]
     fn identity_source_failure_happens_before_any_backend_mutation() {
         let mut backend = FakeBackend::new();
-        let existing = backend.grant(grant(
-            "network",
-            Capability::Broker {
-                pid: 7,
-                name: "standing".to_string(),
-            },
-        ));
+        let existing = backend.grant(grant("network", broker(7, "standing")));
         let before = backend.snapshot_os_state();
         let grants_before = backend.grants_issued().to_vec();
         let result = catch_unwind(AssertUnwindSafe(|| {
-            backend.grant_with(
-                grant(
-                    "network",
-                    Capability::Broker {
-                        pid: 8,
-                        name: "new".to_string(),
-                    },
-                ),
-                || panic!("deterministic random source failure"),
-            )
+            backend.grant_with(grant("network", broker(8, "new")), || {
+                panic!("deterministic random source failure")
+            })
         }));
         assert!(result.is_err());
         assert_eq!(backend.snapshot_os_state(), before);
@@ -479,12 +414,7 @@ mod tests {
     }
 
     fn mount_by(owner: &CellOwner) -> UniverseOp {
-        UniverseOp::AddMount {
-            id: GrantId::new(),
-            source: "/code".to_string(),
-            target: "/workspace".to_string(),
-            owner: owner.clone(),
-        }
+        fixtures::op(GrantId::new(), owner.clone(), mount("/code", "/workspace"))
     }
 
     fn address_of(op: &UniverseOp) -> Handle {
@@ -505,9 +435,7 @@ mod tests {
     #[test]
     fn graceful_removal_of_a_stuck_grant_keeps_the_holding_its_record_and_its_peer() {
         let network = cell_owner("cell-1", "network");
-        let capability = Capability::UdsSocket {
-            path: "/run/ak/egressd.uds".to_string(),
-        };
+        let capability = uds_socket("/run/ak/egressd.uds");
         let mut backend = FakeBackend::new();
         let stuck = backend.grant(grant_to(&network, capability.clone()));
         let peer = backend.grant(grant_to(&network, capability));
@@ -599,19 +527,15 @@ mod tests {
         let stalled = cell_owner("cell-1", "stalled");
         let peer_owner = cell_owner("cell-1", "network");
         let same_plugin_elsewhere = cell_owner("cell-2", "stalled");
-        let capability = Capability::ProxyMap {
-            host: "api.github.com".to_string(),
-            route: "splice".to_string(),
-        };
+        let capability = proxy_map("api.github.com", "splice");
         let mut backend = FakeBackend::new();
         backend.stall_graceful_drains_for_owner(stalled.clone());
         let granted = backend.grant(grant_to(&stalled, capability.clone()));
-        let op = UniverseOp::SetProxyMap {
-            id: GrantId::new(),
-            host: "api.github.com".to_string(),
-            route: "splice".to_string(),
-            owner: stalled.clone(),
-        };
+        let op = fixtures::op(
+            GrantId::new(),
+            stalled.clone(),
+            proxy_map("api.github.com", "splice"),
+        );
         backend.apply(op.clone()).unwrap();
         let peer = backend.grant(grant_to(&peer_owner, capability.clone()));
         let elsewhere = backend.grant(grant_to(&same_plugin_elsewhere, capability));
@@ -661,12 +585,7 @@ mod tests {
         let workspace = cell_owner("cell-1", "workspace");
         let op = mount_by(&workspace);
         let mut backend = FakeBackend::new();
-        let stuck = backend.grant(grant_to(
-            &workspace,
-            Capability::SessionFile {
-                path: "/skills/pr.md".to_string(),
-            },
-        ));
+        let stuck = backend.grant(grant_to(&workspace, session_file("/skills/pr.md")));
         backend.apply(op.clone()).unwrap();
         backend.mark_stuck(address_of(&op));
         backend.mark_stuck(stuck.handle);
@@ -690,12 +609,7 @@ mod tests {
         );
         assert_eq!(backend.snapshot_os_state(), before);
         assert_eq!(backend.peek_entry(stuck.handle).unwrap(), stuck);
-        let drained = backend.grant(grant_to(
-            &workspace,
-            Capability::SessionFile {
-                path: "/skills/drained.md".to_string(),
-            },
-        ));
+        let drained = backend.grant(grant_to(&workspace, session_file("/skills/drained.md")));
         assert_eq!(backend.revoke(drained.handle, zero).unwrap(), drained);
         assert_eq!(backend.snapshot_os_state(), before);
     }
@@ -739,10 +653,7 @@ mod tests {
         let before = backend.snapshot_os_state();
         let other_source = UniverseRemoval {
             id: op.id(),
-            capability: Capability::Mount {
-                source: "/secrets".to_string(),
-                target: "/workspace".to_string(),
-            },
+            capability: mount("/secrets", "/workspace"),
         };
         for drain in [
             DrainSpec::graceful(Duration::from_millis(5)),
@@ -774,20 +685,20 @@ mod tests {
         let doomed = cell_owner("cell-1", "doomed");
         let mut backend = FakeBackend::new();
         backend.fail_apply_for_owner(doomed.clone(), "injected refusal");
-        let elsewhere = UniverseOp::WriteSessionFile {
-            id: GrantId::new(),
-            path: "/skills/pr.md".to_string(),
-            owner: cell_owner("cell-2", "doomed"),
-        };
+        let elsewhere = fixtures::op(
+            GrantId::new(),
+            cell_owner("cell-2", "doomed"),
+            session_file("/skills/pr.md"),
+        );
         backend.apply(elsewhere.clone()).unwrap();
         let before = backend.snapshot_os_state();
         assert_eq!(
             backend
-                .apply(UniverseOp::WriteSessionFile {
-                    id: GrantId::new(),
-                    path: "/skills/pr.md".to_string(),
-                    owner: doomed,
-                })
+                .apply(fixtures::op(
+                    GrantId::new(),
+                    doomed,
+                    session_file("/skills/pr.md")
+                ))
                 .unwrap_err(),
             BackendError::Fault("injected refusal".to_string())
         );
@@ -822,35 +733,21 @@ mod tests {
         let before = backend.snapshot_os_state();
         for (op, error) in [
             (
-                UniverseOp::WriteSessionFile {
-                    id: GrantId::new(),
-                    path: "skills/pr.md".to_string(),
-                    owner: owner.clone(),
-                },
+                fixtures::op(GrantId::new(), owner.clone(), session_file("skills/pr.md")),
                 RecipeError::NotAbsolute {
                     field: "path",
                     value: "skills/pr.md".to_string(),
                 },
             ),
             (
-                UniverseOp::AddMount {
-                    id: GrantId::new(),
-                    source: "/code".to_string(),
-                    target: "/workspace/".to_string(),
-                    owner: owner.clone(),
-                },
+                fixtures::op(GrantId::new(), owner.clone(), mount("/code", "/workspace/")),
                 RecipeError::NotCanonical {
                     field: "target",
                     value: "/workspace/".to_string(),
                 },
             ),
             (
-                UniverseOp::SpawnBroker {
-                    id: GrantId::new(),
-                    pid: 4242,
-                    name: "egress\0d".to_string(),
-                    owner: owner.clone(),
-                },
+                fixtures::op(GrantId::new(), owner.clone(), broker(4242, "egress\0d")),
                 RecipeError::ContainsNul { field: "name" },
             ),
         ] {
