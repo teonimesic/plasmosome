@@ -972,6 +972,18 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
+    fn the_diagnostics_read_end_is_nonblocking() {
+        let prepared = HelperExec::prepare(&record_recipe()).expect("the record recipe prepares");
+        // SAFETY: fcntl with F_GETFL takes no pointer, and `prepared` keeps the descriptor open.
+        let flags = unsafe { libc::fcntl(prepared.diagnostics.as_raw_fd(), libc::F_GETFL) };
+        assert!(
+            flags != -1 && flags & libc::O_NONBLOCK != 0,
+            "a caller can poll the diagnostics without a read that blocks"
+        );
+    }
+
+    #[test]
     fn preparing_waits_while_a_fork_holds_the_spawn_lock() {
         let fitting = record_recipe();
         let held = crate::spawn_lock::hold_fork_side();
