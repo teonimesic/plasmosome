@@ -1,105 +1,44 @@
 use std::ffi::{CStr, CString, OsStr};
+use std::fmt;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::private_socket::{FinalRule, PrivateSocketError, effective_uid, io_failure, last_errno};
-
-#[derive(Debug)]
-pub(crate) struct Walk {
-    pub(crate) start: OwnedFd,
-    pub(crate) start_path: PathBuf,
-    pub(crate) components: Vec<CString>,
-}
-
-impl Walk {
-    pub(crate) fn from_root(path: &Path) -> Result<Walk, PrivateSocketError> {
-        let components = absolute_components(path)?;
-        let root = Path::new("/");
-        let start = open_root().map_err(|error| io_failure("open", root, &error))?;
-        Ok(Walk {
-            start,
-            start_path: root.to_path_buf(),
-            components,
-        })
-    }
-
-    pub(crate) fn path(&self) -> PathBuf {
-        let mut path = self.start_path.clone();
-        for component in &self.components {
-            path.push(OsStr::from_bytes(component.as_bytes()));
-        }
-        path
-    }
-
-    fn run(&self, euid: u32, rule: FinalRule) -> Result<(OwnedFd, Facts), PrivateSocketError> {
-        let mut at = self.start_path.clone();
-        let mut facts = stat_fd(&self.start, &at)?;
-        let mut held: Option<OwnedFd> = None;
-        for (index, component) in self.components.iter().enumerate() {
-            let parent = held.as_ref().unwrap_or(&self.start);
-            refuse_ignored_ownership(parent, &at)?;
-            judge_ancestor(&facts, euid, &at)?;
-            refuse_replacing_acl(parent, &at)?;
-            at.push(OsStr::from_bytes(component.as_bytes()));
-            let last = index + 1 == self.components.len();
-            let access = if last { libc::O_RDONLY } else { SEARCH_ONLY };
-            let next = open_child(parent, component, &at, access, |facts, at| {
-                if last {
-                    rule.judge(facts, euid, at)
-                } else {
-                    judge_ancestor(facts, euid, at)
-                }
-            })?;
-            facts = stat_fd(&next, &at)?;
-            held = Some(next);
-        }
-        let dir = match held {
-            Some(dir) => dir,
-            None => self
-                .start
-                .try_clone()
-                .map_err(|error| io_failure("dup", &at, &error))?,
-        };
-        Ok((dir, facts))
-    }
-
-    pub(crate) fn judged(
-        &self,
-        path: &Path,
-        rule: FinalRule,
-    ) -> Result<(OwnedFd, Facts), PrivateSocketError> {
-        let euid = effective_uid();
-        let (dir, facts) = self.run(euid, rule)?;
-        refuse_ignored_ownership(&dir, path)?;
-        rule.judge(&facts, euid, path)?;
-        rule.refuse_final_acl(&dir, path)?;
-        Ok((dir, facts))
-    }
-}
-
+/// The device and inode of a directory a walk passed or opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Kind {
+pub struct DirIdentity {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+/// The type of an object, as a stat that does not follow a symlink reports it. A FIFO, a device
+/// and every other type are `Other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
     Directory,
+    Regular,
     Socket,
     Symlink,
     Other,
 }
 
+/// What `fstat` on an open descriptor, or `fstatat` without following, reported about one object.
+/// `mode` holds only the permission, set-id and sticky bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Facts {
-    pub(crate) kind: Kind,
-    pub(crate) uid: u32,
-    pub(crate) mode: u32,
-    pub(crate) dev: u64,
-    pub(crate) ino: u64,
+pub struct Facts {
+    pub kind: Kind,
+    pub uid: u32,
+    pub mode: u32,
+    pub dev: u64,
+    pub ino: u64,
 }
 
 impl Facts {
     fn of(stat: &libc::stat) -> Facts {
         let kind = match stat.st_mode & libc::S_IFMT {
             libc::S_IFDIR => Kind::Directory,
+            libc::S_IFREG => Kind::Regular,
             libc::S_IFSOCK => Kind::Socket,
             libc::S_IFLNK => Kind::Symlink,
             _ => Kind::Other,
@@ -111,6 +50,13 @@ impl Facts {
             mode: mode & 0o7777,
             dev,
             ino: stat.st_ino,
+        }
+    }
+
+    fn identity(&self) -> DirIdentity {
+        DirIdentity {
+            dev: self.dev,
+            ino: self.ino,
         }
     }
 }
@@ -125,24 +71,371 @@ fn mode_and_device(stat: &libc::stat) -> (u32, u64) {
     (stat.st_mode, stat.st_dev)
 }
 
-pub(crate) fn judge_ancestor(
-    facts: &Facts,
-    euid: u32,
-    at: &Path,
-) -> Result<(), PrivateSocketError> {
+/// The object at the end of a walk, as the walk shows it to the caller's judge.
+#[derive(Debug, Clone, Copy)]
+pub struct Reached<'a> {
+    /// The start path joined with every component.
+    pub path: &'a Path,
+    /// From the object's open descriptor, or from `fstatat` in its parent when it cannot be
+    /// opened.
+    pub facts: Facts,
+    /// The directory holding the object, which has already passed the ancestor rule. `None` when
+    /// the walk has no component, so the object is the start itself.
+    pub parent: Option<Facts>,
+}
+
+/// What a walk opened, and the identity of every directory it passed on the way: the start
+/// first, then each directory below it. The chain ends with the directory itself after
+/// [`Walk::open_directory`], and with the directory holding the file after [`Walk::open_file`].
+#[derive(Debug)]
+pub struct Opened {
+    pub fd: OwnedFd,
+    pub facts: Facts,
+    pub chain: Vec<DirIdentity>,
+}
+
+/// A path walked one component at a time from a start directory, never following a symlink.
+///
+/// Every directory the walk passes, the start included, must be owned by root or the effective UID
+/// and writable by neither group nor other, with no sticky-bit exception. On macOS it must also
+/// carry no ACL allow entry that lets anyone replace its entries, and sit on no volume mounted with
+/// ownership ignored. The object the walk reaches is decided by the caller's judge, which sees it
+/// even when it cannot be opened.
+///
+/// A walk can be opened again. Each open starts from the same start descriptor, so comparing the
+/// identities of two opens shows whether the path still names the same object.
+#[derive(Debug)]
+pub struct Walk {
+    start: OwnedFd,
+    start_path: PathBuf,
+    components: Vec<CString>,
+}
+
+#[derive(Clone, Copy)]
+enum Last {
+    Directory,
+    File,
+}
+
+impl Walk {
+    /// A walk of `path` from "/", which this opens now. `path` must be absolute and normal: no
+    /// empty, `.` or `..` component and no trailing slash. "/" alone is a walk with no component.
+    pub fn from_root(path: &Path) -> Result<Walk, WalkRefusal> {
+        let components = absolute_components(path)?;
+        let root = Path::new("/");
+        let start = open_root().map_err(|error| io_failure("open", root, &error))?;
+        Ok(Walk {
+            start,
+            start_path: root.to_path_buf(),
+            components,
+        })
+    }
+
+    /// A walk of `relative` from `start`, an open directory the caller names `start_path`.
+    /// `relative` must be one or more normal components. The start is judged like every directory
+    /// the walk passes, and nothing above it is. Production paths walk from "/"; this serves tests
+    /// and callers that already hold a directory they verified.
+    pub fn from_dir(
+        start: OwnedFd,
+        start_path: &Path,
+        relative: &Path,
+    ) -> Result<Walk, WalkRefusal> {
+        let components = components_of(relative.as_os_str().as_bytes(), relative)?;
+        Ok(Walk {
+            start,
+            start_path: start_path.to_path_buf(),
+            components,
+        })
+    }
+
+    /// The start path joined with every component.
+    pub fn path(&self) -> PathBuf {
+        let mut path = self.start_path.clone();
+        for component in &self.components {
+            path.push(OsStr::from_bytes(component.as_bytes()));
+        }
+        path
+    }
+
+    /// Opens the last component as a directory. On macOS a directory on a volume mounted with
+    /// ownership ignored is refused; then `judge` decides it. A directory this user may not open
+    /// is judged from `fstatat` in its parent, and is `Io` only when the judge passes it. Checks
+    /// that need the descriptor, such as an ACL check, are the caller's, on the returned `fd`.
+    pub fn open_directory<E>(
+        &self,
+        judge: impl Fn(&Reached<'_>) -> Result<(), E>,
+    ) -> Result<Opened, E>
+    where
+        E: From<WalkRefusal>,
+    {
+        self.reach(Last::Directory, judge)
+    }
+
+    /// Opens the last component read-only with `O_NOFOLLOW`, `O_NONBLOCK` and `O_NOCTTY` and
+    /// without `O_DIRECTORY`, so a FIFO or a device cannot block the open. `judge` decides the
+    /// object from `fstat` on that descriptor, and must refuse every type the caller does not
+    /// want. A regular file it accepts comes back blocking; any other type stays nonblocking. A
+    /// symlink is `Symlink` and a missing name is `Missing`. An object that otherwise cannot be
+    /// opened is judged from `fstatat` in its parent, and is `Io` only when the judge passes it.
+    pub fn open_file<E>(&self, judge: impl Fn(&Reached<'_>) -> Result<(), E>) -> Result<Opened, E>
+    where
+        E: From<WalkRefusal>,
+    {
+        self.reach(Last::File, judge)
+    }
+
+    fn reach<E>(
+        &self,
+        last: Last,
+        judge: impl Fn(&Reached<'_>) -> Result<(), E>,
+    ) -> Result<Opened, E>
+    where
+        E: From<WalkRefusal>,
+    {
+        let euid = effective_uid();
+        let mut at = self.start_path.clone();
+        let mut facts = stat_fd(&self.start, &at)?;
+        let Some((name, above)) = self.components.split_last() else {
+            return self.reach_start(last, facts, judge);
+        };
+        let mut chain = Vec::with_capacity(self.components.len() + 1);
+        let mut held: Option<OwnedFd> = None;
+        for component in above {
+            let parent = held.as_ref().unwrap_or(&self.start);
+            pass(parent, &facts, euid, &at)?;
+            chain.push(facts.identity());
+            at.push(OsStr::from_bytes(component.as_bytes()));
+            let next = open_child(parent, component, &at, SEARCH_ONLY, |facts| {
+                judge_ancestor(facts, euid, &at).map_err(E::from)
+            })?;
+            facts = stat_fd(&next, &at)?;
+            held = Some(next);
+        }
+        let parent = held.as_ref().unwrap_or(&self.start);
+        pass(parent, &facts, euid, &at)?;
+        chain.push(facts.identity());
+        let holder = facts;
+        at.push(OsStr::from_bytes(name.as_bytes()));
+        let reached = |facts: Facts| Reached {
+            path: &at,
+            facts,
+            parent: Some(holder),
+        };
+        match last {
+            Last::Directory => {
+                let dir = open_child(parent, name, &at, libc::O_RDONLY, |facts| {
+                    judge(&reached(*facts))
+                })?;
+                let facts = stat_fd(&dir, &at)?;
+                refuse_ignored_ownership(&dir, &at)?;
+                judge(&reached(facts))?;
+                chain.push(facts.identity());
+                Ok(Opened {
+                    fd: dir,
+                    facts,
+                    chain,
+                })
+            }
+            Last::File => {
+                let file = open_file_at(parent, name, &at, |facts| judge(&reached(*facts)))?;
+                let facts = stat_fd(&file, &at)?;
+                judge(&reached(facts))?;
+                if facts.kind == Kind::Regular {
+                    clear_nonblocking(&file, &at)?;
+                }
+                Ok(Opened {
+                    fd: file,
+                    facts,
+                    chain,
+                })
+            }
+        }
+    }
+
+    fn reach_start<E>(
+        &self,
+        last: Last,
+        facts: Facts,
+        judge: impl Fn(&Reached<'_>) -> Result<(), E>,
+    ) -> Result<Opened, E>
+    where
+        E: From<WalkRefusal>,
+    {
+        let at = &self.start_path;
+        let fd = self
+            .start
+            .try_clone()
+            .map_err(|error| io_failure("dup", at, &error))?;
+        let reached = Reached {
+            path: at,
+            facts,
+            parent: None,
+        };
+        let chain = match last {
+            Last::Directory => {
+                refuse_ignored_ownership(&fd, at)?;
+                judge(&reached)?;
+                vec![facts.identity()]
+            }
+            Last::File => {
+                judge(&reached)?;
+                Vec::new()
+            }
+        };
+        Ok(Opened { fd, facts, chain })
+    }
+}
+
+fn pass(dir: &OwnedFd, facts: &Facts, euid: u32, at: &Path) -> Result<(), WalkRefusal> {
+    refuse_ignored_ownership(dir, at)?;
+    judge_ancestor(facts, euid, at)?;
+    refuse_replacing_acl(dir, at)
+}
+
+/// Why a walk refused. Each variant names the path where the walk stopped: the component that
+/// broke a rule, or the object it could not open. `Display` names the path and the rule; callers
+/// branch on the variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WalkRefusal {
+    NotNormal {
+        path: PathBuf,
+    },
+    Symlink {
+        path: PathBuf,
+    },
+    Missing {
+        path: PathBuf,
+    },
+    NotDirectory {
+        path: PathBuf,
+    },
+    ForeignOwner {
+        path: PathBuf,
+        uid: u32,
+    },
+    Replaceable {
+        path: PathBuf,
+        mode: u32,
+    },
+    ReplaceableByAcl {
+        path: PathBuf,
+    },
+    OwnershipIgnored {
+        path: PathBuf,
+    },
+    Io {
+        op: &'static str,
+        path: PathBuf,
+        errno: i32,
+    },
+}
+
+impl WalkRefusal {
+    /// The path where the walk stopped.
+    pub fn path(&self) -> &Path {
+        match self {
+            WalkRefusal::NotNormal { path }
+            | WalkRefusal::Symlink { path }
+            | WalkRefusal::Missing { path }
+            | WalkRefusal::NotDirectory { path }
+            | WalkRefusal::ForeignOwner { path, .. }
+            | WalkRefusal::Replaceable { path, .. }
+            | WalkRefusal::ReplaceableByAcl { path }
+            | WalkRefusal::OwnershipIgnored { path }
+            | WalkRefusal::Io { path, .. } => path,
+        }
+    }
+}
+
+impl fmt::Display for WalkRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WalkRefusal::NotNormal { path } => write!(
+                f,
+                "{} is not an absolute path of normal components (no empty, . or .. components)",
+                path.display()
+            ),
+            WalkRefusal::Symlink { path } => write!(
+                f,
+                "{} is a symlink, which the walk does not follow",
+                path.display()
+            ),
+            WalkRefusal::Missing { path } => write!(f, "{} does not exist", path.display()),
+            WalkRefusal::NotDirectory { path } => {
+                write!(f, "{} is not a directory", path.display())
+            }
+            WalkRefusal::ForeignOwner { path, uid } => write!(
+                f,
+                "{} is owned by uid {uid}, which is not trusted here",
+                path.display()
+            ),
+            WalkRefusal::Replaceable { path, mode } => write!(
+                f,
+                "{} has mode {mode:04o}: group or other can replace entries in it",
+                path.display()
+            ),
+            WalkRefusal::ReplaceableByAcl { path } => write!(
+                f,
+                "{} has an ACL allow entry granting add_file, add_subdirectory, delete_child, \
+                 delete, writesecurity or chown; such an entry is refused on an ancestor whoever \
+                 it names, even if it applies only to new children",
+                path.display()
+            ),
+            WalkRefusal::OwnershipIgnored { path } => write!(
+                f,
+                "{} is on a volume mounted with ownership ignored (noowners): its owner and mode \
+                 do not keep other users out",
+                path.display()
+            ),
+            WalkRefusal::Io { op, path, errno } => {
+                write!(f, "{op} failed at {} (errno {errno})", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for WalkRefusal {}
+
+/// The effective UID of this process.
+#[allow(unsafe_code)]
+pub fn effective_uid() -> u32 {
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// Whether the object open at `fd` carries an ACL allow entry granting write data, append data,
+/// write attributes, write extended attributes, write security, chown, delete, or generic write
+/// or all, whoever the entry names. On Linux it is always false: a POSIX ACL entry that grants
+/// write shows in the group bits, which a mode check already reads. An ACL that cannot be read
+/// is an error.
+pub fn acl_grants_write(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    grants_write(fd)
+}
+
+#[cfg(target_os = "macos")]
+fn grants_write(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    darwin_acl::grants_write(fd).map_err(|(_, errno)| io::Error::from_raw_os_error(errno))
+}
+
+#[cfg(target_os = "linux")]
+fn grants_write(_fd: BorrowedFd<'_>) -> io::Result<bool> {
+    Ok(false)
+}
+
+pub(crate) fn judge_ancestor(facts: &Facts, euid: u32, at: &Path) -> Result<(), WalkRefusal> {
     if facts.kind != Kind::Directory {
-        return Err(PrivateSocketError::NotDirectory {
+        return Err(WalkRefusal::NotDirectory {
             path: at.to_path_buf(),
         });
     }
     if facts.uid != 0 && facts.uid != euid {
-        return Err(PrivateSocketError::ForeignOwner {
+        return Err(WalkRefusal::ForeignOwner {
             path: at.to_path_buf(),
             uid: facts.uid,
         });
     }
     if facts.mode & 0o022 != 0 {
-        return Err(PrivateSocketError::Replaceable {
+        return Err(WalkRefusal::Replaceable {
             path: at.to_path_buf(),
             mode: facts.mode,
         });
@@ -150,9 +443,9 @@ pub(crate) fn judge_ancestor(
     Ok(())
 }
 
-pub(crate) fn absolute_components(path: &Path) -> Result<Vec<CString>, PrivateSocketError> {
+pub(crate) fn absolute_components(path: &Path) -> Result<Vec<CString>, WalkRefusal> {
     let Some(relative) = path.as_os_str().as_bytes().strip_prefix(b"/") else {
-        return Err(PrivateSocketError::BadPath {
+        return Err(WalkRefusal::NotNormal {
             path: path.to_path_buf(),
         });
     };
@@ -163,10 +456,7 @@ pub(crate) fn absolute_components(path: &Path) -> Result<Vec<CString>, PrivateSo
     }
 }
 
-pub(crate) fn components_of(
-    relative: &[u8],
-    whole: &Path,
-) -> Result<Vec<CString>, PrivateSocketError> {
+fn components_of(relative: &[u8], whole: &Path) -> Result<Vec<CString>, WalkRefusal> {
     relative
         .split(|byte| *byte == b'/')
         .map(|component| match component {
@@ -174,7 +464,7 @@ pub(crate) fn components_of(
             component => CString::new(component).ok(),
         })
         .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| PrivateSocketError::BadPath {
+        .ok_or_else(|| WalkRefusal::NotNormal {
             path: whole.to_path_buf(),
         })
 }
@@ -203,55 +493,109 @@ const SEARCH_ONLY: libc::c_int = libc::O_SEARCH;
 const SEARCH_ONLY: libc::c_int = libc::O_PATH;
 
 #[allow(unsafe_code)]
-fn open_child(
+fn open_at(parent: &OwnedFd, name: &CStr, flags: libc::c_int) -> Result<OwnedFd, i32> {
+    // SAFETY: `name` is a CStr that outlives the call, and `parent` keeps its descriptor open for
+    // it. openat keeps no pointer to the name.
+    let raw = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    if raw >= 0 {
+        // SAFETY: openat returned a non-negative descriptor just above, which nothing else owns.
+        Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+    } else {
+        Err(last_errno())
+    }
+}
+
+fn open_child<E>(
     parent: &OwnedFd,
     name: &CStr,
     at: &Path,
     access: libc::c_int,
-    judge: impl FnOnce(&Facts, &Path) -> Result<(), PrivateSocketError>,
-) -> Result<OwnedFd, PrivateSocketError> {
-    // SAFETY: `name` is a CStr that outlives the call, and `parent` keeps its descriptor open for
-    // it. openat keeps no pointer to the name.
-    let raw = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
+    judge: impl FnOnce(&Facts) -> Result<(), E>,
+) -> Result<OwnedFd, E>
+where
+    E: From<WalkRefusal>,
+{
+    let flags = access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let errno = match open_at(parent, name, flags) {
+        Ok(dir) => return Ok(dir),
+        Err(errno) => errno,
     };
-    if raw >= 0 {
-        // SAFETY: openat returned a non-negative descriptor just above, which nothing else owns.
-        return Ok(unsafe { OwnedFd::from_raw_fd(raw) });
-    }
-    let errno = last_errno();
-    let at = at.to_path_buf();
+    let path = at.to_path_buf();
     Err(match errno {
-        libc::ELOOP => PrivateSocketError::SymlinkInPath { path: at },
-        libc::ENOENT => PrivateSocketError::NoDirectory { path: at },
+        libc::ELOOP => WalkRefusal::Symlink { path }.into(),
+        libc::ENOENT => WalkRefusal::Missing { path }.into(),
         libc::ENOTDIR => match stat_at(parent, name) {
-            Ok(facts) if facts.kind == Kind::Symlink => {
-                PrivateSocketError::SymlinkInPath { path: at }
-            }
-            _ => PrivateSocketError::NotDirectory { path: at },
+            Ok(facts) if facts.kind == Kind::Symlink => WalkRefusal::Symlink { path }.into(),
+            _ => WalkRefusal::NotDirectory { path }.into(),
         },
-        libc::EACCES => match stat_at(parent, name).map(|facts| judge(&facts, &at)) {
-            Ok(Err(refusal)) => refusal,
-            _ => PrivateSocketError::Io {
-                op: "openat",
-                path: at,
-                errno,
-            },
-        },
-        errno => PrivateSocketError::Io {
-            op: "openat",
-            path: at,
-            errno,
-        },
+        libc::EACCES => judged_or_io(stat_at(parent, name), judge, path, errno),
+        errno => io_at(path, errno).into(),
     })
 }
 
+fn open_file_at<E>(
+    parent: &OwnedFd,
+    name: &CStr,
+    at: &Path,
+    judge: impl FnOnce(&Facts) -> Result<(), E>,
+) -> Result<OwnedFd, E>
+where
+    E: From<WalkRefusal>,
+{
+    let flags =
+        libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let errno = match open_at(parent, name, flags) {
+        Ok(file) => return Ok(file),
+        Err(errno) => errno,
+    };
+    let path = at.to_path_buf();
+    Err(match errno {
+        libc::ELOOP => WalkRefusal::Symlink { path }.into(),
+        libc::ENOENT => WalkRefusal::Missing { path }.into(),
+        errno => judged_or_io(stat_at(parent, name), judge, path, errno),
+    })
+}
+
+fn judged_or_io<E>(
+    found: Result<Facts, i32>,
+    judge: impl FnOnce(&Facts) -> Result<(), E>,
+    path: PathBuf,
+    errno: i32,
+) -> E
+where
+    E: From<WalkRefusal>,
+{
+    match found.map(|facts| judge(&facts)) {
+        Ok(Err(refusal)) => refusal,
+        _ => io_at(path, errno).into(),
+    }
+}
+
+fn io_at(path: PathBuf, errno: i32) -> WalkRefusal {
+    WalkRefusal::Io {
+        op: "openat",
+        path,
+        errno,
+    }
+}
+
 #[allow(unsafe_code)]
-fn stat_fd(fd: &OwnedFd, at: &Path) -> Result<Facts, PrivateSocketError> {
+fn clear_nonblocking(fd: &OwnedFd, at: &Path) -> Result<(), WalkRefusal> {
+    // SAFETY: fcntl with F_GETFL takes no pointer, and `fd` keeps its descriptor open for the call.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io_failure("fcntl", at, &io::Error::last_os_error()));
+    }
+    // SAFETY: fcntl with F_SETFL takes an integer flag set, not a pointer, and `fd` keeps its
+    // descriptor open for the call.
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return Err(io_failure("fcntl", at, &io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[allow(unsafe_code)]
+fn stat_fd(fd: &OwnedFd, at: &Path) -> Result<Facts, WalkRefusal> {
     // SAFETY: libc::stat is a plain C struct, for which all zeroes is a valid value.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: `fd` keeps its descriptor open, and `stat` is a local libc::stat that fstat may
@@ -284,37 +628,43 @@ pub(crate) fn stat_at(dir: &OwnedFd, name: &CStr) -> Result<Facts, i32> {
     }
 }
 
-pub(crate) fn refuse_if(
+pub(crate) fn refuse_if<E>(
     found: Result<bool, (&'static str, i32)>,
     at: &Path,
-    refusal: impl FnOnce(PathBuf) -> PrivateSocketError,
-) -> Result<(), PrivateSocketError> {
+    refusal: impl FnOnce(PathBuf) -> E,
+) -> Result<(), E>
+where
+    E: From<WalkRefusal>,
+{
     match found {
         Ok(false) => Ok(()),
         Ok(true) => Err(refusal(at.to_path_buf())),
-        Err((op, errno)) => Err(PrivateSocketError::Io {
+        Err((op, errno)) => Err(WalkRefusal::Io {
             op,
             path: at.to_path_buf(),
             errno,
-        }),
+        }
+        .into()),
     }
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn refuse_replacing_acl(dir: &OwnedFd, at: &Path) -> Result<(), PrivateSocketError> {
-    refuse_if(darwin_acl::allows_replacing_entries(dir), at, |at| {
-        PrivateSocketError::ReplaceableByAcl { path: at }
-    })
+pub(crate) fn refuse_replacing_acl(dir: &OwnedFd, at: &Path) -> Result<(), WalkRefusal> {
+    refuse_if(
+        darwin_acl::allows_replacing_entries(dir.as_fd()),
+        at,
+        |path| WalkRefusal::ReplaceableByAcl { path },
+    )
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn refuse_replacing_acl(_dir: &OwnedFd, _at: &Path) -> Result<(), PrivateSocketError> {
+pub(crate) fn refuse_replacing_acl(_dir: &OwnedFd, _at: &Path) -> Result<(), WalkRefusal> {
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
-fn refuse_ignored_ownership(dir: &OwnedFd, at: &Path) -> Result<(), PrivateSocketError> {
+fn refuse_ignored_ownership(dir: &OwnedFd, at: &Path) -> Result<(), WalkRefusal> {
     // SAFETY: libc::statfs is a plain C struct, for which all zeroes is a valid value.
     let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: `dir` keeps its descriptor open, and `stats` is a local libc::statfs that fstatfs may
@@ -324,19 +674,33 @@ fn refuse_ignored_ownership(dir: &OwnedFd, at: &Path) -> Result<(), PrivateSocke
     } else {
         Err(("fstatfs", last_errno()))
     };
-    refuse_if(ignored, at, |path| PrivateSocketError::OwnershipIgnored {
-        path,
-    })
+    refuse_if(ignored, at, |path| WalkRefusal::OwnershipIgnored { path })
 }
 
 #[cfg(target_os = "linux")]
-fn refuse_ignored_ownership(_dir: &OwnedFd, _at: &Path) -> Result<(), PrivateSocketError> {
+fn refuse_ignored_ownership(_dir: &OwnedFd, _at: &Path) -> Result<(), WalkRefusal> {
     Ok(())
+}
+
+pub(crate) fn io_failure(op: &'static str, at: &Path, error: &io::Error) -> WalkRefusal {
+    WalkRefusal::Io {
+        op,
+        path: at.to_path_buf(),
+        errno: errno_of(error),
+    }
+}
+
+pub(crate) fn errno_of(error: &io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(libc::EIO)
+}
+
+pub(crate) fn last_errno() -> i32 {
+    errno_of(&io::Error::last_os_error())
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) mod darwin_acl {
-    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd, BorrowedFd};
     use std::os::raw::{c_int, c_void};
 
     const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
@@ -344,9 +708,13 @@ pub(crate) mod darwin_acl {
     const ACL_NEXT_ENTRY: c_int = -1;
     const ACL_EXTENDED_ALLOW: c_int = 1;
     const ACL_ADD_FILE: u64 = 1 << 2;
+    const ACL_WRITE_DATA: u64 = 1 << 2;
     const ACL_DELETE: u64 = 1 << 4;
     const ACL_ADD_SUBDIRECTORY: u64 = 1 << 5;
+    const ACL_APPEND_DATA: u64 = 1 << 5;
     const ACL_DELETE_CHILD: u64 = 1 << 6;
+    const ACL_WRITE_ATTRIBUTES: u64 = 1 << 8;
+    const ACL_WRITE_EXTATTRIBUTES: u64 = 1 << 10;
     const ACL_WRITE_SECURITY: u64 = 1 << 12;
     const ACL_CHANGE_OWNER: u64 = 1 << 13;
     const KAUTH_ACE_GENERIC_ALL: u64 = 1 << 21;
@@ -357,6 +725,15 @@ pub(crate) mod darwin_acl {
         | ACL_DELETE_CHILD
         | ACL_WRITE_SECURITY
         | ACL_CHANGE_OWNER
+        | KAUTH_ACE_GENERIC_ALL
+        | KAUTH_ACE_GENERIC_WRITE;
+    const WRITES: u64 = ACL_WRITE_DATA
+        | ACL_APPEND_DATA
+        | ACL_WRITE_ATTRIBUTES
+        | ACL_WRITE_EXTATTRIBUTES
+        | ACL_WRITE_SECURITY
+        | ACL_CHANGE_OWNER
+        | ACL_DELETE
         | KAUTH_ACE_GENERIC_ALL
         | KAUTH_ACE_GENERIC_WRITE;
 
@@ -383,10 +760,10 @@ pub(crate) mod darwin_acl {
 
     impl Acl {
         #[allow(unsafe_code)]
-        fn of(dir: &OwnedFd) -> Result<Option<Acl>, (&'static str, i32)> {
-            // SAFETY: acl_get_fd_np reads only the descriptor, which `dir` keeps open. A non-null
+        fn of(fd: BorrowedFd<'_>) -> Result<Option<Acl>, (&'static str, i32)> {
+            // SAFETY: acl_get_fd_np reads only the descriptor, which `fd` keeps open. A non-null
             // result is a new ACL that this Acl then owns.
-            let acl = unsafe { acl_get_fd_np(dir.as_raw_fd(), ACL_TYPE_EXTENDED) };
+            let acl = unsafe { acl_get_fd_np(fd.as_raw_fd(), ACL_TYPE_EXTENDED) };
             if !acl.is_null() {
                 return Ok(Some(Acl(acl)));
             }
@@ -421,13 +798,23 @@ pub(crate) mod darwin_acl {
         }
     }
 
-    pub(crate) fn has_entries(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
-        Ok(Acl::of(dir)?.is_some_and(|acl| acl.entries().next().is_some()))
+    pub(crate) fn has_entries(fd: BorrowedFd<'_>) -> Result<bool, (&'static str, i32)> {
+        Ok(Acl::of(fd)?.is_some_and(|acl| acl.entries().next().is_some()))
+    }
+
+    pub(super) fn allows_replacing_entries(
+        fd: BorrowedFd<'_>,
+    ) -> Result<bool, (&'static str, i32)> {
+        allows_any(fd, REPLACES_ENTRIES)
+    }
+
+    pub(super) fn grants_write(fd: BorrowedFd<'_>) -> Result<bool, (&'static str, i32)> {
+        allows_any(fd, WRITES)
     }
 
     #[allow(unsafe_code)]
-    pub(super) fn allows_replacing_entries(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
-        let Some(acl) = Acl::of(dir)? else {
+    fn allows_any(fd: BorrowedFd<'_>, rights: u64) -> Result<bool, (&'static str, i32)> {
+        let Some(acl) = Acl::of(fd)? else {
             return Ok(false);
         };
         for entry in acl.entries() {
@@ -446,7 +833,7 @@ pub(crate) mod darwin_acl {
             if unsafe { acl_get_permset_mask_np(entry, &mut mask) } != 0 {
                 return Err(("acl_get_permset_mask_np", super::last_errno()));
             }
-            if mask & REPLACES_ENTRIES != 0 {
+            if mask & rights != 0 {
                 return Ok(true);
             }
         }

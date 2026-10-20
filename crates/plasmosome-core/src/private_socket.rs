@@ -10,17 +10,11 @@ use std::path::{Path, PathBuf};
 use crate::instance::DirectoryStream;
 #[cfg(target_os = "macos")]
 use crate::nofollow::darwin_acl;
+pub use crate::nofollow::{DirIdentity, effective_uid};
 use crate::nofollow::{
-    Facts, Kind, Walk, absolute_components, judge_ancestor, refuse_if, refuse_replacing_acl,
-    stat_at,
+    Facts, Kind, Opened, Walk, WalkRefusal, absolute_components, errno_of, judge_ancestor,
+    last_errno, refuse_if, refuse_replacing_acl, stat_at,
 };
-
-/// The device and inode of the directory a [`PrivateDir`] holds open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DirIdentity {
-    pub dev: u64,
-    pub ino: u64,
-}
 
 /// A socket's parent directory, opened without following symlinks and judged private: every
 /// ancestor is owned by root or the effective UID and writable by neither group nor other, and
@@ -36,37 +30,6 @@ pub struct PrivateDir {
     dir: OwnedFd,
     identity: DirIdentity,
     walk: Walk,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum FinalRule {
-    Private,
-    Ancestor,
-}
-
-impl FinalRule {
-    pub(crate) fn judge(
-        self,
-        facts: &Facts,
-        euid: u32,
-        at: &Path,
-    ) -> Result<(), PrivateSocketError> {
-        match self {
-            FinalRule::Private => judge_private(facts, euid, at),
-            FinalRule::Ancestor => judge_ancestor(facts, euid, at),
-        }
-    }
-
-    pub(crate) fn refuse_final_acl(
-        self,
-        dir: &OwnedFd,
-        at: &Path,
-    ) -> Result<(), PrivateSocketError> {
-        match self {
-            FinalRule::Private => refuse_acl(dir, at),
-            FinalRule::Ancestor => refuse_replacing_acl(dir, at),
-        }
-    }
 }
 
 impl PrivateDir {
@@ -85,23 +48,18 @@ impl PrivateDir {
         start_path: &Path,
         relative: &Path,
     ) -> Result<PrivateDir, PrivateSocketError> {
-        let components = crate::nofollow::components_of(relative.as_os_str().as_bytes(), relative)?;
-        Self::from_walk(Walk {
-            start,
-            start_path: start_path.to_path_buf(),
-            components,
-        })
+        Self::from_walk(Walk::from_dir(start, start_path, relative)?)
     }
 
     fn from_walk(walk: Walk) -> Result<PrivateDir, PrivateSocketError> {
         let path = walk.path();
-        let (dir, facts) = walk.judged(&path, FinalRule::Private)?;
+        let opened = open_private(&walk, &path)?;
         Ok(PrivateDir {
             path,
-            dir,
+            dir: opened.fd,
             identity: DirIdentity {
-                dev: facts.dev,
-                ino: facts.ino,
+                dev: opened.facts.dev,
+                ino: opened.facts.ino,
             },
             walk,
         })
@@ -120,7 +78,7 @@ impl PrivateDir {
     /// Walks the path again and requires the same judgments and the same directory identity.
     /// A directory renamed away and replaced at the path is `Replaced`.
     pub fn reconfirm(&self) -> Result<(), PrivateSocketError> {
-        let (_, facts) = self.walk.judged(&self.path, FinalRule::Private)?;
+        let facts = open_private(&self.walk, &self.path)?.facts;
         if facts.dev == self.identity.dev && facts.ino == self.identity.ino {
             Ok(())
         } else {
@@ -380,15 +338,20 @@ pub struct ListedEntry {
 pub fn list_trusted_dir(path: &Path) -> Result<Vec<ListedEntry>, PrivateSocketError> {
     let walk = Walk::from_root(path)?;
     let path = walk.path();
-    let (dir, _) = walk.judged(&path, FinalRule::Ancestor)?;
-    list_entries(&dir, &path)
+    let euid = effective_uid();
+    let opened = walk.open_directory(|reached| {
+        judge_ancestor(&reached.facts, euid, reached.path).map_err(PrivateSocketError::from)
+    })?;
+    refuse_replacing_acl(&opened.fd, &path)?;
+    list_entries(&opened.fd, &path)
 }
 
-/// The effective UID of this process.
-#[allow(unsafe_code)]
-pub fn effective_uid() -> u32 {
-    // SAFETY: geteuid takes no arguments and cannot fail.
-    unsafe { libc::geteuid() }
+fn open_private(walk: &Walk, path: &Path) -> Result<Opened, PrivateSocketError> {
+    let euid = effective_uid();
+    let opened =
+        walk.open_directory(|reached| judge_private(&reached.facts, euid, reached.path))?;
+    refuse_acl(&opened.fd, path)?;
+    Ok(opened)
 }
 
 /// Why a private socket path, socket or peer was refused. `Display` names the path and the
@@ -579,6 +542,26 @@ impl fmt::Display for PrivateSocketError {
 }
 
 impl std::error::Error for PrivateSocketError {}
+
+impl From<WalkRefusal> for PrivateSocketError {
+    fn from(refusal: WalkRefusal) -> Self {
+        match refusal {
+            WalkRefusal::NotNormal { path } => PrivateSocketError::BadPath { path },
+            WalkRefusal::Symlink { path } => PrivateSocketError::SymlinkInPath { path },
+            WalkRefusal::Missing { path } => PrivateSocketError::NoDirectory { path },
+            WalkRefusal::NotDirectory { path } => PrivateSocketError::NotDirectory { path },
+            WalkRefusal::ForeignOwner { path, uid } => {
+                PrivateSocketError::ForeignOwner { path, uid }
+            }
+            WalkRefusal::Replaceable { path, mode } => {
+                PrivateSocketError::Replaceable { path, mode }
+            }
+            WalkRefusal::ReplaceableByAcl { path } => PrivateSocketError::ReplaceableByAcl { path },
+            WalkRefusal::OwnershipIgnored { path } => PrivateSocketError::OwnershipIgnored { path },
+            WalkRefusal::Io { op, path, errno } => PrivateSocketError::Io { op, path, errno },
+        }
+    }
+}
 
 fn judge_private(facts: &Facts, euid: u32, path: &Path) -> Result<(), PrivateSocketError> {
     if facts.kind != Kind::Directory {
@@ -802,7 +785,7 @@ fn listed_from(
             Ok(facts) => match facts.kind {
                 Kind::Directory => EntryKind::Directory,
                 Kind::Symlink => EntryKind::Symlink,
-                Kind::Socket | Kind::Other => EntryKind::Other,
+                Kind::Regular | Kind::Socket | Kind::Other => EntryKind::Other,
             },
             Err(errno) if errno == libc::ENOENT => continue,
             Err(errno) => {
@@ -852,7 +835,7 @@ fn refuse_acl(dir: &OwnedFd, path: &Path) -> Result<(), PrivateSocketError> {
 
 #[cfg(target_os = "macos")]
 fn acl_present(dir: &OwnedFd) -> Result<bool, (&'static str, i32)> {
-    darwin_acl::has_entries(dir)
+    darwin_acl::has_entries(dir.as_fd())
 }
 
 #[cfg(target_os = "linux")]
@@ -889,20 +872,12 @@ fn no_socket_or_io(errno: i32, path: &Path) -> PrivateSocketError {
     }
 }
 
-pub(crate) fn io_failure(op: &'static str, at: &Path, error: &io::Error) -> PrivateSocketError {
+fn io_failure(op: &'static str, at: &Path, error: &io::Error) -> PrivateSocketError {
     PrivateSocketError::Io {
         op,
         path: at.to_path_buf(),
         errno: errno_of(error),
     }
-}
-
-fn errno_of(error: &io::Error) -> i32 {
-    error.raw_os_error().unwrap_or(libc::EIO)
-}
-
-pub(crate) fn last_errno() -> i32 {
-    errno_of(&io::Error::last_os_error())
 }
 
 #[cfg(test)]

@@ -15,8 +15,11 @@ pub mod instance;
 pub mod kill_budget;
 pub mod lifecycle;
 pub mod manifest;
+/// The no-follow walk: opens a directory or a file one component at a time from "/", never
+/// following a symlink, judges every directory it passes by spec 001 §4.1's ancestor rule, and
+/// hands the object it reaches to the caller's judge.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-mod nofollow;
+pub mod nofollow;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod private_socket;
 pub mod protocol;
