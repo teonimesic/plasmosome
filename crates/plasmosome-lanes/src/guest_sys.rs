@@ -38,12 +38,15 @@ pub fn mount(source: &str, target: &Path, fstype: &str, flags: libc::c_ulong) ->
     check(rc)
 }
 
-/// Flush filesystems and power the machine off. Returns only if reboot(2) refused.
+/// Flush filesystems and power the machine off. Returns only if reboot(2) refused. Any caller
+/// with `CAP_SYS_BOOT`, such as a probe running as uid 0, stops the guest, so only `lane-init`
+/// calls it.
 pub fn power_off() -> io::Error {
     // SAFETY: sync takes no arguments and only flushes filesystem buffers.
     unsafe { libc::sync() };
-    // SAFETY: RB_POWER_OFF takes no pointer; for process 1 the call stops the machine and does
-    // not return, and otherwise it fails with an errno and changes nothing.
+    // SAFETY: RB_POWER_OFF takes no pointer, so the call touches no memory of this process.
+    // reboot(2) checks CAP_SYS_BOOT, not the caller's PID: with it the machine stops and the call
+    // does not return, and without it the call fails with EPERM and changes nothing.
     unsafe { libc::reboot(libc::RB_POWER_OFF) };
     io::Error::last_os_error()
 }

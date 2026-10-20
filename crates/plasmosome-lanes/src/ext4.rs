@@ -41,7 +41,9 @@ fn failed(name: &str, output: &Output) -> io::Error {
 }
 
 /// Build a raw ext4 image at `out` holding the tree under `staged`, with e2fsprogs' `mke2fs -d`
-/// from `tool_dir`. Refuses, naming the tool, when `tool_dir` has no `mke2fs`.
+/// from `tool_dir`. Refuses, naming the tool, when `tool_dir` has no `mke2fs`. `/` is owned by
+/// 0:0, and every other file keeps the owner it has in `staged`, so a tree a non-root user
+/// staged gives files owned by that user.
 pub fn ext4_from_dir(tool_dir: &Path, staged: &Path, out: &Path) -> io::Result<()> {
     let mke2fs = tool(tool_dir, "mke2fs")?;
     let size_mib = (tree_bytes(staged)? * 2 / MIB + 8).max(MIN_IMAGE_MIB);
