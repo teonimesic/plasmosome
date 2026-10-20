@@ -549,8 +549,9 @@ variants and embed the new exact types.
 No missing identity receives a default. Identity-bearing structures reject unknown fields, so an
 old lossy field cannot quietly accompany and disagree with its replacement.
 
-The single-plugin `LogRecord` now requires `format: 3`. This explicitly replaces the implemented
-format2 boundary; it is not a format2 payload with a silently changed broker meaning.
+The single-plugin `LogRecord` now requires `format: 3`. This explicitly replaces the format2
+boundary implemented before plasmosome-8pr4; it is not a format2 payload with a silently changed
+broker meaning.
 Writers and readers accept only version3. Unversioned/version2 records, other versions, numeric
 handles, identity-less inverses and PID-bearing broker payloads refuse. Preserve old files and
 return an error rather than synthesize IDs or launch descriptions, skip effects or rewrite bytes.
@@ -560,7 +561,8 @@ shipped it; the repository baseline writes and reads format3. Format3 now has a 
 so any later incompatible change to these records requires another explicit version transition,
 not a silent change inside format3. Missing recipes or data endpoints refuse.
 Amended on 2026-10-20, when plasmosome-8pr4 shipped the first format3 writer. Until then this
-paragraph called format3 still unimplemented and said the baseline wrote format2.
+paragraph called format3 still unimplemented, said the baseline wrote format2, and called format2
+the implemented boundary.
 The separate, not-yet-implemented per-cell `CellJournalRecord` remains spec008's format1.
 
 Before extending a nonempty legacy file, append validates all existing complete LF-terminated

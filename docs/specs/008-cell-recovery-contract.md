@@ -154,8 +154,10 @@ provider's original root/source rather than rewriting it to the new requirer's r
 provider with the same name is not a matching registry member. Source and mock/effects change
 together in prepare/commit/abort, including empty attachments; unmentioned sources stay unchanged.
 This registry-source addition is part of the still-unimplemented per-cell format1 before its
-first writer ships. Missing source is refused, not defaulted to local. Existing single-plugin
-version2/version3 contracts and the refusal to migrate them into cell histories are unchanged.
+first writer ships. Missing source is refused, not defaulted to local. The single-plugin version3
+contract, the refusal of version2, and the refusal to migrate either into cell histories are
+unchanged. Amended on 2026-10-20, when plasmosome-8pr4 shipped the version3 writer. Until then
+this sentence called version2 and version3 both existing single-plugin contracts.
 No second file/database maps journal generations or PluginIds back to artifact origins.
 
 `named` is true for a plasmid the request named: the one `plasmid.add` names, or one a genome
@@ -659,9 +661,11 @@ Core currently serves only plasmosome.status from an empty registry; its existin
 recovery root or live observation client. Membrane currently serves membrane.status, not the
 recovery/operation RPCs below. The current ledger helper's append-whole-history recipe is not a
 cell writer and must no longer be recommended for reopen/extend. The implemented legacy reader
-already has spec017's strict version2 rules; the revised broker representation now requires its
-explicit version3 cutover. That reader's narrow torn-tail allowance is unchanged, but append
-refuses an incomplete target. Neither legacy reader supplies this cell reader's strict-LF rule.
+has spec017's strict version3 rules, after the explicit version3 cutover that carried the revised
+broker representation. Amended on 2026-10-20, when plasmosome-8pr4 shipped that cutover. Until
+then this sentence gave the reader version2 rules and called the cutover still required. That
+reader's narrow torn-tail allowance is unchanged, but append refuses an incomplete target.
+Neither legacy reader supplies this cell reader's strict-LF rule.
 
 Implementation adds core's ledger dependency, the recovery module, explicit recovered-state
 carriers and daemon integration; ledger owns the typed journal reader/writer. Backend owns the
