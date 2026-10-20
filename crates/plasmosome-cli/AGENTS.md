@@ -21,8 +21,10 @@ It is `publish = false` and never ships on its own.
   one. `Json` implements `Drop`, so code takes children out with `std::mem::take`.
 - **A repeated key is refused after decoding.** `"a"` and the same key spelled with an escape are
   one key. Keeping whichever copy a parser keeps would change what the daemon sent.
-- **A value built by hand is checked.** `Number::new`, `ClientError::new` and `KernelError::new`
-  refuse what would write invalid JSON or a repeated key. Their fields stay private.
+- **The constructors check what they take.** `Number::new`, `ClientError::new` and
+  `KernelError::new` refuse what would write invalid JSON or a repeated key, at any depth of the
+  value they take. Their fields stay private. An `Envelope`'s `result` is not checked: it comes
+  from `scan`, so never build one by hand outside a test.
 - **`emit` writes in pieces.** It never builds the whole output, which for a deep reply in the
   human form is about 66 times the reply's size.
 - **The client codes are a closed list.** A new code lands in spec 025 first, then in

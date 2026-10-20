@@ -42,10 +42,12 @@ make it write the square of its depth. A deep level still costs two lines of up 
 about 132 bytes: at the bound, 8,388,608 nested arrays write 1,107,294,270 bytes, about 1.1 GB,
 in the human form. Nothing may parse the human form.
 
-A value built by hand is checked as a reply is. `json::Number::new` takes only text that RFC
-8259's number grammar accepts. `ClientError::new` refuses a field that repeats or is named
-`domain`, `code` or `message`, and `KernelError::new` refuses an error that is not an object or
-already has `domain`. Each hands back what it refused.
+The constructors check what they take. `json::Number::new` takes only text that RFC 8259's
+number grammar accepts. `ClientError::new` refuses a field that repeats or is named `domain`,
+`code` or `message`, and `KernelError::new` refuses an error that is not an object or already has
+`domain`. Both refuse a value that repeats a key at any depth. Each hands back what it refused.
+An `Envelope`'s `result` is written as given: it comes from `scan`, which refuses a repeated key
+at every depth.
 
 `emit` writes an `Envelope` in either form and ends it with a newline. A success goes to stdout:
 `schema` 1, `command`, `instance` when a socket was chosen, with `name` when one was known, and
