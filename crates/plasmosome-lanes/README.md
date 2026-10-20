@@ -78,6 +78,10 @@ any line between the markers that is not a result, a result out of order or for 
 probe, and a probe with no result or a `null` one. Lines before `LANE-BEGIN` and after `LANE-END`
 are ignored.
 
+`run_lane` reads the console through a limit of 16 MiB (`MAX_CONSOLE_BYTES`), and a longer
+console is `NotRun` whatever it holds, as spec 026 §5 asks of bytes a guest writes. It keeps the
+first MiB of the VMM's stderr and reads and drops the rest, so the VMM never blocks on the pipe.
+
 ## Probes
 
 `lane-probe <subcommand>` prints one JSON line with `probe` and `ok`; a failed operation names its
