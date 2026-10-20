@@ -122,7 +122,7 @@ the field's parents are tables, not inline tables: a section such as
 Exactly two refusals an author can cause name no declaration field and carry no `fix`:
 
 1. a TOML syntax error, which the parser reports by line and column;
-2. a declaration over spec 020's size limit.
+2. a declaration over 1 MiB, the maximum accepted size spec 020 §2 gives each declaration.
 
 An unknown key is not one of them. Every other refusal an author can cause carries a field and a
 `fix`. A 108 the author did not cause carries no `fix` either: a file that cannot be read, or a
