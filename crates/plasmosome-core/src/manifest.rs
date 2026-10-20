@@ -2336,12 +2336,15 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
 
     #[test]
     fn an_empty_id_is_refused_naming_id_and_no_plasmid() {
-        let (plasmid, field, fix) = field_refusal(
+        for declaration in [
             "id = \"\"\ndescription = \"Read pull requests.\"\nimpl.wasm = \"pr.wasm\"",
-        );
-        assert_eq!(plasmid, None);
-        assert_eq!(field, "id");
-        assert_eq!(fix, "id = \"choose-a-stable-id\"");
+            "id = \"\"\nimpl.wasm = \"pr.wasm\"",
+        ] {
+            let (plasmid, field, fix) = field_refusal(declaration);
+            assert_eq!(plasmid, None, "{declaration}");
+            assert_eq!(field, "id", "{declaration}");
+            assert_eq!(fix, "id = \"choose-a-stable-id\"", "{declaration}");
+        }
     }
 
     #[test]
@@ -2380,6 +2383,29 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
     const CSI: &str = concat!("\\", "u009B");
 
     const DELETE: &str = concat!("\\", "u007F");
+
+    const BELL: &str = concat!("\\", "u0007");
+
+    const LINE_SEPARATOR: &str = concat!("\\", "u2028");
+
+    const RIGHT_TO_LEFT: &str = concat!("\\", "u202E");
+
+    const ACTED_ON: [u32; 13] = [
+        0x2028, 0x2029, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067,
+        0x2068, 0x2069,
+    ];
+
+    fn raw(code: u32) -> char {
+        char::from_u32(code).unwrap()
+    }
+
+    fn acted_on(character: char) -> bool {
+        character.is_control() || ACTED_ON.contains(&u32::from(character))
+    }
+
+    fn line_and_bidi_characters() -> String {
+        ACTED_ON.iter().map(|code| raw(*code)).collect()
+    }
 
     fn declared(tail: &str) -> String {
         format!("{DECLARED}{tail}\n")
@@ -2632,6 +2658,72 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "hosts = [\"api.github.com\", \"uploads.github.com\"]",
             ),
             (
+                declared("commands = [\"gh\", \"gh\"]"),
+                github,
+                "commands",
+                "[commands.commands.gh]\nexec = [\"gh\"]",
+            ),
+            (
+                declared("[commands]\ncommands = [\"gh\", \"gh\"]"),
+                github,
+                "commands.commands",
+                "[commands.commands.gh]\nexec = [\"gh\"]",
+            ),
+            (
+                declared("commands = [\"gh\", \"git\"]"),
+                github,
+                "commands",
+                "[commands.commands.gh]\nexec = [\"gh\"]\n[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("network = [\"a.example\", \"a.example\"]"),
+                github,
+                "network",
+                "[network]\nhosts = [\"a.example\"]",
+            ),
+            (
+                declared("[network]\nhosts = 443\n[mock]\nhosts = [\"a.example\", \"a.example\"]"),
+                github,
+                "network.hosts",
+                "hosts = [\"a.example\"]",
+            ),
+            (
+                declared("[mock]\nhosts = [\"a.example\", \"a.example\"]"),
+                github,
+                "network",
+                "[network]\nhosts = [\"a.example\"]",
+            ),
+            (
+                declared("[network]\nhosts = []\n[mock]\nhosts = [\"a.example\", \"a.example\"]"),
+                github,
+                "network.hosts",
+                "hosts = [\"a.example\"]",
+            ),
+            (
+                declared("[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20, \"10.0.0.0/8\"]"),
+                github,
+                "network.pin_cidrs[0]",
+                REMOVAL,
+            ),
+            (
+                declared("[commands.commands]\ngit = \" \""),
+                github,
+                "commands.commands.git",
+                "[commands.commands.git]\nexec = [\"git\"]",
+            ),
+            (
+                declared("[commands.commands.git]\nexec = \" \""),
+                github,
+                "commands.commands.git.exec",
+                "exec = [\"git\"]",
+            ),
+            (
+                declared("[commands.commands.\"café\"]\nsubject = \"git\""),
+                github,
+                "commands.commands.\"café\".exec",
+                "exec = [\"café\"]",
+            ),
+            (
                 declared("[mock]\nhosts = [\"a.example\", \"b.example\"]"),
                 github,
                 "network",
@@ -2795,6 +2887,21 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             github,
             format!("commands.commands.\"a{CSI}b\".exec"),
             format!("exec = [\"a{CSI}b\"]"),
+        ));
+        rows.push((
+            declared(&format!("[network]\nhosts = \"x{}y\"", raw(0x2028))),
+            github,
+            "network.hosts".to_string(),
+            format!("hosts = [\"x{LINE_SEPARATOR}y\"]"),
+        ));
+        rows.push((
+            declared(&format!(
+                "[commands.commands.\"a{}b\"]\nsubject = \"git\"",
+                raw(0x202E)
+            )),
+            github,
+            format!("commands.commands.\"a{RIGHT_TO_LEFT}b\".exec"),
+            format!("exec = [\"a{RIGHT_TO_LEFT}b\"]"),
         ));
         rows.push((
             declared(&format!("[network]\nhosts = \"x{ESCAPE}y\"")),
@@ -3112,11 +3219,27 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
                 "[commands.commands.\"a\\nb\"]\nexec = [\"git\"]\n\
                  [commands.commands.\"a\\nb\".network]\nhosts = [\"h{ESCAPE}\", 5]"
             )),
+            format!(
+                "id = \"a{}b\"\ndescription = \"Reach the declared API.\"\n[network]\nports = [443]\n",
+                line_and_bidi_characters()
+            ),
+            declared(&format!(
+                "[network]\nhosts = \"x{}y\"",
+                line_and_bidi_characters()
+            )),
+            declared(&format!(
+                "[network]\nhosts = [\"api.github.com\"]\n[mock]\nhosts = [\"m{}\"]",
+                line_and_bidi_characters()
+            )),
+            declared(&format!(
+                "[commands.commands.\"k{}\"]\nexec = [\"git\"]\nnetwork = 443",
+                line_and_bidi_characters()
+            )),
         ]
     }
 
     #[test]
-    fn a_refusal_holds_no_control_character_but_the_line_breaks_of_a_section_fix() {
+    fn a_refusal_writes_no_raw_control_line_or_bidi_character_but_a_section_fix_line_break() {
         let declarations = author_refusals()
             .into_iter()
             .map(|(declaration, ..)| declaration)
@@ -3134,9 +3257,33 @@ refs = [{ id = "t", consumer = "git", delivery = ["helper", "mint"], ttl = "1h" 
             let controls: String = error
                 .to_string()
                 .chars()
-                .filter(|character| character.is_control())
+                .filter(|character| acted_on(*character))
                 .collect();
             assert_eq!(controls, "\n".repeat(breaks), "{declaration}\n{error}");
+        }
+    }
+
+    #[test]
+    fn a_toml_syntax_error_writes_no_raw_control_line_or_bidi_character_but_its_line_breaks() {
+        for (code, escaped) in [
+            (0x1B, ESCAPE),
+            (0x9B, CSI),
+            (0x07, BELL),
+            (0x2028, LINE_SEPARATOR),
+            (0x202E, RIGHT_TO_LEFT),
+        ] {
+            let declaration = format!("id = \"github-pr\"\nx = {}\n", raw(code));
+            let error = PlasmidManifest::parse(&declaration).unwrap_err();
+            assert!(matches!(error, ManifestError::Parse(_)), "{error:?}");
+            let text = error.to_string();
+            assert!(
+                !text
+                    .chars()
+                    .any(|character| character != '\n' && acted_on(character)),
+                "{code:#x}: {text:?}"
+            );
+            assert!(text.contains(escaped), "{code:#x}: {text:?}");
+            assert!(text.contains('\n'), "{code:#x} keeps its layout: {text:?}");
         }
     }
 

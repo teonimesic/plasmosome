@@ -643,6 +643,24 @@ mod tests {
     }
 
     #[test]
+    fn a_manifest_refusal_for_a_syntax_error_escapes_the_control_characters_it_quotes() {
+        for (code, escaped) in [(0x1B, "u001B"), (0x9B, "u009B"), (0x07, "u0007")] {
+            let character = char::from_u32(code).unwrap();
+            let error = PlasmidManifest::parse(&format!("id = \"github-pr\"\nx = {character}\n"))
+                .expect_err("a raw control character is not a TOML value");
+            let wire = WireError::manifest_refusal(DECLARATION_PATH.to_string(), &error);
+            let value = serde_json::to_value(&wire).expect("a wire error serializes");
+            let detail = value["detail"].as_str().expect("a 108 carries its detail");
+            assert!(!detail.contains(character), "{code:#x}: {detail:?}");
+            assert!(
+                detail.contains(&format!("\\{escaped}")),
+                "{code:#x}: {detail:?}"
+            );
+            assert_eq!(value.get("fix"), None, "{value}");
+        }
+    }
+
+    #[test]
     fn every_application_error_serializes_its_code_and_structured_fields() {
         expect_code_and_fields(
             WireError::ambiguous_target(vec!["cell-1".to_string(), "cell-2".to_string()]),

@@ -268,6 +268,31 @@ fn chains() -> Vec<(String, Vec<&'static str>, Vec<&'static str>)> {
             github.clone(),
             none.clone(),
         ),
+        (
+            "network = [\"a.example\", \"a.example\"]",
+            vec!["a.example"],
+            none.clone(),
+        ),
+        (
+            "[mock]\nhosts = [\"a.example\", \"a.example\"]",
+            vec!["a.example"],
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = []\n[mock]\nhosts = [\"a.example\", \"a.example\"]",
+            vec!["a.example"],
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = 443\n[mock]\nhosts = [\"a.example\", \"a.example\"]",
+            vec!["a.example"],
+            none.clone(),
+        ),
+        (
+            "[network]\nhosts = [\"api.github.com\"]\npin_cidrs = [20, \"10.0.0.0/8\"]",
+            github.clone(),
+            vec!["10.0.0.0/8"],
+        ),
         ("[impl]\nwasm = 5", none.clone(), none.clone()),
         ("impl = \"x.wasm\"", none.clone(), none.clone()),
         ("commands = 5", none.clone(), none.clone()),
@@ -313,6 +338,18 @@ fn chains() -> Vec<(String, Vec<&'static str>, Vec<&'static str>)> {
             none.clone(),
             none.clone(),
         ),
+        (
+            "[commands.commands.\"café\"]\nsubject = \"git\"",
+            none.clone(),
+            none.clone(),
+        ),
+        ("commands = [\"gh\", \"gh\"]", none.clone(), none.clone()),
+        (
+            "[commands]\ncommands = [\"gh\", \"gh\"]",
+            none.clone(),
+            none.clone(),
+        ),
+        ("commands = [\"gh\", \"git\"]", none.clone(), none.clone()),
         (
             "[commands.commands.\"a\\nb\"]\nsubject = \"git\"",
             none.clone(),
@@ -407,6 +444,11 @@ fn a_command_fix_runs_the_program_the_author_wrote() {
         ("[commands.commands.git]\nexec = []", "git"),
         ("commands = 5", "git"),
         ("[commands]\n[commands.commands]", "git"),
+        ("commands = [\"gh\", \"gh\"]", "gh"),
+        ("[commands]\ncommands = [\"gh\", \"gh\"]", "gh"),
+        ("[commands.commands]\ngit = \" \"", "git"),
+        ("[commands.commands.git]\nexec = \" \"", "git"),
+        ("[commands.commands.\"café\"]\nsubject = \"git\"", "café"),
     ] {
         let manifest = followed(&format!("{DECLARED}{tail}\n"));
         let commands = manifest.commands.unwrap().commands;
@@ -417,4 +459,52 @@ fn a_command_fix_runs_the_program_the_author_wrote() {
 
 fn strings(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_string()).collect()
+}
+
+#[test]
+fn a_commands_fix_writes_each_name_the_author_wrote_once() {
+    for tail in [
+        "commands = [\"gh\", \"git\", \"gh\"]",
+        "[commands]\ncommands = [\"gh\", \"git\", \"gh\"]",
+    ] {
+        let manifest = followed(&format!("{DECLARED}{tail}\n"));
+        let commands = manifest.commands.unwrap().commands;
+        let written: Vec<(String, Vec<String>)> = commands
+            .into_iter()
+            .map(|command| (command.id, command.exec))
+            .collect();
+        assert_eq!(
+            written,
+            vec![
+                ("gh".to_string(), strings(&["gh"])),
+                ("git".to_string(), strings(&["git"]))
+            ],
+            "{tail}"
+        );
+    }
+}
+
+#[test]
+fn a_section_fix_inside_an_inline_table_does_not_apply_today() {
+    let start =
+        format!("{DECLARED}[commands.commands]\ngit = {{ exec = [\"git\"], network = 443 }}\n");
+    let Err(ManifestError::Field { field, fix, .. }) = PlasmidManifest::parse(&start) else {
+        panic!("{start} is refused at the command's network");
+    };
+    assert_eq!(
+        (field.as_str(), fix.as_str()),
+        (
+            "commands.commands.git.network",
+            "[commands.commands.git.network]\nhosts = [\"api.example.com\"]"
+        )
+    );
+    let written = applied(&start, &field, &fix);
+    assert!(
+        matches!(
+            PlasmidManifest::parse(&written),
+            Err(ManifestError::Parse(_))
+        ),
+        "a [table] header cannot add to an inline table, so this fix is not TOML once \
+         written:\n{written}"
+    );
 }
