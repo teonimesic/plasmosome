@@ -110,6 +110,16 @@ def scratch():
         shutil.rmtree(root)
 
 
+@contextmanager
+def patched(name, value):
+    original = TOOL[name]
+    TOOL[name] = value
+    try:
+        yield
+    finally:
+        TOOL[name] = original
+
+
 def write_tar(path, entries, mtimes=None):
     with tarfile.open(path, "w", format=tarfile.GNU_FORMAT) as out:
         for name, spec in entries.items():
@@ -313,6 +323,10 @@ def the_product_image_has_nothing_under_opt_or_usr_local_bin():
         paths = {record["path"]: record for record in records}
         assert paths["/opt"]["type"] == "dir" and paths["/usr/local/bin"]["type"] == "dir"
         assert [p for p in paths if p.startswith(("/opt/", "/usr/local/bin/"))] == []
+        code, out, err, work, images = built(root, FakeDocker({"opt": None, "usr/local/bin": None}), work_name="absent")
+        assert code == 0, err
+        records = (Path(json.loads(out)["image_dir"]) / "content.jsonl").read_text()
+        assert '"/opt"' not in records and '"/usr/local/bin"' not in records
 
 
 def dev_proc_sys_are_emptied_and_dockerenv_dropped():
@@ -521,12 +535,8 @@ def contract_check_reads_debugfs_output():
             assert API["check_image"](check, facts, uuid)["mke2fs_version"] == "1.47.0"
         with changed(check / "opt.ls", "/2/040755/0/0/./\n"):
             assert "cannot parse" in refusal("check", API["check_image"], check, facts, uuid)
-        original = TOOL["MAX_ADD_BYTES"]
-        TOOL["MAX_ADD_BYTES"] = 2
-        try:
+        with patched("MAX_ADD_BYTES", 2):
             assert "larger than 2 bytes" in refusal("check", API["check_image"], check, facts, uuid)
-        finally:
-            TOOL["MAX_ADD_BYTES"] = original
         (check / "group").unlink()
         assert "/etc/group" in refusal("check", API["check_image"], check, facts, uuid)
         (check / "group").symlink_to(check / "passwd")
@@ -745,32 +755,23 @@ def placement_renames_then_sets_uchg():
 
 def failure_before_placement_removes_the_stage_and_keeps_the_work_root():
     with scratch() as root:
-        original = TOOL["place"]
-
         def failing(run, env, images_root, stage_dir):
             raise Refused("place", "injected")
 
-        TOOL["place"] = failing
-        try:
+        with patched("place", failing):
             code, out, err, work, images = built(root, FakeDocker(), work_name="injected")
-        finally:
-            TOOL["place"] = original
         assert code == 1 and err == "root-image: refused place: injected\n", err
         assert list(images.iterdir()) == []
         assert {"base.tar", "stage.tar", "content.jsonl", "rootfs.raw"} <= set(os.listdir(work))
-        original = TOOL["hash_bounded"]
-
         def interrupted(*args):
             raise KeyboardInterrupt
 
-        TOOL["hash_bounded"] = interrupted
-        try:
-            built(root, FakeDocker(), work_name="interrupted")
-            raise AssertionError("the interrupt did not propagate")
-        except KeyboardInterrupt:
-            pass
-        finally:
-            TOOL["hash_bounded"] = original
+        with patched("hash_bounded", interrupted):
+            try:
+                built(root, FakeDocker(), work_name="interrupted")
+                raise AssertionError("the interrupt did not propagate")
+            except KeyboardInterrupt:
+                pass
         assert list(images.iterdir()) == []
         fake = FakeDocker()
         fake.rootfs = None
@@ -783,22 +784,14 @@ def reads_from_the_base_are_bounded():
     with scratch() as root:
         assert "4096" in refusal("stage", stage_with, root, limit=4096)
         assert "/etc/passwd" in refusal("stage", stage_with, root, {"etc/passwd": f(PASSWD + b"x" * (1 << 20))})
-        original = TOOL["MAX_OUTPUT_BYTES"]
-        TOOL["MAX_OUTPUT_BYTES"] = 8
-        try:
+        with patched("MAX_OUTPUT_BYTES", 8):
             detail = refusal("command", API["run_command"], [sys.executable, "-c", "print('x' * 9)"], dict(os.environ))
-        finally:
-            TOOL["MAX_OUTPUT_BYTES"] = original
         assert "8 bytes" in detail
         result = API["run_command"]([sys.executable, "-c", "import sys; print('out'); sys.exit('err')"], dict(os.environ))
         assert result == Result(1, "out\n", "err\n")
         assert "not installed" in refusal("command", API["run_command"], [str(root / "no-such-program")], {})
-        original = TOOL["COMMAND_TIMEOUT"]
-        TOOL["COMMAND_TIMEOUT"] = 0.1
-        try:
+        with patched("COMMAND_TIMEOUT", 0.1):
             detail = refusal("command", API["run_command"], [sys.executable, "-c", "import time; time.sleep(5)"], {})
-        finally:
-            TOOL["COMMAND_TIMEOUT"] = original
         assert "longer than" in detail
         reader = API["LimitedReader"](io.BytesIO(b"abc"), 2, "the export")
         assert "the export is larger than 2 bytes" in refusal("stage", reader.read)
