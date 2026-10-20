@@ -401,7 +401,7 @@ mod tests {
     const FULL_CONFIG: [(&str, &str); 5] = [
         ("control_socket", r#""/tmp/c.uds""#),
         ("name", r#""work""#),
-        ("instance_root", r#""/srv/instances/work""#),
+        ("instance_root", r#""/srv/roots/r7""#),
         ("recovery_deadline_ms", "4321"),
         ("registry_root", r#""/srv/imports""#),
     ];
@@ -559,7 +559,7 @@ mod tests {
             DaemonConfig {
                 control_socket: PathBuf::from("/tmp/c.uds"),
                 name: InstanceName::parse("work").expect("`work` is an instance name"),
-                instance_root: PathBuf::from("/srv/instances/work"),
+                instance_root: PathBuf::from("/srv/roots/r7"),
                 recovery_deadline: Duration::from_millis(4321),
                 registry_root: Some(PathBuf::from("/srv/imports")),
             }
@@ -628,6 +628,10 @@ mod tests {
             ),
             ("7".to_string(), "integer `7`, expected a JSON object"),
             ("null".to_string(), "null, expected a JSON object"),
+            (
+                format!("{} {{}}", written(&FULL_CONFIG)),
+                "trailing characters",
+            ),
         ]);
     }
 
@@ -647,6 +651,11 @@ mod tests {
                         if *named == key && path == Path::new("cells")
                 ),
                 "the refusal carries the key and the path as written: {refusal:?}"
+            );
+            assert_eq!(
+                refusal.to_string(),
+                format!("`{key}` must be an absolute path, got \"cells\""),
+                "the operator reads the key and the path as written"
             );
             assert!(refusal.source().is_none(), "{refusal:?}");
         }
@@ -679,6 +688,21 @@ mod tests {
     }
 
     #[test]
+    fn the_deadline_admits_every_positive_whole_number_of_milliseconds() {
+        for (written_ms, deadline) in [
+            ("1", Duration::from_millis(1)),
+            ("18446744073709551615", Duration::from_millis(u64::MAX)),
+        ] {
+            let parsed = parse_config(&replacing("recovery_deadline_ms", written_ms))
+                .unwrap_or_else(|error| panic!("{written_ms} ms is a valid deadline: {error}"));
+            assert_eq!(
+                parsed.recovery_deadline, deadline,
+                "{written_ms} ms is carried exactly, with no floor above 1 and no cap"
+            );
+        }
+    }
+
+    #[test]
     fn registry_root_is_optional_and_omission_means_local_operation() {
         let local = parse_config(&omitting("registry_root"))
             .expect("a config without registry_root parses");
@@ -701,7 +725,7 @@ mod tests {
             .expect("the config parses");
         let there = parse_config(&replacing("control_socket", r#""/b/elsewhere.uds""#))
             .expect("the config parses");
-        assert_eq!(here.instance_root, PathBuf::from("/srv/instances/work"));
+        assert_eq!(here.instance_root, PathBuf::from("/srv/roots/r7"));
         assert_eq!(
             there.instance_root, here.instance_root,
             "moving the control socket does not move the instance root"
@@ -715,6 +739,29 @@ mod tests {
         assert!(
             refusal.to_string().contains("`instance_root`"),
             "the refusal names the missing key: {refusal}"
+        );
+    }
+
+    #[test]
+    fn the_daemon_serves_without_creating_its_instance_root() {
+        let directory = tempfile::tempdir().expect("the test owns a temporary directory");
+        let control = directory.path().join("control.uds");
+        let configured = config(directory.path(), &control, "work");
+        let root = configured.instance_root.clone();
+        assert!(!root.exists(), "the configured root starts missing");
+        let daemon = start(configured);
+
+        let mut client = addressable(&control);
+        assert_eq!(
+            ask(&mut client, STATUS_REQUEST).pointer("/result/ready"),
+            Some(&json!(true)),
+            "this build serves status whether or not its instance root exists"
+        );
+        drop(client);
+        daemon.stop().expect("a clean shutdown is not an error");
+        assert!(
+            !root.exists(),
+            "the daemon never creates its instance root: the operator supplies it"
         );
     }
 
