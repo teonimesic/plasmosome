@@ -520,7 +520,7 @@ fn refuses_when_git_cannot_read() {
         let (repository, _) = commit(&base());
         let shadow = shadow_git(concat!(
             "  every:*) echo 'fatal: stub git' >&2; exit 128 ;;\n",
-            "  id:rev-parse) echo 'not a commit id'; exit 0 ;;\n",
+            "  id:rev-parse) echo 'refs/heads/main'; exit 0 ;;\n",
             "  list:ls-tree) echo 'fatal: stub ls-tree' >&2; exit 128 ;;\n",
             "  record:ls-tree) printf 'a record with no tab\\0'; exit 0 ;;\n",
             "  blob:cat-file) echo 'fatal: stub cat-file' >&2; exit 128 ;;\n",
@@ -571,6 +571,37 @@ fn refuses_when_git_cannot_read() {
 
         for (case, output) in outputs_in_parallel(runs) {
             assert_cannot_read(&output, case);
+            let says: &[&str] = match case {
+                "git fails every call" => {
+                    &["cannot read HEAD as a commit: git rev-parse exited 128: fatal: stub git"]
+                }
+                "git rev-parse prints no commit id" => &[
+                    "cannot read HEAD as a commit: git rev-parse printed refs/heads/main, not a commit id",
+                ],
+                "git ls-tree fails" => &[
+                    "cannot read the tree of ",
+                    ": git ls-tree exited 128: fatal: stub ls-tree",
+                ],
+                "git ls-tree prints a record the step cannot parse" => &[
+                    "cannot read the tree of ",
+                    ": git ls-tree printed a record this step cannot parse: a record with no tab",
+                ],
+                "git cat-file fails" => &[
+                    "cannot read rust-toolchain.toml (blob ",
+                    ": git cat-file exited 128: fatal: stub cat-file",
+                ],
+                "a working directory that is no repository" => &[
+                    "cannot read HEAD as a commit: git rev-parse exited 128: fatal: not a git repository",
+                ],
+                _ => &["cannot read HEAD as a commit: git cannot run: "],
+            };
+            let said = said(&output);
+            for fragment in says {
+                assert!(
+                    said.contains(fragment),
+                    "{case}: the step must say what it could not read and why, `{fragment}`; it said:\n{said}"
+                );
+            }
         }
     });
 }
