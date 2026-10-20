@@ -1,4 +1,5 @@
-use std::io;
+use std::fs::File;
+use std::io::{self, Read, Seek};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::LazyLock;
@@ -7,51 +8,69 @@ use std::time::{Duration, Instant};
 
 const DAEMON: &str = env!("CARGO_BIN_EXE_membraned");
 const BOUND: Duration = Duration::from_secs(60);
+const STDERR_LIMIT: u64 = 4096;
 
-static WARM_UP: LazyLock<Option<ExitStatus>> = LazyLock::new(|| {
-    let mut child = Command::new(DAEMON)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("membraned starts for its warm-up");
-    exit_within(&mut child, BOUND).expect("the warm-up's state is readable")
-});
+static WARM_UP: LazyLock<Result<(), String>> =
+    LazyLock::new(|| run_once("membraned", Command::new(DAEMON), BOUND));
 
 /// Takes nothing and returns a command for the membraned under test, with no
 /// arguments set.
 ///
-/// macOS charges the first exec of a freshly linked binary up to seconds
-/// under load. The first call in a test process runs membraned once with no
-/// arguments, so that cost is spent before any test deadline starts. Every
-/// call panics unless that run exited with the usage status 2; a run still
-/// going after 60 seconds is killed and fails the same way.
+/// macOS charges the first exec of a binary file it has not run before up to
+/// seconds under load, and cargo writes `target/debug/membraned` again on every
+/// run, so every test run pays that cost. The first call in a test process
+/// runs membraned once with no arguments, so the cost is spent before any test
+/// deadline starts. A run still going after 60 seconds is killed and reaped.
+/// Every call panics unless that run exited with the usage status 2, and every
+/// call reports a failure with the same message, which names the cause and up
+/// to 4096 bytes of the run's stderr.
 pub fn membraned() -> Command {
-    exited_with_usage("membraned", *WARM_UP);
+    if let Err(failure) = &*WARM_UP {
+        panic!("{failure}");
+    }
     Command::new(DAEMON)
 }
 
-/// Takes a daemon's name and the outcome of its warm-up run, where `None`
-/// means the run did not exit within its bound, and panics unless the run
-/// exited with status 2.
-pub fn exited_with_usage(daemon: &str, outcome: Option<ExitStatus>) {
-    let Some(status) = outcome else {
-        panic!("warm-up of {daemon} did not exit within {BOUND:?}");
-    };
-    assert_eq!(
-        status.code(),
-        Some(2),
-        "warm-up of {daemon} exits with its usage status 2, not {status}"
-    );
+fn run_once(daemon: &str, mut command: Command, bound: Duration) -> Result<(), String> {
+    let no_file =
+        |error: io::Error| format!("warm-up of {daemon} has no file for its stderr: {error}");
+    let mut stderr = tempfile::tempfile().map_err(no_file)?;
+    let writer = stderr.try_clone().map_err(no_file)?;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(writer)
+        .spawn()
+        .map_err(|error| format!("warm-up of {daemon} could not start: {error}"))?;
+    let outcome = exit_within(&mut child, bound);
+    let said = first_bytes(&mut stderr);
+    match outcome {
+        Ok(Some(status)) if status.code() == Some(2) => Ok(()),
+        Ok(Some(status)) => Err(format!(
+            "warm-up of {daemon} exits with its usage status 2, not {status}; its stderr: {said:?}"
+        )),
+        Ok(None) => Err(format!(
+            "warm-up of {daemon} did not exit within {bound:?}; its stderr: {said:?}"
+        )),
+        Err(error) => Err(format!(
+            "the state of the warm-up of {daemon} is unreadable: {error}; its stderr: {said:?}"
+        )),
+    }
 }
 
-/// Takes a running child and a bound, and returns the child's exit status,
-/// or `None` after killing and reaping a child still running at the bound.
-pub fn exit_within(child: &mut Child, bound: Duration) -> io::Result<Option<ExitStatus>> {
+fn exit_within(child: &mut Child, bound: Duration) -> io::Result<Option<ExitStatus>> {
     let deadline = Instant::now() + bound;
     loop {
-        if let Some(status) = child.try_wait().expect("the warm-up's state is readable") {
-            return Ok(Some(status));
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) => {}
+            Err(error) => {
+                if error.raw_os_error() != Some(libc::ECHILD) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return Err(error);
+            }
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -62,12 +81,15 @@ pub fn exit_within(child: &mut Child, bound: Duration) -> io::Result<Option<Exit
     }
 }
 
-/// Takes a daemon's name, the command that runs it with no arguments and a
-/// bound, and returns `Ok` only when that run exited with status 2 within the
-/// bound; otherwise it returns the one message every caller reports.
-pub fn run_once(daemon: &str, command: Command, bound: Duration) -> Result<(), String> {
-    let _ = (daemon, command, bound);
-    todo!("the warm-up's single run")
+fn first_bytes(file: &mut File) -> String {
+    let mut bytes = Vec::new();
+    match file
+        .rewind()
+        .and_then(|()| file.by_ref().take(STDERR_LIMIT).read_to_end(&mut bytes))
+    {
+        Ok(_) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => format!("unreadable: {error}"),
+    }
 }
 
 #[test]
