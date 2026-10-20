@@ -1812,52 +1812,63 @@ mod tests {
         }
     }
 
+    fn names(listed: &[&str]) -> std::vec::IntoIter<io::Result<Vec<u8>>> {
+        listed
+            .iter()
+            .map(|name| Ok(name.as_bytes().to_vec()))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
     #[test]
-    #[allow(unsafe_code)]
-    fn listing_takes_each_kind_from_a_no_follow_stat_whatever_readdir_reports() {
+    fn names_with_no_type_get_their_kind_from_a_no_follow_stat_and_are_sorted() {
         let root = test_root();
         let at = |name: &str| root.path().join(name);
         make_dir(&at("dir"), 0o700);
         fs::write(at("file"), b"").expect("write");
         symlink("dir", at("link")).expect("symlink");
         let _socket = UnixListener::bind(at("sock")).expect("bind a socket");
-        for reported in [libc::DT_UNKNOWN, libc::DT_DIR] {
-            let listing = list_entries_with(&start(&root), root.path(), |entry| {
-                // SAFETY: `entry` is the non-null record readdir just returned, which stays valid
-                // until the next readdir on the stream, and d_type lies in its fixed header.
-                unsafe { (*entry).d_type = reported };
-            });
-            assert_eq!(
-                listing,
-                Ok(vec![
-                    listed("dir", EntryKind::Directory),
-                    listed("file", EntryKind::Other),
-                    listed("link", EntryKind::Symlink),
-                    listed("sock", EntryKind::Other),
-                ]),
-                "readdir reported d_type {reported} for every entry"
-            );
-        }
+        assert_eq!(
+            listed_from(
+                &start(&root),
+                root.path(),
+                names(&["sock", "link", "file", "dir"])
+            ),
+            Ok(vec![
+                listed("dir", EntryKind::Directory),
+                listed("file", EntryKind::Other),
+                listed("link", EntryKind::Symlink),
+                listed("sock", EntryKind::Other),
+            ])
+        );
     }
 
     #[test]
-    #[allow(unsafe_code)]
-    fn listing_skips_an_entry_that_vanishes_after_readdir_reports_it() {
+    fn a_name_gone_before_its_stat_is_left_out() {
         let root = test_root();
-        make_dir(&root.path().join("gone"), 0o700);
         make_dir(&root.path().join("kept"), 0o700);
-        let mut removed = false;
-        let listing = list_entries_with(&start(&root), root.path(), |entry| {
-            // SAFETY: `entry` is the non-null record readdir just returned, which stays valid
-            // until the next readdir on the stream, and its d_name is NUL-terminated.
-            let name = unsafe { CStr::from_ptr((&raw const (*entry).d_name).cast()) };
-            if name == c"gone" {
-                fs::remove_dir(root.path().join("gone")).expect("rmdir");
-                removed = true;
-            }
-        });
-        assert!(removed, "readdir never reported gone");
-        assert_eq!(listing, Ok(vec![listed("kept", EntryKind::Directory)]));
+        assert_eq!(
+            listed_from(&start(&root), root.path(), names(&["gone", "kept"])),
+            Ok(vec![listed("kept", EntryKind::Directory)])
+        );
+    }
+
+    #[test]
+    fn a_readdir_error_after_some_names_is_io_naming_the_directory() {
+        let root = test_root();
+        make_dir(&root.path().join("kept"), 0o700);
+        let failing = vec![
+            Ok(b"kept".to_vec()),
+            Err(io::Error::from_raw_os_error(libc::EIO)),
+        ];
+        assert_eq!(
+            listed_from(&start(&root), root.path(), failing.into_iter()),
+            Err(PrivateSocketError::Io {
+                op: "readdir",
+                path: root.path().to_path_buf(),
+                errno: libc::EIO
+            })
+        );
     }
 
     #[test]
