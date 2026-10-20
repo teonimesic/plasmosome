@@ -1244,6 +1244,8 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::thread;
     use std::time::{Duration, SystemTime};
@@ -2609,5 +2611,818 @@ mod tests {
         assert!(
             matches!(refusal("file"), FileRefusal::Io(error) if error.raw_os_error() == Some(libc::EEXIST))
         );
+    }
+
+    const BOOT_TEXT: &str = "5d1e7c3a-0b2f-4e6d-9a8b-1c2d3e4f5a6b";
+
+    fn boot() -> BootSession {
+        BootSession::parse(BOOT_TEXT).expect("a boot session")
+    }
+
+    fn marker(name: &str, stopped: bool) -> LaunchedMarker {
+        LaunchedMarker {
+            cell: cell(name),
+            boot_session: boot(),
+            stopped,
+        }
+    }
+
+    fn opened(root: &Path, name: &str) -> CellDir {
+        make_cell(root, name, None);
+        open_root(root)
+            .cell_dir(&cell(name))
+            .expect("the cell opens")
+    }
+
+    fn recording_cell(root: &Path, name: &str) -> (InstanceRoot, WriterLock, CellDir) {
+        let (instance, lock) = recording_locked(root);
+        let dir = instance
+            .create_cell_dir(&lock, &cell(name))
+            .expect("the cell is created");
+        reset_syncs();
+        (instance, lock, dir)
+    }
+
+    fn synced() -> Vec<(u64, u64)> {
+        SYNCED.with(|all| all.borrow().clone())
+    }
+
+    fn identity_at(path: &Path) -> (u64, u64) {
+        identity(&fs::symlink_metadata(path).expect("the entry exists"))
+    }
+
+    fn exists(path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok()
+    }
+
+    fn no_sync(_: BorrowedFd<'_>) -> io::Result<()> {
+        Ok(())
+    }
+
+    #[test]
+    fn a_launched_marker_is_one_line_with_or_without_a_clean_stop() {
+        let running = marker("cell-1", false);
+        let stopped = marker("cell-1", true);
+        assert_eq!(
+            running.encode(),
+            format!("{{\"cell\":\"cell-1\",\"boot_session\":\"{BOOT_TEXT}\"}}\n").into_bytes()
+        );
+        assert_eq!(
+            stopped.encode(),
+            format!("{{\"cell\":\"cell-1\",\"boot_session\":\"{BOOT_TEXT}\",\"stopped\":true}}\n")
+                .into_bytes()
+        );
+        for each in [running, stopped] {
+            assert_eq!(
+                LaunchedMarker::decode(&each.encode()).expect("its own record decodes"),
+                each
+            );
+        }
+        let spaced = format!("{{\"cell\": \"cell-9\", \"boot_session\": \"{BOOT_TEXT}\"}}\n");
+        assert_eq!(
+            LaunchedMarker::decode(spaced.as_bytes()).expect("spec 023's example form decodes"),
+            marker("cell-9", false)
+        );
+        let upper = LaunchedMarker {
+            boot_session: BootSession::parse(&BOOT_TEXT.to_uppercase()).expect("a boot session"),
+            ..marker("cell-1", false)
+        };
+        assert_eq!(upper.encode(), running_bytes());
+    }
+
+    fn running_bytes() -> Vec<u8> {
+        marker("cell-1", false).encode()
+    }
+
+    #[test]
+    fn a_launched_marker_decodes_only_one_strict_record() {
+        let good = format!("{{\"cell\":\"cell-1\",\"boot_session\":\"{BOOT_TEXT}\"}}");
+        let with = |extra: &str| {
+            format!("{{\"cell\":\"cell-1\",\"boot_session\":\"{BOOT_TEXT}\"{extra}}}\n")
+                .into_bytes()
+        };
+        let session = |text: &str| {
+            format!("{{\"cell\":\"cell-1\",\"boot_session\":\"{text}\"}}\n").into_bytes()
+        };
+        let cell_is = |text: &str| {
+            format!("{{\"cell\":{text},\"boot_session\":\"{BOOT_TEXT}\"}}\n").into_bytes()
+        };
+        let refused: Vec<(&str, Vec<u8>)> = vec![
+            ("no newline", good.clone().into_bytes()),
+            ("a second line", format!("{good}\n{good}\n").into_bytes()),
+            ("text after the newline", format!("{good}\n ").into_bytes()),
+            ("a CRLF ending", format!("{good}\r\n").into_bytes()),
+            ("an empty record", Vec::new()),
+            ("only a newline", b"\n".to_vec()),
+            ("a torn record", format!("{}\n", &good[..20]).into_bytes()),
+            ("a repeated key", with(",\"cell\":\"cell-1\"")),
+            ("an unknown key", with(",\"pid\":1")),
+            ("stopped false", with(",\"stopped\":false")),
+            ("stopped as a string", with(",\"stopped\":\"true\"")),
+            ("stopped null", with(",\"stopped\":null")),
+            ("stopped as a number", with(",\"stopped\":1")),
+            ("an uppercase session", session(&BOOT_TEXT.to_uppercase())),
+            (
+                "a session without hyphens",
+                session(&BOOT_TEXT.replace('-', "")),
+            ),
+            ("a braced session", session(&format!("{{{BOOT_TEXT}}}"))),
+            ("a 35-character session", session(&BOOT_TEXT[..35])),
+            ("a 37-character session", session(&format!("{BOOT_TEXT}0"))),
+            (
+                "a session that is not hex",
+                session(&BOOT_TEXT.replace('a', "g")),
+            ),
+            (
+                "a session that is a number",
+                b"{\"cell\":\"cell-1\",\"boot_session\":5}\n".to_vec(),
+            ),
+            ("cell-0", cell_is("\"cell-0\"")),
+            ("a cell outside spec 023's IDs", cell_is("\"a-journal\"")),
+            ("a cell that is a number", cell_is("1")),
+            (
+                "no cell",
+                format!("{{\"boot_session\":\"{BOOT_TEXT}\"}}\n").into_bytes(),
+            ),
+            ("no boot session", b"{\"cell\":\"cell-1\"}\n".to_vec()),
+            ("an array", format!("[{good}]\n").into_bytes()),
+            ("bytes that are not UTF-8", b"\xff\n".to_vec()),
+        ];
+        for (what, bytes) in refused {
+            match LaunchedMarker::decode(&bytes) {
+                Err(MarkerFault::Malformed(reason)) => assert!(!reason.is_empty(), "{what}"),
+                other => panic!("{what} is malformed, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_launched_marker_holds_at_most_4096_bytes() {
+        let padded = |total: usize| {
+            let record = running_bytes();
+            let mut bytes = b"{".to_vec();
+            bytes.extend(std::iter::repeat_n(b' ', total - record.len()));
+            bytes.extend(&record[1..]);
+            assert_eq!(bytes.len(), total);
+            bytes
+        };
+        assert_eq!(MAX_MARKER_BYTES, 4096);
+        assert_eq!(
+            LaunchedMarker::decode(&padded(4096)).expect("4,096 bytes decode"),
+            marker("cell-1", false)
+        );
+        expect_match!(LaunchedMarker::decode(&padded(4097)), Err(MarkerFault::TooLarge) => ());
+    }
+
+    #[test]
+    fn read_launched_is_absent_only_when_no_entry_is_there() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        expect_match!(dir.read_launched(), MarkerRead::Absent => ());
+        fs::write(
+            root.join("cells/cell-1/launched"),
+            marker("cell-1", true).encode(),
+        )
+        .expect("the marker is written");
+        expect_match!(dir.read_launched(), MarkerRead::Present(found) => {
+            assert_eq!(found, marker("cell-1", true))
+        });
+    }
+
+    #[test]
+    fn a_symlink_named_launched_is_unreadable_and_not_followed() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = root.join("cells/cell-1/launched");
+        let target = root.join("elsewhere");
+        fs::write(&target, running_bytes()).expect("the target is written");
+        symlink(&target, &path).expect("the link is made");
+        expect_match!(dir.read_launched(), MarkerRead::Unreadable(MarkerFault::Symlink) => ());
+        fs::remove_file(&path).expect("the link is removed");
+        symlink(root.join("missing"), &path).expect("the dangling link is made");
+        expect_match!(dir.read_launched(), MarkerRead::Unreadable(MarkerFault::Symlink) => ());
+    }
+
+    #[test]
+    fn a_directory_or_fifo_named_launched_is_unreadable_without_blocking() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = root.join("cells/cell-1/launched");
+        fs::create_dir(&path).expect("the directory is made");
+        expect_match!(dir.read_launched(), MarkerRead::Unreadable(MarkerFault::NotRegular) => ());
+        fs::remove_dir(&path).expect("the directory is removed");
+        make_fifo(&path);
+        expect_match!(
+            within("reading a FIFO marker", move || dir.read_launched()),
+            MarkerRead::Unreadable(MarkerFault::NotRegular) => ()
+        );
+    }
+
+    #[test]
+    fn a_marker_naming_another_cell_is_unreadable() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        fs::write(
+            root.join("cells/cell-1/launched"),
+            marker("cell-2", false).encode(),
+        )
+        .expect("the marker is written");
+        expect_match!(dir.read_launched(), MarkerRead::Unreadable(MarkerFault::WrongCell { found }) => {
+            assert_eq!(found, cell("cell-2"))
+        });
+    }
+
+    #[test]
+    fn a_torn_second_line_or_oversized_marker_is_unreadable() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = root.join("cells/cell-1/launched");
+        let whole = running_bytes();
+        for (what, bytes) in [
+            ("an empty marker", Vec::new()),
+            (
+                "a marker without its newline",
+                whole[..whole.len() - 1].to_vec(),
+            ),
+            ("half a marker", whole[..20].to_vec()),
+            ("two records", [whole.clone(), whole.clone()].concat()),
+            (
+                "a record and a torn second line",
+                [whole.clone(), whole[..9].to_vec()].concat(),
+            ),
+        ] {
+            fs::write(&path, &bytes).expect("the marker is written");
+            match dir.read_launched() {
+                MarkerRead::Unreadable(MarkerFault::Malformed(_)) => {}
+                other => panic!("{what} is malformed, got {other:?}"),
+            }
+        }
+        fs::write(&path, vec![b' '; 5000]).expect("the marker is written");
+        expect_match!(dir.read_launched(), MarkerRead::Unreadable(MarkerFault::TooLarge) => ());
+    }
+
+    #[test]
+    fn a_marker_that_cannot_be_opened_is_an_io_fault_not_absence() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = root.join("cells/cell-1/launched");
+        fs::write(&path, running_bytes()).expect("the marker is written");
+        let restore = restrict(&path, 0o000);
+        expect_match!(dir.read_launched(), MarkerRead::Unreadable(MarkerFault::Io(source)) => {
+            assert_eq!(source.raw_os_error(), Some(libc::EACCES))
+        });
+        drop(restore);
+        let restore = restrict(&root.join("cells/cell-1"), 0o000);
+        let result = dir.read_launched();
+        drop(restore);
+        expect_match!(result, MarkerRead::Unreadable(MarkerFault::Io(source)) => {
+            assert_eq!(source.raw_os_error(), Some(libc::EACCES))
+        });
+    }
+
+    #[test]
+    fn create_launched_writes_a_private_marker_then_syncs_it_and_the_directory() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        dir.create_launched(boot()).expect("the marker is created");
+        let path = root.join("cells/cell-1/launched");
+        assert_eq!(fs::read(&path).expect("the marker reads"), running_bytes());
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(
+            synced(),
+            [identity_at(&path), identity_at(&root.join("cells/cell-1"))]
+        );
+        expect_match!(dir.read_launched(), MarkerRead::Present(found) => {
+            assert_eq!(found, marker("cell-1", false))
+        });
+    }
+
+    #[test]
+    fn create_launched_never_replaces_an_entry() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = root.join("cells/cell-1/launched");
+        dir.create_launched(boot())
+            .expect("the first marker is created");
+        let later = BootSession::parse("00000000-0000-4000-8000-000000000001").expect("a session");
+        expect_match!(dir.create_launched(later), Err(CellDirError::AlreadyExists { path: refused }) => {
+            assert_eq!(refused, path)
+        });
+        assert_eq!(fs::read(&path).expect("the marker reads"), running_bytes());
+        fs::remove_file(&path).expect("the marker is removed");
+        let target = root.join("never-created");
+        symlink(&target, &path).expect("the dangling link is made");
+        expect_match!(dir.create_launched(boot()), Err(CellDirError::AlreadyExists { .. }) => ());
+        assert!(!exists(&target), "the marker was created through the link");
+    }
+
+    #[test]
+    fn create_launched_refuses_a_cell_outside_spec_023s_ids() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "a-journal");
+        expect_match!(
+            dir.create_launched(boot()),
+            Err(CellDirError::InvalidCell(CellPathError::NotACellName(text))) => assert_eq!(text, "a-journal")
+        );
+        assert!(!exists(&root.join("cells/a-journal/launched")));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn host_boot_session_text() -> String {
+        let output = std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "kern.bootsessionuuid"])
+            .output()
+            .expect("sysctl runs");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout)
+            .expect("sysctl prints text")
+            .trim_end_matches('\n')
+            .to_lowercase()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn host_boot_session_text() -> String {
+        fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .expect("the boot ID reads")
+            .trim_end_matches('\n')
+            .to_lowercase()
+    }
+
+    #[test]
+    fn the_marker_records_the_hosts_boot_session_in_lowercase() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        dir.create_launched(crate::clock::boot_session().expect("the host boot session"))
+            .expect("the marker is created");
+        let record: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join("cells/cell-1/launched")).expect("the marker reads"),
+        )
+        .expect("the marker is JSON");
+        assert_eq!(record["boot_session"], host_boot_session_text());
+    }
+
+    #[test]
+    fn mark_launched_stopped_replaces_the_marker_by_a_synced_rename() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        dir.create_launched(boot()).expect("the marker is created");
+        let path = root.join("cells/cell-1/launched");
+        let before = identity_at(&path);
+        let mut old = fs::File::open(&path).expect("the old marker opens");
+        reset_syncs();
+        dir.mark_launched_stopped()
+            .expect("the clean stop is recorded");
+        assert_eq!(
+            fs::read(&path).expect("the marker reads"),
+            marker("cell-1", true).encode()
+        );
+        let after = identity_at(&path);
+        assert_ne!(after, before, "the marker was rewritten in place");
+        let mut kept = Vec::new();
+        old.read_to_end(&mut kept).expect("the old marker reads");
+        assert_eq!(
+            kept,
+            running_bytes(),
+            "the old record changed under its reader"
+        );
+        assert_eq!(mode_of(&path), 0o600);
+        assert!(!exists(&root.join("cells/cell-1/launched.tmp")));
+        assert_eq!(synced(), [after, identity_at(&root.join("cells/cell-1"))]);
+    }
+
+    #[test]
+    fn mark_launched_stopped_replaces_a_temporary_left_by_a_crash() {
+        for stale in ["a torn file", "a symlink"] {
+            let (_dir, root) = temp_root();
+            let dir = opened(&root, "cell-1");
+            dir.create_launched(boot()).expect("the marker is created");
+            let temporary = root.join("cells/cell-1/launched.tmp");
+            let target = root.join("elsewhere");
+            if stale == "a symlink" {
+                fs::write(&target, b"keep").expect("the target is written");
+                symlink(&target, &temporary).expect("the link is made");
+            } else {
+                fs::write(&temporary, b"{\"cell\":\"cel").expect("the temporary is written");
+            }
+            dir.mark_launched_stopped()
+                .unwrap_or_else(|error| panic!("{stale}: {error:?}"));
+            expect_match!(dir.read_launched(), MarkerRead::Present(found) => {
+                assert_eq!(found, marker("cell-1", true), "{stale}")
+            });
+            assert!(!exists(&temporary), "{stale} was left");
+            if stale == "a symlink" {
+                assert_eq!(fs::read(&target).expect("the target reads"), b"keep");
+            }
+        }
+    }
+
+    #[test]
+    fn mark_launched_stopped_needs_this_cells_marker_and_writes_nothing_without_it() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = root.join("cells/cell-1/launched");
+        let temporary = root.join("cells/cell-1/launched.tmp");
+        expect_match!(dir.mark_launched_stopped(), Err(CellDirError::Missing { path: refused }) => {
+            assert_eq!(refused, path)
+        });
+        assert!(!exists(&path) && !exists(&temporary));
+        let foreign = marker("cell-2", false).encode();
+        fs::write(&path, &foreign).expect("the marker is written");
+        expect_match!(
+            dir.mark_launched_stopped(),
+            Err(CellDirError::MarkerUnreadable { path: refused, fault: MarkerFault::WrongCell { .. } }) => {
+                assert_eq!(refused, path)
+            }
+        );
+        assert_eq!(fs::read(&path).expect("the marker reads"), foreign);
+        assert!(!exists(&temporary));
+    }
+
+    #[test]
+    fn mark_launched_stopped_on_a_stopped_marker_keeps_it_stopped() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        dir.create_launched(boot()).expect("the marker is created");
+        dir.mark_launched_stopped().expect("the first stop");
+        dir.mark_launched_stopped().expect("the second stop");
+        assert_eq!(
+            fs::read(root.join("cells/cell-1/launched")).expect("the marker reads"),
+            marker("cell-1", true).encode()
+        );
+    }
+
+    #[test]
+    fn a_reader_never_sees_a_partial_marker_while_it_is_rewritten() {
+        let (_dir, root) = temp_root();
+        make_cell(&root, "cell-1", None);
+        let mut instance = open_root(&root);
+        instance.sync = no_sync;
+        let writer = instance.cell_dir(&cell("cell-1")).expect("the cell opens");
+        let reader = instance.cell_dir(&cell("cell-1")).expect("the cell opens");
+        writer
+            .create_launched(boot())
+            .expect("the marker is created");
+        let done = Arc::new(AtomicBool::new(false));
+        let reading = {
+            let done = Arc::clone(&done);
+            thread::spawn(move || {
+                let mut reads = 0_u64;
+                while !done.load(Ordering::SeqCst) {
+                    match reader.read_launched() {
+                        MarkerRead::Present(found) if found.cell == cell("cell-1") => reads += 1,
+                        other => return Err(format!("{other:?}")),
+                    }
+                }
+                Ok(reads)
+            })
+        };
+        let path = root.join("cells/cell-1/launched");
+        let running = root.join("cells/cell-1/running");
+        for _ in 0..1_000 {
+            fs::write(&running, running_bytes()).expect("the running record is written");
+            fs::rename(&running, &path).expect("the running record is put back");
+            writer
+                .mark_launched_stopped()
+                .expect("the clean stop is recorded");
+        }
+        done.store(true, Ordering::SeqCst);
+        let reads = reading
+            .join()
+            .expect("the reader did not panic")
+            .unwrap_or_else(|seen| panic!("a reader saw {seen}"));
+        assert!(reads > 0, "the reader never read the marker");
+    }
+
+    #[test]
+    fn remove_launched_removes_the_marker_syncs_and_tolerates_absence() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        dir.create_launched(boot()).expect("the marker is created");
+        reset_syncs();
+        dir.remove_launched().expect("the marker is removed");
+        expect_match!(dir.read_launched(), MarkerRead::Absent => ());
+        dir.remove_launched()
+            .expect("a missing marker is not an error");
+        assert_eq!(synced(), [identity_at(&root.join("cells/cell-1")); 2]);
+        let path = root.join("cells/cell-1/launched");
+        fs::create_dir(&path).expect("the directory is made");
+        expect_match!(dir.remove_launched(), Err(CellDirError::Io { path: refused, .. }) => {
+            assert_eq!(refused, path)
+        });
+        assert!(exists(&path), "a directory named launched was removed");
+    }
+
+    #[test]
+    fn create_runtime_dir_is_private_exclusive_and_synced() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        let runtime = dir.create_runtime_dir().expect("runtime is created");
+        let path = root.join("cells/cell-1/runtime");
+        assert!(
+            fs::symlink_metadata(&path)
+                .expect("runtime exists")
+                .is_dir()
+        );
+        assert_eq!(mode_of(&path), 0o700);
+        assert_eq!(
+            identity(
+                &fs::File::from(runtime)
+                    .metadata()
+                    .expect("the descriptor's fstat")
+            ),
+            identity_at(&path)
+        );
+        assert_eq!(synced(), [identity_at(&root.join("cells/cell-1"))]);
+        expect_match!(dir.create_runtime_dir(), Err(CellDirError::AlreadyExists { path: refused }) => {
+            assert_eq!(refused, path)
+        });
+    }
+
+    #[test]
+    fn create_runtime_dir_never_follows_or_reuses_an_entry() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let target = root.join("elsewhere");
+        symlink(&target, root.join("cells/cell-1/runtime")).expect("the dangling link is made");
+        expect_match!(dir.create_runtime_dir(), Err(CellDirError::AlreadyExists { .. }) => ());
+        assert!(!exists(&target), "runtime was created through the link");
+    }
+
+    #[test]
+    fn create_created_is_exclusive_private_and_synced() {
+        let (_dir, root) = temp_root();
+        let (_instance, lock, dir) = recording_cell(&root, "cell-1");
+        assert!(!dir.has_created().expect("created is checked"));
+        dir.create_created(&lock).expect("created is written");
+        let path = root.join("cells/cell-1/created");
+        assert_eq!(fs::read(&path).expect("created reads"), b"");
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(
+            synced(),
+            [identity_at(&path), identity_at(&root.join("cells/cell-1"))]
+        );
+        assert!(dir.has_created().expect("created is checked"));
+        expect_match!(dir.create_created(&lock), Err(CellDirError::AlreadyExists { path: refused }) => {
+            assert_eq!(refused, path)
+        });
+    }
+
+    #[test]
+    fn create_created_refuses_a_foreign_lock() {
+        let (_first_dir, first) = temp_root();
+        let (_second_dir, second) = temp_root();
+        let (_first, foreign) = locked(&first);
+        let (instance, lock) = locked(&second);
+        let dir = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
+            .expect("the cell is created");
+        expect_match!(dir.create_created(&foreign), Err(CellDirError::ForeignLock { path }) => {
+            assert_eq!(path, first.join("controller.lock"))
+        });
+        assert!(!exists(&second.join("cells/cell-1/created")));
+    }
+
+    #[test]
+    fn a_created_entry_that_is_not_a_regular_file_is_refused_and_not_followed() {
+        let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
+        let dir = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
+            .expect("the cell is created");
+        let path = root.join("cells/cell-1/created");
+        let target = root.join("elsewhere");
+        fs::write(&target, b"").expect("the target is written");
+        symlink(&target, &path).expect("the link is made");
+        expect_match!(dir.has_created(), Err(CellDirError::NotARegularFile { path: refused }) => {
+            assert_eq!(refused, path)
+        });
+        expect_match!(dir.create_created(&lock), Err(CellDirError::AlreadyExists { .. }) => ());
+        fs::remove_file(&path).expect("the link is removed");
+        fs::create_dir(&path).expect("the directory is made");
+        expect_match!(dir.has_created(), Err(CellDirError::NotARegularFile { .. }) => ());
+    }
+
+    #[test]
+    fn retire_moves_the_whole_cell_directory_and_unlinks_nothing() {
+        let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
+        let dir = instance
+            .create_cell_dir(&lock, &cell("cell-3"))
+            .expect("the cell is created");
+        let cell_path = root.join("cells/cell-3");
+        appended(&dir, &lock)
+            .file
+            .write_all(b"{}\n")
+            .expect("the journal is written");
+        dir.create_launched(boot()).expect("the marker is created");
+        fs::write(cell_path.join("membrane.uds"), b"stale").expect("the stale socket is made");
+        drop(dir.create_runtime_dir().expect("runtime is created"));
+        fs::write(cell_path.join("runtime/root.img"), b"disk").expect("the disk is written");
+        let before = identity_at(&cell_path);
+        instance.retire(&lock, dir).expect("the cell retires");
+        assert!(!exists(&cell_path));
+        let retired = root.join("retired/cell-3");
+        assert_eq!(identity_at(&retired), before);
+        let marker = marker("cell-3", false).encode();
+        for (name, bytes) in [
+            ("ledger.ndjson", &b"{}\n"[..]),
+            ("launched", &marker[..]),
+            ("membrane.uds", b"stale"),
+            ("runtime/root.img", b"disk"),
+        ] {
+            assert_eq!(
+                fs::read(retired.join(name)).expect("the entry moved"),
+                bytes,
+                "{name}"
+            );
+        }
+        assert!(described(&instance.discover(&lock).expect("discovery succeeds")).is_empty());
+    }
+
+    #[test]
+    fn retire_makes_retired_private_and_syncs_the_root_then_cells_then_retired() {
+        for existing in [None, Some(0o755)] {
+            let (_dir, root) = temp_root();
+            if let Some(mode) = existing {
+                fs::create_dir(root.join("retired")).expect("retired is made");
+                set_mode(&root.join("retired"), mode);
+            }
+            let (instance, lock, dir) = recording_cell(&root, "cell-1");
+            instance.retire(&lock, dir).expect("the cell retires");
+            assert_eq!(mode_of(&root.join("retired")), 0o700, "{existing:?}");
+            assert_eq!(
+                synced(),
+                [
+                    identity_at(&root),
+                    identity_at(&root.join("cells")),
+                    identity_at(&root.join("retired")),
+                ],
+                "{existing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retire_refuses_a_retired_that_is_a_symlink_or_not_a_directory() {
+        for planted in ["a symlink", "a regular file"] {
+            let (_dir, root) = temp_root();
+            let (instance, lock) = locked(&root);
+            let dir = instance
+                .create_cell_dir(&lock, &cell("cell-1"))
+                .expect("the cell is created");
+            let elsewhere = root.join("elsewhere");
+            fs::create_dir(&elsewhere).expect("the link target is made");
+            if planted == "a symlink" {
+                symlink(&elsewhere, root.join("retired")).expect("the link is made");
+            } else {
+                fs::write(root.join("retired"), b"").expect("the file is made");
+            }
+            expect_match!(instance.retire(&lock, dir), Err(RetireError::RetiredNotADirectory { path }) => {
+                assert_eq!(path, root.join("retired"), "{planted}")
+            });
+            assert!(
+                exists(&root.join("cells/cell-1")),
+                "{planted}: the cell moved"
+            );
+            assert_eq!(
+                fs::read_dir(&elsewhere).expect("the target lists").count(),
+                0,
+                "{planted}: the cell moved through the link"
+            );
+        }
+    }
+
+    #[test]
+    fn retire_never_replaces_an_earlier_retired_directory() {
+        for earlier_holds in [None, Some("root.img")] {
+            let (_dir, root) = temp_root();
+            let (instance, lock) = locked(&root);
+            let dir = instance
+                .create_cell_dir(&lock, &cell("cell-3"))
+                .expect("the cell is created");
+            let earlier = root.join("retired/cell-3");
+            fs::create_dir_all(&earlier).expect("the earlier retired cell is made");
+            if let Some(name) = earlier_holds {
+                fs::write(earlier.join(name), b"kept disk").expect("the kept disk is written");
+            }
+            let live = identity_at(&root.join("cells/cell-3"));
+            let kept = identity_at(&earlier);
+            expect_match!(instance.retire(&lock, dir), Err(RetireError::AlreadyRetired { path }) => {
+                assert_eq!(path, earlier, "{earlier_holds:?}")
+            });
+            assert_eq!(identity_at(&root.join("cells/cell-3")), live);
+            assert_eq!(identity_at(&earlier), kept);
+            if let Some(name) = earlier_holds {
+                assert_eq!(
+                    fs::read(earlier.join(name)).expect("the kept disk reads"),
+                    b"kept disk"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retire_refuses_a_directory_swapped_in_under_the_name() {
+        let (_dir, root) = temp_root();
+        let (instance, lock) = locked(&root);
+        let dir = instance
+            .create_cell_dir(&lock, &cell("cell-2"))
+            .expect("the cell is created");
+        fs::rename(root.join("cells/cell-2"), root.join("aside")).expect("the cell is moved aside");
+        fs::create_dir(root.join("cells/cell-2")).expect("another directory takes its name");
+        let swapped = identity_at(&root.join("cells/cell-2"));
+        expect_match!(instance.retire(&lock, dir), Err(RetireError::Moved { path }) => {
+            assert_eq!(path, root.join("cells/cell-2"))
+        });
+        assert_eq!(identity_at(&root.join("cells/cell-2")), swapped);
+        assert!(!exists(&root.join("retired/cell-2")));
+    }
+
+    #[test]
+    fn retire_refuses_a_cell_whose_name_is_gone_or_a_link() {
+        for replaced_by in [None, Some("a link to it")] {
+            let (_dir, root) = temp_root();
+            let (instance, lock) = locked(&root);
+            let dir = instance
+                .create_cell_dir(&lock, &cell("cell-2"))
+                .expect("the cell is created");
+            fs::rename(root.join("cells/cell-2"), root.join("aside"))
+                .expect("the cell is moved aside");
+            if replaced_by.is_some() {
+                symlink(root.join("aside"), root.join("cells/cell-2")).expect("the link is made");
+            }
+            expect_match!(instance.retire(&lock, dir), Err(RetireError::Moved { path }) => {
+                assert_eq!(path, root.join("cells/cell-2"), "{replaced_by:?}")
+            });
+            assert!(exists(&root.join("aside")));
+            assert!(!exists(&root.join("retired/cell-2")), "{replaced_by:?}");
+        }
+    }
+
+    #[test]
+    fn retire_refuses_a_foreign_lock_and_moves_nothing() {
+        let (_first_dir, first) = temp_root();
+        let (_second_dir, second) = temp_root();
+        let (_first, foreign) = locked(&first);
+        let (instance, lock) = locked(&second);
+        let dir = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
+            .expect("the cell is created");
+        expect_match!(instance.retire(&foreign, dir), Err(RetireError::ForeignLock { path }) => {
+            assert_eq!(path, first.join("controller.lock"))
+        });
+        assert!(exists(&second.join("cells/cell-1")));
+        assert!(!exists(&second.join("retired")));
+    }
+
+    #[test]
+    fn every_marker_and_retirement_error_names_what_it_refused_and_keeps_its_cause() {
+        let cause = Some(eio().to_string());
+        let fault = MarkerFault::Symlink.to_string();
+        let rows: Vec<(Box<dyn Error>, &str, Option<String>)> = vec![
+            (refused_at!(CellDirError::NotARegularFile), "/inst/x", None),
+            (
+                Box::new(CellDirError::MarkerUnreadable {
+                    path: PathBuf::from("/inst/x"),
+                    fault: MarkerFault::Symlink,
+                }),
+                "/inst/x",
+                Some(fault),
+            ),
+            (refused_at!(RetireError::ForeignLock), "/inst/x", None),
+            (
+                refused_at!(RetireError::RetiredNotADirectory),
+                "/inst/x",
+                None,
+            ),
+            (refused_at!(RetireError::AlreadyRetired), "/inst/x", None),
+            (refused_at!(RetireError::Moved), "/inst/x", None),
+            (failed_at!(RetireError::Io), "/inst/x", cause.clone()),
+            (Box::new(MarkerFault::Symlink), "symlink", None),
+            (Box::new(MarkerFault::NotRegular), "regular file", None),
+            (Box::new(MarkerFault::TooLarge), "4096", None),
+            (Box::new(MarkerFault::Io(eio())), "marker", cause.clone()),
+            (
+                Box::new(MarkerFault::Malformed("an unknown key \"pid\"".into())),
+                "an unknown key \"pid\"",
+                None,
+            ),
+            (
+                Box::new(MarkerFault::WrongCell {
+                    found: cell("cell-2"),
+                }),
+                "cell-2",
+                None,
+            ),
+        ];
+        for (error, names, source) in rows {
+            let text = error.to_string();
+            assert!(text.contains(names), "{text:?} does not name {names:?}");
+            assert_eq!(error.source().map(ToString::to_string), source, "{text}");
+            if let Some(source) = source {
+                assert!(text.contains(&source), "{text:?} omits its cause");
+            }
+        }
     }
 }
