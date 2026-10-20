@@ -469,8 +469,9 @@ def findings_are_not_markup():
         forge = Forge(directory, labels=["security"])
         result, calls = forge.run(document(forged, EXPIRED))
         assert result.returncode == 0, (result.stdout, result.stderr)
-        result, calls = forge.run(document({**EXPIRED, "advisory": "RUSTSEC-2000-0002"}, sections=("weekly",)),
-                                  run_url=LATER_URL)
+        later = {**EXPIRED, "advisory": "RUSTSEC-2000-0002",
+                 "title": "deny.toml ignores RUSTSEC-2000-0002 until 2000-01-02, which has passed"}
+        result, calls = forge.run(document(later, sections=("weekly",)), run_url=LATER_URL)
         assert result.returncode == 0, (result.stdout, result.stderr)
         body = forge.issues()[1]["body"]
         assert "spec026-section-end weekly --> after" in body and "RUSTSEC-2000-0002" in body, body
