@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use plasmosome_backend::{CellId, MockMode};
 
-use crate::manifest::ManifestError;
+use crate::manifest::{ManifestError, diagnostic_key};
 use crate::state::{CellStatus, GenomeName};
 
 /// One control request as it arrives on the wire.
@@ -479,6 +479,34 @@ impl WireError {
     }
 }
 
+impl WireError {
+    /// Code 102 for a software command name that is already taken (spec 027 §3.1): `target` is
+    /// the command's path, and the message names what holds it: another plasmid, the root
+    /// image, or another command of the same tree.
+    pub fn name_conflict(conflict: &plasmosome_backend::software::Conflict) -> WireError {
+        let mut error = WireError::bare(ErrorCode::AlreadyExists, conflict.to_string());
+        error.target = Some(conflict.target.clone());
+        error
+    }
+
+    /// Code 108 for plasmid `plasmid`'s software tree that cannot be pinned (spec 027 §3.1).
+    /// `detail` names the plasmid as a declaration refusal does and says what is wrong. `path`
+    /// is relative to the tree's root, not a declaration file's path as in other 108s.
+    pub fn pin_refusal(
+        plasmid: &str,
+        refusal: &plasmosome_backend::software::PinRefusal,
+    ) -> WireError {
+        let detail = format!("plasmid {}: {refusal}", diagnostic_key(plasmid));
+        let mut error = WireError::bare(
+            ErrorCode::ManifestInvalid,
+            format!("the software tree cannot be pinned: {detail}"),
+        );
+        error.detail = Some(detail);
+        error.path = Some(refusal.path().to_string());
+        error
+    }
+}
+
 /// What a named instance is doing, as reported by whoever probed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -902,5 +930,23 @@ mod tests {
             serde_json::from_value::<StatusResult>(encoded).expect("a status result round-trips"),
             result
         );
+    }
+
+    #[test]
+    fn status_params_refuse_a_key_the_verb_does_not_define() {
+        assert_eq!(
+            serde_json::from_str::<StatusParams>("{\"name\":\"x\"}")
+                .expect("params holding only the keys the verb defines read"),
+            StatusParams {
+                name: Some("x".to_string())
+            },
+        );
+        for params in ["{\"name\":\"x\",\"extra\":1}", "{\"extra\":1}"] {
+            let outcome = serde_json::from_str::<StatusParams>(params);
+            assert!(
+                outcome.is_err(),
+                "a key plasmosome.status does not define is refused, not ignored: {params} read as {outcome:?}"
+            );
+        }
     }
 }
