@@ -2,10 +2,12 @@ use std::ffi::{CStr, CString, OsStr};
 use std::fmt;
 use std::io;
 use std::net::Shutdown;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+
+use crate::instance::DirectoryStream;
 
 /// The device and inode of the directory a [`PrivateDir`] holds open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +39,40 @@ struct Walk {
     components: Vec<CString>,
 }
 
+#[derive(Clone, Copy)]
+enum FinalRule {
+    Private,
+    Ancestor,
+}
+
+impl FinalRule {
+    fn judge(self, facts: &Facts, euid: u32, at: &Path) -> Result<(), PrivateSocketError> {
+        match self {
+            FinalRule::Private => judge_private(facts, euid, at),
+            FinalRule::Ancestor => judge_ancestor(facts, euid, at),
+        }
+    }
+
+    fn refuse_acl(self, dir: &OwnedFd, at: &Path) -> Result<(), PrivateSocketError> {
+        match self {
+            FinalRule::Private => refuse_acl(dir, at),
+            FinalRule::Ancestor => refuse_replacing_acl(dir, at),
+        }
+    }
+}
+
 impl Walk {
+    fn from_root(path: &Path) -> Result<Walk, PrivateSocketError> {
+        let components = absolute_components(path)?;
+        let root = Path::new("/");
+        let start = open_root().map_err(|error| io_failure("open", root, &error))?;
+        Ok(Walk {
+            start,
+            start_path: root.to_path_buf(),
+            components,
+        })
+    }
+
     fn path(&self) -> PathBuf {
         let mut path = self.start_path.clone();
         for component in &self.components {
@@ -46,7 +81,7 @@ impl Walk {
         path
     }
 
-    fn run(&self, euid: u32) -> Result<(OwnedFd, Facts), PrivateSocketError> {
+    fn run(&self, euid: u32, rule: FinalRule) -> Result<(OwnedFd, Facts), PrivateSocketError> {
         let mut at = self.start_path.clone();
         let mut facts = stat_fd(&self.start, &at)?;
         let mut held: Option<OwnedFd> = None;
@@ -60,7 +95,7 @@ impl Walk {
             let access = if last { libc::O_RDONLY } else { SEARCH_ONLY };
             let next = open_child(parent, component, &at, access, |facts, at| {
                 if last {
-                    judge_private(facts, euid, at)
+                    rule.judge(facts, euid, at)
                 } else {
                     judge_ancestor(facts, euid, at)
                 }
@@ -78,12 +113,12 @@ impl Walk {
         Ok((dir, facts))
     }
 
-    fn judged(&self, path: &Path) -> Result<(OwnedFd, Facts), PrivateSocketError> {
+    fn judged(&self, path: &Path, rule: FinalRule) -> Result<(OwnedFd, Facts), PrivateSocketError> {
         let euid = effective_uid();
-        let (dir, facts) = self.run(euid)?;
+        let (dir, facts) = self.run(euid, rule)?;
         refuse_ignored_ownership(&dir, path)?;
-        judge_private(&facts, euid, path)?;
-        refuse_acl(&dir, path)?;
+        rule.judge(&facts, euid, path)?;
+        rule.refuse_acl(&dir, path)?;
         Ok((dir, facts))
     }
 }
@@ -95,14 +130,7 @@ impl PrivateDir {
     /// the component that broke it. A component this user may not open is judged from a
     /// no-follow `fstatat` in its parent; only when it breaks no rule is the result `Io`.
     pub fn open(path: &Path) -> Result<PrivateDir, PrivateSocketError> {
-        let components = absolute_components(path)?;
-        let root = Path::new("/");
-        let start = open_root().map_err(|error| io_failure("open", root, &error))?;
-        Self::from_walk(Walk {
-            start,
-            start_path: root.to_path_buf(),
-            components,
-        })
+        Self::from_walk(Walk::from_root(path)?)
     }
 
     #[cfg(test)]
@@ -121,7 +149,7 @@ impl PrivateDir {
 
     fn from_walk(walk: Walk) -> Result<PrivateDir, PrivateSocketError> {
         let path = walk.path();
-        let (dir, facts) = walk.judged(&path)?;
+        let (dir, facts) = walk.judged(&path, FinalRule::Private)?;
         Ok(PrivateDir {
             path,
             dir,
@@ -146,7 +174,7 @@ impl PrivateDir {
     /// Walks the path again and requires the same judgments and the same directory identity.
     /// A directory renamed away and replaced at the path is `Replaced`.
     pub fn reconfirm(&self) -> Result<(), PrivateSocketError> {
-        let (_, facts) = self.walk.judged(&self.path)?;
+        let (_, facts) = self.walk.judged(&self.path, FinalRule::Private)?;
         if facts.dev == self.identity.dev && facts.ino == self.identity.ino {
             Ok(())
         } else {
@@ -371,6 +399,43 @@ pub fn check_private_path(
             name: error.into_cstring().to_string_lossy().into_owned(),
         })?;
     PrivateDir::open(parent)?.socket_entry(&name, trusted_uid)
+}
+
+/// What a listed entry is, read from a no-follow stat. A symbolic link is `Symlink` whatever it
+/// points to. Sockets, regular files and every other type are `Other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Directory,
+    Symlink,
+    Other,
+}
+
+/// One entry of a directory listed by [`list_trusted_dir`]: its name as the bytes on disk, which
+/// need not be UTF-8, and its kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedEntry {
+    pub name: Vec<u8>,
+    pub kind: EntryKind,
+}
+
+/// Walks `path` from "/" without following symlinks, judges every component, the final one
+/// included, by the ancestor rule, and lists the final directory. `path` must be absolute and
+/// normal, as for [`PrivateDir::open`]. The final directory passes when its ancestors would: it
+/// is owned by root or the effective UID and writable by neither group nor other. On macOS it
+/// also carries no ACL allow entry that lets anyone replace its entries, and sits on no volume
+/// mounted with ownership ignored. It need not be 0700, and an ACL that only reads or denies
+/// passes. A symlink anywhere in the path is `SymlinkInPath` and a missing component is
+/// `NoDirectory`; every refusal names the component that broke the rule.
+///
+/// Returns every entry but `.` and `..`, sorted by name bytes. Each kind comes from a no-follow
+/// `fstatat` in the opened directory, never from readdir, and no entry is followed. An entry gone
+/// before its `fstatat` is left out. Names are raw bytes: the caller applies its own name rules.
+/// A failure to read the directory or to stat an entry is `Io`.
+pub fn list_trusted_dir(path: &Path) -> Result<Vec<ListedEntry>, PrivateSocketError> {
+    let walk = Walk::from_root(path)?;
+    let path = walk.path();
+    let (dir, _) = walk.judged(&path, FinalRule::Ancestor)?;
+    list_entries(&dir, &path)
 }
 
 /// The effective UID of this process.
@@ -966,6 +1031,47 @@ fn stat_at(dir: &OwnedFd, name: &CStr) -> Result<Facts, i32> {
     } else {
         Err(last_errno())
     }
+}
+
+fn list_entries(dir: &OwnedFd, path: &Path) -> Result<Vec<ListedEntry>, PrivateSocketError> {
+    let names = DirectoryStream::open(dir.as_fd())
+        .map_err(|error| io_failure("fdopendir", path, &error))?;
+    listed_from(dir, path, names)
+}
+
+fn listed_from(
+    dir: &OwnedFd,
+    path: &Path,
+    names: impl Iterator<Item = io::Result<Vec<u8>>>,
+) -> Result<Vec<ListedEntry>, PrivateSocketError> {
+    let mut listed = Vec::new();
+    for name in names {
+        let name = name.map_err(|error| io_failure("readdir", path, &error))?;
+        let name = CString::new(name).map_err(|error| PrivateSocketError::BadName {
+            name: String::from_utf8_lossy(&error.into_vec()).into_owned(),
+        })?;
+        let kind = match stat_at(dir, &name) {
+            Ok(facts) => match facts.kind {
+                Kind::Directory => EntryKind::Directory,
+                Kind::Symlink => EntryKind::Symlink,
+                Kind::Socket | Kind::Other => EntryKind::Other,
+            },
+            Err(errno) if errno == libc::ENOENT => continue,
+            Err(errno) => {
+                return Err(PrivateSocketError::Io {
+                    op: "fstatat",
+                    path: path.join(OsStr::from_bytes(name.as_bytes())),
+                    errno,
+                });
+            }
+        };
+        listed.push(ListedEntry {
+            name: name.into_bytes(),
+            kind,
+        });
+    }
+    listed.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    Ok(listed)
 }
 
 #[allow(unsafe_code)]

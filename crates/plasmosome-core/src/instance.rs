@@ -956,11 +956,11 @@ fn clear_nonblocking(file: BorrowedFd<'_>) -> io::Result<()> {
     Ok(())
 }
 
-struct DirectoryStream(NonNull<libc::DIR>);
+pub(crate) struct DirectoryStream(NonNull<libc::DIR>);
 
 impl DirectoryStream {
     #[allow(unsafe_code)]
-    fn open(dir: BorrowedFd<'_>) -> io::Result<DirectoryStream> {
+    pub(crate) fn open(dir: BorrowedFd<'_>) -> io::Result<DirectoryStream> {
         let owned = dir.try_clone_to_owned()?;
         // SAFETY: `owned` is a descriptor this function owns. On success fdopendir takes it over,
         // and into_raw_fd below gives up the OwnedFd, so only closedir closes it. On failure the
