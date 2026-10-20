@@ -493,6 +493,21 @@ def findings_are_not_markup():
         assert result.returncode == 0, (result.stdout, result.stderr)
         comment = forge.issues()[4]["comments"][0]
     # Seven fields of the finding, and the commit, date and trigger of each section shown: two in the body, one in the comment.
+    # A tool failure's title is printed to the job's log too, where the runner ends a line at a CR
+    # and reads a line that starts with "::" as a workflow command.
+    failure = {**TOOL_FAILURE, "title": "error log: failed\r::warning title=Forged::nothing to see\r::add-mask::RUSTSEC"}
+    with tempfile.TemporaryDirectory(prefix="security-issue-markup-log-") as directory:
+        forge = Forge(directory, labels=["security"])
+        for mode in ("dry-run", "write"):
+            result, calls = forge.run(document(failure), mode=mode)
+            assert result.returncode == 1, (mode, result.stdout, result.stderr)
+            for log in (result.stdout, result.stderr):
+                lines = re.split(r"\r\n|\r|\n", log)
+                assert not any(line.lstrip().startswith("::") for line in lines), (mode, log)
+            forged = [line for line in re.split(r"\r\n|\r|\n", result.stderr) if "Forged" in line]
+            assert len(forged) == 1 and forged[0].startswith("tool failure, written into the security issue: "), forged
+            assert forged[0].endswith("::add-mask::RUSTSEC"), forged
+
     for text, spans in ((body, 7 + 3 * 2), (comment, 7 + 3)):
         rest = outside_spans(text)
         for token in ("@", "<", "evil.example", "::warning", "tick", "forged"):
@@ -565,6 +580,7 @@ def audit_workflow():
     assert re.search(r"(?m)^  schedule:\n    - cron: ", triggers), triggers
     assert re.search(r"(?m)^  workflow_dispatch:", triggers), triggers
     assert "pull_request" not in code and "paths" not in triggers, triggers
+    assert re.findall(r"(?m)^  (\S+):", block(code, "on")) == ["push", "schedule", "workflow_dispatch"], triggers
     assert re.search(r"(?m)^permissions:\n  contents: read\n(?!  )", audit), audit
     assert re.search(r"(?m)^concurrency:\n  group: audit\n  cancel-in-progress: false\n(?!  )", audit), audit
     assert "cargo-audit" not in code and "cargo audit" not in code, audit
@@ -596,6 +612,11 @@ def audit_workflow():
     assert len(reporting) == 1 and steps_of(report)[-2:] == reporting + handing, steps_of(report)
     assert "EVENT: ${{ github.event_name }}" in reporting[0] and '--event "$EVENT"' in script(reporting[0]), reporting
     assert "GITHUB_OUTPUT" not in reporting[0] and "python" not in handing[0] and "tools/" not in handing[0], handing
+    # The hand-over runs only after the report step succeeded, so its failure means the size guard
+    # tripped, and a failed hand-over fails the job.
+    assert "continue-on-error" not in report, report
+    for step in steps_of(report):
+        assert not re.search(r"(?m)^(?:        )?(?:if|continue-on-error):", step), step
     limits = re.findall(r'(?m)^if \[ "\$size" -gt (\d+) \]; then', script(handing[0]))
     assert limits == [str(OUTPUT_LIMIT)] and API["HANDOVER_LIMIT"] == OUTPUT_LIMIT, (limits, handing)
     writing = [step for step in steps_of(issue) if "tools/security-issue" in step]
