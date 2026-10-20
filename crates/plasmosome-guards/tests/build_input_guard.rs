@@ -1029,12 +1029,22 @@ fn refuses_configuration_reached_through_a_symlink() {
                     vec![gitlink(".cargo")],
                     vec![(".cargo", "(submodule)")],
                 ),
+                (
+                    "a symlink whose target is longer than any path",
+                    vec![symlink(".cargo", &"x".repeat(5_000))],
+                    vec![(".cargo", "(symlink)")],
+                ),
             ],
         );
         let said = said_for(&outputs, "a symlink named .cargo");
         assert!(
-            said.contains("a symlink to settings"),
+            said.contains("a symlink to settings; "),
             "a refused symlink must name its target; the step said:\n{said}"
+        );
+        let said = said_for(&outputs, "a symlink whose target is longer than any path");
+        assert!(
+            said.contains("a symlink to a target longer than 4096 bytes; "),
+            "a symlink target is read through a bound, and one past it is described, not printed; the step said:\n{said}"
         );
     });
 }
