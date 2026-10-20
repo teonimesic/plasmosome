@@ -133,6 +133,28 @@ that ID every time. APFS and ext4 keep the bytes a name was created with. Spec 0
 allocates ASCII `cell-<n>` IDs, which are stored as given everywhere; nothing here refuses a
 non-ASCII ID on HFS+ at creation.
 
+## Configuration
+
+`plasmosomed` takes one JSON object, read by `parse_config`:
+
+```json
+{"control_socket": "/private/path/control.uds", "name": "work",
+ "instance_root": "/private/path/instance", "recovery_deadline_ms": 5000,
+ "registry_root": "/private/path/imports"}
+```
+
+- `control_socket` is the path the daemon binds, and `name` is the instance it answers for.
+- `instance_root` is required and absolute. The trusted operator supplies it (spec 008); it is
+  never inferred from `control_socket`, even when the socket sits in the usual instance layout.
+- `recovery_deadline_ms` is required: a whole number of milliseconds, at least 1.
+- `registry_root` is optional and absolute when given. Without it the daemon is purely local;
+  no other path, `HOME` or request supplies a default.
+
+The config must be one JSON object: an array is refused rather than read by position. An unknown
+key, a key given twice, or an explicit `null` refuses the config, and the refusal names the key.
+The binary prints it and exits 2. This build checks these keys for shape only: it does not open
+the instance root, recover cells or read registry imports (spec 001 §6, item 7).
+
 ## Socket ownership
 
 `plasmosomed` refuses a control-socket path that already exists — a live socket, a stale socket,
