@@ -635,7 +635,6 @@ fn refuses_when_git_cannot_read() {
                 "git ls-tree prints a record the step cannot parse",
                 "record",
             ),
-            ("git cat-file fails", "blob"),
         ]
         .into_iter()
         .map(|(case, stub)| {
@@ -648,16 +647,24 @@ fn refuses_when_git_cannot_read() {
         })
         .collect();
 
-        let (outside_ascii, _) = commit(&with_base(&[file(
-            &spelled("crates/", 0xe9, "/rust-toolchain.toml"),
-            FOUR_KEYS,
-        )]));
-        let mut command = guard_command(root);
-        command
-            .current_dir(outside_ascii.path())
-            .env("PATH", first_on_path(shadow.path()))
-            .env("STUB_GIT_CASE", "blob");
-        runs.push(("git cat-file fails on a path outside ASCII", command));
+        let one_blob = [
+            ("git cat-file fails", "rust-toolchain.toml".to_string()),
+            (
+                "git cat-file fails on a path outside ASCII",
+                spelled("crates/", 0xe9, "/rust-toolchain.toml"),
+            ),
+        ];
+        let mut only_that_blob = Vec::new();
+        for (case, path) in one_blob {
+            let (repository, _) = commit(&[file(&path, FOUR_KEYS)]);
+            let mut command = guard_command(root);
+            command
+                .current_dir(repository.path())
+                .env("PATH", first_on_path(shadow.path()))
+                .env("STUB_GIT_CASE", "blob");
+            runs.push((case, command));
+            only_that_blob.push(repository);
+        }
 
         let elsewhere = tempfile::tempdir().expect("a scratch directory is created");
         let ceiling = elsewhere
