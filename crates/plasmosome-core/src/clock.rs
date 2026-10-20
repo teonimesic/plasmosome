@@ -67,3 +67,181 @@ impl fmt::Display for ClockError {
 }
 
 impl std::error::Error for ClockError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant, UNIX_EPOCH};
+
+    const UUID_TEXT: &str = "5D1E7C3A-0B2F-4E6D-9A8B-1C2D3E4F5A6B";
+
+    #[test]
+    fn system_boot_session_is_stable() {
+        let first = boot_session().unwrap();
+        let second = boot_session().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(BootSession::parse(&first.to_string()), Some(first));
+        let clock = SystemClock::new().unwrap();
+        assert_eq!(clock.now().continuous.boot, first);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_boot_session_is_kern_bootsessionuuid() {
+        let output = std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "kern.bootsessionuuid"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            BootSession::parse(text.trim_end_matches('\n')),
+            Some(boot_session().unwrap())
+        );
+    }
+
+    #[test]
+    fn continuous_advances() {
+        let clock = SystemClock::new().unwrap();
+        let first = clock.now();
+        std::thread::sleep(Duration::from_millis(50));
+        let second = clock.now();
+        assert!(second.wait.duration_since(first.wait) >= Duration::from_millis(50));
+        let advanced = second.continuous.ns - first.continuous.ns;
+        assert!(advanced >= 45_000_000, "advanced {advanced} ns");
+        assert!(advanced < 5_000_000_000, "advanced {advanced} ns");
+        assert_eq!(second.continuous.boot, first.continuous.boot);
+    }
+
+    #[test]
+    fn the_wall_reading_is_unix_milliseconds() {
+        let clock = SystemClock::new().unwrap();
+        let unix_ms = || {
+            u64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap()
+        };
+        let before = unix_ms();
+        let wall = clock.now().wall.unix_ms();
+        let after = unix_ms();
+        assert!(before <= wall && wall <= after, "{before} {wall} {after}");
+    }
+
+    #[test]
+    fn the_wait_reading_is_instant_now() {
+        let clock = SystemClock::new().unwrap();
+        let before = Instant::now();
+        let wait = clock.now().wait;
+        let after = Instant::now();
+        assert!(before <= wait && wait <= after);
+    }
+
+    #[test]
+    fn continuous_clock_is_the_specified_one() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(CONTINUOUS_CLOCK, libc::CLOCK_MONOTONIC_RAW);
+        #[cfg(target_os = "linux")]
+        assert_eq!(CONTINUOUS_CLOCK, libc::CLOCK_BOOTTIME);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[repr(C)]
+    struct Timebase {
+        numer: u32,
+        denom: u32,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
+    unsafe extern "C" {
+        /// Takes nothing and returns the tick count since boot, which advances while the host
+        /// sleeps. It has no failure.
+        fn mach_continuous_time() -> u64;
+        /// Writes the ratio of nanoseconds to ticks through `info`, which must point to a
+        /// writable `Timebase`. Returns 0 on success.
+        fn mach_timebase_info(info: *mut Timebase) -> libc::c_int;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
+    fn mach_continuous_ns() -> u64 {
+        let mut timebase = Timebase { numer: 0, denom: 0 };
+        // SAFETY: `timebase` is a live, writable `Timebase` with the C layout of
+        // `mach_timebase_info_data_t`, and it outlives the call.
+        assert_eq!(unsafe { mach_timebase_info(&mut timebase) }, 0);
+        // SAFETY: `mach_continuous_time` takes no arguments and touches no caller memory.
+        let ticks = unsafe { mach_continuous_time() };
+        let ns = u128::from(ticks) * u128::from(timebase.numer) / u128::from(timebase.denom);
+        u64::try_from(ns).unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn continuous_agrees_with_mach_continuous_time() {
+        let clock = SystemClock::new().unwrap();
+        let before = mach_continuous_ns();
+        let reading = clock.now().continuous.ns;
+        let after = mach_continuous_ns();
+        assert!(
+            before.saturating_sub(1_000_000) <= reading && reading <= after + 1_000_000,
+            "{before} {reading} {after}"
+        );
+    }
+
+    #[test]
+    fn a_wall_clock_before_1970_is_refused() {
+        let before = UNIX_EPOCH - Duration::from_millis(1);
+        assert_eq!(wall_ms_at(before), Err(ClockError::BeforeEpoch));
+        assert_eq!(wall_ms_at(UNIX_EPOCH), Ok(0));
+        assert_eq!(
+            wall_ms_at(UNIX_EPOCH + Duration::from_micros(1_792_483_200_000_999)),
+            Ok(1_792_483_200_000)
+        );
+    }
+
+    #[test]
+    fn boot_text_is_one_uuid_and_its_terminator() {
+        let session = BootSession::parse(UUID_TEXT).unwrap();
+        let sysctl = format!("{UUID_TEXT}\0");
+        assert_eq!(boot_from(sysctl.as_bytes(), b"\0"), Ok(session));
+        let proc_file = format!("{}\n", UUID_TEXT.to_lowercase());
+        assert_eq!(boot_from(proc_file.as_bytes(), b"\n"), Ok(session));
+        assert_eq!(boot_from(UUID_TEXT.as_bytes(), b"\n"), Ok(session));
+        for refused in [
+            &b""[..],
+            b"\n",
+            b"not a uuid\n",
+            b"5D1E7C3A-0B2F-4E6D-9A8B-1C2D3E4F5A6B\n\n",
+            b"5D1E7C3A-0B2F-4E6D-9A8B-1C2D3E4F5A6B\0\0",
+            b"\xff\xfe\n",
+        ] {
+            match boot_from(refused, b"\n") {
+                Err(ClockError::BootSession { detail }) => assert!(!detail.is_empty()),
+                other => panic!("{refused:?} gave {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn clock_errors_say_what_failed() {
+        assert_eq!(
+            ClockError::BeforeEpoch.to_string(),
+            "the wall clock reads before 1970-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            ClockError::Continuous { errno: 22 }.to_string(),
+            "the continuous clock could not be read: errno 22"
+        );
+        assert_eq!(
+            ClockError::BootSession {
+                detail: "\"x\" is not a UUID".into()
+            }
+            .to_string(),
+            "the boot session could not be read: \"x\" is not a UUID"
+        );
+    }
+}
