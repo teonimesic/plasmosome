@@ -1174,3 +1174,27 @@ fn other_cell_after_the_force_rejects_force_refused_while_the_plugin_stands_else
         ))
     });
 }
+
+#[test]
+fn a_substitute_and_a_stranger_keep_the_class_they_stand_in_for() {
+    for capability in conformance::sample_capabilities() {
+        let substituted = substituted_capability(&capability);
+        assert_eq!(substituted.class(), capability.class(), "{capability:?}");
+        assert_ne!(substituted, capability);
+    }
+    for class in [
+        UniverseClass::SessionFile,
+        UniverseClass::UdsPath,
+        UniverseClass::ProxyMap,
+        UniverseClass::BrokerPid,
+        UniverseClass::Mount,
+    ] {
+        let handle = Handle {
+            class,
+            id: GrantId::new(),
+        };
+        let stranger = a_stranger(handle);
+        assert_eq!(stranger.handle, handle);
+        assert_eq!(stranger.capability.class(), class);
+    }
+}
