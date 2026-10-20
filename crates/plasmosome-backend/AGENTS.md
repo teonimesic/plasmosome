@@ -4,8 +4,9 @@
 
 The trait between capability decisions and capability enforcement, plus the fake backend that
 makes the kernel testable without a VM. It also holds the SHA-256 `Digest`, spec 001's
-observation paging (`paging`), and spec 028's lifetime values (`lifetime`) with the `Clock` seam
-(`clock`), which guest, membrane and controller share.
+observation paging (`paging`), spec 027's pinned software trees (`software`), and spec 028's
+lifetime values (`lifetime`) with the `Clock` seam (`clock`), which guest, membrane and controller
+share.
 
 ## Hard rules
 
@@ -34,3 +35,9 @@ observation paging (`paging`), and spec 028's lifetime values (`lifetime`) with 
 `src/fixtures.rs` is a test-only copy of the capability factories in `plasmosome_testkit::builders`,
 and its `op` is the twin of the testkit's private `op_for`. The unit tests here cannot use the
 testkit's copy, because it links a second build of this crate. Change the two copies together.
+
+The `test-fixture` feature makes `software::fixture` public, which builds a `CommandName` from
+text. No crate enables it, the testkit included, and `no_crate_enables_the_backend_test_fixture`
+fails if one does. A `--workspace` build merges features across members, so one edge would reach
+product code with every gate green. A crate that needs the fixture adds a `cargo check -p` for
+each product crate in the same change, and changes that guard.
