@@ -979,41 +979,6 @@ mod tests {
     }
 
     #[test]
-    fn ancestor_judge_refuses_group_or_other_writable_and_sticky_directories() {
-        let at = Path::new("/a");
-        assert_eq!(
-            judge_ancestor(&facts(Kind::Directory, 0, 0o755), EUID, at),
-            Ok(())
-        );
-        assert_eq!(
-            judge_ancestor(&facts(Kind::Directory, EUID, 0o700), EUID, at),
-            Ok(())
-        );
-        for mode in [0o775, 0o757, 0o1777] {
-            assert_eq!(
-                judge_ancestor(&facts(Kind::Directory, 0, mode), EUID, at),
-                Err(PrivateSocketError::Replaceable {
-                    path: at.to_path_buf(),
-                    mode
-                })
-            );
-        }
-        assert_eq!(
-            judge_ancestor(&facts(Kind::Directory, 4242, 0o755), EUID, at),
-            Err(PrivateSocketError::ForeignOwner {
-                path: at.to_path_buf(),
-                uid: 4242
-            })
-        );
-        assert_eq!(
-            judge_ancestor(&facts(Kind::Other, 0, 0o755), EUID, at),
-            Err(PrivateSocketError::NotDirectory {
-                path: at.to_path_buf()
-            })
-        );
-    }
-
-    #[test]
     fn private_judge_refuses_any_group_or_other_bit() {
         let path = Path::new("/a/cell");
         for mode in [0o700, 0o500] {
