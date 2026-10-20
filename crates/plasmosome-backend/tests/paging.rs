@@ -717,11 +717,13 @@ fn errors_describe_themselves() {
         PagingError::ScopeChanged { snapshot: 1 } => "snapshot 1 was captured for another scope";
         PagingError::OffsetOutOfRange { offset: 10, total: 10 }
             => "offset 10 is outside the 10-byte account";
-        PagingError::Expired => "the capture's deadline has passed";
+        PagingError::Expired
+            => "the capture has ended: its deadline passed or the server dropped it";
         PagingError::SnapshotsExhausted => "this connection has issued every snapshot ID";
         PagingError::BadPageSize { page_bytes: 0 } => "a page of 0 bytes is outside 1 to 65536";
         PagingError::Encode { detail: detail() } => "the account cannot be encoded as JSON: boom";
-        CaptureError::<&str>::Paging(PagingError::Expired) => "the capture's deadline has passed";
+        CaptureError::<&str>::Paging(PagingError::Expired)
+            => "the capture has ended: its deadline passed or the server dropped it";
         CaptureError::Collect("disk gone") => "collecting the account failed: disk gone";
         AssemblyFault::Page(PageFault::EmptyBytes) => "the page carries no bytes";
         AssemblyFault::FirstPageNotAtZero { offset: 4 }
