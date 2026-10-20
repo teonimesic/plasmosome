@@ -327,6 +327,13 @@ mod tests {
         Confinement::Unverifiable { reason }
     }
 
+    fn unconfined(sandboxed: bool, allowed: &[&'static str]) -> Confinement {
+        Confinement::Unconfined {
+            sandboxed,
+            allowed: allowed.to_vec(),
+        }
+    }
+
     #[test]
     fn a_sandboxed_process_denying_every_required_operation_is_confined() {
         let Confinement::Confined(evidence) = judge(PID, &confined()) else {
@@ -345,10 +352,7 @@ mod tests {
         };
         assert_eq!(
             judge(PID, &readings),
-            Confinement::Unconfined {
-                sandboxed: true,
-                allowed: REQUIRED_DENIALS.to_vec(),
-            },
+            unconfined(true, &REQUIRED_DENIALS),
             "allow-default answers sandboxed and allows all five"
         );
     }
@@ -358,10 +362,7 @@ mod tests {
         for operation in REQUIRED_DENIALS {
             assert_eq!(
                 judge(PID, &with_operation(operation, Ok(0))),
-                Confinement::Unconfined {
-                    sandboxed: true,
-                    allowed: vec![operation],
-                },
+                unconfined(true, &[operation]),
                 "{operation} answered allowed"
             );
         }
@@ -372,10 +373,7 @@ mod tests {
         for value in [2, -2, libc::c_int::MAX, libc::c_int::MIN] {
             assert_eq!(
                 judge(PID, &with_operation("network-bind", Ok(value))),
-                Confinement::Unconfined {
-                    sandboxed: true,
-                    allowed: vec!["network-bind"],
-                },
+                unconfined(true, &["network-bind"]),
                 "network-bind answered {value}"
             );
         }
@@ -389,19 +387,10 @@ mod tests {
             .retain(|(operation, _)| *operation != "network-inbound");
         assert_eq!(
             judge(PID, &readings),
-            Confinement::Unconfined {
-                sandboxed: true,
-                allowed: vec!["network-inbound"],
-            }
+            unconfined(true, &["network-inbound"])
         );
         readings.operations.clear();
-        assert_eq!(
-            judge(PID, &readings),
-            Confinement::Unconfined {
-                sandboxed: true,
-                allowed: REQUIRED_DENIALS.to_vec(),
-            }
-        );
+        assert_eq!(judge(PID, &readings), unconfined(true, &REQUIRED_DENIALS));
     }
 
     #[test]
@@ -415,10 +404,7 @@ mod tests {
                         ..confined()
                     }
                 ),
-                Confinement::Unconfined {
-                    sandboxed: false,
-                    allowed: Vec::new(),
-                },
+                unconfined(false, &[]),
                 "the sandboxed query answered {value}, though every operation answered denied"
             );
         }
@@ -429,10 +415,7 @@ mod tests {
         };
         assert_eq!(
             judge(PID, &unsandboxed),
-            Confinement::Unconfined {
-                sandboxed: false,
-                allowed: REQUIRED_DENIALS.to_vec(),
-            }
+            unconfined(false, &REQUIRED_DENIALS)
         );
     }
 

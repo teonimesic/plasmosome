@@ -108,6 +108,24 @@ mod darwin {
         }
     }
 
+    fn observed_under(profile: &str) -> Confinement {
+        let sleeper = Sleeper::start(profile);
+        observe(sleeper.pid())
+    }
+
+    fn allowing_every_required_operation(sandboxed: bool) -> Confinement {
+        Confinement::Unconfined {
+            sandboxed,
+            allowed: REQUIRED_DENIALS.to_vec(),
+        }
+    }
+
+    fn gone() -> Confinement {
+        Confinement::Unverifiable {
+            reason: Unverifiable::ProcessUnreadable { errno: libc::ESRCH },
+        }
+    }
+
     #[allow(unsafe_code)]
     fn wait_until_exited_unreaped(pid: libc::pid_t) {
         let id = libc::id_t::try_from(pid).expect("a child's pid is positive");
@@ -153,34 +171,25 @@ mod darwin {
 
     #[test]
     fn an_allow_default_sandbox_is_unconfined() {
-        let sleeper = Sleeper::start("(version 1)(allow default)");
         assert_eq!(
-            observe(sleeper.pid()),
-            Confinement::Unconfined {
-                sandboxed: true,
-                allowed: REQUIRED_DENIALS.to_vec(),
-            }
+            observed_under("(version 1)(allow default)"),
+            allowing_every_required_operation(true)
         );
     }
 
     #[test]
     fn a_process_with_no_sandbox_is_unconfined() {
-        let sleeper = Sleeper::start("none");
         assert_eq!(
-            observe(sleeper.pid()),
-            Confinement::Unconfined {
-                sandboxed: false,
-                allowed: REQUIRED_DENIALS.to_vec(),
-            }
+            observed_under("none"),
+            allowing_every_required_operation(false)
         );
     }
 
     #[test]
     fn a_bare_deny_default_sandbox_is_confined_too_so_the_policy_is_not_identified() {
-        let sleeper = Sleeper::start("(version 1)(deny default)");
         assert!(
             matches!(
-                observe(sleeper.pid()),
+                observed_under("(version 1)(deny default)"),
                 Confinement::Confined(evidence)
                     if evidence.binding() == PolicyBinding::PropertiesObserved
             ),
@@ -196,9 +205,7 @@ mod darwin {
         wait_until_exited_unreaped(pid);
         assert_eq!(
             observe(pid),
-            Confinement::Unverifiable {
-                reason: Unverifiable::ProcessUnreadable { errno: libc::ESRCH },
-            },
+            gone(),
             "a zombie answers 1 to every sandbox query, so those answers must not count"
         );
     }
@@ -209,22 +216,14 @@ mod darwin {
         let pid = sleeper.pid();
         sleeper.child.kill().expect("the sleeper is signalled");
         sleeper.child.wait().expect("the sleeper is reaped");
-        assert_eq!(
-            observe(pid),
-            Confinement::Unverifiable {
-                reason: Unverifiable::ProcessUnreadable { errno: libc::ESRCH },
-            }
-        );
+        assert_eq!(observe(pid), gone());
     }
 
     #[test]
     fn this_test_process_runs_with_no_sandbox_and_is_unconfined() {
         assert_eq!(
             observe(own_pid()),
-            Confinement::Unconfined {
-                sandboxed: false,
-                allowed: REQUIRED_DENIALS.to_vec(),
-            },
+            allowing_every_required_operation(false),
             "these tests must run outside any sandbox"
         );
     }
