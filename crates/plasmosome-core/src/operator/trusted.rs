@@ -265,6 +265,7 @@ mod tests {
     };
     use crate::nofollow::{Facts, Kind, Reached, effective_uid};
     use std::fs;
+    use std::os::fd::OwnedFd;
     use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
@@ -299,6 +300,59 @@ mod tests {
             file.chain(),
             [identity_of(root.path()), identity_of(&root.join("dir"))]
         );
+    }
+
+    #[test]
+    fn open_walks_from_the_root_and_returns_every_directory_identity_down_to_the_parent() {
+        let root = TestRoot::walkable_from_root();
+        write_file(&root.join("operator.json"), b"{\"version\": 1}", 0o600);
+        let file = TrustedFile::open(&root.join("operator.json")).expect("a trusted file opens");
+        assert_eq!(file.path(), root.join("operator.json"));
+        assert_eq!(file.bytes(), b"{\"version\": 1}");
+        let mut at = PathBuf::from("/");
+        let mut expected = vec![identity_of(&at)];
+        for component in root.path().components().skip(1) {
+            at.push(component);
+            expected.push(identity_of(&at));
+        }
+        assert_eq!(file.chain(), expected);
+    }
+
+    #[test]
+    fn the_bytes_come_from_the_checked_descriptor_not_the_path_text() {
+        let root = TestRoot::new();
+        make_dir(&root.join("a"), 0o700);
+        make_dir(&root.join("b"), 0o700);
+        write_file(&root.join("a/f.json"), b"good", 0o600);
+        write_file(&root.join("b/f.json"), b"bad!", 0o600);
+        let start = OwnedFd::from(fs::File::open(root.join("a")).expect("a opens"));
+        let walk = Walk::from_dir(start, &root.join("b"), Path::new("f.json"))
+            .expect("a normal relative path");
+        let file = TrustedFile::from_walk(walk).expect("the file in a opens");
+        assert_eq!(file.path(), root.join("b/f.json"));
+        assert_eq!(file.bytes(), b"good");
+    }
+
+    #[test]
+    fn a_group_or_other_writable_start_is_ancestor() {
+        let root = TestRoot::new();
+        write_file(&root.join("operator.json"), b"{}", 0o600);
+        for mode in [0o770, 0o707] {
+            set_mode(root.path(), mode);
+            let refusal = refused(open_in(&root, "operator.json"));
+            assert_eq!(
+                (refusal.path.clone(), refusal.check),
+                (root.join("operator.json"), TrustCheck::Ancestor)
+            );
+            assert!(
+                refusal
+                    .reason
+                    .contains(&format!("{} has mode {mode:04o}", root.path().display())),
+                "{}",
+                refusal.reason
+            );
+        }
+        set_mode(root.path(), 0o700);
     }
 
     #[test]

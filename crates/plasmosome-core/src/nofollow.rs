@@ -854,7 +854,7 @@ pub(crate) mod fixtures {
 
     use tempfile::TempDir;
 
-    use super::{DirIdentity, Facts, Kind, Walk};
+    use super::{DirIdentity, Facts, Kind, Walk, effective_uid, judge_ancestor};
 
     pub(crate) struct TestRoot {
         path: PathBuf,
@@ -885,6 +885,54 @@ pub(crate) mod fixtures {
             Walk::from_dir(self.start(), &self.path, Path::new(relative))
                 .expect("a normal relative path")
         }
+
+        pub(crate) fn walkable_from_root() -> TestRoot {
+            let euid = effective_uid();
+            let mut refusals = Vec::new();
+            for base in walkable_bases() {
+                let dir = match tempfile::Builder::new().prefix("nf").tempdir_in(&base) {
+                    Ok(dir) => dir,
+                    Err(error) => {
+                        refusals.push(format!("{}: {error}", base.display()));
+                        continue;
+                    }
+                };
+                let path = fs::canonicalize(dir.path()).expect("the test root resolves");
+                set_mode(&path, 0o700);
+                let walked = Walk::from_root(&path).and_then(|walk| {
+                    walk.open_directory(|reached| {
+                        judge_ancestor(&reached.facts, euid, reached.path)
+                    })
+                });
+                match walked {
+                    Ok(_) => return TestRoot { path, _dir: dir },
+                    Err(refusal) => refusals.push(format!("{}: {refusal}", base.display())),
+                }
+            }
+            panic!(
+                "no base holds a test root the walk from / accepts; on macOS the base is the \
+                 per-user temp directory, on Linux XDG_RUNTIME_DIR, else the test binary's \
+                 directory:\n{}",
+                refusals.join("\n")
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn walkable_bases() -> Vec<PathBuf> {
+        vec![std::env::temp_dir()]
+    }
+
+    #[cfg(target_os = "linux")]
+    fn walkable_bases() -> Vec<PathBuf> {
+        let mut bases: Vec<PathBuf> = std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|base| !base.is_empty())
+            .map(PathBuf::from)
+            .into_iter()
+            .collect();
+        let binary = std::env::current_exe().expect("the test binary knows its own path");
+        bases.extend(binary.parent().map(Path::to_path_buf));
+        bases
     }
 
     impl Drop for TestRoot {
@@ -979,6 +1027,18 @@ pub(crate) mod fixtures {
             .status()
             .expect("chmod +a runs");
         assert!(status.success(), "chmod +a {rule:?} failed");
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn add_acl_at(path: &Path, index: usize, rule: &str) {
+        let status = std::process::Command::new("/bin/chmod")
+            .arg("+a#")
+            .arg(index.to_string())
+            .arg(rule)
+            .arg(path)
+            .status()
+            .expect("chmod +a# runs");
+        assert!(status.success(), "chmod +a# {index} {rule:?} failed");
     }
 
     #[cfg(target_os = "macos")]
@@ -1402,16 +1462,63 @@ mod tests {
                 kind: Kind::Regular
             })
         );
+        let seen = std::cell::RefCell::new(None);
+        let outcome = root.walk("file").open_file(|reached: &Reached<'_>| {
+            *seen.borrow_mut() =
+                Some((reached.facts.kind, reached.parent.map(|parent| parent.ino)));
+            Ok::<(), WalkRefusal>(())
+        });
         assert_eq!(
-            root.walk("file")
-                .open_file(accept)
-                .map(|opened| opened.facts),
+            outcome.map(|opened| opened.facts),
             Err(WalkRefusal::Io {
                 op: "openat",
                 path: root.join("file"),
                 errno: libc::EACCES
             })
         );
+        assert_eq!(
+            seen.into_inner(),
+            Some((Kind::Regular, Some(identity_of(root.path()).ino))),
+            "the judge of a file it cannot open sees the directory holding it"
+        );
+    }
+
+    #[test]
+    fn a_walk_judges_its_start_by_the_ancestor_rule() {
+        let root = TestRoot::new();
+        make_dir(&root.join("dir"), 0o700);
+        write_file(&root.join("file"), b"", 0o600);
+        write_file(&root.join("dir/file"), b"", 0o600);
+        for mode in [0o770, 0o707] {
+            set_mode(root.path(), mode);
+            let replaceable = Err(WalkRefusal::Replaceable {
+                path: root.path().to_path_buf(),
+                mode,
+            });
+            assert_eq!(
+                root.walk("file")
+                    .open_file(accept)
+                    .map(|opened| opened.facts),
+                replaceable,
+                "{mode:04o}"
+            );
+            assert_eq!(
+                root.walk("dir/file")
+                    .open_file(accept)
+                    .map(|opened| opened.facts),
+                replaceable,
+                "{mode:04o}"
+            );
+            assert_eq!(
+                root.walk("dir")
+                    .open_directory(accept)
+                    .map(|opened| opened.facts),
+                replaceable,
+                "{mode:04o}"
+            );
+        }
+        set_mode(root.path(), 0o700);
+        assert!(root.walk("dir/file").open_file(accept).is_ok());
     }
 
     #[test]
@@ -1459,7 +1566,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn acl_grants_write_finds_an_allow_entry_that_lets_anyone_change_the_file() {
-        use super::fixtures::{add_acl, add_raw_allow_for_everyone};
+        use super::fixtures::{add_acl, add_acl_at, add_raw_allow_for_everyone};
         let root = TestRoot::new();
         let granted = |name: &str| {
             let path = root.join(name);
@@ -1476,18 +1583,22 @@ mod tests {
             "everyone allow writesecurity",
             "everyone allow chown",
             "everyone allow delete",
-            "everyone allow read,readattr\neveryone allow write",
         ]
         .iter()
         .enumerate()
         {
             let name = format!("granted{index}");
             write_file(&root.join(&name), b"", 0o600);
-            for line in rule.lines() {
-                add_acl(&root.join(&name), line);
-            }
+            add_acl(&root.join(&name), rule);
             assert!(granted(&name), "{rule:?}");
         }
+        write_file(&root.join("second"), b"", 0o600);
+        add_acl(&root.join("second"), "staff allow read");
+        add_acl_at(&root.join("second"), 1, "everyone allow write");
+        assert!(
+            granted("second"),
+            "an allow-write entry after another allow entry"
+        );
         for (index, rule) in [
             "everyone allow read,readattr,readextattr,readsecurity,execute",
             "everyone deny write,append,writeattr,writeextattr,writesecurity,chown,delete",
@@ -1505,6 +1616,26 @@ mod tests {
             add_raw_allow_for_everyone(&root.join(name), rights);
             assert!(granted(name), "{name}");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_walk_finds_a_replacing_acl_entry_after_another_allow_entry() {
+        use super::fixtures::{add_acl, add_acl_at};
+        let root = TestRoot::new();
+        make_dir(&root.join("held"), 0o700);
+        write_file(&root.join("held/file"), b"", 0o600);
+        add_acl(&root.join("held"), "staff allow list");
+        assert!(root.walk("held/file").open_file(accept).is_ok());
+        add_acl_at(&root.join("held"), 1, "everyone allow add_file");
+        assert_eq!(
+            root.walk("held/file")
+                .open_file(accept)
+                .map(|opened| opened.facts),
+            Err(WalkRefusal::ReplaceableByAcl {
+                path: root.join("held")
+            })
+        );
     }
 
     #[cfg(target_os = "linux")]
