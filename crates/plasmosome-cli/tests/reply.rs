@@ -311,7 +311,7 @@ fn a_kernel_exit_reads_the_code_it_was_given() {
 
 #[test]
 fn every_bad_reply() {
-    let cases: [(&[u8], &str); 22] = [
+    let cases: [(&[u8], &str); 24] = [
         (b"not json", "expected a value at byte 0"),
         (b"", "the text ends inside a value at byte 0"),
         (&[b'{', 0xff, b'}'], "the text is not UTF-8 at byte 1"),
@@ -333,6 +333,14 @@ fn every_bad_reply() {
         ),
         (
             br#"{"id":null,"error":{"code":-32603,"message":"m"}}"#,
+            "the reply's id is not 1",
+        ),
+        (
+            br#"{"id":2,"error":{"code":-32700,"message":"m"}}"#,
+            "the reply's id is not 1",
+        ),
+        (
+            br#"{"error":{"code":-32600,"message":"m"}}"#,
             "the reply's id is not 1",
         ),
         (br#"{"id":1,"result":[]}"#, "the result is not an object"),
