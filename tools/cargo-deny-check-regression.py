@@ -128,6 +128,7 @@ def gates_job(workflow):
 def wrapper_steps(workflow):
     """Each gates step that runs the wrapper, as its keys and values without its name."""
     steps = [dict(re.findall(r"(?m)^(?:      - |        )([\w-]+):[ \t]*(.*?)[ \t]*$", step))
+             | {"continued": line for line in step.splitlines() if re.match(r"         +[^ #]", line)}
              for step in re.split(r"(?m)^(?=      - )", gates_job(workflow))]
     return [{key: value for key, value in step.items() if key != "name"} for step in steps
             if re.search(r"tools/cargo-deny-check(?![\w.-])", step.get("run", ""))]
