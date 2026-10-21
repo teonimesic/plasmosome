@@ -266,7 +266,6 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         &expected,
         "the snapshot lost or invented an object",
     );
-    let expected_state = state_of(&expected);
     let at_issued: Vec<UniverseOp> = issued
         .iter()
         .map(|standing| {
@@ -279,6 +278,7 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         .collect();
     let fresh = invalid_operations();
     for invalid in fresh.iter().chain(&at_issued) {
+        let before = backend.snapshot_os_state();
         contract_assert_eq!(
             backend.grant(invalid.clone(), GrantKind::Hot),
             Err(invalid_refusal(invalid)),
@@ -287,12 +287,13 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         );
         contract_assert_eq!(
             backend.snapshot_os_state(),
-            expected_state,
+            before,
             "a refused invalid {} grant changed the state",
             invalid.class().as_str()
         );
     }
     for invalid in &fresh {
+        let before = backend.snapshot_os_state();
         contract_assert_eq!(
             backend.revoke(invalid.handle(), DrainSpec::forcing()),
             Err(BackendError::UnknownHandle {
@@ -301,8 +302,15 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
             "a refused invalid {} grant must issue no record",
             invalid.class().as_str()
         );
+        contract_assert_eq!(
+            backend.snapshot_os_state(),
+            before,
+            "a revoke of a refused invalid {} grant's handle changed the state",
+            invalid.class().as_str()
+        );
     }
     for invalid in invalid_operations().iter().chain(&at_issued) {
+        let before = backend.snapshot_os_state();
         contract_assert_eq!(
             backend.apply(invalid.clone()),
             Err(invalid_refusal(invalid)),
@@ -311,12 +319,13 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         );
         contract_assert_eq!(
             backend.snapshot_os_state(),
-            expected_state,
+            before,
             "a refused invalid {} apply changed the state",
             invalid.class().as_str()
         );
     }
     for invalid in invalid_operations().iter().chain(&at_issued) {
+        let before = backend.snapshot_os_state();
         contract_assert_eq!(
             backend.plant(invalid.object()),
             Err(invalid_refusal(invalid)),
@@ -325,7 +334,7 @@ pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> 
         );
         contract_assert_eq!(
             backend.snapshot_os_state(),
-            expected_state,
+            before,
             "a refused invalid {} plant changed the state",
             invalid.class().as_str()
         );
@@ -1443,18 +1452,14 @@ fn remove_expected(expected: &mut Vec<OsObject>, removed: &OsObject) {
     expected.remove(index);
 }
 
-fn state_of(objects: &[OsObject]) -> OsState {
-    let mut state = OsState::new();
-    for object in objects {
-        state
+fn assert_exact_state(actual: &OsState, expected: &[OsObject], context: &str) {
+    let mut expected_state = OsState::new();
+    for object in expected {
+        expected_state
             .insert(object.clone())
             .expect("expected conformance objects must have unique addresses");
     }
-    state
-}
-
-fn assert_exact_state(actual: &OsState, expected: &[OsObject], context: &str) {
-    contract_assert_eq!(actual, &state_of(expected), "{context}");
+    contract_assert_eq!(actual, &expected_state, "{context}");
 }
 
 #[cfg(test)]
