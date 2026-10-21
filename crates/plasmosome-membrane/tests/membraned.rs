@@ -413,7 +413,7 @@ fn membraned_exits_nonzero_naming_the_failure() {
     let no_arguments = membraned(&[]).output().expect("membraned runs");
     assert_eq!(
         no_arguments.status.code(),
-        Some(2),
+        Some(64),
         "membraned needs a config"
     );
     assert!(
