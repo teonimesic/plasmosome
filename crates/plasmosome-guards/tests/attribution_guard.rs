@@ -406,7 +406,7 @@ fn clears_a_paragraph_that_mixes_prose_with_a_quoted_trailer() {
 }
 
 #[test]
-fn refuses_a_trailer_naming_a_vendor_whose_name_no_person_carries() {
+fn refuses_a_coding_agents_listed_address_under_its_products_name() {
     check_workspace(|root| {
         assert_refused_crediting_each(
             root,
@@ -416,7 +416,7 @@ fn refuses_a_trailer_naming_a_vendor_whose_name_no_person_carries() {
                 "Devin <devin@cognition.ai>",
                 "Grok <noreply@x.ai>",
             ],
-            "credits a coding agent this guard did not name before",
+            "credits a coding agent by its listed tool address, under the name of its product",
         );
     });
 }
