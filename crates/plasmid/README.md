@@ -43,11 +43,11 @@ $ echo $?
 ```
 
 A command line that is wrong exits 64 with an `invalid` envelope. `argument` names the argument
-at fault when there is one. With `-h` or `--help`, only the command words are judged: no flag is
-a fault, known or unknown, with or without a value, given once or twice, and the envelope names
-the first bad word. Without them, `--version` anywhere but as the sole argument is the fault
-named. Otherwise the envelope names the first fault on the line, flag or word, reading from the
-left:
+at fault when there is one. With `-h` or `--help` before `--`, only the command words are judged:
+no flag is a fault, known or unknown, with or without a value, given once or twice, and the
+envelope names the first bad word. Without them, `--version` anywhere before `--` but as the sole
+argument is the fault named. Otherwise the envelope names the first fault on the line, flag or
+word, reading from the left:
 
 ```console
 $ plasmid frobnicate
