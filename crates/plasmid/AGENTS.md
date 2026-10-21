@@ -25,10 +25,11 @@ on it.
 ## The envelopes
 
 The binary writes spec 025's envelopes, `not_served`, `invalid` and `local_io`, with its own
-writer in `src/envelope.rs`. It does not use `plasmosome-cli`'s writer: `plasmosome-cli` is not published,
-and a normal dependency on an unpublished package stops this crate from packaging, which spec 010
-requires it to keep doing. Whether plasmid moves onto `plasmosome-cli` later is an open question
-(plasmosome-4t24). Both writers escape the terminal controls spec 025 section 3 names.
+writer in `src/envelope.rs`. It does not use `plasmosome-cli`'s writer: `plasmosome-cli` is not
+published, and a normal dependency on an unpublished package stops this crate from packaging,
+which spec 010 requires it to keep doing. Whether plasmid moves onto `plasmosome-cli` later is an
+open question (plasmosome-4t24). Both writers escape the terminal controls spec 025 section 3
+names.
 
 ## Testing
 
@@ -40,3 +41,10 @@ helpers in `tests/support/mod.rs`. They parse what `plasmid new` writes with `pl
 parser, so a printed section that drifts from the refusals the parser gives fails a test.
 `plasmosome-core` is a path-only dev-dependency, which `cargo package` drops. As a normal
 dependency it would stop this crate from packaging, because `plasmosome-core` is not published.
+
+The tests that write to a closed pipe live in `tests/closed_streams.rs`, a test binary with one
+`#[test]`, so no other thread spawns a child while one of those pipes exists. When they shared a
+binary with other tests, a closed pipe's read end was still open somewhere in 14 of 400 runs
+under load, most likely in a child spawned at that moment. Each pipe is probed with a write that
+must fail before a child gets it, so a leak fails the test instead of passing unseen. Keep any new
+closed-pipe case inside that one `#[test]`.

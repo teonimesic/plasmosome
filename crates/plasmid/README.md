@@ -27,8 +27,9 @@ than a library and a binary sharing one dependency table.
 `plasmid --help` lists them with these marks, the global flags, `PLASMOSOME_KERNEL` and the exit
 codes. `plasmid <command> --help` describes one command. `plasmid --version` prints
 `plasmid 0.0.0`; anywhere else before `--`, `--version` is a usage error. The command is the
-first word read from the left, past each known flag and its value, up to `--` or the first unknown
-flag with no `=`. So `plasmid --frob add x` is a usage error that names `--frob`, and
+first word read from the left, past each known flag and its value and each unknown flag shaped
+`--name=value`, up to `--` or any other unknown flag. So `plasmid --frob add x` and
+`plasmid -x=1 list` are usage errors that name `--frob` and `-x=1`, and
 `plasmid --frob=x add x --help` prints add's help.
 
 A command that is not served exits 2 and prints one JSON line on stderr. Of the rest of the line
@@ -42,8 +43,11 @@ $ echo $?
 ```
 
 A command line that is wrong exits 64 with an `invalid` envelope. `argument` names the argument
-at fault when there is one, and when the line holds more than one fault it names the first,
-reading from the left:
+at fault when there is one. With `-h` or `--help`, only the command words are judged: no flag is
+a fault, known or unknown, with or without a value, given once or twice, and the envelope names
+the first bad word. Without them, `--version` anywhere but as the sole argument is the fault
+named. Otherwise the envelope names the first fault on the line, flag or word, reading from the
+left:
 
 ```console
 $ plasmid frobnicate
@@ -52,13 +56,17 @@ $ echo $?
 64
 ```
 
+plasmid does not yet check the values of `--kernel`, `--socket` and `--deadline-ms`, because no
+served command reads them. So where the `plasmosome` binary names a bad value, plasmid names the
+next fault, if there is one: `plasmid --kernel ../x frobnicate` names `frobnicate`.
+
 Help or the version that cannot be written to stdout exits 1 with a third envelope, `local_io`,
 under `command` `--help` or `--version`, with the `errno` when there is one. All three envelopes
 follow the command line's spec, 025: stdout stays empty, and every terminal control in a string is
 written as a `\u` escape. With `--human` the command prints the message and then
 `(client not_served)`, `(client invalid_argument)` or `(client local_io)`, with each terminal
-control shown as `<U+XXXX>`. The human form is for a person; nothing may parse it. `--json` and `--human` together,
-or either one twice, is a usage error.
+control shown as `<U+XXXX>`. The human form is for a person; nothing may parse it. Outside help,
+`--json` and `--human` together, or either one twice, is a usage error.
 
 ## Writing a declaration
 
