@@ -367,6 +367,14 @@ pub enum BackendError {
         id: GrantId,
         error: RecipeError,
     },
+    /// The operation at this address had its first effect and did not finish, or a withdrawal
+    /// failed after it released something. Its unfinished effect is in the snapshot's
+    /// `incomplete` until an exact removal clears it. `detail` is diagnostic, never a selector.
+    IncompleteEffect {
+        class: &'static str,
+        id: GrantId,
+        detail: String,
+    },
     Fault(String),
     Unimplemented(&'static str),
 }
@@ -400,6 +408,9 @@ impl fmt::Display for BackendError {
             }
             BackendError::InvalidOperation { class, id, error } => {
                 write!(f, "invalid {class} operation {id}: {error}")
+            }
+            BackendError::IncompleteEffect { class, id, detail } => {
+                write!(f, "{class} operation {id} is incomplete: {detail}")
             }
             BackendError::Fault(cause) => write!(f, "backend fault: {cause}"),
             BackendError::Unimplemented(what) => write!(f, "unimplemented in this track: {what}"),

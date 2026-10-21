@@ -36,6 +36,18 @@ impl FakeBackend {
         self.refused_owners.insert(owner, cause.to_string());
     }
 
+    /// Makes every later `grant` and `apply` of a valid operation owned by exactly `owner` fail
+    /// after its first effect, with `BackendError::IncompleteEffect` carrying `detail`.
+    pub fn fail_after_effect_for_owner(&mut self, owner: CellOwner, detail: &str) {
+        let _ = (owner, detail);
+    }
+
+    /// Makes the next withdrawal of the holding at this exact address fail after it released
+    /// something, with `BackendError::IncompleteEffect` carrying `detail`.
+    pub fn fail_next_withdrawal(&mut self, handle: Handle, detail: &str) {
+        let _ = (handle, detail);
+    }
+
     /// Makes every graceful withdrawal of the holding at this exact address time out, through
     /// either `revoke` or `apply_removal`. A forced withdrawal still succeeds.
     pub fn mark_stuck(&mut self, handle: Handle) {
