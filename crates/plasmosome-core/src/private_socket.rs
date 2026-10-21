@@ -215,9 +215,13 @@ impl PrivateListener {
         name: &str,
         trusted_uid: u32,
     ) -> Result<PrivateListener, PrivateSocketError> {
-        let (socket, bound) = prepare(dir, name)?;
+        let seam = Seam {
+            draw: &mut random_temporary,
+            observe: &mut |_| {},
+        };
+        let (listener, bound) = publish(dir, name, effective_uid(), seam)?;
         Ok(PrivateListener {
-            listener: UnixListener::from(socket),
+            listener,
             bound,
             trusted_uid,
         })
@@ -711,10 +715,12 @@ struct Seam<'a> {
     observe: &'a mut dyn FnMut(Step),
 }
 
+#[cfg(test)]
 fn prepare(dir: PrivateDir, name: &str) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
     prepare_with(dir, name, || {})
 }
 
+#[cfg(test)]
 fn prepare_with(
     dir: PrivateDir,
     name: &str,
@@ -723,6 +729,7 @@ fn prepare_with(
     prepare_as(dir, name, effective_uid(), after_bind)
 }
 
+#[cfg(test)]
 fn prepare_as(
     dir: PrivateDir,
     name: &str,
@@ -741,7 +748,7 @@ fn prepare_as(
         draw: &mut random_temporary,
         observe: &mut observe,
     };
-    publish(dir, name, owner, seam)
+    publish(dir, name, owner, seam).map(|(listener, bound)| (OwnedFd::from(listener), bound))
 }
 
 #[allow(unsafe_code)]
@@ -750,7 +757,7 @@ fn publish(
     name: &str,
     owner: u32,
     seam: Seam<'_>,
-) -> Result<(OwnedFd, BoundEntry), PrivateSocketError> {
+) -> Result<(UnixListener, BoundEntry), PrivateSocketError> {
     let c_name = entry_name(name)?;
     let path = dir.path.join(name);
     address_for(&path)?;
@@ -826,7 +833,7 @@ fn publish(
     }
     bound.name = c_name;
     bound.entry.path = path;
-    Ok((OwnedFd::from(listener), bound))
+    Ok((listener, bound))
 }
 
 fn choose_temporary(
