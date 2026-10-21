@@ -16,6 +16,8 @@ const REFUSAL_TABLE_HEADER: &str = "| #124 error | Client code | `rule` | Exit |
 
 const SOCKET: &str = "/Users/o/.plasmosome/instances/a/control.uds";
 
+const CHECKED: &str = "/Users/o/.plasmosome/instances/checked/control.uds";
+
 const DIRECTORY: &str = "/Users/o/.plasmosome/instances/a";
 
 const INSTANCES: &str = "/Users/o/.plasmosome/instances";
@@ -50,11 +52,11 @@ fn field<'a>(error: &'a ClientError, key: &str) -> Option<&'a Json> {
 }
 
 fn from_socket(error: &PrivateSocketError) -> ClientError {
-    map_refusal(error, Path::new(SOCKET), PathOrigin::SocketFlag, TRUSTED)
+    map_refusal(error, Path::new(CHECKED), PathOrigin::SocketFlag, TRUSTED)
 }
 
 fn from_home(error: &PrivateSocketError) -> ClientError {
-    map_refusal(error, Path::new(SOCKET), PathOrigin::Home, TRUSTED)
+    map_refusal(error, Path::new(CHECKED), PathOrigin::Home, TRUSTED)
 }
 
 fn variant_name(error: &PrivateSocketError) -> String {
@@ -187,7 +189,7 @@ fn every_row_from_socket() -> Vec<Row> {
             PrivateSocketError::BadName {
                 name: "a/b".to_string(),
             },
-            SOCKET,
+            CHECKED,
             "name",
         ),
         row(
@@ -226,7 +228,7 @@ fn every_row_from_socket() -> Vec<Row> {
             PrivateSocketError::PeerCredentials { errno: 57 },
             ClientCode::PeerMismatch,
             2,
-            vec![("path", text(SOCKET)), ("uid", number(TRUSTED))],
+            vec![("path", text(CHECKED)), ("uid", number(TRUSTED))],
         ),
         row(
             PrivateSocketError::PeerMismatch {
@@ -236,7 +238,7 @@ fn every_row_from_socket() -> Vec<Row> {
             ClientCode::PeerMismatch,
             2,
             vec![
-                ("path", text(SOCKET)),
+                ("path", text(CHECKED)),
                 ("uid", number(TRUSTED)),
                 ("peer_uid", number(65)),
             ],
@@ -323,6 +325,52 @@ fn as_spec_row(error: &PrivateSocketError) -> [String; 4] {
         _ => String::new(),
     };
     [variant_name(error), code, rule, exit]
+}
+
+fn position(error: &PrivateSocketError) -> usize {
+    match error {
+        PrivateSocketError::BadPath { .. } => 0,
+        PrivateSocketError::SymlinkInPath { .. } => 1,
+        PrivateSocketError::NoDirectory { .. } => 2,
+        PrivateSocketError::NoSocket { .. } => 3,
+        PrivateSocketError::NotDirectory { .. } => 4,
+        PrivateSocketError::ForeignOwner { .. } => 5,
+        PrivateSocketError::Replaceable { .. } => 6,
+        PrivateSocketError::ReplaceableByAcl { .. } => 7,
+        PrivateSocketError::OwnershipIgnored { .. } => 8,
+        PrivateSocketError::NotPrivate { .. } => 9,
+        PrivateSocketError::AclPresent { .. } => 10,
+        PrivateSocketError::Replaced { .. } => 11,
+        PrivateSocketError::BadName { .. } => 12,
+        PrivateSocketError::PathTooLong { .. } => 13,
+        PrivateSocketError::AddressInUse { .. } => 14,
+        PrivateSocketError::NotASocket { .. } => 15,
+        PrivateSocketError::SocketOwner { .. } => 16,
+        PrivateSocketError::SocketMode { .. } => 17,
+        PrivateSocketError::BindEscaped { .. } => 18,
+        PrivateSocketError::PeerCredentials { .. } => 19,
+        PrivateSocketError::PeerMismatch { .. } => 20,
+        PrivateSocketError::Io { .. } => 21,
+    }
+}
+
+#[test]
+fn every_variant_is_listed_once_and_has_a_row_in_spec_025() {
+    let rows = every_row_from_socket();
+    let positions: Vec<usize> = rows.iter().map(|row| position(&row.error)).collect();
+    assert_eq!(
+        positions,
+        (0..rows.len()).collect::<Vec<usize>>(),
+        "each variant once, in the enum's order"
+    );
+    let table = spec_025_refusal_rows();
+    for row in &rows {
+        let name = variant_name(&row.error);
+        let listed = table
+            .get(position(&row.error))
+            .map(|cells| cells[0].as_str());
+        assert_eq!(listed, Some(name.as_str()), "spec 025's row for {name}");
+    }
 }
 
 #[test]
@@ -437,15 +485,26 @@ fn peer_fields() {
 
 #[test]
 fn the_trusted_uid_is_the_one_passed_in() {
-    let trusted = effective_uid().wrapping_add(1);
-    assert_ne!(trusted, effective_uid());
-    let refusal = map_refusal(
-        &PrivateSocketError::PeerCredentials { errno: 57 },
-        Path::new(SOCKET),
-        PathOrigin::SocketFlag,
-        trusted,
-    );
-    assert_eq!(field(&refusal, "uid"), Some(&number(trusted)));
+    let effective = effective_uid();
+    let passed = effective.wrapping_add(1);
+    let own = effective.wrapping_add(2);
+    assert_ne!(passed, effective);
+    assert_ne!(own, effective);
+    for error in [
+        PrivateSocketError::PeerCredentials { errno: 57 },
+        PrivateSocketError::PeerMismatch {
+            trusted: own,
+            found: 65,
+        },
+    ] {
+        let refusal = map_refusal(&error, Path::new(SOCKET), PathOrigin::SocketFlag, passed);
+        assert_eq!(
+            field(&refusal, "uid"),
+            Some(&number(passed)),
+            "{}'s uid",
+            variant_name(&error)
+        );
+    }
 }
 
 #[test]
