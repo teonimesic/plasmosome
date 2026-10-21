@@ -16,12 +16,22 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 
 
 SOURCE = Path(__file__).resolve().with_name("check-pipeline-health")
 API = runpy.run_path(str(SOURCE))
 NOW = datetime(2026, 9, 12, 15, tzinfo=timezone.utc)
 START = NOW - timedelta(hours=1)
+
+
+class Skipped(Exception):
+    """A row that cannot run on this platform, with the reason the run prints."""
+
+
+def only_on_macos(reason):
+    if sys.platform != "darwin":
+        raise Skipped(f"macOS only: {reason}")
 
 
 def responses(*items):
@@ -705,25 +715,43 @@ def a_failed_row_fails_the_run_whatever_rows_skip():
     assert errors.getvalue().count("Traceback") == 2, errors.getvalue()
 
 
-def main():
-    only_on_macos_skips_by_name_off_darwin()
-    a_failed_row_fails_the_run_whatever_rows_skip()
-    native_uncertainty()
-    delivery_boundaries()
-    security_issues()
-    cli_security_issues()
-    cli_failure_isolation()
-    cli_readonly_startup()
-    runner_boundaries()
-    cli_exit_metadata()
-    runner_released_group_identity()
-    runner_refused_group_of_exited_leader()
-    the_kernel_refuses_killpg_on_a_group_whose_only_member_is_a_zombie()
-    runner_refused_group_of_live_leader()
-    runner_refused_group_of_exiting_leader()
-    runner_ends_descendants_of_exited_leader()
-    print("PASS: native uncertainty/ownership/drift/pause, complete-or-unknown delivery windows/pagination, security issues with ages or unknown, CLI clock/failure isolation, bounded reaped source commands")
+def run_rows(rows):
+    failed, skipped = [], []
+    for row in rows:
+        try:
+            row()
+        except Skipped as reason:
+            skipped.append(row.__name__)
+            print(f"skip {row.__name__}: {reason}")
+        except Exception as error:
+            failed.append(row.__name__)
+            print(f"FAIL {row.__name__}: {type(error).__name__}: {error}", flush=True)
+            traceback.print_exception(error)
+        else:
+            print(f"ok {row.__name__}")
+    print(f"{len(rows) - len(failed) - len(skipped)} passed, {len(failed)} failed, {len(skipped)} skipped")
+    return 1 if failed else 0
+
+
+TESTS = [
+    only_on_macos_skips_by_name_off_darwin,
+    a_failed_row_fails_the_run_whatever_rows_skip,
+    native_uncertainty,
+    delivery_boundaries,
+    security_issues,
+    cli_security_issues,
+    cli_failure_isolation,
+    cli_readonly_startup,
+    runner_boundaries,
+    cli_exit_metadata,
+    runner_released_group_identity,
+    runner_refused_group_of_exited_leader,
+    the_kernel_refuses_killpg_on_a_group_whose_only_member_is_a_zombie,
+    runner_refused_group_of_live_leader,
+    runner_refused_group_of_exiting_leader,
+    runner_ends_descendants_of_exited_leader,
+]
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(run_rows(TESTS))
