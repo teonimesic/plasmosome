@@ -419,8 +419,11 @@ impl<'a> Line<'a> {
     }
 
     fn no_command(&self) -> Reading {
-        if let Some(bad) = self.tail.iter().find(|arg| arg.to_str().is_none()) {
-            return self.not_utf8(bad);
+        if let Some(dashes) = self.tail.first() {
+            return self.usage(
+                "a command is required before `--`; see plasmosome --help".to_string(),
+                Some(dashes),
+            );
         }
         self.usage(
             "a command is required; see plasmosome --help".to_string(),
