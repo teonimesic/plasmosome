@@ -629,11 +629,12 @@ A renewal is a spec 008 transaction whose replacement changes only the lease; an
 scope stays. After its prepare is durable, a session-log `renew` event records operator, reason,
 and old and new bounds; like `force`, it records authorization, not completion. Then come commit,
 finish and publication. The supervisor raises a gate only from a published DesiredCell, so a raise
-always follows a durable commit and no gate is later than the journal. If B passes before the
-commit, the controller appends abort and replies 105 `{from: "draining", to: "active"}`. If a gate
-fences between commit and publication, the fence stays, and the controller expires the attachment
-with cause `lease` and replies the same 105. Renewal and expiry share spec 023's arrival order: a
-renewal arriving after B gets that 105 before prepare, and one still running at B fails.
+always follows a durable commit and no gate is later than the journal. If B (spec 028 section 1)
+passes before the commit, the controller appends abort and replies 105
+`{from: "draining", to: "active"}`. If a gate fences between commit and publication, the fence
+stays, and the controller expires the attachment with cause `lease` and replies the same 105.
+Renewal and expiry share spec 023's arrival order: a renewal arriving after B gets that 105
+before prepare, and one still running at B fails.
 
 ## 4. Controller ⇄ membrane (the supervisor side of the contract)
 
@@ -1215,12 +1216,12 @@ gate. Guest drain and host drain share the one remaining budget.
 
 **Lifetime fence (spec 028).** The supervisor gets each grant's bound and idle limit with its
 apply (spec 001 §4.1), before activation. It takes an earlier bound at any time, and a later one
-only from a published DesiredCell (spec 028 section 8). From B on, the host gate of every grant in
-the attachment admits no request, on any reference, opened before B or after. The gate reads the
-supervisor's clock at every admission, as spec 001 §4.2's graceful pause does, so the fence needs
-no timer and no controller. It refuses before any OS effect, with spec 001's `grant_inactive`. It
-caps each admitted request's work at B + D, and when B moves earlier, work already admitted is
-cut to the new B + D.
+only from a published DesiredCell (spec 028 section 8). From B (spec 028 section 1) on, the host
+gate of every grant in the attachment admits no request, on any reference, opened before B or
+after. The gate reads the supervisor's clock at every admission, as spec 001 §4.2's graceful
+pause does, so the fence needs no timer and no controller. It refuses before any OS effect, with
+spec 001's `grant_inactive`. It caps each admitted request's work at B + D, and when B moves
+earlier, work already admitted is cut to the new B + D.
 
 For the idle limit, the gate keeps the continuous time of the last request it admitted for the
 attachment; a request still in flight is not use, and sleep counts as idle. It fences once that time
