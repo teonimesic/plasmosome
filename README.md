@@ -84,9 +84,10 @@ socket is owned by you or by root, is not a symlink, and is writable by neither 
 On macOS it also refuses when `/` or any directory on the way down to the socket is on a volume
 mounted with ownership ignored, which `mount` lists as `noowners`, because there the owner and
 mode it reads do not keep other users out.
-Before it builds, the example checks the type, owner and mode of the base and of each directory
-above it, that you can write the base, that its mount is not `noexec` (on Linux), and that its
-path is short enough, and stops with one line naming the first that fails.
+Before it builds, the example checks that the base's path is valid UTF-8, the type, owner and
+mode of the base and of each directory above it, that you can write the base, that its mount is
+not `noexec` (on Linux), and that its path is short enough, and stops with one line naming the
+first that fails.
 It does not check for ignored ownership, which Python's `os` module cannot read, so on such a
 volume the build runs and then `plasmosomed` refuses to start, naming the first directory on
 that volume. Python cannot read `noexec` on macOS either, so there such a base fails the build.
