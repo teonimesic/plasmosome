@@ -115,6 +115,12 @@ pub struct SocketEntry {
     pub ino: u64,
 }
 
+/// The backlog [`PrivateListener::bind`] passes to `listen`. Once about this many connections
+/// wait unaccepted, macOS refuses the next connect with `ECONNREFUSED`, the error a closed
+/// listener gives too. Linux makes a blocking connect wait and a nonblocking one fail with
+/// `EAGAIN`.
+pub const LISTEN_BACKLOG: i32 = 16;
+
 /// A listening socket inside a [`PrivateDir`] that hands out only connections whose kernel peer
 /// UID is trusted. Dropping it closes the socket and then removes the entry it created, only
 /// while the entry at that name is still the same socket by device and inode.
@@ -207,7 +213,7 @@ impl PrivateListener {
     ) -> Result<PrivateListener, PrivateSocketError> {
         let (socket, bound) = prepare(dir, name)?;
         // SAFETY: listen takes no pointer, and `socket` keeps its descriptor open for the call.
-        if unsafe { libc::listen(socket.as_raw_fd(), 16) } != 0 {
+        if unsafe { libc::listen(socket.as_raw_fd(), LISTEN_BACKLOG) } != 0 {
             return Err(io_failure(
                 "listen",
                 &bound.entry.path,
