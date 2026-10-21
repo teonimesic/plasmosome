@@ -152,11 +152,11 @@ other OS is not a skip; the other OS's job runs it.
 
 ### The rustdoc step
 
-`gates` and `macos` each run `cargo doc --locked --workspace --no-deps` as one step, directly
-after the ignored-test report, with `RUSTDOCFLAGS` set to `-D warnings` on that step alone. It is
-the fifth of the steps the two jobs share. `--locked` is there because
-[spec 026](026-security-standard.md#3-the-toolchain) requires it of every CI cargo command that
-resolves dependencies. `--no-deps` documents the workspace members only; a dependency's doc
+`gates` and `macos` each run `cargo doc --locked --workspace --no-deps` as one step, directly after
+the ignored-test report, with `RUSTDOCFLAGS` set to `-D warnings` on that step alone. It is step 5
+of the `macos` list above, the fifth of the shared steps that start at clippy. `--locked` is there
+because [spec 026](026-security-standard.md#3-the-toolchain) requires it of every CI cargo command
+that resolves dependencies. `--no-deps` documents the workspace members only; a dependency's doc
 warnings are not this repository's to fix.
 
 - **Both jobs.** rustdoc documents only what is compiled for the OS it runs on. Items under
@@ -167,15 +167,17 @@ warnings are not this repository's to fix.
   build doctests, and they would no longer run what the root gate runs.
 - **Public items only.** The step does not pass `--document-private-items`. It checks the docs a
   caller reads, which is what the root `AGENTS.md` asks `///` to serve. It is also the command
-  executors already ran by hand, so a green root gate predicts a green step. A broken link in a
-  private item's doc may go unreported.
-- **What it cannot see.** `-D warnings` turns a warning into an error, and a lint a package
-  allows does not warn, so the step passes it. A rustdoc lint can be allowed in a manifest,
-  through `[lints.rustdoc]` or the root's `[workspace.lints.rustdoc]`, or in source, through an
-  attribute such as `#![allow(rustdoc::broken_intra_doc_links)]` or `allow(warnings)`. Each is a
-  visible line in a diff. [Spec 026 §8](026-security-standard.md#8-which-prs-this-spec-governs)
-  already puts every manifest `[lints]` change before its reviewer, and a reviewer reads a new
-  attribute as code.
+  executors already ran by hand, so a green root gate predicts a green step on the same OS. A broken
+  link in a private item's doc may go unreported.
+- **What it cannot see.** `-D warnings` turns a warning into an error, and a lint a package allows
+  does not warn, so the step passes it. A rustdoc lint can be allowed in a manifest, through
+  `[lints.rustdoc]` or the root's `[workspace.lints.rustdoc]`, or in source, through an attribute
+  such as `#![allow(rustdoc::broken_intra_doc_links)]` or `allow(warnings)`. Each is a visible line
+  in a diff. [Spec 026 §8](026-security-standard.md#8-which-prs-this-spec-governs) already puts
+  every manifest `[lints]` change before its reviewer, and a reviewer reads a new attribute as code.
+  A target whose manifest sets `doc = false` is not documented at all, and an item marked
+  `#[doc(hidden)]` drops out of the docs, so the step reads neither one's links. Spec 026 §8 does
+  not list a manifest's target tables, so a reviewer reads a `doc = false` line as code too.
 - **Not a guard.** It is a lint run on the footing of the clippy step: it reports rustdoc's lints
   at the levels rustdoc and the packages set, with warnings denied.
   [Spec 013](013-what-earns-a-guard.md) counts a level a package declares as that package's code,
@@ -260,9 +262,10 @@ in plasmosome-36oc's notes.
   without a C warning; and every test that is not ignored builds and passes. It promises nothing
   a booted guest would show, nothing about other macOS versions (spec 001 admits macOS 14 and
   later) and nothing about Intel Macs.
-- A green `gates` or `macos` run promises: rustdoc documented every workspace member on that OS
-  with no warning, at the lint levels the packages declare. It promises nothing about the docs of
-  private items, or of items compiled only for the other OS.
+- A green `gates` or `macos` run promises: rustdoc documented every workspace member on that OS with
+  no warning, at the lint levels the packages declare. It promises nothing about the docs of private
+  or `#[doc(hidden)]` items, of a target whose manifest sets `doc = false`, or of items compiled
+  only for the other OS.
 - A test that needs a prerequisite asserts it; one a CI runner cannot supply is
   `#[ignore = "needs <prerequisite>"]`, and a bare `#[ignore]` fails clippy in every member.
   `gates` and `macos` each name every ignored test with its crate and reason, say none was only
