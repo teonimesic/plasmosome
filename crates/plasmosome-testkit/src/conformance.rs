@@ -193,13 +193,12 @@ pub fn revoke_unknown_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> 
 }
 
 /// Checks that either successful revoke policy removes the exact granted object and its issued
-/// record.
+/// record, and leaves no unfinished effect.
 pub fn drained_revoke_removes_object<B: EnforcementBackend>(make: impl Fn() -> B) {
     for drain in drains() {
         let mut backend = make();
         for prepared in sample_grants() {
             let entry = grant_prepared(&mut backend, &prepared);
-            let object = entry.object();
             backend.revoke(entry.handle, drain).unwrap_or_else(|error| {
                 contract_panic!(
                     "a {} revoke of {} failed: {error}",
@@ -207,18 +206,15 @@ pub fn drained_revoke_removes_object<B: EnforcementBackend>(make: impl Fn() -> B
                     entry.handle
                 )
             });
-            let snapshot = observe(&mut backend);
-            contract_assert!(
-                !holds_exact(snapshot.state(), &object),
-                "a {} revoke left {} standing",
-                policy_of(drain),
-                object.describe()
-            );
-            contract_assert!(
-                !issues_record(&snapshot, entry.handle),
-                "a {} revoke kept the issued record of {}",
-                policy_of(drain),
-                entry.handle
+            assert_account(
+                &observe(&mut backend),
+                &[],
+                &[],
+                &format!(
+                    "a {} revoke left {}'s object, record or effect",
+                    policy_of(drain),
+                    entry.handle
+                ),
             );
         }
     }
@@ -519,19 +515,19 @@ where
     }
 }
 
-/// Checks that spent handles stay spent after later grants under either policy.
+/// Checks that spent handles stay spent after later grants under either policy, and that a
+/// refused spent-handle revoke leaves exactly the live grant's object and record.
 pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn() -> B) {
     for drain in drains() {
         let mut backend = make();
         let mut spent = Vec::new();
         for prepared in sample_grants().into_iter().take(2) {
             let entry = grant_prepared(&mut backend, &prepared);
-            let object = entry.object();
             contract_unwrap!(backend.revoke(entry.handle, drain));
-            spent.push((entry, object));
+            spent.push(entry);
         }
         let live = grant_prepared(&mut backend, &sample_grants().remove(2));
-        for (entry, spent_object) in spent.into_iter().rev() {
+        for entry in spent.into_iter().rev() {
             contract_assert_eq!(
                 contract_unwrap_err!(backend.revoke(entry.handle, drain)),
                 BackendError::UnknownHandle {
@@ -539,16 +535,11 @@ pub fn revoke_of_a_revoked_handle_is_error<B: EnforcementBackend>(make: impl Fn(
                 },
                 "revoking the already-revoked handle must return UnknownHandle"
             );
-            let snapshot = observe(&mut backend);
-            contract_assert!(!holds_exact(snapshot.state(), &spent_object));
-            contract_assert!(
-                holds_exact(snapshot.state(), &live.object()),
-                "a refused spent-handle revoke took the live neighbour"
-            );
-            contract_assert_eq!(
-                snapshot.grants(),
+            assert_account(
+                &observe(&mut backend),
+                &[live.object()],
                 std::slice::from_ref(&live),
-                "a refused spent-handle revoke changed the issued records"
+                "a refused spent-handle revoke changed the account",
             );
         }
     }
@@ -1516,13 +1507,6 @@ fn owner_holds_key(state: &OsState, owner: &CellOwner, class: UniverseClass, key
     state
         .objects()
         .any(|object| &object.owner == owner && object.class() == class && object.key() == key)
-}
-
-fn issues_record(snapshot: &EnforcementSnapshot, handle: Handle) -> bool {
-    snapshot
-        .grants()
-        .iter()
-        .any(|record| record.handle == handle)
 }
 
 fn remove_expected<T: PartialEq>(expected: &mut Vec<T>, removed: &T) {
