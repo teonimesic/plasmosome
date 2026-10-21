@@ -1,6 +1,8 @@
 use crate::vmm::SpawnError;
+use plasmosome_core::private_socket::PrivateListener;
 use std::cell::Cell;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::sync::{PoisonError, RwLock};
 
 static SPAWN_LOCK: RwLock<()> = RwLock::new(());
@@ -18,6 +20,38 @@ pub(crate) enum Forked {
 /// `with_descriptors_held` and `with_each_descriptor_held` make one, so a
 /// function that takes it can run only inside descriptor creation.
 pub(crate) struct DescriptorsHeld(());
+
+/// A value that owns one descriptor, which `with_descriptors_held` checks for
+/// close-on-exec.
+///
+/// Implement it only for a type that owns its descriptor, so that dropping
+/// the value closes it: `with_descriptors_held` closes an inheritable
+/// descriptor before the lock is released only by dropping the value. The
+/// descriptor is lent for that check alone. Never close it, accept on it,
+/// change its flags or keep a copy of it. It is lent as a `RawFd`, not a
+/// `BorrowedFd`, so making a copy needs `unsafe`.
+pub(crate) trait OwnsDescriptor {
+    /// The descriptor this value owns.
+    fn descriptor(&self) -> RawFd;
+}
+
+impl OwnsDescriptor for OwnedFd {
+    fn descriptor(&self) -> RawFd {
+        todo!()
+    }
+}
+
+impl OwnsDescriptor for UnixStream {
+    fn descriptor(&self) -> RawFd {
+        todo!()
+    }
+}
+
+impl OwnsDescriptor for PrivateListener {
+    fn descriptor(&self) -> RawFd {
+        todo!()
+    }
+}
 
 /// Runs `create` while no `VmmChild::spawn` in this process can fork.
 ///
