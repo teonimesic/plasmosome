@@ -84,7 +84,13 @@ an empty commands table; `[commands]`, its commands table or a command that is n
 program; and a `[mock]` with no `[network]`, or naming a host `[network]` does not declare. In
 `hosts`, `pin_cidrs` and `[mock]` `hosts`, an entry that is not a string is named by its index.
 Its fix is `remove this entry`, except in a pin list with no string entry, where it is the
-example pin `"192.0.2.0/24"`: removing the last pin would leave egress unpinned.
+example pin `"192.0.2.0/24"`: removing the last pin would leave egress unpinned. A `[provides]`
+binding whose key is empty or only whitespace is refused at its own path, such as `provides.""`,
+before anything inside it is checked. Its fix is `remove this entry`: no key is guessed, so
+following the fix deletes the binding and its tools. A key is blank when every character in it is
+Unicode White_Space, the characters `str::trim` removes. A key made only of U+3000 or U+00A0 is
+blank. A key such as `" a"` is not, and neither is one made only of U+FEFF, U+200B or U+180E, which
+are not White_Space.
 
 For a network section that is not a table, or a `hosts` that is not a list, the fix uses the
 string the author wrote there. For the top-level `[network]`, it then uses the `[mock]` hosts.
