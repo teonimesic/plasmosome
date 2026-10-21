@@ -98,6 +98,15 @@ fn version_is_the_sole_argument_and_reads_no_config() {
 
     write_config(directory.path(), OsStr::new("--version"), &socket);
     assert_prints_the_version(directory.path(), "--version holds a valid config");
+
+    let fifo = directory.path().join("--version");
+    std::fs::remove_file(&fifo).expect("the config named --version is removed");
+    let made = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo makes {fifo:?}: {made}");
+    assert_prints_the_version(directory.path(), "--version is a FIFO nobody writes");
     assert!(!socket.exists(), "--version binds nothing");
 }
 
@@ -107,7 +116,7 @@ fn every_other_sole_operand_remains_a_literal_config_path() {
     let occupied = directory.path().join("taken.uds");
     std::fs::write(&occupied, b"owned occupied path").expect("the occupied path is written");
 
-    let cases: [(OsString, OsString); 9] = [
+    let cases: [(OsString, OsString); 11] = [
         (OsString::from("--help"), OsString::from("./--help")),
         (OsString::from("-h"), OsString::from("./-h")),
         (OsString::from("--version"), OsString::from("./--version")),
@@ -115,6 +124,8 @@ fn every_other_sole_operand_remains_a_literal_config_path() {
         (OsString::from("--Version"), OsString::from("--Version")),
         (OsString::from("--version=x"), OsString::from("--version=x")),
         (OsString::from("--help=x"), OsString::from("--help=x")),
+        (OsString::from("--vers"), OsString::from("--vers")),
+        (OsString::from("--version "), OsString::from("--version ")),
         (OsString::from("help"), OsString::from("help")),
         (OsString::from("--"), OsString::from("--")),
     ];
@@ -189,7 +200,7 @@ fn a_usage_error_exits_64_and_starts_nothing() {
     let socket = directory.path().join("membrane.uds");
     write_config(directory.path(), OsStr::new("valid.json"), &socket);
 
-    let lists: [&[&str]; 15] = [
+    let lists: [&[&str]; 16] = [
         &[],
         &["--version", "extra"],
         &["extra", "--version"],
@@ -204,6 +215,7 @@ fn a_usage_error_exits_64_and_starts_nothing() {
         &["--config-fd=3", "--lock-fd=4", "--cell="],
         &["--config-fd=3", "--lock-fd=4", "--cellcell-1"],
         &["--config-fd=3", "--lock-fd=4", "--cell==cell-1"],
+        &["--config-fd=3", "--lock-fd=4", "--cell= cell-1"],
         &["--config-fd=5", "--lock-fd=4", "--cell=cell-1"],
     ];
     let mut cases: Vec<Vec<OsString>> = lists

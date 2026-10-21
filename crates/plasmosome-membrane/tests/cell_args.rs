@@ -65,6 +65,7 @@ fn a_cell_that_is_not_a_cell_id_is_not_the_form() {
         "--cell=cell-10000000000",
         "--cell=Cell-1",
         "--cell=cell-1 ",
+        "--cell= cell-1",
         "--cell=cell-1/x",
         "--cell",
         "--cell cell-1",
