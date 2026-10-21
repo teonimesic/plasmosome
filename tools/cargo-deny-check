@@ -499,5 +499,5 @@ if __name__ == "__main__":
         status = TOOL_FAILURE
         with contextlib.suppress(Exception):
             summarize(f"cargo-deny tool failure (not a finding): the wrapper crashed running `cargo-deny-check "
-                      f"{shlex.join(sys.argv[1:])}`. The job log has the traceback and any result printed before it.\n")
+                      f"{shlex.join(sys.argv[1:])}`. Earlier lockfiles may have refused; the job log has their results.\n")
     sys.exit(status)
