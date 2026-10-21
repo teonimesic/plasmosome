@@ -131,13 +131,14 @@ pub enum ArtifactFault {
     Writable { mode: u32 },
     /// The artifact's mode has the set-user-ID or set-group-ID bit.
     SetIdBits { mode: u32 },
-    /// On macOS, the artifact carries an ACL allow entry granting write, append, write
-    /// attributes or security, chown or delete to some principal.
+    /// On macOS, the artifact carries an ACL allow entry granting write data, append data, write
+    /// attributes, write extended attributes, write security, chown, delete, or generic write or
+    /// all, whoever the entry names.
     WriteAcl,
     /// Neither `uchg` nor `schg` is set on the artifact.
     NotImmutable,
-    /// This platform cannot show the artifact immutable. Every artifact off macOS is refused
-    /// this way.
+    /// This platform cannot show the artifact immutable. Off macOS, every artifact that passes
+    /// the other rules is refused this way.
     ImmutabilityUnverifiable,
     /// The artifact's size, modification time or change time moved while it was hashed.
     ChangedWhileHashing,
@@ -225,16 +226,20 @@ fn kind_name(kind: Kind) -> &'static str {
 ///
 /// Walks `artifact.path()` from "/" one component at a time without following a symlink; every
 /// directory on the way must be owned by root or the effective UID and writable by neither group
-/// nor other, with no sticky-bit exception, and on macOS carry no ACL entry letting another
-/// principal replace its entries. The last name is opened without blocking and must be a regular
-/// file owned by root or the effective UID, with no write bit, no set-id bit, no ACL entry
-/// granting write, and `uchg` or `schg` set. Only then are its bytes hashed through that
-/// descriptor and compared with `artifact.sha256()`. A file that breaks a rule is refused, never
-/// trusted after hashing. Off macOS every artifact is refused `ImmutabilityUnverifiable`.
+/// nor other, with no sticky-bit exception, and on macOS carry no ACL allow entry, whoever it
+/// names, that grants a right to replace its entries. The last name is opened without blocking
+/// and must be a regular file owned by root or the effective UID, with no write bit, no set-id
+/// bit, no ACL entry granting write, and `uchg` or `schg` set. Only then are its bytes hashed
+/// through that descriptor, reading at most one byte past the size it was checked at, and
+/// compared with `artifact.sha256()`. Its size, modification time and change time must not move
+/// while it is hashed. A file that breaks a rule is refused, never trusted after hashing. Off
+/// macOS, every artifact that passes the other rules is refused `ImmutabilityUnverifiable`.
 ///
 /// On macOS pass the canonical path, `/private/var/...` rather than `/var/...`: a symlink
 /// anywhere on the path is refused. Root and the effective UID can still change an artifact
-/// after it passes; the checks keep out every other principal.
+/// after it passes. So can a process that opened it for writing before it was locked, because
+/// the mode and `uchg` refuse only new opens, and this process cannot see another process's
+/// descriptors. [`VerifiedArtifact::reconfirm`] refuses such a change made before it runs.
 pub fn verify_artifact(
     role: ArtifactRole,
     artifact: &Artifact,

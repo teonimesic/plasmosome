@@ -213,23 +213,29 @@ artifacts by path. `runtime::artifacts::verify_artifact` checks one artifact tha
 
 The path is walked from `/` with core's no-follow walk, `plasmosome_core::nofollow`. No component
 may be a symlink. Every directory on the way must be owned by root or the effective uid and
-writable by neither group nor other, with no sticky-bit exception and, on macOS, no ACL entry that
-lets another principal replace its entries. The file must be a regular file owned by root or the
-effective uid, with no write bit, no set-id bit and no ACL entry granting write, and on macOS `uchg`
-or `schg` must be set. Off macOS immutability cannot be shown, so every artifact is refused with
-`ImmutabilityUnverifiable`. Only then are the bytes hashed, through the same descriptor with
-positioned reads, and compared with the pin.
+writable by neither group nor other, with no sticky-bit exception and, on macOS, no ACL allow entry
+that grants a right to replace its entries, whoever the entry names. The file must be a regular
+file owned by root or the effective uid, with no write bit, no set-id bit and no ACL entry granting
+write, and on macOS `uchg` or `schg` must be set. Off macOS immutability cannot be shown, so every
+artifact that passes the other rules is refused with `ImmutabilityUnverifiable`. Only then are the
+bytes hashed, through the same descriptor with positioned reads, and compared with the pin. The
+hash reads at most one byte past the size the file was checked at, so a file that keeps growing
+cannot keep it running. The file's size, modification time and change time must be the same after
+the hash as before it, or it is refused as `ChangedWhileHashing`.
 
 On macOS pass the canonical path: `/var` is a symlink, so `/var/folders/...` is refused at `/var`.
-Measured on this Mac on 2026-10-21, the qualified bundle's kernel is refused at `/usr/local/var`,
-which has mode 0775; that is owner gate O-1 on `plasmosome-qep`.
+Measured on macOS 26.6.2 on 2026-10-21, the qualified bundle's kernel is refused at
+`/usr/local/var`, which has mode 0775; that is owner gate O-1 on `plasmosome-qep`.
 
-A `VerifiedArtifact` keeps the descriptor, the file's device and inode, its size and its digest.
-`file()` still reads the verified inode after the path is made to name another file. `reconfirm()`
-opens the path again under the same checks and refuses another inode as `Replaced`; call it just
-before the launch that relies on the path. Root and the effective uid can still clear `uchg` and
-change a file, or replace a directory they own. The checks keep out every other principal, which
-is owner gate O-4.
+A `VerifiedArtifact` keeps the descriptor, the file's device and inode, its size and times, and its
+digest. `file()` still reads the verified inode after the path is made to name another file.
+`reconfirm()` opens the path again under the same checks. It refuses another inode as `Replaced`,
+and a file whose size or times moved since it was verified as `ChangedSinceVerification`. Call it
+just before the launch that relies on the path. Root and the effective uid can still clear `uchg`
+and change a file, or replace a directory they own; that is owner gate O-4. A process that opened
+the file for writing before it was locked can still write it too, because the mode and `uchg`
+refuse only new opens. Measured on macOS 26.6.2, such a write moves the file's times, so
+`reconfirm()` refuses a change made before it runs, but not one made after.
 
 ## Launching the VMM helper
 
@@ -268,7 +274,8 @@ relative path can add to where the helper's loader looks for libraries. They do 
 path built into the helper or its libraries, such as the one owner gate O-6 of `plasmosome-qep`
 names in the qualified libkrun. The launch checks no artifact either: the cell, plasmosome-7em,
 which is not built yet, must verify the helper and its libraries with `runtime::artifacts` before it
-prepares the launch.
+prepares the launch. That checks only the files the recipe lists. plasmosome-vev, also not built,
+audits the helper's Mach-O load names against those verified libraries.
 
 ## Control-socket ownership
 
