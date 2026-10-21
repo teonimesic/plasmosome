@@ -337,9 +337,10 @@ impl InstanceRoot {
         let mut lowest = 1;
         for _ in 0..ALLOCATION_ATTEMPTS {
             let next = self.next_cell_number(lowest)?;
-            match self.create_cell_dir(lock, &format_cell_id(next)) {
+            let cell = format_cell_id(next);
+            match self.create_cell_dir(lock, &cell) {
                 Err(CellDirError::AlreadyExists { .. }) => lowest = next + 1,
-                created => return created.map_err(AllocateError::Create),
+                created => return created.map_err(|source| AllocateError::Create { cell, source }),
             }
         }
         Err(AllocateError::Contended {
@@ -1061,7 +1062,7 @@ pub enum AllocateError {
     Listing { path: PathBuf, source: io::Error },
     Exhausted,
     Contended { path: PathBuf },
-    Create(CellDirError),
+    Create { cell: CellId, source: CellDirError },
 }
 
 /// Spec 023 §3's `launched` marker: the cell it belongs to and the host boot session its
@@ -1485,8 +1486,8 @@ impl fmt::Display for AllocateError {
                  chose already taken in {}",
                 path.display()
             ),
-            AllocateError::Create(error) => {
-                write!(f, "the new cell's directory was not created: {error}")
+            AllocateError::Create { cell, source } => {
+                write!(f, "creating {} failed: {source}", cell.as_str())
             }
         }
     }
@@ -1496,7 +1497,7 @@ impl std::error::Error for AllocateError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             AllocateError::Listing { source, .. } => Some(source),
-            AllocateError::Create(error) => Some(error),
+            AllocateError::Create { source, .. } => Some(source),
             AllocateError::ForeignLock { .. }
             | AllocateError::NotADirectory { .. }
             | AllocateError::Exhausted
