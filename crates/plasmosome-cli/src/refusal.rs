@@ -29,6 +29,7 @@ pub fn map_refusal(
     origin: PathOrigin,
     trusted_uid: u32,
 ) -> ClientError {
+    #[deny(clippy::wildcard_enum_match_arm)]
     let (code, fields) = match error {
         PrivateSocketError::BadPath { .. } => match origin {
             PathOrigin::SocketFlag => (
