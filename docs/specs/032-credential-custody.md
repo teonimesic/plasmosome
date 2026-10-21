@@ -405,9 +405,9 @@ attaches a binding's value to a request only when all of these hold.
 8. The relay never follows a redirect. It returns a redirect response as it came, and a request
    to the new location is a new request, checked like any other.
 
-**The request rules.** On both paths, for every request it could attach a value to, the relay
-refuses a request that breaks one of these before it sends any byte. On the workload path it then
-closes the guest's connection.
+**The request rules.** These apply to every request on an intercepted flow, and to every
+component request that names a reference. The relay refuses a request that breaks one before it
+sends any byte. On the workload path it then closes the guest's connection.
 
 1. **Target.** The request target is origin-form: a path and an optional query. An absolute-form
    target is refused unless its authority is the binding's host and port, and is then sent in
