@@ -1542,6 +1542,23 @@ mod tests {
     }
 
     #[test]
+    fn the_leader_signal_stand_in_answers_only_for_its_pid_on_its_thread_until_dropped() {
+        assert_eq!(leader_signal_stand_in(4000), None);
+        {
+            let _stand_in = LeaderSignalStandIn::failing(4000, libc::ESRCH);
+            assert_eq!(leader_signal_stand_in(4000), Some(Err(libc::ESRCH)));
+            assert_eq!(leader_signal_stand_in(4001), None);
+            let elsewhere = std::thread::spawn(|| leader_signal_stand_in(4000))
+                .join()
+                .expect("the other thread asks without panicking");
+            assert_eq!(elsewhere, None);
+        }
+        assert_eq!(leader_signal_stand_in(4000), None);
+        let _withheld = LeaderSignalStandIn::withheld(4000);
+        assert_eq!(leader_signal_stand_in(4000), Some(Ok(())));
+    }
+
+    #[test]
     #[allow(unsafe_code)]
     fn immediate_teardown_while_child_is_pre_setsid_reaps_exact_child() {
         let (gate_read, gate_write) = pipe();
