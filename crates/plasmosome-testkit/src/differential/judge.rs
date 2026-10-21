@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
-use super::{FUSE, Lane, Manifest, ManifestRefusal, Observation, Run};
+use super::normalize::normalize;
+use super::{FUSE, Lane, Manifest, ManifestRefusal, Observation, RuleKind, Run};
 
 /// What a finding is about: a declared probe, or the harness transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,13 +18,13 @@ pub enum Reason {
     /// `lane` has no runs, or one of its runs has no completion marker for the subject, or the
     /// subject failed there before the step it observes.
     NotRun { lane: Lane },
-    /// The two runs of `lane` differ in `field`.
+    /// The two runs of `lane` differ in `field` after normalization.
     Noise { lane: Lane, field: String },
-    /// A completed open run and a completed absent run of a reach probe are equal, leaving out
-    /// the fields a rule covers.
+    /// A completed open run and a completed absent run of a reach probe are equal after
+    /// normalization.
     NoDiscrimination,
-    /// The cell lane differs from the absent lane in `field`, and no allowance admits the
-    /// cell's value there.
+    /// The cell lane differs from the absent lane in `field` after normalization, and no
+    /// allowance admits the cell's value there.
     Differs { field: String },
     /// `lane` does not show the manifest's neutral value for `name`.
     NotNeutral { lane: Lane, name: NeutralName },
@@ -82,6 +83,15 @@ pub enum RunRefusal {
     UnknownProbe { lane: Lane, probe: String },
     /// A run observed one probe twice.
     DuplicateObservation { lane: Lane, probe: String },
+    /// A completed observation in `lane` holds, in a `field` of `probe` that a rule covers,
+    /// something other than one value of the rule's `kind` or a list of such values, or a list
+    /// of system times or durations that mixes integers with numbers held as `f64`.
+    RuleCannotHold {
+        lane: Lane,
+        probe: String,
+        field: String,
+        kind: RuleKind,
+    },
 }
 
 /// Judges `runs` against `manifest` under spec 027 §6. A lane has no runs, which leaves every
@@ -91,10 +101,11 @@ pub enum RunRefusal {
 /// lane equals the absent lane except where an allowance admits the cell's exact value.
 /// Neutral names are checked on every completed run, and every completed run of one lane is
 /// compared with every completed run of the other. So a failure is listed even when a lane's
-/// other run is not run, and the verdict does not depend on the order of a lane's runs. Every
-/// field is compared exactly, because the manifest's rules are not applied yet. That can only
-/// find more noise and more differences. Discrimination leaves out the fields a rule covers, so
-/// a value a rule would replace cannot make a reach probe look as if it discriminated.
+/// other run is not run, and the verdict does not depend on the order of a lane's runs. All
+/// three comparisons, noise, discrimination and the cell against the absent lane, see each
+/// completed observation after normalization: every value a [`super::Rule`] covers is replaced
+/// by a placeholder, and every other field is compared exactly. A ruled value its kind cannot
+/// hold refuses the runs, naming the lane, probe, field and kind.
 pub fn judge(manifest: &Manifest, runs: &[Run]) -> Result<Verdict, RunRefusal> {
     manifest.validate().map_err(RunRefusal::Manifest)?;
     let lanes = pair(manifest, runs)?;
@@ -115,8 +126,11 @@ pub fn judge(manifest: &Manifest, runs: &[Run]) -> Result<Verdict, RunRefusal> {
                 let reason = Reason::NotNeutral { lane: *lane, name };
                 push(&mut findings, &subject, reason);
             }
-            let fields = observations.map(|seen| seen.map(|seen| seen.fields.clone()));
-            ran.push((*lane, fields));
+            let [first, second] = observations.map(|seen| {
+                seen.map(|seen| normalize(manifest, *lane, seen))
+                    .transpose()
+            });
+            ran.push((*lane, [first?, second?]));
         }
         let allowed = |field: &str, value: &Value| {
             manifest.allowances.iter().any(|allowance| {
@@ -125,13 +139,7 @@ pub fn judge(manifest: &Manifest, runs: &[Run]) -> Result<Verdict, RunRefusal> {
                     && allowance.cell_value == *value
             })
         };
-        let ruled: Vec<&str> = manifest
-            .rules
-            .iter()
-            .filter(|rule| rule.probe == probe.id)
-            .map(|rule| rule.field.as_str())
-            .collect();
-        let reach = probe.reach.map(|_| ruled.as_slice());
+        let reach = probe.reach.is_some();
         compare(&subject, &ran, reach, allowed, &mut findings);
     }
     let mut ran = Vec::new();
@@ -147,7 +155,7 @@ pub fn judge(manifest: &Manifest, runs: &[Run]) -> Result<Verdict, RunRefusal> {
     compare(
         &Subject::Transcript,
         &ran,
-        None,
+        false,
         |_, _| false,
         &mut findings,
     );
@@ -270,7 +278,7 @@ type Ran = [(Lane, [Option<Fields>; 2])];
 fn compare(
     subject: &Subject,
     ran: &Ran,
-    reach: Option<&[&str]>,
+    reach: bool,
     allowed: impl Fn(&str, &Value) -> bool,
     findings: &mut Vec<Finding>,
 ) {
@@ -281,19 +289,9 @@ fn compare(
             }
         }
     }
-    if let Some(ruled) = reach {
-        let unruled = |fields: &Fields| {
-            let mut fields = fields.clone();
-            fields.retain(|field, _| !ruled.contains(&field.as_str()));
-            fields
-        };
-        let pairs = completed_pairs(ran, Lane::Open, Lane::Absent);
-        if pairs
-            .iter()
-            .any(|(open, absent)| unruled(open) == unruled(absent))
-        {
-            push(findings, subject, Reason::NoDiscrimination);
-        }
+    let pairs = || completed_pairs(ran, Lane::Open, Lane::Absent);
+    if reach && pairs().iter().any(|(open, absent)| open == absent) {
+        push(findings, subject, Reason::NoDiscrimination);
     }
     let mut fields = BTreeSet::new();
     for (cell, absent) in completed_pairs(ran, Lane::Cell, Lane::Absent) {
