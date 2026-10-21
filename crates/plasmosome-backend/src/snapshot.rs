@@ -1,12 +1,29 @@
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-use crate::backend::{BackendError, Handle, LedgerEntry};
-use crate::universe::{OsState, UniverseOp};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+use crate::backend::{BackendError, Capability, Handle, LedgerEntry};
+use crate::universe::{CellOwner, OsState, UniverseOp};
+use crate::wire::{ObjectOnly, object_serde};
+
+/// An operation whose first effect happened and which did not finish. It keeps the complete
+/// operation, so its cleanup can select exactly that address, owner and capability. It is never
+/// a successful holding, and never says that the recipe's process exists.
+///
+/// Decoding refuses a missing or unknown field and a positional array.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncompleteEffect {
     pub operation: UniverseOp,
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "IncompleteEffect", deny_unknown_fields)]
+struct IncompleteEffectShape {
+    operation: UniverseOp,
+}
+
+object_serde!(IncompleteEffect through IncompleteEffectShape);
 
 impl IncompleteEffect {
     pub fn handle(&self) -> Handle {
@@ -14,7 +31,15 @@ impl IncompleteEffect {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A backend's complete account (spec 017): its standing holdings, the original issued records
+/// whose withdrawal authority remains, and its unfinished effects. A caller deciding that
+/// nothing is left asks `is_empty`, never only `state`.
+///
+/// Every value passed `new`'s checks, so one address appears at most once in `state` and
+/// `incomplete` together, and every issued record agrees with exactly one row. Encoding writes
+/// `{"state": ..., "grants": [...], "incomplete": [...]}`. Decoding requires all three fields,
+/// refuses an unknown field and a positional array, and runs `new`'s checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnforcementSnapshot {
     state: OsState,
     grants: Vec<LedgerEntry>,
@@ -22,11 +47,74 @@ pub struct EnforcementSnapshot {
 }
 
 impl EnforcementSnapshot {
+    /// Builds the account, or refuses it with the first failure in this order:
+    ///
+    /// 1. an address repeated in `incomplete` returns `IdentityConflict`;
+    /// 2. an address both standing and in `incomplete` returns `IdentityConflict`;
+    /// 3. a handle repeated in `grants` returns `IdentityConflict`;
+    /// 4. an issued record whose standing or incomplete row has another owner or capability
+    ///    returns `IdentityConflict`;
+    /// 5. an issued record with neither a standing nor an incomplete row returns `Fault`.
+    ///
+    /// A repeat is refused even when its payload is identical. An issued record whose holding is
+    /// in `incomplete` is accepted: a withdrawal that failed after release keeps its record.
+    /// `grants` and `incomplete` are then sorted by address, so two equal accounts compare equal
+    /// whatever order their rows came in.
     pub fn new(
         state: OsState,
-        grants: Vec<LedgerEntry>,
-        incomplete: Vec<IncompleteEffect>,
+        mut grants: Vec<LedgerEntry>,
+        mut incomplete: Vec<IncompleteEffect>,
     ) -> Result<EnforcementSnapshot, BackendError> {
+        let mut unfinished = BTreeMap::new();
+        for effect in &incomplete {
+            if unfinished.insert(effect.handle(), effect).is_some() {
+                return Err(conflict(effect.handle()));
+            }
+        }
+        let standing: BTreeMap<Handle, _> = state
+            .objects()
+            .map(|object| {
+                let address = Handle {
+                    class: object.class(),
+                    id: object.id,
+                };
+                (address, (&object.owner, object.capability.clone()))
+            })
+            .collect();
+        if let Some(effect) = incomplete
+            .iter()
+            .find(|effect| standing.contains_key(&effect.handle()))
+        {
+            return Err(conflict(effect.handle()));
+        }
+        let mut issued = BTreeMap::new();
+        for entry in &grants {
+            if issued.insert(entry.handle, entry).is_some() {
+                return Err(conflict(entry.handle));
+            }
+        }
+        let row = |handle: &Handle| -> Option<(&CellOwner, Capability)> {
+            standing.get(handle).cloned().or_else(|| {
+                unfinished
+                    .get(handle)
+                    .map(|effect| (effect.operation.owner(), effect.operation.capability()))
+            })
+        };
+        if let Some(entry) = grants.iter().find(|entry| {
+            row(&entry.handle).is_some_and(|(owner, capability)| {
+                *owner != entry.owner || capability != entry.capability
+            })
+        }) {
+            return Err(conflict(entry.handle));
+        }
+        if let Some(entry) = grants.iter().find(|entry| row(&entry.handle).is_none()) {
+            return Err(BackendError::Fault(format!(
+                "issued record {} has no standing or incomplete holding",
+                entry.handle
+            )));
+        }
+        grants.sort_by_key(|entry| entry.handle);
+        incomplete.sort_by_key(IncompleteEffect::handle);
         Ok(EnforcementSnapshot {
             state,
             grants,
@@ -34,6 +122,7 @@ impl EnforcementSnapshot {
         })
     }
 
+    /// The account of a backend that holds nothing: three empty collections.
     pub fn empty() -> EnforcementSnapshot {
         EnforcementSnapshot {
             state: OsState::new(),
@@ -46,16 +135,60 @@ impl EnforcementSnapshot {
         &self.state
     }
 
+    /// The original issued records whose withdrawal authority remains, sorted by handle. They
+    /// are never rebuilt from standing objects: an applied or planted object has no record.
     pub fn grants(&self) -> &[LedgerEntry] {
         &self.grants
     }
 
+    /// The unfinished effects, sorted by address.
     pub fn incomplete(&self) -> &[IncompleteEffect] {
         &self.incomplete
     }
 
+    /// True only when all three collections are empty.
     pub fn is_empty(&self) -> bool {
         self.state.is_empty() && self.grants.is_empty() && self.incomplete.is_empty()
+    }
+}
+
+fn conflict(address: Handle) -> BackendError {
+    BackendError::IdentityConflict {
+        class: address.class.as_str(),
+        id: address.id,
+    }
+}
+
+impl Serialize for EnforcementSnapshot {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            state: &'a OsState,
+            grants: &'a [LedgerEntry],
+            incomplete: &'a [IncompleteEffect],
+        }
+
+        Wire {
+            state: &self.state,
+            grants: &self.grants,
+            incomplete: &self.incomplete,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for EnforcementSnapshot {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(expecting = "struct EnforcementSnapshot", deny_unknown_fields)]
+        struct Wire {
+            state: OsState,
+            grants: Vec<LedgerEntry>,
+            incomplete: Vec<IncompleteEffect>,
+        }
+
+        let wire = Wire::deserialize(ObjectOnly::new(deserializer))?;
+        EnforcementSnapshot::new(wire.state, wire.grants, wire.incomplete).map_err(D::Error::custom)
     }
 }
 

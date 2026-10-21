@@ -404,7 +404,7 @@ impl fmt::Display for BackendError {
             BackendError::InvalidOperation { class, id, error } => {
                 write!(f, "invalid {class} operation {id}: {error}")
             }
-            BackendError::Fault(cause) => write!(f, "injected backend fault: {cause}"),
+            BackendError::Fault(cause) => write!(f, "backend fault: {cause}"),
             BackendError::Unimplemented(what) => write!(f, "unimplemented in this track: {what}"),
         }
     }
