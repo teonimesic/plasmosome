@@ -67,7 +67,7 @@ pub(crate) fn standard() -> Vec<Entry> {
 }
 
 fn pad(out: &mut Vec<u8>, byte: u8) {
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(byte);
     }
 }
