@@ -46,13 +46,14 @@ fails both. The first instance then revokes its grants in both orders.
 
 `snapshot_never_invents_objects` also sends an invalid operation of every class through `grant`,
 `apply` and `plant`, each at a fresh address and at an issued one. Each call must return
-`InvalidOperation` and leave the state as it was just before that call. So must each revoke of a
-refused grant's handle, which returns `UnknownHandle`. A later check therefore cannot hide what an
-earlier refusal changed. A refusal that clears or swaps what stands at its address fails, and so
-does a revoke that tidies away residue. A private backend that refuses another launch at an
-occupied broker endpoint, as spec 017 allows a real adapter to do, passes every clause, so the
-relaunched broker in `repeated_grants_are_independently_removable` must keep its own command and
-sockets.
+`InvalidOperation` and leave the state as it was just before that call. So must each revoke of
+the handle of a grant refused at a fresh address, which returns `UnknownHandle`. The state must not
+change between two of those calls either, so a refusal whose effect lands after it returned fails.
+A later check therefore cannot hide what an earlier refusal changed. A refusal that clears or swaps
+what stands at its address fails, and so does a revoke that tidies away residue. A private backend
+that refuses another launch at an occupied broker endpoint, as spec 017 allows a real adapter to
+do, passes every clause, so the relaunched broker in `repeated_grants_are_independently_removable`
+must keep its own command and sockets.
 
 A clause earns its place by being watched failing against a backend built to carry the defect it
 names. The suite started at five, and the three added by task 009 came from asking what a broken

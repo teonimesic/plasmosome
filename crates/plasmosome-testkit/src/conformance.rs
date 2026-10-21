@@ -245,8 +245,10 @@ pub fn planted_residue_survives_unrelated_revoke<B: EnforcementBackend>(make: im
 /// Checks that snapshots contain every and only requested grant or planted object; that a
 /// grant, apply or plant of an invalid operation of any class, at a fresh address or at an issued
 /// one, returns `InvalidOperation` and leaves the state as it was just before that call; that a
-/// revoke of a refused grant's handle returns `UnknownHandle` and changes nothing; and that a
-/// backend fresh from the factory, made after another instance was used, observes nothing.
+/// revoke of the handle of a grant refused at a fresh address returns `UnknownHandle` and changes
+/// nothing; that the state does not change between two of those calls either, so an effect that
+/// lands after its refusal returned is seen; and that a backend fresh from the factory, made
+/// after another instance was used, observes nothing.
 pub fn snapshot_never_invents_objects<B: EnforcementBackend>(make: impl Fn() -> B) {
     let mut backend = make();
     let mut expected = Vec::new();
