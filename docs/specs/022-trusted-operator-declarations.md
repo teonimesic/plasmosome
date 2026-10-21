@@ -135,7 +135,7 @@ sources for its cell.
   `path` the declaration, at a reload as at an add, not a `content` fault of this file. Amended on
   2026-10-21: this did not say when the key is checked, so a mismatch read both as this file's
   `content` fault and as §5's 108 naming the declaration.
-- `declaration` is optional: the absolute path of the plasmid's declaration file, for local
+- `declaration` is optional: the canonical path of the plasmid's declaration file, for local
   selection (§5).
 - `proxy_maps` and `mounts` are required arrays and may be empty.
 - `lifetime` is optional: `{"lease_ms": N}` with an optional `"idle_ms": N`, each 1,000 to
@@ -147,8 +147,17 @@ sources for its cell.
   `ProxyRecipe::validate` as implemented. Among other things, that refuses port 0, an
   IPv4-mapped or IPv4-compatible IPv6 literal, a literal not in its one display spelling, and a
   DNS name whose last label is a number.
-- A Mount entry has exactly `target` (an absolute, NUL-free guest path), `source` (an absolute,
-  NUL-free host path) and `access` (`read_only | read_write`).
+- A Mount entry has exactly `target` (a canonical guest path), `source` (a canonical host path) and
+  `access` (`read_only | read_write`).
+- A canonical path starts with `/`, is NUL-free, and has no empty, `.` or `..` component and no
+  trailing `/`. `/` alone is not one. A path that is not canonical is refused, never rewritten. This
+  is the rule spec 017's `Capability::validate`, as implemented, applies to a Mount's `source` and
+  `target`, and rule 1's walk opens no declaration path with an empty, `.` or `..` component.
+  Amended on 2026-10-21: this asked only that `declaration` be absolute
+  and that `target` and `source` be absolute and NUL-free. A file could
+  then list a Mount `source` such as `/Users/operator/src/project/`, which
+  `Capability::validate` refuses after resolution, or a `declaration` with a `..` component, which
+  failed only when §5 opened it, as `path` rather than this file's `content`.
 - Within one plasmid's entry, two ProxyMap entries with the same `host`, `port` and `transport`
   must not share a mode, and two Mount entries must not share a `target`. TCP and UDP entries on
   one port are separate.
@@ -194,12 +203,16 @@ For each key the plasmid does not provide itself, in order:
    not resolved again (§6). The search opens every listed declaration under §3, an attached
    plasmid's included. One that fails §3, does not parse or has an `id` other than its key refuses
    the request with 108 naming it: the search fails closed. Exactly one candidate joins the closure
-   and is resolved like the named plasmid; spec 001's version selection still applies to it. None is
+   and is resolved like the named plasmid. No version selection applies
+   to it: a requirement names a capability key with no version range
+   (spec 011), and nothing pins a local plasmid's version. None is
    103, `capability` the key, `plasmid` the requirer. More than one is 100 with their IDs. Amended
    on 2026-10-21: this did not say whether an attached plasmid can be a candidate. Taking one would
    give the requirer an edge to a plasmid whose record does not provide the key, which spec 008
    refuses, and whose attached generation serves none of the key's tools. Amended on 2026-10-21:
-   this did not refuse a listing whose `id` differs from its key.
+   this did not refuse a listing whose `id` differs from its key. Amended on 2026-10-21: this said
+   that spec 001's version selection still applies to the candidate. Spec 001 states no version
+   selection, and with one candidate, no range and no pin, there is nothing to select.
 
 **No cycle.** When step 2's one candidate is already in the closure, it does not join or get
 resolved again: the requirer's edge goes to it, so two members that require one provider share it.
@@ -633,13 +646,17 @@ ProxyMap (O-11) or Mount (O-7).
    - a FIFO, refused within one second (`not_regular`);
    - over 1 MiB (`size`);
    - non-UTF-8, a duplicate key, an unknown field, `version: 2` (`content`);
+   - a relative `declaration`, a `declaration` of `/` and one with a `.` component, a Mount `source`
+     with a trailing `/` and one with a NUL, a Mount `target` with a `..` component and one with an
+     empty component, and a Mount `source` of `/` (`content`);
    - `/private/etc/hosts` (`parent`), and with O-8 a second UID's file in a directory the
      controller's UID owns (`owner`).
 
    Then delete the file and restart: startup and recovery succeed. Catches: trusting the path
-   text, checking only the file's mode, following links, blocking on a FIFO, and reporting every
-   fault as a parse error. Amended on 2026-10-21: this listed a file over 1 MiB under `content`,
-   while rule 4 refuses it as `size`.
+   text, checking only the file's mode, following links, blocking on a FIFO, reporting every fault
+   as a parse error, and accepting a path that is not canonical. Amended on 2026-10-21: this listed
+   a file over 1 MiB under `content`, while rule 4 refuses it as `size`. Amended on 2026-10-21: this
+   item had no case for a path that is not canonical.
 9. Cell A holds a `read_write` Mount of S. The operator file inside S, a listed declaration inside
    S, and S declared but not yet held each give 108 `inside_mount_source`; outside S, requests
    succeed. Rename S away: a request for cell A is 108 `inside_mount_source`, and one for cell B
@@ -697,4 +714,6 @@ ProxyMap (O-11) or Mount (O-7).
 - Credential custody, command subjects and attestation.
 - A local genome grammar.
 - Watching the operator file, or pushing its changes into running cells.
-- Version selection between providers, which spec 001 already does.
+- Version selection between providers. A local candidate has none (§5), and spec 020 binds a
+  registry member's required keys to pinned provider releases. Amended on 2026-10-21: this said that
+  spec 001 already does it; spec 001 states no version selection.
