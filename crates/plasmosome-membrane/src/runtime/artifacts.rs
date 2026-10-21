@@ -137,6 +137,9 @@ pub enum ArtifactFault {
     ImmutabilityUnverifiable,
     /// The artifact's size, modification time or change time moved while it was hashed.
     ChangedWhileHashing,
+    /// The artifact's size, modification time or change time moved after it was verified, so
+    /// something changed it in place.
+    ChangedSinceVerification,
     /// The bytes hash to `actual`, not the pinned `expected`.
     DigestMismatch { expected: Digest, actual: Digest },
     /// The path now names another file than the one verified.
@@ -188,6 +191,9 @@ impl fmt::Display for ArtifactFault {
             ArtifactFault::ChangedWhileHashing => {
                 f.write_str("its size or times moved while it was hashed")
             }
+            ArtifactFault::ChangedSinceVerification => {
+                f.write_str("its size or times moved after it was verified")
+            }
             ArtifactFault::DigestMismatch { expected, actual } => {
                 write!(f, "it hashes to {actual}, not the pinned {expected}")
             }
@@ -237,7 +243,7 @@ pub fn verify_artifact(
     let walk =
         Walk::from_root(artifact.path().as_path()).map_err(|refusal| refuse(refusal.into()))?;
     let checked = open_checked(&walk).map_err(refuse)?;
-    let digest = hash(&checked.file).map_err(refuse)?;
+    let digest = hash(&checked.file, checked.stamp.size).map_err(refuse)?;
     let after = stamp(&stat(&checked.file).map_err(refuse)?);
     judge_unchanged(checked.stamp, after).map_err(refuse)?;
     if digest != *artifact.sha256() {
@@ -320,7 +326,12 @@ fn stamp(metadata: &Metadata) -> Stamp {
 #[cfg(target_os = "macos")]
 fn judge_immutability(metadata: &Metadata) -> Result<(), ArtifactFault> {
     use std::os::macos::fs::MetadataExt;
-    if metadata.st_flags() & (libc::UF_IMMUTABLE | libc::SF_IMMUTABLE) != 0 {
+    judge_flags(metadata.st_flags())
+}
+
+#[cfg(target_os = "macos")]
+fn judge_flags(flags: u32) -> Result<(), ArtifactFault> {
+    if flags & (libc::UF_IMMUTABLE | libc::SF_IMMUTABLE) != 0 {
         Ok(())
     } else {
         Err(ArtifactFault::NotImmutable)
@@ -332,7 +343,7 @@ fn judge_immutability(_metadata: &Metadata) -> Result<(), ArtifactFault> {
     Err(ArtifactFault::ImmutabilityUnverifiable)
 }
 
-fn hash(file: &File) -> Result<Digest, ArtifactFault> {
+fn hash(file: &File, _size: u64) -> Result<Digest, ArtifactFault> {
     Digest::of_reader(Positioned { file, offset: 0 }).map_err(|error| io_fault("pread", &error))
 }
 
@@ -357,13 +368,13 @@ fn io_fault(op: &'static str, error: &io::Error) -> ArtifactFault {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Stamp {
-    pub(crate) size: u64,
-    pub(crate) modified: (i64, i64),
-    pub(crate) changed: (i64, i64),
+struct Stamp {
+    size: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
 }
 
-pub(crate) fn judge_artifact(facts: &Facts, euid: u32) -> Result<(), ArtifactFault> {
+fn judge_artifact(facts: &Facts, euid: u32) -> Result<(), ArtifactFault> {
     if facts.kind != Kind::Regular {
         return Err(ArtifactFault::NotRegular { kind: facts.kind });
     }
@@ -379,7 +390,7 @@ pub(crate) fn judge_artifact(facts: &Facts, euid: u32) -> Result<(), ArtifactFau
     Ok(())
 }
 
-pub(crate) fn judge_unchanged(before: Stamp, after: Stamp) -> Result<(), ArtifactFault> {
+fn judge_unchanged(before: Stamp, after: Stamp) -> Result<(), ArtifactFault> {
     if before == after {
         Ok(())
     } else {
