@@ -4,10 +4,10 @@ The checks that have nowhere else to run, written as tests that fail the build.
 
 Each one refuses a mistake you cannot take back, or one the tree would have to carry an apology
 for: a crate reaching a registry under a name nobody claimed, two packages answering to the same
-binary name, test scaffolding shipping outside `[dev-dependencies]`, a commit crediting a model as
-an author, the private research corpus reaching a public tree, a commit that swaps or wraps what
-cargo builds through committed Cargo configuration or a toolchain file, and a skill Claude Code
-cannot find.
+binary name, test scaffolding shipping outside `[dev-dependencies]`, a commit crediting a model or
+somebody no reader can trace, the private research corpus reaching a public tree, a commit that
+swaps or wraps what cargo builds through committed Cargo configuration or a toolchain file, and a
+skill Claude Code cannot find.
 
 Nothing here pins a design. A guard is worth its cost when the thing it prevents is permanent or
 public, or when [spec 013](../../docs/specs/013-what-earns-a-guard.md)'s operational carve-out
@@ -24,7 +24,7 @@ each crate's `AGENTS.md`, where it can be argued with.
 | `testkit_is_dev_only` | A kernel crate depending on `plasmosome-testkit` outside `[dev-dependencies]`, an optional dependency behind a feature included, which ships test scaffolding |
 | `lanes_are_dev_only` | Any member depending on `plasmosome-lanes` outside `[dev-dependencies]`, an optional dependency behind a feature included, which would ship the lanes' libkrun loader and guest boot inside a product binary |
 | `no_crate_enables_the_backend_test_fixture` | Any crate, `plasmosome-testkit` included, turning on the backend's `test-fixture` feature by a normal or build dependency, for any target and by any route: its own dependency, a build-dependency, its `[features]`, or a root `[workspace.dependencies]` entry. That would ship the test scaffolding that builds a `CommandName` from text to a consumer. A `--workspace` build merges the features of every member it selects, so even a testkit edge reaches product code. A crate that later needs the fixture adds a `cargo check -p` for each product crate in the same change |
-| `attribution_guard` | A model co-author trailer at any position in a commit message, including the middle of a body a squash merge composed |
+| `attribution_guard` | A `Co-authored-by` or `Signed-off-by` trailer at any position in a commit message, including the middle of a body a squash merge composed, that credits a model or names somebody no reader can trace. An untraceable value has no address, or an address on a domain such as `.local` or `example.com`. When a value has an address, a model is found by a vendor's name anywhere in it, which still refuses a person whose name or address holds one. A paragraph ends where git's parser ends one. A line that git reads as text but another reader may call blank, such as one holding only a no-break space, is read both ways, and the guard refuses what either reading refuses. It reads trailers only, not a commit's author or committer |
 | `provenance_guard` | The private research corpus reaching this public tree — and it refuses when the search it depends on cannot run |
 | `skill_discovery` | A skill under `.agents/skills/` with no committed symlink under `.claude/skills/`, which no tool then lists |
 | `build_input_guard` | A commit that swaps or wraps what cargo builds through committed Cargo configuration or a toolchain file, judged from the object store before anything runs; any submodule, whose files the commit does not hold; and any tracked `.gitattributes`, through which checkout could write a file other than the blob the step judged, which a maintainer lifts only by changing the step. It tests `.githooks/build-input-guard`, spec 026's git-only step, which `gates` runs first. A clean verdict does not yet cover `[patch]`, `[replace]`, path dependencies outside the repository, symlinks that leave it, or lockfile sources other than crates.io: a reviewer reads those by hand until plasmosome-jfm2 |
