@@ -351,7 +351,9 @@ impl InstanceRoot {
     /// all move with it. It needs this root's writer lock; a lock taken on another root is
     /// `ForeignLock` and nothing is created or moved. The caller must also hold the cell's
     /// `supervisor.lock`, as spec 023 requires, which shows that no `membraned` still runs in
-    /// the directory; this call does not take or check that lock.
+    /// the directory; this call does not take or check that lock. A caller holds it when it has
+    /// a [`SupervisorLock`] for this cell that it has not handed over, from
+    /// [`CellDir::create_supervisor_lock`] or a `Free` [`CellDir::probe_supervisor_lock`].
     ///
     /// `retired` is created when it is missing. Every call sets it to mode 0700 and syncs the
     /// root, as [`InstanceRoot::create_cell_dir`] does for `cells`; if that sync fails, nothing

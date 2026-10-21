@@ -22,7 +22,7 @@ one.
 | `kill_budget` | `cell.kill`'s deadlines under spec 023 §7, with no IO. The lock reserve is a tenth of the kill's deadline D, from 1 ms to 3 s, fixed for the request and not rounded. Each step's share is measured from what is left of D past that reserve when the step starts: the workload stop, which is `Skipped` with `now`, the withdrawal with its drain, effect and publication parts, and the guest stop's `DrainSpec` and answer wait. Each share is whole milliseconds and at least 1 ms, or `NoBudget`. `Incomplete` is the reply's closed set, and a reply is a retirement exactly when it lacks `teardown`. With `now` it records only `teardown` |
 | `session_log` | Append-only, synced audit record shared by an instance's cells through one locked writer; an IO error stops all later appends |
 | `state` | Wire types: instances, cells, genomes, and the plasmids attached to each cell with their `plasmosome_backend::MockMode`; the one constructor for a cell's journal and socket paths |
-| `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens, spec 023's `launched` and `created` markers and `runtime/`, and retirement into `retired/` |
+| `instance` | The instance root: the controller writer lock, no-follow discovery of `cells/`, cell directories and journal opens, spec 023's cell ID allocation, `supervisor.lock` and `membraned.log`, its `launched` and `created` markers and `runtime/`, and retirement into `retired/` |
 | `supervisor_check` | Spec 023 §8's supervisor check, with no IO: `decide` gives the outcome of the first table row a cell's lock, marker and journal match, and `after_query` says whether one answer from a held lock's supervisor, given within the answer cap, adopts the cell, waits, or sets it aside once the cap passes. Adopting does not promise the cell is served: spec 008's journal replay can still quarantine it, and spec 023's no-`created` rule can end it. Callers gather the facts and carry out the outcome |
 | `closure` | What removing a plugin takes, with no IO. `AttachmentGraph` holds one cell's attached plugins, the providers each one directly requires, and which ones were asked for by name; a provider is attached before its requirers. `stranded_by` lists the plugins that directly require a given one, which `plasmid.remove` must refuse to strand. `removal_closure` gives that plugin, every plugin that transitively requires it, and every unnamed provider required only by plugins it takes, followed down the chain. Spec 011's `plasmid.remove` and spec 028's expiry are to share it, so the two cannot take different sets; nothing calls it yet |
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
@@ -226,6 +226,52 @@ cell directory get the same treatment.
   macOS uses `renameatx_np` with `RENAME_EXCL` and Linux `renameat2` with `RENAME_NOREPLACE`, so
   an existing `retired/<cell>` is `AlreadyRetired`. Nothing is unlinked: the journal, the markers,
   a stale `membrane.uds` and `runtime/root.img` move with the directory.
+
+## Cell IDs and the supervisor lock
+
+Spec 023 §2 has the controller choose each new cell's ID, and §3 and §4 give every cell a
+`supervisor.lock` that is held without a gap from its creation until `membraned` exits.
+`InstanceRoot` and `CellDir` provide both, and open `membraned.log`. Like the markers, they
+open everything through opened directories, never by path and never through a symlink. Nothing
+calls them yet.
+
+- `InstanceRoot::allocate_cell` needs the writer lock. It lists `cells/` and `retired/` by name
+  and creates `cell-<n>`, where `n` is one more than the largest number it found, or 1 when
+  there is none. Any entry named `cell-<n>` counts, whatever it is, so an ID in either directory
+  is never allocated again. A name `parse_cell_id` refuses, such as `cell-07`, does not count.
+  The listing creates neither directory, and sets each one it finds to mode 0700. A `cells` or
+  `retired` that is a symlink or not a directory is `NotADirectory`, and nothing is created.
+- The directory itself is made by `create_cell_dir`: exclusive, mode 0700 and synced. If another
+  process made the chosen name first, the call lists again and tries the next number, up to 64
+  times, and is then `Contended`. When `cell-9999999999` is taken it is `Exhausted`.
+- Allocations run one at a time, under a mutex held from the listing until the directory exists.
+  The mutex lives in the `WriterLock`, not in the `InstanceRoot`, because two opens of one root
+  can share one writer lock, and only one writer lock exists per root. A panic during an
+  allocation does not block the next one.
+- `CellDir::create_supervisor_lock` creates `supervisor.lock` exclusively with mode 0600,
+  close-on-exec, takes `flock(LOCK_EX | LOCK_NB)` on it and syncs the cell directory. The
+  returned `SupervisorLock` holds the lock. `into_owned_fd` gives up its descriptor, still
+  locked, to become `membraned`'s descriptor 4.
+- `CellDir::probe_supervisor_lock` tries the lock on a fresh read-only descriptor. `Held` means
+  another open of the file holds it, even one in this process. `Free` keeps the lock it took
+  until the returned `SupervisorLock` is dropped. `Missing` means no entry is there, and nothing
+  is created. A symlink is refused, and so is anything but a regular file.
+- Nothing here calls `LOCK_UN`. An `flock` lock belongs to the open file, so it is released only
+  when every descriptor of that open file is closed: the copy handed to `membraned` keeps it
+  held after the controller drops its own. A forked child that has not called `exec` keeps it
+  alive too, as it does the writer lock.
+- `CellDir::supervisor_lock_identity` gives the device and inode of the file at the name, so
+  `membraned` can check that its descriptor 4 is this cell's lock (spec 023 §5, step 2).
+  `SupervisorLock::identity` gives the same for the file it holds.
+- `CellDir::open_supervisor_log` opens `membraned.log` for appending, `membraned`'s stderr. It
+  creates the log if it is missing and never truncates it, sets it to mode 0600 whatever the
+  umask, and returns it close-on-exec and in blocking mode.
+
+`InstanceRoot::retire` still does not check the supervisor lock its caller must hold. A caller
+holds it when it has a `SupervisorLock` whose `identity()` equals the cell's
+`supervisor_lock_identity()`: one from `create_supervisor_lock` that it has not handed over, or
+one from a `Free` probe. `retire` does not take one yet. Nothing calls `retire`, and its first
+caller is where the shape of that call will be known.
 
 ## Configuration
 
