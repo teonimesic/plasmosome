@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
@@ -584,6 +585,35 @@ def runner_refused_group_of_live_leader():
         assert child.stdout.closed and child.stderr.closed, "a refused group left its pipes open"
 
 
+def runner_refused_group_of_exiting_leader():
+    calls, timers = [], []
+
+    def killpg(child, group, sig):
+        calls.append("after reap" if group != child.pid or child.returncode is not None else "refused")
+        assert calls[-1] == "refused", "signalled a group after its leader was reaped"
+        timer = threading.Timer(1, child.kill)
+        timers.append(timer)
+        timer.start()
+        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+
+    with tempfile.TemporaryDirectory(prefix="pipeline-health-exiting-leader-") as directory, \
+            runner_syscalls(killpg) as processes:
+        # The call's deadline is the whole budget, so no time is left when the refusal comes.
+        runner = API["JsonRunner"](Path(directory), timeout=0.5, budget=0.5)
+        try:
+            runner([sys.executable, "-c", "import time; time.sleep(30)"])
+        except RuntimeError as exc:
+            assert str(exc) == "source command timed out", exc
+        else:
+            raise AssertionError("timed-out source accepted")
+        finally:
+            for timer in timers:
+                timer.cancel()
+                timer.join()
+        assert processes.child.returncode is not None, "a leader that exited during the grace was left unreaped"
+        assert calls == ["refused"], f"expected exactly one killpg, saw {calls}"
+
+
 def runner_ends_descendants_of_exited_leader():
     def killpg(child, group, sig):
         os.killpg(group, sig)
@@ -632,6 +662,7 @@ def main():
     runner_released_group_identity()
     runner_refused_group_of_exited_leader()
     runner_refused_group_of_live_leader()
+    runner_refused_group_of_exiting_leader()
     runner_ends_descendants_of_exited_leader()
     print("PASS: native uncertainty/ownership/drift/pause, complete-or-unknown delivery windows/pagination, security issues with ages or unknown, CLI clock/failure isolation, bounded reaped source commands")
 
