@@ -15,21 +15,23 @@ every submodule, since the commit does not hold a submodule's files. It refuses 
 `.gitattributes`, since through one, checkout can write a file other than the blob this step
 judged; a maintainer lifts that by changing this step.
 
-In every `Cargo.toml` it refuses `[patch]`, `[replace]` and `cargo-features`. A path dependency, in
-any dependency table, must reach a tracked directory inside the repository. The build script,
-`package.workspace`, workspace members and target paths must stay inside it. A path is read as cargo
-reads it: `..` first, lexically from the manifest's directory, then through tracked symlinks, at
-most 40 of them. That lexical reading relies on the `cargo-features` refusal: cargo reads two
-unstable forms, `package.build` as an array and a dependency's `base`, another way, so revisit this
-model before lifting that refusal or moving `channel` to a cargo that makes either stable. It
-refuses a tracked symlink that leaves the repository, loops, or leads to a directory holding a
-`Cargo.toml`, because cargo reads that manifest's paths from the symlink's location. Inside a
-symlink's target, `..` steps back only out of a tracked directory. After any other name, such as
-`.git` or `target`, it is refused: a checkout can hold anything there, and this step sees only the
-commit. A symlink target, or a path value that need not be a directory, that ends at an untracked
-name passes; what a checkout later holds at that name, such as under `target/` or `.git/`, is not
-judged. In every `Cargo.lock`, a package has no source or exactly one of the two crates.io sources.
-It never reads `deny.toml`, which a PR can loosen. Names and paths are compared as a
+In every `Cargo.toml` it refuses `[patch]`, `[replace]`, `cargo-features` and `[project]`. Cargo
+reads `[project]` as `[package]` before edition 2024, and this step reads only `[package]`, so
+refusing it leaves `[package]` the one table a build script or `package.workspace` is read from. A
+path dependency, in any dependency table, must reach a tracked directory inside the repository. The
+build script, `package.workspace`, workspace members and target paths must stay inside it. A path is
+read as cargo reads it: `..` first, lexically from the manifest's directory, then through tracked
+symlinks, at most 40 of them. That lexical reading relies on the `cargo-features` refusal: cargo
+reads two unstable forms, `package.build` as an array and a dependency's `base`, another way, so
+revisit this model before lifting that refusal or moving `channel` to a cargo that makes either
+stable. It refuses a tracked symlink that leaves the repository, loops, or leads to a directory
+holding a `Cargo.toml`, because cargo reads that manifest's paths from the symlink's location.
+Inside a symlink's target, `..` steps back only out of a tracked directory. After any other name,
+such as `.git` or `target`, it is refused: a checkout can hold anything there, and this step sees
+only the commit. A symlink target, or a path value that need not be a directory, that ends at an
+untracked name passes; what a checkout later holds at that name, such as under `target/` or `.git/`,
+is not judged. In every `Cargo.lock`, a package has no source or exactly one of the two crates.io
+sources. It never reads `deny.toml`, which a PR can loosen. Names and paths are compared as a
 case-insensitive filesystem compares them, Unicode normalization included.
 
 Exit 0: clean. Exit 1: refused. Each finding is one line, `build-input-guard: <path>: <key>:
@@ -124,6 +126,10 @@ TOP_LEVEL_REFUSED = {
     "cargo-features": (
         "unstable cargo features are refused; on a nightly toolchain, profile-rustflags lets a "
         "manifest pass rustflags such as --cap-lints=allow"
+    ),
+    "project": (
+        "[project] is cargo's old name for [package]; cargo reads its build and workspace values, "
+        "which this step judges only under [package], so it is refused"
     ),
 }
 NOT_A_STRING = "cargo reads a path here, and this value is not a string"
