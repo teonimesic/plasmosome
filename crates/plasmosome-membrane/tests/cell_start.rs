@@ -57,6 +57,14 @@ impl Instance {
             .join(format_cell_id(number).as_str())
     }
 
+    fn retire_by_hand(&self, number: u64) -> PathBuf {
+        let retired = self.path.join("retired");
+        fs::create_dir_all(&retired).expect("retired/ is made");
+        let moved = retired.join(format_cell_id(number).as_str());
+        fs::rename(self.cell_path(number), &moved).expect("the cell is moved to retired/");
+        moved
+    }
+
     fn config(&self, number: u64) -> SupervisorConfig {
         config_for(&self.path, number)
     }
@@ -131,6 +139,10 @@ fn config_for(root: &Path, number: u64) -> SupervisorConfig {
         runtime_recipe: recipe(),
         boot_deadline_ms: 60_000,
     }
+}
+
+fn sample_config(number: u64) -> SupervisorConfig {
+    config_for(Path::new("/var/plasmosome"), number)
 }
 
 fn encoded(config: &SupervisorConfig) -> Vec<u8> {
@@ -226,21 +238,21 @@ fn refused_lock(
 
 #[test]
 fn reads_one_record() {
-    let config = config_for(Path::new("/var/plasmosome"), 1);
+    let config = sample_config(1);
     let read = read_piped(encoded(&config), &argv(1));
     assert_eq!(read.expect("the record is read"), config);
 }
 
 #[test]
 fn a_record_of_exactly_the_bound_before_its_newline_is_accepted() {
-    let config = config_for(Path::new("/var/plasmosome"), 1);
+    let config = sample_config(1);
     let read = read_piped(padded(&config, MAX_RECORD_BYTES), &argv(1));
     assert_eq!(read.expect("the largest record is read"), config);
 }
 
 #[test]
 fn a_record_one_byte_over_the_bound_is_too_large() {
-    let config = config_for(Path::new("/var/plasmosome"), 1);
+    let config = sample_config(1);
     let refusal = refused_record(padded(&config, MAX_RECORD_BYTES + 1), &argv(1));
     assert!(
         matches!(
@@ -253,7 +265,7 @@ fn a_record_one_byte_over_the_bound_is_too_large() {
 
 #[test]
 fn a_record_with_no_newline_before_eof_is_refused() {
-    let mut record = encoded(&config_for(Path::new("/var/plasmosome"), 1));
+    let mut record = encoded(&sample_config(1));
     record.pop();
     let refusal = refused_record(record, &argv(1));
     assert!(
@@ -279,7 +291,7 @@ fn nothing_before_eof_is_refused() {
 
 #[test]
 fn a_second_line_after_the_record_is_refused() {
-    let record = encoded(&config_for(Path::new("/var/plasmosome"), 1));
+    let record = encoded(&sample_config(1));
     let refusal = refused_record(record.repeat(2), &argv(1));
     assert!(
         matches!(
@@ -292,7 +304,7 @@ fn a_second_line_after_the_record_is_refused() {
 
 #[test]
 fn a_record_for_another_cell_is_refused() {
-    let record = encoded(&config_for(Path::new("/var/plasmosome"), 2));
+    let record = encoded(&sample_config(2));
     let refusal = refused_record(record, &argv(1));
     let CellStartRefusal::CellMismatch { argv, record } = refusal else {
         panic!("{refusal:?}");
@@ -408,23 +420,23 @@ fn refuses_this_lock_opened_without_the_lock() {
 fn refuses_a_retired_directory() {
     let instance = Instance::new();
     let controller = instance.cell(1);
-    fs::create_dir(instance.path.join("retired")).expect("retired/ is made");
-    let retired = instance.path.join("retired").join("cell-1");
-    fs::rename(instance.cell_path(1), &retired).expect("the cell is moved to retired/");
+    let retired = instance.retire_by_hand(1);
     let refusal = refused_lock(&instance, handed_over(&controller), &instance.config(1));
     let CellStartRefusal::CellDirectory(CellDirError::Missing { path }) = &refusal else {
         panic!("{refusal:?}");
     };
     assert_eq!(path.as_path(), instance.cell_path(1));
+    assert!(
+        retired.join("supervisor.lock").is_file(),
+        "the lock moved with the cell"
+    );
 }
 
 #[test]
 fn refuses_a_cell_directory_reached_through_a_symlink() {
     let instance = Instance::new();
     let controller = instance.cell(1);
-    fs::create_dir(instance.path.join("retired")).expect("retired/ is made");
-    let retired = instance.path.join("retired").join("cell-1");
-    fs::rename(instance.cell_path(1), &retired).expect("the cell is moved to retired/");
+    let retired = instance.retire_by_hand(1);
     std::os::unix::fs::symlink(&retired, instance.cell_path(1)).expect("the symlink is made");
     let refusal = refused_lock(&instance, handed_over(&controller), &instance.config(1));
     assert!(
