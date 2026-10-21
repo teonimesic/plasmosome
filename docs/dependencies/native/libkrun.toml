@@ -56,11 +56,11 @@ limits = [
   728df812). So dyld searches that path among others, and a library planted there runs its \
   initializers before any check of the loaded images (crates/plasmosome-lanes/README.md, \
   "Limits"). This is owner gate O-6. lane-vmm refuses the run when such a file exists, before \
-  it loads libkrun. plasmosome-vev, an open planned task, plans an audit that refuses any \
-  LC_RPATH, so plasmosome-qep's cell boot waits on O-6. Nothing on main refuses an LC_RPATH \
-  today. plasmosome-jab, an open task, plans a successor bundle that edits this dylib: it \
-  deletes the rpath with install_name_tool and signs the file again ad hoc. It plans no new \
-  build of libkrun.\
+  it loads libkrun. plasmosome-membrane's runtime::closure::audit_closure refuses any \
+  LC_RPATH, so it refuses this dylib. No launch calls it yet; the cell, plasmosome-7em, will, \
+  so plasmosome-qep's cell boot waits on O-6. plasmosome-jab, an open task, plans a successor \
+  bundle that edits this dylib: it deletes the rpath with install_name_tool and signs the file \
+  again ad hoc. It plans no new build of libkrun.\
   """,
   """\
   libkrun's Cargo.lock at 728df812 locks 184 crates.io packages, and the dylib's Rust code is \
