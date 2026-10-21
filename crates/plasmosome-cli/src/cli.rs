@@ -93,8 +93,8 @@ pub struct Context<'a> {
     pub trusted_uid: u32,
     /// The monotonic clock a command's deadline is counted on, from the start of the call.
     pub clock: &'a dyn Clock,
-    /// Where socket selection reads `HOME` and `PLASMOSOME_KERNEL`. The binary passes
-    /// [`ProcessEnv`].
+    /// Where socket selection reads `HOME` and `PLASMOSOME_KERNEL`. The binary passes the
+    /// process's own environment.
     pub env: &'a dyn Env,
 }
 
