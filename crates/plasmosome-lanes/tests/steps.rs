@@ -19,10 +19,17 @@ fn result_line(probe: &str) -> String {
     format!("LANE-RESULT {}", common::result_json(probe, 1000))
 }
 
+fn wait_for(path: &Path) -> String {
+    format!(
+        "n=0\nwhile [ ! -e {path} ]; do n=$((n+1)); [ $n -gt 1000 ] && exit 9; sleep 0.01; done\n",
+        path = quoted(path),
+    )
+}
+
 fn waits_for(flag: &Path, console: &Path, after: &str) -> String {
     format!(
-        "n=0\nwhile [ ! -e {flag} ]; do n=$((n+1)); [ $n -gt 1000 ] && exit 9; sleep 0.01; done\nprintf '%s\\n' '{line}' >> {console}\n",
-        flag = quoted(flag),
+        "{wait}printf '%s\\n' '{line}' >> {console}\n",
+        wait = wait_for(flag),
         console = quoted(console),
         line = result_line(after),
     )
@@ -65,6 +72,9 @@ fn a_step_runs_once_its_probe_reports_and_its_flag_releases_the_guest() {
     let order = Arc::new(Mutex::new(Vec::new()));
     let seen_by_action = Arc::clone(&order);
     let console_for_action = console.clone();
+    let flag_for_action = flag.clone();
+    let flagged_early = Arc::new(Mutex::new(None));
+    let flagged_by_action = Arc::clone(&flagged_early);
     let body = format!(
         "{}{}{}",
         header(&console, "a"),
@@ -75,6 +85,7 @@ fn a_step_runs_once_its_probe_reports_and_its_flag_releases_the_guest() {
         after: "a".to_string(),
         flag: flag.clone(),
         action: Box::new(move || {
+            *flagged_by_action.lock().expect("the flag check") = Some(flag_for_action.exists());
             let text = fs::read_to_string(&console_for_action)?;
             seen_by_action
                 .lock()
@@ -92,6 +103,11 @@ fn a_step_runs_once_its_probe_reports_and_its_flag_releases_the_guest() {
     assert_eq!(run.steps[0].outcome, Ok("moved the tree".to_string()));
     assert!(run.steps[0].flagged_ms >= run.steps[0].started_ms);
     assert_eq!(*order.lock().expect("the order"), [2]);
+    assert_eq!(
+        *flagged_early.lock().expect("the flag check"),
+        Some(false),
+        "the flag existed while the action ran"
+    );
     assert!(flag.exists());
     let seen: Vec<&str> = run.seen.iter().map(|(probe, _)| probe.as_str()).collect();
     assert_eq!(seen, ["a", "b"]);
@@ -141,32 +157,37 @@ fn steps_run_in_order_each_after_its_own_probe() {
 }
 
 #[test]
-fn a_failed_action_is_recorded_and_still_releases_the_guest() {
+fn a_failed_action_is_recorded_and_writes_no_flag() {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let console = dir.path().join("console.log");
     let flag = dir.path().join("flag-a");
+    let acted = dir.path().join("acted");
+    let marker = acted.clone();
     let body = format!(
         "{}{}{}",
         header(&console, "a"),
-        waits_for(&flag, &console, "b"),
-        end(&console, 2)
+        wait_for(&acted),
+        end(&console, 1)
     );
     let steps = vec![Step {
         after: "a".to_string(),
         flag: flag.clone(),
-        action: Box::new(|| Err(io::Error::other("the move failed"))),
+        action: Box::new(move || {
+            fs::write(&marker, b"")?;
+            Err(io::Error::other("the move failed"))
+        }),
     }];
 
-    let run = run(dir.path(), &body, &["a", "b"], steps);
+    let run = run(dir.path(), &body, &["a"], steps);
 
-    assert_eq!(finished(&run), ["a", "b"]);
+    assert_eq!(finished(&run), ["a"]);
     assert_eq!(run.steps.len(), 1);
     let error = run.steps[0]
         .outcome
         .clone()
         .expect_err("the error is recorded");
     assert!(error.contains("the move failed"), "{error}");
-    assert!(flag.exists());
+    assert!(!flag.exists(), "a failed action released the guest");
 }
 
 #[test]
@@ -202,7 +223,7 @@ fn a_result_line_still_being_written_does_not_start_a_step() {
     let partial = result_line("a");
     let (head, tail) = partial.split_at(partial.len() / 2);
     let body = format!(
-        "cat > /dev/null\nprintf '%s\\n' 'LANE-BEGIN run-1' > {console}\nprintf '%s' '{head}' >> {console}\nsleep 1\n[ -e {flag} ] && exit 8\nprintf '%s\\n' '{tail}' >> {console}\n{wait}{end}",
+        "cat > /dev/null\nprintf '%s\\n' 'LANE-BEGIN run-1' > {console}\nprintf '%s' '{head}' >> {console}\nsleep 0.2\n[ -e {flag} ] && exit 8\nprintf '%s\\n' '{tail}' >> {console}\n{wait}{end}",
         console = quoted(&console),
         flag = quoted(&flag),
         wait = waits_for(&flag, &console, "b"),
@@ -226,7 +247,7 @@ fn a_whole_result_line_with_no_newline_yet_does_not_start_a_step() {
     let console = dir.path().join("console.log");
     let flag = dir.path().join("flag-a");
     let body = format!(
-        "cat > /dev/null\nprintf '%s\\n' 'LANE-BEGIN run-1' > {console}\nprintf '%s' '{line}' >> {console}\nsleep 1\n[ -e {flag} ] && exit 8\nprintf '\\n' >> {console}\n{wait}{end}",
+        "cat > /dev/null\nprintf '%s\\n' 'LANE-BEGIN run-1' > {console}\nprintf '%s' '{line}' >> {console}\nsleep 0.2\n[ -e {flag} ] && exit 8\nprintf '\\n' >> {console}\n{wait}{end}",
         console = quoted(&console),
         flag = quoted(&flag),
         line = result_line("a"),
@@ -250,11 +271,21 @@ fn a_flag_that_cannot_be_written_is_recorded_as_the_steps_error() {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let console = dir.path().join("console.log");
     let flag = dir.path().join("missing/flag-a");
-    let body = format!("{}{}", header(&console, "a"), end(&console, 1));
+    let acted = dir.path().join("acted");
+    let marker = acted.clone();
+    let body = format!(
+        "{}{}{}",
+        header(&console, "a"),
+        wait_for(&acted),
+        end(&console, 1)
+    );
     let steps = vec![Step {
         after: "a".to_string(),
         flag,
-        action: Box::new(|| Ok("moved".to_string())),
+        action: Box::new(move || {
+            fs::write(&marker, b"")?;
+            Ok("moved".to_string())
+        }),
     }];
 
     let run = run(dir.path(), &body, &["a"], steps);

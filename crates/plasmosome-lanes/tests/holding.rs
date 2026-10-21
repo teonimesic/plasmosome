@@ -140,6 +140,39 @@ fn a_symbolic_link_is_moved_as_a_link_and_its_target_stays() {
 }
 
 #[test]
+fn a_link_to_a_directory_outside_the_tree_is_moved_as_a_link_and_never_walked() {
+    let layout = layout();
+    let outside = layout.outside.with_file_name("outside-dir");
+    fs::create_dir(&outside).expect("a directory outside the tree is made");
+    fs::write(outside.join("kept.txt"), b"kept").expect("its file is written");
+    symlink(&outside, layout.tree.join("lib/dir-link")).expect("a link is made");
+
+    let moved = move_to_holding(&layout.tree, &layout.holding).expect("the tree moves");
+
+    let link = moved
+        .iter()
+        .find(|entry| entry.from.ends_with("lib/dir-link"))
+        .expect("the link moved");
+    assert!(!link.is_dir, "the link was taken for a directory");
+    assert!(
+        fs::symlink_metadata(&link.to)
+            .expect("the moved link")
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        moved
+            .iter()
+            .all(|entry| !entry.from.starts_with(&link.from) || entry.from == link.from),
+        "an entry behind the link moved: {moved:?}"
+    );
+    assert_eq!(
+        fs::read(outside.join("kept.txt")).expect("the outside file stays"),
+        b"kept"
+    );
+}
+
+#[test]
 fn names_already_in_the_holding_directory_are_never_replaced() {
     let layout = layout();
     let first = move_to_holding(&layout.tree, &layout.holding).expect("the first tree moves");

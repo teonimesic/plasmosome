@@ -110,6 +110,54 @@ fn a_symlink_elsewhere_to_a_directory_inside_the_share_overlaps_it() {
 }
 
 #[test]
+fn a_share_reached_through_a_link_overlaps_a_file_inside_it_reached_through_another() {
+    let (_dir, root) = tree();
+    let file = root.join("software/Share/opt/p/tool");
+    fs::write(&file, b"tool").expect("a file is written");
+    let share_link = root.join("elsewhere/share-link");
+    let file_link = root.join("elsewhere/tool-link");
+    symlink(root.join("software/Share"), &share_link).expect("the share's link is made");
+    symlink(&file, &file_link).expect("the file's link is made");
+
+    assert_eq!(both_ways(&share_link, &file), (true, true));
+    assert_eq!(both_ways(&share_link, &file_link), (true, true));
+}
+
+#[test]
+fn directories_on_two_volumes_with_one_inode_number_do_not_overlap() {
+    let candidates = [
+        "/proc",
+        "/sys",
+        "/dev",
+        "/run",
+        "/System/Volumes/VM",
+        "/System/Volumes/Preboot",
+        "/System/Volumes/Update",
+        "/System/Volumes/xarts",
+        "/System/Volumes/iSCPreboot",
+        "/System/Volumes/Hardware",
+    ];
+    let found: Vec<(PathBuf, u64, u64)> = candidates
+        .iter()
+        .filter_map(|path| {
+            let metadata = fs::metadata(path)
+                .ok()
+                .filter(|metadata| metadata.is_dir())?;
+            Some((PathBuf::from(path), metadata.dev(), metadata.ino()))
+        })
+        .collect();
+    let pair = found.iter().enumerate().find_map(|(index, (a, dev, ino))| {
+        found[index + 1..]
+            .iter()
+            .find(|(_, other_dev, other_ino)| other_ino == ino && other_dev != dev)
+            .map(|(b, _, _)| (a.clone(), b.clone()))
+    });
+    let (a, b) = pair.expect("two volume roots here share an inode number on different devices");
+
+    assert_eq!(both_ways(&a, &b), (false, false), "{a:?} and {b:?}");
+}
+
+#[test]
 fn a_path_differing_only_in_case_overlaps_on_a_case_insensitive_volume() {
     let (_dir, root) = tree();
     let share = root.join("software/Share");

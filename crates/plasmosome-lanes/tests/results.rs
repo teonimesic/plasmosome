@@ -98,6 +98,34 @@ fn a_row_with_a_missing_run_or_verdict_is_not_run() {
 }
 
 #[test]
+fn a_row_whose_mutant_did_not_run_is_not_run_and_never_caught() {
+    let records = [
+        record("real", &[("M1", Verdict::Pass)]),
+        record(
+            "simplified",
+            &[("M1", Verdict::NotRun("the VM did not start".to_string()))],
+        ),
+    ];
+
+    assert!(
+        matches!(row_verdict(&m1(), &records), Verdict::NotRun(reason) if reason.contains("simplified") && reason.contains("the VM did not start"))
+    );
+    let text = render("", &[m1()], &records);
+    assert!(
+        text.lines().any(
+            |line| line.starts_with("| M1 | the claim of M1 |") && line.contains("**not run**")
+        ),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("| M1 | simplified |")
+                && line.ends_with("| not run: the VM did not start |")),
+        "{text}"
+    );
+}
+
+#[test]
 fn an_observation_run_never_changes_a_rows_verdict() {
     let rows = row(
         "O1",
@@ -238,7 +266,8 @@ fn each_observation_row_is_tabled_after_the_verdicts_with_not_run_for_a_missing_
 }
 
 #[test]
-fn an_observation_row_with_every_record_reads_recorded_and_a_missing_verdict_reads_not_run() {
+fn an_observation_row_reads_recorded_only_with_its_observation_and_a_missing_verdict_reads_not_run()
+{
     let names = row("Names", vec![run("real", Expect::Observe)]);
     let records = [
         record("real", &[("M1", Verdict::Pass)]),
@@ -248,11 +277,28 @@ fn an_observation_row_with_every_record_reads_recorded_and_a_missing_verdict_rea
         ),
     ];
 
-    let text = render("", &[m1(), names], &records);
-
+    assert!(
+        matches!(row_verdict(&names, &records), Verdict::NotRun(reason) if reason.contains("real") && reason.contains("Names"))
+    );
+    let text = render("", &[m1(), names.clone()], &records);
     assert!(
         text.lines()
-            .any(|line| line.starts_with("| Names |") && line.ends_with("| **recorded** |")),
+            .any(|line| line.starts_with("| Names | the claim of Names |")
+                && line.contains("| **not recorded**: ")),
+        "{text}"
+    );
+    assert!(
+        !text.contains("**recorded**"),
+        "a row with no observation reads recorded: {text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("| Names | real |") && line.ends_with("| not recorded |")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line == "| Names | real | not recorded |"),
         "{text}"
     );
     assert!(
@@ -262,4 +308,22 @@ fn an_observation_row_with_every_record_reads_recorded_and_a_missing_verdict_rea
         "{text}"
     );
     assert!(text.contains("- M2: not run: no console"), "{text}");
+
+    let mut observed = records.clone();
+    observed[0]
+        .observations
+        .insert("Names".to_string(), vec!["cafe: one name".to_string()]);
+    assert_eq!(row_verdict(&names, &observed), Verdict::Pass);
+    let text = render("", &[m1(), names], &observed);
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("| Names | the claim of Names |")
+                && line.ends_with("| **recorded** |")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.starts_with("| Names | real |") && line.ends_with("| recorded |")),
+        "{text}"
+    );
 }

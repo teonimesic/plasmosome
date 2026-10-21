@@ -74,6 +74,11 @@ fn m1_is_not_run_without_a_workload_stat() {
     let mut lying = m1((0, 0));
     lying[0].result.as_mut().expect("a line")["id_u"] = json!(0);
     assert!(is_not_run(&judge_m1(&lying)));
+    let mut framed_as_root = m1((0, 0));
+    framed_as_root[0].uid = 0;
+    assert!(
+        matches!(judge_m1(&framed_as_root), Verdict::NotRun(reason) if reason.contains("ran as uid 0"))
+    );
 }
 
 fn mountinfo(options: &str) -> Value {
@@ -407,6 +412,97 @@ fn m3_fails_when_the_guest_lists_the_holding_directory() {
 }
 
 #[test]
+fn m3_is_not_run_when_the_unconfined_control_is_missing_or_fails() {
+    let results = detach(Some(5001));
+    let no_control: String = self_check(None)
+        .lines()
+        .filter(|row| !row.contains("control"))
+        .map(|row| format!("{row}\n"))
+        .collect();
+    assert!(!no_control.contains("control"));
+    assert!(
+        matches!(judge_m3(&results, &no_control, &data(), &tool()), Verdict::NotRun(reason) if reason.contains("control"))
+    );
+    let failed_control = self_check(None).replace(
+        "control read outside: expected allowed, observed allowed, holds",
+        "control read outside: expected allowed, observed ENOENT, FAILS",
+    );
+    assert_ne!(failed_control, self_check(None));
+    assert!(
+        matches!(judge_m3(&results, &failed_control, &data(), &tool()), Verdict::NotRun(reason) if reason.contains("control read outside"))
+    );
+}
+
+#[test]
+fn m3_fails_when_the_tree_is_still_in_the_share() {
+    let mut results = detach(Some(5001));
+    replace(&mut results, "detach-list-opt", 1000, listing(&["p"]));
+
+    assert!(is_fail(
+        &judge_m3(&results, &self_check(None), &data(), &tool()),
+        "opt"
+    ));
+}
+
+#[test]
+fn m3_fails_when_a_holding_directory_is_anywhere_in_the_share() {
+    let check = self_check(None);
+    let mut in_opt = detach(Some(5001));
+    replace(
+        &mut in_opt,
+        "detach-list-opt",
+        1000,
+        listing(&[gate::HOLDING]),
+    );
+    assert!(is_fail(
+        &judge_m3(&in_opt, &check, &data(), &tool()),
+        gate::HOLDING
+    ));
+    let mut renamed = detach(Some(5001));
+    replace(
+        &mut renamed,
+        "detach-list-share",
+        1000,
+        listing(&["kept", "opt"]),
+    );
+    assert!(is_fail(
+        &judge_m3(&renamed, &check, &data(), &tool()),
+        "kept"
+    ));
+    let mut no_names = detach(Some(5001));
+    replace(
+        &mut no_names,
+        "detach-list-opt",
+        1000,
+        json!({"probe": "list", "ok": true}),
+    );
+    assert!(is_fail(
+        &judge_m3(&no_names, &check, &data(), &tool()),
+        "opt"
+    ));
+    let mut unlisted = detach(Some(5001));
+    replace(
+        &mut unlisted,
+        "detach-list-opt",
+        1000,
+        refused("list", "EIO"),
+    );
+    assert!(is_not_run(&judge_m3(&unlisted, &check, &data(), &tool())));
+}
+
+#[test]
+fn m3_is_not_run_when_a_release_ran_as_root_and_relays_the_holders_uid() {
+    let mut results = detach(Some(5001));
+    let mut relayed = released("fd", "fd", &data());
+    relayed["id_u"] = json!(1000);
+    replace(&mut results, "m3-release-fd", 0, relayed);
+
+    assert!(
+        matches!(judge_m3(&results, &self_check(None), &data(), &tool()), Verdict::NotRun(reason) if reason.contains("ran as uid 0"))
+    );
+}
+
+#[test]
 fn m3_is_not_run_when_a_release_ran_as_root() {
     let mut results = detach(Some(5001));
     replace(
@@ -454,6 +550,19 @@ fn m4_fails_on_a_listing_with_any_name_even_when_every_former_name_is_gone() {
     );
 
     assert!(is_fail(&judge_m4(&stray, true), "stray"));
+}
+
+#[test]
+fn m4_fails_on_a_listing_line_with_no_names() {
+    let mut malformed = detach(Some(5000));
+    replace(
+        &mut malformed,
+        "m4-release-cwd",
+        1000,
+        cwd_release(json!({"probe": "list", "ok": true}), &[("bin", gone())]),
+    );
+
+    assert!(is_fail(&judge_m4(&malformed, true), "listing"));
 }
 
 #[test]
@@ -610,6 +719,13 @@ fn r1_reports_a_trial_that_missed_the_file_or_found_it_early_and_never_rounds_up
 }
 
 #[test]
+fn r1_fails_a_trial_whose_lookup_after_found_a_directory() {
+    let tally = judge_r1(&r1_trial(0, gone(), found()), 1);
+
+    assert!(is_fail(&tally.trials[0].outcome, "dir"));
+}
+
+#[test]
 fn a_tally_passes_only_on_every_claimed_trial() {
     let trial = |index, outcome| Trial { index, outcome };
     let all = Tally {
@@ -640,13 +756,26 @@ fn a_tally_passes_only_on_every_claimed_trial() {
     assert!(matches!(failed.verdict(), Verdict::Fail(reason) if reason.contains("0 of 2")));
 }
 
-fn stage(config: &str, mount: Value, workload_stat: Value) -> ProbeResult {
+fn stage_with(
+    config: &str,
+    mount: Value,
+    initial_stat: Value,
+    workload_stat: Value,
+) -> ProbeResult {
     framed(
         &format!("r2-{config}"),
         0,
         json!({"probe": "stage", "ok": true, "config": config, "mount": mount,
-               "initial_stat": {"probe": "stat", "ok": true, "kind": "file", "id_u": 0},
-               "workload_stat": workload_stat}),
+               "initial_stat": initial_stat, "workload_stat": workload_stat}),
+    )
+}
+
+fn stage(config: &str, mount: Value, workload_stat: Value) -> ProbeResult {
+    stage_with(
+        config,
+        mount,
+        json!({"probe": "stat", "ok": true, "kind": "file", "id_u": 0}),
+        workload_stat,
     )
 }
 
@@ -669,6 +798,16 @@ fn r2(private: Value, unreachable: Value) -> Vec<ProbeResult> {
             json!({"ok": true}),
             workload_stat(unreachable),
         ),
+        stage(
+            "private-parent",
+            json!({"ok": true}),
+            workload_stat(refused("stat", "ENOENT")),
+        ),
+        stage(
+            "late-directory",
+            json!({"ok": true}),
+            workload_stat(refused("stat", "ENOENT")),
+        ),
     ]
 }
 
@@ -682,8 +821,66 @@ fn r2_shows_a_successful_mount_the_workload_cannot_see() {
             ("visible".to_string(), Verdict::Pass),
             ("private".to_string(), Verdict::Pass),
             ("unreachable".to_string(), Verdict::Pass),
+            ("private-parent".to_string(), Verdict::Pass),
+            ("late-directory".to_string(), Verdict::Pass),
         ]
     );
+}
+
+#[test]
+fn r2_fails_a_parent_private_configuration_the_workload_could_see() {
+    for index in [3, 4] {
+        let mut results = r2(refused("stat", "ENOENT"), refused("stat", "ENOENT"));
+        let config = gate::R2_CONFIGS[index];
+        results[index] = stage(
+            config,
+            json!({"ok": true}),
+            workload_stat(json!({"probe": "stat", "ok": true, "kind": "file"})),
+        );
+
+        assert!(is_fail(&judge_r2(&results)[index].1, config), "{config}");
+    }
+}
+
+#[test]
+fn r2_is_not_run_in_any_configuration_whose_staging_left_no_file() {
+    for (index, config) in gate::R2_CONFIGS.iter().enumerate() {
+        let seen = if *config == "visible" {
+            json!({"probe": "stat", "ok": true, "kind": "file"})
+        } else {
+            refused("stat", "ENOENT")
+        };
+        let mut results = r2(refused("stat", "ENOENT"), refused("stat", "ENOENT"));
+        results[index] = stage_with(
+            config,
+            json!({"ok": true}),
+            json!({"probe": "stat", "ok": false, "errno": "ENOENT", "id_u": 0}),
+            workload_stat(seen.clone()),
+        );
+        assert!(
+            matches!(&judge_r2(&results)[index].1, Verdict::NotRun(reason) if reason.contains("initial")),
+            "{config}"
+        );
+        results[index] = stage_with(
+            config,
+            json!({"ok": true}),
+            json!({"probe": "stat", "ok": true, "kind": "dir", "id_u": 0}),
+            workload_stat(seen),
+        );
+        assert!(is_not_run(&judge_r2(&results)[index].1), "{config}");
+    }
+}
+
+#[test]
+fn r2_fails_the_visible_control_when_the_workload_finds_a_directory() {
+    let mut results = r2(refused("stat", "ENOENT"), refused("stat", "ENOENT"));
+    results[0] = stage(
+        "visible",
+        json!({"ok": true}),
+        workload_stat(json!({"probe": "stat", "ok": true, "kind": "dir"})),
+    );
+
+    assert!(is_fail(&judge_r2(&results)[0].1, "visible"));
 }
 
 #[test]
@@ -995,9 +1192,16 @@ fn the_r1_probes_watch_await_and_release_each_trial_in_turn() {
 fn the_r2_r3_and_r4_probes_run_as_the_uids_their_judges_read() {
     assert_eq!(
         ids_and_uids(&gate::r2_probes()),
-        owned(&[("r2-visible", 0), ("r2-private", 0), ("r2-unreachable", 0)])
+        owned(&[
+            ("r2-visible", 0),
+            ("r2-private", 0),
+            ("r2-unreachable", 0),
+            ("r2-private-parent", 0),
+            ("r2-late-directory", 0),
+        ])
     );
     assert_eq!(gate::r2_probes()[1].args, ["stage", "private"]);
+    assert_eq!(gate::r2_probes()[4].args, ["stage", "late-directory"]);
     let r3 = gate::r3_probes(1);
     assert_eq!(
         ids_and_uids(&r3),
