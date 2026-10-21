@@ -4,7 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -13,9 +13,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use plasmosome_core::private_socket::{
-    Accepted, EntryKind, ListedEntry, PrivateDir, PrivateListener, PrivateSocketError,
-    RemoveOutcome, SocketEntry, check_peer_uid, check_private_path, effective_uid,
-    list_trusted_dir, peer_uid,
+    Accepted, EntryKind, LISTEN_BACKLOG, ListedEntry, PrivateDir, PrivateListener,
+    PrivateSocketError, RemoveOutcome, SocketEntry, check_peer_uid, check_private_path,
+    effective_uid, list_trusted_dir, peer_uid,
 };
 use tempfile::TempDir;
 
@@ -1002,15 +1002,49 @@ fn close_reports_a_name_the_directory_will_not_let_it_inspect() {
     }
 }
 
+#[allow(unsafe_code)]
 fn connected(at: &Path) -> Result<(), std::io::ErrorKind> {
-    UnixStream::connect(at)
-        .map(drop)
-        .map_err(|error| error.kind())
+    // SAFETY: sockaddr_un is a plain C struct, for which all zeroes is a valid value.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let name = at.as_os_str().as_bytes();
+    assert!(name.len() < address.sun_path.len(), "{} fits", at.display());
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(name) {
+        *slot = *byte as libc::c_char;
+    }
+    // SAFETY: socket takes no pointer.
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    assert!(raw >= 0, "socket: {}", std::io::Error::last_os_error());
+    // SAFETY: socket returned this descriptor just above, and nothing else owns it.
+    let client = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: fcntl with F_SETFL takes an integer flag set, not a pointer, and `client` keeps
+    // its descriptor open for the call.
+    let set = unsafe { libc::fcntl(client.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+    assert_eq!(set, 0, "fcntl: {}", std::io::Error::last_os_error());
+    let length = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    // SAFETY: connect reads `length` bytes of `address`, a live local, and `client` keeps its
+    // descriptor open for the call.
+    let outcome = unsafe { libc::connect(client.as_raw_fd(), (&raw const address).cast(), length) };
+    if outcome == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().kind())
+    }
 }
+
+const RECONNECT_WAITS_MS: [u64; 12] = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048];
+
+const CONNECTS_PER_LISTENER: usize = 2 + RECONNECT_WAITS_MS.len();
+
+const _: () = assert!(
+    CONNECTS_PER_LISTENER < LISTEN_BACKLOG as usize,
+    "the close test must stay under the backlog: on macOS a full queue refuses a connect as a \
+     closed listener does"
+);
 
 fn refused_once_spawns_in_flight_exec(at: &Path) -> Result<(), std::io::ErrorKind> {
     let mut found = connected(at);
-    for wait_ms in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048] {
+    for wait_ms in RECONNECT_WAITS_MS {
         if found.is_err() {
             break;
         }
