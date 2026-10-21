@@ -1810,14 +1810,23 @@ subject = "git"
 
     #[test]
     fn a_written_backend_changes_nothing_in_the_parsed_declaration() {
-        let without =
-            PlasmidManifest::parse(&workspace_declaration("{ dst = \"/srv/work\" }")).unwrap();
-        assert_eq!(without.workspace.as_ref().unwrap().dst, "/srv/work");
-        for backend in ["virtiofs", "fuse"] {
-            let mount = format!("{{ backend = \"{backend}\", dst = \"/srv/work\" }}");
-            let written = PlasmidManifest::parse(&workspace_declaration(&mount))
-                .unwrap_or_else(|error| panic!("backend = {backend:?} was refused: {error:?}"));
-            assert_eq!(written, without, "backend = {backend:?}");
+        for (dst, parsed) in [("dst = \"/srv/work\"", "/srv/work"), ("", "/workspace")] {
+            let without =
+                PlasmidManifest::parse(&workspace_declaration(&format!("{{ {dst} }}"))).unwrap();
+            let only_dst = WorkspaceMount {
+                dst: parsed.to_string(),
+            };
+            assert_eq!(without.workspace, Some(only_dst));
+            for backend in ["virtiofs", "fuse"] {
+                let mount = if dst.is_empty() {
+                    format!("{{ backend = \"{backend}\" }}")
+                } else {
+                    format!("{{ backend = \"{backend}\", {dst} }}")
+                };
+                let written = PlasmidManifest::parse(&workspace_declaration(&mount))
+                    .unwrap_or_else(|error| panic!("{mount} was refused: {error:?}"));
+                assert_eq!(written, without, "{mount}");
+            }
         }
     }
 
