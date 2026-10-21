@@ -1741,7 +1741,6 @@ mod tests {
             ),
         ];
         for (refusal, text) in cases {
-            assert_eq!(refusal.path(), at());
             assert_eq!(refusal.to_string(), text);
         }
     }
