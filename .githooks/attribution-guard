@@ -6,8 +6,8 @@
 #
 # It also refuses either trailer when it names somebody no reader can trace: a value with no
 # address, or an address on a domain no account can sit on, such as `.local`, which is what git
-# falls back to on a machine with no `user.email`. An address no mailbox has, such as `<probe@>` or
-# one holding a space, counts as no address. When a value has an address, a model is still
+# falls back to on a machine with no `user.email`. A malformed address, such as `<probe@>` or one
+# holding a space, counts as no address. When a value has an address, a model is still
 # found by a vendor's name anywhere in it, so a person whose name or address holds one is refused
 # too. A value with no address is refused either way, and only a whole vendor word in its name
 # makes the refusal say it credits a model. It reads trailers only, not a commit's author or
@@ -48,10 +48,11 @@ vendor_word="(^|[^[:alnum:]])($vendors)([^[:alnum:]]|\$)"
 untraceable_domain='@([^@]*\.)?(local|localhost|invalid|test|example|example\.com|example\.net|example\.org|home\.arpa|internal|localdomain)\.?$'
 
 # A malformed address, which counts as no address (spec 029 section 4 rule 2). Its local part is
-# the text before its last `@`, and its domain the text after it. One alternative per shape, in
-# the rule's order: an empty local part; a domain that, once one trailing dot is removed, is empty,
+# the text before its last `@`, and its domain the text after it. Each shape the rule lists has one
+# alternative: an empty local part; a domain that, once one trailing dot is removed, is empty,
 # starts with a dot, ends with a dot, or holds two dots in a row; and whitespace anywhere. A single
-# trailing dot passes, as the domain list ignores it. The whitespace is the UTF-8 bytes of the
+# trailing dot passes, as the domain list ignores it. Any other shape, such as two `@` in a row,
+# goes on to the vendor search and the domain list. The whitespace is the UTF-8 bytes of the
 # characters `blank_to_another_reader` counts as blank, because the guard runs in the C locale, and
 # the two sets must stay the same.
 blank_bytes="[ "$'\t\r\v\f'"]|"$'\xc2'"["$'\x85\xa0'"]|"$'\xe1\x9a\x80'"|"$'\xe2\x80'"["$'\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\xa8\xa9\xaf'"]|"$'\xe2\x81\x9f'"|"$'\xe3\x80\x80'"|"$'\xef\xbb\xbf'
