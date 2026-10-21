@@ -470,6 +470,31 @@ mod tests {
         }
     }
 
+    struct WritesOnInherited {
+        connection: libc::c_int,
+        sends: bool,
+        sent: libc::c_int,
+    }
+
+    impl Launch for WritesOnInherited {
+        #[allow(unsafe_code)]
+        fn launch(self) -> ! {
+            let byte = b"x";
+            // SAFETY: write, pause and _exit are async-signal-safe and allocate nothing. Each
+            // write reads one byte of a static, on a descriptor this child inherited.
+            unsafe {
+                let on_connection =
+                    !self.sends || libc::write(self.connection, byte.as_ptr().cast(), 1) == 1;
+                if on_connection && libc::write(self.sent, byte.as_ptr().cast(), 1) == 1 {
+                    loop {
+                        libc::pause();
+                    }
+                }
+                libc::_exit(1)
+            }
+        }
+    }
+
     #[test]
     fn bind_refuses_every_existing_entry_and_leaves_it_as_it_was() {
         let scratch = Scratch::new();
@@ -635,6 +660,48 @@ mod tests {
             child.pid(),
             "a forked connector reports its own pid, not this process's"
         );
+    }
+
+    #[test]
+    fn the_peer_pid_is_the_connector_on_linux_and_the_last_sender_on_darwin() {
+        let scratch = Scratch::new();
+        let path = scratch.path("data.sock");
+        let listener = RuntimeListener::bind(&path).unwrap();
+        let this_process = libc::pid_t::try_from(std::process::id()).unwrap();
+        for sends in [false, true] {
+            let connection = UnixStream::connect(path.as_path()).unwrap();
+            let [ready, sent] = pipe();
+            let child = VmmChild::spawn(WritesOnInherited {
+                connection: connection.as_raw_fd(),
+                sends,
+                sent: sent.as_raw_fd(),
+            })
+            .expect("the fork succeeds");
+            assert!(
+                readable_within(&File::from(ready), PATIENCE),
+                "the child reports within {PATIENCE:?} that it wrote"
+            );
+            let (mut stream, pid) = accepted_within(&listener);
+            let expected = if sends && cfg!(not(target_os = "linux")) {
+                child.pid()
+            } else {
+                this_process
+            };
+            assert_eq!(
+                pid, expected,
+                "the child inherited the connection; sends: {sends}"
+            );
+            let mut byte = [0u8; 1];
+            assert_eq!(
+                stream.read(&mut byte).map_err(|error| error.kind()),
+                if sends {
+                    Ok(1)
+                } else {
+                    Err(ErrorKind::WouldBlock)
+                },
+                "the child sent before the accept; sends: {sends}"
+            );
+        }
     }
 
     #[test]
