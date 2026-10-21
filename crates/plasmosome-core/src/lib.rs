@@ -5,6 +5,9 @@
 //! the frozen control protocol on an ndjson connection, which its binary
 //! `plasmosomed` serves on the control socket its config names.
 
+/// The controller's check of one spec 001 §4.2 Artifact before it allocates a cell (spec 023 §1).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod artifact;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod clock;
 pub mod closure;

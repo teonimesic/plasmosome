@@ -9,6 +9,8 @@ use serde::de::value::MapAccessDeserializer;
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
+mod cell_runtime;
+
 use crate::control::{Controller, Handler, serve_connection};
 use crate::private_socket::{
     Accepted, PrivateDir, PrivateListener, PrivateSocketError, effective_uid,
@@ -416,6 +418,7 @@ mod tests {
             instance_root: directory.join("instance"),
             recovery_deadline: Duration::from_secs(5),
             registry_root: None,
+            cell_runtime: None,
         }
     }
 
@@ -608,7 +611,13 @@ mod tests {
                 instance_root: PathBuf::from("/srv/roots/r7"),
                 recovery_deadline: Duration::from_millis(4321),
                 registry_root: Some(PathBuf::from("/srv/imports")),
+                cell_runtime: None,
             }
+        );
+        assert_eq!(
+            parse_config(&format!("{}\n", written(&FULL_CONFIG)))
+                .expect("a config file's final newline is whitespace after the object"),
+            parsed
         );
 
         refused_naming(vec![
@@ -659,6 +668,8 @@ mod tests {
             (replacing("registry_root", "7"), "`registry_root`"),
             (replacing("registry_root", "null"), "`registry_root`"),
             (adding("registry", r#""/srv/imports""#), "`registry`"),
+            (adding("cell_runtime", "null"), "`cell_runtime`"),
+            (adding("cell_runtime", "{}"), "`cell_runtime"),
             (
                 adding("instance_root", r#""/srv/other""#),
                 "`instance_root`",
