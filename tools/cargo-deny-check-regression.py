@@ -375,13 +375,11 @@ def outcomes():
         assert result.stdout.splitlines()[-1].strip() == LOCK_HINT and CARGO_HINT not in result.stdout, result.stdout
         assert REFUSAL in summary and LOCK_HINT in summary and TOOL_FAILURE not in result.stdout + summary, summary
 
-        result, calls, summary = repository.run("advisories", plan=plan("advisories", {"Cargo.toml": "malformed-graphs"}))
-        assert result.returncode == 2 and TOOL_FAILURE + " the wrapper crashed" in result.stdout, result.stdout
-        assert "Traceback" in result.stdout and "TypeError" in result.stdout, result.stdout
-
         result, calls, summary = repository.run(
             "advisories", plan=plan("advisories", {"Cargo.toml": "vulnerability", "fuzz/Cargo.toml": "malformed-graphs"}))
         assert result.returncode == 2 and len(calls) == 2 and REFUSAL in result.stdout, result.stdout
+        assert TOOL_FAILURE + " the wrapper crashed" in result.stdout, result.stdout
+        assert "Traceback" in result.stdout and "TypeError" in result.stdout, result.stdout
         assert len(summary.splitlines()) == 1 and summary.startswith(TOOL_FAILURE + " the wrapper crashed"), summary
         assert "`cargo-deny-check advisories`" in summary and "job log" in summary, summary
 
