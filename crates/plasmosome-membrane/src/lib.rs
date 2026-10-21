@@ -5,6 +5,7 @@
 
 pub mod brokers;
 pub mod cell_args;
+pub mod cell_start;
 pub mod control;
 pub mod daemon;
 pub mod exec;
