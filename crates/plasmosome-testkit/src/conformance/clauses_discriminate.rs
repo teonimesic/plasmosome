@@ -4,15 +4,16 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use super as conformance;
 use crate::builders::{broker, mount, proxy_map, session_file, uds_socket};
 use plasmosome_backend::{
-    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, Grant, GrantId,
-    GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy, UniverseClass,
-    UniverseOp, UniverseRemoval,
+    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, FileAccess, Grant,
+    GrantId, GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy,
+    UniverseClass, UniverseOp, UniverseRemoval,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Defect {
     None,
-    RevokeReturnsAStranger,
+    RevokeReturnsAStranger(UniverseClass),
+    RevokeReturnsAnotherRecipe(UniverseClass),
     UnknownHandleReportsSuccess,
     RevokeKeepsTheObject,
     RevokeTidiesTheWholeUniverse,
@@ -38,7 +39,10 @@ enum Defect {
     GrantSubstitutesProxyRoute,
     GrantSubstitutesBrokerLaunch,
     GrantSubstitutesRequestedOwner,
-    GrantSubstitutesRequestedCapability,
+    GrantSubstitutesRequestedCapability(UniverseClass),
+    GrantSubstitutesRecipe(UniverseClass),
+    GrantReturnsAnotherRecipe(UniverseClass),
+    GrantRecordsAnotherRecipe(UniverseClass),
     GrantPanics,
     SnapshotPanicsLikeAssertion,
     RevokeTakesTheSamePluginInAnotherCell,
@@ -409,8 +413,11 @@ impl EnforcementBackend for DefectiveBackend {
         if self.defect == Defect::GrantSubstitutesRequestedOwner {
             grant.owner.plugin = PluginId::from("substituted-owner");
         }
-        if self.defect == Defect::GrantSubstitutesRequestedCapability {
+        if self.defect == Defect::GrantSubstitutesRequestedCapability(grant.capability.class()) {
             grant.capability = substituted_capability(&grant.capability);
+        }
+        if self.defect == Defect::GrantSubstitutesRecipe(grant.capability.class()) {
+            grant.capability = substituted_recipe(&grant.capability);
         }
         if self.defect == Defect::GrantSubstitutesLiveOwner
             && let Some(owner) = self
@@ -444,7 +451,7 @@ impl EnforcementBackend for DefectiveBackend {
             grant.capability = capability;
         }
         let handle = self.mint(grant.capability.class());
-        let entry = LedgerEntry {
+        let mut entry = LedgerEntry {
             handle,
             owner: grant.owner,
             capability: grant.capability,
@@ -457,7 +464,11 @@ impl EnforcementBackend for DefectiveBackend {
                     .objects()
                     .any(|held| held.owner == entry.owner && held.capability == entry.capability);
             if !duplicate {
-                self.state.insert(entry.object()).unwrap();
+                let mut object = entry.object();
+                if self.defect == Defect::GrantRecordsAnotherRecipe(object.class()) {
+                    object.capability = substituted_recipe(&object.capability);
+                }
+                self.state.insert(object).unwrap();
             }
             if self.defect == Defect::GrantMaterializesAShadow {
                 self.state.insert(shadow_of(&entry)).unwrap();
@@ -472,6 +483,9 @@ impl EnforcementBackend for DefectiveBackend {
         {
             self.ledger.remove(&previous);
             self.grant_order.retain(|held| *held != previous);
+        }
+        if self.defect == Defect::GrantReturnsAnotherRecipe(entry.capability.class()) {
+            entry.capability = substituted_recipe(&entry.capability);
         }
         self.ledger.insert(handle, entry.clone());
         self.grant_order.push(handle);
@@ -513,8 +527,14 @@ impl EnforcementBackend for DefectiveBackend {
         self.grant_order.retain(|held| *held != handle);
         self.freed.push(handle);
         self.spent.insert(handle, entry.clone());
-        if self.defect == Defect::RevokeReturnsAStranger {
+        if self.defect == Defect::RevokeReturnsAStranger(handle.class) {
             return Ok(a_stranger(handle));
+        }
+        if self.defect == Defect::RevokeReturnsAnotherRecipe(handle.class) {
+            return Ok(LedgerEntry {
+                capability: substituted_recipe(&entry.capability),
+                ..entry
+            });
         }
         Ok(entry)
     }
@@ -667,6 +687,29 @@ fn substituted_capability(capability: &Capability) -> Capability {
     }
 }
 
+fn substituted_recipe(capability: &Capability) -> Capability {
+    let mut substitute = capability.clone();
+    match &mut substitute {
+        Capability::SessionFile { recipe, .. } => recipe.mode = flipped(recipe.mode),
+        Capability::UdsSocket { recipe, .. } => {
+            recipe.guest_path = format!("{}.substituted", recipe.guest_path);
+        }
+        Capability::ProxyMap { recipe, .. } => recipe.port = recipe.port % u16::MAX + 1,
+        Capability::Broker { launch, .. } => {
+            launch.data_socket = format!("{}.substituted", launch.data_socket);
+        }
+        Capability::Mount { recipe, .. } => recipe.access = flipped(recipe.access),
+    }
+    substitute
+}
+
+fn flipped(access: FileAccess) -> FileAccess {
+    match access {
+        FileAccess::ReadOnly => FileAccess::ReadWrite,
+        FileAccess::ReadWrite => FileAccess::ReadOnly,
+    }
+}
+
 fn shadow_of(entry: &LedgerEntry) -> OsObject {
     OsObject {
         id: GrantId::new(),
@@ -713,6 +756,14 @@ fn assert_rejected(run: impl FnOnce()) {
         (Ok(()), true) => panic!("a conformance failure was recorded without a panic"),
     }
 }
+
+const CLASSES: [UniverseClass; 5] = [
+    UniverseClass::SessionFile,
+    UniverseClass::UdsPath,
+    UniverseClass::ProxyMap,
+    UniverseClass::BrokerPid,
+    UniverseClass::Mount,
+];
 
 fn run_all(defect: Defect) {
     conformance::grant_is_replayable(carrying(defect));
@@ -784,7 +835,11 @@ fn infrastructure_and_fixture_panics_cannot_satisfy_clause_witnesses() {
 
 #[test]
 fn established_clauses_reject_their_distinct_faults() {
-    assert_rejected(|| conformance::grant_is_replayable(carrying(Defect::RevokeReturnsAStranger)));
+    for class in CLASSES {
+        assert_rejected(|| {
+            conformance::grant_is_replayable(carrying(Defect::RevokeReturnsAStranger(class)))
+        });
+    }
     assert_rejected(|| {
         conformance::revoke_unknown_handle_is_error(carrying(Defect::UnknownHandleReportsSuccess))
     });
@@ -837,11 +892,177 @@ fn snapshot_clause_rejects_returned_owner_substitution() {
 
 #[test]
 fn snapshot_clause_rejects_returned_capability_substitution() {
-    assert_rejected(|| {
-        conformance::snapshot_never_invents_objects(carrying(
-            Defect::GrantSubstitutesRequestedCapability,
-        ))
-    });
+    for class in CLASSES {
+        assert_rejected(|| {
+            conformance::snapshot_never_invents_objects(carrying(
+                Defect::GrantSubstitutesRequestedCapability(class),
+            ))
+        });
+    }
+}
+
+#[test]
+fn a_substitute_and_a_stranger_stand_in_only_for_their_own_class() {
+    for class in CLASSES {
+        let mut substituting =
+            DefectiveBackend::carrying(Defect::GrantSubstitutesRequestedCapability(class));
+        let mut estranged = DefectiveBackend::carrying(Defect::RevokeReturnsAStranger(class));
+        for grant in conformance::sample_grants() {
+            let targeted = grant.capability.class() == class;
+            let entry = substituting.grant(grant.clone());
+            assert_eq!(entry.capability != grant.capability, targeted, "{grant:?}");
+            let entry = estranged.grant(grant.clone());
+            let returned = estranged
+                .revoke(entry.handle, DrainSpec::forcing())
+                .unwrap();
+            assert_eq!(returned != entry, targeted, "{grant:?}");
+        }
+    }
+}
+
+#[test]
+fn snapshot_clause_rejects_a_grant_that_substitutes_a_recipe_in_any_class() {
+    for class in CLASSES {
+        assert_rejected(|| {
+            conformance::snapshot_never_invents_objects(carrying(Defect::GrantSubstitutesRecipe(
+                class,
+            )))
+        });
+    }
+}
+
+#[test]
+fn snapshot_clause_rejects_an_entry_that_returns_another_recipe_in_any_class() {
+    for class in CLASSES {
+        assert_rejected(|| {
+            conformance::snapshot_never_invents_objects(carrying(
+                Defect::GrantReturnsAnotherRecipe(class),
+            ))
+        });
+    }
+}
+
+#[test]
+fn snapshot_clause_rejects_an_object_recorded_with_another_recipe_in_any_class() {
+    for class in CLASSES {
+        assert_rejected(|| {
+            conformance::snapshot_never_invents_objects(carrying(
+                Defect::GrantRecordsAnotherRecipe(class),
+            ))
+        });
+    }
+}
+
+#[test]
+fn replay_clause_rejects_a_revoke_that_returns_another_recipe_in_any_class() {
+    for class in CLASSES {
+        assert_rejected(|| {
+            conformance::grant_is_replayable(carrying(Defect::RevokeReturnsAnotherRecipe(class)))
+        });
+    }
+}
+
+#[test]
+fn a_recipe_defect_changes_only_the_recipe_of_its_own_class() {
+    for class in CLASSES {
+        for (defect, returns_another, records_another) in [
+            (Defect::GrantSubstitutesRecipe(class), true, true),
+            (Defect::GrantReturnsAnotherRecipe(class), true, false),
+            (Defect::GrantRecordsAnotherRecipe(class), false, true),
+        ] {
+            let mut backend = DefectiveBackend::carrying(defect);
+            for capability in conformance::sample_capabilities() {
+                let request = Grant {
+                    owner: conformance::conformance_owner(),
+                    capability: capability.clone(),
+                    kind: GrantKind::Hot,
+                };
+                let entry = backend.grant(request.clone());
+                let snapshot = backend.snapshot_os_state();
+                let object = snapshot
+                    .objects()
+                    .find(|held| held.id == entry.handle.id)
+                    .expect("the grant must stand");
+                assert_eq!(
+                    (entry.handle.class, &entry.owner, entry.kind, &object.owner),
+                    (
+                        capability.class(),
+                        &request.owner,
+                        request.kind,
+                        &request.owner
+                    ),
+                    "{defect:?}"
+                );
+                let targeted = capability.class() == class;
+                let context = format!("{defect:?} on {capability:?}");
+                only_the_recipe_differs(
+                    &entry.capability,
+                    &capability,
+                    targeted && returns_another,
+                    &context,
+                );
+                only_the_recipe_differs(
+                    &object.capability,
+                    &capability,
+                    targeted && records_another,
+                    &context,
+                );
+            }
+        }
+        let mut revoking = DefectiveBackend::carrying(Defect::RevokeReturnsAnotherRecipe(class));
+        for grant in conformance::sample_grants() {
+            let entry = revoking.grant(grant.clone());
+            assert_eq!(entry.handle.class, grant.capability.class());
+            assert_eq!(
+                (&entry.owner, entry.kind, &entry.capability),
+                (&grant.owner, grant.kind, &grant.capability)
+            );
+            let returned = revoking.revoke(entry.handle, DrainSpec::forcing()).unwrap();
+            let snapshot = revoking.snapshot_os_state();
+            assert!(
+                !snapshot.objects().any(|held| held.id == entry.handle.id),
+                "a revoke must withdraw the object: {grant:?}"
+            );
+            assert_eq!(
+                (returned.handle, &returned.owner, returned.kind),
+                (entry.handle, &entry.owner, entry.kind)
+            );
+            let targeted = grant.capability.class() == class;
+            only_the_recipe_differs(
+                &returned.capability,
+                &entry.capability,
+                targeted,
+                &format!("{grant:?}"),
+            );
+        }
+    }
+    for access in [FileAccess::ReadOnly, FileAccess::ReadWrite] {
+        assert_ne!(flipped(access), access);
+    }
+}
+
+fn only_the_recipe_differs(
+    observed: &Capability,
+    expected: &Capability,
+    changed: bool,
+    context: &str,
+) {
+    assert_eq!(observed != expected, changed, "{context}");
+    assert_eq!(selection_of(observed), selection_of(expected), "{context}");
+    assert_eq!(observed.validate(), Ok(()), "{context}");
+}
+
+fn selection_of(capability: &Capability) -> (UniverseClass, Vec<&str>) {
+    let fields = match capability {
+        Capability::SessionFile { path, .. } | Capability::UdsSocket { path, .. } => vec![path],
+        Capability::ProxyMap { host, route, .. } => vec![host, route],
+        Capability::Broker { name, .. } => vec![name],
+        Capability::Mount { source, target, .. } => vec![source, target],
+    };
+    (
+        capability.class(),
+        fields.into_iter().map(String::as_str).collect(),
+    )
 }
 
 #[test]
@@ -1182,13 +1403,7 @@ fn a_substitute_and_a_stranger_keep_the_class_they_stand_in_for() {
         assert_eq!(substituted.class(), capability.class(), "{capability:?}");
         assert_ne!(substituted, capability);
     }
-    for class in [
-        UniverseClass::SessionFile,
-        UniverseClass::UdsPath,
-        UniverseClass::ProxyMap,
-        UniverseClass::BrokerPid,
-        UniverseClass::Mount,
-    ] {
+    for class in CLASSES {
         let handle = Handle {
             class,
             id: GrantId::new(),
@@ -1197,4 +1412,23 @@ fn a_substitute_and_a_stranger_keep_the_class_they_stand_in_for() {
         assert_eq!(stranger.handle, handle);
         assert_eq!(stranger.capability.class(), class);
     }
+}
+
+#[test]
+fn the_class_loops_run_every_universe_class() {
+    let (mut session, mut socket, mut proxy, mut broker, mut mount) =
+        (false, false, false, false, false);
+    for class in CLASSES {
+        match class {
+            UniverseClass::SessionFile => session = true,
+            UniverseClass::UdsPath => socket = true,
+            UniverseClass::ProxyMap => proxy = true,
+            UniverseClass::BrokerPid => broker = true,
+            UniverseClass::Mount => mount = true,
+        }
+    }
+    assert!(
+        session && socket && proxy && broker && mount,
+        "the class loops leave out a universe class: {CLASSES:?}"
+    );
 }
