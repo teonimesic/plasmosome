@@ -196,6 +196,10 @@ fn restrict_to_owner(path: &RecipePath) -> Result<(), i32> {
 /// connection and sent one byte before the call is the one reported, not the
 /// one that connected (measured on macOS 26.6.2). A match with a child's pid
 /// then shows only that the child was the last to use that socket.
+///
+/// When the peer closed its end before the call, Darwin fails with
+/// `ENOTCONN`, and Linux still reports the pid the connector had. On neither
+/// platform does a pid show that the peer is still running.
 #[allow(unsafe_code)]
 pub fn peer_pid(stream: &UnixStream) -> std::io::Result<libc::pid_t> {
     #[cfg(target_os = "linux")]

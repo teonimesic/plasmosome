@@ -250,6 +250,12 @@ connection and sent one byte before the accept is the one reported (measured on 
 Darwin a match with the helper's pid shows that the helper was the last process to use that socket,
 not that it connected, and a genuine helper whose child sent first does not match.
 
+Each accepted connection comes back as one `Connection`. When its pid cannot be read, it is
+`Unidentified` with the errno, and the connection is closed. On Darwin a peer that connected and
+exited before the accept is that case, with `ENOTCONN`; on Linux the same peer is `Identified` with
+the pid it had. `accept_ready` returns an error only when the listener's own accept fails, so a
+process that connects and leaves cannot make the listener look broken.
+
 `DiagnosticTranscript` reads the read end of the diagnostic pipe that `HelperExec::prepare` returns,
 on a thread of its own, so a helper that writes a lot never blocks on descriptor 2. It keeps the
 first 1,048,576 bytes and counts the rest. `finish(wait)` waits up to `wait` for end of file and
