@@ -28,6 +28,8 @@ one.
 | `daemon` | Serves the control protocol on a Unix socket; the `plasmosomed` binary |
 | `clock` | `SystemClock`, the production `plasmosome_backend::Clock`: the wall clock, `CLOCK_MONOTONIC_RAW` on macOS or `CLOCK_BOOTTIME` on Linux tagged with the boot session, and `Instant`. `boot_session` reads `kern.bootsessionuuid` or `/proc/sys/kernel/random/boot_id` |
 | `private_socket` | The recovery-socket boundary: a private parent directory, a 0600 socket, kernel peer-UID checks on both ends. `list_trusted_dir` lists a directory whose every component, itself included, passes the ancestor rule |
+| `nofollow` | The no-follow walk `private_socket` and `operator` open trusted paths with, public so `plasmosome-membrane` can too: every directory passed meets the ancestor rule, the caller's judge decides the object reached, and a file opens without blocking |
+| `operator` | Spec 022's operator declarations. `trusted::TrustedFile` reads the operator file or a declaration under §3 rules 1 to 4 |
 | `runtime` | The hardware runtime's launch input, which the controller writes and `plasmosome-membrane` reads: a JSON reader that refuses repeated keys (`strict_json`), the canonical absolute `RecipePath`, the strictly parsed `RuntimeRecipe` with its refusals and the host's limits, spec 023's `RuntimeTemplate`, `cell-<n>` IDs (`cell_id`) and the `SupervisorConfig` record handed to `membraned` (`supervisor_config`) |
 
 ## Use
@@ -102,14 +104,26 @@ every string, is a basic string on one line. Every control character is escaped,
 line and paragraph separators U+2028 and U+2029 and the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069, which a client can read as a line break or a reordering. A command's
 refusals name it by its TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file
-could not be read), `ManifestError::Parse` (the text is not TOML) and `ManifestError::TooLarge`
-(the declaration is over 1 MiB) carry no field. For `Parse`, the TOML parser reports a position,
+could not be read), `ManifestError::Parse` (the text is not TOML), `ManifestError::TooLarge`
+(the declaration is over 1 MiB) and `ManifestError::TooDeep` (the declaration nests more than 32
+levels deep) carry no field. For `Parse`, the TOML parser reports a position,
 not a field path, and naming one would be a guess. A `Parse` error quotes the source line, and its
 text is written with the same escapes, keeping its line breaks. `TooLarge` is decided before any
 TOML is parsed: a declaration over `MAX_MANIFEST_BYTES`, 1 MiB, is refused with no field and no
 fix. `load` reads at most 1 MiB plus one byte, so a file, device or FIFO that delivers more than
 1 MiB, `/dev/zero` among them, is refused at the bound. It does not bound time: a FIFO with no
 writer, or whose writer stops short of the bound and never closes, still blocks it.
+`TooDeep` is decided after the size check and before any TOML is parsed, with no field and no fix.
+`parse` counts how deep the text nests and refuses more than `MAX_MANIFEST_DEPTH`, 32 levels. The
+root table is level 1. Each array, each inline table and each dot in a key adds a level, and each
+part of a table header's name adds two. Nothing inside a string or a comment counts. TOML's own
+limit bounds each construct alone, not the depth they reach together, and a tree deep enough
+overflows the stack while toml builds or reads it, so the count runs before toml sees the text.
+The count is exact for arrays, inline tables and dotted keys, and never below the depth of the tree
+toml builds, so a declaration that passes has a tree at most 32 levels deep. A header part counts
+two whatever it names, so under a plain table header the count is above the tree's depth, up to
+about twice it: a 16-part table header with a key under it counts 33 and is refused, although its
+tree is 17 deep.
 `WireError::manifest_refusal` turns any of them into code 108, carrying the fix when there is one.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
 description.
@@ -474,3 +488,69 @@ On macOS, the generic-rights test writes an ACL entry that holds only a generic 
 the raw `chmod_extended` system call. The `noowners` test creates a
 1 MB HFS+ image under the test root, attaches it with `hdiutil attach -owners off`, which
 needs no root, and detaches it when the test ends.
+
+## The no-follow walk
+
+`nofollow` is the one walk core uses to open a path it must trust. It is public so that
+`plasmosome-membrane` can use it too.
+`Walk::from_root` walks an absolute, normal path from `/`, one component at a time.
+`Walk::from_dir` walks a relative path from a directory the caller already holds. It exists for
+core's own tests, which use it to start below a sticky `/tmp`, because it judges nothing above
+its start.
+
+- Every directory the walk passes, the start included, meets the ancestor rule of the private
+  sockets above. It is owned by root or the effective UID and writable by neither group nor
+  other, with no sticky-bit exception. On macOS it also carries no ACL allow entry that lets
+  anyone replace its entries, and sits on no volume mounted with ownership ignored.
+- No component is followed. A symlink anywhere is `Symlink`, and a missing name is `Missing`.
+- `open_directory` opens the last component as a directory. `open_file` opens it read-only with
+  `O_NOFOLLOW`, `O_NONBLOCK` and `O_NOCTTY` and without `O_DIRECTORY`, so a FIFO or a device
+  returns at once. A regular file comes back blocking; any other type stays nonblocking.
+- The caller passes a judge, which decides the object from `fstat` on its descriptor and also
+  sees the directory that holds it. `open_file` opens whatever is at the name, so its judge must
+  refuse every type the caller does not want. An object that cannot be opened is judged from a no-follow
+  `fstatat` in its parent, and the walk reports `Io` only when the judge passes it. Checks that
+  need the descriptor, such as an ACL check, are the caller's.
+- `Opened` holds the descriptor, its facts, and the device and inode of every directory passed:
+  the start first, ending with the directory itself or with the file's parent.
+- A `Walk` opens again from the same start descriptor, so comparing two opens shows whether the
+  path still names the same object.
+- `acl_grants_write` reports whether a file's macOS ACL has an allow entry granting write data,
+  append, write attributes, write extended attributes, write security, chown, delete, or generic
+  write or all, whoever it names. On Linux it is always false: such a POSIX ACL entry shows in
+  the group bits, which a mode check reads.
+
+`PrivateDir` and `list_trusted_dir` run on this walk, each with its own rule for the last
+directory.
+
+## Trusted files
+
+`operator::trusted::TrustedFile::open` reads a file under spec 022 §3 rules 1 to 4: the operator
+declarations file and every declaration it lists. It reads the bytes once, through the
+descriptor it checked, and keeps the identity of `/` and of every directory down to the file's
+parent. A refusal is a `TrustRefusal`: the file's path, the check, and a reason naming the
+component or the value found.
+
+| Check | Refused when |
+| --- | --- |
+| `path` | the path is not absolute and normal, a component is a symlink or missing, or a read fails |
+| `ancestor` | a directory above the file breaks the ancestor rule |
+| `parent` | the effective UID does not own the file's own directory |
+| `not_regular` | the file is not a regular file; a FIFO is refused at once |
+| `owner` | the effective UID does not own the file |
+| `links` | the file does not have exactly one link: a second link, or none once it is unlinked |
+| `mode` | group or other can write it, or a macOS ACL allow entry grants write |
+| `size` | it holds more than 1,048,576 bytes, found by reading at most one byte more |
+
+The parent, type and owner checks also judge a file the controller cannot open. On macOS the
+path is `/private/etc/...` or `/private/var/...`: `/etc` and `/var` are symlinks, so a path
+through them is `path`. Rule 5, no trusted file inside a Mount source, and rule 6, the content,
+are not checked here.
+
+Most unit tests build their files under a canonical temp directory and walk from it, so they run
+on Linux below a sticky `/tmp`. One test opens a file through the walk from `/`, so its test root
+must sit where every ancestor passes. It takes the bases the daemon's unit tests use. On macOS
+that is the per-user temp directory `confstr(_CS_DARWIN_USER_TEMP_DIR)` names, whatever `TMPDIR`
+says. On Linux it tries `XDG_RUNTIME_DIR` when it is set, then the test binary's directory. If no
+base passes, the test fails and names each base with the ancestor that refused it. The test that
+`/etc/hosts` is `parent` skips as root, because root owns `/etc`.

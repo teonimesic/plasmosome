@@ -15,6 +15,14 @@ pub mod instance;
 pub mod kill_budget;
 pub mod lifecycle;
 pub mod manifest;
+/// The no-follow walk: opens a directory or a file one component at a time from "/", never
+/// following a symlink, judges every directory it passes by spec 001 §4.1's ancestor rule, and
+/// hands the object it reaches to the caller's judge.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod nofollow;
+/// Spec 022's operator declarations: the trusted files the controller reads them from.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod operator;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod private_socket;
 pub mod protocol;
@@ -28,6 +36,7 @@ pub mod runtime;
 pub mod session_log;
 pub mod state;
 pub mod supervisor_check;
+mod toml_depth;
 pub mod version;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -45,7 +54,7 @@ pub use kill_budget::{
     GuestStop, Incomplete, KillBudget, Share, Shortfall, Withdrawal, WorkloadStop,
 };
 pub use lifecycle::{PluginState, StateError};
-pub use manifest::{MAX_MANIFEST_BYTES, ManifestError, PlasmidManifest};
+pub use manifest::{MAX_MANIFEST_BYTES, MAX_MANIFEST_DEPTH, ManifestError, PlasmidManifest};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub use private_socket::{
     Accepted, DirIdentity, PrivateDir, PrivateListener, PrivateSocketError, SocketEntry,
