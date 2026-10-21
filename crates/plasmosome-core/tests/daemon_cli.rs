@@ -72,6 +72,7 @@ fn exact_help_operands_succeed_before_config_reading() {
         assert!(output.stderr.is_empty(), "{output:?}");
         let stdout = String::from_utf8(output.stdout).expect("help is UTF-8");
         assert!(stdout.contains("plasmosomed <config.json>"), "{stdout}");
+        assert!(stdout.contains("--version"), "{stdout}");
         assert!(stdout.contains("plasmosome.status"), "{stdout}");
     }
 }
@@ -105,6 +106,24 @@ fn help_shows_a_config_the_daemon_accepts_and_says_it_recovers_no_cells() {
 }
 
 #[test]
+fn version_is_the_sole_argument_and_reads_no_config() {
+    let directory = private_root::private_root();
+    let socket = directory.path().join("free.uds");
+    write_config(directory.path(), OsStr::new("--version"), &socket);
+
+    let output = output_within(plasmosomed(directory.path(), &[OsStr::new("--version")]));
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("plasmosomed {}\n", env!("CARGO_PKG_VERSION")),
+        "{output:?}"
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(!socket.exists(), "--version binds nothing");
+}
+
+#[test]
 fn every_other_sole_operand_remains_a_literal_config_path() {
     let directory = private_root::private_root();
     let occupied = directory.path().join("taken.uds");
@@ -113,7 +132,7 @@ fn every_other_sole_operand_remains_a_literal_config_path() {
     let cases: [(OsString, OsString); 5] = [
         (OsString::from("--help"), OsString::from("./--help")),
         (OsString::from("-h"), OsString::from("./-h")),
-        (OsString::from("--version"), OsString::from("--version")),
+        (OsString::from("--version"), OsString::from("./--version")),
         (OsString::from("help"), OsString::from("help")),
         (OsString::from("--"), OsString::from("--")),
     ];
@@ -160,7 +179,7 @@ fn help_does_not_override_the_existing_arity_check() {
         [config.as_os_str(), OsStr::new("--help")],
     ] {
         let output = output_within(plasmosomed(directory.path(), &arguments));
-        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert_eq!(output.status.code(), Some(64), "{output:?}");
         assert!(output.stdout.is_empty(), "{output:?}");
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("usage:"),
@@ -168,4 +187,33 @@ fn help_does_not_override_the_existing_arity_check() {
         );
     }
     assert!(!socket.exists(), "invalid arity never starts the daemon");
+}
+
+#[test]
+fn a_usage_error_exits_64_and_starts_nothing() {
+    let directory = private_root::private_root();
+    let socket = directory.path().join("control.uds");
+    write_config(directory.path(), OsStr::new("valid.json"), &socket);
+
+    let lists: [&[&str]; 8] = [
+        &[],
+        &["--version", "extra"],
+        &["extra", "--version"],
+        &["-h", "extra"],
+        &["--help", "extra"],
+        &["--version", "--help"],
+        &["valid.json", "extra"],
+        &["--config-fd=3", "--lock-fd=4", "--cell=cell-1"],
+    ];
+    for list in lists {
+        let arguments: Vec<&OsStr> = list.iter().map(OsStr::new).collect();
+        let output = output_within(plasmosomed(directory.path(), &arguments));
+        assert_eq!(output.status.code(), Some(64), "{list:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{list:?}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).starts_with("usage: plasmosomed <config.json>"),
+            "{list:?}: {output:?}"
+        );
+        assert!(!socket.exists(), "{list:?} never starts the daemon");
+    }
 }
