@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -87,9 +87,9 @@ impl EnforcementSnapshot {
         {
             return Err(conflict(effect.handle()));
         }
-        let mut issued = BTreeMap::new();
+        let mut issued = BTreeSet::new();
         for entry in &grants {
-            if issued.insert(entry.handle, entry).is_some() {
+            if !issued.insert(entry.handle) {
                 return Err(conflict(entry.handle));
             }
         }
