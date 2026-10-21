@@ -4,14 +4,18 @@
 # naming one, and GitHub shows it as a co-author when it can resolve the address to an account. A
 # `Signed-off-by` naming one certifies what a tool cannot.
 #
+# A trailer credits a model when its address is a listed tool address, or a GitHub noreply address
+# whose login is a listed login, such as `coderabbitai[bot]`. A name never makes a value a model's,
+# and neither does a vendor's domain, so `Claude Monet <claude.monet@corp.locale.io>` and
+# `Jane Doe <jane@anthropic.com>` are people. There is no rule for bots: one the list does not
+# name, such as Dependabot, is cleared (spec 029 section 5).
+#
 # It also refuses either trailer when it names somebody no reader can trace: a value with no
 # address, or an address on a domain no account can sit on, such as `.local`, which is what git
 # falls back to on a machine with no `user.email`. A malformed address, such as `<probe@>` or one
-# holding a space, counts as no address. When a value has an address, a model is still
-# found by a vendor's name anywhere in it, so a person whose name or address holds one is refused
-# too. A value with no address is refused either way, and only a whole vendor word in its name
-# makes the refusal say it credits a model. It reads trailers only, not a commit's author or
-# committer (spec 029 section 4).
+# holding a space, counts as no address. A value with no address is refused whatever its name, and
+# only a whole vendor word in its name makes the refusal say it credits a model. It reads trailers
+# only, not a commit's author or committer (spec 029 section 4).
 #
 # Runs as a pre-push hook AND as a CI gate, because a hook is bypassable and a gate is not.
 # Fails closed: anything it cannot read is a refusal, never a pass.
@@ -32,14 +36,56 @@ else
   revs=("HEAD")
 fi
 
-# Matched against a trailer's value, so it must not hold a string a person could carry. `devin`
-# and `sonnet` are left out for that reason and reached through their vendor domains instead:
-# refusing a contributor for their own name is a refusal they cannot act on.
+# A model tool's own addresses, and its GitHub logins, each compared with the whole address
+# (spec 029 section 4 rule 3). Each entry is already escaped for an extended regular expression,
+# and each has a probe in `tests/attribution_guard.rs`. The logins' account ids live there, not
+# here. The list grows on evidence: a tool's first observed address joins it with its probe, and
+# an entry found to be a person's leaves it in its own change. `llama` and `mistral` have no known
+# tool address yet.
+tool_addresses=(
+  'noreply@anthropic\.com'
+  'cursoragent@cursor\.com'
+  'codex@openai\.com'
+  'devin@cognition\.ai'
+  'noreply@x\.ai'
+)
+tool_logins=(
+  'claude'
+  'claude\[bot\]'
+  'copilot'
+  'coderabbitai\[bot\]'
+  'google-labs-jules\[bot\]'
+  'gemini-code-assist\[bot\]'
+  'devin-ai-integration\[bot\]'
+  'chatgpt-codex-connector\[bot\]'
+  'openai-codex\[bot\]'
+  'cursor\[bot\]'
+  'cursoragent'
+)
+
+# Joins its arguments with `|`, as the alternatives of one pattern.
+alternatives() {
+  local IFS='|'
+  printf '%s' "$*"
+}
+
+# A listed address, or a GitHub noreply address, with or without the `<id>+` prefix, whose login is
+# listed. The guard matches with `-i`, which in the C locale ignores ASCII case alone.
+tool_address="^($(alternatives "${tool_addresses[@]}"))\$"
+tool_login="^([0-9]+\\+)?($(alternatives "${tool_logins[@]}"))@users\\.noreply\\.github\\.com\$"
+
+# Vendor words. They decide only what the refusal of an identity with no address says: a model is
+# known by its address, never by these words. `devin` and `sonnet` are left out, because a person
+# may carry either as a name.
 vendors='claude|anthropic|gpt|openai|copilot|codex|gemini|llama|mistral|cursor|cognition\.ai|grok|x\.ai'
 
-# The same words, each only as a whole word. It decides what the refusal of an identity with no
-# address says, so `Claudette Roe <>` is untraceable, not a model.
-vendor_word="(^|[^[:alnum:]])($vendors)([^[:alnum:]]|\$)"
+# The same words, each only as a whole word, so `Claudette Roe <>` is untraceable, not a model. A
+# byte outside ASCII counts as part of a word, as an ASCII letter or digit does, so a name where a
+# letter outside ASCII follows `Claude` is untraceable too. The guard reads bytes, so it cannot
+# tell a letter outside ASCII from a space outside it: a vendor word next to either is not a whole
+# word here. Both are refused; only the reason they are given differs.
+word_byte="[:alnum:]"$'\x80'"-"$'\xff'
+vendor_word="(^|[^$word_byte])($vendors)([^$word_byte]|\$)"
 
 # A domain no account can sit on: the text after the address's last `@` equals a listed name, or
 # ends in `.` and one, ignoring one trailing dot. `local` is where git puts a machine with no
@@ -52,7 +98,7 @@ untraceable_domain='@([^@]*\.)?(local|localhost|invalid|test|example|example\.co
 # alternative: an empty local part; a domain that, once one trailing dot is removed, is empty,
 # starts with a dot, ends with a dot, or holds two dots in a row; and whitespace anywhere. A single
 # trailing dot passes, as the domain list ignores it. Any other shape, such as two `@` in a row,
-# goes on to the vendor search and the domain list. The whitespace is the UTF-8 bytes of the
+# goes on to the tool list and the domain list. The whitespace is the UTF-8 bytes of the
 # characters `blank_to_another_reader` counts as blank, because the guard runs in the C locale, and
 # the two sets must stay the same.
 blank_bytes="[ "$'\t\r\v\f'"]|"$'\xc2'"["$'\x85\xa0'"]|"$'\xe1\x9a\x80'"|"$'\xe2\x80'"["$'\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\xa8\xa9\xaf'"]|"$'\xe2\x81\x9f'"|"$'\xe3\x80\x80'"|"$'\xef\xbb\xbf'
@@ -68,6 +114,26 @@ co_author='^[[:space:]]*co-authored-by[[:space:]]*:'
 
 offences=()
 
+# Writes $1 with each byte outside printable ASCII as `\x` and two hex digits. A pattern can hold a
+# tab, a carriage return and the bytes of invisible spaces, and printed as they are, they garble or
+# hide the line that names it. The loop takes time that grows with the square of its input's
+# length in bash, so it is for the guard's own patterns, never for a value from a commit.
+visible() {
+  local text=$1 shown='' byte code index
+  for ((index = 0; index < ${#text}; index++)); do
+    byte=${text:index:1}
+    case $byte in
+      [' '-'~']) shown+=$byte ;;
+      *)
+        printf -v code '%d' "'$byte"
+        printf -v byte '\\x%02x' $((code & 255))
+        shown+=$byte
+        ;;
+    esac
+  done
+  printf '%s' "$shown"
+}
+
 # Answers whether $2 matches $1, and exits the guard if grep could not decide.
 #
 # `grep -q` exits 0 for a match and 1 for no match; anything higher is a failure to read. Treating
@@ -80,7 +146,7 @@ matches() {
     0) return 0 ;;
     1) return 1 ;;
     *)
-      echo "attribution-guard: grep exited $status matching '$pattern'"
+      echo "attribution-guard: grep exited $status matching '$(visible "$pattern")'"
       echo "Refusing rather than passing: a check this guard cannot run is a check it cannot clear."
       exit 1
       ;;
@@ -93,7 +159,8 @@ matches() {
 # The address is the text inside the value's last `<...>`, and the name is what comes before it. An
 # identity with no address is refused whatever its name: no account can be found for it. Its name
 # decides only what the refusal says. A malformed address counts as no address, so it is judged
-# by its name before the vendor search and the domain list.
+# by its name before the tool list and the domain list. Only the tool list makes an address a
+# model's, and anything the three tests leave is a person's or a bot's.
 #
 # `read` does the splitting and the trimming. Pattern expansions such as `${value##*<}` take time
 # that grows with the square of a value's length or worse in bash: a name padded with 5,000 spaces
@@ -114,7 +181,7 @@ judge_trailer() {
     else
       offence "$position" "$value" untraceable
     fi
-  elif matches "$vendors" "$value"; then
+  elif matches "$tool_address" "$address" || matches "$tool_login" "$address"; then
     offence "$position" "$value" model
   elif matches "$untraceable_domain" "$address"; then
     offence "$position" "$value" untraceable
