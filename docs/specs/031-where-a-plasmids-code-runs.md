@@ -172,9 +172,11 @@ component that escapes the sandbox runs as the component host process, under G3'
 - **G3. Two confinements.** The component runs inside the WebAssembly sandbox, and the component
   host process is confined too. It applies the pinned policy before it reads one byte of the
   launch record or the component. The policy denies by default. It allows no file open, no
-  outbound Unix-socket connect, no `process-exec` or `process-fork`, no signal to another process
-  and no `mach-lookup`. Its allow rules are listed and reviewed in task F8c's record; whether the
-  process needs any other operation is not measured. Every channel the process uses is a
+  outbound Unix-socket connect, no `process-exec` or `process-fork`, no signal to another process,
+  no `mach-lookup`, no process information about another process, and `sysctl` reads only under
+  listed names. Its allow rules are listed and reviewed in task F8c's record; whether the
+  process needs any other operation is not measured, and task F8c measures whether Seatbelt
+  filters `kern.procargs2` by name. Every channel the process uses is a
   descriptor `membraned` made and passed to it. It opens no path, and creates, binds or connects no
   socket. `membraned` starts it as spec 023 starts every process: "Every other descriptor is closed
   in the new process before exec, by `posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`"
@@ -188,8 +190,8 @@ component that escapes the sandbox runs as the component host process, under G3'
   outbound connections to Unix sockets and answers `network-outbound` denied."
   (`plasmosome-membrane`'s `confinement.rs`, lines 4 to 7). Spec 023 records the same gap in the
   helper's own policy: "the qualified bundle's policy allows any Unix socket" (`023:438`). So for
-  Unix connects, signals, exec and Mach lookups the reviewed policy text is the proof, and an
-  acceptance item probes each.
+  Unix connects, signals, exec, Mach lookups and reads of other processes the reviewed policy text
+  is the proof, and an acceptance item probes each.
 - **G4. Enforcement outside the component host.** Every check here is made by the cell's egress
   relay, outside the confined process, so a component host that skipped its own check still
   reaches nothing undeclared. The relay takes the owner `{cell, plugin}` from the egress channel a
@@ -209,8 +211,8 @@ component that escapes the sandbox runs as the component host process, under G3'
 - **G6. No say in teardown.** Spec 011 holds: "A plasmid implements no revocation hook, gets no
   chance to refuse a detach" (`011:84-85`). The world exports nothing the kernel calls at attach,
   detach, reload or expiry, except `names` at launch. These hold outside the component host. Detach
-  and expiry never wait on the component: a drain cuts any call still running when its deadline D
-  arrives, so a graceful removal never answers 106 because of a call. At B, `membraned` closes the
+  and expiry never wait on the component: a drain cuts a call still running at its deadline D less a
+  reserve, so a graceful removal never answers 106 because of a call. At B, `membraned` closes the
   holding's host-side connections, so no admitted call sends anything after B. Each withdrawal
   reaps its own component host (§8). Two parts hold only while the WebAssembly sandbox holds: the
   component host drops a call within 1 s once its connection closes, and exits within 1 s once it
@@ -238,7 +240,10 @@ component that escapes the sandbox runs as the component host process, under G3'
 - **G11. Denials are missing declarations.** A request of the component refused at the boundary is
   reported as spec 011 says: "The report names what was denied and the declaration field it belongs
   in" (`011:392-393`), so it names the host and `network.hosts`, or the port and `network.ports`,
-  and nothing that was granted.
+  and nothing that was granted. The relay knows which plasmid's code sent a request, so the report
+  names that plasmid and is judged by that plasmid's grants alone (the proposed spec 011 change). A
+  that only another plasmid in the cell declared is reported to the requesting plasmid as
+  `network.hosts`. Naming it shows the component nothing it did not send.
 
 ### 5. How a tool is found
 
@@ -369,9 +374,13 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
   compiler's own memory on Darwin is not measured; task F8a measures the peak for a 64 MiB
   component.
 - **Drain.** A graceful withdrawal of a component holding pauses its streams, as spec 024's pause
-  column says, and lets each call in flight run until the drain deadline D. At D, `membraned`
-  closes that holding's remaining host-side connections, the component host drops their calls, and
-  the withdrawal goes on. So a call never makes the drain time out, and a graceful `plasmid.remove`
+  column says, and lets each call in flight run until the drain deadline D less a release
+  reserve: the smaller of 1,000 ms and half of D, a provisional default, as spec 024's reserves
+  are. Then `membraned` closes that holding's remaining host-side connections, the component host
+  drops their calls, and the withdrawal goes on. The component host's exit, its reaping and the
+  guest's removal of the socket run in the reserve, so the withdrawal ends by D. For a release
+  that does not, spec 001's rule stands: "A deadline after partial release is incomplete_effect"
+  (`001:1000`). So a call never makes the drain time out, and a graceful `plasmid.remove`
   never answers 106 because of a call (the proposed spec 017 change). Without this, spec 017's
   "Before destructive release, timeout restores that holding's admission" (`017:419-420`) would let
   a running call make a detach fail.
@@ -382,8 +391,9 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
   host-side connections by the supervisor's clock (the proposed spec 028 change). That close is
   needed because a call in flight sends nothing until it finishes, so no admission comes to fence
   it, and spec 028's gate has no timer: "so the fence needs no timer and no controller"
-  (`028:125-126`). The component host drops each call within 1 s of its connection closing (§6),
-  so admitted work ends within 1 s of B. Its egress holdings are fenced at the same B. The removal
+  (`028:125-126`). So no admitted call sends anything after B, and while the WebAssembly sandbox
+  holds, the component host drops each call within 1 s of its connection closing (§6), so admitted
+  work ends within 1 s of B. Its egress holdings are fenced at the same B. The removal
   that follows starts "within 2 s of B, or of its own next run" (`028:116-117`).
 - **Order and reaping.** Within a plasmid, the Broker capability comes after its egress ProxyMap
   capabilities (the proposed spec 022 change), and spec 008 retires effects "in reverse original
@@ -402,15 +412,22 @@ such as `socat` makes the socket an ordinary stdio MCP server with no Plasmosome
   membrane is ready only when "every broker answers ready" (`001:723`), and it names the holder:
   "`broker` — the one that held the set back" (`001:727`). A trap inside a call is not a death:
   the instance is dropped and the host keeps serving.
-- **An orphan.** A SIGKILLed `membraned` leaves its component hosts running until each reads end of
-  file on its lifeline, and that exit holds only while the WebAssembly sandbox holds (G6). So the
-  controller stops them from outside. When its supervisor check (spec 023 §8) finds a cell whose
+- **An orphan.** The component host holds a lifeline descriptor from `membraned`, and a native
+  thread outside WebAssembly exits the host when the lifeline reads end of file. So a host whose
+  supervisor died, even by SIGKILL, stops by itself with no signal. That exit holds only while the
+  WebAssembly sandbox holds (G6), so the controller's signal is the backstop for a host that
+  outlived its lifeline. When the controller's supervisor check (spec 023 §8) finds a cell whose
   supervisor is gone, it reads that cell's pid records and stops each process whose pid and start
   time both still match: SIGKILL, then a read that shows the pid gone or its start time changed. A
   record whose start time differs names another process, which is left alone. The record only
-  names what to stop; no cell state is derived from it (the proposed spec 023 change). Spec 026
+  names what to stop; no cell state is derived from it (the proposed spec 023 change). Spec 017
+  says "a new process using the same number cannot be signalled or adopted" (`017:516-517`), so
+  the proposed spec 017 and spec 001 changes make this stop the one exception. A pid freed and
+  reused between the read and the signal is not excluded. Spec 026
   lists the VMM helper's orphan as not covered: "The helper and VM keep running." (`026:95`). A
-  component host is not left that way.
+  component host that outlived its lifeline is stopped at the controller's next supervisor check
+  of that cell, which runs at startup and, while serving, "whenever a query to a cell's membrane
+  fails" (`023:366`).
 
 ### 9. What a failure looks like on each wire
 
@@ -441,8 +458,8 @@ After prepare, a failed launch check aborts the transaction, and the reply is 10
   the declaration says. A fix that wrote an exported name into the declaration could write a blank
   tool name, which spec 011 refuses (task plasmosome-f324). Spec 001's count, "Exactly three
   refusals an author can cause name no declaration field" (`001:127`), counts refusals of a
-  declaration, and the proposed spec 001 and spec 011 changes say that a component fault is not
-  one;
+  declaration. The proposed spec 001 and spec 011 changes write "refusal of a declaration" there
+  and say that a component fault is not one;
 - a digest mismatch: 108 with `path` the component and no field or `fix`, since "A 108 the author
   did not cause carries no `fix` either" (`001:135`).
 
@@ -470,7 +487,7 @@ as the network import's DNS error. A declared host on an undeclared port fails a
 refused, as spec 024 says of a workload's flow: "A new TCP connect fails with `ECONNREFUSED` when
 no other eligible grant covers its host, port and transport" (`024:354`). A certificate that no
 trusted root signed fails as the network import's certificate error, and no request byte is sent.
-A request cut by a fence or a removal fails as a connection reset.
+A request cut by a fence or a removal fails as the network import's `connection-terminated`.
 
 ### 10. Reported active, and the use witness
 
@@ -515,7 +532,13 @@ spec to settle W1 to W4 and W10. Until then this spec fixes nothing about these 
   each request's method, URL, headers and body over the egress channel, and the relay makes the
   TLS connection, checks the destination, attaches any credential and returns the response. Only
   `https` URLs are sent. So TLS, certificates and credentials stay outside the component host (G4).
-  A raw socket import would put TLS, and so any credential, inside the component.
+  A raw socket import would put TLS, and so any credential, inside the component. The relay's TLS
+  client and HTTP response parser read bytes from a declared host, which the plasmid's author may
+  run. They run in `membraned`, outside both confinements, so each is a hostile parser with a
+  bound and a fuzz target. The relay follows no redirect, since spec 017's host names are "not
+  implicit permission to run a program, follow a redirect or use ambient DNS" (`017:118`). It
+  returns a redirect response to the component, and a request to the new location is checked like
+  any other.
 - **W3.** Input schemas. Default: `{"type": "object"}` plus the declaration's sentence. A schema
   in the declaration is a spec 011 grammar change. A schema from the component would be text a
   model reads that no declaration review covered (G5).
@@ -546,6 +569,10 @@ quotes the text it changes with its lines at main 3c5db3b8.
 - §5: replace "The plasmid WIT world (SDK surface) — deferred by design; `plasmid-sdk` is a
   reserved crate with a placeholder world." (`001:1609-1610`) with "The plasmid WIT world is
   provisional, at version 0.1.0, as spec 031 defines it. It is not frozen."
+- §1: replace "Exactly three refusals an author can cause" (`001:127`) with "Exactly three refusals
+  of a declaration that an author can cause", and "Every other refusal an author can cause"
+  (`001:134`) with "Every other refusal of a declaration that an author can cause", so the count
+  stays true.
 - §1: after "Every other refusal an author can cause carries a field and a `fix`."
   (`001:134-135`), add "A spec 031 component fault is not a refusal of the declaration. A fault in
   the component a declaration names, such as an import its world does not name or a tool the
@@ -561,11 +588,24 @@ quotes the text it changes with its lines at main 3c5db3b8.
 - §4.1: after "`SpawnBroker` carries `{id,name,launch,owner}`" (`001:944`) and the rest of that
   sentence, add "A spec 031 component's Broker capability also carries its `guest_path` and its
   component launch record (spec 017)."
+- §4.1: after "Graceful timeout retains the exact holding and its peers." (`001:982`), add "A spec
+  031 component Broker's drain does not time out on a running call (spec 017)."
+- §4.1: after "it never signals a numeric PID copied from a request or old record."
+  (`001:983-984`), add "Spec 031's orphan stop is the one exception, only for a host that outlived
+  its lifeline: after the supervisor is gone, the controller signals a component host named by its
+  pid record only when the pid and the start time both still match (spec 017). A pid freed and
+  reused between that read and the signal is not excluded."
 - §4.2: replace "Broker data is exposed at the reserved guest Unix path
   `/.plasmosome/brokers/<hex-encoded UTF-8 name>.sock`;" (`001:1265-1266`) with "Broker data is
   exposed at the capability's recorded `guest_path`, under `/run/tools`, which PID1 makes before
   hello (spec 024 §5). One listener stands at each Broker target while any holding is at it, so a
   reload hands over with no gap;".
+- §4.2: after "so the fence needs no timer and no controller." (`001:1305`), add "A spec 031
+  component holding adds one timer (spec 028 §4)."
+- §4.2: after "Do not close a healthy stream merely because this observation timed out."
+  (`001:1321-1322`), add "A spec 031 component Broker is the exception: at the deadline less its
+  release reserve, `membraned` closes its remaining host-side connections and the withdrawal goes
+  on (spec 017)."
 - §4.2: after "Workload edits of resolver configuration grant no bypass." (`001:1408-1409`), add
   "A ProxyMap holding whose recipe says a spec 031 component reaches it is never installed in the
   guest. It adds no DNS answer, route or rule here. The cell's egress relay serves it only to that
@@ -586,6 +626,10 @@ quotes the text it changes with its lines at main 3c5db3b8.
 - Out of scope: replace "Freezing the world is its sibling spec, and it is the larger of the
   two." (`011:551-552`) with "Spec 031 is that sibling. It defines a provisional world, version
   0.1.0, and does not freeze it."
+- Behavior and Contract: replace "So every refusal an author can cause" (`011:113`) with "So
+  every refusal of a declaration that an author can cause", and "Every refusal an author can
+  cause carries" (`011:358`) with "Every refusal of a declaration that an author can cause
+  carries", so the count stays true.
 - Behavior: after "are the only exceptions (Contract)." (`011:118`), add "A fault in a plasmid's
   component, spec 031's component fault, names the component instead: it is not a refusal of the
   declaration."
@@ -603,6 +647,10 @@ quotes the text it changes with its lines at main 3c5db3b8.
     `fix` the line `id = "<name>"`: the `id` with each `/` and NUL replaced by `-`, cut to 91 bytes
     at a character boundary, and given the prefix `plasmid-` if the result is `.` or `..` (spec
     031 §5)."
+- Contract, *Whom*: after "no `network.hosts` denial reaches a plasmid's `denials`."
+  (`011:418-419`), add "Spec 031's component egress relay is such a boundary: it takes the plasmid
+  from the egress channel a request came on. For a component's own request, *What* reads that
+  plasmid's grants, not the cell's, and the report names that plasmid."
 
 **Spec 020** (F2).
 
@@ -624,7 +672,10 @@ quotes the text it changes with its lines at main 3c5db3b8.
   `command` is exactly the component host's absolute path, from `component_runtime.host`, so the
   executable is named once. `control_socket` and `data_socket` are endpoints `membraned` binds in
   the cell's private directory, under spec 001 §4.1's rules, and passes to the component host as
-  listening descriptors, so the component host binds no socket."
+  listening descriptors, so the component host binds no socket. The controller names each holding's
+  endpoints by its `GrantId`, so a reload's two holdings at one target never share one." That keeps
+  "A different launch description cannot silently take over either occupied endpoint"
+  (`017:491-492`) true.
 - Resolved recipes: replace "Broker, UdsSocket and SessionFile have no declaration source yet."
   (`017:125-126`) with "Broker's declaration source is a declaration's `[impl].wasm` (spec 031);
   UdsSocket and SessionFile have none yet."
@@ -635,31 +686,60 @@ quotes the text it changes with its lines at main 3c5db3b8.
   request's bytes (spec 031)."
 - Drain: after "Before destructive release, timeout restores that holding's admission and
   preserves its full authority and peers." (`017:419-420`), add "A spec 031 component Broker's
-  drain does not time out on a running call: when the deadline arrives, `membraned` closes the
-  holding's remaining host-side connections, which ends their calls, and the withdrawal goes on.
-  So a component's call never makes a graceful removal answer 106."
+  drain does not time out on a running call. At the deadline less a release reserve, the smaller
+  of 1,000 ms and half the deadline, `membraned` closes the holding's remaining host-side
+  connections, which ends their calls, and the withdrawal goes on. The component host's exit, its
+  reaping and the guest's removal of the socket run in the reserve, so the withdrawal ends by the
+  deadline; one that does not is `incomplete_effect` (spec 001 §4.1). The reserve is a provisional
+  default. So a component's call never makes a graceful removal answer 106."
+- Versions: replace "The single-plugin `LogRecord` now requires `format: 3`." (`017:556`) with
+  "The single-plugin `LogRecord` requires `format: 3` or `format: 4`.", and "Writers and readers
+  accept only version3." (`017:559`) with "Readers accept only version3 and version4, and a writer
+  that implements spec 031 writes only version4."
 - Versions: after "so any later incompatible change to these records requires another explicit
   version transition, not a silent change inside format3." (`017:565-566`), add "Spec 031's
   `ProxyRecipe.reached_by` and Broker `guest_path` and `component` are such a change, so they come
   with format4, which requires them and gives them no default. A format4 reader also reads format3
   records as what they meant, since no component holding existed before format4: each ProxyMap as
   `reached_by` `workload`, and each Broker with `component` null and `guest_path` the path spec 001
-  §4.2 then derived from its name. A format4 writer writes only format4." A version, and not an
-  optional field, because a missing field read as `workload` would install a component's holding
+  §4.2 then derived from its name, under `/.plasmosome`, the one exception to spec 001 §4.2's
+  `/run/tools`. One file may hold format3 records followed by format4 records, which is what a
+  format4 writer's append to an existing log produces. A format3 record after a format4 record
+  refuses. Each record validates under its own format. A format4 writer writes only format4." A
+  version, and not an optional field, because a missing field read as `workload` would install a
+  component's holding
   in the guest, the wider reading, and spec 008 says "Required fields have no defaults" (`008:89`).
+- Append and open: in "append validates all existing complete LF-terminated version3 records"
+  (`017:572-573`) and "must parse completely with version3" (`017:578`), write "version3 or
+  version4" for "version3": each record is checked under its own format, and no version3 record
+  may follow a version4 one.
 - Broker launch: after "equal launches may share one original owned broker" (`017:507`) and the
   rest of that paragraph, add "A launch with a spec 031 `component` record is never shared: each
   holding has its own component host."
+- Process authority: after "a new process using the same number cannot be signalled or adopted."
+  (`017:516-517`), add "Spec 031's orphan stop is the one exception, only for a host that outlived
+  its lifeline: after the supervisor is gone, the controller signals a component host named by its
+  pid record only when the pid and the start time both still match. A pid freed and reused
+  between that read and the signal is not excluded."
 
 **Spec 008** (F3).
 
+- After "is the format the baseline writes and reads." (`008:84-85`), add "Spec 031 adds spec017's
+  single-plugin version4. A writer that implements spec 031 writes version4, and its reader also
+  reads version3."
 - Replace "For brokers the capability is `{name, launch:BrokerLaunch}`, never a PID." (`008:131`)
   with "For brokers the capability is `{name, launch:BrokerLaunch, guest_path, component}` (spec
   017 and spec 031), never a PID."
+- In "single-plugin logs, the implemented version3 and the refused version2" (`008:135-136`),
+  write "version3, spec 031's version4 and the refused version2".
 - After "This registry-source addition is part of the still-unimplemented per-cell format1 before
   its first writer ships." (`008:157-158`), add "So are spec 031's `ProxyRecipe.reached_by` and
   Broker `guest_path` and `component`, required with no default. Spec 017's single-plugin format4
   adds the same fields and still reads format3."
+- Replace "The single-plugin version3 contract, the refusal of version2, and the refusal to migrate
+  either into cell histories are unchanged." (`008:158-160`) with "The single-plugin version3 and
+  version4 contracts, the refusal of version2, and the refusal to migrate any of them into cell
+  histories are unchanged."
 
 **Spec 022** (F3).
 
@@ -687,7 +767,7 @@ quotes the text it changes with its lines at main 3c5db3b8.
 - §8: after "`read_write` where the held Mount was `read_only`." (`022:361`), add two items: "- a
   ProxyMap reached by `workload` at a host, port and transport the plasmid held reached by
   `component`;" and "- a Broker it did not hold, or a declaration that drops the held Broker's
-  `[impl].wasm` while it keeps any `[network]` need or `[provides]` binding (spec 031)." Spec
+  `[impl].wasm` while it keeps any `[network]` need (spec 031)." Spec
   022's acceptance item 7 gains the case of a reload that drops `[impl].wasm` and keeps `[network]`
   and an empty tools table.
 - Open question 1: after "No declaration section selects them." (`022:522`), add "For Broker,
@@ -703,6 +783,10 @@ quotes the text it changes with its lines at main 3c5db3b8.
   Artifact in the template." (`023:78-79`) with "Spec 001 §4.2's immutability rule for the helper
   applies to `membraned`, to every Artifact in the template and to every Artifact in
   `component_runtime`."
+- §5: after "That is owner decision O-10; this spec makes such a cell visible and does not clean
+  it." (`023:204-205`), add "A spec 031 component host of such a cell is the one exception: it
+  exits when its lifeline reads end of file, and the supervisor check stops one that outlived its
+  lifeline (§8). The helper and guest stay as this paragraph says."
 - §8: after "It never touches an entry spec 008 does not validate." (`023:373`), add "When the check
   finds a cell whose supervisor is gone, it also stops that cell's spec 031 component hosts. It
   reads each pid record `{pid, start_time}` that `membraned` wrote under the cell's `runtime/`
@@ -710,6 +794,9 @@ quotes the text it changes with its lines at main 3c5db3b8.
   start time both still match, then confirms by a read that the pid is gone or its start time
   changed. A record whose start time differs names another process, which it leaves alone. The
   record names only what to stop; no cell state is derived from it."
+- Open question 1, O-10: after "This spec sets that cell aside and does not clean it."
+  (`023:652-653`), add "Spec 031's component hosts are the exception: each exits on its lifeline,
+  and §8 stops one that outlived it. O-10 asks about the helper and the guest only."
 
 **Spec 026** (F4).
 
@@ -718,8 +805,9 @@ quotes the text it changes with its lines at main 3c5db3b8.
   the host inside a confined component host. The standard defends against its code as well as its
   bytes."
 - Not covered yet: after "An orphan after `SIGKILL` of `membraned`" (`026:95`) and the rest of
-  that item, add "A spec 031 component host is not left running that way: the controller's
-  supervisor check stops it by its pid and start time (spec 023 §8)."
+  that item, add "A spec 031 component host exits when its lifeline reads end of file. One that
+  outlived its lifeline is stopped at the controller's next supervisor check of that cell, by its
+  pid and start time (spec 023 §8)."
 - Not covered yet: replace "A broker is such a process: it runs unconfined" (`026:102-103`) and
   the rest of that sentence and the next with "A broker is such a process, behind spec 001's and
   spec 017's peer-UID checks. A spec 031 component host is confined by its own pinned policy and
@@ -727,9 +815,11 @@ quotes the text it changes with its lines at main 3c5db3b8.
   broker runs unconfined, and the standard defends against its bytes, not its code."
 - The parser rows land with each parser, as "A new parser lands in the same PR as its row below and
   its bound." (`026:402`) requires. That is task F8, for the component host's line reader and
-  launch record, and task F11, for the relay's parser of a component's egress requests. That
-  parser's writer is the component host, and so possibly a component that escaped the sandbox, so
-  it is hostile and gets a fuzz target too: "A parser whose writer is hostile also has a fuzz
+  launch record, and task F11b, for three parsers of the relay, which runs in `membraned`, outside
+  both confinements. The relay's parser of a component's egress requests has the component host
+  as its writer, and so possibly a component that escaped the sandbox. The relay's TLS client and
+  HTTP response parser read bytes from a declared host, which the plasmid's author may run. So
+  each is hostile and gets a fuzz target too: "A parser whose writer is hostile also has a fuzz
   target." (`026:400`).
 
 **Spec 027** (F5).
@@ -755,10 +845,13 @@ quotes the text it changes with its lines at main 3c5db3b8.
   until it finishes, so it meets no admission to fence it."
 - §5: replace "Spec 022's version 1 declares no Broker; the spec that gives Broker a source must
   bound its accepted work by H." (`028:213-214`) with "Spec 031 gives Broker a source and bounds a
-  component host's accepted work: at B `membraned` closes its connections, its calls end within
-  1 s, and each holding's withdrawal reaps its own process. Any other Broker still has no source."
+  component host's accepted work: at B `membraned` closes its connections, so no admitted call
+  sends anything after B, and while the WebAssembly sandbox holds its calls end within 1 s. Each
+  holding's withdrawal reaps its own process. Any other Broker still has no source."
 - §7: replace "Admitted work stops by B + D; a Broker's does not" (`028:245`) with "Admitted work
-  stops by B + D, and a spec 031 component host's within 1 s of B; any other Broker's does not".
+  stops by B + D. For a spec 031 component host, at B `membraned` closes its connections, so no
+  admitted call sends anything after B, and while the WebAssembly sandbox holds its calls end
+  within 1 s. Any other Broker's work does not stop by B + D".
 
 ## Open questions
 
@@ -849,12 +942,15 @@ target.
 8. **The process is confined before it reads (host; G2, G3).** A test build of the component host
    tries, after launch: to open a host file; to open a TCP socket; to connect to a Unix socket that
    the test binds as the same user, outside the passed descriptors; to signal another process of
-   the same user; to exec `/bin/true`; and to look up a Mach service, such as the security
-   daemon's. Each fails, and the membrane's observation reads confined. The test feeds the
+   the same user; to exec `/bin/true`; to look up a Mach service, such as the security daemon's;
+   to read another same-user process's arguments and environment through `sysctl` with
+   `KERN_PROCARGS2`; and to read that process's `proc_pidinfo`. Each fails, and the membrane's
+   observation reads confined. The test feeds the
    component through a pipe and writes its first byte only after the observation reads confined,
    so a host that reads before it confines is seen unconfined while it waits. Catches: confinement
-   after parsing; a policy that allows file, network, Unix-socket, signal, exec or Mach access,
-   including one the observation reads as confined.
+   after parsing; a policy that allows file, network, Unix-socket, signal, exec, Mach or
+   process-information access, or `sysctl` reads under every name, including one the observation
+   reads as confined.
 9. **Only the passed descriptors survive (membrane; G3).** The test reads the component host's
    descriptor table from outside, with `proc_pidinfo` and `PROC_PIDLISTFDS`, and finds exactly the
    passed descriptors and 0 to 2 on `/dev/null`. A mutant `membraned` that leaves its 4090
@@ -884,8 +980,10 @@ target.
     the fixture receives no request byte. Catches: a relay that skips verification; roots taken
     from the request.
 14. **Denials name what was missing (model; G11).** The denials of items 11 and 12 appear in the
-    session log and in `denials` with `network.hosts` or `network.ports`, and no granted host
-    appears anywhere. Catches: a report that lists what was granted.
+    session log and in the requesting plasmid's `denials` with `network.hosts` or `network.ports`.
+    The host only another plasmid in the cell declared is reported to the requesting plasmid as
+    `network.hosts`, and no granted host appears anywhere. Catches: a report that lists what was
+    granted; a report judged by the cell's grants, which drops that host or names no plasmid.
 15. **The deadline (host; G7).** An infinite loop returns `isError` with the deadline sentence
     within the deadline plus 1 s, and the next call succeeds. Catches: no interruption; a poisoned
     shared instance.
@@ -925,9 +1023,9 @@ target.
     but a socket left.
 25. **Detach never waits on the component (membrane, then pinned runtime; G6).** A component in an
     infinite loop, under a call deadline longer than D, is detached by a graceful `plasmid.remove`
-    that answers success within D plus 1 s, never 106, and the call's connection is closed at D.
-    Catches: a drain that waits on the call and times out, which would let a plasmid refuse a
-    detach; a call cut before D.
+    that answers success within D, never 106, and the call's connection is closed at D less the
+    release reserve. Catches: a drain that waits on the call and times out, which would let a
+    plasmid refuse a detach; a call cut before D less the reserve; a release run past D.
 26. **The lifetime bound (membrane, then pinned runtime; G6).** At B new connections close at once
     and `membraned` closes the open ones, with no request arriving after B. A call admitted before
     B ends within 1 s of B; the egress holdings are fenced; the Broker holding is the removal's
@@ -947,9 +1045,11 @@ target.
     Catches: `active` after the tools stopped resolving; a silent restart.
 30. **Two cells, two processes (pinned runtime; G8).** Two cells with the same plasmid have two
     component hosts, and detaching one leaves the other's calls working. After a reload, the old
-    generation's process is gone, checked with its start time, and the new one serves. Catches:
-    sharing across cells or holdings; a component host reaped only at the last withdrawal at its
-    target.
+    generation's process is gone, checked with its start time, and the new one serves. Two
+    component plasmids in one cell each reach only their own component host through their own
+    socket, so `tools/list` on each shows only that plasmid's tools. Catches: sharing across
+    cells, plasmids or holdings; a socket routed to another plasmid's host; a component host
+    reaped only at the last withdrawal at its target.
 31. **A reload cannot move a component's reach (model; G4).** A plasmid attached with
     `[impl].wasm`, a tool and `[network]` `api.github.com:443` is reloaded with the component and
     its tool removed and `[network]` kept: once with no tools table and once with an empty one.
@@ -966,6 +1066,17 @@ target.
 34. **A controller restart changes nothing (model).** After a controller restart the component
     host is still running and its calls work, and recovery opens no declaration. Catches: recovery
     that reads declarations again or launches a second process.
+35. **A host stops itself when its supervisor dies (model; G6).** With a call running an infinite
+    loop, `membraned` is SIGKILLed. The component host exits within 1 s with no signal sent to it,
+    and the controller's next supervisor check of that cell finds no host to stop and sends no
+    signal. Catches: a host that ignores its lifeline; a lifeline read on the thread that runs the
+    call.
+36. **The journal's formats (model).** A format4 ProxyMap record without `reached_by`, or a Broker
+    without `component`, refuses. A format3 ProxyMap reads as `reached_by` `workload`, and a
+    format3 Broker as `component` null with its `guest_path` under `/.plasmosome`. A file of
+    format3 records followed by format4 records opens, each record checked under its own format.
+    A format3 record after a format4 record refuses. Catches: `reached_by` read as optional with a
+    default; a format4 reader that refuses format3; a reader that takes format3 after format4.
 
 ## Out of scope
 
