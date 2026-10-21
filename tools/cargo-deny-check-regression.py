@@ -379,6 +379,12 @@ def outcomes():
         assert result.returncode == 2 and TOOL_FAILURE + " the wrapper crashed" in result.stdout, result.stdout
         assert "Traceback" in result.stdout and "TypeError" in result.stdout, result.stdout
 
+        result, calls, summary = repository.run(
+            "advisories", plan=plan("advisories", {"Cargo.toml": "vulnerability", "fuzz/Cargo.toml": "malformed-graphs"}))
+        assert result.returncode == 2 and len(calls) == 2 and REFUSAL in result.stdout, result.stdout
+        assert len(summary.splitlines()) == 1 and summary.startswith(TOOL_FAILURE + " the wrapper crashed"), summary
+        assert "`cargo-deny-check advisories`" in summary and "job log" in summary, summary
+
         directory_summary = Path(directory) / "summary-directory"
         directory_summary.mkdir()
         result, calls, summary = repository.run("sources", plan=plan("sources"), summary=directory_summary)
