@@ -1,7 +1,7 @@
 use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -195,6 +195,13 @@ impl PrivateListener {
         self.listener.as_raw_fd()
     }
 
+    /// Closes the socket, then removes the entry it created only while the entry at that name
+    /// in the held directory is still the same socket by device and inode, and says what it
+    /// found there. Dropping the listener does the same and discards the outcome.
+    pub fn close(self) -> RemoveOutcome {
+        todo!()
+    }
+
     /// Accepts one pending connection without blocking. `Ok(None)`: nothing pending. A peer
     /// whose effective UID is not trusted, or whose credentials cannot be read, is reported as
     /// `Accepted::Refused`. Its stream is closed inside this call, and no code here reads from it.
@@ -224,6 +231,27 @@ impl PrivateListener {
         stream.set_nonblocking(false)?;
         Ok(Some(Accepted::Trusted(stream)))
     }
+}
+
+impl AsFd for PrivateListener {
+    /// The listening descriptor, as [`PrivateListener::as_raw_fd`] gives it.
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        todo!()
+    }
+}
+
+/// The result of removing a path that was created, after checking that the path still names
+/// the object that was made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveOutcome {
+    /// The path still named the created object, and it is gone.
+    Removed,
+    /// Nothing was at the path.
+    AlreadyGone,
+    /// Another object now occupies the path. It was left in place.
+    LeftReplacement,
+    /// The removal failed with this errno; the object may remain.
+    Failed { errno: i32 },
 }
 
 /// One accepted connection: a stream from a trusted peer, or the reason the peer was refused.
