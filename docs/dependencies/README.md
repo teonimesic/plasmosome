@@ -6,7 +6,9 @@ would cost, and what the crate brings with it: the packages in its closure, the 
 build time, the macros that put `unsafe` into our code, and any native code. The record and the
 rules around it are defined in
 [spec 026, section 1](../specs/026-security-standard.md#1-dependency-admission). This file says
-how to fill one in, so that two people derive the same facts.
+how to fill one in, so that two people derive the same facts. Each native artifact the runtime
+pins, such as libkrun and the guest kernel, has a different record in `native/`, described in the
+last section.
 
 Three fields are derived: `range`, `brings` and `build_time_code`. They come from
 `cargo metadata` by the procedure below, and nobody writes them by hand. The other fields are
@@ -259,3 +261,108 @@ changes `build_time_code` in every record whose `brings` holds `quote@1`.
 
 A PR whose Cargo.lock changes no version in the crate's closure, and no package in it, leaves the
 record's derived fields as they are.
+
+## Native artifact records
+
+Each native artifact the runtime pins has a record in `native/`, one TOML file named for the
+artifact: `libkrun.toml` and `guest-kernel.toml` today. The rule is the paragraph "Native
+artifacts" in [spec 026, section 1](../specs/026-security-standard.md#1-dependency-admission). A
+record says what the artifact is for, which bytes are pinned, where they come from, and how often
+someone checks for updates and advisories. No guard reads these records. Spec 026 section 7 leaves
+a missing record, or one that is never checked, to the reviewer.
+
+Every one of these ten keys is required, and no other key is allowed:
+
+- `name`: the file stem.
+- `purpose`: what the runtime uses the artifact for.
+- `version`: the upstream version, as the repository's pins name it.
+- `bundle_manifest_sha256`: the SHA-256 of the runtime bundle's `manifest.json`. The repository
+  pins its first 16 digits as `PINNED_BUNDLE_ID`.
+- `file`: the artifact's path in the bundle, as the manifest's `files` names it.
+- `sha256`: that file's SHA-256.
+- `sources`: a non-empty array of strings. Each upstream input, with its version and its commit or
+  digest; each change the build made to an input, and who authorized it; and the build.
+- `licence`: an SPDX expression, read from the pinned source.
+- `limits`: `"none"`, or a non-empty array of strings. Each is a known fault, and says where it is
+  tracked.
+- `checks`: a table of exactly five strings. `cadence` is how often the checks are meant to run.
+  `updates` and `advisories` say how to run each one. `by` says who runs them: until the owner
+  answers spec 026's Q6, nobody does. `last` is `"never"`, or a line that starts with the date of
+  the last check, as `YYYY-MM-DD`, and says what it found.
+
+The other values are strings, and both digests are 64 lowercase hex digits. Long strings use the
+`"""\` form, as the crate records do.
+
+### Where each fact comes from
+
+Every fact comes from what the repository pins: the bundle, a clone of each upstream at the pinned
+commit, and each tarball checked by its digest. No fact is copied from a website or taken from an
+upstream's maintainers.
+
+**The bundle.** Use a copy of the bundle whose directory name is `PINNED_BUNDLE_ID`, in
+`crates/plasmosome-lanes/src/bundle.rs`. The "Testing" section of the lanes README says where the
+lanes look for it. Check the manifest before reading it:
+
+```shell
+shasum -a 256 <bundle>/manifest.json
+```
+
+That digest is `bundle_manifest_sha256`. Its first 16 digits must equal the directory's name and
+`PINNED_BUNDLE_ID`. `file` is the path `bundle.rs` pins, `LIBKRUN` or `KERNEL`. `sha256` is the
+manifest's `files` entry for `file`, and `shasum -a 256 <bundle>/<file>` must print the same. The
+manifest's `pinned` names each upstream's repository, tag and commit, and each tarball's digest.
+Its `deviations` names each change the build made to an input.
+
+**A clone.** Clone the repository the manifest names, with no checkout, and read every file from
+the pinned commit, so that nothing in a working tree reaches the record:
+
+```shell
+git clone --no-checkout <repo> <clone>
+git -C <clone> rev-parse --verify '<commit>^{commit}'
+git -C <clone> tag --points-at <commit>
+git -C <clone> show <commit>:<path>
+```
+
+The tags must include the pinned tag. A clone you already have serves too, once
+`git -C <clone> rev-parse HEAD` prints the commit.
+
+**A tarball.** Fetch it from the address the upstream's build names, and check
+`shasum -a 256 <tarball>` against the manifest before reading anything in it. Then read a file in
+it, such as `tar -xOJf <tarball> linux-<version>/COPYING`. The kernel's address is `KERNEL_REMOTE`
+in libkrunfw's `Makefile`.
+
+**Each field.**
+
+- `version`: for libkrun, spec 001 §4.2 and `LIBKRUN` name it. For the kernel,
+  `BUNDLE_KERNEL_RELEASE` in `crates/plasmosome-lanes/tests/boot.rs` names it, and the tarball's
+  `Makefile` must give it as `VERSION.PATCHLEVEL.SUBLEVEL`.
+- `licence`: libkrun's is `license` in `src/libkrun/Cargo.toml`. The kernel's is the
+  `SPDX-License-Identifier` line of the tarball's `COPYING`. That line writes `GPL-2.0`, the
+  deprecated SPDX name for `GPL-2.0-only`.
+- `sources`: each repository, tag, commit and digest as `pinned` gives it, and each count from the
+  clone, such as `git -C <clone> ls-tree --name-only <commit> patches/ | wc -l`. A file's digest at
+  the commit is `git -C <clone> show <commit>:<path> | shasum -a 256`. Write each change in
+  `deviations` out exactly, so that applying it to the upstream file gives the manifest's
+  `config_used_sha256`. Where the build ran, and with which tools, comes from the manifest's
+  `os_identity` and `build_tools`, or from the plasmosome-itt notes that recorded the build. A fact
+  with neither source is left out.
+- `limits`: `otool -l <bundle>/<file>` prints each `LC_RPATH`, and the list must equal
+  `LIBKRUN_RPATHS` in `crates/plasmosome-lanes/src/dyld.rs`. The kernel's unset options are read
+  from the config used, which the upstream file and the change in `sources` rebuild, for example
+  with `grep -n -F '# CONFIG_SECURITY is not set' <config>`. This counts the crates.io packages
+  libkrun's lockfile locks:
+
+  ```shell
+  git -C <clone> show <commit>:Cargo.lock \
+    | grep -c -x -F 'source = "registry+https://github.com/rust-lang/crates.io-index"'
+  ```
+
+### When a native record changes
+
+A PR that changes a pin updates the records, as spec 026 section 1 says. The pins are spec 001
+§4.2's libkrun version and commit, `PINNED_BUNDLE_ID`, `LIBKRUN` and `KERNEL` in `bundle.rs`,
+`LIBKRUNFW` and `LIBKRUN_RPATHS` in `dyld.rs`, `BUNDLE_KERNEL_RELEASE`, and every file in the
+bundle. Find each place that holds one with `git grep -n -F` and the record's version, its commit,
+or the bundle ID. A new bundle changes `bundle_manifest_sha256` in every record, even one whose
+file stays the same. A check of updates or advisories rewrites `checks.last` with its date and what
+it found.
