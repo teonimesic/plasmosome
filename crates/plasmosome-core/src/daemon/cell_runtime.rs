@@ -1,3 +1,258 @@
+use std::fmt;
+use std::path::Path;
+use std::time::Duration;
+
+use serde_json::Value;
+
+use crate::runtime::cell_id::{MAX_CELL_NUMBER, format_cell_id};
+use crate::runtime::cell_paths::{CellPaths, CellPathsError};
+use crate::runtime::path::{PathError, RecipePath};
+use crate::runtime::recipe::{
+    Artifact, ArtifactRole, PlatformLimits, RecipeRefusal, RuntimeRecipe, RuntimeTemplate,
+    TemplateRefusal,
+};
+use crate::runtime::supervisor_config::{ConfigRecordRefusal, SupervisorConfig};
+use crate::state::CELLS_DIR;
+
+const KEYS: [&str; 4] = [
+    "membraned",
+    "template",
+    "start_deadline_ms",
+    "stop_deadline_ms",
+];
+
+const REQUIRED: [&str; 3] = ["membraned", "template", "start_deadline_ms"];
+
+const DEFAULT_STOP_DEADLINE: Duration = Duration::from_millis(30_000);
+
+/// Spec 023 §1's `cell_runtime`: what the controller needs to start a cell's supervisor. Only
+/// `parse_config` checks the rules below; a value built by hand carries no such promise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellRuntime {
+    /// The `membraned` Artifact the controller starts for every cell.
+    pub membraned: Artifact,
+    /// The recipe without its three per-cell paths. A cell's recipe is this, completed with
+    /// [`CellPaths`] for that cell.
+    pub template: RuntimeTemplate,
+    /// The template completed at startup with the paths of the longest cell ID,
+    /// `cell-9999999999`. Its Artifacts are the template's, and [`CellRuntime::artifacts`] lists
+    /// them from it. Its per-cell paths belong to no cell: never launch it.
+    pub startup_recipe: RuntimeRecipe,
+    /// The configured `instance_root` as a recipe path, for [`CellPaths::new`] and the config
+    /// record.
+    pub instance_root: RecipePath,
+    /// `start_deadline_ms`: the budget for `cell.new` to reach ready with its genome attached.
+    /// Never zero.
+    pub start_deadline: Duration,
+    /// `stop_deadline_ms`, 30 s when absent: the default budget of `cell.kill`, and the cleanup
+    /// budget after a failed start. Never zero.
+    pub stop_deadline: Duration,
+}
+
+impl CellRuntime {
+    /// `membraned`, then every Artifact of the template in recipe order: the files spec 023 §4
+    /// step 2 verifies before a cell is allocated.
+    pub fn artifacts(&self) -> impl Iterator<Item = &Artifact> {
+        std::iter::once(&self.membraned).chain(
+            self.startup_recipe
+                .artifacts()
+                .map(|(_, artifact)| artifact),
+        )
+    }
+}
+
+/// Why `cell_runtime` refuses startup. Rules are checked in this order and the first broken one
+/// is returned: the object and its keys (an unknown key before a missing one), `membraned`, the
+/// template's keys, the deadlines, the host's limits, `instance_root`, the paths of the longest
+/// cell ID and the length of its three sockets, the template's values, an Artifact inside the
+/// cells directory, and the size of the largest config record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellRuntimeError {
+    /// `cell_runtime` is not a JSON object; `null` included.
+    NotAnObject,
+    /// `cell_runtime` holds `key`, which it does not define. Of several, the smallest by bytes.
+    UnknownKey { key: String },
+    /// `cell_runtime` lacks `key`. Of several, the first of `membraned`, `template` and
+    /// `start_deadline_ms`.
+    MissingKey { key: &'static str },
+    /// `membraned` is not an Artifact; the refusal names fields from `cell_runtime.membraned`.
+    Membraned(RecipeRefusal),
+    /// The template carries a per-cell path or lacks or adds a key, or, completed with the
+    /// longest cell's paths, is not a recipe this host may launch. Fields are named from the
+    /// template.
+    Template(TemplateRefusal),
+    /// `key` is not a JSON integer from 1 to `u64::MAX`.
+    BadDeadline { key: &'static str },
+    /// The host did not report the limits a recipe is checked against.
+    Host(RecipeRefusal),
+    /// `instance_root` is not a path a recipe accepts: it must also have no trailing `/`, no
+    /// empty, `.` or `..` component, and must not be `/`.
+    InstanceRoot { fault: PathError },
+    /// The longest cell ID has no paths under `instance_root`.
+    CellPaths(CellPathsError),
+    /// With the longest cell ID, the socket at `path` is `bytes` long, and this host's
+    /// `sun_path` holds at most `max`. The sockets are checked shortest first: `membrane.uds`,
+    /// `data.uds`, `control.uds`.
+    SocketPathTooLong {
+        path: String,
+        bytes: usize,
+        max: usize,
+    },
+    /// The template's Artifact `role` is at `path`, under `<instance_root>/cells/`, where every
+    /// cell's own paths are. Such an Artifact could be some cell's per-cell path, and that cell's
+    /// recipe would be refused after its directory exists.
+    ArtifactInCells { role: ArtifactRole, path: String },
+    /// The config record for the longest cell ID and the largest boot deadline is refused, so
+    /// some `cell.new` would be.
+    Record(ConfigRecordRefusal),
+}
+
+pub(super) fn read(
+    value: &Value,
+    instance_root: &Path,
+    limits: impl FnOnce() -> Result<PlatformLimits, RecipeRefusal>,
+) -> Result<CellRuntime, CellRuntimeError> {
+    let Value::Object(entries) = value else {
+        return Err(CellRuntimeError::NotAnObject);
+    };
+    if let Some(key) = entries
+        .keys()
+        .filter(|key| !KEYS.contains(&key.as_str()))
+        .min()
+    {
+        return Err(CellRuntimeError::UnknownKey { key: key.clone() });
+    }
+    if let Some(key) = REQUIRED.into_iter().find(|key| !entries.contains_key(*key)) {
+        return Err(CellRuntimeError::MissingKey { key });
+    }
+    let membraned = Artifact::from_value(&entries["membraned"], "cell_runtime.membraned")
+        .map_err(CellRuntimeError::Membraned)?;
+    let template =
+        RuntimeTemplate::from_value(&entries["template"]).map_err(CellRuntimeError::Template)?;
+    let start_deadline = deadline(&entries["start_deadline_ms"], "start_deadline_ms")?;
+    let stop_deadline = entries
+        .get("stop_deadline_ms")
+        .map_or(Ok(DEFAULT_STOP_DEADLINE), |value| {
+            deadline(value, "stop_deadline_ms")
+        })?;
+    let limits = limits().map_err(CellRuntimeError::Host)?;
+    let instance_root = RecipePath::parse(&instance_root.to_string_lossy())
+        .map_err(|fault| CellRuntimeError::InstanceRoot { fault })?;
+    let longest = format_cell_id(MAX_CELL_NUMBER);
+    let paths = CellPaths::new(&instance_root, &longest).map_err(CellRuntimeError::CellPaths)?;
+    let max = limits.max_socket_path_bytes();
+    for socket in [
+        &paths.membrane_socket,
+        &paths.data_path,
+        &paths.control_path,
+    ] {
+        let bytes = socket.as_str().len();
+        if bytes > max {
+            return Err(CellRuntimeError::SocketPathTooLong {
+                path: socket.as_str().to_owned(),
+                bytes,
+                max,
+            });
+        }
+    }
+    let startup_recipe = template
+        .complete(
+            &paths.writable_root,
+            &paths.control_path,
+            &paths.data_path,
+            &limits,
+        )
+        .map_err(|refusal| CellRuntimeError::Template(TemplateRefusal::Recipe(refusal)))?;
+    let cells = format!("{}/{CELLS_DIR}/", instance_root.as_str());
+    if let Some((role, artifact)) = startup_recipe
+        .artifacts()
+        .find(|(_, artifact)| artifact.path().as_str().starts_with(&cells))
+    {
+        return Err(CellRuntimeError::ArtifactInCells {
+            role,
+            path: artifact.path().as_str().to_owned(),
+        });
+    }
+    SupervisorConfig {
+        cell: longest,
+        instance_root: instance_root.clone(),
+        runtime_recipe: startup_recipe.clone(),
+        boot_deadline_ms: u64::MAX,
+    }
+    .encode()
+    .map_err(CellRuntimeError::Record)?;
+    Ok(CellRuntime {
+        membraned,
+        template,
+        startup_recipe,
+        instance_root,
+        start_deadline,
+        stop_deadline,
+    })
+}
+
+fn deadline(value: &Value, key: &'static str) -> Result<Duration, CellRuntimeError> {
+    value
+        .as_u64()
+        .filter(|milliseconds| *milliseconds > 0)
+        .map(Duration::from_millis)
+        .ok_or(CellRuntimeError::BadDeadline { key })
+}
+
+impl fmt::Display for CellRuntimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CellRuntimeError::NotAnObject => f.write_str("`cell_runtime` must be a JSON object"),
+            CellRuntimeError::UnknownKey { key } => {
+                write!(f, "`cell_runtime.{key}` is not a key of `cell_runtime`")
+            }
+            CellRuntimeError::MissingKey { key } => write!(f, "`cell_runtime.{key}` is required"),
+            CellRuntimeError::Membraned(refusal) => {
+                write!(f, "`cell_runtime.membraned` is refused: {refusal}")
+            }
+            CellRuntimeError::Template(refusal) => {
+                write!(f, "`cell_runtime.template` is refused: {refusal}")
+            }
+            CellRuntimeError::BadDeadline { key } => write!(
+                f,
+                "`cell_runtime.{key}` must be a whole number of milliseconds from 1 to {}",
+                u64::MAX
+            ),
+            CellRuntimeError::Host(refusal) => {
+                write!(
+                    f,
+                    "the limits a cell recipe is checked against are unknown: {refusal}"
+                )
+            }
+            CellRuntimeError::InstanceRoot { fault } => write!(
+                f,
+                "with `cell_runtime`, `instance_root` must be a canonical absolute path: {fault}"
+            ),
+            CellRuntimeError::CellPaths(refusal) => write!(
+                f,
+                "the paths of {} under `instance_root` are refused: {refusal}",
+                format_cell_id(MAX_CELL_NUMBER).as_str()
+            ),
+            CellRuntimeError::SocketPathTooLong { path, bytes, max } => write!(
+                f,
+                "`instance_root` makes the socket path {path} {bytes} bytes for the longest cell \
+                 ID; a socket path on this host holds at most {max}"
+            ),
+            CellRuntimeError::ArtifactInCells { role, path } => write!(
+                f,
+                "`cell_runtime.template.{role}.path` is {path}, inside the cells directory of \
+                 `instance_root`, where each cell's own paths are"
+            ),
+            CellRuntimeError::Record(refusal) => write!(
+                f,
+                "the largest config record this `cell_runtime` gives a cell is refused: {refusal}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CellRuntimeError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

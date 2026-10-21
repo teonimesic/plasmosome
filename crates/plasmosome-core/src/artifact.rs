@@ -1,3 +1,170 @@
+use std::fmt;
+use std::fs::File;
+use std::io::{self, Read};
+use std::os::fd::AsFd;
+use std::path::Path;
+
+use plasmosome_backend::Digest;
+
+use crate::nofollow::{Kind, Reached, Walk, WalkRefusal, acl_grants_write, effective_uid};
+use crate::operator::trusted::kind_name;
+use crate::protocol::WireError;
+use crate::runtime::path::RecipePath;
+use crate::runtime::recipe::Artifact;
+
+/// Why an Artifact is not trusted: its path as the recipe names it, and the first rule it broke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactRefusal {
+    pub path: RecipePath,
+    pub reason: ArtifactFault,
+}
+
+/// The rule an Artifact broke, in the order [`verify_artifact`] checks them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactFault {
+    /// The walk from `/` stopped: a component is a symlink or missing, a directory above the file
+    /// is not owned by root or the controller's UID, group or other can write it, or a macOS ACL
+    /// entry lets anyone replace its entries. A failed open, `fstat`, ACL read or read is `Io`.
+    Walk(WalkRefusal),
+    /// The object at the path is a `kind` other than a regular file.
+    NotRegular { kind: Kind },
+    /// The file is owned by `uid`, which is neither root nor the controller's effective UID.
+    ForeignOwner { uid: u32 },
+    /// Group or other can write the file; `mode` holds its permission bits.
+    Writable { mode: u32 },
+    /// A macOS ACL allow entry on the file grants write to someone.
+    WriteAcl,
+    /// The file's bytes hash to `found`, not to the pinned digest.
+    Digest { found: Digest },
+}
+
+/// Checks one Artifact before the controller trusts it, as spec 023 §1 says for `membraned` and
+/// every Artifact of the template. Walks its path from `/` without following a symlink, and
+/// refuses unless every directory above the file is owned by root or the effective UID, writable
+/// by neither group nor other and, on macOS, carries no ACL entry that lets anyone replace its
+/// entries. The file, opened without following and without blocking, must be a regular file
+/// owned by root or the effective UID, writable by neither group nor other, with no ACL allow
+/// entry granting write. Only then is it read, through the descriptor that was checked, and
+/// hashed: a file that breaks a rule is refused, never trusted because its digest matches. The
+/// read stops one byte past the size `fstat` reported, so it ends even when the file grows while
+/// it is read.
+///
+/// A pass describes the file as it was during the check. Whoever opens it later by path must
+/// guard its own open.
+pub fn verify_artifact(artifact: &Artifact) -> Result<(), ArtifactRefusal> {
+    let walk = Walk::from_root(artifact.path().as_path())
+        .map_err(|refusal| refused(artifact, ArtifactFault::Walk(refusal)))?;
+    verify_walk(walk, artifact)
+}
+
+fn verify_walk(walk: Walk, artifact: &Artifact) -> Result<(), ArtifactRefusal> {
+    check(walk, artifact.path().as_path(), artifact.sha256())
+        .map_err(|reason| refused(artifact, reason))
+}
+
+fn check(walk: Walk, path: &Path, pinned: &Digest) -> Result<(), ArtifactFault> {
+    let euid = effective_uid();
+    let opened = walk.open_file(|reached| judge(reached, euid))?;
+    let file = File::from(opened.fd);
+    if acl_grants_write(file.as_fd()).map_err(|error| io_fault("acl", path, &error))? {
+        return Err(ArtifactFault::WriteAcl);
+    }
+    let size = file
+        .metadata()
+        .map_err(|error| io_fault("fstat", path, &error))?
+        .len();
+    let found = digest_within(&file, size).map_err(|error| io_fault("read", path, &error))?;
+    if found != *pinned {
+        return Err(ArtifactFault::Digest { found });
+    }
+    Ok(())
+}
+
+fn judge(reached: &Reached<'_>, euid: u32) -> Result<(), ArtifactFault> {
+    let facts = reached.facts;
+    if facts.kind != Kind::Regular {
+        return Err(ArtifactFault::NotRegular { kind: facts.kind });
+    }
+    if facts.uid != 0 && facts.uid != euid {
+        return Err(ArtifactFault::ForeignOwner { uid: facts.uid });
+    }
+    if facts.mode & 0o022 != 0 {
+        return Err(ArtifactFault::Writable { mode: facts.mode });
+    }
+    Ok(())
+}
+
+fn digest_within(reader: impl Read, size: u64) -> io::Result<Digest> {
+    Digest::of_reader(reader.take(size.saturating_add(1)))
+}
+
+fn refused(artifact: &Artifact, reason: ArtifactFault) -> ArtifactRefusal {
+    ArtifactRefusal {
+        path: artifact.path().clone(),
+        reason,
+    }
+}
+
+fn io_fault(op: &'static str, path: &Path, error: &io::Error) -> ArtifactFault {
+    ArtifactFault::Walk(WalkRefusal::Io {
+        op,
+        path: path.to_path_buf(),
+        errno: error.raw_os_error().unwrap_or(libc::EIO),
+    })
+}
+
+impl From<WalkRefusal> for ArtifactFault {
+    fn from(refusal: WalkRefusal) -> Self {
+        ArtifactFault::Walk(refusal)
+    }
+}
+
+impl ArtifactRefusal {
+    /// The refusal as `cell.new` answers it: code 108 with `path` the Artifact's path and
+    /// `detail` the broken rule, and no `fix`.
+    pub fn wire(&self) -> WireError {
+        WireError::manifest_invalid(self.reason.to_string(), self.path.as_str().to_owned())
+    }
+}
+
+impl fmt::Display for ArtifactRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} is not a trusted artifact: {}",
+            self.path.as_str(),
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for ArtifactRefusal {}
+
+impl fmt::Display for ArtifactFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ArtifactFault::Walk(refusal) => refusal.fmt(f),
+            ArtifactFault::NotRegular { kind } => {
+                write!(f, "it is {}, not a regular file", kind_name(*kind))
+            }
+            ArtifactFault::ForeignOwner { uid } => write!(
+                f,
+                "it is owned by uid {uid}, neither root nor the controller's uid {}",
+                effective_uid()
+            ),
+            ArtifactFault::Writable { mode } => {
+                write!(f, "it has mode {mode:04o}: group or other can write it")
+            }
+            ArtifactFault::WriteAcl => {
+                f.write_str("it carries an ACL allow entry that grants write")
+            }
+            ArtifactFault::Digest { found } => {
+                write!(f, "its SHA-256 is {found}, not the pinned digest")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

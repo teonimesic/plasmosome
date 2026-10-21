@@ -8,13 +8,19 @@ use std::time::Duration;
 use serde::de::value::MapAccessDeserializer;
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+use serde_json::Value;
+use serde_json::value::RawValue;
 
 mod cell_runtime;
+
+pub use cell_runtime::{CellRuntime, CellRuntimeError};
 
 use crate::control::{Controller, Handler, serve_connection};
 use crate::private_socket::{
     Accepted, PrivateDir, PrivateListener, PrivateSocketError, effective_uid,
 };
+use crate::runtime::recipe::{PlatformLimits, RecipeRefusal};
+use crate::runtime::strict_json;
 use crate::state::{ControllerState, InstanceName, InstanceNameError};
 
 const ACCEPT_POLL: Duration = Duration::from_millis(25);
@@ -24,9 +30,10 @@ const NO_LEDGER_YET: u64 = 0;
 
 /// Everything `plasmosomed` needs to start: the path it answers on, which
 /// named instance it is, where that instance's durable state lives, how long
-/// startup recovery may take, and where trusted registry imports live, if
-/// anywhere. Only `parse_config` checks the rules below; a value built by hand
-/// carries no such promise.
+/// startup recovery may take, where trusted registry imports live, if
+/// anywhere, and how to start a cell's supervisor, if it may. Only
+/// `parse_config` checks the rules below; a value built by hand carries no
+/// such promise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonConfig {
     pub control_socket: PathBuf,
@@ -40,6 +47,9 @@ pub struct DaemonConfig {
     /// Absolute when present. `None` means purely local operation: no other
     /// path, `HOME` or request supplies a default.
     pub registry_root: Option<PathBuf>,
+    /// Spec 023 §1's `cell_runtime`. `None` means `cell.new` refuses; startup,
+    /// recovery, `cell.kill` and every observation still work.
+    pub cell_runtime: Option<CellRuntime>,
 }
 
 /// Why a config text is not a config.
@@ -54,6 +64,7 @@ pub enum ConfigError {
         path: PathBuf,
     },
     ZeroRecoveryDeadline,
+    CellRuntime(CellRuntimeError),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -67,6 +78,7 @@ impl std::fmt::Display for ConfigError {
             ConfigError::ZeroRecoveryDeadline => {
                 write!(f, "`recovery_deadline_ms` must be at least 1")
             }
+            ConfigError::CellRuntime(error) => write!(f, "`cell_runtime` is refused: {error}"),
         }
     }
 }
@@ -76,6 +88,7 @@ impl std::error::Error for ConfigError {
         match self {
             ConfigError::NotConfig(error) => Some(error),
             ConfigError::NotAnInstanceName(error) => Some(error),
+            ConfigError::CellRuntime(error) => Some(error),
             ConfigError::NotAbsolute { .. } | ConfigError::ZeroRecoveryDeadline => None,
         }
     }
@@ -83,16 +96,33 @@ impl std::error::Error for ConfigError {
 
 /// Reads a config out of JSON text, or says which part of it is not a config.
 /// `control_socket`, `name`, `instance_root` and `recovery_deadline_ms` are
-/// required, and `registry_root` is optional. `instance_root` and
-/// `registry_root` must be absolute paths, and `recovery_deadline_ms` a whole
-/// number of milliseconds, at least 1. An explicit `null` is not an omission:
-/// it is refused like any other value of the wrong type. A key the daemon does
-/// not know, or one given twice, is refused rather than ignored, so a
-/// misspelled setting stops the daemon instead of silently not applying.
-/// `name` is parsed into an `InstanceName`, so a path-shaped name never
-/// reaches the socket layer. The text must be one JSON object: an array is
-/// refused rather than read by position. Nothing on disk is read or created.
+/// required, and `registry_root` and `cell_runtime` are optional.
+/// `instance_root` and `registry_root` must be absolute paths, and
+/// `recovery_deadline_ms` a whole number of milliseconds, at least 1. An
+/// explicit `null` is not an omission: it is refused like any other value of
+/// the wrong type. A key the daemon does not know, or one given twice, is
+/// refused rather than ignored, so a misspelled setting stops the daemon
+/// instead of silently not applying; inside `cell_runtime` a key given twice
+/// is refused at any depth. `name` is parsed into an `InstanceName`, so a
+/// path-shaped name never reaches the socket layer. The text must be one JSON
+/// object: an array is refused rather than read by position.
+///
+/// A `cell_runtime` is checked as spec 023 §1 says, against this host's
+/// limits, which are read only when the key is present. With it,
+/// `instance_root` must also be a canonical path, so that the longest cell
+/// ID's three socket paths can be measured, the template completed with that
+/// cell's paths, and the largest config record encoded. A `cell_runtime` that
+/// passes cannot make any later `cell.new` refuse its recipe or its record.
+/// Nothing on disk is read or created, the Artifacts included: `cell.new`
+/// verifies those with [`crate::artifact::verify_artifact`].
 pub fn parse_config(text: &str) -> Result<DaemonConfig, ConfigError> {
+    read_config(text, PlatformLimits::host)
+}
+
+fn read_config(
+    text: &str,
+    limits: impl FnOnce() -> Result<PlatformLimits, RecipeRefusal>,
+) -> Result<DaemonConfig, ConfigError> {
     let written = one_object(text).map_err(ConfigError::NotConfig)?;
     let name = InstanceName::parse(&written.name).map_err(ConfigError::NotAnInstanceName)?;
     let instance_root = absolute("instance_root", written.instance_root)?;
@@ -103,12 +133,18 @@ pub fn parse_config(text: &str) -> Result<DaemonConfig, ConfigError> {
         .registry_root
         .map(|path| absolute("registry_root", path))
         .transpose()?;
+    let cell_runtime = written
+        .cell_runtime
+        .map(|value| cell_runtime::read(&value, &instance_root, limits))
+        .transpose()
+        .map_err(ConfigError::CellRuntime)?;
     Ok(DaemonConfig {
         control_socket: written.control_socket,
         name,
         instance_root,
         recovery_deadline: Duration::from_millis(written.recovery_deadline_ms),
         registry_root,
+        cell_runtime,
     })
 }
 
@@ -154,6 +190,8 @@ struct Written {
     recovery_deadline_ms: u64,
     #[serde(default, deserialize_with = "registry_root")]
     registry_root: Option<PathBuf>,
+    #[serde(default, deserialize_with = "cell_runtime")]
+    cell_runtime: Option<Value>,
 }
 
 fn unusable<'de, D: Deserializer<'de>, T>(
@@ -185,6 +223,13 @@ fn recovery_deadline_ms<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u6
 
 fn registry_root<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<PathBuf>, D::Error> {
     unusable::<D, _>("registry_root", PathBuf::deserialize(deserializer)).map(Some)
+}
+
+fn cell_runtime<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    let raw = unusable::<D, _>("cell_runtime", Box::<RawValue>::deserialize(deserializer))?;
+    strict_json::parse_value(raw.get().as_bytes())
+        .map(Some)
+        .map_err(|error| D::Error::custom(format!("`cell_runtime` is unusable: {error}")))
 }
 
 /// Why the daemon could not start, or could not keep serving. `Boundary` is the private-socket

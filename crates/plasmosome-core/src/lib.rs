@@ -44,7 +44,9 @@ pub mod version;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub use clock::{ClockError, SystemClock, boot_session};
 pub use control::{Controller, Handler, MAX_LINE_BYTES, serve_connection};
-pub use daemon::{ConfigError, DaemonConfig, DaemonError, parse_config, run};
+pub use daemon::{
+    CellRuntime, CellRuntimeError, ConfigError, DaemonConfig, DaemonError, parse_config, run,
+};
 pub use gatekeeper::Gatekeeper;
 pub use instance::{
     CellDir, CellDirError, DiscoveredEntry, Discovery, DiscoveryError, EntryClass, InstanceRoot,
