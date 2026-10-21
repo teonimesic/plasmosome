@@ -48,9 +48,10 @@ says, but cell mode is not built yet. Until native task `plasmosome-t8nq` builds
 form prints one line saying so and exits 2, with no usage text, by Main's decision (3) on native
 task `plasmosome-rhn`. No argument, or any other list of more than one, prints usage on stderr
 and exits 64. That includes those three arguments in another order, with a fourth, or with a
-`--cell=` value that is not a cell ID. A configuration the daemon cannot read, or refuses,
-exits 2. A failure to bind or serve exits 1. The `-h`, `--help`, `--version` and exit 64 rules
-are spec 025 §6's. Exits 2 and 1 are unchanged.
+`--cell=` value that is not a cell ID. A configuration the daemon cannot read, or that
+`daemon::parse_config` refuses, exits 2. A later failure exits 1: to bind or inspect the control
+socket, to find or start a broker, or to accept connections while serving. The `-h`, `--help`,
+`--version` and exit 64 rules are spec 025 §6's. Exits 2 and 1 are unchanged.
 
 ## Readiness is an answered query
 
