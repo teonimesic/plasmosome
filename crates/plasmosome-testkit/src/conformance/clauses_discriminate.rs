@@ -12,7 +12,7 @@ use plasmosome_backend::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Defect {
     None,
-    RevokeReturnsAStranger,
+    RevokeReturnsAStranger(UniverseClass),
     UnknownHandleReportsSuccess,
     RevokeKeepsTheObject,
     RevokeTidiesTheWholeUniverse,
@@ -38,7 +38,7 @@ enum Defect {
     GrantSubstitutesProxyRoute,
     GrantSubstitutesBrokerLaunch,
     GrantSubstitutesRequestedOwner,
-    GrantSubstitutesRequestedCapability,
+    GrantSubstitutesRequestedCapability(UniverseClass),
     GrantSubstitutesRecipe(UniverseClass),
     GrantReturnsAnotherRecipe(UniverseClass),
     GrantRecordsAnotherRecipe(UniverseClass),
@@ -412,7 +412,7 @@ impl EnforcementBackend for DefectiveBackend {
         if self.defect == Defect::GrantSubstitutesRequestedOwner {
             grant.owner.plugin = PluginId::from("substituted-owner");
         }
-        if self.defect == Defect::GrantSubstitutesRequestedCapability {
+        if matches!(self.defect, Defect::GrantSubstitutesRequestedCapability(_)) {
             grant.capability = substituted_capability(&grant.capability);
         }
         if self.defect == Defect::GrantSubstitutesRecipe(grant.capability.class()) {
@@ -526,7 +526,7 @@ impl EnforcementBackend for DefectiveBackend {
         self.grant_order.retain(|held| *held != handle);
         self.freed.push(handle);
         self.spent.insert(handle, entry.clone());
-        if self.defect == Defect::RevokeReturnsAStranger {
+        if matches!(self.defect, Defect::RevokeReturnsAStranger(_)) {
             return Ok(a_stranger(handle));
         }
         Ok(entry)
@@ -750,6 +750,14 @@ fn assert_rejected(run: impl FnOnce()) {
     }
 }
 
+const CLASSES: [UniverseClass; 5] = [
+    UniverseClass::SessionFile,
+    UniverseClass::UdsPath,
+    UniverseClass::ProxyMap,
+    UniverseClass::BrokerPid,
+    UniverseClass::Mount,
+];
+
 fn run_all(defect: Defect) {
     conformance::grant_is_replayable(carrying(defect));
     conformance::revoke_unknown_handle_is_error(carrying(defect));
@@ -820,7 +828,11 @@ fn infrastructure_and_fixture_panics_cannot_satisfy_clause_witnesses() {
 
 #[test]
 fn established_clauses_reject_their_distinct_faults() {
-    assert_rejected(|| conformance::grant_is_replayable(carrying(Defect::RevokeReturnsAStranger)));
+    for class in CLASSES {
+        assert_rejected(|| {
+            conformance::grant_is_replayable(carrying(Defect::RevokeReturnsAStranger(class)))
+        });
+    }
     assert_rejected(|| {
         conformance::revoke_unknown_handle_is_error(carrying(Defect::UnknownHandleReportsSuccess))
     });
@@ -873,20 +885,33 @@ fn snapshot_clause_rejects_returned_owner_substitution() {
 
 #[test]
 fn snapshot_clause_rejects_returned_capability_substitution() {
-    assert_rejected(|| {
-        conformance::snapshot_never_invents_objects(carrying(
-            Defect::GrantSubstitutesRequestedCapability,
-        ))
-    });
+    for class in CLASSES {
+        assert_rejected(|| {
+            conformance::snapshot_never_invents_objects(carrying(
+                Defect::GrantSubstitutesRequestedCapability(class),
+            ))
+        });
+    }
 }
 
-const CLASSES: [UniverseClass; 5] = [
-    UniverseClass::SessionFile,
-    UniverseClass::UdsPath,
-    UniverseClass::ProxyMap,
-    UniverseClass::BrokerPid,
-    UniverseClass::Mount,
-];
+#[test]
+fn a_substitute_and_a_stranger_stand_in_only_for_their_own_class() {
+    for class in CLASSES {
+        let mut substituting =
+            DefectiveBackend::carrying(Defect::GrantSubstitutesRequestedCapability(class));
+        let mut estranged = DefectiveBackend::carrying(Defect::RevokeReturnsAStranger(class));
+        for grant in conformance::sample_grants() {
+            let targeted = grant.capability.class() == class;
+            let entry = substituting.grant(grant.clone());
+            assert_eq!(entry.capability != grant.capability, targeted, "{grant:?}");
+            let entry = estranged.grant(grant.clone());
+            let returned = estranged
+                .revoke(entry.handle, DrainSpec::forcing())
+                .unwrap();
+            assert_eq!(returned != entry, targeted, "{grant:?}");
+        }
+    }
+}
 
 #[test]
 fn snapshot_clause_rejects_a_grant_that_substitutes_a_recipe_in_any_class() {
