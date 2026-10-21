@@ -61,7 +61,12 @@ impl CompositeBackend {
             let observed = self.leaf_snapshot(leaf)?;
             only_its_own_classes(leaf, &observed)?;
             for object in observed.state().objects() {
-                state.insert(object.clone())?;
+                if !state.insert(object.clone())? {
+                    return Err(BackendError::IdentityConflict {
+                        class: object.class().as_str(),
+                        id: object.id,
+                    });
+                }
             }
             grants.extend_from_slice(observed.grants());
             incomplete.extend_from_slice(observed.incomplete());
