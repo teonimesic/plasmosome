@@ -950,28 +950,30 @@ gate O-8).
     )
 }
 
+fn scratch_git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=lanes",
+            "-c",
+            "user.email=lanes@example.invalid",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git {args:?}");
+}
+
 #[test]
 fn the_test_commit_is_marked_uncommitted_for_an_untracked_or_a_changed_file() {
     let repo = tempfile::tempdir().expect("a directory for a repository");
-    let git = |args: &[&str]| {
-        let status = Command::new("git")
-            .args([
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "user.name=lanes",
-                "-c",
-                "user.email=lanes@example.invalid",
-            ])
-            .args(args)
-            .current_dir(repo.path())
-            .stdin(Stdio::null())
-            .status()
-            .expect("git runs");
-        assert!(status.success(), "git {args:?}");
-    };
+    let crate_dir = repo.path().join("crate");
     write_file(
         &repo.path().join(".git"),
         b"gitdir: no-such-directory\n",
@@ -982,12 +984,13 @@ fn the_test_commit_is_marked_uncommitted_for_an_untracked_or_a_changed_file() {
         "a directory git cannot read is not clean"
     );
     fs::remove_file(repo.path().join(".git")).expect("the .git file is removed");
-    git(&["init", "-q"]);
+    scratch_git(repo.path(), &["init", "-q"]);
     write_file(&repo.path().join("tracked"), b"tracked\n", 0o644);
-    git(&["add", "tracked"]);
-    git(&["commit", "-q", "-m", "one"]);
+    write_file(&crate_dir.join("lib"), b"lib\n", 0o644);
+    scratch_git(repo.path(), &["add", "tracked", "crate/lib"]);
+    scratch_git(repo.path(), &["commit", "-q", "-m", "one"]);
 
-    let head = commit_at(repo.path());
+    let head = commit_at(&crate_dir);
     assert!(
         head.len() == 40 && head.chars().all(|c| c.is_ascii_hexdigit()),
         "{head}"
@@ -1001,16 +1004,18 @@ fn the_test_commit_is_marked_uncommitted_for_an_untracked_or_a_changed_file() {
         0o644,
     );
     assert_eq!(
-        commit_at(repo.path()),
-        format!("{head} with uncommitted changes")
+        commit_at(&crate_dir),
+        format!("{head} with uncommitted changes"),
+        "an untracked file at the repository's root, read from a subdirectory"
     );
 
     fs::remove_dir_all(&untracked).expect("the untracked directory is removed");
-    assert_eq!(commit_at(repo.path()), head);
+    assert_eq!(commit_at(&crate_dir), head);
     write_file(&repo.path().join("tracked"), b"changed\n", 0o644);
     assert_eq!(
-        commit_at(repo.path()),
-        format!("{head} with uncommitted changes")
+        commit_at(&crate_dir),
+        format!("{head} with uncommitted changes"),
+        "a changed file at the repository's root, read from a subdirectory"
     );
 }
 

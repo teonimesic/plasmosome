@@ -296,7 +296,7 @@ fn an_observation_row_reads_recorded_only_with_its_observation_and_a_missing_ver
     );
     assert!(
         text.lines()
-            .any(|line| line.starts_with("| Names | real |") && line.ends_with("| not recorded |")),
+            .any(|line| line == "| Names | real | what real is | recorded | not recorded |"),
         "{text}"
     );
     assert!(
@@ -330,7 +330,7 @@ fn an_observation_row_reads_recorded_only_with_its_observation_and_a_missing_ver
     );
     assert!(
         text.lines()
-            .any(|line| line.starts_with("| Names | real |") && line.ends_with("| not recorded |")),
+            .any(|line| line == "| Names | real | what real is | recorded | not recorded |"),
         "{text}"
     );
     assert!(
@@ -353,7 +353,7 @@ fn an_observation_row_reads_recorded_only_with_its_observation_and_a_missing_ver
     );
     assert!(
         text.lines()
-            .any(|line| line.starts_with("| Names | real |") && line.ends_with("| recorded |")),
+            .any(|line| line == "| Names | real | what real is | recorded | recorded |"),
         "{text}"
     );
 }
