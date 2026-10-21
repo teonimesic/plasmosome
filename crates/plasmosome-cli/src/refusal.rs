@@ -20,9 +20,9 @@ pub enum PathOrigin {
 ///
 /// `checked` is the path the caller passed to the check: the socket path for
 /// `check_private_path` and `check_peer_uid`, and `instances/` for `list_trusted_dir`. It is the
-/// `path` of a refusal that reports none. `trusted_uid` is the UID the caller passed to the check,
-/// and is `peer_mismatch`'s `uid`. Each code carries only the fields spec 025's client-code table
-/// lists for it.
+/// `path` of a refusal that reports none. From `--socket`, it is also `BadPath`'s `argument`.
+/// `trusted_uid` is the UID the caller passed to the check, and is `peer_mismatch`'s `uid`. Each
+/// code carries only the fields spec 025's client-code table lists for it.
 ///
 /// Every path is written by lossy UTF-8 conversion, each invalid sequence as U+FFFD. So a path
 /// that is not UTF-8 is shown as another path, and `NotPrivate`'s `fix` would change that other
