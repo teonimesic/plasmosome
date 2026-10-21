@@ -1,10 +1,20 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use crate::toml_depth;
+
 /// The most bytes a declaration may hold: spec 020's limit for one
 /// declaration. `load` and `parse` refuse a longer one with
 /// `ManifestError::TooLarge`.
 pub const MAX_MANIFEST_BYTES: usize = 1 << 20;
+
+/// The deepest a declaration may nest. The root table is level 1. Each array
+/// and each inline table adds a level, and so does each dot in a key, for the
+/// table it implies. Each part of a table header's name adds two levels,
+/// enough for an array of tables and its element. Nothing inside a string or
+/// a comment counts. `parse` refuses a deeper declaration with
+/// `ManifestError::TooDeep` before any TOML is parsed.
+pub const MAX_MANIFEST_DEPTH: usize = 32;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlasmidManifest {
@@ -169,6 +179,9 @@ pub enum ManifestError {
     TooLarge {
         limit: usize,
     },
+    TooDeep {
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for ManifestError {
@@ -196,6 +209,12 @@ impl std::fmt::Display for ManifestError {
             ManifestError::TooLarge { limit } => {
                 write!(f, "manifest exceeds the {limit}-byte limit")
             }
+            ManifestError::TooDeep { limit } => {
+                write!(
+                    f,
+                    "manifest nesting counts more than the {limit}-level limit"
+                )
+            }
         }
     }
 }
@@ -210,6 +229,8 @@ impl PlasmidManifest {
     /// writer blocks this call while it opens the FIFO, and a FIFO whose
     /// writer stops short of the bound and never closes blocks it while it
     /// reads. A file that is not UTF-8 is an `Io` error of kind `InvalidData`.
+    /// What was read goes to `parse`, which refuses a declaration nested
+    /// deeper than `MAX_MANIFEST_DEPTH` with `TooDeep`.
     pub fn load(path: &Path) -> Result<PlasmidManifest, ManifestError> {
         let file = std::fs::File::open(path).map_err(ManifestError::Io)?;
         let mut bytes = Vec::new();
@@ -231,11 +252,17 @@ impl PlasmidManifest {
     }
 
     /// Parses a declaration. Text longer than `MAX_MANIFEST_BYTES` is refused
-    /// with `TooLarge` before any of it is parsed.
+    /// with `TooLarge`, and then text nested deeper than `MAX_MANIFEST_DEPTH`
+    /// with `TooDeep`, both before any of it is parsed as TOML.
     pub fn parse(text: &str) -> Result<PlasmidManifest, ManifestError> {
         if text.len() > MAX_MANIFEST_BYTES {
             return Err(ManifestError::TooLarge {
                 limit: MAX_MANIFEST_BYTES,
+            });
+        }
+        if toml_depth::deeper_than(text, MAX_MANIFEST_DEPTH) {
+            return Err(ManifestError::TooDeep {
+                limit: MAX_MANIFEST_DEPTH,
             });
         }
         let raw: toml::Value = toml::from_str(text).map_err(ManifestError::Parse)?;
