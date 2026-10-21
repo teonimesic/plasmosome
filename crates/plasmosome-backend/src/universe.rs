@@ -746,6 +746,7 @@ impl fmt::Display for ResidueReport {
 mod tests {
     use super::*;
     use crate::fixtures::{self, broker, mount, proxy_map, session_file};
+    use crate::recipe::{FileAccess, ProxyTransport};
 
     fn object(owner: &str, capability: Capability) -> OsObject {
         OsObject {
@@ -937,6 +938,266 @@ mod tests {
         let diff = Diff::between(&after, &conflicting);
         assert_eq!(diff.removed, vec![after_object]);
         assert_eq!(diff.added, vec![conflicting_object]);
+    }
+
+    fn recipe_field_changes() -> Vec<(&'static str, Capability, Capability)> {
+        let session = |recipe: SessionFileRecipe| Capability::SessionFile {
+            path: "/skills/pr.md".to_string(),
+            recipe,
+        };
+        let uds = |recipe: UdsRecipe| Capability::UdsSocket {
+            path: "/run/egressd.uds".to_string(),
+            recipe,
+        };
+        let proxy = |recipe: ProxyRecipe| Capability::ProxyMap {
+            host: "api.github.com".to_string(),
+            route: "splice".to_string(),
+            recipe,
+        };
+        let mount = |recipe: MountRecipe| Capability::Mount {
+            source: "/code".to_string(),
+            target: "/workspace".to_string(),
+            recipe,
+        };
+        let broker = |launch: BrokerLaunch| Capability::Broker {
+            name: "egressd".to_string(),
+            launch,
+        };
+        vec![
+            (
+                "SessionFile.recipe.contents",
+                session(fixtures::session_recipe()),
+                session(SessionFileRecipe {
+                    contents: b"# Review\n".to_vec(),
+                    ..fixtures::session_recipe()
+                }),
+            ),
+            (
+                "SessionFile.recipe.mode",
+                session(fixtures::session_recipe()),
+                session(SessionFileRecipe {
+                    mode: FileAccess::ReadWrite,
+                    ..fixtures::session_recipe()
+                }),
+            ),
+            (
+                "SessionFile.recipe.guest_path",
+                session(fixtures::session_recipe()),
+                session(SessionFileRecipe {
+                    guest_path: "/run/plasmosome/review".to_string(),
+                    ..fixtures::session_recipe()
+                }),
+            ),
+            (
+                "UdsSocket.recipe.upstream",
+                uds(fixtures::uds_recipe()),
+                uds(UdsRecipe {
+                    upstream: "/run/plasmosome/audit.sock".to_string(),
+                    ..fixtures::uds_recipe()
+                }),
+            ),
+            (
+                "UdsSocket.recipe.guest_path",
+                uds(fixtures::uds_recipe()),
+                uds(UdsRecipe {
+                    guest_path: "/run/plasmosome/audit-guest.sock".to_string(),
+                    ..fixtures::uds_recipe()
+                }),
+            ),
+            (
+                "ProxyMap.recipe.transport",
+                proxy(fixtures::proxy_recipe()),
+                proxy(ProxyRecipe {
+                    transport: ProxyTransport::Udp,
+                    ..fixtures::proxy_recipe()
+                }),
+            ),
+            (
+                "ProxyMap.recipe.destination",
+                proxy(fixtures::proxy_recipe()),
+                proxy(ProxyRecipe {
+                    destination: "audit.plasmosome.test".to_string(),
+                    ..fixtures::proxy_recipe()
+                }),
+            ),
+            (
+                "ProxyMap.recipe.port",
+                proxy(fixtures::proxy_recipe()),
+                proxy(ProxyRecipe {
+                    port: 8443,
+                    ..fixtures::proxy_recipe()
+                }),
+            ),
+            (
+                "ProxyMap.recipe.allow_private",
+                proxy(fixtures::proxy_recipe()),
+                proxy(ProxyRecipe {
+                    allow_private: true,
+                    ..fixtures::proxy_recipe()
+                }),
+            ),
+            (
+                "Mount.recipe.access",
+                mount(fixtures::mount_recipe()),
+                mount(MountRecipe {
+                    access: FileAccess::ReadWrite,
+                }),
+            ),
+            (
+                "Broker.launch.command",
+                broker(fixtures::launch()),
+                broker(BrokerLaunch {
+                    command: vec![
+                        "/usr/libexec/plasmosome-broker".to_string(),
+                        "--audit".to_string(),
+                    ],
+                    ..fixtures::launch()
+                }),
+            ),
+            (
+                "Broker.launch.control_socket",
+                broker(fixtures::launch()),
+                broker(BrokerLaunch {
+                    control_socket: "/run/plasmosome/audit.control".to_string(),
+                    ..fixtures::launch()
+                }),
+            ),
+            (
+                "Broker.launch.data_socket",
+                broker(fixtures::launch()),
+                broker(BrokerLaunch {
+                    data_socket: "/run/plasmosome/audit.data".to_string(),
+                    ..fixtures::launch()
+                }),
+            ),
+        ]
+    }
+
+    fn json_leaves(capability: &Capability) -> BTreeMap<String, serde_json::Value> {
+        fn walk(
+            value: serde_json::Value,
+            path: String,
+            found: &mut BTreeMap<String, serde_json::Value>,
+        ) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    for (name, field) in fields {
+                        let nested = if path.is_empty() {
+                            name
+                        } else {
+                            format!("{path}.{name}")
+                        };
+                        walk(field, nested, found);
+                    }
+                }
+                leaf => {
+                    found.insert(path, leaf);
+                }
+            }
+        }
+        let mut found = BTreeMap::new();
+        walk(
+            serde_json::to_value(capability).unwrap(),
+            String::new(),
+            &mut found,
+        );
+        found
+    }
+
+    fn state_of(objects: &[OsObject]) -> OsState {
+        let mut state = OsState::new();
+        for object in objects {
+            state.insert(object.clone()).unwrap();
+        }
+        state
+    }
+
+    #[test]
+    fn every_recipe_and_launch_field_has_one_row_that_changes_only_that_field() {
+        let rows = recipe_field_changes();
+        let mut recipe_fields: Vec<String> = [
+            session_file("/skills/pr.md"),
+            fixtures::uds_socket("/run/egressd.uds"),
+            proxy_map("api.github.com", "splice"),
+            mount("/code", "/workspace"),
+            broker("egressd"),
+        ]
+        .iter()
+        .flat_map(|capability| json_leaves(capability).into_keys())
+        .filter(|path| path.contains(".recipe.") || path.contains(".launch."))
+        .collect();
+        recipe_fields.sort();
+        let mut row_fields: Vec<String> = rows.iter().map(|row| row.0.to_string()).collect();
+        row_fields.sort();
+        assert_eq!(row_fields, recipe_fields);
+        assert_eq!(rows.len(), 13);
+
+        for (field, before, after) in rows {
+            assert_eq!(before.class(), after.class(), "{field}");
+            assert_eq!(before.key(), after.key(), "{field}");
+            assert_eq!(before.validate(), Ok(()), "{field}");
+            assert_eq!(after.validate(), Ok(()), "{field}");
+            let before_leaves = json_leaves(&before);
+            let after_leaves = json_leaves(&after);
+            assert_eq!(
+                before_leaves.keys().collect::<Vec<_>>(),
+                after_leaves.keys().collect::<Vec<_>>(),
+                "{field}"
+            );
+            let differing: Vec<&str> = before_leaves
+                .iter()
+                .filter(|(path, value)| after_leaves[*path] != **value)
+                .map(|(path, _)| path.as_str())
+                .collect();
+            assert_eq!(differing, vec![field]);
+        }
+    }
+
+    #[test]
+    fn both_comparisons_see_every_recipe_and_launch_field() {
+        let baseline = object("baseline", session_file("/skills/baseline.md"));
+        for (field, before_capability, after_capability) in recipe_field_changes() {
+            let held = object("network", before_capability);
+            let changed = OsObject {
+                capability: after_capability,
+                ..held.clone()
+            };
+            let before = state_of(&[baseline.clone(), held.clone()]);
+            let after = state_of(&[baseline.clone(), changed.clone()]);
+            assert!(
+                !before.canonically_equivalent(&after) && !after.canonically_equivalent(&before),
+                "canonical equivalence missed a changed {field}"
+            );
+            assert_eq!(
+                Diff::between(&before, &after),
+                Diff {
+                    added: vec![changed.clone()],
+                    removed: vec![held.clone()],
+                },
+                "the exact diff missed a changed {field}"
+            );
+
+            for kept in [held, changed] {
+                let reissued = OsObject {
+                    id: GrantId::new(),
+                    ..kept.clone()
+                };
+                let original = state_of(&[baseline.clone(), kept.clone()]);
+                let renamed = state_of(&[baseline.clone(), reissued.clone()]);
+                assert!(
+                    original.canonically_equivalent(&renamed),
+                    "a new grant id alone must not change the canonical account ({field})"
+                );
+                assert_eq!(
+                    Diff::between(&original, &renamed),
+                    Diff {
+                        added: vec![reissued],
+                        removed: vec![kept],
+                    },
+                    "a new grant id alone is one lost and one leaked object ({field})"
+                );
+            }
+        }
     }
 
     #[test]
