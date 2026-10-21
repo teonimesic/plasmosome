@@ -931,19 +931,33 @@ mod tests {
             (walk, checked)
         }
 
+        const CLOCK_PROBE_WRITES: u32 = 100_000;
+
+        fn change_time_after_a_write(probe: &File) -> (i64, i64) {
+            probe
+                .write_all_at(b"tick", 0)
+                .expect("the probe is written");
+            let probed = probe.metadata().expect("fstat");
+            (probed.ctime(), probed.ctime_nsec())
+        }
+
         fn after_the_clock_passes(tree: &ArtifactTree, stamp: Stamp) {
             let probe = fs::OpenOptions::new()
                 .write(true)
                 .open(tree.file("clock", b"", 0o644))
                 .expect("the clock probe opens");
-            loop {
-                probe
-                    .write_all_at(b"tick", 0)
-                    .expect("the probe is written");
-                let probed = probe.metadata().expect("fstat");
-                if (probed.ctime(), probed.ctime_nsec()) > stamp.changed {
-                    return;
-                }
+            let mut probed = change_time_after_a_write(&probe);
+            let mut writes = 1;
+            while probed <= stamp.changed {
+                assert!(
+                    writes < CLOCK_PROBE_WRITES,
+                    "the file clock does not move on writes: after {writes} probe writes, far \
+                     more than the one APFS needs, the probe's change time {probed:?} is not past \
+                     the checked change time {:?}",
+                    stamp.changed
+                );
+                probed = change_time_after_a_write(&probe);
+                writes += 1;
             }
         }
 
