@@ -890,7 +890,8 @@ Each has the default this spec uses until the owner answers.
 
 Each item names its level, the guards it proves, and the broken custody it catches. The
 **marker** is a distinctive value written into a secret file, such as `mk-` followed by 32 random
-hex digits, searched for as text.
+hex digits. A search for a marker looks for its plain text and for its base64, base64url,
+percent-encoded and hex forms, and its SHA-256 in hex, so a copy in another encoding is found too.
 
 1. **A covered reference becomes a binding (model; G2, G10).** A `wasm` reference, with an entry
    at the plasmid's declared `api.github.com:443`: the attachment's journal record holds the
@@ -908,20 +909,28 @@ hex digits, searched for as text.
    unrealized mode bound; a wrong string; a partial attach.
 3. **The operator file cannot add reach (model; G10).** An entry for a reference the declaration
    does not name, and an entry at a host the plasmid does not declare, are each 108 with `path`
-   the operator file and a `detail` naming the reference and target. A `credentials` key in a
-   version 1 file is 108 `content`. Catches: an operator file that widens what a declaration asks
-   for.
-4. **The secret file's checks (model, real files on Darwin; G2, G12).** Each is 108 with `path`
-   the secret file and `detail` the check: mode 0640, and 0600 with an `everyone allow read` ACL
-   (`mode`); a symlink (`path`); a second link (`links`); a FIFO, refused within 1 s
-   (`not_regular`); 65,537 bytes (`size`); a CR, an inner LF, a NUL, a byte above 0x7E and an
-   empty file (`content`); a file inside a held Mount source (`inside_mount_source`). The marker
-   never appears in any refusal. A value with one trailing LF is sent without it. Catches: a
-   readable secret trusted; header injection through CR or LF; secret bytes echoed in a refusal; a
-   trailing newline sent.
+   the operator file and a `detail` naming the reference and target. Each of these is 108
+   `content`: a `credentials` key in a version 1 file; two entries with the same reference and
+   target; `transport: udp`; a `header` of `host`, `content-length` or `transfer-encoding`; and a
+   17-character `surrogate_prefix`. Catches: an operator file that widens what a declaration asks
+   for; an entry that binds a framing field, or a binding that can never apply.
+4. **The secret file's checks (model, real files on Darwin; G1, G2, G12).** Each is 108 with
+   `path` the secret file and `detail` the check: mode 0640, and 0600 with an
+   `everyone allow read` ACL (`mode`); a symlink (`path`); a group-writable ancestor
+   (`ancestor`); a second link (`links`); a FIFO, refused within 1 s (`not_regular`); 65,537 bytes
+   (`size`); a CR, an inner LF, a NUL, a byte above 0x7E and an empty file (`content`); a file
+   inside a held Mount source (`inside_mount_source`). Where the test host can make them, a parent
+   directory and a file that another user (uid N) owns are `parent` and `owner`; otherwise those
+   rows are reported not run. With a binding standing, a later plasmid whose Mount source is the
+   secrets directory, and one whose source is an ancestor of it, attached to another cell, are
+   each 108 with `path` the operator file, and nothing is prepared. The marker never appears in
+   any refusal. A value with one trailing LF is sent without it. Catches: a readable secret
+   trusted; header injection through CR or LF; secret bytes echoed in a refusal; a trailing
+   newline sent; a later Mount that puts a bound secret file in a guest.
 5. **Not keyed by ID alone (model; G13).** A registry member with the local entry's ID is 103
-   `entry:credential:<ref>` when the entry has no `publishers`, binds when it lists the member's
-   publisher, and is 103 for any other publisher. Catches: a credential keyed by plasmid ID alone.
+   `entry:credential:<ref>` when the entry has no `publishers`. It binds when the entry names its
+   registry and publisher. It is 103 for another publisher, and for the same publisher name in
+   another registry. Catches: a credential keyed by plasmid ID, or by a bare publisher name.
 6. **Reload (model; G9).** A reload that keeps the binding keeps its surrogate. A new reference, a
    held reference at a new target, a held reference at a new mode, and a new `path_scope` entry
    are each 109 with nothing prepared. A changed source proceeds, and the replacement's apply reads
@@ -937,60 +946,120 @@ hex digits, searched for as text.
    `get` that returns the value; a value printed by `{:?}`; values from the inherited environment.
 9. **The component path (membrane; G4, G6).** With a fake component host, and a fixture TLS server
    for H trusted through test roots: a request naming R to H arrives with the value in the
-   binding's header, and a request naming nothing arrives as sent. A request naming R to a
-   declared but unbound H2, and one naming an undeclared R2, are each refused before any byte
-   reaches a fixture; only the second yields §8's denial. Catches: attaching unasked; attaching at
-   an unbound host; a request sent without the credential it named; a denial for a line the
-   author cannot write.
+   binding's header, and a request naming nothing arrives with no value. These are each refused
+   before any byte reaches a fixture: a request naming R to a declared but unbound H2; one naming
+   an undeclared R2; and one naming R that adds its own `Host`, `Content-Length`,
+   `Transfer-Encoding` or `Connection`. Only R2 yields §8's denial, and its `fix`, written into
+   the declaration, parses. A request to a host no grant holds yields the `network.hosts` denial.
+   Catches: attaching unasked; attaching at an unbound host; a component's `Host` sent to a shared
+   front; a denial for a line the author cannot write; a `fix` that does not parse.
 10. **The workload path's substitution rules (membrane; G4).** With a test client that trusts a
     test authority, the surrogate in the bound header, `Host` H and a path inside the
-    `path_scope`, the fixture receives the value. The fixture receives the surrogate unchanged for
-    a path outside the scope; for paths with `..`, `%2F` and `%2e`; for a `Host` other than H; for
-    the surrogate in the URL or in the body; and for another attachment's surrogate. Catches:
-    substitution outside the scope; a path trick; another site at one address; substitution in a
-    body; use across attachments.
+    `path_scope`, the fixture receives the value. The fixture receives the surrogate, and no value,
+    for a path outside the scope; for the surrogate in the URL or in the body; for another
+    attachment's surrogate; and on a flow whose selected grant is another attachment's holding at
+    the same target. Catches: substitution outside the scope; substitution in a body; use across
+    attachments; a value on another attachment's flow.
 11. **The upstream (membrane; G4).** A fixture whose certificate no trusted root signed: the TLS
     connection fails, and the fixture receives no request byte. A fixture that answers 302 to
     another host: the client receives the 302, and the relay sends nothing else. Catches: an
     unverified upstream; a followed redirect carrying the value.
-12. **Scrubbing (membrane; G1, G12).** A fixture echoes the request's headers and body. The
+12. **Reflection (membrane; G1, G8, G12).** A fixture echoes the request's headers and body. The
     client, and on the component path the fake component host, receive the surrogate or the
-    placeholder where the value was, in headers and in an unencoded body, with a 40-character
-    value split across two chunks at every offset. Catches: a reflection into the guest; a
-    scrubber that misses a split copy.
+    placeholder where the value was, in headers and in the body. The value is 40 characters, split
+    across two transfer-coding chunks, with a chunk-size line between the halves, at every offset.
+    The fixture receives `Accept-Encoding: identity` and no `TE`, `Range` or `If-Range`, whatever
+    the client sent. A fixture that answers with gzip anyway, one that answers with
+    `Transfer-Encoding: gzip, chunked`, and one that answers 206 each get the client's connection
+    closed, and the component's request fails, with no byte of the body passed on. The fixture's
+    trailers never reach the client. After each chunk, the relay releases the same number of bytes
+    whether the chunk's tail matches a prefix of the value or not, so a scrubber that holds back
+    only on a prefix match fails this item. Catches: a reflection into the guest; a compressed or
+    ranged echo; a scrubber that misses a split copy; a hold-back whose timing tells the value.
 13. **Refuse rather than expose, and read nothing else (membrane; G8, G11).** A client that does
     not trust the test authority fails its handshake with the ordinary unknown-authority error,
-    and the fixture receives nothing. A flow to a target with no binding is relayed as a stream:
-    bytes that are not HTTP pass unchanged. Catches: a fallback to plain text or to delivery;
-    intercepting a flow that carries no credential.
+    and the fixture receives nothing. A flow to a target with no binding, and a flow of an
+    attachment that binds nothing at a bound target, are relayed as streams: each sees the
+    fixture's own chain, and bytes that are not HTTP pass unchanged. Catches: a fallback to plain
+    text or to delivery; intercepting a flow, or a peer's flow, that carries no credential.
 14. **The fence and withdrawal (membrane and model; G5, G9).** At B, a request with the surrogate
     is refused as spec 024 §9 says, and the fixture receives nothing. After withdrawal,
-    `membraned`'s observation lists no binding for the attachment. A new attachment of the same
-    plasmid gets a different surrogate, and the old one is never substituted again. Catches:
-    attaching after the fence; a value kept after withdrawal; a surrogate reused.
+    `membrane.cell.observe` lists no binding for the attachment, and the withdrawal does not finish
+    while it still lists one. In the model, recovery reports a binding listed for a holding the
+    journal does not record as stray drift. A new attachment of the same plasmid gets a different
+    surrogate, and the old one is never substituted again. Catches: attaching after the fence; a
+    value kept after withdrawal; a binding that outlives its holding unseen; a surrogate reused.
 15. **Status (model; G2, G7).** `plasmid.list` and `cell.status` show `credentials` for each
     plasmid, with reference, target, mode, and the surrogate for `inject`. The marker and the
     source path appear nowhere. Catches: a value or source in status; a surrogate the operator
     cannot find.
-16. **Hostile framing (membrane; G12).** A request with both `Content-Length` and
-    `Transfer-Encoding`, one with two `Content-Length` values, a header line over the bound, and
-    a head over the bound are each refused, and the connection closed. Fuzz targets for the
-    request parser and the scrubber exist, and their corpus replays under `cargo test`. Catches: a
-    second request smuggled past the rules; an unbounded parser.
+16. **Hostile requests (membrane; G4, G12).** Each of these is refused before a byte reaches the
+    fixture, and the connection closed: both `Content-Length` and `Transfer-Encoding`; two
+    `Content-Length` values; `Transfer-Encoding: gzip, chunked`; an obs-fold; a space before a
+    colon; a bare LF; a header line, and a head, over the bound; two `Host` fields; a `Host` with
+    another port; an absolute-form target with another authority; the bound header twice; and the
+    paths `..;`, a raw `\`, `%2F`, `%2e`, `%25` and `%c0%ae`. An absolute-form target with the
+    bound authority arrives in origin-form. The fixture receives each admitted request in the
+    relay's own form, not the client's bytes, and two attachments' flows to one destination arrive
+    on different upstream connections. Fuzz targets for the TLS server, the request parser, the
+    response parser and the scrubber exist, and their corpus replays under `cargo test`. Catches:
+    a second request smuggled past the rules; a second `Host` routed to another site; a path
+    trick; raw bytes forwarded; a shared upstream connection; an unbounded parser.
 17. **No value in a real cell (pinned runtime; G1, G11).** In a booted cell,
     `env KEY=<surrogate> curl https://H/<scoped path>` reaches a fixture of H that receives the
     value. A scan of the guest's files, every process's environment and arguments, and
     `mountinfo` finds no copy of the marker. Reported not run until O-1, O-6, O-7 and O-11.
     Catches: a value staged in the guest by any path.
-18. **The instance authority (membrane and model; G14).** The marker here is the base64 text of
-    the test authority's private key. It is never found in the journal, the session log, any
+18. **The instance authority (membrane and model; G1, G14).** The marker here is the base64 text
+    of the test authority's private key. It is never found in the journal, the session log, any
     reply, status or refusal text, nor in any byte the fake component host or the fake guest
-    bridge receives. A client that connects to a declared host with no `inject`
-    binding gets no certificate from the instance authority: it sees the fixture's own chain. A
-    leaf the relay presents for a bound target expires no later than the attachment's B. A key
-    file that fails a §1 file check is 108 with `path` the key file. Catches: an authority key in a
-    record or the guest; interception of a flow with no binding; a leaf that outlives its
-    attachment; an unchecked key file.
+    bridge receives. A client that connects to a declared host with no `inject` binding gets no
+    certificate from the instance authority: it sees the fixture's own chain. A leaf the relay
+    presents for a bound target expires no later than the attachment's B. A key file that fails a
+    §1 file check, rule 5 included, is 108 with `path` the key file. A later plasmid whose Mount
+    source is the key's directory, or an ancestor of it, attached to another cell, is 108.
+    Catches: an authority key in a record or the guest; interception of a flow with no binding; a
+    leaf that outlives its attachment; an unchecked key file; a Mount that exposes the key.
+19. **What the controller sends `membraned` (model; G2, G3, G14).** The fake backend records every
+    message the controller sends a `membraned`: each `membrane.effect.apply`'s params, the launch
+    record, and the argv, environment and files of each launch. Neither marker, the value's or the
+    key's, is in any of them, and the apply params name the secret file only by its path.
+    Catches: a controller that reads the value and sends it in the apply params; a key sent at
+    launch.
+20. **What `membraned` writes (membrane; G2).** After a substitution on each path, and after each
+    refusal of §5, `membraned.log`, every log `membraned` writes, and every reply on
+    `membrane.uds` hold neither marker. Catches: a relay that logs the request it sent, or a parse
+    error that quotes it.
+21. **No surrogate, no value (membrane; G6).** On an intercepted flow, a request without the
+    binding's header, one whose header holds anything but this binding's surrogate, and one with
+    the surrogate only in another field each reach the fixture with no value. Catches: a relay
+    that adds the value to a request that did not present the surrogate.
+22. **A shared leaf (membrane; G14).** Two attachments bind `inject` credentials at one target,
+    with leases ending at different times. The leaf's notAfter is the earlier `not_after`. After
+    the earlier binding fences, the next handshake gets a leaf whose notAfter is the later bound.
+    After `plasmid.renew` moves a bound later, the next handshake gets a later notAfter. When an
+    idle limit ends an attachment before its leaf's notAfter, nothing is attached from then. When
+    no binding at the target admits, a drain that never finishes holds no leaf key, and new flows
+    there are not intercepted. Catches: a leaf with the latest bound; no new leaf after a renewal;
+    a leaf trusted to end use; a leaf key kept through a stuck drain.
+23. **Out of scope on the component path (membrane; G4).** A request naming R to H, on a path
+    outside R's `path_scope`, is refused before any byte reaches the fixture. It is reported with
+    `field` R's `scope.path_scope` and `fix` the path. Catches: an out-of-scope request sent with
+    the value, or sent without it.
+24. **The checks at apply (membrane; G3).** Between resolution and apply, the secret file is
+    replaced by a symlink, a FIFO and a 0644 file, and, where the test host can make one, a file
+    another user (uid N) owns. Each apply is 108 with `path` the secret file and `detail` the
+    check, and no request carries a value. Catches: a `membraned` that follows a link at apply, or
+    accepts a file whose owner or mode is wrong.
+25. **Mock modes (membrane; G4).** With the holding at `simulate`, the operator's mock fixture
+    receives the surrogate, or for a component no credential, and never the value. At `capture`,
+    the capture file holds no marker. Catches: the owner's live value sent to a mock or written to
+    a capture file.
+26. **The surrogate (model; G9).** A fake random source first returns a surrogate that a journal
+    of the instance holds: the controller draws again, and the attachment's surrogate differs from
+    every journaled one. With a 16-character prefix and a 20-character value, the random part
+    still has at least 22 characters, and scrubbing writes the run of `x`. Catches: a reused
+    surrogate; a surrogate with almost no random part.
 
 ## Out of scope
 
