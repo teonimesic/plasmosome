@@ -50,10 +50,18 @@ pub fn umount2(target: &Path, flags: libc::c_int) -> io::Result<()> {
 }
 
 /// unshare(2) with `flags`: `CLONE_FS | CLONE_FILES` gives the calling thread its own working
-/// directory and descriptor table, and `CLONE_NEWNS` gives the process its own mount table.
+/// directory and descriptor table, and `CLONE_NEWNS` gives the process its own mount table. After
+/// `CLONE_FILES`, a descriptor number names an entry in the calling thread's own table: keep each
+/// descriptor the thread opens in that thread, and use no descriptor owned elsewhere from it.
 pub fn unshare(flags: libc::c_int) -> io::Result<()> {
     // SAFETY: unshare takes one integer and touches no memory of this process; a failure only
-    // sets errno.
+    // sets errno. With CLONE_FILES the calling thread gets a copy of the descriptor table, so
+    // descriptor ownership splits: an OwnedFd held elsewhere stays open in the other table when
+    // this thread closes its copy, and a descriptor this thread opens afterwards is in no other
+    // thread's table, so moved to another thread its number names another file or none. That
+    // breaks what OwnedFd promises, not memory; the one caller that passes CLONE_FILES,
+    // hold_in_thread, keeps every descriptor it opens in the unshared thread and touches none
+    // from elsewhere.
     check(unsafe { libc::unshare(flags) })
 }
 

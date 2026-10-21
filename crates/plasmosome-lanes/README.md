@@ -155,7 +155,7 @@ ran as; a failed operation names its errno symbolically, such as `"errno": "EACC
 | `mount <source> <target> <fstype>` | create `target` and mount `source` there |
 | `umount-detach <target>` | `umount2(target, MNT_DETACH)` |
 | `scan <path>...` | every `/proc/<pid>/` and `/proc/<pid>/task/<tid>/` whose `fd`, `cwd`, `root`, `exe` or `maps` names a path's device and inode, the scanner's own process left out |
-| `stage <config>` | as guest root, bind a file into a workload mount namespace for `visible`, `private` or `unreachable`, and report the mount's result and the workload's `stat` as uid 1000 |
+| `stage <config>` | as guest root, bind a file into a workload mount namespace for `visible`, `private`, `unreachable`, `private-parent` or `late-directory`, and report the mount's result, the initial namespace's `stat` and the workload's `stat` as uid 1000 |
 | `mountinfo` | each mount's point, root within its filesystem, optional fields such as `shared:N`, type, source and options |
 | `id` | real and effective uid and gid, and the supplementary groups |
 | `devices` | each virtio device's name and device ID, and whether each block device is read-only |
@@ -176,13 +176,15 @@ beside it, and a read-only flag share (tag `ctl`, at `/mnt/ctl`).
 
 The host acts during a run through `steps::run_lane_with_steps`. A thread reads the console every
 5 ms. Once a named probe's result line is complete, it runs that step's action, such as moving a
-tree to the holding directory, and then writes the step's flag file into the flag share. A guest
-`await` probe waits for that file, so guest processes hold their references while the host acts.
-The flag is written after a failed action too, so the guest is never left waiting.
+tree to the holding directory, and once the action has succeeded writes the step's flag file into
+the flag share. A guest `await` probe waits for that file, so guest processes hold their
+references while the host acts. A failed action writes no flag: the guest's `await` runs out, the
+step's error is in the record, and the judges that need the step read `not run`.
 
 Each test writes a JSON record to `target/tmp/q1a-records`, or to `LANES_RECORDS`, and
 `write_the_results_file` turns the records into the results file, beside the records or at
-`LANES_RESULTS`. The results of 2026-10-20 are in
+`LANES_RESULTS`. It refuses records that name more than one test commit, or a tree with
+uncommitted changes, so re-run every lane at one commit before writing. The results of 2026-10-20 are in
 `docs/benchmarks/2026-10-20-spec027-q1a-gate.md`.
 
 ## Building the guest binaries
@@ -271,9 +273,17 @@ the bundle's `base/rootfs.raw` as its writable root image.
   included. This Homebrew `mke2fs` cannot read a tarball either: it was built without libarchive.
   A caller that needs root-owned files must set the owners itself, for example with
   `debugfs -w` and `set_inode_field`.
-- A host step runs on the console watcher's thread, so a slow action delays every later step. A
-  result line that lands in the run's last 5 ms is seen only by the final read, which takes no
-  step.
+- A host step runs on the console watcher's thread, so a slow action delays every later step.
+  The watcher takes steps only while `run_lane` runs. A result line it has not read when
+  `run_lane` returns is seen only by the final read, which takes no step. That covers a line
+  written after the watcher's last poll, a gap of 5 ms that grows when the thread is not
+  scheduled under load, and a line written while a step's action is still running when the run
+  ends. A gate lane cannot end in that window while it measures, because every step's probe is
+  followed by an `await` that holds the guest for up to 30 s, and a lane whose `await` runs out
+  is `not run`. The steps tests keep each launcher alive until its step's action has run. The
+  mutant that lets the final read take steps survives them: a test that kills it must hold an
+  action past the run's end by a fixed margin, and a correct build would fail it whenever
+  `run_lane` took longer than that margin to return.
 - `lane-init`'s final wait blocks while any child is alive after the kill. A process stuck in an
   uninterruptible sleep, for example on a virtio-fs request, keeps the guest running until
   `run_lane`'s timeout, and the run is `TimedOut`.
