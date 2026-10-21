@@ -266,6 +266,16 @@ fn kernel_codes_exit_by_the_table() {
         ),
         3
     );
+    for code in ["101", "999"] {
+        assert_eq!(
+            exit_for(
+                "1",
+                &format!(r#"{{"code":{code},"message":"m","to":"unknown"}}"#)
+            ),
+            2,
+            "code {code} with to unknown"
+        );
+    }
     for code in ["-32601", "-32602", "999", "-1", "0", "99999999999999999999"] {
         assert_eq!(
             exit_for("1", &format!(r#"{{"code":{code},"message":"m"}}"#)),
@@ -428,10 +438,10 @@ fn a_reply_line_is_read_up_to_its_newline() {
 
 #[test]
 fn bytes_after_the_newline_are_not_read() {
-    let mut input: &[u8] = b"{\"id\":1,\"result\":{}}\n{\"id\":1,\"error\":not json";
+    let mut input: &[u8] = b"{\"id\":1,\"result\":{}}\n{\"id\":1,\"error\":not json}\nmore";
     let line = read_reply(&mut input).expect("the line ends with a newline");
     assert_eq!(line, br#"{"id":1,"result":{}}"#);
-    assert_eq!(input, br#"{"id":1,"error":not json"#);
+    assert_eq!(input, b"{\"id\":1,\"error\":not json}\nmore");
     assert!(matches!(judge_reply(&line), Ok(Reply::Result(_))));
 
     let mut reader = Script::new(vec![
@@ -493,6 +503,16 @@ fn an_interrupted_read_is_retried() {
     ]);
     assert_eq!(
         read_reply(&mut reader),
+        Ok(br#"{"id":1,"result":{}}"#.to_vec())
+    );
+
+    let mut mid_line = Script::new(vec![
+        Step::Bytes(br#"{"id":1,"#.to_vec()),
+        Step::Fail(io::Error::from(io::ErrorKind::Interrupted)),
+        Step::Bytes(b"\"result\":{}}\n".to_vec()),
+    ]);
+    assert_eq!(
+        read_reply(&mut mid_line),
         Ok(br#"{"id":1,"result":{}}"#.to_vec())
     );
 }
@@ -663,6 +683,24 @@ fn a_request_line_escapes_controls_and_is_one_line() {
     let parsed_back: serde_json::Value =
         serde_json::from_str(line.trim_end()).expect("the request line is JSON");
     assert_eq!(parsed_back["params"]["argv"][0], format!("a{escape}\nb"));
+}
+
+#[test]
+fn a_request_line_escapes_its_method() {
+    let backslash = char::from_u32(0x5c).expect("U+005C is a character");
+    let escape = char::from_u32(0x1b).expect("U+001B is a character");
+    let newline = char::from_u32(0x0a).expect("U+000A is a character");
+    let method = format!("a\"b{backslash}c{escape}d{newline}e");
+    let line = request_line(&method, Vec::new()).expect("no params repeat a key");
+    let written =
+        format!("\"a{backslash}\"b{backslash}{backslash}c{backslash}u001bd{backslash}u000ae\"");
+    assert_eq!(
+        line,
+        format!("{{\"id\":1,\"method\":{written},\"params\":{{}}}}{newline}")
+    );
+    let parsed_back: serde_json::Value =
+        serde_json::from_str(line.trim_end()).expect("the request line is JSON");
+    assert_eq!(parsed_back["method"], method);
 }
 
 #[test]
