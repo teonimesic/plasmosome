@@ -327,6 +327,13 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   workspace path, which tools. Spec 022's trusted operator declarations decide only where each
   declared need leads on this host (the real destination, the host directory and its access), and
   can leave a need unmet, never add one.
+- **`[workspace].mount.backend` is optional, has no default and selects nothing.** A
+  declaration may write it or leave it out, and either way parses to the same declaration.
+  Every Mount is realized through the mediated guest filesystem (spec 017), and spec 001 §4.2
+  forbids a virtiofs export, so no value of `backend` says how a workspace reaches the cell.
+  `dst` and its default are spec 022 §6's. Amended on 2026-10-21: before this, no text here
+  stated the `[workspace]` grammar, and the parser gave an absent `backend` the value
+  `"virtiofs"`.
 - **The declaration carries a required `description`** — one or two plain sentences saying what
   the plasmid is for. A declaration without one does not parse, and the error names the field.
 - **Every declared tool carries a required description.** The `[provides]` binding's `tools` is a
@@ -521,6 +528,11 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   refused at `provides.""` with `remove this entry`. Catches: a parser that keeps a blank key, one
   that drops it and its tools in silence, one that refuses only the empty key, a fix that writes the
   blank key back, and a check inside the binding first. Amended on 2026-10-21: this item is new.
+- A `[workspace]` whose `mount` writes `backend = "virtiofs"`, and one that writes
+  `backend = "fuse"`, each parse to the same declaration as the same file without `backend`. A
+  `mount` with no `dst` parses with `dst` `/workspace`. Catches: a parser that gives an absent
+  `backend` a default, `"virtiofs"` or any other, one that keeps a written `backend` in what it
+  parses, and one that refuses it. Amended on 2026-10-21: this item is new.
 - A plasmid granted two hosts and denied a third produces a report naming the denied host and the
   hosts field, in which neither granted host appears anywhere.
 - The denial report reaches the session log and the plasmid's status, and the calling code inside

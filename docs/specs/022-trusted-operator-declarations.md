@@ -304,8 +304,9 @@ leaves every remaining plasmid at the mode it attached at. To change a mode, det
   with `target` = `dst`. It becomes one Mount capability with the entry's `source`, `target` and
   a MountRecipe of its `access`. With no entry: 103, `capability` `entry:workspace:<dst>`.
 - `backend` selects no mechanism. Every Mount is realized as spec 017 and spec 001 §4.2 say,
-  through the mediated guest filesystem. Spec 001 forbids a virtiofs export, and the grammar's
-  default of `"virtiofs"` does not override that.
+  through the mediated guest filesystem. Spec 001 forbids a virtiofs export. `backend` has no
+  default, and a written one, `"virtiofs"` included, changes nothing (spec 011). Amended on
+  2026-10-21: this said the grammar's default of `"virtiofs"` does not override that.
 
 **The Mount source guard.** A Mount source must not expose the kernel's own state, nor let a cell
 rewrite what decides what cells get. The resolver opens the source with the walk of §3 rule 1; a
