@@ -242,6 +242,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11.9"
+
+      - name: python in use
+        run: python3 -VV
+
       - name: install the pinned toolchain
         run: rustup toolchain install --no-self-update
 
@@ -251,6 +258,22 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.event_name == 'push' }}
+
+      # `macos` runs the suites whose tools run on a Mac.
+      - name: ignored tests regression
+        run: python3 tools/ignored-tests-regression.py
+
+      - name: pipeline review usage regression
+        run: python3 tools/pipeline-review-usage-regression.py
+
+      - name: check pipeline health regression
+        run: python3 tools/check-pipeline-health-regression.py
+
+      - name: root image regression
+        run: python3 tools/root-image-regression.py
+
+      - name: quickstart regression
+        run: python3 tools/quickstart-regression.py
 
       # These five steps match the five in `gates`, from clippy to rustdoc. Change both jobs.
       - name: clippy
