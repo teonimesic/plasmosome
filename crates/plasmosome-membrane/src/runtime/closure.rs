@@ -1000,6 +1000,39 @@ mod tests {
             (Helper, DyldEnvironment)
         );
         assert_eq!(with_library(environment), (Library(0), DyldEnvironment));
+        assert_eq!(with_library(text(LC_RPATH, "")), (Library(0), rpath("")));
+    }
+
+    #[test]
+    fn an_unknown_load_command_refuses_only_when_dyld_requires_it() {
+        const REQUIRED: u32 = 0x8000_0099;
+        let required = executable(&[load(LIBSYSTEM), text(REQUIRED, "x")]);
+        let optional = executable(&[load(LIBSYSTEM), text(0x99, "x")]);
+        let unknown = UnknownRequiredCommand { cmd: REQUIRED };
+
+        assert_eq!(
+            read(&required).expect("it reads").required_unknown,
+            [REQUIRED]
+        );
+        assert_eq!(refused(&required, &[]), (Helper, unknown.clone()));
+        assert_eq!(
+            refused(
+                &qualified_helper(),
+                &[(LIBKRUN, libkrun_with(&[text(REQUIRED, "x")]))]
+            ),
+            (Library(0), unknown)
+        );
+        assert!(
+            read(&optional)
+                .expect("it reads")
+                .required_unknown
+                .is_empty()
+        );
+        assert!(audit(&optional, &[]).is_ok());
+        for known in [0x8000_0022, 0x8000_0028, 0x8000_0033, 0x8000_0034] {
+            let image = executable(&[load(LIBSYSTEM), text(known, "x")]);
+            assert!(audit(&image, &[]).is_ok(), "{known:#x}");
+        }
     }
 
     #[test]
@@ -1066,7 +1099,7 @@ mod tests {
 
     #[test]
     fn an_absolute_listed_path_is_listed_before_the_system_rule_and_compared_exactly() {
-        let dotted = "/b/lib/../lib/libkrun.1.19.4.dylib";
+        let dotted = "/b/lib/./libkrun.1.19.4.dylib";
 
         assert_eq!(
             resolve_in(LIBKRUN, BIN, &[LIBKRUN]),
@@ -1090,9 +1123,8 @@ mod tests {
         "/System/Library/User Template/x.dylib",
     ];
 
-    const NOT_SYSTEM: [&str; 16] = [
+    const NOT_SYSTEM: [&str; 15] = [
         "/usr/libx/e.dylib",
-        "/usr/lib/../../tmp/e.dylib",
         "/usr/lib/./e.dylib",
         "/usr//lib/e.dylib",
         "/usr/lib/",
@@ -1127,6 +1159,59 @@ mod tests {
             );
         }
         assert!(!is_system_name(KRUN_NAME));
+    }
+
+    #[test]
+    fn a_dot_dot_after_a_directory_the_name_writes_refuses_and_a_leading_run_does_not() {
+        let climbs = |name: &str| DotDotAfterNamedDirectory {
+            name: name.to_owned(),
+        };
+        for (name, loader_dir, listed) in [
+            (
+                "@executable_path/sub/../libt.dylib",
+                BIN,
+                "/b/bin/libt.dylib",
+            ),
+            (
+                "@executable_path/../sub/../lib/libt.dylib",
+                BIN,
+                "/b/lib/libt.dylib",
+            ),
+            ("@executable_path/../../x/../y", BIN, "/y"),
+            ("@loader_path/a/../b.dylib", "/b/lib", "/b/lib/b.dylib"),
+            ("@loader_path/./a/./../b.dylib", "/b/lib", "/b/lib/b.dylib"),
+            ("/b/lib/../lib/libkrun.1.19.4.dylib", BIN, LIBKRUN),
+            ("/usr/lib/swift/../libSystem.B.dylib", BIN, LIBSYSTEM),
+            ("/usr/lib/../../tmp/e.dylib", BIN, LIBKRUN),
+        ] {
+            assert_eq!(
+                resolve_in(name, loader_dir, &[listed]),
+                Err(climbs(name)),
+                "{name}"
+            );
+        }
+        for name in [
+            "/usr/lib/swift/../libSystem.B.dylib",
+            "/usr/lib/../../tmp/e.dylib",
+        ] {
+            assert!(!is_system_name(name), "{name}");
+        }
+        for name in [
+            KRUN_NAME,
+            "@executable_path/../../b/lib/libkrun.1.19.4.dylib",
+            "@executable_path/./../lib//libkrun.1.19.4.dylib",
+        ] {
+            assert_eq!(
+                resolve_in(name, BIN, &[LIBKRUN]),
+                Ok(Resolution::Listed(0)),
+                "{name}"
+            );
+        }
+        let helper = executable(&[load("@executable_path/sub/../libt.dylib")]);
+        assert_eq!(
+            refused(&helper, &[("/b/bin/libt.dylib", library(&[]))]),
+            (Helper, climbs("@executable_path/sub/../libt.dylib"))
+        );
     }
 
     #[test]
@@ -1368,11 +1453,34 @@ mod tests {
                 name: "kern.osversion",
                 errno: 2,
             },
+            DotDotAfterNamedDirectory { name: name() },
+            UnknownRequiredCommand { cmd: 0x8000_0099 },
         ] {
             assert!(
                 show(Helper, fault.clone()).len() > "helper: ".len(),
                 "{fault:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_volume_is_sealed_only_when_mounted_at_root_read_only_and_reporting_the_seal() {
+        let sealed = VolumeFacts {
+            mounted_at_root: true,
+            read_only: true,
+            seal: Some(true),
+        };
+        for mounted_at_root in [false, true] {
+            for read_only in [false, true] {
+                for seal in [None, Some(false), Some(true)] {
+                    let facts = VolumeFacts {
+                        mounted_at_root,
+                        read_only,
+                        seal,
+                    };
+                    assert_eq!(is_sealed_system_volume(facts), facts == sealed, "{facts:?}");
+                }
+            }
         }
     }
 
@@ -1516,23 +1624,49 @@ mod tests {
         }
 
         #[test]
-        fn a_system_name_that_leaves_the_sealed_volume_refuses_as_unlisted() {
+        fn a_system_name_that_leaves_the_sealed_volume_refuses_in_the_helper_or_a_library() {
             let tree = ArtifactTree::new();
             tree.dir("bin", 0o755);
-            let bytes = executable(&[
-                load(LIBSYSTEM),
-                dylib(LC_LOAD_WEAK_DYLIB, "/usr/lib/cron/libx.dylib"),
-            ]);
+            tree.dir("lib", 0o755);
+            let cron = || dylib(LC_LOAD_WEAK_DYLIB, "/usr/lib/cron/libx.dylib");
+            let bytes = executable(&[load(LIBSYSTEM), cron()]);
             let helper = verified(Helper, &tree.immutable_file("bin/helper", &bytes));
-
-            let fault = unlisted("/usr/lib/cron/libx.dylib", None);
-            assert_eq!(
-                audit_closure(&helper, &[]),
+            let bytes = executable(&[load(LIBSYSTEM), load("@executable_path/../lib/libx.dylib")]);
+            let clean = verified(Helper, &tree.immutable_file("bin/clean", &bytes));
+            let bytes = library(&[load(LIBSYSTEM), cron()]);
+            let shim = verified(Library(0), &tree.immutable_file("lib/libx.dylib", &bytes));
+            let refusal = |image| {
                 Err(ClosureRefusal {
-                    image: Helper,
-                    fault
+                    image,
+                    fault: unlisted("/usr/lib/cron/libx.dylib", None),
                 })
-            );
+            };
+
+            assert_eq!(audit_closure(&helper, &[]), refusal(Helper));
+            assert_eq!(audit_closure(&clean, &[shim]), refusal(Library(0)));
+        }
+
+        #[test]
+        fn the_root_volume_reports_the_seal_and_the_data_preboot_and_dev_volumes_do_not() {
+            let facts = |path: &std::ffi::CStr| {
+                volume_facts(path).unwrap_or_else(|error| panic!("{path:?}: {error}"))
+            };
+            let volume = |mounted_at_root, read_only, seal| VolumeFacts {
+                mounted_at_root,
+                read_only,
+                seal,
+            };
+
+            assert_eq!(facts(c"/"), volume(true, true, Some(true)));
+            assert_eq!(facts(c"/usr/lib"), volume(true, true, Some(true)));
+            for path in [
+                c"/System/Volumes/Data",
+                c"/System/Volumes/Preboot",
+                c"/System/Volumes/Preboot/Cryptexes/OS",
+            ] {
+                assert_eq!(facts(path), volume(false, false, Some(false)), "{path:?}");
+            }
+            assert_eq!(facts(c"/dev"), volume(false, false, None));
         }
     }
 }
