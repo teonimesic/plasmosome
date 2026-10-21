@@ -23,6 +23,10 @@ pub enum PathOrigin {
 /// `path` of a refusal that reports none. `trusted_uid` is the UID the caller passed to the check,
 /// and is `peer_mismatch`'s `uid`. Each code carries only the fields spec 025's client-code table
 /// lists for it.
+///
+/// Every path is written by lossy UTF-8 conversion, each invalid sequence as U+FFFD. So a path
+/// that is not UTF-8 is shown as another path, and `NotPrivate`'s `fix` would change that other
+/// path. Spec 025 section 5 has the caller refuse a socket path that is not UTF-8 first.
 pub fn map_refusal(
     error: &PrivateSocketError,
     checked: &Path,

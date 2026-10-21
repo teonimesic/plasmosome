@@ -100,8 +100,10 @@ stream it failed on; the caller picks the exit.
 
 `map_refusal` turns a refusal from `plasmosome-core`'s private-socket checks into the client error
 that spec 025 §5's table gives it. It has one match arm for each of `PrivateSocketError`'s 22
-variants and no catch-all arm. So a variant added to `plasmosome-core` stops this crate's build
-until spec 025's table and the map both name it.
+variants, and clippy refuses a catch-all arm there (`wildcard_enum_match_arm` is denied on that
+match). So a variant added to `plasmosome-core` stops this crate's build until the map names it.
+The refusal test has its own match over every variant, so the test build stops too until the test
+lists the variant, and the test then fails until spec 025's table has its row.
 
 The caller passes the refusal, the path it passed to the check, where that path came from, and the
 trusted UID it passed to the check. The path is the socket path for `check_private_path` and
@@ -114,10 +116,15 @@ Each code carries only the fields spec 025's client-code table lists for it. `pa
 component the check reports. `BadName`, `PeerCredentials` and `PeerMismatch` report none, so their
 `path` is the path passed to the check. `unsafe_socket` adds `rule`, and `NotPrivate` adds a `fix`:
 `chmod 700` with the directory in single quotes, each single quote in it written as `'"'"'`, so a
-POSIX shell runs the text as it stands. `peer_mismatch`'s `uid` is the trusted UID passed in, since
-the map never reads the effective UID. Its `peer_uid` is the UID the kernel reported, absent when it
-could not be read. `Replaced`, `AddressInUse` and `BindEscaped` come only from binding a socket,
-which the client never does, so each is `internal`, exit 70.
+POSIX shell runs the text as it stands. `peer_mismatch`'s `uid` is the trusted UID passed in: the
+map never reads the effective UID, nor `PeerMismatch`'s own `trusted`. Its `peer_uid` is the UID
+the kernel reported, absent when it could not be read. `Replaced`, `AddressInUse` and
+`BindEscaped` come only from `PrivateListener::bind` and `PrivateDir::reconfirm`, which the client
+never calls, so each is `internal`, exit 70.
+
+Every path is written by lossy UTF-8 conversion, so the caller passes only UTF-8 paths, as spec
+025 §5 requires. A path that is not UTF-8 would be shown with U+FFFD, and `NotPrivate`'s `fix`
+would then name another path.
 
 ## What's inside
 
