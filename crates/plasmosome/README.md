@@ -30,4 +30,5 @@ To follow the work, read the repository. Nothing for building a capability modul
 [`plasmid-sdk`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid-sdk), the
 contract a module will build against, is reserved in this repository and unimplemented, and the
 authoring tool [`plasmid`](https://github.com/teonimesic/plasmosome/tree/main/crates/plasmid)
-does not yet write one.
+writes a module's declaration but not yet its component in this repository's source. The
+`plasmid 0.0.0` on crates.io is the name-holding placeholder, whose `plasmid new` only refuses.
