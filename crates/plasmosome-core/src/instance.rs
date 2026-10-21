@@ -35,6 +35,7 @@ const RETIRED_DIR: &CStr = c"retired";
 const SUPERVISOR_LOCK_FILE: &CStr = c"supervisor.lock";
 const SUPERVISOR_LOG_FILE: &CStr = c"membraned.log";
 const ALLOCATION_ATTEMPTS: usize = 64;
+const CELL_ID_PREFIX: &[u8] = b"cell-";
 const MARKER_KEYS: [&str; 3] = ["cell", "boot_session", "stopped"];
 pub(crate) const MAX_MARKER_BYTES: usize = 4096;
 const MARKER_READ_LIMIT: u64 = MAX_MARKER_BYTES as u64 + 1;
@@ -332,10 +333,11 @@ impl InstanceRoot {
             .allocation
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let mut lowest = 1;
         for _ in 0..ALLOCATION_ATTEMPTS {
-            let next = self.next_cell_number()?;
+            let next = self.next_cell_number(lowest)?;
             match self.create_cell_dir(lock, &format_cell_id(next)) {
-                Err(CellDirError::AlreadyExists { .. }) => {}
+                Err(CellDirError::AlreadyExists { .. }) => lowest = next + 1,
                 created => return created.map_err(AllocateError::Create),
             }
         }
@@ -441,7 +443,7 @@ impl InstanceRoot {
         Ok(cells)
     }
 
-    fn next_cell_number(&self) -> Result<u64, AllocateError> {
+    fn next_cell_number(&self, lowest: u64) -> Result<u64, AllocateError> {
         let cells = c_name(CELLS_DIR.as_bytes()).map_err(|source| AllocateError::Listing {
             path: self.path.join(CELLS_DIR),
             source,
@@ -452,6 +454,7 @@ impl InstanceRoot {
         let largest = in_cells.max(self.largest_cell_number(RETIRED_DIR)?);
         largest
             .checked_add(1)
+            .map(|next| next.max(lowest))
             .filter(|next| *next <= MAX_CELL_NUMBER)
             .ok_or(AllocateError::Exhausted)
     }
@@ -475,8 +478,7 @@ impl InstanceRoot {
         let mut largest = 0;
         for listed in DirectoryStream::open(dir.as_fd()).map_err(listing)? {
             let listed = listed.map_err(listing)?;
-            let number = std::str::from_utf8(&listed).ok().and_then(parse_cell_id);
-            largest = largest.max(number.unwrap_or(0));
+            largest = largest.max(listed_cell_number(&listed).unwrap_or(0));
         }
         Ok(largest)
     }
@@ -1443,8 +1445,8 @@ impl fmt::Display for AllocateError {
             ),
             AllocateError::Contended { path } => write!(
                 f,
-                "another process created the chosen name in {} before each of \
-                 {ALLOCATION_ATTEMPTS} attempts, so no cell was allocated",
+                "no cell was allocated: each of {ALLOCATION_ATTEMPTS} attempts found the name it \
+                 chose already taken in {}",
                 path.display()
             ),
             AllocateError::Create(error) => {
@@ -1555,6 +1557,14 @@ fn open_at(
     // SAFETY: openat returned a non-negative descriptor just above, which nothing else owns, so
     // this OwnedFd becomes its only owner.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn listed_cell_number(name: &[u8]) -> Option<u64> {
+    let mut lowered = name.to_vec();
+    lowered
+        .get_mut(..CELL_ID_PREFIX.len())?
+        .make_ascii_lowercase();
+    std::str::from_utf8(&lowered).ok().and_then(parse_cell_id)
 }
 
 fn parse_cell_name(raw: &[u8]) -> Option<CellId> {
