@@ -518,21 +518,28 @@ fn a_symbolic_link_in_instances_refuses_the_selection() {
         ("a file", file),
         ("nothing", elsewhere.path().join("missing")),
     ];
+    let mut not_refused = Vec::new();
     for (what, pointee) in pointees {
         let home = Home::new();
-        let a = home.listening("a");
+        let a = home.live("a", 1);
         let link = home.instances().join("l");
         std::os::unix::fs::symlink(&pointee, &link).expect("a symlink");
         let ran = run(&["status"], home.vars());
-        assert_eq!(
-            ran.exit,
-            Exit::Refused,
-            "a link to {what}: {}",
-            String::from_utf8_lossy(&ran.stderr)
-        );
+        if ran.exit != Exit::Refused {
+            not_refused.push(format!(
+                "a link to {what}: {}",
+                String::from_utf8_lossy(&ran.stderr)
+            ));
+            continue;
+        }
         assert_unsafe(&home, "symlink", &link);
-        assert_never_reached(&a, &format!("a selection beside a link to {what}"));
+        assert_eq!(
+            a.connections(),
+            0,
+            "a selection beside a link to {what} reached a"
+        );
     }
+    assert!(not_refused.is_empty(), "{not_refused:#?}");
     assert_never_reached(&target, "a selection with a symbolic link");
 }
 
@@ -814,5 +821,8 @@ fn a_candidate_whose_path_is_too_long_refuses_the_selection() {
     assert_eq!(error["max_bytes"], MAX_PATH);
     assert!(envelope.get("instance").is_none(), "{envelope}");
     assert_never_reached(&a, "a selection with a candidate too long to connect to");
-    assert_never_reached(&listener, "a selection with a candidate too long to connect to");
+    assert_never_reached(
+        &listener,
+        "a selection with a candidate too long to connect to",
+    );
 }
