@@ -142,13 +142,15 @@ impl RuntimeListener {
             Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(None),
             Err(error) => return Err(error),
         };
-        if let Err(error) = stream.set_nonblocking(true) {
-            return Ok(Some(Connection::Unidentified {
+        let identified = stream
+            .set_nonblocking(true)
+            .and_then(|()| peer_pid(&stream));
+        Ok(Some(match identified {
+            Ok(pid) => Connection::Identified { stream, pid },
+            Err(error) => Connection::Unidentified {
                 errno: errno_of(&error),
-            }));
-        }
-        let pid = peer_pid(&stream)?;
-        Ok(Some(Connection::Identified { stream, pid }))
+            },
+        }))
     }
 
     /// Closes the listener, then removes its socket file if a no-follow
