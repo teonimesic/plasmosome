@@ -1,7 +1,9 @@
 use std::ffi::{CStr, CString, OsStr};
 use std::fmt;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "macos")]
+use std::os::fd::AsFd;
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
