@@ -74,21 +74,30 @@ fn exact_help_operands_succeed_before_config_reading() {
     }
 }
 
+fn assert_prints_the_version(directory: &Path, state: &str) {
+    let output = output_within(membraned(directory, &[OsStr::new("--version")]));
+    assert_eq!(output.status.code(), Some(0), "{state}: {output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("membraned {}\n", env!("CARGO_PKG_VERSION")),
+        "{state}: {output:?}"
+    );
+    assert!(output.stderr.is_empty(), "{state}: {output:?}");
+}
+
 #[test]
 fn version_is_the_sole_argument_and_reads_no_config() {
     let directory = tempfile::tempdir().expect("the test owns a temporary directory");
     let socket = directory.path().join("free.uds");
+
+    assert_prints_the_version(directory.path(), "no file named --version");
+
+    std::fs::write(directory.path().join("--version"), b"not JSON")
+        .expect("the conflicting filename is written");
+    assert_prints_the_version(directory.path(), "--version holds not JSON");
+
     write_config(directory.path(), OsStr::new("--version"), &socket);
-
-    let output = output_within(membraned(directory.path(), &[OsStr::new("--version")]));
-
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        format!("membraned {}\n", env!("CARGO_PKG_VERSION")),
-        "{output:?}"
-    );
-    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_prints_the_version(directory.path(), "--version holds a valid config");
     assert!(!socket.exists(), "--version binds nothing");
 }
 
@@ -98,10 +107,14 @@ fn every_other_sole_operand_remains_a_literal_config_path() {
     let occupied = directory.path().join("taken.uds");
     std::fs::write(&occupied, b"owned occupied path").expect("the occupied path is written");
 
-    let cases: [(OsString, OsString); 5] = [
+    let cases: [(OsString, OsString); 9] = [
         (OsString::from("--help"), OsString::from("./--help")),
         (OsString::from("-h"), OsString::from("./-h")),
         (OsString::from("--version"), OsString::from("./--version")),
+        (OsString::from("-V"), OsString::from("-V")),
+        (OsString::from("--Version"), OsString::from("--Version")),
+        (OsString::from("--version=x"), OsString::from("--version=x")),
+        (OsString::from("--help=x"), OsString::from("--help=x")),
         (OsString::from("help"), OsString::from("help")),
         (OsString::from("--"), OsString::from("--")),
     ];
@@ -128,6 +141,18 @@ fn every_other_sole_operand_remains_a_literal_config_path() {
         output.status.code(),
         Some(2),
         "a raw non-UTF-8 operand does not alias its lossy spelling: {output:?}"
+    );
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot read"),
+        "{output:?}"
+    );
+
+    let output = output_within(membraned(directory.path(), &[OsStr::new("")]));
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an empty operand is a path that cannot be read: {output:?}"
     );
     assert!(output.stdout.is_empty(), "{output:?}");
     assert!(
@@ -164,7 +189,7 @@ fn a_usage_error_exits_64_and_starts_nothing() {
     let socket = directory.path().join("membrane.uds");
     write_config(directory.path(), OsStr::new("valid.json"), &socket);
 
-    let lists: [&[&str]; 13] = [
+    let lists: [&[&str]; 15] = [
         &[],
         &["--version", "extra"],
         &["extra", "--version"],
@@ -177,6 +202,8 @@ fn a_usage_error_exits_64_and_starts_nothing() {
         &["--config-fd=3", "--lock-fd=4"],
         &["--config-fd=3", "--lock-fd=4", "--cell=../x"],
         &["--config-fd=3", "--lock-fd=4", "--cell="],
+        &["--config-fd=3", "--lock-fd=4", "--cellcell-1"],
+        &["--config-fd=3", "--lock-fd=4", "--cell==cell-1"],
         &["--config-fd=5", "--lock-fd=4", "--cell=cell-1"],
     ];
     let mut cases: Vec<Vec<OsString>> = lists

@@ -68,6 +68,8 @@ fn a_cell_that_is_not_a_cell_id_is_not_the_form() {
         "--cell=cell-1/x",
         "--cell",
         "--cell cell-1",
+        "--cellcell-1",
+        "--cell==cell-1",
         "--Cell=cell-1",
         "cell-1",
     ] {
