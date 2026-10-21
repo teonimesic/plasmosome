@@ -876,7 +876,21 @@ fn bind_refuses_a_path_longer_than_sun_path() {
     let longest = "s".repeat(room);
     let listener = bind(&root, &longest);
     assert_eq!(listener.entry().path.as_os_str().len(), SUN_PATH_MAX);
+    assert_eq!(connected(&listener.entry().path), Ok(()));
+    assert!(matches!(accept_one(&listener), Accepted::Trusted(_)));
     drop(listener);
+
+    let deep = root.path().join("d".repeat(SUN_PATH_MAX - 2 - used));
+    make_dir(&deep, 0o700);
+    let dir = PrivateDir::open(&deep).expect("the deep directory is private");
+    let listener = PrivateListener::bind(dir, "s", effective_uid()).expect("a one-byte name binds");
+    assert_eq!(listener.entry().path.as_os_str().len(), SUN_PATH_MAX);
+    assert_eq!(connected(&listener.entry().path), Ok(()));
+    assert!(matches!(accept_one(&listener), Accepted::Trusted(_)));
+    drop(listener);
+    assert_eq!(names_in(&deep), Vec::<String>::new());
+    fs::remove_dir(&deep).expect("rmdir");
+
     let too_long = "s".repeat(room + 1);
     assert_eq!(
         PrivateListener::bind(private_dir(&root), &too_long, effective_uid()).unwrap_err(),
@@ -886,6 +900,40 @@ fn bind_refuses_a_path_longer_than_sun_path() {
         }
     );
     assert_eq!(fs::read_dir(root.path()).expect("readdir").count(), 0);
+}
+
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .expect("readdir")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn bind_leaves_exactly_one_entry_named_as_configured() {
+    let root = private_root();
+    let listener = bind(&root, "sock");
+    assert_eq!(listener.entry(), &entry_of(&root.path().join("sock")));
+    assert_eq!(names_in(root.path()), vec!["sock"]);
+    assert_eq!(listener.close(), RemoveOutcome::Removed);
+    assert_eq!(names_in(root.path()), Vec::<String>::new());
+}
+
+#[test]
+fn drop_removes_the_socket_at_its_configured_name() {
+    let root = private_root();
+    let listener = bind(&root, "sock");
+    assert_eq!(names_in(root.path()), vec!["sock"]);
+    drop(listener);
+    assert_eq!(names_in(root.path()), Vec::<String>::new());
 }
 
 #[test]
