@@ -17,7 +17,11 @@ holding every backend to the same functions.
 The exact-grant clauses build expected objects from each request plus the issued identity, never
 from a backend's returned owner or capability. Applied-object withdrawal keeps observations from
 every other universe class standing. Dedicated defective backends alter each colliding resource
-field, substitute an owner, remove cross-class state, and choose the wrong exact instance.
+field, substitute an owner, remove cross-class state, and choose the wrong exact instance. Three
+change only a recipe or launch: in the returned entry, in the recorded object, or in both, and
+`snapshot_never_invents_objects` must reject each. A defect that substitutes a capability or a
+recipe, or returns a stranger from a revoke, names one class, and its witness runs it once for
+each of the five. So a clause that checks only its first grant still fails a witness.
 
 A clause earns its place by being watched failing against a backend built to carry the defect it
 names. The suite started at five, and the three added by task 009 came from asking what a broken
