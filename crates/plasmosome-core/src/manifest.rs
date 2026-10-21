@@ -1491,7 +1491,7 @@ description = "Make the workspace available to the cell."
 version = "0.1.0"
 
 [workspace]
-mount = { backend = "virtiofs", dst = "/workspace" }
+mount = { dst = "/workspace" }
 "#;
 
     const GITHUB_PR_WITH_MOCK: &str = r#"
@@ -1796,7 +1796,36 @@ subject = "git"
     #[test]
     fn workspace_manifest_parses_the_mount() {
         let manifest = PlasmidManifest::parse(WORKSPACE).unwrap();
-        assert_eq!(manifest.workspace.as_ref().unwrap().backend, "virtiofs");
+        assert_eq!(manifest.workspace.as_ref().unwrap().dst, "/workspace");
+    }
+
+    fn workspace_declaration(mount: &str) -> String {
+        format!(
+            "id = \"workspace-bind\"\n\
+             description = \"Make the workspace available to the cell.\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [workspace]\n\
+             mount = {mount}\n"
+        )
+    }
+
+    #[test]
+    fn a_written_backend_changes_nothing_in_the_parsed_declaration() {
+        let without =
+            PlasmidManifest::parse(&workspace_declaration("{ dst = \"/srv/work\" }")).unwrap();
+        assert_eq!(without.workspace.as_ref().unwrap().dst, "/srv/work");
+        for backend in ["virtiofs", "fuse"] {
+            let mount = format!("{{ backend = \"{backend}\", dst = \"/srv/work\" }}");
+            let written = PlasmidManifest::parse(&workspace_declaration(&mount))
+                .unwrap_or_else(|error| panic!("backend = {backend:?} was refused: {error:?}"));
+            assert_eq!(written, without, "backend = {backend:?}");
+        }
+    }
+
+    #[test]
+    fn a_mount_with_no_dst_gets_the_workspace_path() {
+        let manifest = PlasmidManifest::parse(&workspace_declaration("{}")).unwrap();
         assert_eq!(manifest.workspace.as_ref().unwrap().dst, "/workspace");
     }
 
