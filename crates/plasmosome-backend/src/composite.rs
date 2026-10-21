@@ -199,7 +199,12 @@ mod tests {
             assert_eq!(entry.handle, op.handle());
             assert_eq!(entry.object(), op.object());
             assert_eq!(
-                backend.leaf_snapshot(leaf).objects().collect::<Vec<_>>(),
+                backend
+                    .leaf_snapshot(leaf)
+                    .unwrap()
+                    .state()
+                    .objects()
+                    .collect::<Vec<_>>(),
                 vec![&op.object()]
             );
             assert_eq!(backend.grant(op.clone(), GrantKind::Hot).unwrap(), entry);
@@ -207,7 +212,7 @@ mod tests {
                 backend.revoke(op.handle(), DrainSpec::forcing()).unwrap(),
                 entry
             );
-            assert!(backend.snapshot_os_state().is_empty());
+            assert!(backend.snapshot_os_state().unwrap().is_empty());
         }
     }
 
@@ -221,7 +226,7 @@ mod tests {
             CompositeBackend::new(fake(), Box::new(filesystem), fake()).expect("valid leaves");
         let applied = fixtures::op(GrantId::new(), owner.clone(), mount("/code", "/workspace"));
         backend.apply(applied.clone()).unwrap();
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         assert_eq!(
             backend.grant(applied.clone(), GrantKind::Hot),
             Err(BackendError::IdentityConflict {
@@ -234,7 +239,7 @@ mod tests {
             backend.grant(refused.clone(), GrantKind::Hot),
             Err(BackendError::Fault("leaf refused".to_string()))
         );
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
         for handle in [applied.handle(), refused.handle()] {
             assert_eq!(
                 backend.revoke(handle, DrainSpec::forcing()),
@@ -264,12 +269,16 @@ mod tests {
         assert!(
             backend
                 .leaf_snapshot(Leaf::Filesystem)
+                .unwrap()
+                .state()
                 .objects()
                 .any(|object| object == &file.object())
         );
         assert!(
             backend
                 .leaf_snapshot(Leaf::Network)
+                .unwrap()
+                .state()
                 .objects()
                 .any(|object| object == &proxy.object())
         );
@@ -277,7 +286,7 @@ mod tests {
             backend.revoke(proxy.handle, DrainSpec::forcing()).unwrap(),
             proxy
         );
-        assert_eq!(backend.snapshot_os_state().len(), 1);
+        assert_eq!(backend.snapshot_os_state().unwrap().state().len(), 1);
     }
 
     #[test]
@@ -292,7 +301,7 @@ mod tests {
         network.mark_stuck(entry.handle);
         let mut backend =
             CompositeBackend::new(Box::new(network), fake(), fake()).expect("valid leaves");
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         assert_eq!(
             backend
                 .revoke(entry.handle, DrainSpec::graceful(Duration::from_millis(2)))
@@ -302,9 +311,9 @@ mod tests {
                 deadline_ms: 2,
             }
         );
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
         backend.revoke(entry.handle, DrainSpec::forcing()).unwrap();
-        assert!(backend.snapshot_os_state().is_empty());
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
     }
 
     #[test]
@@ -322,7 +331,12 @@ mod tests {
             BackendError::UnknownHandle { handle: stale }
         );
         assert_eq!(
-            backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+            backend
+                .snapshot_os_state()
+                .unwrap()
+                .state()
+                .objects()
+                .collect::<Vec<_>>(),
             vec![&live.object()]
         );
     }
@@ -343,7 +357,7 @@ mod tests {
         let mut backend =
             CompositeBackend::new(fake(), Box::new(filesystem), fake()).expect("valid leaves");
         backend.apply(op.clone()).unwrap();
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         let graceful = DrainSpec::graceful(Duration::from_millis(3));
         assert_eq!(
             backend
@@ -368,11 +382,11 @@ mod tests {
                 deadline_ms: 3,
             }
         );
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
         backend
             .apply_removal(op.removal(), &owner, DrainSpec::forcing())
             .unwrap();
-        assert!(backend.snapshot_os_state().is_empty());
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
     }
 
     #[test]
@@ -406,6 +420,8 @@ mod tests {
         assert_eq!(
             backend
                 .leaf_snapshot(Leaf::Filesystem)
+                .unwrap()
+                .state()
                 .objects()
                 .collect::<Vec<_>>(),
             vec![&expected]
@@ -415,21 +431,23 @@ mod tests {
             owner: cell_owner("audit"),
             ..expected.clone()
         };
-        let before_conflict = backend.snapshot_os_state();
+        let before_conflict = backend.snapshot_os_state().unwrap();
         assert_eq!(
             backend.plant(conflict).unwrap_err(),
             BackendError::IdentityConflict { class: "mount", id }
         );
-        assert_eq!(backend.snapshot_os_state(), before_conflict);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before_conflict);
 
         backend
             .apply_removal(removal.clone(), &expected.owner, DrainSpec::forcing())
             .unwrap();
-        assert!(backend.snapshot_os_state().is_empty());
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
         backend.plant(expected.clone()).unwrap();
         assert_eq!(
             backend
                 .leaf_snapshot(Leaf::Filesystem)
+                .unwrap()
+                .state()
                 .objects()
                 .collect::<Vec<_>>(),
             vec![&expected]
@@ -437,7 +455,7 @@ mod tests {
         backend
             .apply_removal(removal, &expected.owner, DrainSpec::forcing())
             .unwrap();
-        assert!(backend.snapshot_os_state().is_empty());
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
     }
 
     const LEAVES: [Leaf; 3] = [Leaf::Network, Leaf::Filesystem, Leaf::Broker];

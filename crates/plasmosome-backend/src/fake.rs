@@ -211,7 +211,7 @@ mod tests {
                     let first = grant(&mut backend, "owner", capability.clone());
                     let second = grant(&mut backend, "owner", capability);
                     assert_ne!(first.handle, second.handle);
-                    assert_eq!(backend.snapshot_os_state().len(), 2);
+                    assert_eq!(backend.snapshot_os_state().unwrap().state().len(), 2);
                     let (taken, survivor) = if reverse {
                         (second, first)
                     } else {
@@ -219,11 +219,16 @@ mod tests {
                     };
                     backend.revoke(taken.handle, drain).unwrap();
                     assert_eq!(
-                        backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                        backend
+                            .snapshot_os_state()
+                            .unwrap()
+                            .state()
+                            .objects()
+                            .collect::<Vec<_>>(),
                         vec![&survivor.object()]
                     );
                     backend.revoke(survivor.handle, drain).unwrap();
-                    assert!(backend.snapshot_os_state().is_empty());
+                    assert!(backend.snapshot_os_state().unwrap().is_empty());
                 }
             }
         }
@@ -236,16 +241,16 @@ mod tests {
         let second_mount = grant(&mut backend, "owner", mount("/code", "/workspace"));
         let first_route = grant(&mut backend, "owner", proxy_map("api.github.com", "audit"));
         let second_route = grant(&mut backend, "owner", proxy_map("api.github.com", "deploy"));
-        assert_eq!(backend.snapshot_os_state().len(), 4);
+        assert_eq!(backend.snapshot_os_state().unwrap().state().len(), 4);
         backend
             .revoke(second_mount.handle, DrainSpec::forcing())
             .unwrap();
         backend
             .revoke(first_route.handle, DrainSpec::forcing())
             .unwrap();
-        let standing = backend.snapshot_os_state();
+        let standing = backend.snapshot_os_state().unwrap();
         assert_eq!(
-            standing.objects().cloned().collect::<Vec<_>>(),
+            standing.state().objects().cloned().collect::<Vec<_>>(),
             vec![second_route.object(), first_mount.object()]
         );
     }
@@ -263,7 +268,12 @@ mod tests {
         let live = grant(&mut backend, "network", capability);
         backend.revoke(live.handle, DrainSpec::forcing()).unwrap();
         assert_eq!(
-            backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+            backend
+                .snapshot_os_state()
+                .unwrap()
+                .state()
+                .objects()
+                .collect::<Vec<_>>(),
             vec![&residue]
         );
         backend
@@ -276,7 +286,7 @@ mod tests {
                 DrainSpec::forcing(),
             )
             .unwrap();
-        assert!(backend.snapshot_os_state().is_empty());
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
     }
 
     #[test]
@@ -285,7 +295,7 @@ mod tests {
         let mut backend = FakeBackend::new();
         let first = grant(&mut backend, "deploy", capability.clone());
         let second = grant(&mut backend, "deploy", capability.clone());
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         let wrong_capability = UniverseRemoval {
             id: first.handle.id,
             capability: proxy_map("api.github.com", "other"),
@@ -305,7 +315,7 @@ mod tests {
                 backend.apply_removal(removal, &owner, DrainSpec::forcing()),
                 Err(BackendError::UnknownObject { .. })
             ));
-            assert_eq!(backend.snapshot_os_state(), before);
+            assert_eq!(backend.snapshot_os_state().unwrap(), before);
         }
         backend.revoke(first.handle, DrainSpec::forcing()).unwrap();
         assert!(matches!(
@@ -313,7 +323,12 @@ mod tests {
             Err(BackendError::UnknownHandle { .. })
         ));
         assert_eq!(
-            backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+            backend
+                .snapshot_os_state()
+                .unwrap()
+                .state()
+                .objects()
+                .collect::<Vec<_>>(),
             vec![&second.object()]
         );
     }
@@ -325,15 +340,20 @@ mod tests {
         let stuck = grant(&mut backend, "network", capability.clone());
         let peer = grant(&mut backend, "network", capability);
         backend.mark_stuck(stuck.handle);
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         assert!(matches!(
             backend.revoke(stuck.handle, DrainSpec::graceful(Duration::from_millis(2))),
             Err(BackendError::DrainTimedOut { .. })
         ));
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
         backend.revoke(stuck.handle, DrainSpec::forcing()).unwrap();
         assert_eq!(
-            backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+            backend
+                .snapshot_os_state()
+                .unwrap()
+                .state()
+                .objects()
+                .collect::<Vec<_>>(),
             vec![&peer.object()]
         );
     }
@@ -349,25 +369,25 @@ mod tests {
         let mut backend = FakeBackend::new();
         backend.apply(op.clone()).unwrap();
         backend.apply(op.clone()).unwrap();
-        assert_eq!(backend.snapshot_os_state().len(), 1);
+        assert_eq!(backend.snapshot_os_state().unwrap().state().len(), 1);
         let peer = fixtures::op(
             GrantId::new(),
             cell_owner("cell-1", "github-pr"),
             session_file("/skills/pr.md"),
         );
         backend.apply(peer).unwrap();
-        assert_eq!(backend.snapshot_os_state().len(), 2);
+        assert_eq!(backend.snapshot_os_state().unwrap().state().len(), 2);
         let conflict = fixtures::op(
             id,
             cell_owner("cell-1", "audit"),
             session_file("/skills/pr.md"),
         );
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         assert!(matches!(
             backend.apply(conflict),
             Err(BackendError::IdentityConflict { .. })
         ));
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
     }
 
     #[test]
@@ -388,10 +408,10 @@ mod tests {
             backend.revoke(entry.handle, DrainSpec::forcing()),
             Err(BackendError::UnknownHandle { .. })
         ));
-        assert_eq!(backend.snapshot_os_state().len(), 1);
+        assert_eq!(backend.snapshot_os_state().unwrap().state().len(), 1);
         let fresh = grant(&mut backend, "github-pr", entry.capability);
         assert_ne!(fresh.handle, entry.handle);
-        assert_eq!(backend.snapshot_os_state().len(), 2);
+        assert_eq!(backend.snapshot_os_state().unwrap().state().len(), 2);
     }
 
     fn cell_owner(cell: &str, plugin: &str) -> CellOwner {
@@ -426,7 +446,7 @@ mod tests {
         let stuck = grant_to(&mut backend, &network, capability.clone());
         let peer = grant_to(&mut backend, &network, capability);
         backend.mark_stuck(stuck.handle);
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         assert_eq!(
             backend
                 .apply_removal(
@@ -440,13 +460,18 @@ mod tests {
                 deadline_ms: 7,
             }
         );
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
         assert_eq!(backend.peek_entry(stuck.handle).unwrap(), stuck);
         backend
             .apply_removal(stuck.removal(), &network, DrainSpec::forcing())
             .unwrap();
         assert_eq!(
-            backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+            backend
+                .snapshot_os_state()
+                .unwrap()
+                .state()
+                .objects()
+                .collect::<Vec<_>>(),
             vec![&peer.object()]
         );
         assert_eq!(
@@ -466,7 +491,7 @@ mod tests {
         let mut backend = FakeBackend::new();
         backend.apply(op.clone()).unwrap();
         backend.mark_stuck(address);
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         assert_eq!(
             backend
                 .apply_removal(
@@ -480,11 +505,11 @@ mod tests {
                 deadline_ms: 3,
             }
         );
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
         backend
             .apply_removal(op.removal(), &workspace, DrainSpec::forcing())
             .unwrap();
-        assert!(backend.snapshot_os_state().is_empty());
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
     }
 
     #[test]
@@ -505,7 +530,7 @@ mod tests {
                 DrainSpec::graceful(Duration::from_millis(3)),
             )
             .unwrap();
-        assert!(backend.snapshot_os_state().is_empty());
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
     }
 
     #[test]
@@ -525,7 +550,7 @@ mod tests {
         backend.apply(op.clone()).unwrap();
         let peer = grant_to(&mut backend, &peer_owner, capability.clone());
         let elsewhere = grant_to(&mut backend, &same_plugin_elsewhere, capability);
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         let graceful = DrainSpec::graceful(Duration::from_millis(9));
         assert_eq!(
             backend.revoke(granted.handle, graceful).unwrap_err(),
@@ -543,7 +568,7 @@ mod tests {
                 deadline_ms: 9,
             }
         );
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
         assert_eq!(backend.peek_entry(granted.handle).unwrap(), granted);
         assert_eq!(backend.revoke(peer.handle, graceful).unwrap(), peer);
         assert_eq!(
@@ -557,13 +582,18 @@ mod tests {
             granted
         );
         assert_eq!(
-            backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+            backend
+                .snapshot_os_state()
+                .unwrap()
+                .state()
+                .objects()
+                .collect::<Vec<_>>(),
             vec![&op.object()]
         );
         backend
             .apply_removal(op.removal(), &stalled, DrainSpec::forcing())
             .unwrap();
-        assert!(backend.snapshot_os_state().is_empty());
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
     }
 
     #[test]
@@ -575,7 +605,7 @@ mod tests {
         backend.apply(op.clone()).unwrap();
         backend.mark_stuck(op.handle());
         backend.mark_stuck(stuck.handle);
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         let zero = DrainSpec::graceful(Duration::ZERO);
         assert_eq!(
             backend
@@ -593,11 +623,11 @@ mod tests {
                 deadline_ms: 0,
             }
         );
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
         assert_eq!(backend.peek_entry(stuck.handle).unwrap(), stuck);
         let drained = grant_to(&mut backend, &workspace, session_file("/skills/drained.md"));
         assert_eq!(backend.revoke(drained.handle, zero).unwrap(), drained);
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
     }
 
     #[test]
@@ -636,7 +666,7 @@ mod tests {
         backend.stall_graceful_drains_for_owner(stalled.clone());
         backend.apply(op.clone()).unwrap();
         backend.mark_stuck(op.handle());
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         let other_source = UniverseRemoval {
             id: op.id(),
             capability: mount("/secrets", "/workspace"),
@@ -661,7 +691,7 @@ mod tests {
                         id: op.id(),
                     }
                 );
-                assert_eq!(backend.snapshot_os_state(), before);
+                assert_eq!(backend.snapshot_os_state().unwrap(), before);
             }
         }
     }
@@ -677,7 +707,7 @@ mod tests {
             session_file("/skills/pr.md"),
         );
         backend.apply(elsewhere.clone()).unwrap();
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         assert_eq!(
             backend
                 .apply(fixtures::op(
@@ -688,9 +718,9 @@ mod tests {
                 .unwrap_err(),
             BackendError::Fault("injected refusal".to_string())
         );
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
         assert_eq!(
-            before.objects().collect::<Vec<_>>(),
+            before.state().objects().collect::<Vec<_>>(),
             vec![&elsewhere.object()]
         );
     }
@@ -777,7 +807,7 @@ mod tests {
         let mut backend = FakeBackend::new();
         backend.apply(mount_by(&owner)).unwrap();
         backend.fail_before_effect_for_owner(owner.clone(), "injected refusal");
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         for (op, error) in invalid_operations(&owner) {
             let rule = error.to_string();
             let expected = BackendError::InvalidOperation {
@@ -794,15 +824,15 @@ mod tests {
                 )
             );
             assert_eq!(backend.apply(op.clone()).unwrap_err(), expected);
-            assert_eq!(backend.snapshot_os_state(), before);
+            assert_eq!(backend.snapshot_os_state().unwrap(), before);
             assert_eq!(backend.plant(op.object()).unwrap_err(), expected);
-            assert_eq!(backend.snapshot_os_state(), before);
+            assert_eq!(backend.snapshot_os_state().unwrap(), before);
         }
         assert_eq!(
             backend.apply(mount_by(&owner)).unwrap_err(),
             BackendError::Fault("injected refusal".to_string())
         );
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
     }
 
     fn issued(op: &UniverseOp, kind: GrantKind) -> LedgerEntry {
@@ -831,7 +861,12 @@ mod tests {
                 let entry = backend.grant(op.clone(), kind).unwrap();
                 assert_eq!(entry, issued(&op, kind));
                 assert_eq!(
-                    backend.snapshot_os_state().objects().collect::<Vec<_>>(),
+                    backend
+                        .snapshot_os_state()
+                        .unwrap()
+                        .state()
+                        .objects()
+                        .collect::<Vec<_>>(),
                     vec![&op.object()]
                 );
                 assert_eq!(backend.peek_entry(op.handle()).unwrap(), entry);
@@ -847,14 +882,14 @@ mod tests {
                 let op = fixtures::op(GrantId::new(), owner.clone(), capability);
                 let mut backend = FakeBackend::new();
                 let first = backend.grant(op.clone(), kind).unwrap();
-                let before = backend.snapshot_os_state();
+                let before = backend.snapshot_os_state().unwrap();
                 assert_eq!(backend.grant(op.clone(), kind).unwrap(), first);
-                assert_eq!(backend.snapshot_os_state(), before);
+                assert_eq!(backend.snapshot_os_state().unwrap(), before);
                 assert_eq!(
                     backend.revoke(op.handle(), DrainSpec::forcing()).unwrap(),
                     first
                 );
-                assert!(backend.snapshot_os_state().is_empty());
+                assert!(backend.snapshot_os_state().unwrap().is_empty());
             }
         }
     }
@@ -865,7 +900,7 @@ mod tests {
         let op = fixtures::op(GrantId::new(), owner.clone(), mount("/code", "/workspace"));
         let mut backend = FakeBackend::new();
         let original = backend.grant(op.clone(), GrantKind::Hot).unwrap();
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         assert_eq!(
             backend.grant(op.clone(), GrantKind::GenerationBound),
             Err(conflict(&op))
@@ -888,7 +923,7 @@ mod tests {
                 Err(conflict(&changed))
             );
         }
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
         assert_eq!(backend.peek_entry(op.handle()).unwrap(), original);
         assert_eq!(
             backend.revoke(op.handle(), DrainSpec::forcing()).unwrap(),
@@ -919,7 +954,7 @@ mod tests {
             let mut backend = FakeBackend::new();
             backend.apply(applied.clone()).unwrap();
             backend.plant(planted.clone()).unwrap();
-            let before = backend.snapshot_os_state();
+            let before = backend.snapshot_os_state().unwrap();
             for standing in [applied.clone(), planted.operation()] {
                 let requests = [
                     standing.clone(),
@@ -941,7 +976,7 @@ mod tests {
                             Err(conflict(&op)),
                             "{op:?}"
                         );
-                        assert_eq!(backend.snapshot_os_state(), before);
+                        assert_eq!(backend.snapshot_os_state().unwrap(), before);
                     }
                     assert_eq!(
                         backend.revoke(op.handle(), DrainSpec::forcing()),
@@ -951,7 +986,7 @@ mod tests {
                         "{op:?}"
                     );
                 }
-                assert_eq!(backend.snapshot_os_state(), before);
+                assert_eq!(backend.snapshot_os_state().unwrap(), before);
             }
         }
     }
@@ -965,15 +1000,15 @@ mod tests {
             let entry = backend
                 .grant(op.clone(), GrantKind::GenerationBound)
                 .unwrap();
-            let before = backend.snapshot_os_state();
+            let before = backend.snapshot_os_state().unwrap();
             backend.apply(op.clone()).unwrap();
             backend.plant(op.object()).unwrap();
-            assert_eq!(backend.snapshot_os_state(), before);
+            assert_eq!(backend.snapshot_os_state().unwrap(), before);
             assert_eq!(
                 backend.revoke(op.handle(), DrainSpec::forcing()).unwrap(),
                 entry
             );
-            assert!(backend.snapshot_os_state().is_empty());
+            assert!(backend.snapshot_os_state().unwrap().is_empty());
         }
     }
 
@@ -986,7 +1021,7 @@ mod tests {
             .map(|capability| grant_to(&mut backend, &owner, capability))
             .collect();
         backend.fail_before_effect_for_owner(owner.clone(), "injected refusal");
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         for (fresh, error) in invalid_operations(&owner) {
             let issued = standing
                 .iter()
@@ -1007,7 +1042,7 @@ mod tests {
                     }),
                     "{op:?}"
                 );
-                assert_eq!(backend.snapshot_os_state(), before);
+                assert_eq!(backend.snapshot_os_state().unwrap(), before);
             }
             assert_eq!(
                 backend.revoke(fresh.handle(), DrainSpec::forcing()),
@@ -1028,7 +1063,7 @@ mod tests {
         let mut backend = FakeBackend::new();
         let standing = backend.grant(mount_by(&doomed), GrantKind::Hot).unwrap();
         backend.fail_before_effect_for_owner(doomed.clone(), "injected refusal");
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         let refused = BackendError::Fault("injected refusal".to_string());
         for capability in capabilities() {
             let op = fixtures::op(GrantId::new(), doomed.clone(), capability.clone());
@@ -1037,7 +1072,7 @@ mod tests {
                 Err(refused.clone())
             );
             assert_eq!(backend.apply(op.clone()), Err(refused.clone()));
-            assert_eq!(backend.snapshot_os_state(), before);
+            assert_eq!(backend.snapshot_os_state().unwrap(), before);
             assert_eq!(
                 backend.revoke(op.handle(), DrainSpec::forcing()),
                 Err(BackendError::UnknownHandle {
@@ -1051,7 +1086,7 @@ mod tests {
             );
             backend.revoke(peer.handle(), DrainSpec::forcing()).unwrap();
         }
-        assert_eq!(backend.snapshot_os_state(), before);
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
         assert_eq!(backend.peek_entry(standing.handle).unwrap(), standing);
         assert_eq!(
             backend
