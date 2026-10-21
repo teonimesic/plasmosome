@@ -1,16 +1,21 @@
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fmt;
-use std::fs::File;
-use std::io::Read;
-use std::os::fd::OwnedFd;
+use std::fs::{File, Permissions};
+use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use plasmosome_core::private_socket::{PrivateDir, PrivateSocketError};
 
 use super::RemoveOutcome;
-use super::artifacts::{ArtifactFault, FileIdentity, VerifiedArtifact};
+use super::artifacts::{ArtifactFault, FileIdentity, Positioned, VerifiedArtifact};
 use super::digest::Digest;
 use super::path::RecipePath;
 use super::recipe::ArtifactRole;
+
+const NEW_COPY_FLAGS: libc::c_int =
+    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+const COPY_MODE: u32 = 0o600;
 
 /// A cell's private directory, the one spec 001 §4.2 puts `writable_root`, `control_path` and
 /// `data_path` under, checked by core's `PrivateDir` and kept open.
@@ -30,8 +35,12 @@ impl PrivateDirectory {
     /// and `path` itself a directory owned by the effective UID with no group or other bits and
     /// no ACL. On macOS pass the canonical path, `/private/var/...` rather than `/var/...`.
     pub fn open(path: &RecipePath) -> Result<PrivateDirectory, CellDirectoryRefusal> {
-        let _ = (path, PrivateDir::open);
-        todo!()
+        let dir = PrivateDir::open(path.as_path())
+            .map_err(|refusal| refused(path, CellDirectoryFault::Private(refusal)))?;
+        Ok(PrivateDirectory {
+            path: path.clone(),
+            dir,
+        })
     }
 
     /// The path it was opened at.
@@ -41,15 +50,20 @@ impl PrivateDirectory {
 
     /// The device and inode of the directory held open.
     pub fn identity(&self) -> FileIdentity {
-        let _ = &self.dir;
-        todo!()
+        let identity = self.dir.identity();
+        FileIdentity {
+            dev: identity.dev,
+            ino: identity.ino,
+        }
     }
 
     /// Walks the path again with the same checks and requires the directory held open. A
     /// directory renamed away and replaced at the path is `Private(Replaced)`. Call it just before
     /// a launch that relies on the path.
     pub fn reconfirm(&self) -> Result<(), CellDirectoryRefusal> {
-        todo!()
+        self.dir
+            .reconfirm()
+            .map_err(|refusal| refused(&self.path, CellDirectoryFault::Private(refusal)))
     }
 }
 
@@ -85,8 +99,24 @@ impl WritableRoot {
         parent: &PrivateDirectory,
         source: &VerifiedArtifact,
     ) -> Result<WritableRoot, CellDirectoryRefusal> {
-        let _ = |reader: std::io::Empty| create_copy(path, parent, reader, source.digest());
-        todo!()
+        if source.role() != ArtifactRole::RootImage {
+            return Err(refused(
+                path,
+                CellDirectoryFault::WrongSource {
+                    role: source.role(),
+                },
+            ));
+        }
+        let bytes = Positioned {
+            file: source.file(),
+            offset: 0,
+        }
+        .take(source.size().saturating_add(1));
+        let root = create_copy(path, parent, bytes, source.digest())?;
+        source
+            .reconfirm()
+            .map_err(|refusal| refused(path, CellDirectoryFault::Source(refusal.fault)))?;
+        Ok(root)
     }
 
     /// The path it was created at.
@@ -104,9 +134,37 @@ impl WritableRoot {
     /// object at the name is `LeftReplacement` and is not touched. The inspection and the unlink
     /// are two steps, so another writer with authority over the directory, the same UID included,
     /// can put an object at the name between them.
-    pub fn remove(self) -> RemoveOutcome {
-        let _ = (&self.parent, &self.name, &self.file, self.removed);
-        todo!()
+    pub fn remove(mut self) -> RemoveOutcome {
+        self.remove_entry()
+    }
+
+    #[allow(unsafe_code)]
+    fn remove_entry(&mut self) -> RemoveOutcome {
+        self.removed = true;
+        match stat_at(self.parent.as_fd(), &self.name) {
+            Ok(found) if found.regular && found.identity == self.identity => {}
+            Ok(_) => return RemoveOutcome::LeftReplacement,
+            Err(errno) => return gone_or_failed(errno),
+        }
+        // SAFETY: `self.name` is a CString this value owns, and `self.parent` keeps the directory
+        // descriptor open for the call. unlinkat keeps no pointer to the name.
+        if unsafe { libc::unlinkat(self.parent.as_raw_fd(), self.name.as_ptr(), 0) } == 0 {
+            RemoveOutcome::Removed
+        } else {
+            gone_or_failed(
+                io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO),
+            )
+        }
+    }
+}
+
+impl Drop for WritableRoot {
+    fn drop(&mut self) {
+        if !self.removed {
+            let _ = self.remove_entry();
+        }
     }
 }
 
@@ -116,10 +174,48 @@ fn create_copy(
     reader: impl Read,
     expected: &Digest,
 ) -> Result<WritableRoot, CellDirectoryRefusal> {
-    let _ = |reader: std::io::Empty, writer: &File| copy_verified(reader, writer, expected);
-    let _ = (path, parent);
-    drop(reader);
-    todo!()
+    let refuse = |fault| refused(path, fault);
+    let (Some(directory), Ok(name)) = (path.parent(), CString::new(path.file_name())) else {
+        return Err(refuse(CellDirectoryFault::WrongParent));
+    };
+    if directory != parent.path {
+        return Err(refuse(CellDirectoryFault::WrongParent));
+    }
+    parent.reconfirm()?;
+    let held = parent
+        .dir
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|error| refuse(io_fault("dup", &error)))?;
+    let file = match open_new(held.as_fd(), &name) {
+        Ok(file) => file,
+        Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+            return Err(refuse(CellDirectoryFault::Exists));
+        }
+        Err(error) => return Err(refuse(io_fault("openat", &error))),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|error| refuse(io_fault("fstat", &error)))?;
+    let root = WritableRoot {
+        path: path.clone(),
+        parent: held,
+        name,
+        file,
+        identity: FileIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        },
+        removed: false,
+    };
+    root.file
+        .set_permissions(Permissions::from_mode(COPY_MODE))
+        .map_err(|error| refuse(io_fault("fchmod", &error)))?;
+    copy_verified(reader, &root.file, expected).map_err(refuse)?;
+    root.file
+        .sync_all()
+        .map_err(|error| refuse(io_fault("fsync", &error)))?;
+    Ok(root)
 }
 
 fn copy_verified(
@@ -127,9 +223,112 @@ fn copy_verified(
     writer: &File,
     expected: &Digest,
 ) -> Result<(), CellDirectoryFault> {
-    let _ = (writer, expected);
-    drop(reader);
-    todo!()
+    let mut tee = Tee {
+        reader,
+        writer,
+        write_failed: false,
+    };
+    let actual = Digest::of_reader(&mut tee)
+        .map_err(|error| io_fault(if tee.write_failed { "write" } else { "pread" }, &error))?;
+    if actual == *expected {
+        Ok(())
+    } else {
+        Err(CellDirectoryFault::CopyMismatch {
+            expected: *expected,
+            actual,
+        })
+    }
+}
+
+struct Tee<'a, R> {
+    reader: R,
+    writer: &'a File,
+    write_failed: bool,
+}
+
+impl<R: Read> Read for Tee<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.reader.read(buffer)?;
+        self.writer.write_all(&buffer[..read]).inspect_err(|_| {
+            self.write_failed = true;
+        })?;
+        Ok(read)
+    }
+}
+
+#[allow(unsafe_code)]
+fn open_new(dir: BorrowedFd<'_>, name: &CStr) -> io::Result<File> {
+    // SAFETY: `name` is a CStr that outlives the call, and the BorrowedFd keeps `dir` open for it.
+    // openat keeps no pointer to the name.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            NEW_COPY_FLAGS,
+            COPY_MODE as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a non-negative descriptor just above, which nothing else owns, so
+    // this File becomes its only owner.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+struct Found {
+    regular: bool,
+    identity: FileIdentity,
+}
+
+#[allow(unsafe_code)]
+fn stat_at(dir: BorrowedFd<'_>, name: &CStr) -> Result<Found, i32> {
+    // SAFETY: libc::stat is a plain C struct, for which all zeroes is a valid value.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `name` is a CStr that outlives the call, the BorrowedFd keeps `dir` open for it, and
+    // `stat` is a local libc::stat that fstatat may write.
+    let outcome = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if outcome != 0 {
+        return Err(io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO));
+    }
+    Ok(Found {
+        regular: stat.st_mode & libc::S_IFMT == libc::S_IFREG,
+        identity: FileIdentity {
+            dev: stat.st_dev as u64,
+            ino: stat.st_ino,
+        },
+    })
+}
+
+fn gone_or_failed(errno: i32) -> RemoveOutcome {
+    if errno == libc::ENOENT {
+        RemoveOutcome::AlreadyGone
+    } else {
+        RemoveOutcome::Failed { errno }
+    }
+}
+
+fn io_fault(op: &'static str, error: &io::Error) -> CellDirectoryFault {
+    CellDirectoryFault::Io {
+        op,
+        errno: error.raw_os_error().unwrap_or(libc::EIO),
+    }
+}
+
+fn refused(path: &RecipePath, fault: CellDirectoryFault) -> CellDirectoryRefusal {
+    CellDirectoryRefusal {
+        path: path.clone(),
+        fault,
+    }
 }
 
 /// Why a cell directory or a writable root was refused: the path asked for and the first rule it
@@ -173,8 +372,31 @@ impl std::error::Error for CellDirectoryRefusal {}
 
 impl fmt::Display for CellDirectoryFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            CellDirectoryFault::Private(refusal) => write!(f, "{refusal}"),
+            CellDirectoryFault::WrongParent => {
+                f.write_str("its parent is not the private directory it was asked to go in")
+            }
+            CellDirectoryFault::WrongSource { role } => {
+                write!(f, "the source is the {role}, not the root image")
+            }
+            CellDirectoryFault::Exists => {
+                f.write_str("an entry already exists and was left as it was")
+            }
+            CellDirectoryFault::CopyMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "the copy hashes to {actual}, not the verified {expected}"
+                )
+            }
+            CellDirectoryFault::Source(fault) => {
+                write!(
+                    f,
+                    "the root image changed or moved after it was verified: {fault}"
+                )
+            }
+            CellDirectoryFault::Io { op, errno } => write!(f, "{op} failed with errno {errno}"),
+        }
     }
 }
 

@@ -78,7 +78,7 @@ impl PrivateDir {
     /// `unlinkat`. They reach this directory even after its path is renamed or names another
     /// one. The caller must not close it or change its flags.
     pub fn as_fd(&self) -> BorrowedFd<'_> {
-        todo!()
+        self.dir.as_fd()
     }
 
     /// Walks the path again and requires the same judgments and the same directory identity.
