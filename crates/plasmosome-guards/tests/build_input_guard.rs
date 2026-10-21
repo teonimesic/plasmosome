@@ -1,5 +1,6 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -142,28 +143,59 @@ fn quoted(text: &str) -> String {
     format!("\"{text}\"")
 }
 
+fn stop_the_group(child: &std::process::Child) {
+    let group = format!("-{}", child.id());
+    let stopped = Command::new("kill")
+        .args(["-KILL", "--", &group])
+        .status()
+        .expect("kill runs");
+    assert!(
+        stopped.success(),
+        "the step's process group {group} could not be stopped"
+    );
+}
+
+fn read_to_end(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut read = Vec::new();
+        pipe.read_to_end(&mut read)
+            .expect("the step's output is read");
+        read
+    })
+}
+
 fn output_within(command: &mut Command, route: &str) -> Output {
     let mut child = command
+        .process_group(0)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("the step runs");
+    let stdout = read_to_end(child.stdout.take().expect("the step's stdout is piped"));
+    let stderr = read_to_end(child.stderr.take().expect("the step's stderr is piped"));
     let started = std::time::Instant::now();
-    while child
-        .try_wait()
-        .expect("the step's status is readable")
-        .is_none()
-    {
+    let mut status = None;
+    while status.is_none() || !stdout.is_finished() || !stderr.is_finished() {
+        if status.is_none() {
+            status = child.try_wait().expect("the step's status is readable");
+        }
         if started.elapsed() > STEP_DEADLINE {
-            child.kill().expect("the step is stopped");
-            child.wait().expect("the stopped step is reaped");
+            stop_the_group(&child);
+            if status.is_none() {
+                child.wait().expect("the stopped step is reaped");
+            }
             panic!(
-                "{route}: the step was still running after {STEP_DEADLINE:?}, so it does not finish"
+                "{route}: the step, or a process it started, was still running after {STEP_DEADLINE:?}, so it does not finish"
             );
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    child.wait_with_output().expect("the step's output is read")
+    Output {
+        status: status.expect("the step has exited"),
+        stdout: stdout.join().expect("the step's stdout is read"),
+        stderr: stderr.join().expect("the step's stderr is read"),
+    }
 }
 
 fn assert_says(outputs: &[(String, String)], route: &str, fragments: &[&str]) {
@@ -343,11 +375,12 @@ fn harness(root: &Path, source: &str) -> (TempDir, Command) {
 }
 
 fn run(root: &Path, directory: &Path, arguments: &[&str]) -> Output {
-    guard_command(root)
-        .current_dir(directory)
-        .args(arguments)
-        .output()
-        .expect("the step runs")
+    let mut command = guard_command(root);
+    command.current_dir(directory).args(arguments);
+    output_within(
+        &mut command,
+        &format!("the step in {} on {arguments:?}", directory.display()),
+    )
 }
 
 fn said(output: &Output) -> String {
@@ -526,10 +559,7 @@ fn outputs_in_parallel<'a>(mut runs: Vec<(&'a str, Command)>) -> Vec<(&'a str, O
             .iter_mut()
             .map(|(case, command)| {
                 let case: &'a str = case;
-                (
-                    case,
-                    scope.spawn(move || command.output().expect("the step runs")),
-                )
+                (case, scope.spawn(move || output_within(command, case)))
             })
             .collect();
         started
@@ -762,12 +792,13 @@ fn never_runs_cargo_rustc_or_rustup() {
         let scratch = stubs.scratch.path().display().to_string();
 
         let (clean, sha) = commit(&base());
-        let output = stubs
-            .apply(&mut guard_command(root))
-            .current_dir(clean.path())
-            .arg(&sha)
-            .output()
-            .expect("the step runs");
+        let output = output_within(
+            stubs
+                .apply(&mut guard_command(root))
+                .current_dir(clean.path())
+                .arg(&sha),
+            "a clean commit with cargo, rustc and rustup stubbed",
+        );
         assert_clean(&output, &sha);
         assert_eq!(
             stubs.log(),
@@ -812,12 +843,13 @@ fn never_runs_cargo_rustc_or_rustup() {
             symlink("crates/c/Cargo.toml", "../a/Cargo.toml"),
             locked("Cargo.lock", &quoted(GIT_SOURCE)),
         ]));
-        let output = stubs
-            .apply(&mut guard_command(root))
-            .current_dir(routes.path())
-            .arg(&sha)
-            .output()
-            .expect("the step runs");
+        let output = output_within(
+            stubs
+                .apply(&mut guard_command(root))
+                .current_dir(routes.path())
+                .arg(&sha),
+            "every refused route with cargo, rustc and rustup stubbed",
+        );
         assert_refusal(
             &output,
             &[
@@ -1053,11 +1085,12 @@ fn nothing_beside_the_script_is_imported() {
 
         let (repository, sha) = commit(&base());
         let mut direct = Command::new(&copy);
-        let output = detached_from_any_inherited_repository(&mut direct)
-            .current_dir(repository.path())
-            .arg(&sha)
-            .output()
-            .expect("the copy runs through its shebang");
+        let output = output_within(
+            detached_from_any_inherited_repository(&mut direct)
+                .current_dir(repository.path())
+                .arg(&sha),
+            "the copy run through its shebang",
+        );
         assert_clean(&output, &sha);
         assert_eq!(
             imported(),
@@ -1067,13 +1100,14 @@ fn nothing_beside_the_script_is_imported() {
 
         for flags in [&[][..], &["-E"][..]] {
             let mut unisolated = Command::new("python3");
-            let output = detached_from_any_inherited_repository(&mut unisolated)
-                .current_dir(repository.path())
-                .args(flags)
-                .arg(&copy)
-                .arg(&sha)
-                .output()
-                .expect("python3 runs");
+            let output = output_within(
+                detached_from_any_inherited_repository(&mut unisolated)
+                    .current_dir(repository.path())
+                    .args(flags)
+                    .arg(&copy)
+                    .arg(&sha),
+                "the copy run without isolation",
+            );
             let said = said(&output);
             assert_eq!(
                 output.status.code(),
@@ -1110,11 +1144,10 @@ fn a_python_without_tomllib_is_refused_by_name() {
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         };
         let (_scratch, mut command) = harness(root, WITHOUT_TOMLLIB);
-        let output = command
-            .current_dir(repository.path())
-            .arg(&sha)
-            .output()
-            .expect("python3 runs");
+        let output = output_within(
+            command.current_dir(repository.path()).arg(&sha),
+            "a python without tomllib",
+        );
         let said = said(&output);
         assert_eq!(
             output.status.code(),
@@ -1137,13 +1170,14 @@ fn a_git_call_that_does_not_finish_is_refused() {
         let (repository, sha) = commit(&base());
         let shadow = shadow_git("  stall:rev-parse) exec sleep 30 ;;\n");
         let (_scratch, mut command) = harness(root, WITH_A_ONE_SECOND_TIMEOUT);
-        let output = command
-            .current_dir(repository.path())
-            .env("PATH", first_on_path(shadow.path()))
-            .env("STUB_GIT_CASE", "stall")
-            .arg(&sha)
-            .output()
-            .expect("python3 runs");
+        let output = output_within(
+            command
+                .current_dir(repository.path())
+                .env("PATH", first_on_path(shadow.path()))
+                .env("STUB_GIT_CASE", "stall")
+                .arg(&sha),
+            "a git call that does not finish",
+        );
         assert_cannot_read(&output, "a git call that does not finish");
         let expected =
             format!("cannot read {sha} as a commit: git rev-parse did not finish within 1 s");
@@ -1791,13 +1825,13 @@ fn the_size_bound_is_checked_while_reading() {
             MAX_BYTES + 1,
             read_past.display()
         ));
-        let output = guard_command(root)
+        let mut command = guard_command(root);
+        command
             .current_dir(repository.path())
             .env("PATH", first_on_path(shadow.path()))
             .env("STUB_GIT_CASE", "stream")
-            .arg(&sha)
-            .output()
-            .expect("the step runs");
+            .arg(&sha);
+        let output = output_within(&mut command, "a blob that streams past the bound");
         assert_refusal(&output, &[("rust-toolchain.toml", "(file)")]);
         assert!(
             said(&output).contains("rust-toolchain.toml: (file): larger than 8 MiB"),
@@ -2676,13 +2710,14 @@ fn each_symlink_target_is_read_once() {
             "  count:cat-file) printf '%s\\n' \"$*\" >> '{}' ;;\n",
             log.display()
         ));
-        let output = guard_command(root)
-            .current_dir(repository.path())
-            .env("PATH", first_on_path(shadow.path()))
-            .env("STUB_GIT_CASE", "count")
-            .arg(&sha)
-            .output()
-            .expect("the step runs");
+        let output = output_within(
+            guard_command(root)
+                .current_dir(repository.path())
+                .env("PATH", first_on_path(shadow.path()))
+                .env("STUB_GIT_CASE", "count")
+                .arg(&sha),
+            "symlink targets counted",
+        );
         let expected: Vec<(&str, &str)> =
             links.iter().map(|(path, _)| (*path, "(symlink)")).collect();
         assert_refusal(&output, &expected);
