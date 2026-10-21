@@ -209,6 +209,9 @@ fn a_command_help_says_whether_it_is_served() {
         (&["frobnicate", "--help"][..], "frobnicate"),
         (&["--frob=x", "frobnicate", "--help"], "frobnicate"),
         (&["add", "x", "y", "--help"], "y"),
+        (&["add", "x", "y", "z", "--help"], "y"),
+        (&["list", "a", "b", "--help"], "a"),
+        (&["new", "a", "b", "--help"], "b"),
     ] {
         let error = usage_error(&run(arguments));
         assert_eq!(error["argument"], argument, "{arguments:?}");
@@ -386,6 +389,7 @@ fn the_full_parse_names_the_first_fault_on_the_line() {
         (&["--kernel", "a", "--kernel", "b"], "--kernel"),
         (&["--json", "--json"], "--json"),
         (&["--socket"], "--socket"),
+        (&["--deadline-ms"], "--deadline-ms"),
         (&["--kernel", "--"], "--kernel"),
         (&["--json", "--human"], "--human"),
         (&["--human", "--json"], "--json"),
