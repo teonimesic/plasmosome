@@ -14,6 +14,16 @@ composite failed three of the original clauses when it was first wired in, becau
 handle its leaf issued; task 008 fixed the backend rather than the clauses, which is the point of
 holding every backend to the same functions.
 
+Every clause reads the backend's complete account, and a snapshot that fails is a contract
+failure. Each account check compares the whole snapshot with what the clause expects: the standing
+objects, an issued record for each standing grant and none for an applied or planted object, and
+no unfinished effect. Two defects hold the clauses to that. `SnapshotOmitsIssuedRecords` reports
+its objects with no records, and `snapshot_never_invents_objects` must reject it.
+`SnapshotReconstructsGrantsFromObjects` rebuilds a record for every standing object, and
+`apply_and_removal_reach_the_universe` must reject it. One per-step check is narrower: after each
+revoke, `planted_residue_survives_unrelated_revoke` checks only that the planted residue still
+stands, and that clause ends with a check of the whole snapshot.
+
 The exact-grant clauses build expected objects from each prepared operation, never from a
 backend's returned entry, and the returned handle must be the address the caller prepared.
 Applied-object withdrawal keeps observations from every other universe class standing. Dedicated
@@ -46,9 +56,11 @@ fails both. The first instance then revokes its grants in both orders.
 
 `snapshot_never_invents_objects` also sends an invalid operation of every class through `grant`,
 `apply` and `plant`, each at a fresh address and at an issued one. Each call must return
-`InvalidOperation` and leave the state as it was just before that call. So must each revoke of
-the handle of a grant refused at a fresh address, which returns `UnknownHandle`. The state must not
-change between two of those calls either, so a refusal whose effect lands after it returned fails.
+`InvalidOperation` and leave the account as it was just before that call. So must each revoke of
+the handle of a grant refused at a fresh address, which returns `UnknownHandle`. The account must
+not change between two of those calls either, so a refusal whose effect lands after it returned
+fails, and so does a refused grant that drops the issued record at its address later
+(`RefusedGrantDropsTheIssuedRecordLate`).
 A later check therefore cannot hide what an earlier refusal changed. A refusal that clears or swaps
 what stands at its address fails, and so does a revoke that tidies away residue. A private backend
 that refuses another launch at an occupied broker endpoint, as spec 017 allows a real adapter to
@@ -73,8 +85,9 @@ must stall every graceful withdrawal of a holding owned by `conformance::stalled
 any release, while Force still succeeds; the fake factories arm this with
 `FakeBackend::stall_graceful_drains_for_owner`. A future real factory must arrange the same stall
 with real resources. The clause times the stalled holding out with a 50 ms and a zero deadline,
-checks that a removal naming the wrong owner is refused before any drain in both directions, and
-drains another plugin in the stalled cell and the same plugin in another cell normally. It
+and each timeout must keep the holding and its issued record. It checks that a removal naming the
+wrong owner is refused before any drain in both directions, and drains another plugin in the
+stalled cell and the same plugin in another cell normally. It
 withdraws the stalled holding and its equal peers in both orders, and runs each order twice,
 draining every other holding under a 50 ms deadline and then under a zero deadline. The
 stalled-first pass forces the stalled holding while every other holding stands; the peer-first

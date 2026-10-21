@@ -182,6 +182,7 @@ mod tests {
     use super::ObjectOnly;
     use crate::backend::tests::{operation, owner};
     use crate::fixtures;
+    use crate::snapshot::{EnforcementSnapshot, IncompleteEffect};
     use crate::{
         BrokerLaunch, Capability, Diff, DrainSpec, FileAccess, GrantId, GrantKind, Handle,
         LedgerEntry, MountRecipe, OsObject, OsState, ProxyRecipe, ProxyTransport, ResidueReport,
@@ -344,6 +345,25 @@ mod tests {
             &["id", "owner", "capability"],
         ));
         accepted.extend(sequence_accepted("OsState", &state, "", &["objects"]));
+        let effect = IncompleteEffect {
+            operation: operation(GrantId::new(), fixtures::broker("egressd")),
+        };
+        accepted.extend(sequence_accepted(
+            "IncompleteEffect",
+            &effect,
+            "",
+            &["operation"],
+        ));
+        let mut granted = OsState::new();
+        granted.insert(entry.object()).unwrap();
+        let snapshot =
+            EnforcementSnapshot::new(granted, vec![entry.clone()], vec![effect]).unwrap();
+        accepted.extend(sequence_accepted(
+            "EnforcementSnapshot",
+            &snapshot,
+            "",
+            &["state", "grants", "incomplete"],
+        ));
         accepted.extend(sequence_accepted(
             "UniverseRemoval",
             &UniverseRemoval {
@@ -438,6 +458,10 @@ mod tests {
             (
                 refusals::<OsState>(json!([])),
                 "invalid type: sequence, expected struct OsState",
+            ),
+            (
+                refusals::<EnforcementSnapshot>(json!([])),
+                "invalid type: sequence, expected struct EnforcementSnapshot",
             ),
         ] {
             for error in errors {

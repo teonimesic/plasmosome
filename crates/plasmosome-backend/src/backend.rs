@@ -9,9 +9,8 @@ use crate::recipe::{
     BrokerLaunch, MountRecipe, ProxyRecipe, RecipeError, SessionFileRecipe, UdsRecipe,
     canonical_path, nul_free,
 };
-use crate::universe::{
-    CellOwner, GrantId, OsObject, OsState, UniverseClass, UniverseOp, UniverseRemoval,
-};
+use crate::snapshot::EnforcementSnapshot;
+use crate::universe::{CellOwner, GrantId, OsObject, UniverseClass, UniverseOp, UniverseRemoval};
 use crate::wire::{ObjectOnly, object_serde, validated_object_serde};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -221,15 +220,15 @@ impl LedgerEntry {
     }
 }
 
+pub(crate) const CLASS_MISMATCH: &str = "ledger entry handle class does not match its capability";
+
 impl Serialize for LedgerEntry {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         if self.handle.class != self.capability.class() {
-            return Err(S::Error::custom(
-                "ledger entry handle class does not match its capability",
-            ));
+            return Err(S::Error::custom(CLASS_MISMATCH));
         }
 
         #[derive(Serialize)]
@@ -266,9 +265,7 @@ impl<'de> Deserialize<'de> for LedgerEntry {
 
         let wire = Wire::deserialize(ObjectOnly::new(deserializer))?;
         if wire.handle.class != wire.capability.class() {
-            return Err(D::Error::custom(
-                "ledger entry handle class does not match its capability",
-            ));
+            return Err(D::Error::custom(CLASS_MISMATCH));
         }
         Ok(LedgerEntry {
             handle: wire.handle,
@@ -404,7 +401,7 @@ impl fmt::Display for BackendError {
             BackendError::InvalidOperation { class, id, error } => {
                 write!(f, "invalid {class} operation {id}: {error}")
             }
-            BackendError::Fault(cause) => write!(f, "injected backend fault: {cause}"),
+            BackendError::Fault(cause) => write!(f, "backend fault: {cause}"),
             BackendError::Unimplemented(what) => write!(f, "unimplemented in this track: {what}"),
         }
     }
@@ -427,7 +424,12 @@ pub trait EnforcementBackend {
         kind: GrantKind,
     ) -> Result<LedgerEntry, BackendError>;
     fn revoke(&mut self, handle: Handle, drain: DrainSpec) -> Result<LedgerEntry, BackendError>;
-    fn snapshot_os_state(&self) -> OsState;
+    /// Observes the backend's complete account: its standing holdings, the original issued
+    /// records whose withdrawal authority remains, and its unfinished effects. An observation that
+    /// fails, or a class the backend cannot observe, returns an error, never an empty or partial
+    /// account. The mutable receiver lets a backend keep what it observed, never replace
+    /// observation with what it was asked to do.
+    fn snapshot_os_state(&mut self) -> Result<EnforcementSnapshot, BackendError>;
     /// Records `op` under the identity and owner it names. An operation whose `validate` fails
     /// returns `InvalidOperation` before any change.
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError>;
