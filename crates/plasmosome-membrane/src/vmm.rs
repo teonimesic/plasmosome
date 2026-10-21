@@ -1574,16 +1574,22 @@ mod signal_pressure {
         DELIVERED.fetch_add(1, Ordering::Relaxed);
     }
 
-    struct ExitOnRelease(libc::c_int);
+    struct ExitOnRelease {
+        read: libc::c_int,
+        write: libc::c_int,
+    }
 
     impl Launch for ExitOnRelease {
         #[allow(unsafe_code)]
         fn launch(self) -> ! {
             let mut byte = 0u8;
-            // SAFETY: read and _exit are async-signal-safe, which is all this forked child may
-            // call. `byte` is a local that read may write, and the length 1 matches it.
+            // SAFETY: close, read and _exit are async-signal-safe, which is all this forked child
+            // may call. Both descriptors are the child's own copies. Closing its copy of the write
+            // end means read sees end of file once the test process is gone. `byte` is a local
+            // that read may write, and the length 1 matches it.
             unsafe {
-                libc::read(self.0, &mut byte as *mut u8 as *mut libc::c_void, 1);
+                libc::close(self.write);
+                libc::read(self.read, &mut byte as *mut u8 as *mut libc::c_void, 1);
                 libc::_exit(0)
             }
         }
@@ -1821,7 +1827,11 @@ mod signal_pressure {
 
         for child_number in 1..=CHILDREN {
             let mut release = Release::open();
-            let child = VmmChild::spawn(ExitOnRelease(release.read)).expect("fork succeeds");
+            let child = VmmChild::spawn(ExitOnRelease {
+                read: release.read,
+                write: release.write,
+            })
+            .expect("fork succeeds");
             release.close_read();
             let pid = child.pid();
             let signals_before = DELIVERED.load(Ordering::Relaxed);
