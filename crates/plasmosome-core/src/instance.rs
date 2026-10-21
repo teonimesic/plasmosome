@@ -5060,6 +5060,18 @@ mod tests {
         static BEFORE_NAMING_THE_LOCK: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
         static AFTER_NAMING_THE_LOCK: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
         static ON_SYNC: RefCell<Option<SyncHook>> = const { RefCell::new(None) };
+        static FAIL_NEXT_PROBE_LOCK: Cell<Option<i32>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn probe_lock_result(locked: io::Result<()>) -> io::Result<()> {
+        match FAIL_NEXT_PROBE_LOCK.with(Cell::take) {
+            Some(errno) => Err(io::Error::from_raw_os_error(errno)),
+            None => locked,
+        }
+    }
+
+    fn fail_next_probe_lock(errno: i32) {
+        FAIL_NEXT_PROBE_LOCK.with(|fail| fail.set(Some(errno)));
     }
 
     pub(super) fn before_naming_the_lock() {
@@ -5683,6 +5695,19 @@ mod tests {
         }
     }
 
+    fn free_test_once_released(dir: &CellDir) -> LockTest {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match dir.test_supervisor_lock() {
+                LockTest::Held if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(1))
+                }
+                free @ LockTest::Free(_) => return free,
+                other => panic!("expected the released lock to test Free, got {other:?}"),
+            }
+        }
+    }
+
     #[allow(unsafe_code)]
     fn descriptor_flags(fd: BorrowedFd<'_>, command: libc::c_int) -> libc::c_int {
         // SAFETY: fcntl with F_GETFD or F_GETFL takes no pointer, and the BorrowedFd keeps `fd`
@@ -6238,6 +6263,216 @@ mod tests {
                 assert_eq!(source.raw_os_error(), Some(libc::EACCES), "{what}: {source}");
             });
         }
+    }
+
+    #[test]
+    fn a_lock_test_reads_a_lock_held_elsewhere_as_held() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let supervisor = dir
+            .create_supervisor_lock()
+            .expect("the supervisor lock is created");
+        let held = identity_at(&lock_path(&root));
+        let test = dir.test_supervisor_lock();
+        assert_eq!(test.fact(), LockFact::Held, "{test:?}");
+        expect_match!(test, LockTest::Held => ());
+        assert_eq!(
+            identity_at(&lock_path(&root)),
+            held,
+            "the test replaced the held lock file"
+        );
+        drop(supervisor);
+    }
+
+    #[test]
+    fn a_lock_test_takes_an_unlocked_lock_file_as_free_and_keeps_it() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = lock_path(&root);
+        drop(
+            dir.create_supervisor_lock()
+                .expect("the supervisor lock is created"),
+        );
+        let file = identity_at(&path);
+        let test = free_test_once_released(&dir);
+        assert_eq!(test.fact(), LockFact::Free, "{test:?}");
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Held) => ());
+        assert!(
+            !a_separate_open_can_lock(&path),
+            "a Free test keeps the lock"
+        );
+        assert_eq!(identity_at(&path), file, "the test replaced the lock file");
+        drop(test);
+        drop(free_once_released(&dir));
+    }
+
+    #[test]
+    fn a_lock_test_creates_a_missing_lock_locked_and_free() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = lock_path(&root);
+        let test = dir.test_supervisor_lock();
+        assert_eq!(test.fact(), LockFact::Free, "{test:?}");
+        let metadata = fs::symlink_metadata(&path).expect("the lock file exists");
+        assert!(metadata.is_file(), "{metadata:?}");
+        assert_eq!(mode_of(&path), 0o600);
+        expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Held) => ());
+        assert!(!exists(&lock_temporary_path(&root)));
+        let (dev, ino) = identity_at(&path);
+        expect_match!(test, LockTest::Free(lock) => {
+            assert_eq!(
+                lock.identity().expect("the held lock's identity"),
+                FileIdentity { dev, ino },
+                "the test holds a file supervisor.lock does not name"
+            )
+        });
+    }
+
+    #[test]
+    fn a_directory_or_a_symlink_at_the_lock_is_untestable_and_left_alone() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = lock_path(&root);
+        fs::create_dir(&path).expect("the directory is made");
+        fs::write(path.join("kept"), b"inside").expect("a file is made inside it");
+        let test = dir.test_supervisor_lock();
+        assert_eq!(test.fact(), LockFact::Untestable, "{test:?}");
+        expect_match!(&test, LockTest::Untestable(CellDirError::NotARegularFile { path: refused }) => {
+            assert_eq!(refused.as_path(), path.as_path())
+        });
+        assert!(
+            fs::symlink_metadata(&path)
+                .expect("the directory is still there")
+                .is_dir()
+        );
+        assert_eq!(fs::read(path.join("kept")).ok(), Some(b"inside".to_vec()));
+        assert!(!exists(&lock_temporary_path(&root)));
+        drop(test);
+
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = lock_path(&root);
+        let target = root.join("elsewhere.lock");
+        fs::write(&target, b"not the lock").expect("the link target is made");
+        symlink(&target, &path).expect("the link is made");
+        let test = dir.test_supervisor_lock();
+        assert_eq!(test.fact(), LockFact::Untestable, "{test:?}");
+        expect_match!(&test, LockTest::Untestable(CellDirError::Symlink { path: refused }) => {
+            assert_eq!(refused.as_path(), path.as_path())
+        });
+        assert!(
+            fs::symlink_metadata(&path)
+                .expect("the link is still there")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read(&target).expect("the target reads"),
+            b"not the lock"
+        );
+        assert!(
+            a_separate_open_can_lock(&target),
+            "the test locked the link's target"
+        );
+        assert!(!exists(&lock_temporary_path(&root)));
+        drop(test);
+    }
+
+    #[test]
+    fn a_lock_file_it_cannot_open_is_untestable() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = lock_path(&root);
+        drop(
+            dir.create_supervisor_lock()
+                .expect("the supervisor lock is created"),
+        );
+        set_mode(&path, 0o000);
+        let test = dir.test_supervisor_lock();
+        assert_eq!(test.fact(), LockFact::Untestable, "{test:?}");
+        expect_match!(test, LockTest::Untestable(CellDirError::Io { path: named, source }) => {
+            assert_eq!(named, path);
+            assert_eq!(source.raw_os_error(), Some(libc::EACCES), "{source}");
+        });
+        assert_eq!(mode_of(&path), 0o000);
+        assert!(!exists(&lock_temporary_path(&root)));
+    }
+
+    #[test]
+    fn a_missing_lock_it_cannot_create_in_a_read_only_cell_is_untestable() {
+        assert_not_root();
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let _restore = restrict(&root.join("cells/cell-1"), 0o500);
+        let test = dir.test_supervisor_lock();
+        assert_eq!(test.fact(), LockFact::Untestable, "{test:?}");
+        expect_match!(test, LockTest::Untestable(CellDirError::Io { path, source }) => {
+            assert_eq!(path, lock_temporary_path(&root));
+            assert_eq!(source.raw_os_error(), Some(libc::EACCES), "{source}");
+        });
+        assert!(!exists(&lock_path(&root)));
+        assert!(!exists(&lock_temporary_path(&root)));
+    }
+
+    #[test]
+    fn a_directory_at_the_lock_temporary_makes_a_missing_lock_untestable() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let temporary = lock_temporary_path(&root);
+        fs::create_dir(&temporary).expect("the directory is made");
+        fs::write(temporary.join("kept"), b"inside").expect("a file is made inside it");
+        let test = dir.test_supervisor_lock();
+        assert_eq!(test.fact(), LockFact::Untestable, "{test:?}");
+        expect_match!(test, LockTest::Untestable(CellDirError::Io { path, source }) => {
+            assert_eq!(path, temporary);
+            assert_eq!(source.raw_os_error(), Some(UNLINK_OF_A_DIRECTORY), "{source}");
+        });
+        assert!(!exists(&lock_path(&root)));
+        assert_eq!(
+            fs::read(temporary.join("kept")).ok(),
+            Some(b"inside".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_lock_whose_cell_sync_fails_after_naming_is_untestable() {
+        let (_dir, root) = temp_root();
+        let (_instance, _lock, dir) = recording_cell(&root, "cell-1");
+        let cell_path = root.join("cells/cell-1");
+        fail_next_sync_of(&cell_path);
+        let test = dir.test_supervisor_lock();
+        assert_eq!(test.fact(), LockFact::Untestable, "{test:?}");
+        expect_match!(test, LockTest::Untestable(CellDirError::Io { path, source }) => {
+            assert_eq!(path, cell_path);
+            assert_injected(&source);
+        });
+        assert!(
+            fs::symlink_metadata(lock_path(&root))
+                .expect("the lock file is in place")
+                .is_file()
+        );
+        expect_match!(free_test_once_released(&dir), LockTest::Free(_) => ());
+    }
+
+    #[test]
+    fn a_lock_whose_flock_fails_for_another_reason_is_untestable() {
+        let (_dir, root) = temp_root();
+        let dir = opened(&root, "cell-1");
+        let path = lock_path(&root);
+        drop(
+            dir.create_supervisor_lock()
+                .expect("the supervisor lock is created"),
+        );
+        drop(free_once_released(&dir));
+        fail_next_probe_lock(libc::ENOLCK);
+        let test = dir.test_supervisor_lock();
+        assert_eq!(test.fact(), LockFact::Untestable, "{test:?}");
+        expect_match!(test, LockTest::Untestable(CellDirError::Io { path: named, source }) => {
+            assert_eq!(named, path);
+            assert_eq!(source.raw_os_error(), Some(libc::ENOLCK), "{source}");
+        });
+        expect_match!(free_test_once_released(&dir), LockTest::Free(_) => ());
     }
 
     #[test]
