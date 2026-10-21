@@ -17,7 +17,7 @@ const DIAGNOSTIC_BYTES: usize = 1024;
 
 const READ_CHUNK: usize = 8 * 1024;
 
-const MAX_WAIT: Duration = Duration::from_millis(25);
+pub(crate) const MAX_WAIT: Duration = Duration::from_millis(25);
 
 const STATUS_REQUEST: &[u8] = b"{\"id\":0,\"method\":\"membrane.status\",\"params\":{}}\n";
 
@@ -190,68 +190,133 @@ where
     N: Fn() -> Instant,
     W: FnMut(RawFd, Interest, Duration) -> std::io::Result<bool>,
 {
+    if let Err(halted) = send_within(&mut stream, request, budget, &now, &mut wait) {
+        return verdict_of(halted);
+    }
+    match read_frame_within(&mut stream, budget, &now, &mut wait) {
+        Ok(Frame::Line { bytes, .. }) => {
+            let verdict = classify(&bytes);
+            match budget.remaining_at(now()) {
+                Ok(_) => Ok(verdict),
+                Err(ProbeStopped::Cancelled) => Err(Cancelled),
+                Err(ProbeStopped::TimedOut) => Ok(spent()),
+            }
+        }
+        Ok(Frame::TooLarge(bytes)) => Ok(Readiness::NotReady(NotReady::Malformed {
+            line: diagnostic(&bytes),
+        })),
+        Err(halted) => verdict_of(halted),
+    }
+}
+
+fn verdict_of(halted: Halted) -> Result<Readiness, Cancelled> {
+    match halted {
+        Halted::Stopped(ProbeStopped::Cancelled) => Err(Cancelled),
+        Halted::Stopped(ProbeStopped::TimedOut) | Halted::Ended | Halted::Failed(_) => Ok(spent()),
+    }
+}
+
+/// Why a budgeted write or frame read on a nonblocking stream stopped early.
+#[derive(Debug)]
+pub(crate) enum Halted {
+    /// The budget was spent or shutdown was asked for, at a check before or
+    /// after a step.
+    Stopped(ProbeStopped),
+    /// The peer closed its end: a read returned end of file, or a write took
+    /// no byte.
+    Ended,
+    /// A read, a write or a wait failed with this error.
+    Failed(std::io::Error),
+}
+
+/// The first frame [`read_frame_within`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Frame {
+    /// The bytes before the first newline. `trailing` is true when the read
+    /// that found the newline also returned bytes after it; those bytes are
+    /// consumed and dropped.
+    Line { bytes: Vec<u8>, trailing: bool },
+    /// More than [`MAX_RESPONSE_BYTES`] arrived without a newline: the
+    /// `MAX_RESPONSE_BYTES + 1` bytes read. Nothing more was read.
+    TooLarge(Vec<u8>),
+}
+
+/// Writes all of `request` to a nonblocking `stream` inside `budget`,
+/// checking it before every write and waiting at most 25 ms of what is left
+/// whenever the stream is full.
+pub(crate) fn send_within<S, N, W>(
+    stream: &mut S,
+    request: &[u8],
+    budget: &ProbeBudget<'_>,
+    now: &N,
+    wait: &mut W,
+) -> Result<(), Halted>
+where
+    S: Write + AsRawFd,
+    N: Fn() -> Instant,
+    W: FnMut(RawFd, Interest, Duration) -> std::io::Result<bool>,
+{
     let fd = stream.as_raw_fd();
     let mut written = 0;
     while written < request.len() {
-        match budget.remaining_at(now()) {
-            Ok(_) => {}
-            Err(ProbeStopped::Cancelled) => return Err(Cancelled),
-            Err(ProbeStopped::TimedOut) => return Ok(spent()),
-        };
+        budget.remaining_at(now()).map_err(Halted::Stopped)?;
         match stream.write(&request[written..]) {
-            Ok(0) => return Ok(spent()),
+            Ok(0) => return Err(Halted::Ended),
             Ok(sent) => written += sent,
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                if !wait_ready(fd, Interest::Writable, budget, &now, &mut wait)? {
-                    return Ok(spent());
-                }
+                wait_ready(fd, Interest::Writable, budget, now, wait)?;
             }
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
-            Err(_) => return Ok(spent()),
+            Err(error) => return Err(Halted::Failed(error)),
         }
     }
+    Ok(())
+}
 
+/// Reads a nonblocking `stream` up to its first newline inside `budget`,
+/// through a limit of [`MAX_RESPONSE_BYTES`] plus one byte. The budget is
+/// checked before and after every read, and a stalled stream waits at most
+/// 25 ms of what is left. The caller checks the budget again once it has
+/// judged the frame.
+pub(crate) fn read_frame_within<S, N, W>(
+    stream: &mut S,
+    budget: &ProbeBudget<'_>,
+    now: &N,
+    wait: &mut W,
+) -> Result<Frame, Halted>
+where
+    S: Read + AsRawFd,
+    N: Fn() -> Instant,
+    W: FnMut(RawFd, Interest, Duration) -> std::io::Result<bool>,
+{
+    let fd = stream.as_raw_fd();
     let mut frame: Vec<u8> = Vec::new();
     let mut chunk = [0u8; READ_CHUNK];
     loop {
-        match budget.remaining_at(now()) {
-            Ok(_) => {}
-            Err(ProbeStopped::Cancelled) => return Err(Cancelled),
-            Err(ProbeStopped::TimedOut) => return Ok(spent()),
-        };
+        budget.remaining_at(now()).map_err(Halted::Stopped)?;
         let room = MAX_RESPONSE_BYTES + 1 - frame.len();
         match stream.read(&mut chunk[..READ_CHUNK.min(room)]) {
-            Ok(0) => return Ok(spent()),
+            Ok(0) => return Err(Halted::Ended),
             Ok(read) => {
-                match budget.remaining_at(now()) {
-                    Ok(_) => {}
-                    Err(ProbeStopped::Cancelled) => return Err(Cancelled),
-                    Err(ProbeStopped::TimedOut) => return Ok(spent()),
-                }
+                budget.remaining_at(now()).map_err(Halted::Stopped)?;
                 let new_bytes = &chunk[..read];
                 if let Some(end) = new_bytes.iter().position(|byte| *byte == b'\n') {
                     frame.extend_from_slice(&new_bytes[..end]);
-                    let verdict = classify(&frame);
-                    return match budget.remaining_at(now()) {
-                        Ok(_) => Ok(verdict),
-                        Err(ProbeStopped::Cancelled) => Err(Cancelled),
-                        Err(ProbeStopped::TimedOut) => Ok(spent()),
-                    };
+                    return Ok(Frame::Line {
+                        bytes: frame,
+                        trailing: end + 1 < read,
+                    });
                 }
                 frame.extend_from_slice(new_bytes);
                 if frame.len() > MAX_RESPONSE_BYTES {
-                    return Ok(Readiness::NotReady(NotReady::Malformed {
-                        line: diagnostic(&frame),
-                    }));
+                    return Ok(Frame::TooLarge(frame));
                 }
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                if !wait_ready(fd, Interest::Readable, budget, &now, &mut wait)? {
-                    return Ok(spent());
-                }
+                wait_ready(fd, Interest::Readable, budget, now, wait)?;
             }
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
-            Err(_) => return Ok(spent()),
+            Err(error) => return Err(Halted::Failed(error)),
         }
     }
 }
@@ -262,22 +327,18 @@ fn wait_ready<N, W>(
     budget: &ProbeBudget<'_>,
     now: &N,
     wait: &mut W,
-) -> Result<bool, Cancelled>
+) -> Result<(), Halted>
 where
     N: Fn() -> Instant,
     W: FnMut(RawFd, Interest, Duration) -> std::io::Result<bool>,
 {
     loop {
-        let left = match budget.remaining_at(now()) {
-            Ok(left) => left,
-            Err(ProbeStopped::Cancelled) => return Err(Cancelled),
-            Err(ProbeStopped::TimedOut) => return Ok(false),
-        };
+        let left = budget.remaining_at(now()).map_err(Halted::Stopped)?;
         match wait(fd, interest, left.min(MAX_WAIT)) {
-            Ok(true) => return Ok(true),
+            Ok(true) => return Ok(()),
             Ok(false) => {}
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
-            Err(_) => return Ok(false),
+            Err(error) => return Err(Halted::Failed(error)),
         }
     }
 }
@@ -477,8 +538,9 @@ fn address_for(socket: &Path) -> std::io::Result<(libc::sockaddr_un, libc::sockl
     Ok((address, (path_at + bytes.len() + 1) as libc::socklen_t))
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Interest {
+/// What a wait asks a descriptor for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Interest {
     Readable,
     Writable,
 }
@@ -492,14 +554,16 @@ impl Interest {
     }
 }
 
+/// Waits up to `limit`, rounded up to whole milliseconds and at least one,
+/// for `fd` to be ready for `interest`. `Ok(false)` means the wait ran out.
 #[allow(unsafe_code)]
-fn wait_fd(fd: RawFd, interest: Interest, slice: Duration) -> std::io::Result<bool> {
+pub(crate) fn wait_fd(fd: RawFd, interest: Interest, limit: Duration) -> std::io::Result<bool> {
     let mut polling = [libc::pollfd {
         fd,
         events: interest.events(),
         revents: 0,
     }];
-    let timeout = slice.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32;
+    let timeout = limit.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32;
     // SAFETY: `polling` is a local array of one pollfd, matching the count of 1.
     let counted = unsafe { libc::poll(polling.as_mut_ptr(), 1, timeout.max(1)) };
     if counted < 0 {
