@@ -133,7 +133,8 @@ cannot keep it waiting.
 ## Probes
 
 `lane-probe <subcommand>` prints one JSON line with `probe`, `ok` and `id_u`, the effective uid it
-ran as; a failed operation names its errno symbolically, such as `"errno": "EACCES"`.
+ran as, or for a `release` its holder answered, the holder's; a failed operation names its errno
+symbolically, such as `"errno": "EACCES"`.
 
 | Subcommand | Observation |
 | --- | --- |
@@ -281,9 +282,9 @@ the bundle's `base/rootfs.raw` as its writable root image.
   ends. A gate lane cannot end in that window while it measures, because every step's probe is
   followed by an `await` that holds the guest for up to 30 s, and a lane whose `await` runs out
   is `not run`. The steps tests keep each launcher alive until its step's action has run. The
-  mutant that lets the final read take steps survives them: a test that kills it must hold an
-  action past the run's end by a fixed margin, and a correct build would fail it whenever
-  `run_lane` took longer than that margin to return.
+  mutant that lets the final read take steps survives them: a test that kills it without a seam
+  must hold an action past the run's end by a fixed margin, and a correct build would fail it
+  whenever `run_lane` took longer than that margin to return.
 - `lane-init`'s final wait blocks while any child is alive after the kill. A process stuck in an
   uninterruptible sleep, for example on a virtio-fs request, keeps the guest running until
   `run_lane`'s timeout, and the run is `TimedOut`.

@@ -744,7 +744,7 @@ fn rows() -> Vec<RowSpec> {
         ),
         row(
             "M3",
-            "A descriptor, a mapping and a running binary opened before the host moves the tree to the holding directory each read their bytes after it, with lane-vmm confined and its self-check passed first. The profile is (allow default): it denies every write but the console's and the disk image's, and denies reads only inside the lane directory, apart from the software directory, the console, the image and the initramfs.",
+            "A descriptor, a mapping and a running binary opened before the host moves the tree to the holding directory each read their bytes after it, with lane-vmm confined and its self-check passed first. The profile is (allow default): it denies every file write but the console's and the disk image's, and denies reads only inside the lane directory, apart from the software directory, the console, the image and the initramfs.",
             vec![
                 run_spec("detach-move", Host::Move.describe(), Pass),
                 run_spec("detach-delete", Host::Delete.describe(), Fail),
@@ -818,7 +818,7 @@ fn rows() -> Vec<RowSpec> {
         ),
         row(
             "R2 private-parent",
-            "027 §3.4, item 4: a configuration 027 counts and does not name. With the parent mount private, the attach point made before the workload's namespace, and that namespace left as unshare made it, mount returns 0 and the workload's stat fails ENOENT.",
+            "027 §3.4, item 4: one of the two configurations 027 counts and does not name; that these two are 027's rests on the original measurement, outside this repository. With the parent mount private, the attach point made before the workload's namespace, and that namespace left as unshare made it, mount returns 0 and the workload's stat fails ENOENT. Its line differs from late-directory's only in the names, `attach_point` and the staged file's inode.",
             vec![run_spec(
                 "r2-staging",
                 "guest root stages each configuration",
@@ -827,7 +827,7 @@ fn rows() -> Vec<RowSpec> {
         ),
         row(
             "R2 late-directory",
-            "027 §3.4, item 4: a configuration 027 counts and does not name. With the parent mount private and no attach point made beforehand, the initial namespace creates the directory after the workload's namespace exists and binds onto it; mount returns 0 and the workload's stat fails ENOENT.",
+            "027 §3.4, item 4: the other of 027's two unnamed configurations, by the same measurement outside this repository. With the parent mount private and no attach point made beforehand, the initial namespace creates the directory after the workload's namespace exists and binds onto it; mount returns 0 and the workload's stat fails ENOENT. Both parents are private, and the workload stats only `opt/p/bin/x`, never `opt/p`, so the record cannot tell whether the late attach point changes anything.",
             vec![run_spec(
                 "r2-staging",
                 "guest root stages each configuration",
@@ -927,11 +927,12 @@ no record, or decided nothing, reads `not run`, a mutant's run included. An obse
 recorded and not judged, and an observation row whose run recorded nothing for it reads
 `not recorded`. A tallied row shows its measured count beside its verdict.
 
-Every workload probe ran as uid 1000, and every result line carries the process's effective uid
-as `id_u`. The setuid observation's holder is the one workload process that ran with effective
-uid 0, which is what that observation looks at. On macOS a new directory takes the group of the
-directory it is made in, so the group M1's plain run shows is that of the folder the lane was made
-in, not one the share chose.
+Every workload probe ran as uid 1000, and every result line carries its process's effective uid
+as `id_u`, except that a `release` line the holder answered carries the holder's uid, passed on,
+not the release process's own. The setuid observation's holder is the one workload process that
+ran with effective uid 0, which is what that observation looks at. On macOS a new directory takes
+the group of the directory it is made in, so the group M1's plain run shows is that of the folder
+the lane was made in, not one the share chose.
 
 Owner gate O-6 was open while these ran: a library planted in `/opt/homebrew/opt/llvm/lib` or
 `/usr/local/lib` would load before `lane-vmm` checks any image. Nothing was planted there, and
