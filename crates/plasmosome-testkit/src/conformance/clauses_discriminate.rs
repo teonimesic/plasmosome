@@ -152,6 +152,19 @@ impl DefectiveBackend {
         }
     }
 
+    fn validated(&self, operation: &UniverseOp, call: Call) -> Result<(), BackendError> {
+        if self.defect == Defect::AcceptsInvalidOperations(call) {
+            return Ok(());
+        }
+        operation
+            .validate()
+            .map_err(|error| BackendError::InvalidOperation {
+                class: operation.class().as_str(),
+                id: operation.id(),
+                error,
+            })
+    }
+
     fn observed(&self) -> OsState {
         if self.mirrors_its_ledger() {
             self.mirrored_state()
@@ -483,6 +496,7 @@ impl EnforcementBackend for DefectiveBackend {
         if self.defect == Defect::GrantPanics {
             std::panic::panic_any(InfrastructureFailure::Grant);
         }
+        self.validated(&operation, Call::Grant)?;
         let mut owner = operation.owner().clone();
         let mut capability = operation.capability();
         if self.defect == Defect::GrantSubstitutesRequestedOwner {
@@ -532,18 +546,26 @@ impl EnforcementBackend for DefectiveBackend {
             capability,
             kind,
         };
-        if self.defect == Defect::RetryRewritesTheIssuedRecord && self.ledger.contains_key(&handle)
-        {
+        if let Some(issued) = self.ledger.get(&handle) {
+            if *issued == entry {
+                return Ok(issued.clone());
+            }
+            if self.defect != Defect::RetryRewritesTheIssuedRecord {
+                return Err(identity_conflict(handle));
+            }
             self.ledger.insert(handle, entry.clone());
             return Ok(entry);
         }
-        if self.defect == Defect::DirectApplyPromotesToGrant
-            && !self.ledger.contains_key(&handle)
-            && self
-                .observed()
-                .objects()
-                .any(|held| *held == entry.object())
+        let observed = self.observed();
+        if observed
+            .objects()
+            .any(|held| held.class() == handle.class && held.id == handle.id)
         {
+            let promotes = self.defect == Defect::DirectApplyPromotesToGrant
+                && observed.objects().any(|held| *held == entry.object());
+            if !promotes {
+                return Err(identity_conflict(handle));
+            }
             self.ledger.insert(handle, entry.clone());
             self.grant_order.push(handle);
             return Ok(entry);
@@ -649,8 +671,11 @@ impl EnforcementBackend for DefectiveBackend {
     }
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
+        self.validated(&op, Call::Apply)?;
         if self.mirrors_its_ledger() {
-            self.applied.push(op);
+            if self.mirrored_state().insert(op.object())? {
+                self.applied.push(op);
+            }
             return Ok(());
         }
         self.refuse_an_occupied_endpoint(&op.capability())?;
@@ -720,8 +745,11 @@ impl EnforcementBackend for DefectiveBackend {
     }
 
     fn plant(&mut self, object: OsObject) -> Result<(), BackendError> {
+        self.validated(&object.operation(), Call::Plant)?;
         if self.mirrors_its_ledger() {
-            self.planted.push(object);
+            if self.mirrored_state().insert(object.clone())? {
+                self.planted.push(object);
+            }
             return Ok(());
         }
         self.state.insert(object).map(|_| ())
@@ -732,6 +760,13 @@ fn removal_of(object: &OsObject) -> UniverseRemoval {
     UniverseRemoval {
         id: object.id,
         capability: object.capability.clone(),
+    }
+}
+
+fn identity_conflict(handle: Handle) -> BackendError {
+    BackendError::IdentityConflict {
+        class: handle.class.as_str(),
+        id: handle.id,
     }
 }
 
