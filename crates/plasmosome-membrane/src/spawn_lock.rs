@@ -105,9 +105,9 @@ pub(crate) fn fork() -> Result<Forked, SpawnError> {
     // documented contract, which safe code can break, as the test launcher PanicOnLaunch does.
     // fork_holding holds the read side of the spawn lock, so no descriptor made inside
     // with_descriptors_held or with_each_descriptor_held is mid-creation. The lock does not cover a
-    // descriptor made in two calls anywhere else, such as a socket or connection std makes on macOS, which has no SOCK_CLOEXEC
-    // or accept4. daemon::run's doc gives the order that keeps the daemon's own sockets out of a
-    // fork.
+    // descriptor made in two calls anywhere else, such as a socket or connection std makes on
+    // macOS, which has no SOCK_CLOEXEC or accept4. daemon::run's doc gives the order that keeps the
+    // daemon's own sockets out of a fork.
     fork_holding(&SPAWN_LOCK, || unsafe { libc::fork() })
 }
 

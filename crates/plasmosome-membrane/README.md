@@ -96,9 +96,10 @@ creates its socket holding the write side, and `HelperExec::prepare` creates the
 the same way, so a spawn waits while either is created; on Linux both are close-on-exec from the
 start, so the wait matters only on Darwin. Creation under the write side returns the values that
 own its descriptors, and only those descriptors are checked: if any is not already close-on-exec,
-all of them are closed before the lock is released and creation fails. A descriptor created under the lock and kept anywhere else is not checked, so the code that
-creates it must mark it close-on-exec before the lock is released. A spawn from the thread that
-holds the write side returns `SpawnError::DescriptorLockHeld` instead of waiting on itself.
+all of them are closed before the lock is released and creation fails. A descriptor created under
+the lock and kept anywhere else is not checked, so the code that creates it must mark it
+close-on-exec before the lock is released. A spawn from the thread that holds the write side returns
+`SpawnError::DescriptorLockHeld` instead of waiting on itself.
 
 The lock covers only those three paths. Forks that do not go through `VmmChild::spawn`, such as
 `std::process::Command`, do not take it, and neither do the standard library's `bind` in
