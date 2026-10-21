@@ -800,7 +800,7 @@ pub mod artifact;
 mod tests {
     use super::*;
     use plasmosome_backend::{
-        Capability, CellId, CellOwner, Diff, FakeBackend, FileAccess, Grant, GrantId, GrantKind,
+        Capability, CellId, CellOwner, Diff, FakeBackend, FileAccess, GrantId, GrantKind,
         ProxyRecipe, ProxyTransport, SessionFileRecipe, UdsRecipe, UniverseOp,
     };
     use std::time::Duration;
@@ -926,22 +926,26 @@ mod tests {
         ]
     }
 
-    fn grant_uds(backend: &mut FakeBackend, path: &str) -> (Handle, UniverseRemoval) {
-        let entry = backend.grant(Grant {
-            owner: cell_owner("network"),
-            capability: uds_socket(path),
-            kind: GrantKind::Hot,
-        });
+    fn granted(
+        backend: &mut FakeBackend,
+        plugin: &str,
+        capability: Capability,
+    ) -> (Handle, UniverseRemoval) {
+        let entry = backend
+            .grant(
+                op(GrantId::new(), cell_owner(plugin), capability),
+                GrantKind::Hot,
+            )
+            .unwrap();
         (entry.handle, entry.removal())
     }
 
+    fn grant_uds(backend: &mut FakeBackend, path: &str) -> (Handle, UniverseRemoval) {
+        granted(backend, "network", uds_socket(path))
+    }
+
     fn grant_file(backend: &mut FakeBackend, path: &str) -> (Handle, UniverseRemoval) {
-        let entry = backend.grant(Grant {
-            owner: cell_owner("github-pr"),
-            capability: session_file(path),
-            kind: GrantKind::Hot,
-        });
-        (entry.handle, entry.removal())
+        granted(backend, "github-pr", session_file(path))
     }
 
     fn populate(backend: &mut FakeBackend) -> Vec<(Handle, UniverseRemoval)> {
@@ -1476,14 +1480,18 @@ mod tests {
                 let mut backend = FakeBackend::new();
                 backend.apply(object.clone()).unwrap();
                 let stuck = backend
-                    .grant(Grant {
-                        owner: CellOwner {
-                            cell: elsewhere.clone(),
-                            plugin: PluginId::from("github-pr"),
-                        },
-                        capability: session_file("/skills/stuck.md"),
-                        kind: GrantKind::Hot,
-                    })
+                    .grant(
+                        op(
+                            GrantId::new(),
+                            CellOwner {
+                                cell: elsewhere.clone(),
+                                plugin: PluginId::from("github-pr"),
+                            },
+                            session_file("/skills/stuck.md"),
+                        ),
+                        GrantKind::Hot,
+                    )
+                    .unwrap()
                     .handle;
                 backend.mark_stuck(stuck);
                 let mut ledger = Ledger::new("github-pr");
