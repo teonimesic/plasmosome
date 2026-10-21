@@ -36,9 +36,10 @@ pub use control::{Controller, Handler, MAX_LINE_BYTES, serve_connection};
 pub use daemon::{ConfigError, DaemonConfig, DaemonError, parse_config, run};
 pub use gatekeeper::Gatekeeper;
 pub use instance::{
-    CellDir, CellDirError, DiscoveredEntry, Discovery, DiscoveryError, EntryClass, InstanceRoot,
-    InstanceRootError, JournalAppend, JournalOpen, JournalRefusal, LaunchedMarker, LockError,
-    MarkerFault, MarkerRead, NotACell, RetireError, WriterLock,
+    AllocateError, CellDir, CellDirError, DiscoveredEntry, Discovery, DiscoveryError, EntryClass,
+    FileIdentity, InstanceRoot, InstanceRootError, JournalAppend, JournalOpen, JournalRefusal,
+    LaunchedMarker, LockError, LockProbe, MarkerFault, MarkerRead, NotACell, RetireError,
+    SupervisorLock, WriterLock,
 };
 pub use kill_budget::{
     GuestStop, Incomplete, KillBudget, Share, Shortfall, Withdrawal, WorkloadStop,

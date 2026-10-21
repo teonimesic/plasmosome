@@ -8,11 +8,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
+use std::sync::{Mutex, PoisonError};
 
 use plasmosome_backend::{BootSession, CellId};
 use serde_json::Value;
 
-use crate::runtime::cell_id::parse_cell_id;
+use crate::runtime::cell_id::{MAX_CELL_NUMBER, format_cell_id, parse_cell_id};
 use crate::runtime::line::{LineFault, read_line};
 use crate::state::{
     CELL_JOURNAL_FILE, CELLS_DIR, CellPathError, cell_ledger_path, validate_cell_id,
@@ -31,6 +32,9 @@ const LAUNCHED_TEMPORARY: &CStr = c"launched.tmp";
 const CREATED_FILE: &CStr = c"created";
 const RUNTIME_DIR: &CStr = c"runtime";
 const RETIRED_DIR: &CStr = c"retired";
+const SUPERVISOR_LOCK_FILE: &CStr = c"supervisor.lock";
+const SUPERVISOR_LOG_FILE: &CStr = c"membraned.log";
+const ALLOCATION_ATTEMPTS: usize = 64;
 const MARKER_KEYS: [&str; 3] = ["cell", "boot_session", "stopped"];
 pub(crate) const MAX_MARKER_BYTES: usize = 4096;
 const MARKER_READ_LIMIT: u64 = MAX_MARKER_BYTES as u64 + 1;
@@ -148,6 +152,7 @@ impl InstanceRoot {
             file,
             path,
             root: self.identity,
+            allocation: Mutex::new(()),
         })
     }
 
@@ -302,6 +307,45 @@ impl InstanceRoot {
         Ok(self.cell_dir_from(dir, cell.clone(), journal_path))
     }
 
+    /// Allocates the next cell ID under spec 023 §2 and creates its directory as
+    /// [`InstanceRoot::create_cell_dir`] does: exclusive, mode 0700 and synced. The ID is
+    /// `cell-<n>`, where `n` is one more than the largest number named in `cells` or `retired`,
+    /// or 1 when there is none. Only names count, so an entry of any kind named `cell-<n>` keeps
+    /// that ID from being allocated again, and a name that `parse_cell_id` refuses is ignored.
+    /// Listing creates neither directory. Each one found is set to mode 0700, as `create_cell_dir`
+    /// does for `cells`. A symlink or anything but a directory at either name is
+    /// `NotADirectory`: it is not followed, and nothing is created.
+    ///
+    /// It needs this root's writer lock; a lock taken on another root is `ForeignLock` and
+    /// nothing is listed. Allocations under one writer lock run one at a time, from the listing
+    /// until the directory exists, through every open of the root that uses that lock. If another
+    /// process creates the chosen name first, the call lists again and tries the next number, at
+    /// most 64 times, then is `Contended`. When `cell-9999999999` is taken it is `Exhausted`. The
+    /// new directory has no `supervisor.lock` yet.
+    pub fn allocate_cell(&self, lock: &WriterLock) -> Result<CellDir, AllocateError> {
+        if lock.root != self.identity {
+            return Err(AllocateError::ForeignLock {
+                path: lock.path.clone(),
+            });
+        }
+        let _allocating = lock
+            .allocation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for _ in 0..ALLOCATION_ATTEMPTS {
+            let next = self.next_cell_number()?;
+            #[cfg(test)]
+            tests::after_scan();
+            match self.create_cell_dir(lock, &format_cell_id(next)) {
+                Err(CellDirError::AlreadyExists { .. }) => {}
+                created => return created.map_err(AllocateError::Create),
+            }
+        }
+        Err(AllocateError::Contended {
+            path: self.path.join(CELLS_DIR),
+        })
+    }
+
     /// Retires a cell (spec 023 §7 step 5, and §8): renames `cells/<cell>` to `retired/<cell>`
     /// and unlinks nothing, so the journal, the markers, a stale `membrane.uds` and `runtime/`
     /// all move with it. It needs this root's writer lock; a lock taken on another root is
@@ -397,6 +441,45 @@ impl InstanceRoot {
         Ok(cells)
     }
 
+    fn next_cell_number(&self) -> Result<u64, AllocateError> {
+        let cells = c_name(CELLS_DIR.as_bytes()).map_err(|source| AllocateError::Listing {
+            path: self.path.join(CELLS_DIR),
+            source,
+        })?;
+        let largest = self
+            .largest_cell_number(&cells)?
+            .max(self.largest_cell_number(RETIRED_DIR)?);
+        largest
+            .checked_add(1)
+            .filter(|next| *next <= MAX_CELL_NUMBER)
+            .ok_or(AllocateError::Exhausted)
+    }
+
+    fn largest_cell_number(&self, name: &CStr) -> Result<u64, AllocateError> {
+        let path = self.path.join(name_of(name));
+        let dir = match open_private_directory(self.dir.as_fd(), name) {
+            Ok(dir) => dir,
+            Err(DirectoryRefusal::Missing) => return Ok(0),
+            Err(DirectoryRefusal::Symlink | DirectoryRefusal::NotADirectory) => {
+                return Err(AllocateError::NotADirectory { path });
+            }
+            Err(DirectoryRefusal::Io(source)) => {
+                return Err(AllocateError::Listing { path, source });
+            }
+        };
+        let listing = |source| AllocateError::Listing {
+            path: path.clone(),
+            source,
+        };
+        let mut largest = 0;
+        for listed in DirectoryStream::open(dir.as_fd()).map_err(listing)? {
+            let listed = listed.map_err(listing)?;
+            let number = std::str::from_utf8(&listed).ok().and_then(parse_cell_id);
+            largest = largest.max(number.unwrap_or(0));
+        }
+        Ok(largest)
+    }
+
     fn open_cells(&self) -> Result<OwnedFd, DirectoryRefusal> {
         let name = c_name(CELLS_DIR.as_bytes()).map_err(DirectoryRefusal::Io)?;
         open_at(self.dir.as_fd(), &name, DIRECTORY_FLAGS, 0)
@@ -483,12 +566,15 @@ impl InstanceRoot {
 /// The instance's writer lock. Dropping it releases the lock and leaves `controller.lock` in
 /// place; so does the death of the process holding it, unless a forked child that has not
 /// called `exec` still holds the file (see [`InstanceRoot::lock`]). Discovery, cell creation and
-/// journal appends take it as proof that the caller holds the lock of the same root.
+/// journal appends take it as proof that the caller holds the lock of the same root. It also
+/// holds the instance's one allocation mutex, so [`InstanceRoot::allocate_cell`] calls that use
+/// it run one at a time.
 #[must_use = "dropping the WriterLock releases the instance lock"]
 pub struct WriterLock {
     file: File,
     path: PathBuf,
     root: Identity,
+    allocation: Mutex<()>,
 }
 
 impl WriterLock {
@@ -759,6 +845,78 @@ impl CellDir {
         self.sync_dir()
     }
 
+    /// Creates spec 023 §3's `supervisor.lock` and locks it (spec 023 §4, step 4). The file is
+    /// created exclusively, without following a symlink, with mode 0600 whatever the umask, and
+    /// close-on-exec; then `flock(LOCK_EX | LOCK_NB)` is taken on it and this directory is
+    /// synced. The returned [`SupervisorLock`] holds the lock. Any existing entry named
+    /// `supervisor.lock`, a symlink included, is `AlreadyExists`. If the lock is not taken, as
+    /// when another open of the new file took it first, or the sync fails, the error is `Io`
+    /// and the file stays in place: a retry is `AlreadyExists`, and once nothing else holds it
+    /// [`CellDir::probe_supervisor_lock`] reports it `Free`.
+    pub fn create_supervisor_lock(&self) -> Result<SupervisorLock, CellDirError> {
+        let path = self.entry_path(SUPERVISOR_LOCK_FILE);
+        let file = self.create_private_file(SUPERVISOR_LOCK_FILE)?;
+        lock_exclusive_nonblocking(file.as_fd()).map_err(cell_dir_io(&path))?;
+        self.sync_dir()?;
+        Ok(SupervisorLock { file, path })
+    }
+
+    /// Tries `supervisor.lock` on a fresh descriptor (spec 023 §4 step 6, §7 step 4 and §8),
+    /// opened read-only, close-on-exec, without following a symlink and without blocking. `Held`
+    /// means another open of the file holds its `flock`, in this process or another, and the
+    /// probe's descriptor is closed. `Free` means the probe took the lock, which the returned
+    /// [`SupervisorLock`] keeps until it is dropped. `Missing` means no entry named
+    /// `supervisor.lock` exists; nothing is created. A symlink there is `Symlink`, and anything
+    /// but a regular file is `NotARegularFile`; neither is locked. The probe never calls
+    /// `LOCK_UN`.
+    pub fn probe_supervisor_lock(&self) -> Result<LockProbe, CellDirError> {
+        let path = self.entry_path(SUPERVISOR_LOCK_FILE);
+        let Some(file) = self.open_supervisor_lock()? else {
+            return Ok(LockProbe::Missing);
+        };
+        match lock_exclusive_nonblocking(file.as_fd()) {
+            Ok(()) => Ok(LockProbe::Free(SupervisorLock { file, path })),
+            Err(error) if error.raw_os_error() == Some(libc::EWOULDBLOCK) => Ok(LockProbe::Held),
+            Err(error) => Err(cell_dir_io(&path)(error)),
+        }
+    }
+
+    /// The device and inode of the file named `supervisor.lock`, opened as
+    /// [`CellDir::probe_supervisor_lock`] opens it, for `membraned` to check that the descriptor
+    /// it was handed is this cell's lock (spec 023 §5, step 2). It takes no lock. With no entry
+    /// there it is `Missing`; a symlink or anything but a regular file is refused as the probe
+    /// refuses it.
+    pub fn supervisor_lock_identity(&self) -> Result<FileIdentity, CellDirError> {
+        let path = self.entry_path(SUPERVISOR_LOCK_FILE);
+        match self.open_supervisor_lock()? {
+            Some(file) => file_identity(&file).map_err(cell_dir_io(&path)),
+            None => Err(CellDirError::Missing { path }),
+        }
+    }
+
+    /// Opens `membraned.log`, `membraned`'s stderr (spec 023 §4), for appending. A missing log is
+    /// created; an existing one is kept, never truncated. Either way it is set to mode 0600
+    /// whatever the umask. It is opened without following a symlink and without blocking on a
+    /// FIFO, and close-on-exec; the returned file is in blocking mode. A symlink is `Symlink` and
+    /// anything but a regular file is `NotARegularFile`; neither is written.
+    pub fn open_supervisor_log(&self) -> Result<File, CellDirError> {
+        let path = self.entry_path(SUPERVISOR_LOG_FILE);
+        let access = libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT;
+        let file = open_regular_at(self.dir.as_fd(), SUPERVISOR_LOG_FILE, access, PRIVATE_FILE)
+            .map_err(|refusal| refusal.into_cell_dir_error(path.clone()))?;
+        change_mode(file.as_fd(), PRIVATE_FILE).map_err(cell_dir_io(&path))?;
+        clear_nonblocking(file.as_fd()).map_err(cell_dir_io(&path))?;
+        Ok(file)
+    }
+
+    fn open_supervisor_lock(&self) -> Result<Option<File>, CellDirError> {
+        match open_regular_at(self.dir.as_fd(), SUPERVISOR_LOCK_FILE, libc::O_RDONLY, 0) {
+            Ok(file) => Ok(Some(file)),
+            Err(FileRefusal::Io(error)) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
+            Err(refusal) => Err(refusal.into_cell_dir_error(self.entry_path(SUPERVISOR_LOCK_FILE))),
+        }
+    }
+
     fn entry_path(&self, name: &CStr) -> PathBuf {
         self.journal_path.with_file_name(name_of(name))
     }
@@ -781,6 +939,13 @@ impl CellDir {
 
     fn write_new_file(&self, name: &CStr, contents: &[u8]) -> Result<(), CellDirError> {
         let path = self.entry_path(name);
+        let mut file = self.create_private_file(name)?;
+        file.write_all(contents).map_err(cell_dir_io(&path))?;
+        (self.sync)(file.as_fd()).map_err(cell_dir_io(&path))
+    }
+
+    fn create_private_file(&self, name: &CStr) -> Result<File, CellDirError> {
+        let path = self.entry_path(name);
         let fd = match open_at(self.dir.as_fd(), name, NEW_FILE_FLAGS, PRIVATE_FILE) {
             Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
                 return Err(CellDirError::AlreadyExists { path });
@@ -788,10 +953,76 @@ impl CellDir {
             created => created.map_err(cell_dir_io(&path))?,
         };
         change_mode(fd.as_fd(), PRIVATE_FILE).map_err(cell_dir_io(&path))?;
-        let mut file = File::from(fd);
-        file.write_all(contents).map_err(cell_dir_io(&path))?;
-        (self.sync)(file.as_fd()).map_err(cell_dir_io(&path))
+        Ok(File::from(fd))
     }
+}
+
+/// A cell's `supervisor.lock`, open and holding its `flock`. The lock belongs to the open file,
+/// not to this value: dropping it closes this descriptor and releases the lock only once no
+/// other descriptor of the same open file remains, such as the copy handed to `membraned`.
+/// Nothing here calls `LOCK_UN`. A process forked from this one that has not called `exec`
+/// keeps the lock alive, as it does the [`WriterLock`]. The descriptor is close-on-exec.
+#[must_use = "dropping the SupervisorLock releases the cell's supervisor lock"]
+pub struct SupervisorLock {
+    file: File,
+    path: PathBuf,
+}
+
+impl SupervisorLock {
+    /// The device and inode of the locked file, from `fstat` on the held descriptor.
+    pub fn identity(&self) -> io::Result<FileIdentity> {
+        file_identity(&self.file)
+    }
+
+    /// Gives up this value for its descriptor, which still holds the lock: spec 023 §4 hands it
+    /// to `membraned` as descriptor 4.
+    pub fn into_owned_fd(self) -> OwnedFd {
+        OwnedFd::from(self.file)
+    }
+}
+
+impl AsFd for SupervisorLock {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.file.as_fd()
+    }
+}
+
+impl fmt::Debug for SupervisorLock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SupervisorLock")
+            .field("fd", &self.file.as_raw_fd())
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+/// What [`CellDir::probe_supervisor_lock`] found. Only `Free` holds the lock.
+#[derive(Debug)]
+#[must_use = "a Free probe holds the supervisor lock until it is dropped"]
+pub enum LockProbe {
+    Held,
+    Free(SupervisorLock),
+    Missing,
+}
+
+/// A file's device and inode, as `fstat` reports them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+/// Why no cell was allocated. `NotADirectory` names a `cells` or `retired` that is a symlink or
+/// not a directory. `Exhausted` means `cell-9999999999` is taken. `Contended` means another
+/// process created the chosen name before each of 64 attempts could.
+#[derive(Debug)]
+pub enum AllocateError {
+    ForeignLock { path: PathBuf },
+    NotADirectory { path: PathBuf },
+    Listing { path: PathBuf, source: io::Error },
+    Exhausted,
+    Contended { path: PathBuf },
+    Create(CellDirError),
 }
 
 /// Spec 023 §3's `launched` marker: the cell it belongs to and the host boot session its
@@ -1193,6 +1424,48 @@ impl std::error::Error for RetireError {
     }
 }
 
+impl fmt::Display for AllocateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AllocateError::ForeignLock { path } => f.write_str(&foreign_lock_text(path)),
+            AllocateError::NotADirectory { path } => write!(
+                f,
+                "{} is a symlink or not a directory, so no cell was allocated",
+                path.display()
+            ),
+            AllocateError::Listing { path, source } => {
+                write!(f, "cannot list {}: {source}", path.display())
+            }
+            AllocateError::Exhausted => write!(
+                f,
+                "no cell ID is left: cell-{MAX_CELL_NUMBER} is already taken"
+            ),
+            AllocateError::Contended { path } => write!(
+                f,
+                "another process created the chosen name in {} before each of \
+                 {ALLOCATION_ATTEMPTS} attempts, so no cell was allocated",
+                path.display()
+            ),
+            AllocateError::Create(error) => {
+                write!(f, "the new cell's directory was not created: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AllocateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AllocateError::Listing { source, .. } => Some(source),
+            AllocateError::Create(error) => Some(error),
+            AllocateError::ForeignLock { .. }
+            | AllocateError::NotADirectory { .. }
+            | AllocateError::Exhausted
+            | AllocateError::Contended { .. } => None,
+        }
+    }
+}
+
 impl fmt::Display for InstanceRootError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1416,6 +1689,39 @@ enum FileRefusal {
     Symlink,
     NotRegular,
     Io(io::Error),
+}
+
+impl FileRefusal {
+    fn into_cell_dir_error(self, path: PathBuf) -> CellDirError {
+        match self {
+            FileRefusal::Symlink => CellDirError::Symlink { path },
+            FileRefusal::NotRegular => CellDirError::NotARegularFile { path },
+            FileRefusal::Io(source) => CellDirError::Io { path, source },
+        }
+    }
+}
+
+fn open_regular_at(
+    dir: BorrowedFd<'_>,
+    name: &CStr,
+    access: libc::c_int,
+    mode: libc::mode_t,
+) -> Result<File, FileRefusal> {
+    let fd = open_at(dir, name, access | FILE_FLAGS, mode)
+        .map_err(|error| file_refusal(dir, name, error))?;
+    let file = File::from(fd);
+    if !file.metadata().map_err(FileRefusal::Io)?.is_file() {
+        return Err(FileRefusal::NotRegular);
+    }
+    Ok(file)
+}
+
+fn file_identity(file: &File) -> io::Result<FileIdentity> {
+    let metadata = file.metadata()?;
+    Ok(FileIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    })
 }
 
 fn file_refusal(parent: BorrowedFd<'_>, name: &CStr, error: io::Error) -> FileRefusal {
