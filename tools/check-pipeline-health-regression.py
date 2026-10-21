@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Defend health-report uncertainty, delivery windows, pagination, security issues and read-only failure boundaries."""
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+import errno
 import json
 import os
 from pathlib import Path
 import runpy
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 
 SOURCE = Path(__file__).resolve().with_name("check-pipeline-health")
@@ -486,6 +490,156 @@ def runner_released_group_identity():
         victim.wait(timeout=5)
 
 
+def process_state(pid):
+    result = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=10)
+    state = result.stdout.strip()
+    return state if result.returncode == 0 and state else None
+
+
+def wait_for_zombie(pid):
+    end = time.monotonic() + 15
+    while not (process_state(pid) or "").startswith("Z"):
+        assert time.monotonic() < end, f"source child {pid} never became an exited, unreaped zombie"
+        time.sleep(0.01)
+
+
+def ended_within(pid, seconds):
+    end = time.monotonic() + seconds
+    while True:
+        state = process_state(pid)
+        if state is None or state.startswith("Z"):
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.01)
+
+
+@contextmanager
+def runner_syscalls(killpg, *, exited_before_read=False):
+    namespace = API["JsonRunner"].__call__.__globals__
+    original_os, original_subprocess = namespace["os"], namespace["subprocess"]
+
+    class Processes:
+        child = None
+
+        def __getattr__(self, name):
+            return getattr(original_subprocess, name)
+
+        def Popen(self, *args, **kwargs):
+            self.child = original_subprocess.Popen(*args, **kwargs)
+            return self.child
+
+    processes = Processes()
+
+    class Syscalls:
+        def __getattr__(self, name):
+            return getattr(original_os, name)
+
+        def killpg(self, group, sig):
+            return killpg(processes.child, group, sig)
+
+        def read(self, fd, size):
+            if exited_before_read:
+                wait_for_zombie(processes.child.pid)
+            return original_os.read(fd, size)
+
+    namespace["subprocess"], namespace["os"] = processes, Syscalls()
+    try:
+        yield processes
+    finally:
+        namespace["subprocess"], namespace["os"] = original_subprocess, original_os
+        if processes.child is not None and processes.child.returncode is None:
+            processes.child.kill()
+            processes.child.wait(timeout=10)
+
+
+def runner_refused_group_of_exited_leader():
+    calls = []
+
+    def killpg(child, group, sig):
+        assert group == child.pid and child.returncode is None, "signalled a group after its leader was reaped"
+        calls.append("injected")
+        try:
+            os.killpg(group, sig)
+        except PermissionError:
+            calls[-1] = "kernel"
+            raise
+        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+
+    with tempfile.TemporaryDirectory(prefix="pipeline-health-exited-leader-") as directory, \
+            runner_syscalls(killpg, exited_before_read=True) as processes:
+        runner = API["JsonRunner"](Path(directory), timeout=10, budget=30, output_limit=1024)
+        try:
+            runner([sys.executable, "-c", "print('x' * 2048)"])
+        except RuntimeError as exc:
+            assert "exceeded byte limit" in str(exc), exc
+        else:
+            raise AssertionError("oversized source accepted")
+        child = processes.child
+        assert child.returncode is not None, "the exited leader of a refused group was left unreaped"
+        assert child.stdout.closed and child.stderr.closed, "a refused group left its pipes open"
+        assert len(calls) == 1, calls
+        if sys.platform == "darwin":
+            assert calls == ["kernel"], f"the kernel did not refuse a group whose only member is a zombie: {calls}"
+
+
+def runner_refused_group_of_live_leader():
+    def killpg(child, group, sig):
+        assert group == child.pid and child.returncode is None, "signalled a group after its leader was reaped"
+        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+
+    with tempfile.TemporaryDirectory(prefix="pipeline-health-live-leader-") as directory, \
+            runner_syscalls(killpg) as processes:
+        runner = API["JsonRunner"](Path(directory), timeout=0.5, budget=60)
+        runner.exit_grace = 0.5
+        try:
+            runner([sys.executable, "-c", "import time; time.sleep(30)"])
+        except RuntimeError as exc:
+            assert "refused SIGKILL" in str(exc) and "sleep" not in str(exc), exc
+        else:
+            raise AssertionError("a live group that refused SIGKILL was accepted")
+        child = processes.child
+        assert child.poll() is None, "the refusing leader was not live, so the row tested nothing"
+        assert child.stdout.closed and child.stderr.closed, "a refused group left its pipes open"
+
+
+def runner_ends_descendants_of_exited_leader():
+    def killpg(child, group, sig):
+        os.killpg(group, sig)
+
+    leader = ("import os, pathlib, time\n"
+              "pid = os.fork()\n"
+              "if pid == 0:\n"
+              "    quiet = os.open(os.devnull, os.O_RDWR)\n"
+              "    for fd in (0, 1, 2):\n"
+              "        os.dup2(quiet, fd)\n"
+              "    time.sleep(60)\n"
+              "    os._exit(0)\n"
+              "pathlib.Path('descendant').write_text(str(pid))\n"
+              "print('x' * 2048)\n")
+    with tempfile.TemporaryDirectory(prefix="pipeline-health-descendant-") as directory, \
+            runner_syscalls(killpg, exited_before_read=True) as processes:
+        record = Path(directory) / "descendant"
+        try:
+            runner = API["JsonRunner"](Path(directory), timeout=10, budget=30, output_limit=1024)
+            try:
+                runner([sys.executable, "-c", leader])
+            except RuntimeError as exc:
+                assert "exceeded byte limit" in str(exc), exc
+            else:
+                raise AssertionError("oversized source accepted")
+            assert ended_within(int(record.read_text()), 10), "a descendant of an exited leader outlived the call"
+        finally:
+            if record.exists():
+                descendant = int(record.read_text())
+                try:
+                    if os.getpgid(descendant) == processes.child.pid and not ended_within(descendant, 0):
+                        os.kill(descendant, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
 def main():
     native_uncertainty()
     delivery_boundaries()
@@ -496,6 +650,9 @@ def main():
     runner_boundaries()
     cli_exit_metadata()
     runner_released_group_identity()
+    runner_refused_group_of_exited_leader()
+    runner_refused_group_of_live_leader()
+    runner_ends_descendants_of_exited_leader()
     print("PASS: native uncertainty/ownership/drift/pause, complete-or-unknown delivery windows/pagination, security issues with ages or unknown, CLI clock/failure isolation, bounded reaped source commands")
 
 
