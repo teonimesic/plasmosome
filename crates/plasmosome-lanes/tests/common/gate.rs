@@ -278,12 +278,12 @@ pub fn commit_at(dir: &Path) -> String {
         .output()
         .expect("git runs");
     let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
-    let clean = Command::new("git")
-        .args(["diff", "--quiet", "HEAD"])
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
         .current_dir(dir)
-        .status()
-        .expect("git runs")
-        .success();
+        .output()
+        .expect("git runs");
+    let clean = status.status.success() && status.stdout.is_empty();
     if clean {
         head
     } else {
