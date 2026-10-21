@@ -7,8 +7,8 @@ use super as conformance;
 use crate::builders::{broker, mount, proxy_map, session_file, uds_socket};
 use plasmosome_backend::{
     BackendError, Capability, CellId, CellOwner, CompositeBackend, DrainSpec, EnforcementBackend,
-    EnforcementSnapshot, FileAccess, GrantId, GrantKind, Handle, LedgerEntry, OsObject, OsState,
-    PluginId, RevokePolicy, UniverseClass, UniverseOp, UniverseRemoval,
+    EnforcementSnapshot, FileAccess, GrantId, GrantKind, Handle, IncompleteEffect, LedgerEntry,
+    OsObject, OsState, PluginId, RevokePolicy, UniverseClass, UniverseOp, UniverseRemoval,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +98,7 @@ enum Defect {
     RefusedGrantDropsTheIssuedRecordLate,
     RefusalDropsTheIssuedRecordAtOnce(Call),
     UnknownRevokeDropsAnIssuedRecord,
+    RevokeLeavesAnUnfinishedEffect,
     SnapshotOmitsIssuedRecords,
     SnapshotReconstructsGrantsFromObjects,
 }
@@ -932,7 +933,17 @@ impl EnforcementBackend for DefectiveBackend {
                 .cloned()
                 .collect(),
         };
-        EnforcementSnapshot::new(state, grants, Vec::new())
+        let incomplete = match self.defect {
+            Defect::RevokeLeavesAnUnfinishedEffect => self
+                .spent
+                .values()
+                .map(|entry| IncompleteEffect {
+                    operation: entry.object().operation(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        EnforcementSnapshot::new(state, grants, incomplete)
     }
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
@@ -2869,6 +2880,38 @@ fn a_record_drop_at_once_keeps_every_object_and_shows_on_the_first_read() {
     assert_eq!(
         backend.snapshot_os_state(),
         Ok(EnforcementSnapshot::new(standing, Vec::new(), Vec::new()).unwrap())
+    );
+}
+
+#[test]
+fn the_revoke_clauses_reject_a_revoke_that_leaves_an_unfinished_effect() {
+    assert_rejected("drained revoke left", || {
+        conformance::drained_revoke_removes_object(carrying(Defect::RevokeLeavesAnUnfinishedEffect))
+    });
+    assert_rejected("spent-handle revoke changed the account", || {
+        conformance::revoke_of_a_revoked_handle_is_error(carrying(
+            Defect::RevokeLeavesAnUnfinishedEffect,
+        ))
+    });
+}
+
+#[test]
+fn a_revoke_that_leaves_an_unfinished_effect_reports_only_its_operation() {
+    let mut backend = DefectiveBackend::carrying(Defect::RevokeLeavesAnUnfinishedEffect);
+    let granted = conformance::op_for(
+        GrantId::new(),
+        conformance::conformance_owner(),
+        mount("/src", "/work"),
+    );
+    let entry = backend.grant(granted.clone(), GrantKind::Hot).unwrap();
+    assert_eq!(
+        backend.revoke(entry.handle, DrainSpec::forcing()),
+        Ok(entry)
+    );
+    let effect = IncompleteEffect { operation: granted };
+    assert_eq!(
+        backend.snapshot_os_state(),
+        EnforcementSnapshot::new(OsState::new(), Vec::new(), vec![effect])
     );
 }
 
