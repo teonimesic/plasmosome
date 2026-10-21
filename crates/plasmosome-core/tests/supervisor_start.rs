@@ -458,9 +458,9 @@ impl Caught {
     fn pids_other_than_this(mut self) -> Vec<libc::pid_t> {
         let mut bytes = Vec::new();
         let _ = self.0.read_to_end(&mut bytes);
-        bytes
-            .chunks_exact(4)
-            .map(|chunk| libc::pid_t::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        let (pids, _) = bytes.as_chunks::<4>();
+        pids.iter()
+            .map(|pid| libc::pid_t::from_ne_bytes(*pid))
             .collect()
     }
 }
