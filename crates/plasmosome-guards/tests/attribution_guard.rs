@@ -944,50 +944,44 @@ fn rule_2_whitespace() -> Vec<char> {
 }
 
 fn malformed_addresses() -> Vec<(String, Verdict)> {
+    let owned = |rows: &[(&str, Verdict)]| -> Vec<(String, Verdict)> {
+        rows.iter()
+            .map(|&(identity, verdict)| (identity.to_owned(), verdict))
+            .collect()
+    };
     let no_break_space = char::from_u32(0xa0).expect("setup: U+00A0 is a Unicode scalar value");
-    let mut rows: Vec<(String, Verdict)> = [
+    let mut rows = owned(&[
         ("Claude <@>", Verdict::Model),
         ("Claude <noreply@anthropic.com >", Verdict::Model),
-    ]
-    .into_iter()
-    .map(|(identity, verdict)| (identity.to_owned(), verdict))
-    .collect();
+    ]);
     rows.push((
         format!("Claude <noreply@anthropic.com{no_break_space}>"),
         Verdict::Model,
     ));
-    rows.extend(
-        [
-            ("Claude <@laptop.local>", Verdict::Model),
-            ("Probe <probe@>", Verdict::Untraceable),
-            ("Probe <probe@.>", Verdict::Untraceable),
-            ("Probe <@>", Verdict::Untraceable),
-            ("Probe <@corp.locale.io>", Verdict::Untraceable),
-            ("Probe < probe@corp.locale.io>", Verdict::Untraceable),
-            ("Probe <probe @corp.locale.io>", Verdict::Untraceable),
-            ("Jane Doe <jane doe@corp.locale.io>", Verdict::Untraceable),
-            ("Probe <probe@corp .locale.io>", Verdict::Untraceable),
-        ]
-        .into_iter()
-        .map(|(identity, verdict)| (identity.to_owned(), verdict)),
-    );
+    rows.extend(owned(&[
+        ("Claude <@laptop.local>", Verdict::Model),
+        ("Probe <probe@>", Verdict::Untraceable),
+        ("Probe <probe@.>", Verdict::Untraceable),
+        ("Probe <@>", Verdict::Untraceable),
+        ("Probe <@corp.locale.io>", Verdict::Untraceable),
+        ("Probe < probe@corp.locale.io>", Verdict::Untraceable),
+        ("Probe <probe @corp.locale.io>", Verdict::Untraceable),
+        ("Jane Doe <jane doe@corp.locale.io>", Verdict::Untraceable),
+        ("Probe <probe@corp .locale.io>", Verdict::Untraceable),
+    ]));
     rows.extend(rule_2_whitespace().into_iter().map(|blank| {
         (
             format!("Probe <probe@corp.locale.io{blank}>"),
             Verdict::Untraceable,
         )
     }));
-    rows.extend(
-        [
-            ("Probe <probe@corp.locale.io..>", Verdict::Untraceable),
-            ("Probe <probe@.corp.locale.io>", Verdict::Untraceable),
-            ("Probe <probe@corp..locale.io>", Verdict::Untraceable),
-            ("Probe <probe@corp.locale.io.>", Verdict::Cleared),
-            ("Jane Doe <jane.doe@corp.locale.io>", Verdict::Cleared),
-        ]
-        .into_iter()
-        .map(|(identity, verdict)| (identity.to_owned(), verdict)),
-    );
+    rows.extend(owned(&[
+        ("Probe <probe@corp.locale.io..>", Verdict::Untraceable),
+        ("Probe <probe@.corp.locale.io>", Verdict::Untraceable),
+        ("Probe <probe@corp..locale.io>", Verdict::Untraceable),
+        ("Probe <probe@corp.locale.io.>", Verdict::Cleared),
+        ("Jane Doe <jane.doe@corp.locale.io>", Verdict::Cleared),
+    ]));
     assert_eq!(
         rows.len(),
         42,
