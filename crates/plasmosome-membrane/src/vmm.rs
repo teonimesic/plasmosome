@@ -1566,6 +1566,7 @@ mod signal_pressure {
     const CHILDREN: usize = 64;
     const INTERRUPTIONS_PER_REAP: usize = 2;
     const SIGNALS_PER_REAP: usize = 512;
+    const YIELDS_PER_SIGNAL: usize = 1_000_000;
 
     static DELIVERED: AtomicUsize = AtomicUsize::new(0);
 
@@ -1701,7 +1702,7 @@ mod signal_pressure {
 
     struct Interrupter {
         aims: Option<mpsc::Sender<Aim>>,
-        released: mpsc::Receiver<()>,
+        released: mpsc::Receiver<Option<usize>>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
@@ -1714,8 +1715,8 @@ mod signal_pressure {
             let (releases, released) = mpsc::channel();
             let thread = std::thread::spawn(move || {
                 for aim in aimed {
-                    interrupt_then_release(target, &aim);
-                    if releases.send(()).is_err() {
+                    let unhandled = interrupt_then_release(target, &aim);
+                    if releases.send(unhandled).is_err() {
                         return;
                     }
                 }
@@ -1728,7 +1729,7 @@ mod signal_pressure {
             }
         }
 
-        fn drop_interrupted(&self, child: VmmChild, release: &Release) {
+        fn drop_interrupted(&self, child: VmmChild, release: &Release) -> Option<usize> {
             let dropped = Arc::new(AtomicBool::new(false));
             self.aims
                 .as_ref()
@@ -1744,7 +1745,7 @@ mod signal_pressure {
             dropped.store(true, Ordering::Relaxed);
             self.released
                 .recv()
-                .expect("the interrupter releases every leader it was aimed at");
+                .expect("the interrupter releases every leader it was aimed at")
         }
     }
 
@@ -1759,10 +1760,12 @@ mod signal_pressure {
     }
 
     #[allow(unsafe_code)]
-    fn interrupt_then_release(target: usize, aim: &Aim) {
+    fn interrupt_then_release(target: usize, aim: &Aim) -> Option<usize> {
         let interruptions_before = interrupted_reaps();
         let mut signals = 0;
-        while interrupted_reaps() - interruptions_before < INTERRUPTIONS_PER_REAP
+        let mut unhandled = None;
+        while unhandled.is_none()
+            && interrupted_reaps() - interruptions_before < INTERRUPTIONS_PER_REAP
             && signals < SIGNALS_PER_REAP
             && !aim.dropped.load(Ordering::Relaxed)
         {
@@ -1774,16 +1777,23 @@ mod signal_pressure {
                 break;
             }
             signals += 1;
+            let mut yields = 0;
             while DELIVERED.load(Ordering::Relaxed) == delivered
                 && !aim.dropped.load(Ordering::Relaxed)
             {
+                if yields == YIELDS_PER_SIGNAL {
+                    unhandled = Some(signals);
+                    break;
+                }
                 std::thread::yield_now();
+                yields += 1;
             }
         }
         let byte = b'x';
         // SAFETY: `byte` is a local and the length 1 matches it. `aim.release` stays open until
         // this thread reports the release, because the Release it belongs to outlives that report.
         unsafe { libc::write(aim.release, &byte as *const u8 as *const libc::c_void, 1) };
+        unhandled
     }
 
     #[allow(unsafe_code)]
@@ -1816,14 +1826,19 @@ mod signal_pressure {
             let signals_before = DELIVERED.load(Ordering::Relaxed);
             let interruptions_before = interrupted_reaps();
             reset_reap_record();
-            {
+            let unhandled = {
                 let _withheld = WithheldLeaderSignal::for_leader(pid);
-                interrupter.drop_interrupted(child, &release);
-            }
+                interrupter.drop_interrupted(child, &release)
+            };
             let signals = DELIVERED.load(Ordering::Relaxed) - signals_before;
             let interruptions = interrupted_reaps() - interruptions_before;
             assert_reaped_by_drop(pid, interruptions);
             assert_reaped_by_handle(pid);
+            if let Some(signal) = unhandled {
+                panic!(
+                    "child {child_number}: SIGUSR1 number {signal} was not handled by the reaping thread within {YIELDS_PER_SIGNAL} yields, so the interrupter released the leader early; something in the drop kept the signal blocked or ignored"
+                );
+            }
             assert!(
                 interruptions >= INTERRUPTIONS_PER_REAP,
                 "child {child_number}: the reaping thread took {signals} SIGUSR1 and {interruptions} of them interrupted its blocking wait, fewer than {INTERRUPTIONS_PER_REAP}, so the retry after EINTR was not exercised"
