@@ -42,7 +42,7 @@ states what the tree serves now.
 | `plasmosomed <config.json>` | Runs a foreground controller and serves only `plasmosome.status` on its configured Unix socket. |
 | `membraned <config.json>` | Runs a foreground empty/broker supervisor and serves only `membrane.status` on its configured Unix socket. |
 | `plasmid <command>` | `plasmid new <name>` writes `<name>.toml`, a declaration holding the id, the version and an empty description, and prints the sections still missing. It writes no component and exits 2. `plasmid list`, `add`, `remove`, `reload` and `renew` are listed in `plasmid --help` and exit 2 with a `not_served` envelope. A wrong command line exits 64 with an `invalid` envelope, and `plasmid --version` prints `plasmid 0.0.0`. |
-| `plasmosome status --socket PATH` | Checks that the socket and every directory above it are private to you and that the daemon runs as you, sends one `plasmosome.status` request, and prints the answer in spec 025's envelope: one JSON line on stdout, or the error on stderr with an exit code that says whether repeating is safe. `status` needs `--socket` in this build. `plasmosome --help` marks every other command not served, and each exits 2 with `not_served`. |
+| `plasmosome status --socket PATH` | Checks that the socket is a socket you own with mode `0600`, in a directory you own that no other user can open, and that no user but you or root can replace a directory above it. It then checks that the daemon runs as you, sends one `plasmosome.status` request, and prints the answer in spec 025's envelope: one JSON line on stdout, or the error on stderr with an exit code that says whether repeating is safe. `status` needs `--socket` in this build. `plasmosome --help` marks every other command not served, and each exits 2 with `not_served`. |
 
 The `plasmosome` executable serves only `status --socket`, so there is no `plasmosome start`. The
 accepted future controller methods — `plasmosome.start/list/status/stop`,
@@ -292,7 +292,14 @@ with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir=private_base) 
         return allowance
 
     def plasmosome_status(record, path):
-        argv = [str(binaries["plasmosome"]), "status", "--socket", str(path)]
+        argv = [
+            str(binaries["plasmosome"]),
+            "status",
+            "--kernel",
+            "quickstart",
+            "--socket",
+            str(path),
+        ]
         print("plasmosome status argv:", json.dumps(argv))
         deadline = time.monotonic() + STATUS_BUDGET
         while True:
@@ -336,7 +343,7 @@ with tempfile.TemporaryDirectory(prefix="plasmosome-status-", dir=private_base) 
             f"unexpected envelope command: {envelope}",
         )
         require(
-            envelope["instance"] == {"socket": str(path)},
+            envelope["instance"] == {"name": "quickstart", "socket": str(path)},
             f"unexpected envelope instance: {envelope}",
         )
         print("plasmosome status stdout:", completed.stdout, end="")
@@ -581,10 +588,12 @@ print("status-only quickstart completed successfully")
 PY
 ```
 
-`plasmosome status --socket` asks the controller for its status, retrying while the daemon has
-not yet bound its socket, and prints spec 025's envelope: `schema`, `command`, `instance` and the
-controller's `result` as it arrived. That result has `ready:true`, `cells:[]` and
-`ledger_generation:0`: the controller can answer status, but no guest exists. Its config must
+`plasmosome status --socket` asks the controller for its status once and prints spec 025's
+envelope: `schema`, `command`, `instance` and the controller's `result` as it arrived. The
+example's own loop runs it again while the daemon has not yet bound its socket.
+`--kernel quickstart` names the instance, so the controller checks that name against its
+config. The result has `ready:true`, `cells:[]` and `ledger_generation:0`: the controller can
+answer status, but no guest exists. Its config must
 name an absolute `instance_root` and a `recovery_deadline_ms` of at least 1. This build checks
 both for shape only and uses neither: it does not open the root or recover cells yet, so the
 example never creates `instance`. The membrane, which the example asks directly over its own

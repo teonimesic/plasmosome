@@ -111,8 +111,9 @@ pub fn main_with(args: impl IntoIterator<Item = OsString>, version: &str) -> u8 
 }
 
 /// Reads `args` against `context.commands`, runs a served command, writes the outcome to
-/// `stdout` or `stderr`, and returns the exit. The command's deadline starts at this call. A panic prints nothing of its own: it ends in one `internal` envelope on `stderr`, in
-/// the form the line chose, and [`Exit::Internal`].
+/// `stdout` or `stderr`, and returns the exit. The command's deadline starts at this call. A
+/// panic prints nothing of its own: it ends in one `internal` envelope on `stderr`, in the form
+/// the line chose, and [`Exit::Internal`].
 ///
 /// The first call installs a panic hook for the whole process. The hook is silent on a thread
 /// while it runs `handle`, and passes every other panic to the hook that was set before it. A

@@ -152,6 +152,12 @@ with `cause` `closed`, `deadline` or `transport`, exit 1. A line past the bound 
 still take effect, so each is `outcome_unknown`, exit 3, with `cause` `closed`, `deadline`,
 `transport` or `reply_too_large`.
 
+`reply::cut_off` builds the client error for a request cut off midway, after part of it was
+written. A write that timed out has `cause` `deadline`, and its message says the deadline passed
+before the request was written whole. Any other failed write has `cause` `transport`, and its
+message says writing failed after part of the request was sent and names the error. The code and
+exit follow `unanswered`'s: `no_reply`, exit 1, or `outcome_unknown`, exit 3.
+
 `reply::request_line` writes `{"id":1,"method":...,"params":{...}}` and a newline through the
 compact writer. It hands the params back when a key repeats among them or inside a value.
 
@@ -230,11 +236,12 @@ ms, is counted on the `Context`'s clock from the start of `handle`. In order:
    `--kernel` beside `--socket` only adds the `name` param.
 2. It builds the request line and measures it. A line over 1,048,576 bytes before its newline,
    spec 001's request limit, is a usage error whose `argument` is `--kernel`'s name, the one
-   argument the line holds. With `--socket` alone the line is a fixed 49 bytes before its
-   newline. A name is written with each `"` as two bytes, so half a megabyte of quotes passes the
-   bound. Through a process, macOS's `ARG_MAX` of 1,048,576 bytes covers every argument and the
-   environment together, and Linux caps one argument at 131,072 bytes, so on Linux only a
-   library caller reaches the bound.
+   argument the line holds. `--socket` has passed selection by then, so the error carries
+   `instance`, as `socket_path_too_long` does. With `--socket` alone the line is a fixed 49 bytes
+   before its newline. A name is written with each `"` as two bytes, so half a megabyte of quotes
+   passes the bound. Through a process, macOS's `ARG_MAX` of 1,048,576 bytes covers every
+   argument and the environment together, and Linux caps one argument at 131,072 bytes, so on
+   Linux only a library caller reaches the bound.
 3. A path longer than `sun_path` holds, 103 bytes on macOS and 107 on Linux, is
    `socket_path_too_long` with `path` and `max_bytes`, exit 2, before any system call.
 4. `check_private_path` with the trusted UID. A refusal goes through `map_refusal` with
@@ -243,9 +250,9 @@ ms, is counted on the `Context`'s clock from the start of `handle`. In order:
    where it is, with no `fix`: on macOS a live daemon whose backlog is full refuses connections
    too. No entry is `not_running`. Any other failure is `transport` with `path` and `errno`.
 6. `exchange` checks the peer, writes the request and reads the reply, below.
-7. The reply goes through `judge_reply` and `kernel_exit`, and a missing one through
-   `unanswered`, with `changes_state` false.
-8. It writes the envelope. From step 3 on, every envelope has `instance` with `socket`, and
+7. The reply goes through `judge_reply` and `kernel_exit`, a missing one through `unanswered`,
+   and a request cut off midway through `cut_off`, each with `changes_state` false.
+8. It writes the envelope. From step 2 on, every envelope has `instance` with `socket`, and
    `name` when `--kernel` was given. A failed write to stdout is `local_io` with `errno`, exit 1,
    on stderr. Rust ignores `SIGPIPE`, so a closed pipe returns `EPIPE`.
 
@@ -253,8 +260,9 @@ ms, is counted on the `Context`'s clock from the start of `handle`. In order:
 the deadline. It calls `check_peer_uid` before writing a byte. A peer that runs as another UID,
 or whose UID cannot be read, is `peer_mismatch`, and the stream is closed unread. With no time
 left it is `deadline` with `deadline_ms`, and nothing is written. Each write and each read then
-waits only the time left. A write that fails before any byte is `transport`. After part of the
-request is written the command still changes nothing, so a failure is `unanswered`'s, with
+waits only the time left. A write that fails before any byte is `transport`. A write that fails
+after part of the request is written is `Unreplied::CutOff` with the error. The daemon has no
+whole line then, so the command still changes nothing, and the failure is `cut_off`'s, with
 cause `transport` or `deadline`. On macOS a socket whose peer has closed refuses a new timeout
 with `EINVAL` (measured on Darwin 25.6), so the read or write is then made without blocking; such
 a socket can receive nothing more.
@@ -275,6 +283,7 @@ On macOS a Unix-socket `connect` never blocks. On Linux a full backlog makes it 
 | `reply::judge_reply`, `reply::Reply` | Spec 025's reply rules: a `result`, a kernel error, or `bad_reply` |
 | `reply::kernel_exit` | A kernel error's exit, by its code |
 | `reply::unanswered` | `no_reply`, `reply_too_large` or `outcome_unknown`, by whether the command changes state |
+| `reply::cut_off` | `no_reply` or `outcome_unknown` for a request cut off midway, by whether the command changes state |
 | `reply::request_line` | The request line, `id` 1, ended with a newline |
 | `json::write_compact` | The JSON form, with every terminal control escaped |
 | `json::write_human` | The human form, with every terminal control shown as `<U+XXXX>` |
