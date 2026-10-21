@@ -1,4 +1,5 @@
-use plasmosome_core::{ManifestError, PlasmidManifest};
+use plasmosome_core::{ManifestError, PlasmidManifest, WireError};
+use serde_json::Value as Json;
 use toml_edit::{DocumentMut, Item, Key, TableLike, Value};
 
 const DECLARED: &str = "id = \"github-pr\"\ndescription = \"Reach the declared API.\"\n";
@@ -99,6 +100,42 @@ fn followed(start: &str) -> PlasmidManifest {
                 panic!("{start}\nafter {steps:?} is refused with no field: {error}\n{text}")
             }
         }
+    }
+    panic!("{start}\nhas no end after {steps:?}");
+}
+
+fn followed_from_the_wire(start: &str) -> PlasmidManifest {
+    let mut text = start.to_string();
+    let mut steps: Vec<(String, String)> = Vec::new();
+    while steps.len() < 8 {
+        let error = match PlasmidManifest::parse(&text) {
+            Ok(manifest) => return manifest,
+            Err(error) => error,
+        };
+        let ManifestError::Field { plasmid, .. } = &error else {
+            panic!("{start}\nafter {steps:?} is refused with no field: {error}\n{text}");
+        };
+        let wire = WireError::manifest_refusal("plasmids/github-pr.toml".to_string(), &error);
+        let line = serde_json::to_string(&wire).unwrap();
+        let read: Json = serde_json::from_str(&line).unwrap();
+        let member = |name: &str| {
+            read.get(name)
+                .and_then(Json::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("{start}\nafter {steps:?} the 108 has no {name}: {line}"))
+        };
+        let step = (member("field"), member("fix"));
+        assert_eq!(
+            read.get("plasmid"),
+            plasmid.as_deref().map(Json::from).as_ref(),
+            "{start}\nthe 108's plasmid is the refusal's own: {line}"
+        );
+        assert!(
+            !steps.contains(&step),
+            "{start}\n{step:?} repeats after {steps:?}"
+        );
+        text = applied(&text, &step.0, &step.1);
+        steps.push(step);
     }
     panic!("{start}\nhas no end after {steps:?}");
 }
@@ -414,6 +451,25 @@ fn following_each_fix_as_written_ends_granting_only_the_hosts_and_pins_the_autho
             (strings(&hosts), strings(&pins)),
             "{start}"
         );
+    }
+}
+
+#[test]
+fn a_client_following_each_fix_from_the_wire_alone_ends_where_the_parser_does() {
+    let mut starts: Vec<String> = chains().into_iter().map(|(start, _, _)| start).collect();
+    starts.push(
+        "id = \"x: network.hosts\"\ndescription = \"Run git.\"\n\
+         [commands.commands.\"a: b\"]\nexec = [\"git\"]\n\
+         [commands.commands.\"a: b\".network]\nhosts = [\"api.github.com\", 5]\n"
+            .to_string(),
+    );
+    starts.push(
+        "id = \"x: network.hosts\"\ndescription = \"Reach the declared API.\"\n\
+         [network]\nports = [443]\n"
+            .to_string(),
+    );
+    for start in starts {
+        assert_eq!(followed_from_the_wire(&start), followed(&start), "{start}");
     }
 }
 
