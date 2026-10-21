@@ -65,7 +65,7 @@ string_serde!(
 );
 
 /// The resolved recipe of a session file: its initial bytes, the guest's access, and the
-/// absolute guest path it appears at.
+/// canonical absolute guest path it appears at.
 ///
 /// Decoding refuses a missing or unknown field. Decoding JSON text also refuses a repeated
 /// field, but a `serde_json::Value` or `Map` keeps only the last copy of a repeated key, so a
@@ -101,8 +101,8 @@ struct SessionFileShape {
     guest_path: String,
 }
 
-/// The resolved recipe of a socket grant: the absolute host socket it relays to and the
-/// absolute guest path it appears at.
+/// The resolved recipe of a socket grant: the canonical absolute host socket it relays to and the
+/// canonical absolute guest path it appears at.
 ///
 /// Decoding refuses a missing or unknown field. Decoding JSON text also refuses a repeated
 /// field, but a `serde_json::Value` or `Map` keeps only the last copy of a repeated key, so a
@@ -206,8 +206,8 @@ struct MountShape {
     access: FileAccess,
 }
 
-/// How to launch a broker: the exact argument vector, whose first word is an absolute program
-/// path, and two differently spelled absolute host-private endpoints.
+/// How to launch a broker: the exact argument vector, whose first word is a canonical absolute
+/// program path, and two differently spelled canonical absolute host-private endpoints.
 ///
 /// Every word is data. Nothing here runs a shell, searches `PATH` or expands `$HOME` or `~`.
 /// Decoding refuses a missing or unknown field. Decoding JSON text also refuses a repeated

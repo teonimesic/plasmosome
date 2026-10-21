@@ -1,9 +1,9 @@
 //! The controller: plasmid manifests in the frozen grammar, the tool registry,
 //! the kernel-owned append-only session log, the credential gatekeeper, the
-//! plasmid lifecycle FSM, capability version selection, and the desired-state
-//! reconciler over named instances, cells and genomes. A caller reaches it over
-//! the frozen control protocol on an ndjson connection, which its binary
-//! `plasmosomed` serves on the control socket its config names.
+//! plasmid lifecycle FSM, and the desired-state reconciler over named
+//! instances, cells and genomes. A caller reaches it over the frozen control
+//! protocol on an ndjson connection, which its binary `plasmosomed` serves on
+//! the control socket its config names.
 
 /// The controller's check of one spec 001 §4.2 Artifact before it allocates a cell (spec 023 §1).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
