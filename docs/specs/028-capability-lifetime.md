@@ -150,6 +150,15 @@ replacement for the plasmid and every attachment section 2 takes with it; exact 
 recorded effect, LIFO, with a graceful `DrainSpec` of D; a finish only after fresh observation
 proves them absent. It enters spec 023's one-at-a-time order as a mutation that arrived at B, and
 withdraws only this attachment's holdings; spec 017 keeps every equal peer.
+When the transaction takes several attachments, it still uses one graceful `DrainSpec`. Its
+deadline is the largest `drain_ms` recorded in the `Lifetime` of any attachment it takes, counted
+from the start of the transaction. Every withdrawal shares that one remaining budget, in LIFO
+order, as spec 001 §4.2's graceful removal does. Each attachment's own D still caps its gate's
+admitted work at B + D. A drain timeout answers 106 with `deadline_ms` set to that largest D. This
+covers only the transaction this paragraph names, run by `plasmid.remove` or by an expiry. It does
+not cover the one removal of the whole cell that a `cell.kill` makes, which keeps the kill's own
+deadline (spec 023 §7). Amended on 2026-10-21, from #205's round 2 review (2026-10-20T19:28:58Z):
+this did not say which D a removal of several attachments uses, though each records its own.
 
 **Escalation (question 2).** By default a bound forces nothing. A holding whose graceful withdrawal
 returned `DrainTimedOut` keeps its fence and stays standing, named `timed_out` (section 6); the
