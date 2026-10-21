@@ -936,3 +936,34 @@ fn judges_each_identity_as_a_co_author() {
 fn judges_each_identity_as_a_sign_off() {
     check_workspace(|root| assert_each_identity_judged_in(root, Position::SignedOffBy));
 }
+
+#[test]
+fn splits_a_paragraph_only_at_a_line_git_reads_as_blank() {
+    check_workspace(|root| {
+        let model = "Co-authored-by \"Gemini <probe@corp.locale.io>\" credits a model: GitHub shows it on main as a co-author.";
+        let lines: &[(&str, &str, bool)] = &[
+            ("U+3000, an ideographic space", "\u{3000}", true),
+            ("U+2003, an em space", "\u{2003}", true),
+            ("U+00A0, a no-break space", "\u{a0}", true),
+            ("a vertical tab", "\u{b}", true),
+            ("a form feed", "\u{c}", true),
+            ("a space", " ", false),
+            ("a tab", "\t", false),
+            ("a carriage return", "\r", false),
+        ];
+        let probes: Vec<Probe> = lines
+            .iter()
+            .enumerate()
+            .map(|(index, (name, line, git_reads_text))| Probe {
+                label: format!("a line holding only {name}"),
+                message: format!("probe {index}\n\nProse A\nProse B\nProse C\nCo-authored-by: Gemini <probe@corp.locale.io>\n{line}\nSigned-off-by: A Colleague <colleague@corp.locale.io>\n"),
+                refusal: git_reads_text.then(|| model.to_owned()),
+            })
+            .collect();
+        assert_each_probe_judged(
+            root,
+            "Git ends a paragraph only at a line holding nothing but spaces, tabs and carriage returns. A model's co-author line above a person's sign-off is a trailer unless such a line comes between them, so",
+            &probes,
+        );
+    });
+}
