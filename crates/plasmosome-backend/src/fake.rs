@@ -700,19 +700,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn apply_and_plant_refuse_an_invalid_value_before_any_fault_or_change() {
-        let owner = cell_owner("cell-1", "github-pr");
-        let mut backend = FakeBackend::new();
-        backend.apply(mount_by(&owner)).unwrap();
-        backend.fail_before_effect_for_owner(owner.clone(), "injected refusal");
-        let before = backend.snapshot_os_state();
-        for (op, error) in [
+    fn invalid_operations(owner: &CellOwner) -> Vec<(UniverseOp, RecipeError)> {
+        vec![
             (
                 fixtures::op(GrantId::new(), owner.clone(), session_file("skills/pr.md")),
                 RecipeError::NotAbsolute {
                     field: "path",
                     value: "skills/pr.md".to_string(),
+                },
+            ),
+            (
+                fixtures::op(GrantId::new(), owner.clone(), uds_socket("run/egressd.uds")),
+                RecipeError::NotAbsolute {
+                    field: "path",
+                    value: "run/egressd.uds".to_string(),
                 },
             ),
             (
@@ -757,7 +758,17 @@ mod tests {
                     path: fixtures::launch().control_socket,
                 },
             ),
-        ] {
+        ]
+    }
+
+    #[test]
+    fn apply_and_plant_refuse_an_invalid_value_before_any_fault_or_change() {
+        let owner = cell_owner("cell-1", "github-pr");
+        let mut backend = FakeBackend::new();
+        backend.apply(mount_by(&owner)).unwrap();
+        backend.fail_before_effect_for_owner(owner.clone(), "injected refusal");
+        let before = backend.snapshot_os_state();
+        for (op, error) in invalid_operations(&owner) {
             let rule = error.to_string();
             let expected = BackendError::InvalidOperation {
                 class: op.class().as_str(),
@@ -875,30 +886,61 @@ mod tests {
         );
     }
 
+    fn another_of_its_class(capability: &Capability) -> Capability {
+        match capability {
+            Capability::SessionFile { .. } => session_file("/skills/other.md"),
+            Capability::UdsSocket { .. } => uds_socket("/run/ak/other.uds"),
+            Capability::ProxyMap { .. } => proxy_map("other.github.com", "splice"),
+            Capability::Broker { .. } => broker("other"),
+            Capability::Mount { .. } => mount("/other", "/workspace"),
+        }
+    }
+
     #[test]
-    fn a_grant_never_promotes_an_applied_or_planted_object() {
+    fn a_grant_never_promotes_or_replaces_an_applied_or_planted_object() {
         let owner = cell_owner("cell-1", "workspace");
         for capability in capabilities() {
             let applied = fixtures::op(GrantId::new(), owner.clone(), capability.clone());
             let planted = OsObject {
                 id: GrantId::new(),
                 owner: owner.clone(),
-                capability,
+                capability: capability.clone(),
             };
             let mut backend = FakeBackend::new();
             backend.apply(applied.clone()).unwrap();
             backend.plant(planted.clone()).unwrap();
             let before = backend.snapshot_os_state();
-            for op in [applied.clone(), planted.operation()] {
-                for kind in [GrantKind::Hot, GrantKind::GenerationBound] {
-                    assert_eq!(backend.grant(op.clone(), kind), Err(conflict(&op)));
+            for standing in [applied.clone(), planted.operation()] {
+                let requests = [
+                    standing.clone(),
+                    fixtures::op(
+                        standing.id(),
+                        cell_owner("cell-1", "other"),
+                        capability.clone(),
+                    ),
+                    fixtures::op(
+                        standing.id(),
+                        owner.clone(),
+                        another_of_its_class(&capability),
+                    ),
+                ];
+                for op in requests {
+                    for kind in [GrantKind::Hot, GrantKind::GenerationBound] {
+                        assert_eq!(
+                            backend.grant(op.clone(), kind),
+                            Err(conflict(&op)),
+                            "{op:?}"
+                        );
+                        assert_eq!(backend.snapshot_os_state(), before);
+                    }
+                    assert_eq!(
+                        backend.revoke(op.handle(), DrainSpec::forcing()),
+                        Err(BackendError::UnknownHandle {
+                            handle: op.handle()
+                        }),
+                        "{op:?}"
+                    );
                 }
-                assert_eq!(
-                    backend.revoke(op.handle(), DrainSpec::forcing()),
-                    Err(BackendError::UnknownHandle {
-                        handle: op.handle()
-                    })
-                );
                 assert_eq!(backend.snapshot_os_state(), before);
             }
         }
@@ -929,29 +971,44 @@ mod tests {
     fn grant_refuses_an_invalid_operation_before_a_fault_or_any_change() {
         let owner = cell_owner("cell-1", "github-pr");
         let mut backend = FakeBackend::new();
-        let standing = backend.grant(mount_by(&owner), GrantKind::Hot).unwrap();
+        let standing: Vec<LedgerEntry> = capabilities()
+            .into_iter()
+            .map(|capability| grant_to(&mut backend, &owner, capability))
+            .collect();
         backend.fail_before_effect_for_owner(owner.clone(), "injected refusal");
         let before = backend.snapshot_os_state();
-        let op = fixtures::op(GrantId::new(), owner.clone(), session_file("skills/pr.md"));
-        assert_eq!(
-            backend.grant(op.clone(), GrantKind::Hot),
-            Err(BackendError::InvalidOperation {
-                class: "session-file",
-                id: op.id(),
-                error: RecipeError::NotAbsolute {
-                    field: "path",
-                    value: "skills/pr.md".to_string(),
-                },
-            })
-        );
-        assert_eq!(backend.snapshot_os_state(), before);
-        assert_eq!(
-            backend.revoke(op.handle(), DrainSpec::forcing()),
-            Err(BackendError::UnknownHandle {
-                handle: op.handle()
-            })
-        );
-        assert_eq!(backend.peek_entry(standing.handle).unwrap(), standing);
+        for (fresh, error) in invalid_operations(&owner) {
+            let issued = standing
+                .iter()
+                .find(|entry| entry.handle.class == fresh.class())
+                .unwrap();
+            let at_the_issued_address = OsObject {
+                id: issued.handle.id,
+                ..fresh.object()
+            }
+            .operation();
+            for op in [fresh.clone(), at_the_issued_address] {
+                assert_eq!(
+                    backend.grant(op.clone(), GrantKind::Hot),
+                    Err(BackendError::InvalidOperation {
+                        class: op.class().as_str(),
+                        id: op.id(),
+                        error: error.clone(),
+                    }),
+                    "{op:?}"
+                );
+                assert_eq!(backend.snapshot_os_state(), before);
+            }
+            assert_eq!(
+                backend.revoke(fresh.handle(), DrainSpec::forcing()),
+                Err(BackendError::UnknownHandle {
+                    handle: fresh.handle()
+                })
+            );
+        }
+        for entry in standing {
+            assert_eq!(backend.peek_entry(entry.handle).unwrap(), entry);
+        }
     }
 
     #[test]
