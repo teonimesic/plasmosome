@@ -2113,6 +2113,14 @@ mod tests {
     }
 
     #[allow(unsafe_code)]
+    fn a_separate_open_can_share(path: &Path) -> bool {
+        let file = fs::File::open(path).expect("the file opens for a lock attempt");
+        // SAFETY: flock takes no pointer, and `file` stays open until this function returns.
+        let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+        taken == 0
+    }
+
+    #[allow(unsafe_code)]
     fn make_fifo(path: &Path) {
         let name = CString::new(path.as_os_str().as_bytes()).expect("a path without NUL");
         // SAFETY: `name` is a CString that lives until this function returns, and mkfifo keeps no
@@ -5135,9 +5143,33 @@ mod tests {
         entries(&root, "cells", &["cell-2"]);
         let (mut instance, lock) = locked(&root);
         instance.sync = hooked_sync;
+        let scans = hide_after_each_listing(&root, "cell-3");
+        assert_eq!(allocated(&instance, &lock), cell("cell-4"));
+        assert_eq!(scans.get(), 2);
+        assert_eq!(names_under(&root.join("cells")), ["cell-2", "cell-4"]);
+    }
+
+    #[test]
+    fn a_hidden_cell_9999999999_leaves_no_id_and_names_cells() {
+        let (_dir, root) = temp_root();
+        entries(&root, "cells", &["cell-9999999998"]);
+        let (mut instance, lock) = locked(&root);
+        instance.sync = hooked_sync;
+        let scans = hide_after_each_listing(&root, "cell-9999999999");
+        expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Exhausted { path }) => {
+            assert_eq!(path, root.join("cells"))
+        });
+        assert_eq!(scans.get(), 2);
+        assert_eq!(
+            names_under(&root.join("cells")),
+            ["cell-9999999998", "cell-9999999999"]
+        );
+    }
+
+    fn hide_after_each_listing(root: &Path, name: &str) -> Rc<Cell<usize>> {
         let cells = root.join("cells");
         let cells_identity = identity_at(&cells);
-        let hidden = cells.join("cell-3");
+        let hidden = cells.join(name);
         let scans = Rc::new(Cell::new(0));
         let (counted, planted) = (Rc::clone(&scans), hidden.clone());
         on_every_scan(move || {
@@ -5153,9 +5185,7 @@ mod tests {
                     .expect("the hidden name is removed before the next listing");
             }
         });
-        assert_eq!(allocated(&instance, &lock), cell("cell-4"));
-        assert_eq!(scans.get(), 2);
-        assert_eq!(names_under(&root.join("cells")), ["cell-2", "cell-4"]);
+        scans
     }
 
     #[cfg(target_os = "linux")]
@@ -5351,7 +5381,9 @@ mod tests {
                 "{place}"
             );
             let before = names_under(&root.join("cells"));
-            expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Exhausted) => ());
+            expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Exhausted { path }) => {
+                assert_eq!(path, root.join(place), "{place}")
+            });
             assert_eq!(names_under(&root.join("cells")), before, "{place}");
         }
     }
@@ -5392,9 +5424,16 @@ mod tests {
                     fs::write(root.join(place), b"").expect("the file is made");
                 }
                 let (instance, lock) = locked(&root);
-                expect_match!(instance.allocate_cell(&lock), Err(AllocateError::NotADirectory { path }) => {
-                    assert_eq!(path, root.join(place), "{place}: {planted}")
-                });
+                let refused = instance.allocate_cell(&lock);
+                if planted == "a symlink" {
+                    expect_match!(refused, Err(AllocateError::Symlink { path }) => {
+                        assert_eq!(path, root.join(place), "{place}: {planted}")
+                    });
+                } else {
+                    expect_match!(refused, Err(AllocateError::NotADirectory { path }) => {
+                        assert_eq!(path, root.join(place), "{place}: {planted}")
+                    });
+                }
                 assert_eq!(names_under(&elsewhere), ["cell-3"], "{place}: {planted}");
                 assert_eq!(mode_of(&elsewhere), 0o755, "{place}: {planted}");
                 let other = if place == "cells" { "retired" } else { "cells" };
@@ -5547,6 +5586,10 @@ mod tests {
         assert!(
             !a_separate_open_can_lock(&path),
             "the lock is held while the SupervisorLock lives"
+        );
+        assert!(
+            !a_separate_open_can_share(&path),
+            "the lock is exclusive, so a shared lock is refused too"
         );
         let held = identity_at(&path);
         expect_match!(dir.create_supervisor_lock(), Err(CellDirError::AlreadyExists { path: refused }) => {
@@ -5950,9 +5993,10 @@ mod tests {
         let rows: Vec<(Box<dyn Error>, &str, Option<String>)> = vec![
             (refused_at!(AllocateError::ForeignLock), "/inst/x", None),
             (refused_at!(AllocateError::NotADirectory), "/inst/x", None),
+            (refused_at!(AllocateError::Symlink), "/inst/x", None),
             (refused_at!(AllocateError::Contended), "/inst/x", None),
             (failed_at!(AllocateError::Listing), "/inst/x", cause),
-            (Box::new(AllocateError::Exhausted), "cell-9999999999", None),
+            (refused_at!(AllocateError::Exhausted), "/inst/x", None),
             (
                 Box::new(AllocateError::Create {
                     cell: cell("cell-4"),
@@ -5974,6 +6018,13 @@ mod tests {
             path: PathBuf::from("/inst/cells"),
         };
         assert!(contended.to_string().contains("64"), "{contended}");
+        let exhausted = AllocateError::Exhausted {
+            path: PathBuf::from("/inst/cells"),
+        };
+        assert!(
+            exhausted.to_string().contains("cell-9999999999"),
+            "{exhausted}"
+        );
         assert!(
             !contended.to_string().contains("another process"),
             "{contended} blames a process that may not exist"
