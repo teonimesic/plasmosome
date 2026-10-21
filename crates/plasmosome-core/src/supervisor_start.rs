@@ -69,9 +69,8 @@ pub enum StartError {
     /// descriptor 4 and reads an empty record.
     ExecUnconfirmed { lock: SupervisorLock },
     /// Descriptor 3 was closed before `membraned` read the whole record: `membraned` exited or
-    /// closed it. A new process that died before its exec without a report, such as by a signal
-    /// sent to the caller's process group before it left that group, also ends here, since the
-    /// start reads its silence as a successful exec.
+    /// closed it. A new process killed directly before its exec also ends here, with the lock
+    /// released, since the start reads its silence as a successful exec.
     SupervisorClosedPipe,
     /// `membraned` had not read the whole record by the deadline.
     RecordNotTaken,
@@ -88,7 +87,8 @@ pub enum StartStep {
     Session,
     /// Copying the five descriptors onto 0 to 4, or closing every descriptor above 4.
     Descriptors,
-    /// Setting every signal to its default action, or emptying the signal mask.
+    /// Setting every signal to be ignored and then to its default action, or emptying the signal
+    /// mask.
     Signals,
     /// The `execve` of `membraned`.
     Exec,
@@ -113,7 +113,7 @@ pub enum StartStep {
 ///
 /// The children run only async-signal-safe calls between `fork` and `exec` and allocate nothing,
 /// so the caller may have other threads. The calling thread blocks every signal from just before
-/// the fork until it returns, so no handler of this process runs in a child.
+/// the fork until the fork returns, so no handler of this process runs in a child.
 ///
 /// On Darwin a new pipe is close-on-exec only after a second call. A process this one starts at
 /// that moment by a spawn that does not close every other descriptor can inherit a pipe end. If
@@ -288,9 +288,11 @@ fn fork_intermediate(child: &Child) -> Result<libc::pid_t, Failure> {
 #[allow(unsafe_code)]
 unsafe fn intermediate(child: &Child) -> ! {
     let _guard = ExitOnUnwind;
-    // SAFETY: This child has one thread. fork is on POSIX.1-2017's list of async-signal-safe
-    // calls. Its atfork handlers take only locks the first fork's child handlers released, so it
-    // cannot wait on a lock another thread of the parent held.
+    // SAFETY: This child has one thread, and the first fork's own child handlers left every lock
+    // that fork's atfork handlers take released, so this fork cannot wait on a lock another
+    // thread holds. That is reasoned, not measured, from the fork() page of POSIX.1-2024, whose
+    // change history drops fork from the async-signal-safe calls because of those handlers
+    // (Austin Group Defects 62, 1361 and 1383).
     match unsafe { libc::fork() } {
         // SAFETY: fork returned 0, so this is the grandchild, with every signal still blocked.
         0 => unsafe { grandchild(child) },
@@ -416,7 +418,9 @@ impl Closer {
     unsafe fn close_above_four(self, keep: RawFd) -> bool {
         for fd in (FIRST_UNHANDED..self.limit).filter(|fd| *fd != keep) {
             // SAFETY: close takes an integer and is async-signal-safe. Every descriptor from 5 up
-            // but `keep` is one membraned must not inherit, whoever made it.
+            // but `keep` is one membraned must not inherit, whoever made it. Some belong to
+            // OwnedFd values in this child's copy of the parent's memory, which it never drops:
+            // it ends in execve or _exit, so none is closed twice.
             unsafe { libc::close(fd) };
         }
         true
@@ -432,7 +436,9 @@ impl Closer {
     unsafe fn close_above_four(self, keep: RawFd) -> bool {
         let close_range = |first: RawFd, last: libc::c_uint| {
             // SAFETY: close_range takes integers only and is a raw system call, so it allocates
-            // nothing. Every descriptor in the range is one membraned must not inherit.
+            // nothing. Every descriptor in the range is one membraned must not inherit. Some
+            // belong to OwnedFd values in this child's copy of the parent's memory, which it never
+            // drops: it ends in execve or _exit, so none is closed twice.
             unsafe { libc::syscall(libc::SYS_close_range, first as libc::c_uint, last, 0) == 0 }
         };
         (keep == FIRST_UNHANDED || close_range(FIRST_UNHANDED, (keep - 1) as libc::c_uint))

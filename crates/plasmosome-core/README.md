@@ -333,22 +333,33 @@ and creates the lock.
   onto 0 to 4 replaces a source a later copy needs. A lock that already sits at 4 is copied too,
   because `dup2(4, 4)` would leave it close-on-exec. The children make only async-signal-safe
   calls. The calling thread blocks every signal from just before the fork until the fork
-  returns, so no handler of the controller runs in a child; the grandchild sets every action to
-  the default before it empties its mask.
+  returns, so no handler of the controller runs in a child. The grandchild sets every action to
+  be ignored and then to the default before it empties its mask. Setting an action to be ignored
+  discards a signal still pending, such as one sent to the controller's process group before the
+  grandchild left it.
 - A failure before the exec writes its step and errno to the report pipe, which is close-on-exec.
   End of file with nothing read means the exec succeeded. Then, and only then, the controller
   closes its lock and its copy of the read end, so the lock is never free: `membraned` holds the
-  same open file. A failure returns the lock, still held, so the caller can retire the cell.
+  same open file. A failure returns the lock, still held, so the caller can retire the cell. A
+  new process killed directly before its exec also closes the report pipe with nothing written.
+  The start reads that as an exec, so it releases its lock, and the record's write gives
+  `SupervisorClosedPipe`.
+- The wait for the exec ends at the deadline. If by then the new process has neither reported a
+  failure nor closed its report pipe, the controller closes the record's pipe unwritten and
+  returns `ExecUnconfirmed` with the lock still held. A `membraned` that was executed reads an
+  empty record.
 - The record is written after the exec, so it may be larger than a pipe holds. The write never
   waits past the deadline: a full pipe at the deadline is `RecordNotTaken`, and a closed reader is
   `SupervisorClosedPipe`. On Darwin the pipe is set not to raise `SIGPIPE`; on Linux the start
-  relies on a Rust `main` ignoring it. The wait for the exec is not bounded by the deadline.
-  Once the whole record is written, the controller closes the pipe: that is the end of file
+  relies on a Rust `main` ignoring it. Once the whole record is written, the controller closes the pipe: that is the end of file
   `membraned`'s `cell_start::read_config` reads to.
 - On Darwin a new pipe is close-on-exec only after a second call. A process the controller starts
-  at that moment by a spawn that does not close every other descriptor can inherit a pipe end,
-  and the start then waits until that process execs or exits. Spec 023 has every start close
-  them.
+  at that moment by a spawn that does not close every other descriptor can inherit a pipe end.
+  That end has no close-on-exec flag, so if it is the report pipe's write end, the start waits
+  until that process exits, or returns `ExecUnconfirmed` at the deadline. Spec 023 has every
+  start close them.
+- On Linux before 5.9 there is no `close_range`, so every start fails with
+  `Exec { step: Descriptors, errno: ENOSYS }` and no `membraned` runs: the start fails closed.
 
 ## Command line
 
