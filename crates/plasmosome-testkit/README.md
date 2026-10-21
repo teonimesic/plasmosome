@@ -139,7 +139,8 @@ other probe. How a kind is numbered decides which relations its placeholders kee
 - A memory or load counter is numbered by first appearance within its field, so counters in two
   fields are not related.
 - Every duration becomes `<duration>`, so durations keep no relation. A reach probe whose lanes
-  differ only in the order of its durations does not discriminate, since timing is spec 006's.
+  differ only in the order of its durations or in which of them are equal does not discriminate,
+  since timing is spec 006's.
 
 A relation that changes can show as a difference in a later field of the same probe, instead of
 or as well as the field that changed. In `a_leader_that_names_another_process_of_its_list_fails`,
@@ -166,10 +167,10 @@ a list of them, or the runs are refused, naming the lane, probe, field and kind:
 
 Integer system times rank exactly across the whole `i64` and `u64` range, and the others as
 `f64` values. Times that are equal JSON numbers share a number, so `-0.0` and `0.0` are one time.
-No kind holds an object, so no field the workload set lists can sit under a
-ruled field. A number the workload set, such as a time set with `utimensat`, can still sit in a
-ruled list, and keeping it out is the manifest author's job. A rule checks a value's shape, not
-its meaning: a `pid` rule on a numeric `errno` field makes 13 and 2 equal.
+No kind holds an object, so no field the workload set lists can sit under a ruled field. A number
+the workload set, such as a time set with `utimensat`, can still sit in a ruled list, and keeping
+it out is the manifest author's job. A rule checks a value's shape, not its meaning: a `pid` rule
+on a numeric `errno` field makes 13 and 2 equal.
 
 Within a probe, placeholders keep the relations above. So a reach probe whose open and absent
 lanes differ only in a ruled field still discriminates when a relation differs, such as two equal
