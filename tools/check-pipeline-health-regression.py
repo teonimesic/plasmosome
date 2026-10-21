@@ -735,7 +735,6 @@ def run_rows(rows):
 
 TESTS = [
     only_on_macos_skips_by_name_off_darwin,
-    a_failed_row_fails_the_run_whatever_rows_skip,
     native_uncertainty,
     delivery_boundaries,
     security_issues,
@@ -750,6 +749,7 @@ TESTS = [
     runner_refused_group_of_live_leader,
     runner_refused_group_of_exiting_leader,
     runner_ends_descendants_of_exited_leader,
+    a_failed_row_fails_the_run_whatever_rows_skip,
 ]
 
 
