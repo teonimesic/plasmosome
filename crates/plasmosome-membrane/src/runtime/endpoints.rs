@@ -1152,8 +1152,23 @@ mod tests {
         );
     }
 
+    #[allow(unsafe_code)]
+    fn still_pending(listening: std::os::fd::RawFd) -> bool {
+        let mut watched = libc::pollfd {
+            fd: listening,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `watched` is one local pollfd, matching the count of 1, and the caller keeps
+        // `listening` open for the call.
+        let ready = unsafe { libc::poll(&mut watched, 1, 0) };
+        ready == 1 && watched.revents & libc::POLLIN != 0
+    }
+
     fn waits_while_a_fork_holds_the_spawn_lock<T: Send + 'static>(
         operation: impl FnOnce() -> T + Send + 'static,
+        nothing_made_yet: impl FnOnce() -> bool,
+        made: &str,
     ) -> T {
         let held = crate::spawn_lock::hold_fork_side();
         let (finished, finished_after) = mpsc::channel();
@@ -1174,11 +1189,13 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(1));
         };
+        let made_early = early.is_none() && !nothing_made_yet();
         drop(held);
         assert!(
             early.is_none(),
             "it finished while a fork held the spawn lock, without waiting for the write side"
         );
+        assert!(!made_early, "{made} before the write side was taken");
         finished_after
             .recv_timeout(PATIENCE)
             .expect("it finishes once the fork side is released")
@@ -1190,13 +1207,19 @@ mod tests {
         let pending = RuntimeListener::bind(&scratch.path("data.sock")).unwrap();
         let _client = UnixStream::connect(pending.path().as_path()).unwrap();
         let binding = scratch.path("control.sock");
-        let bound = waits_while_a_fork_holds_the_spawn_lock(move || {
-            RuntimeListener::bind(&binding).map(drop)
-        });
+        let socket = binding.as_path().to_owned();
+        let bound = waits_while_a_fork_holds_the_spawn_lock(
+            move || RuntimeListener::bind(&binding).map(drop),
+            || absent(&socket),
+            "the socket existed",
+        );
         assert_eq!(bound, Ok(()));
-        let accepted = waits_while_a_fork_holds_the_spawn_lock(move || {
-            pending.accept_ready().map(|ready| ready.is_some())
-        });
+        let listening = pending.listener.as_raw_fd();
+        let accepted = waits_while_a_fork_holds_the_spawn_lock(
+            move || pending.accept_ready().map(|ready| ready.is_some()),
+            || still_pending(listening),
+            "the connection was accepted",
+        );
         assert!(matches!(accepted, Ok(true)), "{accepted:?}");
     }
 }
