@@ -76,9 +76,11 @@ impl VerifiedArtifact {
     /// descriptor opened for writing before the file was locked, is `ChangedSinceVerification`.
     ///
     /// It sees a change to the file's bytes only if the change moves the device, inode, size,
-    /// modification time or change time. A write through a shared writable mapping that existed
-    /// before the file was locked moves none of them, so neither this nor [`verify_artifact`]
-    /// sees it. Nor does it see a change made after it returns.
+    /// modification time or change time. A shared mapping made before the file was locked, from
+    /// a descriptor opened for writing, can change the bytes whatever protection it had when the
+    /// file was locked, because `mprotect` can add write later. Such a write moves the times only
+    /// at `msync` or `munmap`, if at all, so neither this nor [`verify_artifact`] sees it. Nor
+    /// does it see a change made after it returns.
     pub fn reconfirm(&self) -> Result<(), ArtifactRefusal> {
         let refuse = |fault| ArtifactRefusal {
             role: self.role,
@@ -127,9 +129,10 @@ pub enum ArtifactFault {
     /// The no-follow walk from "/" refused. Its path field names where it stopped: a path that
     /// is not absolute and normal, a symlink, a missing name, a component that is not a
     /// directory, a directory owned by neither root nor the effective UID, one group or other
-    /// can write, one with any ACL allow entry granting write (add_file, add_subdirectory,
-    /// delete_child, delete, writesecurity or chown) whoever the entry names, one on a volume
-    /// mounted with ownership ignored, or one it could not open.
+    /// can write, or one it could not open. On macOS it also refuses a directory with any ACL
+    /// allow entry granting write (add_file, add_subdirectory, delete_child, delete,
+    /// writesecurity, chown, generic write or generic all), whoever the entry names, and one on a
+    /// volume mounted with ownership ignored.
     Walk(WalkRefusal),
     /// The artifact is not a regular file.
     NotRegular { kind: Kind },
@@ -246,13 +249,15 @@ fn kind_name(kind: Kind) -> &'static str {
 ///
 /// On macOS pass the canonical path, `/private/var/...` rather than `/var/...`: a symlink
 /// anywhere on the path is refused. Root and the effective UID can still change an artifact
-/// after it passes. So can a process that opened it for writing, or mapped it shared and
-/// writable, before it was locked: the mode and `uchg` refuse only new opens and new writable
-/// mappings, and this process cannot see another process's descriptors or mappings. Such a
-/// writer can also extend the file before the check, and the hash reads up to the checked size,
-/// so it can make verification slow. [`VerifiedArtifact::reconfirm`] refuses a change made before
-/// it runs if the change moved the size or a time. A write through a shared writable mapping
-/// moves neither, so neither this check nor `reconfirm` sees it.
+/// after it passes. So can a process that opened it for writing before it was locked, through
+/// that descriptor or through a shared mapping made from it, whatever protection the mapping had
+/// then: the mode and `uchg` refuse only new opens and new writable mappings, `mprotect` can
+/// still add write to a mapping made before the lock, and this process cannot see another
+/// process's descriptors or mappings. Such a writer can also extend the file before the check,
+/// and the hash reads up to the checked size, so it can make verification slow.
+/// [`VerifiedArtifact::reconfirm`] refuses a change made before it runs if the change moved the
+/// size or a time. A write through such a mapping moves neither until `msync` or `munmap`, if at
+/// all, so neither this check nor `reconfirm` sees it.
 pub fn verify_artifact(
     role: ArtifactRole,
     artifact: &Artifact,

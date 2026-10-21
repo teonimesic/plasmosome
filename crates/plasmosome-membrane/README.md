@@ -242,13 +242,17 @@ refuse only new opens. Measured on macOS 26.6.2, such a write moves the file's t
 `reconfirm()` refuses a change made before it runs, but not one made after.
 
 `reconfirm()` sees a change to the file's bytes only if the change moves the device, inode, size,
-modification time or change time. A write through a shared writable mapping that existed before the
-file was locked moves none of them, so neither `reconfirm()` nor verification sees it. Measured on
-macOS 26.6.2 on APFS on 2026-10-21, such a write changes what `pread` and a fresh open read at once,
-while the size and times stay as they were until `msync` or `munmap`. A writable shared mapping made
-after the lock fails with `EPERM`, so only a mapping made before it can do this. Hashing again in
-`reconfirm()` would only narrow the window, because the mapping can write after any hash, so it does
-not.
+modification time or change time. A shared mapping made before the file was locked, from a
+descriptor opened for writing, can change the bytes whatever protection it had when the file was
+locked, because `mprotect` can add write later. Such a write moves the times only at `msync` or
+`munmap`, if at all, so neither `reconfirm()` nor verification sees it. Measured on macOS 26.6.2 on
+APFS on 2026-10-21, a write through such a mapping, writable at the lock or made writable after it,
+changes what `pread` and a fresh open read at once, while the size and times stay as they were until
+`msync` or `munmap`; at `munmap` of the mapping made writable after the lock, only the change time
+moved. A mapping made from a descriptor opened read-only cannot gain write (`mprotect` fails with
+`EACCES`), and neither can a mapping made after the lock: `mmap` with `PROT_WRITE` fails with
+`EPERM`, and adding write with `mprotect` fails with `EACCES`. Hashing again in `reconfirm()` would
+only narrow the window, because the mapping can write after any hash, so it does not.
 
 ## Launching the VMM helper
 
