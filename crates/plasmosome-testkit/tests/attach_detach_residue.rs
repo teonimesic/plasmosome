@@ -42,7 +42,7 @@ fn prepare_then_grant(
         ledger.effects(),
         "the log must hold every inverse, in order, before the first grant"
     );
-    assert!(backend.snapshot_os_state().is_empty());
+    assert!(backend.snapshot_os_state().unwrap().is_empty());
     for grant in prepared {
         let entry = backend
             .grant(grant.operation.clone(), grant.kind)
@@ -87,7 +87,7 @@ fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
     assert_eq!(cell.plasmids[0].plasmid, manifest.id);
 
     let mut backend = FakeBackend::new();
-    let before = backend.snapshot_os_state();
+    let before = backend.snapshot_os_state().unwrap();
     assert!(before.is_empty());
 
     let host = &manifest.network.as_ref().expect("a host").hosts[0];
@@ -104,7 +104,12 @@ fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
         prepared,
     );
     assert_eq!(ledger.len(), 3);
-    assert_eq!(backend.snapshot_os_state().len(), 3);
+    let granted = backend.snapshot_os_state().unwrap();
+    assert_eq!(
+        (granted.state().len(), granted.grants().len()),
+        (3, 3),
+        "every prepared grant stands and keeps its issued record"
+    );
 
     let Closure::ExternalFree(mut sealed) = ledger.close() else {
         panic!("a ledger of exact inverses closes without an operator assertion");
@@ -132,8 +137,9 @@ fn attach_then_detach_leaves_no_residue_after_lifo_replay() {
     );
     assert!(registry.is_empty());
 
-    let after = backend.snapshot_os_state();
-    let residue = ResidueReport::from_diff(Diff::between(&before, &after), Vec::new());
+    let after = backend.snapshot_os_state().unwrap();
+    let residue =
+        ResidueReport::from_diff(Diff::between(before.state(), after.state()), Vec::new());
     assert_eq!(residue, ResidueReport::Empty, "{residue}");
     assert!(after.is_empty());
 }
@@ -163,7 +169,7 @@ fn an_identity_source_that_fails_during_allocation_leaves_no_log_and_no_holding(
     );
     assert_eq!(drawn, 2);
     assert!(!log.exists(), "a failed allocation must write no log");
-    assert!(backend.snapshot_os_state().is_empty());
+    assert!(backend.snapshot_os_state().unwrap().is_empty());
 }
 
 #[test]
