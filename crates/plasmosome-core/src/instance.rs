@@ -5281,7 +5281,8 @@ mod tests {
     #[test]
     fn an_allocation_that_loses_every_race_gives_up_after_64_scans() {
         let (_dir, root) = temp_root();
-        let (instance, lock) = locked(&root);
+        let (mut instance, lock) = locked(&root);
+        instance.sync = no_sync;
         let scans = Rc::new(Cell::new(0));
         let (counted, cells) = (Rc::clone(&scans), root.join("cells"));
         on_every_scan(move || {
