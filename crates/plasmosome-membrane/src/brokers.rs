@@ -351,6 +351,7 @@ mod tests {
     #[derive(Default)]
     struct ExpiryAwaitingProbe {
         budgets: Mutex<Vec<Option<Duration>>>,
+        shortfalls: Mutex<Vec<(Duration, Duration)>>,
     }
 
     impl ExpiryAwaitingProbe {
@@ -358,6 +359,13 @@ mod tests {
             self.budgets
                 .lock()
                 .expect("the record of probe budgets is uncontended")
+                .clone()
+        }
+
+        fn shortfalls(&self) -> Vec<(Duration, Duration)> {
+            self.shortfalls
+                .lock()
+                .expect("the record of budget shortfalls is uncontended")
                 .clone()
         }
     }
@@ -373,8 +381,18 @@ mod tests {
                 let Ok(before) = left else {
                     return Ok(ready());
                 };
+                let slept_from = Instant::now();
                 std::thread::sleep(before);
+                let slept = slept_from.elapsed();
                 left = budget.remaining();
+                if let Ok(after) = left
+                    && before.saturating_sub(after) < slept
+                {
+                    self.shortfalls
+                        .lock()
+                        .expect("the record of budget shortfalls is uncontended")
+                        .push((before.saturating_sub(after), slept));
+                }
             }
             assert!(
                 left.is_err(),
@@ -730,6 +748,11 @@ mod tests {
             assert!(
                 matches!(handed.as_slice(), [left] if left.is_none_or(|left| left <= deadline)),
                 "`egressd` must be asked once and handed at most the {deadline:?} its caller allowed, got {handed:?}"
+            );
+            let shortfalls = prober.shortfalls();
+            assert!(
+                shortfalls.is_empty(),
+                "the budget `egressd` was handed must shrink by at least the real time it slept, but (shrank, slept) were {shortfalls:?}"
             );
         }
     }
