@@ -7,6 +7,7 @@ root, because root can write a 0555 directory. Set QUICKSTART_NOEXEC_BASE to a p
 noexec mount to add the case that uses a real mount.
 """
 
+import errno
 import os
 from pathlib import Path
 import re
@@ -154,9 +155,10 @@ def a_base_that_is_not_valid_utf8_is_refused():
     base = ROOT / os.fsdecode(b"q\xff" + secrets.token_hex(4).encode())
     try:
         base.mkdir(mode=0o700)
+        MADE.append(base)
     except OSError as error:
-        raise Skipped(f"this file system cannot make a name that is not UTF-8: {error.strerror}")
-    MADE.append(base)
+        if error.errno != errno.EILSEQ:
+            raise
     shown = os.fsencode(base).decode("utf-8", "backslashreplace")
     refused(base, f"{shown} is not valid UTF-8")
 
