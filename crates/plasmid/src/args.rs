@@ -189,7 +189,7 @@ impl<'a> Line<'a> {
             .take_while(|(kind, argument)| {
                 *kind != Kind::Flag
                     || KNOWN_FLAGS.iter().any(|known| *argument == *known)
-                    || argument.as_encoded_bytes().contains(&b'=')
+                    || holds_its_value(argument)
             })
             .filter(|(kind, _)| *kind == Kind::Word)
             .map(|(_, word)| *word)
@@ -385,6 +385,11 @@ impl<'a> Line<'a> {
             Some(OsStr::new(name)),
         )
     }
+}
+
+fn holds_its_value(flag: &OsStr) -> bool {
+    let bytes = flag.as_encoded_bytes();
+    bytes.starts_with(b"--") && bytes.contains(&b'=')
 }
 
 fn is_plasmid_name(name: &str) -> bool {
