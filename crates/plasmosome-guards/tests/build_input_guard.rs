@@ -1895,6 +1895,11 @@ fn refuses_patch_replace_and_cargo_features() {
                     vec![("crates/a/Cargo.toml", "cargo-features")],
                 ),
                 (
+                    "[project], cargo's old name for [package]",
+                    vec![file("crates/c/Cargo.toml", "[project]\nname = \"c\"\n")],
+                    vec![("crates/c/Cargo.toml", "project")],
+                ),
+                (
                     "a manifest spelling a case-insensitive filesystem finds",
                     vec![package("crates/c/CARGO.TOML", "c", patch)],
                     vec![("crates/c/CARGO.TOML", "patch")],
@@ -1925,6 +1930,11 @@ fn refuses_patch_replace_and_cargo_features() {
             &outputs,
             "cargo-features",
             &["crates/a/Cargo.toml: cargo-features: unstable cargo features are refused"],
+        );
+        assert_says(
+            &outputs,
+            "[project], cargo's old name for [package]",
+            &["crates/c/Cargo.toml: project: [project] is cargo's old name for [package]"],
         );
         assert_says(
             &outputs,
