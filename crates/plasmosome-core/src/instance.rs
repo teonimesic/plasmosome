@@ -44,11 +44,22 @@ type Identity = (u64, u64);
 ///
 /// Private modes (0700 for directories, 0600 for files) are set with `fchmod`, whatever the
 /// umask. A directory this user cannot read, such as one a umask of 0477 left at 0300, is first
-/// set to 0700 by name with `fchmodat` and `AT_SYMLINK_NOFOLLOW`, then opened. On Linux the C
-/// library needs `/proc` or the `fchmodat2` call for that flag; with neither, such a directory
-/// is an `Io` error. On macOS private modes do not restrict access when the root or `cells`
-/// carries an inheritable ACL: the new entry inherits it and the mode does not show it. Nothing
-/// here removes or checks ACLs.
+/// set to 0700 by name with `fchmodat` and `AT_SYMLINK_NOFOLLOW`, then opened. That chmod never
+/// adds group or other bits. It runs on any `EACCES` from opening a directory, not only one the
+/// mode causes. So on macOS a deny-list ACL on `cells` at 0500 or 0300 makes `create_cell_dir`
+/// fail with `Io` and `EACCES` and still leaves `cells` at 0700; `retired` and `runtime` go
+/// through the same steps.
+///
+/// On Linux the C library decides whether `AT_SYMLINK_NOFOLLOW` works. glibc before 2.32
+/// refuses it even with `/proc`. Later glibc needs `/proc` or, from glibc 2.39, the `fchmodat2`
+/// call of Linux 6.6. When glibc refuses it, such a directory is an `Io` error. musl also needs
+/// `/proc` or `fchmodat2`, but with neither it fails with `ENOENT`: `create_cell_dir` and
+/// `CellDir::create_runtime_dir` then report a directory that exists as `Missing`, and
+/// `retire` reports `Io` with `ENOENT`.
+///
+/// On macOS private modes do not restrict access when the root or `cells` carries an
+/// inheritable ACL: the new entry inherits it and the mode does not show it. Nothing here
+/// removes or checks ACLs.
 #[derive(Debug)]
 pub struct InstanceRoot {
     dir: OwnedFd,
