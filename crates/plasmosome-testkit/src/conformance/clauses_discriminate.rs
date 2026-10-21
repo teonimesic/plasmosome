@@ -234,7 +234,7 @@ impl DefectiveBackend {
             }
             Defect::SwallowsInvalidOperations(swallowed) if swallowed == call => Ok(false),
             Defect::ValidatesAfterTheEffect(late) if late == call => {
-                let _ = self.state.insert(operation.object());
+                let _ = self.state.insert(effect_read_back(operation));
                 Err(refusal)
             }
             Defect::RefusalRollsBackItsAddress(rollback) if rollback == call => {
@@ -248,13 +248,13 @@ impl DefectiveBackend {
                     }) =>
             {
                 self.drop_address(operation.handle());
-                let _ = self.state.insert(operation.object());
+                let _ = self.state.insert(effect_read_back(operation));
                 Err(refusal)
             }
             Defect::LeaksAnInvalidOperationOf(class, late)
                 if class == operation.class() && late == call =>
             {
-                let _ = self.state.insert(operation.object());
+                let _ = self.state.insert(effect_read_back(operation));
                 Err(refusal)
             }
             Defect::RefusalRollsBackTheAddressOf(class, rollback)
@@ -269,7 +269,9 @@ impl DefectiveBackend {
                         held.class() == operation.class() && held.id == operation.id()
                     }) =>
             {
-                self.pending_effects.borrow_mut().push(operation.object());
+                self.pending_effects
+                    .borrow_mut()
+                    .push(effect_read_back(operation));
                 Err(refusal)
             }
             Defect::RefusalDropsTheIssuedRecordAtOnce(dropping)
@@ -1183,6 +1185,14 @@ fn a_stranger(handle: Handle) -> LedgerEntry {
         },
         capability,
         kind: GrantKind::Hot,
+    }
+}
+
+fn effect_read_back(operation: &UniverseOp) -> OsObject {
+    OsObject {
+        id: operation.id(),
+        owner: operation.owner().clone(),
+        capability: a_stranger(operation.handle()).capability,
     }
 }
 
@@ -2603,7 +2613,7 @@ fn a_swapping_refusal_changes_only_an_occupied_address_through_its_own_call() {
             );
             let mut expected = OsState::new();
             if call == defective {
-                expected.insert(occupied.object()).unwrap();
+                expected.insert(effect_read_back(&occupied)).unwrap();
             } else {
                 expected.insert(standing.operation.object()).unwrap();
             }
@@ -2773,7 +2783,11 @@ fn a_late_effect_shows_from_the_second_read_after_its_own_call() {
             assert!(backend.standing().is_empty());
             let later = backend.standing();
             if call == defective {
-                assert!(later.objects().any(|held| *held == invalid.object()));
+                assert!(
+                    later
+                        .objects()
+                        .any(|held| *held == effect_read_back(&invalid))
+                );
                 assert_eq!(later.objects().count(), 1);
             } else {
                 assert!(later.is_empty());
