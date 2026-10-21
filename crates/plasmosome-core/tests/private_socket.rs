@@ -973,7 +973,7 @@ fn accept_refuses_a_peer_whose_uid_is_not_trusted_before_reading() {
     assert_eq!(end.expect("EOF"), 0);
     #[cfg(target_os = "linux")]
     assert_eq!(
-        end.expect_err("the server closed with the request unread")
+        end.expect_err("the server closed with the request still queued")
             .kind(),
         std::io::ErrorKind::ConnectionReset
     );
@@ -1014,12 +1014,12 @@ fn accept_refuses_a_peer_that_sent_one_byte_without_taking_it_from_the_queue() {
 const WAITING_PEERS: usize = 200;
 
 #[test]
-fn a_refused_peer_already_waiting_for_a_reply_sees_one_end_every_time() {
+fn a_refused_peer_whose_reader_has_started_sees_one_end_every_time() {
     let root = private_root();
     let trusted = effective_uid().wrapping_add(1);
     let listener = PrivateListener::bind(private_dir(&root), "sock", trusted).expect("bind");
     let ends: Vec<(std::io::Result<usize>, Vec<u8>)> = (0..WAITING_PEERS)
-        .map(|_| {
+        .map(|peer| {
             let mut client = UnixStream::connect(&listener.entry().path).expect("connect");
             client.set_read_timeout(Some(PATIENCE)).expect("timeout");
             client
@@ -1038,7 +1038,17 @@ fn a_refused_peer_already_waiting_for_a_reply_sees_one_end_every_time() {
                 matches!(accept_one(&listener), Accepted::Refused(_)),
                 "a peer with an untrusted UID was accepted"
             );
-            reader.join().expect("the reader finishes")
+            let (end, reply) = reader.join().expect("the reader finishes");
+            if let Err(error) = &end {
+                assert!(
+                    !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ),
+                    "the refused stream was left open: peer {peer}'s read timed out"
+                );
+            }
+            (end, reply)
         })
         .collect();
     assert!(
@@ -1061,8 +1071,9 @@ fn a_refused_peer_already_waiting_for_a_reply_sees_one_end_every_time() {
         .collect();
     assert!(
         unexpected.is_empty(),
-        "{} of {WAITING_PEERS} refused peers waiting to read saw another end than the platform's \
-         (end of file on macOS, a reset on Linux, which shows the request was never read): {:?}",
+        "{} of {WAITING_PEERS} refused peers, each with its reader started before the refusal, \
+         saw another end than the platform's (end of file on macOS, a reset on Linux, which shows \
+         the request was still queued when the stream closed): {:?}",
         unexpected.len(),
         unexpected
     );
