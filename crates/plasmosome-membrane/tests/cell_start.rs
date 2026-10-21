@@ -471,6 +471,23 @@ fn refuses_another_roots_cell_reached_through_a_symlink() {
 }
 
 #[test]
+fn refuses_a_lock_file_that_is_a_symlink_to_another_roots_lock() {
+    let instance = Instance::new();
+    let _own = instance.cell(1);
+    let elsewhere = Instance::new();
+    let controller = elsewhere.cell(1);
+    let lock_path = instance.cell_path(1).join("supervisor.lock");
+    fs::remove_file(&lock_path).expect("the lock file is unlinked");
+    std::os::unix::fs::symlink(elsewhere.cell_path(1).join("supervisor.lock"), &lock_path)
+        .expect("the symlink is made");
+    let refusal = refused_lock(&instance, handed_over(&controller), &instance.config(1));
+    let CellStartRefusal::CellDirectory(CellDirError::Symlink { path }) = &refusal else {
+        panic!("{refusal:?}");
+    };
+    assert_eq!(path.as_path(), lock_path);
+}
+
+#[test]
 fn refuses_a_cell_whose_lock_file_is_gone() {
     let instance = Instance::new();
     let controller = instance.cell(1);
