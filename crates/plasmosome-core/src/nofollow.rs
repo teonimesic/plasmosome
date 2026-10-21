@@ -1381,12 +1381,31 @@ mod tests {
         set_mode(&root.join("a"), 0o770);
         assert_eq!(
             root.walk("a/file")
-                .open_file(accept)
+                .open_file(refuse_all)
                 .map(|opened| opened.facts),
-            Err(WalkRefusal::Replaceable {
+            Err(Judged::Walk(WalkRefusal::Replaceable {
                 path: root.join("a"),
                 mode: 0o770
-            })
+            })),
+            "the directory holding the file is judged before the file"
+        );
+    }
+
+    #[test]
+    fn open_directory_judges_the_directory_holding_it_by_the_ancestor_rule() {
+        let root = TestRoot::new();
+        make_dir(&root.join("a"), 0o700);
+        make_dir(&root.join("a/dir"), 0o700);
+        set_mode(&root.join("a"), 0o770);
+        assert_eq!(
+            root.walk("a/dir")
+                .open_directory(refuse_all)
+                .map(|opened| opened.facts),
+            Err(Judged::Walk(WalkRefusal::Replaceable {
+                path: root.join("a"),
+                mode: 0o770
+            })),
+            "the directory holding the directory is judged before it"
         );
     }
 

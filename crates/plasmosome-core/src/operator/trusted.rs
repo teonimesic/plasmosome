@@ -505,6 +505,73 @@ mod tests {
         );
     }
 
+    struct EndlessZeros {
+        asked: usize,
+    }
+
+    impl Read for EndlessZeros {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.asked += buffer.len();
+            assert!(
+                self.asked <= MAX_TRUSTED_BYTES + 1,
+                "the read asked for {} bytes, more than one byte over the bound",
+                self.asked
+            );
+            buffer.fill(0);
+            Ok(buffer.len())
+        }
+    }
+
+    #[test]
+    fn the_read_asks_for_at_most_one_byte_more_than_the_bound() {
+        let mut endless = EndlessZeros { asked: 0 };
+        match read_bounded(&mut endless, Path::new("/endless")).map(|bytes| bytes.len()) {
+            Err(Fault::Check(TrustCheck::Size, reason)) => {
+                assert_eq!(reason, "/endless holds more than 1048576 bytes");
+            }
+            other => panic!("an endless reader gave {other:?}"),
+        }
+        assert_eq!(endless.asked, MAX_TRUSTED_BYTES + 1);
+        assert_eq!(
+            read_bounded(
+                std::io::repeat(0).take(MAX_TRUSTED_BYTES as u64),
+                Path::new("/exact")
+            )
+            .map(|bytes| bytes.len())
+            .ok(),
+            Some(MAX_TRUSTED_BYTES)
+        );
+    }
+
+    #[test]
+    fn a_sparse_file_a_few_mebibytes_over_the_bound_is_size() {
+        let root = TestRoot::new();
+        let path = root.join("sparse.json");
+        fs::File::create(&path)
+            .and_then(|file| file.set_len((MAX_TRUSTED_BYTES + 3 * LIMIT) as u64))
+            .expect("a sparse file");
+        set_mode(&path, 0o600);
+        assert_eq!(
+            check_of(open_in(&root, "sparse.json")),
+            (path, TrustCheck::Size)
+        );
+    }
+
+    #[test]
+    fn a_file_unlinked_after_the_open_is_links() {
+        let root = TestRoot::new();
+        let path = root.join("operator.json");
+        write_file(&path, b"{}", 0o600);
+        let file = fs::File::open(&path).expect("open");
+        fs::remove_file(&path).expect("unlink");
+        match read_checked(&file, &path).map(|bytes| bytes.len()) {
+            Err(Fault::Check(TrustCheck::Links, reason)) => {
+                assert!(reason.contains("has 0 links"), "{reason}");
+            }
+            other => panic!("an unlinked file gave {other:?}"),
+        }
+    }
+
     #[test]
     fn etc_hosts_is_parent_because_root_owns_its_directory() {
         if effective_uid() == 0 {
