@@ -444,6 +444,7 @@ name = "plasmosome"
 version = "0.0.0"
 dependencies = [
  "plasmosome-cli",
+ "plasmosome-core",
  "serde_json",
  "tempfile",
 ]
@@ -468,6 +469,7 @@ version = "0.1.0"
 dependencies = [
  "plasmosome-core",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

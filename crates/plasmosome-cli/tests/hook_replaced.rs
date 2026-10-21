@@ -3,7 +3,14 @@ use std::io::{self, Write};
 use std::panic::{self, PanicHookInfo};
 use std::sync::{Mutex, PoisonError};
 
-use plasmosome_cli::{COMMANDS, Exit, handle};
+use plasmosome_cli::{COMMANDS, Context, Exit, SystemClock, handle};
+
+const CONTEXT: Context<'static> = Context {
+    version: "0.0.0",
+    commands: COMMANDS,
+    trusted_uid: 0,
+    clock: &SystemClock,
+};
 
 const IN_A_COMMAND: &str = "a panic inside a command, after a newer hook was set";
 
@@ -33,8 +40,7 @@ impl Write for PanicsOnWrite {
 fn a_hook_set_after_the_first_call_replaces_the_quiet_one() {
     let first = handle(
         &args(&["--version"]),
-        "0.0.0",
-        COMMANDS,
+        &CONTEXT,
         &mut Vec::new(),
         &mut Vec::new(),
     );
@@ -48,8 +54,7 @@ fn a_hook_set_after_the_first_call_replaces_the_quiet_one() {
     }));
     let exit = handle(
         &args(&["--help"]),
-        "0.0.0",
-        COMMANDS,
+        &CONTEXT,
         &mut PanicsOnWrite,
         &mut Vec::new(),
     );

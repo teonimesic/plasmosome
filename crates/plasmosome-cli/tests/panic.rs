@@ -5,7 +5,14 @@ use std::panic::{self, PanicHookInfo};
 use std::sync::{Mutex, Once, PoisonError};
 use std::thread;
 
-use plasmosome_cli::{COMMANDS, Exit, handle};
+use plasmosome_cli::{COMMANDS, Context, Exit, SystemClock, handle};
+
+const CONTEXT: Context<'static> = Context {
+    version: "0.0.0",
+    commands: COMMANDS,
+    trusted_uid: 0,
+    clock: &SystemClock,
+};
 
 const IN_A_COMMAND: &str = "a panic inside a command";
 
@@ -62,8 +69,7 @@ fn args(line: &[&str]) -> Vec<OsString> {
 fn version() -> Exit {
     handle(
         &args(&["--version"]),
-        "0.0.0",
-        COMMANDS,
+        &CONTEXT,
         &mut Vec::new(),
         &mut Vec::new(),
     )
@@ -114,8 +120,7 @@ fn a_panic_in_a_command_is_internal_and_no_other_panic_is_hidden() {
     let mut stderr = Vec::new();
     let exit = handle(
         &args(&["cell", "list", "--help"]),
-        "0.0.0",
-        COMMANDS,
+        &CONTEXT,
         &mut PanicsOnWrite(IN_A_COMMAND),
         &mut stderr,
     );
@@ -154,8 +159,7 @@ fn a_panic_writes_internal_in_the_form_the_line_chose() {
         let mut stderr = Vec::new();
         let exit = handle(
             &args(line),
-            "0.0.0",
-            COMMANDS,
+            &CONTEXT,
             &mut PanicsOnWrite(IN_A_FORM),
             &mut stderr,
         );
@@ -185,8 +189,7 @@ fn a_panic_on_another_thread_while_a_command_runs_reaches_the_earlier_hook() {
     let mut stdout = PanicsOnAHelperThread(Vec::new());
     let exit = handle(
         &args(&["--version"]),
-        "0.0.0",
-        COMMANDS,
+        &CONTEXT,
         &mut stdout,
         &mut Vec::new(),
     );
@@ -217,8 +220,7 @@ fn an_inner_call_leaves_the_outer_command_silent() {
     let mut stderr = Vec::new();
     let exit = handle(
         &args(&["--help"]),
-        "0.0.0",
-        COMMANDS,
+        &CONTEXT,
         &mut CallsHandleThenPanics,
         &mut stderr,
     );

@@ -167,9 +167,14 @@ fn help_comes_first_and_never_connects() {
     for (usage, method) in COMMANDS {
         let rows = listed(help, usage);
         assert_eq!(rows.len(), 1, "{usage} is not listed once in {help}");
+        let mark = if usage == "status" {
+            "  served"
+        } else {
+            "  not served"
+        };
         assert!(
-            rows[0].ends_with(" not served"),
-            "{usage} is not marked not served: {:?}",
+            rows[0].ends_with(mark),
+            "{usage} is not marked {mark:?}: {:?}",
             rows[0]
         );
         let verb = if usage.starts_with("registry ") {
@@ -307,7 +312,7 @@ fn unserved_commands_never_connect() {
 
 #[test]
 fn unserved_commands_refuse_without_reading_more() {
-    for (usage, command) in COMMANDS {
+    for (usage, command) in COMMANDS.into_iter().filter(|(usage, _)| *usage != "status") {
         let words: Vec<OsString> = usage
             .split(' ')
             .filter(|word| !word.chars().all(|c| c.is_ascii_uppercase()))

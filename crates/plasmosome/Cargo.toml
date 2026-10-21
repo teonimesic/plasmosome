@@ -14,6 +14,7 @@ exclude = ["AGENTS.md", "CLAUDE.md"]
 plasmosome-cli = { workspace = true }
 
 [dev-dependencies]
+plasmosome-core = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 

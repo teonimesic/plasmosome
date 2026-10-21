@@ -5,7 +5,8 @@ use std::os::unix::ffi::OsStringExt;
 
 use plasmosome_cli::json::Json;
 use plasmosome_cli::{
-    COMMANDS, ClientCode, Command, Exit, Form, Invocation, Reading, handle, read,
+    COMMANDS, ClientCode, Command, Context, Exit, Form, Invocation, Reading, SystemClock, handle,
+    read,
 };
 
 const SPEC_025: &str = concat!(
@@ -47,6 +48,15 @@ fn named_in_an_envelope(argument: &str) -> String {
         format!("a{}", char::REPLACEMENT_CHARACTER)
     } else {
         argument.to_string()
+    }
+}
+
+fn context(commands: &[Command]) -> Context<'_> {
+    Context {
+        version: "0.0.0",
+        commands,
+        trusted_uid: 0,
+        clock: &SystemClock,
     }
 }
 
@@ -224,9 +234,15 @@ fn the_command_table_is_spec_025s() {
         })
         .collect();
     assert_eq!(built, spec);
-    assert!(
-        COMMANDS.iter().all(|command| !command.served),
-        "this build serves no command yet; plasmosome-l1k6 marks status served when it works"
+    let served: Vec<&str> = COMMANDS
+        .iter()
+        .filter(|command| command.served)
+        .map(|command| command.command)
+        .collect();
+    assert_eq!(
+        served,
+        ["plasmosome.status"],
+        "this build serves status alone"
     );
 }
 
@@ -924,7 +940,7 @@ fn an_escaped_echo_in_both_forms() {
         let mut line = args(&["status", "--kernel", &name]);
         line.extend(form.map(OsString::from));
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-        let exit = handle(&line, "0.0.0", &commands, &mut stdout, &mut stderr);
+        let exit = handle(&line, &context(&commands), &mut stdout, &mut stderr);
         assert_eq!(exit, Exit::Usage);
         assert!(stdout.is_empty());
         let text = String::from_utf8(stderr).expect("stderr is UTF-8");
@@ -940,7 +956,7 @@ fn an_escaped_echo_in_both_forms() {
 fn a_failed_stdout_is_local_io() {
     for (line, command) in [(&["--help"][..], "--help"), (&["--version"], "--version")] {
         let mut stderr = Vec::new();
-        let exit = handle(&args(line), "0.0.0", COMMANDS, &mut Closed, &mut stderr);
+        let exit = handle(&args(line), &context(COMMANDS), &mut Closed, &mut stderr);
         assert_eq!(exit, Exit::Unavailable, "{line:?}");
         let envelope = envelope(&stderr);
         assert_eq!(envelope["command"], command);
@@ -950,8 +966,7 @@ fn a_failed_stdout_is_local_io() {
     let mut stderr = Vec::new();
     let exit = handle(
         &args(&["--help", "--human"]),
-        "0.0.0",
-        COMMANDS,
+        &context(COMMANDS),
         &mut Closed,
         &mut stderr,
     );
@@ -966,8 +981,7 @@ fn a_failed_flush_after_a_good_write_is_local_io() {
     let mut stderr = Vec::new();
     let exit = handle(
         &args(&["--version"]),
-        "0.0.0",
-        COMMANDS,
+        &context(COMMANDS),
         &mut stdout,
         &mut stderr,
     );
@@ -983,16 +997,15 @@ fn a_failed_flush_after_a_good_write_is_local_io() {
 fn a_served_command_with_no_code_is_internal() {
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let exit = handle(
-        &args(&["status"]),
-        "0.0.0",
-        &status_served(),
+        &args(&["cell", "list"]),
+        &context(&serving(&["cell.list"])),
         &mut stdout,
         &mut stderr,
     );
     assert_eq!(exit, Exit::Internal);
     assert!(stdout.is_empty());
     let envelope = envelope(&stderr);
-    assert_eq!(envelope["command"], "plasmosome.status");
+    assert_eq!(envelope["command"], "cell.list");
     assert_eq!(envelope["error"]["code"], "internal");
 }
 
