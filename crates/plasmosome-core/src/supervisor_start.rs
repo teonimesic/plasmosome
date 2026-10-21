@@ -104,18 +104,21 @@ pub enum StartStep {
 /// short-lived intermediate forks it and exits. This function reaps the intermediate and keeps no
 /// PID.
 ///
-/// Once the exec succeeded, it closes its lock and its copy of the pipe's read end, so the lock is
-/// never free: `membraned` holds the same open file on descriptor 4. Then it writes `record`,
-/// waiting no later than `deadline` for `membraned` to read, and closes the pipe. Returns `Ok`
-/// once the whole record is written. The wait for the exec itself is not bounded by `deadline`.
+/// It waits no later than `deadline` for the new process to report a failure or close its report
+/// pipe. Past it, it closes the record's pipe unwritten and returns `ExecUnconfirmed` with the
+/// lock still held. Once the exec succeeded, it closes its lock and its copy of the pipe's read
+/// end, so the lock is never free: `membraned` holds the same open file on descriptor 4. Then it
+/// writes `record`, waiting no later than `deadline` for `membraned` to read, and closes the pipe.
+/// Returns `Ok` once the whole record is written.
 ///
 /// The children run only async-signal-safe calls between `fork` and `exec` and allocate nothing,
 /// so the caller may have other threads. The calling thread blocks every signal from just before
 /// the fork until it returns, so no handler of this process runs in a child.
 ///
 /// On Darwin a new pipe is close-on-exec only after a second call. A process this one starts at
-/// that moment by a spawn that does not close every other descriptor can inherit a pipe end, and
-/// this call then waits until that process exits or execs. Spec 023 has every start close them.
+/// that moment by a spawn that does not close every other descriptor can inherit a pipe end. If
+/// it holds the report pipe's write end, this call waits until that process exits, or returns
+/// `ExecUnconfirmed` at `deadline`. Spec 023 has every start close them.
 /// On Darwin the record's pipe never raises `SIGPIPE`. On Linux a reader that exits gives
 /// `SupervisorClosedPipe` only because a Rust `main` ignores `SIGPIPE`; a process that restores
 /// it dies instead. On Linux the new process closes descriptors with `close_range`, which needs
@@ -133,10 +136,11 @@ pub fn start_supervisor(start: SupervisorStart<'_>, deadline: Instant) -> Result
         Err(source) => return Err(StartError::Prepare { lock, source }),
     };
     drop(log);
-    let config = match layout.spawn() {
+    let config = match layout.spawn(deadline) {
         Ok(config) => config,
         Err(Failure::Prepare(source)) => return Err(StartError::Prepare { lock, source }),
         Err(Failure::Step(step, errno)) => return Err(StartError::Exec { lock, step, errno }),
+        Err(Failure::Unconfirmed) => return Err(StartError::ExecUnconfirmed { lock }),
     };
     drop(lock);
     write_record(&config, &record, deadline)
@@ -145,6 +149,7 @@ pub fn start_supervisor(start: SupervisorStart<'_>, deadline: Instant) -> Result
 enum Failure {
     Prepare(io::Error),
     Step(StartStep, i32),
+    Unconfirmed,
 }
 
 struct Layout {
@@ -193,7 +198,7 @@ impl Layout {
         })
     }
 
-    fn spawn(self) -> Result<OwnedFd, Failure> {
+    fn spawn(self, deadline: Instant) -> Result<OwnedFd, Failure> {
         let argv = [
             self.program.as_ptr(),
             CONFIG_FD_FLAG.as_ptr(),
@@ -229,6 +234,9 @@ impl Layout {
         } = self;
         drop((dev_null, log, lock, report_write));
         reap(intermediate);
+        if !report_ready(report_read.as_fd(), deadline) {
+            return Err(Failure::Unconfirmed);
+        }
         match read_report(report_read.as_fd()) {
             None => {
                 drop(config_read);
@@ -523,6 +531,28 @@ fn reap(intermediate: libc::pid_t) {
     // SAFETY: `status` is a local that waitpid may write. `intermediate` is a child this process
     // forked and has not reaped, so its pid still names it.
     while unsafe { libc::waitpid(intermediate, &mut status, 0) } == -1 && errno() == libc::EINTR {}
+}
+
+#[allow(unsafe_code)]
+fn report_ready(report: BorrowedFd<'_>, deadline: Instant) -> bool {
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let milliseconds = left.as_nanos().div_ceil(1_000_000);
+        let timeout = libc::c_int::try_from(milliseconds).unwrap_or(libc::c_int::MAX);
+        let mut watched = libc::pollfd {
+            fd: report.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `watched` is one local pollfd, matching the count of 1, and `report` keeps its
+        // descriptor open.
+        match unsafe { libc::poll(&mut watched, 1, timeout) } {
+            0 if left.is_zero() => return false,
+            0 => {}
+            -1 if matches!(errno(), libc::EINTR | libc::EAGAIN) => {}
+            _ => return true,
+        }
+    }
 }
 
 #[allow(unsafe_code)]
