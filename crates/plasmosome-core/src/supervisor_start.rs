@@ -43,8 +43,9 @@ pub struct SupervisorStart<'a> {
 /// Why [`start_supervisor`] did not hand `membraned` its whole record.
 ///
 /// `Prepare` and `Exec` mean no `membraned` runs, and they return the lock, still held, so the
-/// caller can retire the cell. The other three mean `membraned` was executed and the controller
-/// no longer holds the lock: `membraned` holds it on descriptor 4 until it exits.
+/// caller can retire the cell. `ExecUnconfirmed` returns the lock, still held, but a `membraned`
+/// may run. The other three mean `membraned` was executed and the controller no longer holds the
+/// lock: `membraned` holds it on descriptor 4 until it exits.
 #[derive(Debug)]
 pub enum StartError {
     /// The start could not be laid out, and nothing was forked. A cell ID holding a NUL byte is
@@ -61,6 +62,12 @@ pub enum StartError {
         step: StartStep,
         errno: i32,
     },
+    /// By the deadline the new process had neither reported a failure nor closed its report
+    /// pipe, so the start cannot tell whether `membraned` was executed. Another process holding
+    /// the pipe's write end, as [`start_supervisor`] describes, ends here. No record was written
+    /// and the record's pipe is closed. A `membraned` that was executed holds the same lock on
+    /// descriptor 4 and reads an empty record.
+    ExecUnconfirmed { lock: SupervisorLock },
     /// Descriptor 3 was closed before `membraned` read the whole record: `membraned` exited or
     /// closed it. A new process that died before its exec without a report, such as by a signal
     /// sent to the caller's process group before it left that group, also ends here, since the
@@ -634,6 +641,8 @@ fn pipe_above_four() -> io::Result<[OwnedFd; 2]> {
     if made == -1 {
         return Err(io::Error::last_os_error());
     }
+    #[cfg(test)]
+    tests::after_a_pipe();
     // SAFETY: pipe returned 0, so both entries are new descriptors, which nothing else owns.
     let [read, write] = ends.map(|end| unsafe { OwnedFd::from_raw_fd(end) });
     Ok([above_four(read.as_fd())?, above_four(write.as_fd())?])
@@ -694,6 +703,9 @@ impl fmt::Display for StartError {
             StartError::Exec { step, errno, .. } => {
                 write!(f, "starting the supervisor failed at {step}: errno {errno}")
             }
+            StartError::ExecUnconfirmed { .. } => {
+                f.write_str("the supervisor's exec was not confirmed by the deadline")
+            }
             StartError::SupervisorClosedPipe => {
                 f.write_str("the supervisor closed its config pipe before reading the whole record")
             }
@@ -735,9 +747,22 @@ impl fmt::Display for StartStep {
 mod tests {
     use super::*;
     use crate::instance::InstanceRoot;
+    use std::cell::RefCell;
     use std::error::Error;
     use std::io::{Read, Write};
     use std::time::Duration;
+
+    thread_local! {
+        static AFTER_A_PIPE: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn after_a_pipe() {
+        AFTER_A_PIPE.with(|slot| {
+            if let Some(work) = slot.borrow_mut().as_mut() {
+                work();
+            }
+        });
+    }
 
     const STEPS: [StartStep; 5] = [
         StartStep::Fork,
