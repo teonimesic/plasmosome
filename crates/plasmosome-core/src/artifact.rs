@@ -1,5 +1,5 @@
 use std::fmt;
-use std::fs::File;
+use std::fs::{File, Metadata};
 use std::io::{self, Read};
 use std::os::fd::AsFd;
 use std::path::Path;
@@ -30,10 +30,18 @@ pub enum ArtifactFault {
     NotRegular { kind: Kind },
     /// The file is owned by `uid`, which is neither root nor the controller's effective UID.
     ForeignOwner { uid: u32 },
-    /// Group or other can write the file; `mode` holds its permission bits.
+    /// The file's mode has a write bit, for its owner, its group or others; `mode` holds its
+    /// permission bits.
     Writable { mode: u32 },
+    /// The file's mode has the set-user-ID or the set-group-ID bit.
+    SetIdBits { mode: u32 },
     /// A macOS ACL allow entry on the file grants write to someone.
     WriteAcl,
+    /// On macOS, the file has neither `uchg` nor `schg` set.
+    NotImmutable,
+    /// Off macOS, this build cannot verify that the file is immutable, so every Artifact is
+    /// refused this way.
+    ImmutabilityUnverifiable,
     /// The file's bytes hash to `found`, not to the pinned digest.
     Digest { found: Digest },
 }
@@ -43,8 +51,10 @@ pub enum ArtifactFault {
 /// refuses unless every directory above the file is owned by root or the effective UID, writable
 /// by neither group nor other and, on macOS, carries no ACL entry that lets anyone replace its
 /// entries. The file, opened without following and without blocking, must be a regular file
-/// owned by root or the effective UID, writable by neither group nor other, with no ACL allow
-/// entry granting write. Only then is it read, through the descriptor that was checked, and
+/// owned by root or the effective UID, with no write bit at all, no set-user-ID or set-group-ID
+/// bit, no ACL allow entry granting write, and `uchg` or `schg` set; off macOS it is refused,
+/// because this build cannot verify immutability there. These are the file rules the membrane
+/// repeats at launch. Only then is the file read, through the descriptor that was checked, and
 /// hashed: a file that breaks a rule is refused, never trusted because its digest matches. The
 /// read stops one byte past the size `fstat` reported, so it ends even when the file grows while
 /// it is read.
@@ -58,22 +68,37 @@ pub fn verify_artifact(artifact: &Artifact) -> Result<(), ArtifactRefusal> {
 }
 
 fn verify_walk(walk: Walk, artifact: &Artifact) -> Result<(), ArtifactRefusal> {
-    check(walk, artifact.path().as_path(), artifact.sha256())
+    let path = artifact.path().as_path();
+    open_checked(walk, path)
+        .and_then(|checked| hash_checked(checked, path, artifact.sha256()))
         .map_err(|reason| refused(artifact, reason))
 }
 
-fn check(walk: Walk, path: &Path, pinned: &Digest) -> Result<(), ArtifactFault> {
+struct Checked {
+    file: File,
+    size: u64,
+}
+
+fn open_checked(walk: Walk, path: &Path) -> Result<Checked, ArtifactFault> {
     let euid = effective_uid();
     let opened = walk.open_file(|reached| judge(reached, euid))?;
     let file = File::from(opened.fd);
     if acl_grants_write(file.as_fd()).map_err(|error| io_fault("acl", path, &error))? {
         return Err(ArtifactFault::WriteAcl);
     }
-    let size = file
+    let metadata = file
         .metadata()
-        .map_err(|error| io_fault("fstat", path, &error))?
-        .len();
-    let found = digest_within(&file, size).map_err(|error| io_fault("read", path, &error))?;
+        .map_err(|error| io_fault("fstat", path, &error))?;
+    judge_immutability(&metadata)?;
+    Ok(Checked {
+        size: metadata.len(),
+        file,
+    })
+}
+
+fn hash_checked(checked: Checked, path: &Path, pinned: &Digest) -> Result<(), ArtifactFault> {
+    let found = digest_within(&checked.file, checked.size)
+        .map_err(|error| io_fault("read", path, &error))?;
     if found != *pinned {
         return Err(ArtifactFault::Digest { found });
     }
@@ -88,10 +113,33 @@ fn judge(reached: &Reached<'_>, euid: u32) -> Result<(), ArtifactFault> {
     if facts.uid != 0 && facts.uid != euid {
         return Err(ArtifactFault::ForeignOwner { uid: facts.uid });
     }
-    if facts.mode & 0o022 != 0 {
+    if facts.mode & 0o222 != 0 {
         return Err(ArtifactFault::Writable { mode: facts.mode });
     }
+    if facts.mode & 0o6000 != 0 {
+        return Err(ArtifactFault::SetIdBits { mode: facts.mode });
+    }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn judge_immutability(metadata: &Metadata) -> Result<(), ArtifactFault> {
+    use std::os::macos::fs::MetadataExt;
+    if is_immutable(metadata.st_flags()) {
+        Ok(())
+    } else {
+        Err(ArtifactFault::NotImmutable)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_immutable(flags: u32) -> bool {
+    flags & (libc::UF_IMMUTABLE | libc::SF_IMMUTABLE) != 0
+}
+
+#[cfg(not(target_os = "macos"))]
+fn judge_immutability(_metadata: &Metadata) -> Result<(), ArtifactFault> {
+    Err(ArtifactFault::ImmutabilityUnverifiable)
 }
 
 fn digest_within(reader: impl Read, size: u64) -> io::Result<Digest> {
@@ -120,10 +168,10 @@ impl From<WalkRefusal> for ArtifactFault {
 }
 
 impl ArtifactRefusal {
-    /// The refusal as `cell.new` answers it: code 108 with `path` the Artifact's path and
-    /// `detail` the broken rule, and no `fix`.
+    /// The refusal as `cell.new` answers it: code 108 with `path` the Artifact's path, `detail`
+    /// the broken rule, a message that names an untrusted artifact, and no `fix`.
     pub fn wire(&self) -> WireError {
-        WireError::manifest_invalid(self.reason.to_string(), self.path.as_str().to_owned())
+        WireError::untrusted_artifact(self.reason.to_string(), self.path.as_str().to_owned())
     }
 }
 
@@ -153,11 +201,19 @@ impl fmt::Display for ArtifactFault {
                 effective_uid()
             ),
             ArtifactFault::Writable { mode } => {
-                write!(f, "it has mode {mode:04o}: group or other can write it")
+                write!(f, "it has mode {mode:04o}, with a write bit")
             }
+            ArtifactFault::SetIdBits { mode } => write!(
+                f,
+                "it has mode {mode:04o}, with a set-user-ID or set-group-ID bit"
+            ),
             ArtifactFault::WriteAcl => {
                 f.write_str("it carries an ACL allow entry that grants write")
             }
+            ArtifactFault::NotImmutable => f.write_str("it has neither uchg nor schg set"),
+            ArtifactFault::ImmutabilityUnverifiable => f.write_str(
+                "this build can verify immutability only on macOS, through uchg or schg",
+            ),
             ArtifactFault::Digest { found } => {
                 write!(f, "its SHA-256 is {found}, not the pinned digest")
             }

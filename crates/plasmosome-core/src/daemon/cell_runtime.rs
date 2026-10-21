@@ -25,6 +25,11 @@ const REQUIRED: [&str; 3] = ["membraned", "template", "start_deadline_ms"];
 
 const DEFAULT_STOP_DEADLINE: Duration = Duration::from_millis(30_000);
 
+/// Spec 023 §1's bound on each socket path of the longest cell ID: 103 bytes, the Darwin
+/// `AF_UNIX` limit. It holds on every host, so a config that starts the daemon on Linux, whose
+/// `sun_path` holds 107, holds on a Mac too.
+const MAX_SOCKET_PATH_BYTES: usize = 103;
+
 /// Spec 023 §1's `cell_runtime`: what the controller needs to start a cell's supervisor. Only
 /// `parse_config` checks the rules below; a value built by hand carries no such promise.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,9 +40,10 @@ pub struct CellRuntime {
     /// [`CellPaths`] for that cell.
     pub template: RuntimeTemplate,
     /// The template completed at startup with the paths of the longest cell ID,
-    /// `cell-9999999999`. Its Artifacts are the template's, and [`CellRuntime::artifacts`] lists
-    /// them from it. Its per-cell paths belong to no cell: never launch it.
-    pub startup_recipe: RuntimeRecipe,
+    /// `cell-9999999999`. Its Artifacts are the template's, and [`CellRuntime::artifacts`] is its
+    /// only reader. Its per-cell paths belong to no cell, so it is private: no caller can launch
+    /// it or hand it to a cell.
+    startup_recipe: RuntimeRecipe,
     /// The configured `instance_root` as a recipe path, for [`CellPaths::new`] and the config
     /// record.
     pub instance_root: RecipePath,
@@ -90,8 +96,8 @@ pub enum CellRuntimeError {
     InstanceRoot { fault: PathError },
     /// The longest cell ID has no paths under `instance_root`.
     CellPaths(CellPathsError),
-    /// With the longest cell ID, the socket at `path` is `bytes` long, and this host's
-    /// `sun_path` holds at most `max`. The sockets are checked shortest first: `membrane.uds`,
+    /// With the longest cell ID, the socket at `path` is `bytes` long, over spec 023 §1's `max`,
+    /// 103 bytes on every host. The sockets are checked shortest first: `membrane.uds`,
     /// `data.uds`, `control.uds`.
     SocketPathTooLong {
         path: String,
@@ -140,7 +146,7 @@ pub(super) fn read(
         .map_err(|fault| CellRuntimeError::InstanceRoot { fault })?;
     let longest = format_cell_id(MAX_CELL_NUMBER);
     let paths = CellPaths::new(&instance_root, &longest).map_err(CellRuntimeError::CellPaths)?;
-    let max = limits.max_socket_path_bytes();
+    let max = MAX_SOCKET_PATH_BYTES;
     for socket in [
         &paths.membrane_socket,
         &paths.data_path,
@@ -236,7 +242,7 @@ impl fmt::Display for CellRuntimeError {
             CellRuntimeError::SocketPathTooLong { path, bytes, max } => write!(
                 f,
                 "`instance_root` makes the socket path {path} {bytes} bytes for the longest cell \
-                 ID; a socket path on this host holds at most {max}"
+                 ID; spec 023 allows at most {max} bytes, the Darwin AF_UNIX limit"
             ),
             CellRuntimeError::ArtifactInCells { role, path } => write!(
                 f,
