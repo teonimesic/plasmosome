@@ -1,9 +1,34 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use serde_json::{Map, Value};
 
-use super::{Lane, Manifest, Observation, RuleKind, RunRefusal};
+use super::{Lane, Manifest, Observation, Rule, RuleKind, RunRefusal};
+
+#[derive(Clone, Copy)]
+enum Numbering {
+    Across(RuleKind),
+    Rank,
+    Within,
+    None,
+}
+
+fn numbering(kind: RuleKind) -> Numbering {
+    match kind {
+        RuleKind::Pid
+        | RuleKind::BootId
+        | RuleKind::MountId
+        | RuleKind::Device
+        | RuleKind::Inode
+        | RuleKind::EphemeralPort
+        | RuleKind::ResolvedAddress => Numbering::Across(kind),
+        RuleKind::ParentMountId => Numbering::Across(RuleKind::MountId),
+        RuleKind::SystemTime => Numbering::Rank,
+        RuleKind::MemoryCounter | RuleKind::LoadCounter => Numbering::Within,
+        RuleKind::Duration => Numbering::None,
+    }
+}
 
 pub(super) fn normalize(
     manifest: &Manifest,
@@ -11,8 +36,14 @@ pub(super) fn normalize(
     observation: &Observation,
 ) -> Result<Map<String, Value>, RunRefusal> {
     let mut fields = observation.fields.clone();
-    let rules = manifest.rules.iter();
-    for rule in rules.filter(|rule| rule.probe == observation.probe) {
+    let mut rules: Vec<&Rule> = manifest
+        .rules
+        .iter()
+        .filter(|rule| rule.probe == observation.probe)
+        .collect();
+    rules.sort_by(|left, right| left.field.cmp(&right.field));
+    let mut across: BTreeMap<RuleKind, Vec<Value>> = BTreeMap::new();
+    for rule in rules {
         let Some(value) = fields.get_mut(&rule.field) else {
             continue;
         };
@@ -20,7 +51,8 @@ pub(super) fn normalize(
             Value::Array(items) => items.iter_mut().collect(),
             one => vec![one],
         };
-        let ranked = matches!(rule.kind, RuleKind::SystemTime | RuleKind::Duration);
+        let how = numbering(rule.kind);
+        let ranked = matches!(how, Numbering::Rank);
         let fits = values.iter().all(|value| holds(rule.kind, value));
         let mixed = ranked
             && values.iter().any(|value| value.is_f64())
@@ -33,7 +65,17 @@ pub(super) fn normalize(
                 kind: rule.kind,
             });
         }
-        let mut seen: Vec<Value> = Vec::new();
+        let mut within = Vec::new();
+        let (kind, seen) = match how {
+            Numbering::Across(shared) => (shared, across.entry(shared).or_default()),
+            Numbering::Rank | Numbering::Within => (rule.kind, &mut within),
+            Numbering::None => {
+                for value in values {
+                    *value = Value::String(format!("<{}>", rule.kind.name()));
+                }
+                continue;
+            }
+        };
         for value in &values {
             if !seen.contains(value) {
                 seen.push(Value::clone(value));
@@ -44,7 +86,7 @@ pub(super) fn normalize(
         }
         for value in values {
             let number = 1 + seen.iter().take_while(|seen| **seen != *value).count();
-            *value = Value::String(format!("<{}:{number}>", rule.kind.name()));
+            *value = Value::String(format!("<{}:{number}>", kind.name()));
         }
     }
     Ok(fields)

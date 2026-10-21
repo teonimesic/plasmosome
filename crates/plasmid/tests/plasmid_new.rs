@@ -5,6 +5,10 @@ use std::process::{Command, Output};
 
 use plasmosome_core::{ManifestError, PlasmidManifest};
 
+mod support;
+
+use support::{entries, text, usage_error};
+
 const NO_COMPONENT: &str = "no component";
 
 const UNTIL_FROZEN: &str = "until the plasmid interface is frozen";
@@ -21,30 +25,11 @@ fn plasmid_in<S: AsRef<OsStr>>(directory: &Path, arguments: &[S]) -> Output {
         .expect("the plasmid binary runs")
 }
 
-fn entries(directory: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(directory)
-        .expect("the directory is readable")
-        .map(|entry| {
-            entry
-                .expect("a directory entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    names.sort();
-    names
-}
-
 fn working_directory() -> (tempfile::TempDir, PathBuf) {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let work = scratch.path().join("work");
     std::fs::create_dir(&work).expect("the working directory is made");
     (scratch, work)
-}
-
-fn text(stream: &[u8]) -> String {
-    String::from_utf8(stream.to_vec()).expect("the stream is UTF-8")
 }
 
 fn printed(stdout: &str) -> Vec<(String, String)> {
@@ -279,7 +264,7 @@ fn a_symlink_to_a_file_at_the_declaration_path_is_refused_and_its_target_left_un
 
 #[cfg(unix)]
 #[test]
-fn a_write_that_fails_after_the_create_leaves_no_file_and_a_second_run_succeeds() {
+fn a_declaration_it_cannot_finish_writing_exits_3() {
     let (scratch, work) = working_directory();
     let output = Command::new("/bin/sh")
         .current_dir(&work)
@@ -290,7 +275,7 @@ fn a_write_that_fails_after_the_create_leaves_no_file_and_a_second_run_succeeds(
         ])
         .output()
         .expect("sh runs plasmid under a file size limit of zero");
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
     assert_eq!(entries(&work), Vec::<String>::new(), "{output:?}");
     assert_eq!(entries(scratch.path()), ["work"]);
@@ -337,11 +322,18 @@ fn a_directory_it_cannot_write_into_is_refused_and_nothing_is_written() {
 
 fn assert_name_refused<S: AsRef<OsStr> + std::fmt::Debug>(name: S) {
     let (scratch, work) = working_directory();
-    let output = plasmid_in(&work, &[OsStr::new("new"), name.as_ref()]);
-    assert_eq!(output.status.code(), Some(1), "{name:?}: {output:?}");
-    assert!(output.stdout.is_empty(), "{name:?}: {output:?}");
-    let stderr = text(&output.stderr);
-    assert!(stderr.contains(NOT_A_NAME), "{name:?}: {stderr}");
+    let name = name.as_ref();
+    let output = plasmid_in(&work, &[OsStr::new("new"), name]);
+    let error = usage_error(&output);
+    assert_eq!(
+        error["argument"],
+        name.to_string_lossy().as_ref(),
+        "{name:?}: {output:?}"
+    );
+    if name.to_str().is_some_and(|name| !name.starts_with('-')) {
+        let message = error["message"].as_str().expect("the message is a string");
+        assert!(message.contains(NOT_A_NAME), "{name:?}: {message}");
+    }
     assert_eq!(entries(&work), Vec::<String>::new(), "{name:?}");
     assert_eq!(entries(scratch.path()), ["work"], "{name:?}");
 }
@@ -390,15 +382,21 @@ fn a_name_of_sixty_four_bytes_is_accepted() {
 
 #[test]
 fn plasmid_new_without_exactly_one_name_is_a_usage_error_that_writes_nothing() {
-    for arguments in [vec!["new"], vec!["new", "demo", "other"]] {
+    for (arguments, argument) in [
+        (vec!["new"], None),
+        (vec!["new", "demo", "other"], Some("other")),
+    ] {
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let output = plasmid_in(scratch.path(), &arguments);
-        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
-        assert!(output.stdout.is_empty(), "{arguments:?}: {output:?}");
-        let stderr = text(&output.stderr);
+        let error = usage_error(&output);
+        match argument {
+            Some(argument) => assert_eq!(error["argument"], argument, "{arguments:?}"),
+            None => assert!(error.get("argument").is_none(), "{arguments:?}: {error:?}"),
+        }
+        let message = error["message"].as_str().expect("the message is a string");
         assert!(
-            stderr.contains("exactly one name"),
-            "{arguments:?}: {stderr}"
+            message.contains("exactly one name"),
+            "{arguments:?}: {message}"
         );
         assert_eq!(
             entries(scratch.path()),
@@ -430,12 +428,75 @@ fn plasmid_help_describes_writing_a_declaration() {
 }
 
 #[test]
-fn an_unknown_verb_is_a_named_refusal() {
-    let output = Command::new(env!("CARGO_BIN_EXE_plasmid"))
-        .arg("attach")
-        .output()
-        .expect("the plasmid binary runs");
-    assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("unknown verb `attach`"), "{stderr}");
+fn plasmid_new_refuses_what_does_not_apply_to_it() {
+    for (arguments, argument) in [
+        (&["new", "demo", "--kernel", "a"][..], "--kernel"),
+        (&["--kernel", "a", "new", "demo"], "--kernel"),
+        (&["new", "demo", "--socket", "/x"], "--socket"),
+        (&["new", "demo", "--deadline-ms", "5"], "--deadline-ms"),
+        (&["new", "demo", "--json"], "--json"),
+        (&["new", "demo", "--frob"], "--frob"),
+        (&["new", "demo", "--"], "--"),
+        (&["new", "--json", "demo"], "--json"),
+        (&["new", "demo", "--kernel", "a", "--json"], "--kernel"),
+    ] {
+        let (scratch, work) = working_directory();
+        let error = usage_error(&plasmid_in(&work, arguments));
+        assert_eq!(error["argument"], argument, "{arguments:?}");
+        assert_eq!(entries(&work), Vec::<String>::new(), "{arguments:?}");
+        assert_eq!(entries(scratch.path()), ["work"], "{arguments:?}");
+    }
+    let (_scratch, work) = working_directory();
+    let output = plasmid_in(&work, &["new", "demo", "--human"]);
+    assert_eq!(output.status.code(), Some(64), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.ends_with("(client invalid_argument)\n"),
+        "{stderr:?}"
+    );
+    assert_eq!(entries(&work), Vec::<String>::new());
+
+    let output = plasmid_in(&work, &["new", "demo", "--kernel", "a", "--human"]);
+    assert_eq!(output.status.code(), Some(64), "{output:?}");
+    let stderr = text(&output.stderr);
+    let (message, _) = stderr.split_once('\n').expect("two lines");
+    assert!(
+        message.contains("--kernel") && !message.contains("--human"),
+        "{stderr:?}"
+    );
+    assert_eq!(entries(&work), Vec::<String>::new());
+}
+
+#[test]
+fn plasmid_new_names_the_first_fault_on_its_line() {
+    for (arguments, argument) in [
+        (&["new", "Demo", "--json"][..], "Demo"),
+        (&["new", "--json", "Demo"], "--json"),
+        (&["new", "Demo", "--frob"], "Demo"),
+        (&["new", "--frob", "Demo"], "--frob"),
+        (&["new", "Demo", "--"], "Demo"),
+        (&["new", "--", "Demo"], "--"),
+        (&["new", "Demo", "--kernel", "a"], "Demo"),
+        (&["new", "--kernel", "a", "Demo"], "--kernel"),
+        (&["--kernel", "a", "new", "Demo"], "--kernel"),
+        (&["--kernel", "../x", "new", "demo"], "--kernel"),
+        (&["--kernel", "a", "--frob", "new", "demo"], "--frob"),
+        (&["--kernel", "a", "--frob=x", "new", "demo"], "--kernel"),
+        (&["--kernel", "a", "-x=1", "new", "demo"], "-x=1"),
+        (&["--frob=x", "new", "demo"], "--frob=x"),
+        (&["--json", "--human", "new", "demo"], "--json"),
+        (&["new", "a", "b", "--json"], "b"),
+        (&["new", "a", "--json", "b"], "--json"),
+        (&["new", "a", "b", "--"], "b"),
+        (&["new", "a", "--", "b"], "--"),
+        (&["new", "Demo", "b"], "Demo"),
+        (&["new", "a", "B"], "B"),
+    ] {
+        let (scratch, work) = working_directory();
+        let error = usage_error(&plasmid_in(&work, arguments));
+        assert_eq!(error["argument"], argument, "{arguments:?}");
+        assert_eq!(entries(&work), Vec::<String>::new(), "{arguments:?}");
+        assert_eq!(entries(scratch.path()), ["work"], "{arguments:?}");
+    }
 }
