@@ -39,6 +39,7 @@ pub mod runtime;
 pub mod session_log;
 pub mod state;
 pub mod supervisor_check;
+mod toml_depth;
 pub mod version;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -57,7 +58,7 @@ pub use kill_budget::{
     GuestStop, Incomplete, KillBudget, Share, Shortfall, Withdrawal, WorkloadStop,
 };
 pub use lifecycle::{PluginState, StateError};
-pub use manifest::{MAX_MANIFEST_BYTES, ManifestError, PlasmidManifest};
+pub use manifest::{MAX_MANIFEST_BYTES, MAX_MANIFEST_DEPTH, ManifestError, PlasmidManifest};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub use private_socket::{
     Accepted, DirIdentity, PrivateDir, PrivateListener, PrivateSocketError, SocketEntry,

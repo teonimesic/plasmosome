@@ -105,14 +105,26 @@ every string, is a basic string on one line. Every control character is escaped,
 line and paragraph separators U+2028 and U+2029 and the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069, which a client can read as a line break or a reordering. A command's
 refusals name it by its TOML path, `commands.commands.<key>`. Only `ManifestError::Io` (the file
-could not be read), `ManifestError::Parse` (the text is not TOML) and `ManifestError::TooLarge`
-(the declaration is over 1 MiB) carry no field. For `Parse`, the TOML parser reports a position,
+could not be read), `ManifestError::Parse` (the text is not TOML), `ManifestError::TooLarge`
+(the declaration is over 1 MiB) and `ManifestError::TooDeep` (the declaration nests more than 32
+levels deep) carry no field. For `Parse`, the TOML parser reports a position,
 not a field path, and naming one would be a guess. A `Parse` error quotes the source line, and its
 text is written with the same escapes, keeping its line breaks. `TooLarge` is decided before any
 TOML is parsed: a declaration over `MAX_MANIFEST_BYTES`, 1 MiB, is refused with no field and no
 fix. `load` reads at most 1 MiB plus one byte, so a file, device or FIFO that delivers more than
 1 MiB, `/dev/zero` among them, is refused at the bound. It does not bound time: a FIFO with no
 writer, or whose writer stops short of the bound and never closes, still blocks it.
+`TooDeep` is decided after the size check and before any TOML is parsed, with no field and no fix.
+`parse` counts how deep the text nests and refuses more than `MAX_MANIFEST_DEPTH`, 32 levels. The
+root table is level 1. Each array, each inline table and each dot in a key adds a level, and each
+part of a table header's name adds two. Nothing inside a string or a comment counts. TOML's own
+limit bounds each construct alone, not the depth they reach together, and a tree deep enough
+overflows the stack while toml builds or reads it, so the count runs before toml sees the text.
+The count is exact for arrays, inline tables and dotted keys, and never below the depth of the tree
+toml builds, so a declaration that passes has a tree at most 32 levels deep. A header part counts
+two whatever it names, so under a plain table header the count is above the tree's depth, up to
+about twice it: a 16-part table header with a key under it counts 33 and is refused, although its
+tree is 17 deep.
 `WireError::manifest_refusal` turns any of them into code 108, carrying the fix when there is one.
 `ToolDeclaration` lives in `plasmosome_core::manifest`; `RegistryEntry` includes the tool's
 description.

@@ -113,13 +113,47 @@ def unused_exceptions_are_reported():
     assert [(item["kind"], item["severity"]) for item in found] == [("license-exception-not-encountered", "warning")], found
 
 
-def cache_key_names_installed_version():
+PULL_REQUEST = "github.event_name == 'pull_request'"
+WRAPPER_STEPS = [
+    {"run": "python3 tools/cargo-deny-check sources"},
+    {"if": PULL_REQUEST, "run": "python3 tools/cargo-deny-check advisories --changed-since HEAD^1"},
+    {"if": PULL_REQUEST, "run": "python3 tools/cargo-deny-check licenses --changed-since HEAD^1"},
+]
+
+
+def gates_job(workflow):
+    return next(block for block in re.split(r"(?m)^(?=  [\w-]+:\s*$)", workflow) if "cargo install cargo-deny" in block)
+
+
+def wrapper_steps(workflow):
+    """Each gates step that runs the wrapper, as its keys and values without its name."""
+    steps = [dict(re.findall(r"(?m)^(?:      - |        )([\w-]+):[ \t]*(.*?)[ \t]*$", step))
+             | {"continued": line for line in step.splitlines() if re.match(r"         +[^ #]", line)}
+             for step in re.split(r"(?m)^(?=      - )", gates_job(workflow))]
+    return [{key: value for key, value in step.items() if key != "name"} for step in steps
+            if re.search(r"tools/cargo-deny-check(?![\w.-])", step.get("run", ""))]
+
+
+def gates_job_pins_cargo_deny():
+    """The cache key names the installed version, and the three checks run on the events spec 026 section 4 names."""
     workflow = (SOURCE.parent.parent / ".github" / "workflows" / "ci.yml").read_text()
     versions = re.findall(r"cargo install cargo-deny --version (\S+) --locked", workflow)
     assert len(versions) == 1, versions
-    job = next(block for block in re.split(r"(?m)^(?=  [\w-]+:\s*$)", workflow) if "cargo install cargo-deny" in block)
-    keys = re.findall(r"(?m)^\s+key:\s*(\S+)\s*$", job)
+    keys = re.findall(r"(?m)^\s+key:\s*(\S+)\s*$", gates_job(workflow))
     assert len(keys) == 1 and versions[0] in re.split(r"[^0-9A-Za-z.]+", keys[0]), (versions, keys)
+    assert wrapper_steps(workflow) == WRAPPER_STEPS, wrapper_steps(workflow)
+    sources = "        run: python3 tools/cargo-deny-check sources\n"
+    advisories_run = "        run: python3 tools/cargo-deny-check advisories --changed-since HEAD^1\n"
+    advisories_if = f"        if: {PULL_REQUEST}\n        run: python3 tools/cargo-deny-check advisories"
+    renamed, count = re.subn(r"(?m)^(      - name: .*)$", r"\1, renamed", workflow)
+    assert count and wrapper_steps(renamed) == WRAPPER_STEPS, wrapper_steps(renamed)
+    for old, new in (
+        (sources, sources + "          || true\n"),
+        (advisories_run, advisories_run + "          --changed-since HEAD\n"),
+        (advisories_if, advisories_if.replace("\n", "\n          && false\n", 1)),
+    ):
+        assert workflow.count(old) == 1, old
+        assert wrapper_steps(workflow.replace(old, new)) != WRAPPER_STEPS, new
 
 
 def classification():
@@ -178,6 +212,10 @@ def classification():
     stale_and_broken = API["classify"](
         "sources", FIXTURES["stale-lockfile"]["stderr"] + FIXTURES["db-unreachable"]["stderr"], 1)
     assert stale_and_broken["status"] == "tool failure", stale_and_broken
+    stale_beside_summary = API["classify"](
+        "sources", records("stale-lockfile", "log")[:1] + records("clean-sources", "summary"), 0)
+    assert stale_beside_summary["status"] == "refusal" and stale_beside_summary["failures"] == [], stale_beside_summary
+    assert stale_beside_summary["refusals"][0].splitlines()[-1].strip() == LOCK_HINT, stale_beside_summary
 
     malformed = API["classify"]("advisories", ["", "[]", '{"type": "log"}'], 0)
     assert malformed["status"] == "tool failure" and len(malformed["failures"]) == 2, malformed
@@ -360,15 +398,24 @@ def outcomes():
         assert result.stdout.splitlines()[-1].strip() == LOCK_HINT and CARGO_HINT not in result.stdout, result.stdout
         assert REFUSAL in summary and LOCK_HINT in summary and TOOL_FAILURE not in result.stdout + summary, summary
 
-        result, calls, summary = repository.run("advisories", plan=plan("advisories", {"Cargo.toml": "malformed-graphs"}))
-        assert result.returncode == 2 and TOOL_FAILURE + " the wrapper crashed" in result.stdout, result.stdout
+        result, calls, summary = repository.run(
+            "advisories", plan=plan("advisories", {"Cargo.toml": "vulnerability", "fuzz/Cargo.toml": "malformed-graphs"}))
+        assert result.returncode == 2 and len(calls) == 2 and REFUSAL in result.stdout, result.stdout
+        assert TOOL_FAILURE + " the wrapper crashed" in result.stdout, result.stdout
         assert "Traceback" in result.stdout and "TypeError" in result.stdout, result.stdout
+        assert len(summary.splitlines()) == 1 and summary.startswith(TOOL_FAILURE + " the wrapper crashed"), summary
+        assert "`cargo-deny-check advisories`" in summary and "job log" in summary, summary
+        assert "Earlier lockfiles may have refused" in summary, summary
 
         directory_summary = Path(directory) / "summary-directory"
         directory_summary.mkdir()
         result, calls, summary = repository.run("sources", plan=plan("sources"), summary=directory_summary)
         assert result.returncode == 2 and TOOL_FAILURE + " the wrapper crashed" in result.stdout, result.stdout
         assert "IsADirectoryError" in result.stdout, result.stdout
+
+        unencodable = Path(directory) / "missing" / os.fsdecode(bytes([0xFF])) / "findings.json"
+        result, calls, summary = repository.run("report", "--json-out", str(unencodable), "--event", "push", plan=QUIET)
+        assert result.returncode == 2 and TOOL_FAILURE + " the wrapper crashed" in result.stdout, result.stdout
 
         result, calls, summary = repository.run("sources", plan=plan("sources", {"fuzz/Cargo.toml": "git-source"}))
         assert result.returncode == 1 and "gitdep 0.1.0" in result.stdout, result.stdout
@@ -714,7 +761,7 @@ def main():
     logged_command()
     trigger()
     outcomes()
-    cache_key_names_installed_version()
+    gates_job_pins_cargo_deny()
     unused_exceptions_are_reported()
     print("PASS: cargo-deny output classified by code, tracked lockfiles at any depth, manifest trigger, worst outcome wins, "
           "report with warnings and weekly checks")

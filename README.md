@@ -76,17 +76,21 @@ The checkout is trusted host code: putting build output under the temporary dire
 isolate an untrusted build.
 
 The example makes a fresh 0700 directory inside a base directory and keeps its files, its
-sockets and its build there, about 240 MB, so you must be able to write the base. `plasmosomed`
-refuses a control socket unless every directory above the socket is owned by you or by root, is
-not a symlink, and is writable by neither group nor other (on macOS, nor through an ACL entry).
+sockets and its build there, about 240 MB. So you must be able to write the base, its mount must
+let the build run programs, and its path must be under 60 bytes, so that each socket path in it
+stays under 100 bytes. `plasmosomed` refuses a control socket unless every directory above the
+socket is owned by you or by root, is not a symlink, and is writable by neither group nor other
+(on macOS, nor through an ACL entry).
 On macOS it also refuses when `/` or any directory on the way down to the socket is on a volume
 mounted with ownership ignored, which `mount` lists as `noowners`, because there the owner and
 mode it reads do not keep other users out.
-Before it builds, the example checks the type, owner and mode of the base and of each directory
-above it, and that you can write the base, and stops with one line naming the first that fails.
+Before it builds, the example checks that the base's path is valid UTF-8, the type, owner and
+mode of the base and of each directory above it, that you can write the base, that its mount is
+not `noexec` (on Linux), and that its path is short enough, and stops with one line naming the
+first that fails.
 It does not check for ignored ownership, which Python's `os` module cannot read, so on such a
 volume the build runs and then `plasmosomed` refuses to start, naming the first directory on
-that volume.
+that volume. Python cannot read `noexec` on macOS either, so there such a base fails the build.
 `plasmosomed` makes the full check, ACL entries and ignored ownership included, when it starts.
 
 The base is `PLASMOSOME_QUICKSTART_DIR` when that is set, and otherwise Python's temporary
@@ -157,6 +161,11 @@ def refuse_base(reason):
 private_base = Path(
     os.path.realpath(os.environ.get("PLASMOSOME_QUICKSTART_DIR") or tempfile.gettempdir())
 )
+try:
+    os.fsencode(private_base).decode("utf-8")
+except UnicodeDecodeError:
+    shown = os.fsencode(private_base).decode("utf-8", "backslashreplace")
+    refuse_base(f"{shown} is not valid UTF-8, which the controller's JSON config cannot carry")
 for directory in [*reversed(private_base.parents), private_base]:
     try:
         info = os.lstat(directory)
@@ -171,8 +180,16 @@ for directory in [*reversed(private_base.parents), private_base]:
             f"{directory} has mode {stat.S_IMODE(info.st_mode):04o}: group or other can replace "
             "entries in it"
         )
-if not os.access(private_base, os.W_OK | os.X_OK):
+if not os.access(private_base, os.W_OK | os.X_OK, effective_ids=True):
     refuse_base(f"you cannot create entries in {private_base}")
+if os.statvfs(private_base).f_flag & getattr(os, "ST_NOEXEC", 0):
+    refuse_base(f"{private_base} is on a noexec mount, and the build runs programs from it")
+longest_socket = private_base / "plasmosome-status-XXXXXXXX" / "membrane.uds"
+if len(os.fsencode(longest_socket)) >= 100:
+    refuse_base(
+        f"{private_base} is too long: a socket path such as {longest_socket} must stay under "
+        "100 bytes"
+    )
 print(f"private base: {private_base}")
 
 failure = None
@@ -598,7 +615,7 @@ failure. After the build container runs, the tool reads only two things it left 
 the read-back in `check/`, which must still be a directory and is read through a bound.
 
 The images root above is the lab location, next to the runtime bundles. It is gated. Spec 001
-refuses an artifact with a replaceable parent (001:1041), and `/usr/local/var` is admin-writable,
+refuses an artifact with a replaceable parent (001:1043), and `/usr/local/var` is admin-writable,
 so product verification cannot accept an image from there. Owner gate O-1 (spec 027) is about the
 instance root, not the image, so answering O-1 alone does not admit an image there.
 
