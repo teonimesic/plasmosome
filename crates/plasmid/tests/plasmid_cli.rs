@@ -224,11 +224,13 @@ fn command_help(command: &str) -> String {
 }
 
 #[test]
-fn help_is_read_from_a_value_and_up_to_a_flag_it_does_not_know() {
+fn help_is_read_from_a_value_and_up_to_a_bare_flag_it_does_not_know() {
     let binary = binary_help();
     for (arguments, expected) in [
         (&["--kernel", "--help"][..], binary.clone()),
-        (&["--socket", "-h"], binary),
+        (&["--socket", "-h"], binary.clone()),
+        (&["--frob", "add", "x", "--help"], binary),
+        (&["--frob=x", "add", "x", "--help"], command_help("add")),
         (
             &["add", "my-thing", "--cell", "c1", "--help"],
             command_help("add"),
@@ -264,7 +266,7 @@ fn unserved_commands_refuse_with_not_served() {
     for arguments in [
         &["add", "x", "--kernel", "../x"][..],
         &["add", "x", "--frob"],
-        &["--frob", "add", "x"],
+        &["--frob=x", "add", "x"],
         &["add", "x", "--deadline-ms", "0"],
         &["add", "x", "--json"],
         &["--deadline-ms", "5", "add", "x"],
@@ -291,6 +293,8 @@ fn unserved_commands_refuse_with_not_served() {
         (&["add", "x", "--json", "--human", "--json"], "--human"),
         (&["add", "x", "--human", "--json", "--human"], "--json"),
         (&["add", "x", "--json", "--json", "--human"], "--json"),
+        (&["--frob", "add", "x"], "--frob"),
+        (&["--frob", "list"], "--frob"),
     ] {
         let error = usage_error(&run(arguments));
         assert_eq!(error["argument"], named, "{arguments:?}");
