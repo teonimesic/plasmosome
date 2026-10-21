@@ -674,8 +674,15 @@ mod tests {
         std::fs::create_dir(scratch.root.join("real")).unwrap();
         std::os::unix::fs::symlink("real", scratch.root.join("link")).unwrap();
         let through_link = scratch.path("link/control.sock");
-        let refused = RuntimeListener::bind(&through_link);
-        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(
+            RuntimeListener::bind(&through_link).err(),
+            Some(EndpointRefusal::Private {
+                path: through_link.clone(),
+                refusal: PrivateSocketError::SymlinkInPath {
+                    path: scratch.root.join("link")
+                }
+            })
+        );
         assert!(
             absent(&scratch.root.join("real/control.sock")),
             "no socket was bound in the directory the link names"
@@ -689,8 +696,16 @@ mod tests {
         std::fs::create_dir(&shared).unwrap();
         std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = scratch.path("shared/control.sock");
-        let refused = RuntimeListener::bind(&path);
-        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(
+            RuntimeListener::bind(&path).err(),
+            Some(EndpointRefusal::Private {
+                path: path.clone(),
+                refusal: PrivateSocketError::NotPrivate {
+                    path: shared.clone(),
+                    mode: 0o755
+                }
+            })
+        );
         assert!(absent(path.as_path()), "no socket was bound there");
     }
 
@@ -698,10 +713,15 @@ mod tests {
     fn a_path_longer_than_a_socket_address_names_the_limit() {
         let scratch = Scratch::new();
         let path = scratch.path(&"s".repeat(120));
-        let refused = RuntimeListener::bind(&path).expect_err("the path is too long to bind");
-        assert!(
-            refused.to_string().contains("bytes a socket address holds"),
-            "{refused}"
+        assert_eq!(
+            RuntimeListener::bind(&path).err(),
+            Some(EndpointRefusal::Private {
+                path: path.clone(),
+                refusal: PrivateSocketError::PathTooLong {
+                    path: path.as_path().to_owned(),
+                    max: if cfg!(target_os = "linux") { 107 } else { 103 }
+                }
+            })
         );
         assert!(absent(path.as_path()), "nothing was created");
     }
@@ -717,8 +737,12 @@ mod tests {
         client.write_all(b"hello").unwrap();
         let taken = taken_within(&listener);
         assert!(
-            !matches!(taken, Connection::Identified { .. }),
-            "a peer of another uid is not handed out: {taken:?}"
+            matches!(
+                &taken,
+                Connection::Refused(PrivateSocketError::PeerMismatch { trusted, found })
+                    if (*trusted, *found) == (stranger, effective_uid())
+            ),
+            "a peer of another uid is refused, not handed out: {taken:?}"
         );
         drop(taken);
         let mut byte = [0u8; 1];
