@@ -92,6 +92,7 @@ enum Defect {
     LeaksAnInvalidOperationOf(UniverseClass, Call),
     RefusalRollsBackTheAddressOf(UniverseClass, Call),
     ConflictWithdrawsTheLiveGrantOfItsKey,
+    RefusalSwapsItsAddress(Call),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +223,16 @@ impl DefectiveBackend {
             }
             Defect::RefusalRollsBackItsAddress(rollback) if rollback == call => {
                 self.drop_address(operation.handle());
+                Err(refusal)
+            }
+            Defect::RefusalSwapsItsAddress(swapping)
+                if swapping == call
+                    && self.state.objects().any(|held| {
+                        held.class() == operation.class() && held.id == operation.id()
+                    }) =>
+            {
+                self.drop_address(operation.handle());
+                let _ = self.state.insert(operation.object());
                 Err(refusal)
             }
             Defect::LeaksAnInvalidOperationOf(class, late)
@@ -2324,6 +2335,58 @@ fn a_one_class_leak_or_rollback_changes_only_its_own_class_through_its_own_call(
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn the_snapshot_clause_rejects_a_refusal_that_swaps_the_object_at_its_address() {
+    for call in CALLS {
+        assert_rejected(|| {
+            conformance::snapshot_never_invents_objects(carrying(Defect::RefusalSwapsItsAddress(
+                call,
+            )))
+        });
+    }
+}
+
+#[test]
+fn a_swapping_refusal_changes_only_an_occupied_address_through_its_own_call() {
+    let owner = conformance::conformance_owner;
+    let capability = session_file("/var/lib/plasmosome/conformance/skills/pr.md");
+    let invalid = conformance::invalid_capability(&capability);
+    for defective in CALLS {
+        for call in CALLS {
+            let mut backend = DefectiveBackend::carrying(Defect::RefusalSwapsItsAddress(defective));
+            let fresh = conformance::op_for(GrantId::new(), owner(), invalid.clone());
+            assert_eq!(
+                call_with(&mut backend, call, &fresh),
+                Err(conformance::invalid_refusal(&fresh))
+            );
+            assert!(
+                backend.snapshot_os_state().is_empty(),
+                "{defective:?} {call:?}"
+            );
+            let standing = conformance::hot_grant(owner(), &capability);
+            backend
+                .grant(standing.operation.clone(), standing.kind)
+                .unwrap();
+            let occupied = conformance::op_for(standing.operation.id(), owner(), invalid.clone());
+            assert_eq!(
+                call_with(&mut backend, call, &occupied),
+                Err(conformance::invalid_refusal(&occupied))
+            );
+            let mut expected = OsState::new();
+            if call == defective {
+                expected.insert(occupied.object()).unwrap();
+            } else {
+                expected.insert(standing.operation.object()).unwrap();
+            }
+            assert_eq!(
+                backend.snapshot_os_state(),
+                expected,
+                "{defective:?} {call:?}"
+            );
         }
     }
 }
