@@ -544,10 +544,13 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
   knows only ASCII whitespace, a fix that writes the blank name back, and a description check first.
   Amended on 2026-10-21: this item is new.
 - A `[workspace]` whose `mount` writes `backend = "virtiofs"`, and one that writes
-  `backend = "fuse"`, each parse to the same declaration as the same file without `backend`. A
-  `mount` with no `dst` parses with `dst` `/workspace`. Catches: a parser that gives an absent
-  `backend` a default, `"virtiofs"` or any other, one that keeps a written `backend` in what it
-  parses, and one that refuses it. Amended on 2026-10-21: this item is new.
+  `backend = "fuse"`, each parse to the same declaration as the same file without `backend`,
+  both when the `mount` writes `dst` and when it does not. The parsed mount holds its `dst` and
+  nothing else. A `mount` with no `dst` parses with `dst` `/workspace`. Catches: a parser that
+  gives an absent `backend` a default, `"virtiofs"` or any other, including one that gives every
+  mount the same value whatever is written; one that keeps a written `backend` in what it parses;
+  one whose `dst` default depends on `backend`; and one that refuses it. Amended on 2026-10-21:
+  this item is new.
 - A plasmid granted two hosts and denied a third produces a report naming the denied host and the
   hosts field, in which neither granted host appears anywhere.
 - The denial report reaches the session log and the plasmid's status, and the calling code inside
