@@ -1,8 +1,16 @@
+use std::ffi::CStr;
+
 use super::path::{PathError, RecipePath};
 use crate::state::{CELL_SUPERVISOR_SOCKET, CELLS_DIR, CellPathError, validate_cell_id};
 use plasmosome_backend::CellId;
 
-const RUNTIME_DIR: &str = "runtime";
+/// The name of a cell's runtime directory: `instance` creates it, and the three per-cell paths
+/// are built under it here.
+pub(crate) const RUNTIME_DIR: &CStr = c"runtime";
+const RUNTIME: &str = match RUNTIME_DIR.to_str() {
+    Ok(name) => name,
+    Err(_) => panic!("the runtime directory's name is UTF-8"),
+};
 const WRITABLE_ROOT: &str = "root.img";
 const CONTROL_SOCKET: &str = "control.uds";
 const DATA_SOCKET: &str = "data.uds";
@@ -44,9 +52,9 @@ impl CellPaths {
         };
         Ok(CellPaths {
             membrane_socket: path(CELL_SUPERVISOR_SOCKET)?,
-            writable_root: path(&format!("{RUNTIME_DIR}/{WRITABLE_ROOT}"))?,
-            control_path: path(&format!("{RUNTIME_DIR}/{CONTROL_SOCKET}"))?,
-            data_path: path(&format!("{RUNTIME_DIR}/{DATA_SOCKET}"))?,
+            writable_root: path(&format!("{RUNTIME}/{WRITABLE_ROOT}"))?,
+            control_path: path(&format!("{RUNTIME}/{CONTROL_SOCKET}"))?,
+            data_path: path(&format!("{RUNTIME}/{DATA_SOCKET}"))?,
         })
     }
 }
