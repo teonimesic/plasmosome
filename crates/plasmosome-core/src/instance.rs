@@ -2640,7 +2640,7 @@ mod tests {
         static BEFORE_NEXT_FILE_SYNC: RefCell<Option<BeforeSync>> = const { RefCell::new(None) };
     }
 
-    const WATCHED: [&CStr; 9] = [
+    const WATCHED: [&CStr; 10] = [
         c"launched",
         c"launched.tmp",
         c"created",
@@ -2650,6 +2650,7 @@ mod tests {
         c"cells",
         c"controller.lock",
         c"supervisor.lock",
+        c"supervisor.lock.tmp",
     ];
 
     #[derive(Debug, Clone)]
@@ -5424,6 +5425,10 @@ mod tests {
         root.join("cells/cell-1/membraned.log")
     }
 
+    fn lock_temporary_path(root: &Path) -> PathBuf {
+        root.join("cells/cell-1/supervisor.lock.tmp")
+    }
+
     /// Probes until a lock whose descriptors this test has closed reads `Free`. A process another
     /// test thread is spawning holds a copy of every descriptor until its exec closes it, and the
     /// lock stays held until then.
@@ -5474,9 +5479,16 @@ mod tests {
             !a_separate_open_can_lock(&path),
             "the lock is held while the SupervisorLock lives"
         );
+        let held = identity_at(&path);
         expect_match!(dir.create_supervisor_lock(), Err(CellDirError::AlreadyExists { path: refused }) => {
             assert_eq!(refused, path)
         });
+        assert_eq!(
+            identity_at(&path),
+            held,
+            "the refused create replaced the lock file"
+        );
+        assert!(!exists(&lock_temporary_path(&root)));
         assert!(
             format!("{supervisor:?}").contains("supervisor.lock"),
             "{supervisor:?}"
@@ -5496,6 +5508,11 @@ mod tests {
             last_seen(&cell_path).named(c"supervisor.lock"),
             Some(identity_at(&lock_path(&root))),
             "the cell directory was synced before it named supervisor.lock"
+        );
+        assert_eq!(
+            last_seen(&cell_path).named(c"supervisor.lock.tmp"),
+            None,
+            "the cell directory was synced while it still named the temporary"
         );
     }
 
@@ -5539,6 +5556,93 @@ mod tests {
     }
 
     #[test]
+    fn a_probe_racing_the_creation_never_takes_the_new_lock_first() {
+        const CREATES: u32 = 2000;
+        let (_dir, root) = temp_root();
+        let (mut instance, lock) = locked(&root);
+        instance.sync = no_sync;
+        let dir = instance
+            .create_cell_dir(&lock, &cell("cell-1"))
+            .expect("the cell is created");
+        let path = lock_path(&root);
+        let creating = AtomicBool::new(true);
+        let (lost, probes) = thread::scope(|scope| {
+            let prober = scope.spawn(|| {
+                let mut probes = 0_u32;
+                while creating.load(Ordering::Relaxed) {
+                    drop(dir.probe_supervisor_lock());
+                    probes += 1;
+                }
+                probes
+            });
+            let mut lost = 0_u32;
+            for _ in 0..CREATES {
+                match dir.create_supervisor_lock() {
+                    Ok(held) => drop(held),
+                    Err(CellDirError::Io { source, .. })
+                        if source.raw_os_error() == Some(libc::EWOULDBLOCK) =>
+                    {
+                        lost += 1;
+                    }
+                    Err(other) => panic!("the supervisor lock was not created: {other}"),
+                }
+                fs::remove_file(&path).expect("the lock file is removed");
+            }
+            creating.store(false, Ordering::Relaxed);
+            (lost, prober.join().expect("the prober finishes"))
+        });
+        assert_eq!(
+            lost, 0,
+            "{lost} of {CREATES} creations lost their new lock to a probe that ran {probes} times"
+        );
+    }
+
+    #[test]
+    fn a_leftover_temporary_is_removed_without_being_followed() {
+        for planted in ["a file", "a symlink", "a dangling symlink"] {
+            let (_dir, root) = temp_root();
+            let dir = opened(&root, "cell-1");
+            let temporary = lock_temporary_path(&root);
+            let target = root.join("elsewhere");
+            match planted {
+                "a file" => {
+                    fs::write(&temporary, b"left by a crash").expect("the leftover is made")
+                }
+                "a symlink" => {
+                    fs::write(&target, b"not the lock").expect("the link target is made");
+                    symlink(&target, &temporary).expect("the link is made");
+                }
+                _ => symlink(&target, &temporary).expect("the link is made"),
+            }
+            let supervisor = dir
+                .create_supervisor_lock()
+                .unwrap_or_else(|error| panic!("{planted}: {error}"));
+            assert!(!exists(&temporary), "{planted}");
+            assert!(
+                fs::symlink_metadata(lock_path(&root))
+                    .expect("the lock file exists")
+                    .is_file(),
+                "{planted}"
+            );
+            assert_eq!(
+                fs::read(lock_path(&root)).expect("the lock file reads"),
+                b"",
+                "{planted}"
+            );
+            expect_match!(dir.probe_supervisor_lock(), Ok(LockProbe::Held) => ());
+            if planted == "a symlink" {
+                assert_eq!(
+                    fs::read(&target).expect("the target reads"),
+                    b"not the lock"
+                );
+            } else {
+                assert!(!exists(&target), "{planted}");
+            }
+            drop(supervisor);
+        }
+    }
+
+    #[test]
     fn with_no_lock_file_the_probe_is_missing_and_creates_nothing() {
         let (_dir, root) = temp_root();
         let dir = opened(&root, "cell-1");
@@ -5579,7 +5683,13 @@ mod tests {
                 fs::write(&target, b"").expect("the link target is made");
             }
             symlink(&target, lock_path(&root)).expect("the link is made");
-            expect_match!(dir.create_supervisor_lock(), Err(CellDirError::AlreadyExists { .. }) => ());
+            expect_match!(dir.create_supervisor_lock(), Err(CellDirError::Symlink { path }) => {
+                assert_eq!(path, lock_path(&root), "target exists: {target_exists}")
+            });
+            assert!(
+                !exists(&lock_temporary_path(&root)),
+                "target exists: {target_exists}"
+            );
             expect_match!(dir.probe_supervisor_lock(), Err(CellDirError::Symlink { path }) => {
                 assert_eq!(path, lock_path(&root), "target exists: {target_exists}")
             });
@@ -5633,6 +5743,7 @@ mod tests {
                 let outcomes = within(&format!("opening {planted} as {name}"), move || {
                     if name == "supervisor.lock" {
                         vec![
+                            dir.create_supervisor_lock().map(drop),
                             dir.probe_supervisor_lock().map(drop),
                             dir.supervisor_lock_identity().map(drop),
                         ]
@@ -5645,6 +5756,7 @@ mod tests {
                         assert_eq!(refused, path, "{planted} as {name}")
                     });
                 }
+                assert!(!exists(&lock_temporary_path(&root)), "{planted} as {name}");
             }
         }
     }
