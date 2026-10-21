@@ -547,8 +547,8 @@ fn no_handler_of_the_controller_runs_in_a_child() {
         std::process::id(),
         "the case leads its own process group, so its signals reach no other process"
     );
-    let caught = Caught::install();
     let root = Root::new();
+    let caught = Caught::install(&root.path.join("handler.pids"));
     let cell = Cell::create(&root.path, "cell-108");
     let missing =
         RecipePath::parse(&format!("{}/missing", root.path.display())).expect("a canonical path");
@@ -572,45 +572,46 @@ fn no_handler_of_the_controller_runs_in_a_child() {
     );
 }
 
-static HANDLER_PIPE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+static HANDLER_LOG: std::sync::atomic::AtomicPtr<libc::c_char> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 static HANDLER_OWNER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 extern "C" fn note_foreign_handler(_signal: libc::c_int) {
     let me = own_pid();
-    if me != HANDLER_OWNER.load(std::sync::atomic::Ordering::Relaxed) {
+    let log = HANDLER_LOG.load(std::sync::atomic::Ordering::Relaxed);
+    if me != HANDLER_OWNER.load(std::sync::atomic::Ordering::Relaxed) && !log.is_null() {
         let bytes = me.to_ne_bytes();
-        let pipe = HANDLER_PIPE.load(std::sync::atomic::Ordering::Relaxed);
-        // SAFETY: `bytes` is a local of four bytes that write only reads. getpid and write are
-        // async-signal-safe, which is all a signal handler may call.
+        // SAFETY: `log` is the NUL-terminated path Caught leaked, which lives until the process
+        // ends. `bytes` is a local of four bytes that write only reads. getpid, open, write and
+        // close are async-signal-safe, which is all a signal handler may call. Opening the log
+        // anew reaches it from a child whose descriptors the start has already replaced.
         #[allow(unsafe_code)]
         unsafe {
-            libc::write(pipe, bytes.as_ptr().cast(), bytes.len())
-        };
+            let fd = libc::open(
+                log,
+                libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            );
+            if fd >= 0 {
+                libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+                libc::close(fd);
+            }
+        }
     }
 }
 
-struct Caught(File);
+struct Caught(PathBuf);
 
 impl Caught {
     #[allow(unsafe_code)]
-    fn install() -> Caught {
-        let mut ends: [RawFd; 2] = [-1; 2];
-        // SAFETY: `ends` is a local array of two c_int, the size pipe writes.
-        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0, "a pipe");
-        // SAFETY: pipe returned 0, so both entries are new descriptors, which nothing else owns.
-        let [read, write] = ends.map(|end| unsafe { OwnedFd::from_raw_fd(end) });
-        for end in [&read, &write] {
-            // SAFETY: fcntl with F_SETFL takes an integer flag set, and `end` is open.
-            unsafe { libc::fcntl(end.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
-        }
-        HANDLER_PIPE.store(
-            std::os::fd::IntoRawFd::into_raw_fd(write),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+    fn install(log: &Path) -> Caught {
+        let path = std::ffi::CString::new(log.as_os_str().as_encoded_bytes())
+            .expect("the handler's log path holds no NUL");
+        HANDLER_LOG.store(path.into_raw(), std::sync::atomic::Ordering::Relaxed);
         HANDLER_OWNER.store(own_pid(), std::sync::atomic::Ordering::Relaxed);
         // SAFETY: An all-zero libc::sigaction is a valid empty action with no flags. The handler
-        // only calls getpid and write, which are async-signal-safe. `action` is a local that
-        // outlives the calls, and sigaction copies what it reads.
+        // only calls getpid, open, write and close, which are async-signal-safe. `action` is a
+        // local that outlives the calls, and sigaction copies what it reads.
         unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
             action.sa_sigaction = note_foreign_handler as *const () as libc::sighandler_t;
@@ -621,12 +622,11 @@ impl Caught {
                 0
             );
         }
-        Caught(File::from(read))
+        Caught(log.to_path_buf())
     }
 
-    fn pids_other_than_this(mut self) -> Vec<libc::pid_t> {
-        let mut bytes = Vec::new();
-        let _ = self.0.read_to_end(&mut bytes);
+    fn pids_other_than_this(self) -> Vec<libc::pid_t> {
+        let bytes = std::fs::read(&self.0).unwrap_or_default();
         let (pids, _) = bytes.as_chunks::<4>();
         pids.iter()
             .map(|pid| libc::pid_t::from_ne_bytes(*pid))
