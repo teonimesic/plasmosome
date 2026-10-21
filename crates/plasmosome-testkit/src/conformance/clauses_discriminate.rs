@@ -671,7 +671,7 @@ impl EnforcementBackend for DefectiveBackend {
         };
         let valid = match self.validated(&operation, Call::Grant) {
             Err(refusal) if self.defect == Defect::AnInvalidGrantKeepsARecord => {
-                self.ledger.insert(requested.handle, requested);
+                self.ledger.entry(requested.handle).or_insert(requested);
                 return Err(refusal);
             }
             Err(refusal)
@@ -908,7 +908,12 @@ impl EnforcementBackend for DefectiveBackend {
                 .objects()
                 .map(|object| self.record_rebuilt_from(object))
                 .collect(),
-            _ => self.ledger.values().cloned().collect(),
+            _ => self
+                .ledger
+                .values()
+                .filter(|entry| state.objects().any(|held| *held == entry.object()))
+                .cloned()
+                .collect(),
         };
         EnforcementSnapshot::new(state, grants, Vec::new())
     }
