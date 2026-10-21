@@ -526,7 +526,9 @@ socket through it too, as [Socket ownership](#socket-ownership) says, and so do
     breaks no rule is reported as `Io`.
   - Ancestors only need search permission, so a root-owned 0711 `/home` passes.
   - The directory itself must be owned by the effective UID, have no group or other permission
-    bits, and carry no ACL. It stays open for the checks that follow.
+    bits, and carry no ACL. It stays open for the checks that follow. `as_fd` lends it for
+    calls made relative to it, as the membrane's writable root copy does; they reach the
+    directory that was opened even after its path is renamed or names another one.
 - `PrivateListener::bind` refuses any entry already at the name and never unlinks it.
   - It walks and judges the directory again before it creates the socket, and again after
     `bind`. If the second check fails, it returns that check's error and removes the socket it

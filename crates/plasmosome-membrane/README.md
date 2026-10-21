@@ -22,7 +22,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
-| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here boots a cell yet |
+| `runtime` | Parts of the spec 001 §4.2 hardware runtime. So far the `RemoveOutcome` of removing a path, which is core's `private_socket::RemoveOutcome`, the exact 4090 hello requests with the strict judge of their replies (`hello`), the supervisor's own observation of a helper's Darwin sandbox (`confinement`, below), and three modules re-exported from elsewhere: the SHA-256 `Digest` from `plasmosome-backend` as `runtime::digest`, and from `plasmosome-core` the canonical absolute `RecipePath` as `runtime::path` and the `RuntimeRecipe` as `runtime::recipe`. The JSON reader that refuses duplicate keys is core's too, reachable inside this crate as `runtime::strict_json`. Core's README, "The runtime recipe and the config record", describes them. `launch` execs the VMM helper a recipe names with the exact descriptors spec 001 §4.2 sets out; see "Launching the VMM helper" below. `artifacts` verifies the pinned artifacts and keeps each one open; see "Verifying the pinned artifacts" below. `cell_directory` checks a cell's private directory with core's `PrivateDir` and makes the writable root copy in it; see "The cell directory and the writable root" below. `endpoints` binds the control and data listeners and reads the helper's diagnostics; see "The runtime's listeners and diagnostics" below. Nothing here boots a cell yet |
 
 ## Use
 
@@ -277,6 +277,35 @@ moved. A mapping made from a descriptor opened read-only cannot gain write (`mpr
 `EACCES`), and neither can a mapping made after the lock: `mmap` with `PROT_WRITE` fails with
 `EPERM`, and adding write with `mprotect` fails with `EACCES`. Hashing again in `reconfirm()` would
 only narrow the window, because the mapping can write after any hash, so it does not.
+
+## The cell directory and the writable root
+
+Spec 001 §4.2 puts `writable_root`, `control_path` and `data_path` under an owned, nonreplaceable
+private per-cell directory, and has the supervisor create the writable root exclusively from the
+verified root image. `runtime::cell_directory` does both. In cell mode the directory is spec 023's
+`cells/<cell>/runtime/`, which `membraned` creates through core's `CellDir::create_runtime_dir`.
+
+`PrivateDirectory::open` is core's `PrivateDir::open`, the check `RuntimeListener::bind` makes of
+its parent. A refusal is `CellDirectoryFault::Private` with core's error, which names the rule and
+the component that broke it.
+
+`WritableRoot::create` makes the name in the held directory with `O_CREAT | O_EXCL | O_NOFOLLOW`,
+so any entry already there, a symlink included, is `Exists` and is left as it was. It copies
+through the verified descriptor, not the path, and hashes the bytes as it writes them. Then the
+root image must still pass `reconfirm()`, which refuses an image whose path names another file or
+whose size or times moved. Every refusal after the name was made removes the copy. The copy is a
+plain copy, not an APFS clone: a clone of a `uchg` file can carry the flag, and the copy must be
+writable.
+
+`remove()` and dropping a `WritableRoot` unlink the name in the held directory only while it is
+still the file that was made, by device and inode. A cell directory renamed after the copy still
+has its copy removed, and whatever is then at the old path is left. The inspection and the unlink
+are two steps. As spec 001 §1 says of sockets, this is ownership-correct cleanup, not protection
+from another writer with authority over the directory, the same uid included.
+
+Spec 023 §5 step 9 keeps `root.img` when `membraned` stops on SIGTERM, but a dropped
+`WritableRoot` always removes its copy. The cell, plasmosome-7em, will need a way to give the copy
+up without removing it. Nothing calls this module yet.
 
 ## Launching the VMM helper
 
