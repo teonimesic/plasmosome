@@ -67,9 +67,9 @@ mocks it in the test.
   change to every backend that does.
 - **Conformance functions take a factory, not an instance** — `make: impl Fn() -> B` — so each
   one owns its backend and a clause cannot inherit another clause's state.
-- **There is no clock seam, on purpose.** Durations are passed in as arguments and nothing reads
-  wall time to decide anything. If a flaky time-dependent test ever appears, that is the moment
-  to add a clock trait — not before.
+- **Lifetime decisions read time through `Clock`.** Spec 028 requires one injected clock for
+  every lifetime decision, and tests pass `ManualClock`. Durations are passed in as arguments.
+  Spec 003 names the four earlier decisions that still read elapsed time outside it.
 - **Builders carry only what a test in this repository uses.** A helper written for a caller that
   does not exist is a guess about the next test.
 - **A clause that withdraws a set walks both orders, and each order needs its own witness.**
