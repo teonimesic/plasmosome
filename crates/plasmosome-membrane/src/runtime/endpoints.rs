@@ -966,8 +966,8 @@ mod tests {
         ));
         let PreparedHelper { exec, diagnostics } =
             HelperExec::prepare(&recipe).expect("the record recipe prepares");
-        let mut child = VmmChild::spawn(exec).expect("the fork succeeds");
         let transcript = DiagnosticTranscript::start(diagnostics).expect("the thread starts");
+        let mut child = VmmChild::spawn(exec).expect("the fork succeeds");
         assert_eq!(
             child.wait_terminal(PATIENCE),
             Ok(VmmState::Exited { code: 0 })
