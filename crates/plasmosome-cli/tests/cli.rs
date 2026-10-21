@@ -27,6 +27,52 @@ fn not_utf8() -> OsString {
     OsString::from_vec(vec![b'a', 0xff])
 }
 
+const NOT_UTF8: &str = "a<0xff>";
+
+fn spoken(line: &str) -> Vec<OsString> {
+    line.split(' ')
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            if word == NOT_UTF8 {
+                not_utf8()
+            } else {
+                OsString::from(word)
+            }
+        })
+        .collect()
+}
+
+fn named_in_an_envelope(argument: &str) -> String {
+    if argument == NOT_UTF8 {
+        format!("a{}", char::REPLACEMENT_CHARACTER)
+    } else {
+        argument.to_string()
+    }
+}
+
+fn search_and_show_served() -> Vec<Command> {
+    serving(&["search", "show"])
+}
+
+fn misnamed(rows: &[(&[Command], &str, Option<&str>)]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|(commands, line, argument)| {
+            let reading = read(&spoken(line), commands);
+            let expected = argument.map(named_in_an_envelope);
+            let named = match &reading {
+                Reading::Refuse { command, error, .. }
+                    if command == "invalid" && error.code() == ClientCode::InvalidArgument =>
+                {
+                    Some(refused(&reading).2)
+                }
+                _ => None,
+            };
+            (named != Some(expected.clone()))
+                .then(|| format!("`{line}` should name {expected:?}, read {reading:?}"))
+        })
+        .collect()
+}
+
 fn escape_character() -> char {
     char::from_u32(0x1b).expect("ESC is a code point")
 }
@@ -205,13 +251,22 @@ fn help_comes_before_every_other_rule() {
             "{line:?} read as {reading:?}"
         );
     }
-    let reading = read(&args(&["cell", "exec", "--", "--help"]), COMMANDS);
-    let (command, code, _) = refused(&reading);
-    assert_eq!((command, code), ("cell.exec", ClientCode::NotServed));
+    for line in [
+        &["cell", "exec", "--", "--help"][..],
+        &["cell", "exec", "--", "--help", "--"],
+    ] {
+        let reading = read(&args(line), COMMANDS);
+        let (command, code, _) = refused(&reading);
+        assert_eq!(
+            (command, code),
+            ("cell.exec", ClientCode::NotServed),
+            "{line:?}"
+        );
+    }
 }
 
 #[test]
-fn help_reads_words_only_up_to_a_flag_it_does_not_know() {
+fn help_reads_the_command_words_up_to_an_unknown_flag_without_a_value() {
     for (line, usage) in [
         (
             &["registry", "search", "--source", "main", "--help"][..],
@@ -247,6 +302,10 @@ fn help_reads_words_only_up_to_a_flag_it_does_not_know() {
             &["--frob", "cell", "list", "--help"],
             "plasmosome [FLAGS] COMMAND",
         ),
+        (
+            &["--frob=x", "cell", "list", "--help"],
+            "plasmosome cell list",
+        ),
     ] {
         let text = help_text(line, COMMANDS);
         assert!(
@@ -269,6 +328,34 @@ fn help_reads_words_only_up_to_a_flag_it_does_not_know() {
         COMMANDS,
         Some("extra"),
     );
+    assert_usage(
+        args(&["status", "--frob=x", "extra", "--help"]),
+        COMMANDS,
+        Some("extra"),
+    );
+    assert_usage(
+        args(&["cell", "list", "--mock=simulate", "extra", "--help"]),
+        COMMANDS,
+        Some("extra"),
+    );
+}
+
+#[test]
+fn the_command_words_are_read_the_same_way_by_every_rule() {
+    for line in [
+        &["--frob=x", "cell", "list"][..],
+        &["cell", "list", "--frob"],
+    ] {
+        let reading = read(&args(line), COMMANDS);
+        let (command, code, _) = refused(&reading);
+        assert_eq!(
+            (command, code),
+            ("cell.list", ClientCode::NotServed),
+            "{line:?}"
+        );
+    }
+    assert_usage(args(&["--frob", "cell", "list"]), COMMANDS, Some("--frob"));
+    assert_usage(args(&["cell", "--frob", "list"]), COMMANDS, Some("cell"));
 }
 
 #[test]
@@ -303,12 +390,18 @@ fn the_version_is_read_only_alone() {
     ] {
         assert_usage(args(line), COMMANDS, Some("--version"));
     }
-    let reading = read(
-        &args(&["cell", "exec", "--", "python3", "--version"]),
-        COMMANDS,
-    );
-    let (command, code, _) = refused(&reading);
-    assert_eq!((command, code), ("cell.exec", ClientCode::NotServed));
+    for line in [
+        &["cell", "exec", "--", "python3", "--version"][..],
+        &["cell", "exec", "--", "--version", "--"],
+    ] {
+        let reading = read(&args(line), COMMANDS);
+        let (command, code, _) = refused(&reading);
+        assert_eq!(
+            (command, code),
+            ("cell.exec", ClientCode::NotServed),
+            "{line:?}"
+        );
+    }
 }
 
 #[test]
@@ -482,10 +575,8 @@ fn the_full_parse_refuses_each_fault() {
         (args(&["status", "--kernel"]), Some("--kernel")),
         (args(&["status", "--", "x"]), Some("--")),
         (vec!["status".into(), not_utf8()], Some(lossy.as_str())),
-        (
-            vec!["status".into(), "--".into(), not_utf8()],
-            Some(lossy.as_str()),
-        ),
+        (vec!["status".into(), "--".into(), not_utf8()], Some("--")),
+        (args(&["status", "--"]), Some("--")),
         (vec![not_utf8()], Some(lossy.as_str())),
         (args(&[]), None),
         (args(&["--json"]), None),
@@ -502,6 +593,105 @@ fn the_full_parse_refuses_each_fault() {
         args(&["germinate", "g", "--json", "--human", "--json"]),
         &serving(&["cell.new"]),
         Some("--human"),
+    );
+}
+
+#[test]
+fn the_full_parse_names_the_leftmost_fault() {
+    let status = status_served();
+    let search = search_and_show_served();
+    let rows: Vec<(&[Command], &str, Option<&str>)> = vec![
+        (&status, "frobnicate --frob", Some("frobnicate")),
+        (&status, "frobnicate --json --json", Some("frobnicate")),
+        (&status, "cell frob --kernel", Some("frob")),
+        (&status, "frobnicate a<0xff>", Some("frobnicate")),
+        (&status, "status --frob a<0xff>", Some("--frob")),
+        (&status, "status extra a<0xff>", Some("extra")),
+        (&status, "status --kernel ../x a<0xff>", Some("../x")),
+        (&status, "status extra --frob", Some("extra")),
+        (&status, "status extra --kernel", Some("extra")),
+        (&status, "status extra --json --human", Some("extra")),
+        (&status, "status extra -- x", Some("extra")),
+        (&status, "status extra --", Some("extra")),
+        (&status, "status --kernel ../x extra", Some("../x")),
+        (&status, "status --kernel ../x -- x", Some("../x")),
+        (&status, "status --kernel ../x --kernel a", Some("../x")),
+        (&status, "status --kernel ../x --frob", Some("../x")),
+        (&status, "status --json --kernel ../x --human", Some("../x")),
+        (&status, "status --deadline-ms 0 --json --json", Some("0")),
+        (&status, "status --socket rel --kernel ../x", Some("rel")),
+        (&status, "status --deadline-ms 0 --kernel ../x", Some("0")),
+        (&status, "status --deadline-ms 0 --socket rel", Some("0")),
+        (&status, "--kernel ../x", Some("../x")),
+        (&status, "--deadline-ms 0", Some("0")),
+        (
+            &search,
+            "registry search --kernel a extra",
+            Some("--kernel"),
+        ),
+        (
+            &search,
+            "--kernel a registry search extra",
+            Some("--kernel"),
+        ),
+        (&search, "registry search --kernel a -- x", Some("--kernel")),
+        (
+            &search,
+            "registry search --kernel a --frob",
+            Some("--kernel"),
+        ),
+        (
+            &search,
+            "registry search --kernel a --json --json",
+            Some("--kernel"),
+        ),
+        (
+            &search,
+            "registry search --kernel a a<0xff>",
+            Some("--kernel"),
+        ),
+    ];
+    let wrong = misnamed(&rows);
+    assert!(
+        wrong.is_empty(),
+        "{} of {} lines name the wrong argument:\n{}",
+        wrong.len(),
+        rows.len(),
+        wrong.join("\n")
+    );
+}
+
+#[test]
+fn the_lines_that_read_two_ways_follow_mains_rulings() {
+    let status = status_served();
+    let search = search_and_show_served();
+    let rows: Vec<(&[Command], &str, Option<&str>)> = vec![
+        (&search, "--kernel ../x registry search", Some("--kernel")),
+        (&search, "--socket rel registry search", Some("--socket")),
+        (&search, "--kernel a --frob registry search", Some("--frob")),
+        (
+            &search,
+            "--kernel a --frob=x registry search",
+            Some("--kernel"),
+        ),
+        (&status, "cell --kernel ../x", Some("cell")),
+        (&status, "cell -- x", Some("cell")),
+        (&status, "cell --json --json", Some("cell")),
+        (&status, "registry source --kernel a", Some("source")),
+        (&status, "status --", Some("--")),
+        (&status, "status -- a<0xff>", Some("--")),
+        (&status, "-- x", None),
+        (&status, "-- --version", None),
+        (&status, "-- --help", None),
+        (&status, "-- a<0xff>", Some("a<0xff>")),
+    ];
+    let wrong = misnamed(&rows);
+    assert!(
+        wrong.is_empty(),
+        "{} of {} lines name the wrong argument:\n{}",
+        wrong.len(),
+        rows.len(),
+        wrong.join("\n")
     );
 }
 

@@ -19,6 +19,8 @@ const NESTING_BEFORE: &str = "a panic before many calls";
 
 const NESTING_AFTER: &str = "a panic after many calls";
 
+const AFTER_AN_INNER_CALL: &str = "a panic after an inner call to handle";
+
 const CALLS: usize = 5_000;
 
 const SAME_DEPTH: usize = 4_096;
@@ -193,6 +195,37 @@ fn a_panic_on_another_thread_while_a_command_runs_reaches_the_earlier_hook() {
     assert!(
         !seen(ON_A_HELPER).is_empty(),
         "a helper thread's panic during handle never reached the hook set before it"
+    );
+}
+
+struct CallsHandleThenPanics;
+
+impl Write for CallsHandleThenPanics {
+    fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+        assert_eq!(version(), Exit::Done);
+        panic!("{AFTER_AN_INNER_CALL}")
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn an_inner_call_leaves_the_outer_command_silent() {
+    record_panics();
+    let mut stderr = Vec::new();
+    let exit = handle(
+        &args(&["--help"]),
+        "0.0.0",
+        COMMANDS,
+        &mut CallsHandleThenPanics,
+        &mut stderr,
+    );
+    assert_eq!(exit, Exit::Internal);
+    assert!(
+        seen(AFTER_AN_INNER_CALL).is_empty(),
+        "after an inner call to handle, the outer command's panic reached the hook"
     );
 }
 

@@ -381,6 +381,7 @@ fn usage_errors() {
     assert_usage(&plasmosome(&["--json"]), None);
     assert_usage(&plasmosome(&["frobnicate"]), Some("frobnicate"));
     assert_usage(&plasmosome(&["frobnicate", "--", "x"]), Some("frobnicate"));
+    assert_usage(&plasmosome(&["frobnicate", "--frob"]), Some("frobnicate"));
     assert_usage(
         &plasmosome(&["cell", "list", "--json", "--human", "--json"]),
         Some("--human"),
