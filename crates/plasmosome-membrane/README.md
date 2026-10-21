@@ -18,6 +18,7 @@ were supposed to be revoked, so every spawn path here is paired with a reap.
 | `readiness` | Is a broker actually serving? Readiness is an *answered query*, never a running pid or an existing file — a process can be alive and useless |
 | `brokers` | A cell's broker set, each one a `vmm::VmmChild`, asked again on every call |
 | `cell_args` | Spec 023 §4's argv, `--config-fd=3 --lock-fd=4 --cell=<id>`, matched exactly, so `membraned` can tell it from a usage error |
+| `cell_start` | Spec 023 §5's first two steps: `read_config` reads the config record from descriptor 3 under a cap, and `adopt_lock` checks that descriptor 4 is this cell's locked `supervisor.lock`; see "Starting a cell" below |
 | `daemon` | `membraned`: spawns the configured brokers and answers `membrane.status` on a private control socket |
 | `control` | The ndjson control-protocol envelope the daemon serves |
 | `exec` | Resolving and preparing broker commands for `vmm::VmmChild` to run |
@@ -52,6 +53,27 @@ and exits 64. That includes those three arguments in another order, with a fourt
 `daemon::parse_config` refuses, exits 2. A later failure exits 1: to bind or inspect the control
 socket, to find or start a broker, or to accept connections while serving. The `-h`, `--help`,
 `--version` and exit 64 rules are spec 025 §6's. Exits 2 and 1 are unchanged.
+
+## Starting a cell
+
+`cell_start` holds what a cell's `membraned` does first, before it binds a socket or creates
+anything (spec 023 §5). `membraned`'s `main` does not call it yet; native task `plasmosome-t8nq`
+wires it in.
+
+`read_config` reads descriptor 3 until EOF, or until it has read `MAX_RECORD_BYTES + 2` bytes, one
+more than the largest record, so a writer that never stops cannot make it read more. The read has no
+deadline: a writer that stops without closing its end holds it there, and the controller closes its
+end once the record is written. It closes the descriptor and decodes the bytes with core's
+`SupervisorConfig::decode`. A record of exactly 1,048,576 bytes before its newline is accepted, and
+one of 1,048,577 is `TooLarge`. A record for another cell than argv's `--cell=` is `CellMismatch`.
+
+`adopt_lock` takes `flock(LOCK_EX | LOCK_NB)` on descriptor 4 and sets its close-on-exec flag.
+The handed-over descriptor shares the open file the controller locked, so the lock is taken at
+once; a fresh open of the file while another holds it is `LockNotHeld`. It then opens
+`cells/<cell>` from the record's instance root with core's `InstanceRoot::cell_dir`, which follows
+no symlink, and refuses unless that directory's `supervisor.lock` has the descriptor's device and
+inode. So another cell's lock, an unrelated file and a directory moved to `retired/` are all
+refused. The returned `AdoptedLock` keeps the descriptor; nothing calls `LOCK_UN`.
 
 ## Readiness is an answered query
 
@@ -371,7 +393,7 @@ not in the root file.
 ## Not here yet
 
 The netstack shim and the vsock bridges belong to this crate by that rule, and none of it is
-built: the modules present are `brokers`, `cell_args`, `control`, `daemon`, `exec`, `readiness`,
-`runtime` and `vmm`.
+built: the modules present are `brokers`, `cell_args`, `cell_start`, `control`, `daemon`, `exec`,
+`readiness`, `runtime` and `vmm`.
 Native task `plasmosome-qep`, which boots one real cell from the qualified Darwin runtime bundle,
 carries the first part of that work: the vsock endpoints and their handshake.

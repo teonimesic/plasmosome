@@ -27,9 +27,11 @@ Runs on the host, one per cell. This is where enforcement lives.
   [spec 026](../../docs/specs/026-security-standard.md#2-unsafe-code), because forking a child
   that may only call async-signal-safe functions, exact-child waits, process-group signals, the
   Darwin process-table helper and the Darwin sandbox observation need `libc` and C calls the
-  standard library does not offer;
-  `#[allow(unsafe_code)]` goes on the item that holds the `unsafe`, never on a `mod` or the crate
-  root.
+  standard library does not offer. The supervisor lock `membraned` is handed needs them too:
+  spec 023 §3 requires `flock`, which the standard library does not promise (`File::try_lock`
+  only currently uses it), and the standard library cannot set close-on-exec on a descriptor
+  that is already open. `#[allow(unsafe_code)]` goes on the item that holds the `unsafe`, never
+  on a `mod` or the crate root.
 
 ## Testing
 
