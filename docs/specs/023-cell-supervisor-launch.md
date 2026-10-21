@@ -397,7 +397,12 @@ It never touches an entry spec 008 does not validate. To test the lock, the cont
 until the row's action is done. A missing `supervisor.lock` is created exclusively, locked, and
 counts as free. Whatever the lock, it then reads the `launched` marker before it acts, so every
 set-aside entry can name it. Amended on 2026-10-20: this did not say the marker is read when the
-lock is held.
+lock is held. The controller cannot test a `supervisor.lock` that is a symlink, a directory or any
+other entry that is not a regular file; one it cannot open; one whose `flock` fails for a reason
+other than another holder; or a missing one it cannot create and lock. Such a lock is neither held
+nor free, and has its own row below. §4, step 6, and §7, step 4, never take such a lock as free.
+Amended on 2026-10-21: this did not say what the check does with a lock it cannot test, so a cell
+with one fell under no row.
 
 At startup the held-lock cells are queried concurrently, each with an answer cap
 below `recovery_deadline_ms` that leaves the rest of spec 001 §4.1's single startup deadline for
@@ -407,6 +412,7 @@ counts as no answer. Rows are tried in order:
 | Lock | Marker | Journal | Outcome |
 | --- | --- | --- | --- |
 | held | any | any | Query under spec 008 within the cap, waiting for a `germinating` cell. No answer, or still `germinating`, at the cap: set aside as `unresponsive` or `germinating`. |
+| cannot be tested | any | any | Set aside as `lock_untestable`, with no query. |
 | free | any | corrupt | Quarantine under spec 008, with the lock state and marker in its report. |
 | free | from an earlier boot, or recording a clean stop | no outstanding external obligation | Retire. Every settled holding and pending operation is written to the session log as residue. |
 | free | from an earlier boot, or recording a clean stop | an outstanding external obligation | Set aside as `external_obligations`. |
@@ -422,9 +428,10 @@ appended before the rename. A retirement whose rename fails after its line was a
 cell aside as `retire_failed`, and a second session log line says the cell was not retired. If
 that second line cannot be appended either, the cell stays set aside as `retire_failed` and the
 failure is written to stderr, so the log's last line for the cell is a retirement that did not
-happen; `plasmosome.recovery` still lists the cell. These two reasons join the five the table
-names. Amended on 2026-10-20: this named no reason for that cell. Amended on 2026-10-20: this did
-not say what a failed rename after the line does.
+happen; `plasmosome.recovery` still lists the cell. These two reasons join the six the table names.
+Amended on 2026-10-20: this named no reason for that cell. Amended on 2026-10-20: this did not say
+what a failed rename after the line does. Amended on 2026-10-21: this counted five reasons, from a
+table that had no row for a lock the controller cannot test.
 
 **Set-aside cells** are handled as spec 008 handles quarantine. The cell is absent from the ordinary
 registry, so `cell.list` omits it. `plasmosome.recovery` lists it in `set_aside`, with its reason,
@@ -436,10 +443,11 @@ spec 008 without its supervisor, so they wait, and block nothing else. It is not
 next request naming it, and every startup, runs the check again. A check that adopts it first does
 what startup adoption does: spec 008's pending cleanup, generation comparison, reconciliation and
 publication, then the no-`created` rule below. `cell.kill` on a set-aside cell whose lock is held
-runs §7's steps. Every other verb naming a set-aside cell is 101, and so is `cell.kill` on one
-whose lock is free; clearing those is owner question 3. Amended on 2026-10-20: this named no key
-for set-aside cells in `plasmosome.recovery`, whose keys spec 001 fixes, and did not list their
-settled holdings, which spec 028 §7 requires there.
+runs §7's steps. Every other verb naming a set-aside cell is 101, and so is `cell.kill` on one whose
+lock is free or cannot be tested; clearing those is owner question 3. Amended on 2026-10-20: this
+named no key for set-aside cells in `plasmosome.recovery`, whose keys spec 001 fixes, and did not
+list their settled holdings, which spec 028 §7 requires there. Amended on 2026-10-21: this did not
+say that `cell.kill` on a cell whose lock cannot be tested is 101.
 
 **Order.** At startup the controller classifies every validated cell first, holding each free lock.
 It acts only after that, and only if startup is going to serve. A startup that refuses for another
@@ -812,6 +820,19 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     a registry-imported genome (spec 020). A genome whose apply fails after boot leaves a retired
     directory, no running `membraned`, and a refusal carrying `cell`. Catches: creating a cell
     before resolution, and an empty running cell after a failed attach.
+18. Startup over four validated cells whose `supervisor.lock` cannot be tested: G1 has a directory
+    at that name, G2 a symlink there to an unlocked lock file, G3 a lock file the controller may not
+    open (mode 0000), and G4 no lock, in a cell directory where the test makes creating one fail.
+    Each has `launched` from another boot, a journal with one settled attachment, and a
+    `membrane.uds` bound by a test process that records every connection. Startup serves. Each cell
+    is still under `cells/`, absent from `cell.list`, and listed by `plasmosome.recovery` as
+    `lock_untestable`, with lock `untestable`, marker `earlier_boot` and its attachment in
+    `desired`. The test process records no connection, and readiness is false. `cell.kill` of G1
+    is 101. Once G1's directory is replaced by an unlocked lock file, `cell.status` of G1 runs the
+    check again, retires G1 and is 101. G3 is skipped, and reported as skipped, when the test runs
+    as root. Catches: a lock that cannot be tested taken as free, so its cell is retired, or as
+    held, so its supervisor is queried; a symlink followed to a free lock; and startup refused for
+    one cell's lock. Amended on 2026-10-21: this item is new.
 
 ## Out of scope
 

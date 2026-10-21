@@ -250,10 +250,12 @@ observed by probing control-`status`, not by reading a pidfile).
 
 Spec008 defines recovered `ledger_generation` as the maximum adopted cell generation, or 0.
 It is not a cross-cell acknowledgement watermark. Recovered cells retain their actual observed
-supervisor state; replay does not prove readiness. After successful recovery startup, `ready`
-is false while the account contains drift, quarantine, unmatched effects or any incomplete
-effect, or while a spec 028 expiry is unfinished past its H. Quarantined cells are absent from
-`cells` and remain named in `plasmosome.recovery`. A recovered unknown genome is omitted, as §1
+supervisor state; replay does not prove readiness. After successful recovery startup, `ready` is
+false while the account contains drift, quarantine, a set-aside cell, unmatched effects or any
+incomplete effect, or while a spec 028 expiry is unfinished past its H. Quarantined and set-aside
+cells are absent from `cells` and remain named in `plasmosome.recovery`. Amended on 2026-10-21: this
+did not name set-aside cells, which spec 023 §8 keeps out of `cells` with readiness false. A
+recovered unknown genome is omitted, as §1
 requires.
 
 ### 3.3a `plasmosome.recovery`
@@ -279,16 +281,20 @@ expected, drift, unmatched, incomplete, pending, quarantined, set_aside}`. `set_
 required array of the cells spec 023's supervisor check set aside, in byte order of the cell ID
 string (so `cell-10` sorts before `cell-9`), and `[]` when there is none. Each entry is `{cell,
 reason, lock, marker, desired, pending}`. `reason` is one of `unresponsive`, `germinating`,
-`external_obligations`, `supervisor_lost`, `holdings_without_supervisor`, `retire_unlogged` and
-`retire_failed`. `lock` is `held` or `free`. `marker` is required whatever the lock, since the check
+`lock_untestable`, `external_obligations`, `supervisor_lost`, `holdings_without_supervisor`,
+`retire_unlogged` and `retire_failed`. `lock` is `held`, `free` or `untestable`, the last for a
+`supervisor.lock` spec 023's check cannot test. `marker` is required whatever the lock, since the
+check
 reads `launched` for every cell before it acts: `absent`, `earlier_boot`, `this_boot_stopped`,
 `this_boot` or `unreadable`, for no marker, one from an earlier boot, one from this boot that
 records a clean stop, one from this boot that records none, or one that cannot be read. `desired` is
 the cell's settled DesiredCell from its journal, in this section's projection, so each attachment
 shows its spec 028 `lifetime`; an empty journal gives the empty generation-0 record. `pending` is
 the cell's pending transaction in this section's projection, omitted when it has none. Both are
-omitted when the cell's journal is corrupt, which happens only when the lock is held, since a free
-lock with a corrupt journal quarantines; spec 008 then reports that journal under `quarantined`. A
+omitted when the cell's journal is corrupt, which happens only when the lock is held or untestable,
+since a free lock with a corrupt journal quarantines; spec 008 then reports that journal under
+`quarantined`. Amended on 2026-10-21: `reason` had no `lock_untestable` and `lock` no `untestable`,
+so spec 023's row for a lock its check cannot test had no entry here. A
 cell appears in `set_aside` once. A set-aside cell's records appear only in its entry, apart from a
 corrupt journal's report under `quarantined`, and never in the top-level `desired`,
 `observed_cells`, `pending`, `expected`, `drift`, `unmatched`, `incomplete` or `tombstones`. Its

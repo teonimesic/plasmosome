@@ -521,9 +521,20 @@ original host handles. A source recipe or matching artifact digest proves intend
 effective isolation. The runtime/configuration and observation faults remain separate from
 the sole durable per-cell generation/decision journal.
 
-`RecoveryOutcome` contains `desired`, `tombstones`, `expected: OsState`, `drift: Diff`,
-`unmatched: Vec<UnmatchedRecord>`, `incomplete: Vec<IncompleteEffect>`, `pending`,
-`quarantined: Vec<QuarantineReport>` and independently observed cells.
+`RecoveryOutcome` contains `desired`, `tombstones`, `expected: OsState`, `drift: Diff`, `unmatched:
+Vec<UnmatchedRecord>`, `incomplete: Vec<IncompleteEffect>`, `pending`, `quarantined:
+Vec<QuarantineReport>`, `set_aside` and independently observed cells. `set_aside` is a
+`BTreeMap<CellId, SetAsideCell>` with one entry for each cell spec 023's supervisor check set aside,
+and none for any other cell. `SetAsideCell` is `{ reason, lock, marker, desired:
+Option<DesiredCell>, pending: Option<PendingCellTransaction> }`, with the values spec 001 §3.3a
+gives a `set_aside` entry; `desired` and `pending` are None where that section omits them. The
+check, not `recover`, decides which cells are set aside and why: `recover` tests no lock and reads
+no marker, and is given that decision with its observation. It reads a set-aside cell's journal into
+that cell's entry and into no other field, apart from a corrupt journal's report in `quarantined`,
+and that cell's generation is not part of the instance generation. So the outcome says which cells
+were set aside and why, as `plasmosome.recovery` shows; `cell.list` omits them (spec 023 §8).
+Amended on 2026-10-21: the outcome had no field for set-aside cells, though spec 001 §3.3a's
+projection of it lists them.
 Incomplete contains every independently observed incomplete operation, with exact cell/plugin
 ownership; it is a separate unfinished-effects account, not coerced into an OsObject or silently
 removed from drift. Matching cleanup obligations are resolved as above; other incomplete effects
@@ -590,11 +601,13 @@ allowed to report an observed dead cell; the controller must not derive that sta
 file, socket existence or inability to connect. Before that query, startup applies spec 023's
 supervisor check to each validated cell. It queries only cells whose `supervisor.lock` is held,
 concurrently, each within a cap below the startup deadline. The lock and the `launched` marker are
-the supervisor's own lifecycle evidence, not a PID file or socket existence. A failed query, or a
-free lock with a marker from this boot that records no clean stop, sets that one cell aside: it is
+the supervisor's own lifecycle evidence, not a PID file or socket existence. A failed query, a
+`supervisor.lock` the check cannot test, or a free lock with a marker from this boot that records no
+clean stop, sets that one cell aside: it is
 handled as quarantine is, and never refuses startup. Otherwise a free lock may retire the directory
-to `<root>/retired/<cell>`, which is not discovered again. The same check runs while
-serving, when a query to a supervisor fails.
+to `<root>/retired/<cell>`, which is not discovered again. The same check runs while serving, when a
+query to a supervisor fails. Amended on 2026-10-21: this did not name a lock the check cannot test
+(spec 023 §8).
 
 No requests are answered until complete discovery and observation have succeeded, journals have
 been classified, pending cleanup has completed and every adopted cell's complete settled record
@@ -667,14 +680,16 @@ rule for the instance's control socket is unchanged.
 
 On successful startup, construct ControllerState from recovered identities/modes and actual
 supervisor state, retain the entire recovery account, and pass desired.generation to
-Controller::new. Quarantined cells are absent from the ordinary cell registry and visible in
-`plasmosome.recovery`. The controller's ready flag is false if any quarantine, unmatched effect,
-incomplete effect, drift or unsettled publication remains; an empty instance is ready only after the same startup
+Controller::new. Quarantined and set-aside cells are absent from the ordinary cell registry and
+visible in `plasmosome.recovery`. The controller's ready flag is false if any quarantine, set-aside
+cell, unmatched effect, incomplete effect, drift or unsettled publication remains; an empty instance
+is ready only after the same startup
 requirements. A `revoked` guest binding (spec 024), after its removal completed, is none of these.
 An observed ready cell is not relabelled dead because its desired holdings drift.
 The diagnostic surface states that discrepancy separately. Equal object snapshots do not
 establish equal participant generations or publication content. Matching published records do
 not establish matching holdings. No journal record or recovery result by itself proves liveness.
+Amended on 2026-10-21: this did not name set-aside cells (spec 023 §8).
 
 The controller reconnects to surviving supervisors and retains exact inverses for subsequent
 ordinary revocation. Before any other mutation of a cell, it expires every attachment whose
@@ -892,7 +907,9 @@ remain in Beads under specs012/016, not duplicated as a task in this document.
   length/hash and expiry fail the whole observation without consuming a prefix as authority.
   Retrieving a page again returns the same capture, not rows from a later live inventory.
   A new completed observation during a public transfer cannot replace that transfer's pinned
-  outcome. With empty drift, unmatched and quarantine but one independently observed unrequested
+  outcome, its `set_aside` included: a cell set aside while the transfer runs is not in that
+  transfer's `set_aside`, and the next capture lists it. Amended on 2026-10-21: this did not check
+  `set_aside`. With empty drift, unmatched and quarantine but one independently observed unrequested
   IncompleteEffect, public plasmosome.status remains not ready and plasmosome.recovery returns
   the exact incomplete operation and original owner. Dropping incomplete or deciding readiness
   from OsState alone must fail at the public wire, not only in a recovery model.
