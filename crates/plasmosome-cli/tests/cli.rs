@@ -1023,6 +1023,13 @@ fn help_says_how_this_build_reaches_an_instance() {
         help.contains("This build reaches an instance only through --socket."),
         "{help}"
     );
+    assert!(
+        help.contains(
+            "Beside it, --kernel only names the instance; PLASMOSOME_KERNEL and HOME are not read \
+             yet."
+        ),
+        "{help}"
+    );
 }
 
 #[test]

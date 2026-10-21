@@ -6,12 +6,11 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use plasmosome_cli::json::Json;
-use plasmosome_cli::reply::ReadFailure;
 use plasmosome_cli::{
     COMMANDS, ClientCode, Clock, Context, Deadline, Exit, SystemClock, Unreplied, exchange, handle,
 };
@@ -223,18 +222,77 @@ fn closed_and_silent_daemons() {
     assert_eq!(fake.connections(), 2);
 }
 
-struct LateClock {
+struct ScriptedClock<F> {
     start: Instant,
+    offsets_ms: &'static [u64],
     reads: AtomicUsize,
+    at_reading: F,
 }
 
-impl Clock for LateClock {
+impl<F: Fn(usize) + Sync> Clock for ScriptedClock<F> {
     fn now(&self) -> Instant {
-        match self.reads.fetch_add(1, Ordering::Relaxed) {
-            0 => self.start,
-            _ => self.start + Duration::from_secs(3600),
-        }
+        let reading = self.reads.fetch_add(1, Ordering::Relaxed);
+        (self.at_reading)(reading);
+        let offset = self.offsets_ms[reading.min(self.offsets_ms.len() - 1)];
+        self.start + Duration::from_millis(offset)
     }
+}
+
+const SECOND_CALL: usize = 2;
+
+fn clock_with(
+    offsets_ms: &'static [u64],
+    at_reading: impl Fn(usize) + Sync + 'static,
+) -> &'static dyn Clock {
+    Box::leak(Box::new(ScriptedClock {
+        start: Instant::now(),
+        offsets_ms,
+        reads: AtomicUsize::new(0),
+        at_reading,
+    }))
+}
+
+fn clock_reading(offsets_ms: &'static [u64]) -> &'static dyn Clock {
+    clock_with(offsets_ms, |_| {})
+}
+
+fn peer_at(socket: &Path, act: impl FnOnce(UnixStream) + Send + 'static) {
+    let listener = UnixListener::bind(socket).expect("a socket");
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
+        .expect("the socket is 0600");
+    thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("a connection");
+        act(stream);
+    });
+}
+
+fn read_request(stream: &mut UnixStream) {
+    let mut seen = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    while !seen.contains(&b'\n') {
+        let count = stream.read(&mut buffer).expect("the request arrives");
+        assert!(count > 0, "the client closed before its newline");
+        seen.extend_from_slice(&buffer[..count]);
+    }
+}
+
+fn signal() -> (Mutex<mpsc::Sender<()>>, mpsc::Receiver<()>) {
+    let (sender, receiver) = mpsc::channel();
+    (Mutex::new(sender), receiver)
+}
+
+fn raise(sender: &Mutex<mpsc::Sender<()>>) {
+    let _ = sender
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .send(());
+}
+
+fn await_signal(receiver: &Mutex<mpsc::Receiver<()>>) {
+    let _ = receiver
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .recv_timeout(PATIENCE);
 }
 
 #[test]
@@ -242,17 +300,138 @@ fn the_deadline_before_writing() {
     let root = private_root();
     let socket = socket_in(root.path());
     let fake = FakeDaemon::start(&socket, vec![Answer::Silent]);
-    let clock = Box::leak(Box::new(LateClock {
-        start: Instant::now(),
-        reads: AtomicUsize::new(0),
-    }));
-    let ran = run_on(line(&socket, &[]), clock);
+    let ran = run_on(line(&socket, &[]), clock_reading(&[0, 3_600_000]));
     assert_eq!(ran.exit, Exit::Unavailable);
     let envelope = failure(&ran);
     assert_eq!(envelope["error"]["code"], "deadline");
     assert_eq!(envelope["error"]["deadline_ms"], 10_000);
     assert_eq!(envelope["instance"]["socket"], text(&socket));
     assert_eq!(fake.ended(1), [b""]);
+}
+
+fn no_reply(ran: &Ran) -> (Value, String) {
+    assert_eq!(ran.exit, Exit::Unavailable);
+    let error = &failure(ran)["error"];
+    assert_eq!(error["code"], "no_reply", "{error}");
+    let message = error["message"].as_str().expect("a message").to_string();
+    (error["cause"].clone(), message)
+}
+
+#[test]
+fn each_read_waits_only_the_time_left() {
+    let root = private_root();
+    let socket = socket_in(root.path());
+    let _fake = FakeDaemon::start(&socket, vec![Answer::Silent]);
+    let ran = run_on(
+        line(&socket, &["--deadline-ms", "600"]),
+        clock_reading(&[0, 0, 590]),
+    );
+    assert_eq!(no_reply(&ran).0, "deadline");
+    assert!(
+        ran.took < Duration::from_millis(300),
+        "took {:?} with 10 ms left",
+        ran.took
+    );
+}
+
+fn held_peer(socket: &Path) -> mpsc::Sender<()> {
+    let (release, released) = mpsc::channel::<()>();
+    peer_at(socket, move |stream| {
+        let _ = released.recv_timeout(PATIENCE);
+        drop(stream);
+    });
+    release
+}
+
+#[test]
+fn each_write_waits_only_the_time_left() {
+    let root = private_root();
+    let socket = socket_in(root.path());
+    let release = held_peer(&socket);
+    let name = name_for_a_line_of(MAX_REQUEST_BYTES);
+    let ran = run_on(
+        line(&socket, &["--kernel", &name, "--deadline-ms", "600"]),
+        clock_reading(&[0, 590, 600]),
+    );
+    let _ = release.send(());
+    assert_eq!(no_reply(&ran).0, "deadline");
+    assert!(
+        ran.took < Duration::from_millis(300),
+        "took {:?} with 10 ms left",
+        ran.took
+    );
+}
+
+#[test]
+fn a_request_cut_off_midway_says_the_write_failed() {
+    let root = private_root();
+    let socket = socket_in(root.path());
+    let name = name_for_a_line_of(MAX_REQUEST_BYTES);
+
+    let release = held_peer(&socket);
+    let ran = run_on(
+        line(&socket, &["--kernel", &name, "--deadline-ms", "600"]),
+        clock_reading(&[0, 590, 600]),
+    );
+    let _ = release.send(());
+    let (cause, message) = no_reply(&ran);
+    assert_eq!(cause, "deadline");
+    assert!(
+        message.starts_with("the deadline passed before the request was written whole"),
+        "{message}"
+    );
+
+    let socket = root.path().join("closing.uds");
+    let (close, closing) = signal();
+    let (closed, gone) = signal();
+    peer_at(&socket, move |stream| {
+        let _ = closing.recv_timeout(PATIENCE);
+        drop(stream);
+        raise(&closed);
+    });
+    let gone = Mutex::new(gone);
+    let clock = clock_with(&[0, 9_990], move |reading| {
+        if reading == SECOND_CALL {
+            raise(&close);
+            await_signal(&gone);
+        }
+    });
+    let ran = run_on(line(&socket, &["--kernel", &name]), clock);
+    let (cause, message) = no_reply(&ran);
+    assert_eq!(cause, "transport");
+    assert!(
+        message.starts_with("writing the request failed after part of it was sent"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_read_after_the_daemon_closed_still_takes_its_reply() {
+    let root = private_root();
+    let socket = socket_in(root.path());
+    let (closed, gone) = signal();
+    peer_at(&socket, move |mut stream| {
+        read_request(&mut stream);
+        stream
+            .write_all(b"{\"id\":1,\"result\":{}}\n")
+            .expect("the reply is written");
+        drop(stream);
+        raise(&closed);
+    });
+    let gone = Mutex::new(gone);
+    let clock = clock_with(&[0], move |reading| {
+        if reading == SECOND_CALL {
+            await_signal(&gone);
+        }
+    });
+    let ran = run_on(line(&socket, &[]), clock);
+    assert_eq!(
+        ran.exit,
+        Exit::Done,
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert_eq!(one_line(&ran.stdout)["result"], json!({}));
 }
 
 #[cfg(target_os = "macos")]
@@ -332,7 +511,7 @@ fn refused_peer(stream: UnixStream, trusted_uid: u32) -> (ClientCode, Option<u32
             number(field(error.fields(), "uid")),
             number(field(error.fields(), "peer_uid")),
         ),
-        Err(Unreplied::Unanswered(failure)) => panic!("the request was sent: {failure:?}"),
+        Err(unreplied) => panic!("the request was sent: {unreplied:?}"),
         Ok(line) => panic!("the request was answered: {line:?}"),
     }
 }
@@ -403,6 +582,25 @@ fn the_sun_path_limit() {
     );
     assert_eq!(envelope["instance"]["socket"], text(&over));
     assert_eq!(fake.connections(), 1);
+}
+
+#[test]
+fn the_sun_path_limit_counts_bytes() {
+    let root = private_root();
+    let room = MAX_PATH + 1 - root.path().as_os_str().len() - 1;
+    let wide = char::from_u32(0xe9).expect("a code point").to_string();
+    let over = root
+        .path()
+        .join(format!("{}{}", "s".repeat(room % 2), wide.repeat(room / 2)));
+    assert_eq!(over.as_os_str().len(), MAX_PATH + 1);
+    assert!(text(&over).chars().count() <= MAX_PATH);
+    let ran = run(line(&over, &[]));
+    assert_eq!(ran.exit, Exit::Refused);
+    let error = &failure(&ran)["error"];
+    assert_eq!(
+        (&error["code"], &error["max_bytes"]),
+        (&json!("socket_path_too_long"), &json!(MAX_PATH))
+    );
 }
 
 fn controls() -> String {
@@ -550,10 +748,9 @@ fn a_request_line_over_the_bound_is_refused_before_connecting() {
     assert_eq!(envelope["command"], "invalid");
     assert_eq!(envelope["error"]["code"], "invalid_argument");
     assert_eq!(envelope["error"]["argument"], name.as_str());
-    assert!(
-        envelope.get("instance").is_none(),
-        "{}",
-        envelope["instance"]
+    assert_eq!(
+        envelope["instance"],
+        json!({"name": name, "socket": text(&socket)})
     );
     let accepted = listener.accept().map(|_| ());
     assert!(
@@ -589,7 +786,7 @@ fn a_write_refused_before_any_byte_is_a_transport_failure() {
 }
 
 #[test]
-fn a_request_the_deadline_cuts_off_is_unanswered() {
+fn a_request_the_deadline_cuts_off_is_cut_off() {
     let (ours, mut theirs) = UnixStream::pair().expect("a socket pair");
     let (done, finished) = mpsc::channel::<()>();
     let reader = thread::spawn(move || {
@@ -611,7 +808,11 @@ fn a_request_the_deadline_cuts_off_is_unanswered() {
     let _ = done.send(());
     reader.join().expect("the reader ends");
     assert!(
-        matches!(outcome, Err(Unreplied::Unanswered(ReadFailure::TimedOut))),
+        matches!(
+            &outcome,
+            Err(Unreplied::CutOff(error))
+                if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+        ),
         "{outcome:?}"
     );
 }
