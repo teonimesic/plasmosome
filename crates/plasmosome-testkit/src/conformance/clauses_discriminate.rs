@@ -94,6 +94,7 @@ enum Defect {
     ConflictWithdrawsTheLiveGrantOfItsKey,
     RefusalSwapsItsAddress(Call),
     UnknownRevokeTidiesResidue,
+    RefusedEffectLandsLate(Call),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +138,8 @@ struct DefectiveBackend {
     planted: Vec<OsObject>,
     first_returned: Option<Handle>,
     recovery_log: Rc<RefCell<Vec<LedgerEntry>>>,
+    pending_effects: RefCell<Vec<OsObject>>,
+    landed_effects: RefCell<Vec<OsObject>>,
 }
 
 impl DefectiveBackend {
@@ -156,6 +159,8 @@ impl DefectiveBackend {
             planted: Vec::new(),
             first_returned: None,
             recovery_log,
+            pending_effects: RefCell::default(),
+            landed_effects: RefCell::default(),
         };
         if defect == Defect::RecordsItsOwnRecoveryLog {
             let recovered = backend.recovery_log.borrow().clone();
@@ -246,6 +251,15 @@ impl DefectiveBackend {
                 if class == operation.class() && rollback == call =>
             {
                 self.drop_address(operation.handle());
+                Err(refusal)
+            }
+            Defect::RefusedEffectLandsLate(landing)
+                if landing == call
+                    && !self.state.objects().any(|held| {
+                        held.class() == operation.class() && held.id == operation.id()
+                    }) =>
+            {
+                self.pending_effects.borrow_mut().push(operation.object());
                 Err(refusal)
             }
             _ => Err(refusal),
@@ -842,10 +856,15 @@ impl EnforcementBackend for DefectiveBackend {
             std::panic::panic_any(ASSERTION_SHAPED_INFRASTRUCTURE_PANIC);
         }
         if self.mirrors_its_ledger() {
-            self.mirrored_state()
-        } else {
-            self.state.clone()
+            return self.mirrored_state();
         }
+        let mut observed = self.state.clone();
+        for object in self.landed_effects.borrow().iter() {
+            let _ = observed.insert(object.clone());
+        }
+        let pending = std::mem::take(&mut *self.pending_effects.borrow_mut());
+        self.landed_effects.borrow_mut().extend(pending);
+        observed
     }
 
     fn apply(&mut self, op: UniverseOp) -> Result<(), BackendError> {
@@ -1946,6 +1965,17 @@ fn a_conflict_that_withdraws_a_live_grant_keeps_its_record_and_a_later_apply_hid
         let mut backend = DefectiveBackend::carrying(defect);
         let live = conformance::op_for(GrantId::new(), owner(), capability.clone());
         let entry = backend.grant(live.clone(), GrantKind::Hot).unwrap();
+        let bystanders = [
+            conformance::op_for(
+                GrantId::new(),
+                conformance::second_owner(),
+                capability.clone(),
+            ),
+            conformance::op_for(GrantId::new(), owner(), mount("/src", "/other")),
+        ];
+        for bystander in &bystanders {
+            backend.grant(bystander.clone(), GrantKind::Hot).unwrap();
+        }
         let applied = conformance::op_for(GrantId::new(), owner(), capability.clone());
         backend.apply(applied.clone()).unwrap();
         assert_eq!(
@@ -1958,6 +1988,9 @@ fn a_conflict_that_withdraws_a_live_grant_keeps_its_record_and_a_later_apply_hid
             expected.insert(live.object()).unwrap();
         }
         expected.insert(applied.object()).unwrap();
+        for bystander in &bystanders {
+            expected.insert(bystander.object()).unwrap();
+        }
         assert_eq!(backend.snapshot_os_state(), expected, "{defect:?}");
         assert_eq!(
             backend.ledger.get(&entry.handle),
@@ -2578,4 +2611,37 @@ fn a_changed_writable_mount_keeps_its_key_and_becomes_read_only() {
     let [key_changed, recipe_changed] = conformance::changed_capabilities(&writable);
     assert_eq!(recipe_changed, mount("/src", "/workspace"));
     assert_ne!(selection_of(&key_changed), selection_of(&writable));
+}
+
+#[test]
+fn the_snapshot_clause_rejects_a_refusal_whose_effect_lands_after_it_returns() {
+    for call in CALLS {
+        assert_rejected(|| {
+            conformance::snapshot_never_invents_objects(carrying(Defect::RefusedEffectLandsLate(
+                call,
+            )))
+        });
+    }
+}
+
+#[test]
+fn a_late_effect_shows_from_the_second_read_after_its_own_call() {
+    for defective in CALLS {
+        for call in CALLS {
+            let mut backend = DefectiveBackend::carrying(Defect::RefusedEffectLandsLate(defective));
+            let invalid = invalid_of_every_class().remove(0);
+            assert_eq!(
+                call_with(&mut backend, call, &invalid),
+                Err(conformance::invalid_refusal(&invalid))
+            );
+            assert!(backend.snapshot_os_state().is_empty());
+            let later = backend.snapshot_os_state();
+            if call == defective {
+                assert!(later.objects().any(|held| *held == invalid.object()));
+                assert_eq!(later.objects().count(), 1);
+            } else {
+                assert!(later.is_empty());
+            }
+        }
+    }
 }
