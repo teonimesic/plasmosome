@@ -234,7 +234,8 @@ help on stdout and exits 0. A sole `--version` prints `plasmosomed` and the pack
 as `plasmosomed 0.1.0`, and exits 0. Neither reads a configuration. Any other single argument is
 the configuration path, so a file named `--version` is passed as `./--version`. No argument, or
 more than one, prints usage on stderr and exits 64. A configuration the daemon cannot read, or
-refuses, exits 2. A failure to bind or serve exits 1. These are spec 025 §6's rules.
+refuses, exits 2. A failure to bind or serve exits 1. The `-h`, `--help`, `--version` and exit 64
+rules are spec 025 §6's. Exits 2 and 1 are unchanged.
 
 ## Configuration
 
