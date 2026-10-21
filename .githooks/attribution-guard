@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # A person is accountable for every commit here. A model is a tool that was used, the way an
-# editor or a compiler is, and tools do not co-author. A `Co-authored-by` trailer naming one puts
-# it on main as a co-author, and a `Signed-off-by` naming one certifies what a tool cannot.
+# editor or a compiler is, and tools do not co-author. The squash keeps a `Co-authored-by` trailer
+# naming one, and GitHub shows it as a co-author when it can resolve the address to an account. A
+# `Signed-off-by` naming one certifies what a tool cannot.
 #
 # It also refuses either trailer when it names somebody no reader can trace: a value with no
 # address, or an address on a domain no account can sit on, such as `.local`, which is what git
-# falls back to on a machine with no `user.email`. When a value has an address, a model is still
+# falls back to on a machine with no `user.email`. A malformed address, such as `<probe@>` or one
+# holding a space, counts as no address. When a value has an address, a model is still
 # found by a vendor's name anywhere in it, so a person whose name or address holds one is refused
 # too. A value with no address is refused either way, and only a whole vendor word in its name
 # makes the refusal say it credits a model. It reads trailers only, not a commit's author or
@@ -45,6 +47,17 @@ vendor_word="(^|[^[:alnum:]])($vendors)([^[:alnum:]]|\$)"
 # ICANN for private use, or held by no registry (spec 029 section 4).
 untraceable_domain='@([^@]*\.)?(local|localhost|invalid|test|example|example\.com|example\.net|example\.org|home\.arpa|internal|localdomain)\.?$'
 
+# A malformed address, which counts as no address (spec 029 section 4 rule 2). Its local part is
+# the text before its last `@`, and its domain the text after it. Each shape the rule lists has one
+# alternative: an empty local part; a domain that, once one trailing dot is removed, is empty,
+# starts with a dot, ends with a dot, or holds two dots in a row; and whitespace anywhere. A single
+# trailing dot passes, as the domain list ignores it. Any other shape, such as two `@` in a row,
+# goes on to the vendor search and the domain list. The whitespace is the UTF-8 bytes of the
+# characters `blank_to_another_reader` counts as blank, because the guard runs in the C locale, and
+# the two sets must stay the same.
+blank_bytes="[ "$'\t\r\v\f'"]|"$'\xc2'"["$'\x85\xa0'"]|"$'\xe1\x9a\x80'"|"$'\xe2\x80'"["$'\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\xa8\xa9\xaf'"]|"$'\xe2\x81\x9f'"|"$'\xe3\x80\x80'"|"$'\xef\xbb\xbf'
+malformed_address="^@[^@]*\$|@\.?\$|@\.[^@]+\$|\.\.\$|\.\.[^@]+\$|$blank_bytes"
+
 # Nominates text worth parsing. Deliberately unanchored: it may only ever over-nominate, because
 # a paragraph it skips is a paragraph nothing else looks at.
 nominate='(co-authored-by|signed-off-by)[[:space:]]*:'
@@ -79,7 +92,8 @@ matches() {
 #
 # The address is the text inside the value's last `<...>`, and the name is what comes before it. An
 # identity with no address is refused whatever its name: no account can be found for it. Its name
-# decides only what the refusal says.
+# decides only what the refusal says. A malformed address counts as no address, so it is judged
+# by its name before the vendor search and the domain list.
 #
 # `read` does the splitting and the trimming. Pattern expansions such as `${value##*<}` take time
 # that grows with the square of a value's length or worse in bash: a name padded with 5,000 spaces
@@ -94,7 +108,7 @@ judge_trailer() {
     address=${closed[0]}
     read -r name <<<"${value:0:${#value}-${#last}}"
   fi
-  if ! matches '@' "$address"; then
+  if ! matches '@' "$address" || matches "$malformed_address" "$address"; then
     if matches "$vendor_word" "$name"; then
       offence "$position" "$value" model
     else
@@ -113,7 +127,7 @@ offence() {
   if [ "$verdict" = model ]; then
     reason='credits a model'
     if [ "$position" = Co-authored-by ]; then
-      harm='GitHub shows it on main as a co-author.'
+      harm='the squash keeps the line, and GitHub shows a co-author for it when it can resolve the address to an account.'
     else
       harm='a sign-off certifies where a change came from, which a tool cannot do.'
     fi
