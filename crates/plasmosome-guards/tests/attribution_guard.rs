@@ -845,7 +845,9 @@ fn run_guard_over_probes(root: &Path, probes: &[Probe]) -> ProbeRun {
     let messages: Vec<&str> = probes.iter().map(|probe| probe.message.as_str()).collect();
     let (repository, shas) = probe_repository(&messages);
     let output = guard_command(root, repository.path())
-        .env("LC_ALL", "C.UTF-8")
+        .env_remove("LC_ALL")
+        .env_remove("LC_CTYPE")
+        .env("LANG", "C.UTF-8")
         .arg("probe")
         .output()
         .expect("the guard runs");
