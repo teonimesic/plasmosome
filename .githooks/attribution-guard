@@ -13,6 +13,12 @@
 # Fails closed: anything it cannot read is a refusal, never a pass.
 set -uo pipefail
 
+# Every check here reads bytes in the C locale, as git does. In a UTF-8 locale the shell's
+# `[:space:]` also holds U+3000 and U+2003, so a line of either would end a paragraph that git reads
+# as one. And GNU grep would fold the long s (U+017F) onto `s` under `-i`, which would make a
+# look-alike domain match a listed one.
+export LC_ALL=C
+
 # Takes rev-list arguments as separate words, so a caller can pass a range, or a tip plus
 # `--not --remotes` for a branch the remote has never seen.
 if [ "$#" -gt 0 ]; then
@@ -51,12 +57,10 @@ offences=()
 # Answers whether $2 matches $1, and exits the guard if grep could not decide.
 #
 # `grep -q` exits 0 for a match and 1 for no match; anything higher is a failure to read. Treating
-# that as "no match" is how a guard reports clean because its own tooling broke. The C locale
-# keeps `-i` to ASCII case. In a UTF-8 locale GNU grep folds the long s (U+017F) onto `s`, which
-# would make a look-alike domain match a listed one.
+# that as "no match" is how a guard reports clean because its own tooling broke.
 matches() {
   local pattern=$1 text=$2 status
-  LC_ALL=C grep -qiE "$pattern" <<<"$text"
+  grep -qiE "$pattern" <<<"$text"
   status=$?
   case $status in
     0) return 0 ;;
