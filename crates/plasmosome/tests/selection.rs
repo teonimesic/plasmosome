@@ -44,9 +44,15 @@ fn instance(home: &Path, name: &str) -> PathBuf {
     dir.join("control.uds")
 }
 
+/// Runs the binary with only `vars` in its environment. A coverage run's `LLVM_PROFILE_FILE` is
+/// kept, so the instrumented binary writes its profile where the run collects it, not in the
+/// working directory.
 fn plasmosome(args: &[&str], vars: &[(&str, &OsStr)], cwd: Option<&Path>) -> Output {
     let mut command = Command::new(BINARY);
     command.args(args).env_clear().stdin(Stdio::null());
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
     for (key, value) in vars {
         command.env(key, value);
     }
