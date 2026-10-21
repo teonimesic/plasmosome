@@ -18,6 +18,7 @@ import time
 
 COMMAND_TIMEOUT = 30
 SOURCE_TIMEOUT = 180
+EXIT_GRACE = 5
 OUTPUT_LIMIT = 16 * 1024 * 1024
 PAGE_LIMIT = 1000
 PHASES = ("planning", "in_progress", "review")
@@ -94,6 +95,7 @@ class JsonRunner:
         self.timeout = timeout
         self.deadline = time.monotonic() + budget
         self.output_limit = output_limit
+        self.exit_grace = EXIT_GRACE
         self.calls = 0
 
     def __call__(self, argv):
@@ -143,16 +145,28 @@ class JsonRunner:
         except OSError as exc:
             raise RuntimeError(f"source command I/O failed: {exc.strerror}") from exc
         finally:
-            # A reaped leader no longer reserves its process-group identity.
-            if child.returncode is None:
-                # An unwaited leader still protects cleanup of inherited-pipe descendants.
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                child.wait()
-            child.stdout.close()
-            child.stderr.close()
+            try:
+                # A reaped leader no longer reserves its process-group identity.
+                if child.returncode is None:
+                    self.end_group(child)
+            finally:
+                child.stdout.close()
+                child.stderr.close()
+
+    def end_group(self, child):
+        grace = None
+        try:
+            # An unwaited leader still protects cleanup of inherited-pipe descendants.
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            # macOS refuses a group whose only member is its exiting or exited, unreaped leader.
+            grace = self.exit_grace
+        try:
+            child.wait(timeout=grace)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("source command process group refused SIGKILL and its leader kept running") from exc
 
 
 def invalid_constant(value):
