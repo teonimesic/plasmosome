@@ -390,7 +390,7 @@ attaches a binding's value to a request only when all of these hold.
    as use for the holding's idle limit.
 2. The request reaches the relay through that holding: a component's request at the holding's
    target, or a workload flow whose selected grant is that holding. Spec 001 §4.2 serves each flow
-   from the "smallest currently eligible GrantId among the holdings at that target" (`001:1412`).
+   from the "smallest currently eligible GrantId among the holdings at that target" (`001:1417`).
    A flow through another attachment's grant gets no value.
 3. The holding is at `passthrough`. At `simulate` or `capture` nothing is attached.
 4. The relay itself sends the request to the holding's recorded destination, resolved as spec 017
@@ -572,7 +572,7 @@ wrong key. The relay never answers with an HTTP status or page of its own: spec 
 HTTP status or page from an intermediary" (`027:158`) as observing the membrane.
 
 **To the author**, for task plasmosome-z8n3. Spec 011's rule decides what is reported: "A refusal
-is reported only when the line that would have allowed it can be named." (`011:430`). On the
+is reported only when the line that would have allowed it can be named." (`011:433`). On the
 component path, three refusals are reported. Each is refused before any byte is sent, and the
 report is on the plasmid whose component sent the request, which the relay knows.
 
@@ -584,11 +584,11 @@ report is on the plasmid whose component sent the request, which the relay knows
   `scope.path_scope`, and `fix` the path.
 - A host no grant of the cell holds, whatever reference the request names. Spec 011's network
   rule reports "A DNS lookup of, or a new flow to, a host that no grant of the cell holds"
-  (`011:431-432`), with `field` `network.hosts`.
+  (`011:434-435`), with `field` `network.hosts`.
 
 A declared reference with no binding at a held host is refused and not reported: only the
 operator's entry would change it, as for "a Mount's access, which the operator decides"
-(`011:439`). The request rules' refusals are not reported either, since no declaration line
+(`011:442`). The request rules' refusals are not reported either, since no declaration line
 changes them. On the workload path nothing is reported for want of a credential, because the relay
 refuses no request for that; it only declines to substitute.
 
