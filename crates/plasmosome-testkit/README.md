@@ -118,50 +118,68 @@ not run, and does not depend on the order of a lane's runs:
 - a field in which the cell lane differs from the absent lane, unless an allowance names that
   probe and field and the cell holds exactly its value.
 
-The harness transcript is compared the same way, with no allowances and no rules.
+The harness transcript is compared the same way, with no allowances and no rules. No rule
+reaches it, because rules name probes, so a transcript key with the name of a ruled probe field is
+still compared exactly. Spec 027 §6's verdict says why.
 
 All three comparisons see each completed observation after normalization. A rule names a probe,
 a field and a kind. In each run, `judge` replaces every value of that field with a placeholder
-such as `<pid:2>`, numbered within that probe, field and run: by first appearance, or by order
-for system times and durations. Equal JSON values stay equal, distinct ones stay distinct, times
-keep their order, and an extra value in one field shifts no other. Every field no rule names is
-compared exactly, so nothing is normalized for how it looks, and a field the workload set can
-have no rule. The field must hold one value of the rule's kind or a list of them, or the runs
-are refused, naming the lane, probe, field and kind:
+such as `<pid:2>`, numbered within that probe and run, so an extra value in one probe shifts no
+other probe. How a kind is numbered decides which relations its placeholders keep:
+
+- A value that names something, a process ID, boot ID, mount ID, device, inode, ephemeral port or
+  resolved address, is numbered by first appearance across every field of the probe that has a
+  rule of its kind. The fields are taken in the byte order of their names, and a list's values in
+  their order. So equal values stay equal and distinct ones distinct, even in two fields: a leader
+  that names another process of its list fails, and so do two files that report one inode in two
+  fields. A parent mount ID is numbered with the mount IDs, and its placeholder is
+  `<mount_id:N>`. Apart from that pair, two kinds never share numbers.
+- A system time is numbered by rank within its field, earliest first, and equal times share a
+  number, so time placeholders keep their order.
+- A memory or load counter is numbered by first appearance within its field, so counters in two
+  fields are not related.
+- Every duration becomes `<duration>`, so durations keep no relation. A reach probe whose lanes
+  differ only in the order of its durations or in which of them are equal does not discriminate,
+  since timing is spec 006's.
+
+A relation that changes can show as a difference in a later field of the same probe, instead of
+or as well as the field that changed. In `a_leader_that_names_another_process_of_its_list_fails`,
+only `leader` changes, and `pids` is the field that differs. In
+`two_distinct_files_that_report_one_inode_fail`, the cell's two files in `distinct` share an
+inode, and both `distinct` and `linked` differ: `linked`'s inodes did not change, but its numbers
+moved. Times or counters whose relation matters go in one list field. A relation between two
+probes is never compared, so a probe that needs one reports both values.
+
+Every field no rule names is compared exactly, so nothing is normalized for how it looks, and a
+field the workload set can have no rule. A ruled field must hold one value of the rule's kind or
+a list of them, or the runs are refused, naming the lane, probe, field and kind:
 
 - a process ID, mount ID, parent mount ID, device, inode or memory counter is a whole number;
 - an ephemeral port is a whole number up to 65535;
-- a system time, duration or load counter is any number, but a list of system times or of
-  durations must not mix integers with numbers serde_json holds as floats, since the two do not
-  compare exactly. Floats are the numbers written with a fraction or an exponent, such as `5.0`,
-  and, when serde_json reads JSON text, also `-0` and integers beyond `u64::MAX` or below
-  `i64::MIN`. So `[5, 5.0]` and `[0, -0]` are both refused. A load counter list may mix, since it
-  is not ranked, but `5` and `5.0` are not equal JSON values, so `[5, 5.0]` gets two
-  placeholders;
+- a system time, duration or load counter is any number, but a list of system times must not mix
+  integers with numbers serde_json holds as floats, since the two do not compare exactly. Floats
+  are the numbers written with a fraction or an exponent, such as `5.0`, and, when serde_json
+  reads JSON text, also `-0` and integers beyond `u64::MAX` or below `i64::MIN`. So `[5, 5.0]`,
+  `[-0, 5]` and `[1e3, 1001]` are all refused. A duration or load counter list may mix, since it
+  is not ranked. `5` and `5.0` are not equal JSON values, so in a load counter list `[5, 5.0]`
+  gets two placeholders;
 - a boot ID is a UUID, and a resolved address an IPv4 or IPv6 address.
 
-Integer times and durations rank exactly across the whole `i64` and `u64` range, and the others
-by their total order. No kind holds an object, so no field the workload set lists can sit under a
-ruled field. A number the workload set, such as a time set with `utimensat`, can still sit in a
-ruled list, and keeping it out is the manifest author's job. A rule checks a value's shape, not
-its meaning: a `pid` rule on a numeric `errno` field makes 13 and 2 equal.
+Integer system times rank exactly across the whole `i64` and `u64` range, and the others as
+`f64` values. Times that are equal JSON numbers share a number, so `-0.0` and `0.0` are one time.
+No kind holds an object, so no field the workload set lists can sit under a ruled field. A number
+the workload set, such as a time set with `utimensat`, can still sit in a ruled list, and keeping
+it out is the manifest author's job. A rule checks a value's shape, not its meaning: a `pid` rule
+on a numeric `errno` field makes 13 and 2 equal.
 
-Relations hold only within one field of one run. Two fields are numbered apart, so a relation
-between them is not compared: a process list in `pids` and its leader in `leader`, or two files'
-inodes in two fields, can change which values are equal and still pass. Values whose relation
-matters go in one list field. Within a field, placeholders keep relations, so a reach probe whose
-open and absent lanes differ only in a ruled field still discriminates when the relation differs,
-such as two equal process IDs in one lane and two distinct ones in the other, and does not when
-only the numbers differ.
-
-Durations are ranked on purpose, like system times. Spec 027 §6 lists "times and durations the
-system chose" together and says time placeholders keep their order. So a probe's verdict can turn
-on timing order alone: a reach probe whose only difference is `[a, b]` in the open lane and
-`[b, a]` in the absent lane discriminates. And a relation that changes between a lane's two runs,
-such as two durations that swap order, is reported as noise.
+Within a probe, placeholders keep the relations above. So a reach probe whose open and absent
+lanes differ only in a ruled field still discriminates when a relation differs, such as two equal
+process IDs in one lane and two distinct ones in the other, and does not when only the numbers
+differ.
 
 `judge` takes typed runs and parses no bytes. A reader of the probe output a guest writes
-belongs with the code that runs the lanes.
+belongs with the code that runs the lanes, and spec 027 §6 says which numbers that reader must
+refuse.
 
 ## What's inside
 
