@@ -187,7 +187,7 @@ mod tests {
     use crate::backend::Capability;
     use crate::fixtures::{self, broker, mount, proxy_map, session_file, uds_socket};
     use crate::recipe::{BrokerLaunch, ProxyRecipe, RecipeError};
-    use crate::snapshot::EnforcementSnapshot;
+    use crate::snapshot::{EnforcementSnapshot, IncompleteEffect};
     use crate::universe::{CellId, CellOwner, GrantId, PluginId, UniverseClass};
     use std::time::Duration;
 
@@ -1181,5 +1181,274 @@ mod tests {
         assert_eq!(backend.snapshot_os_state(), Ok(complete.clone()));
         assert_eq!(backend.snapshot_os_state(), Ok(complete));
         assert_eq!(backend.peek_entry(entry.handle).unwrap(), entry);
+    }
+
+    const PROBE: &str = "readiness probe failed";
+
+    fn incomplete(op: &UniverseOp, detail: &str) -> BackendError {
+        BackendError::IncompleteEffect {
+            class: op.class().as_str(),
+            id: op.id(),
+            detail: detail.to_string(),
+        }
+    }
+
+    fn account(
+        objects: &[OsObject],
+        grants: &[LedgerEntry],
+        unfinished: &[&UniverseOp],
+    ) -> EnforcementSnapshot {
+        let incomplete = unfinished
+            .iter()
+            .map(|op| IncompleteEffect {
+                operation: (*op).clone(),
+            })
+            .collect();
+        EnforcementSnapshot::new(standing(objects), grants.to_vec(), incomplete).unwrap()
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Entry {
+        Grant,
+        Apply,
+    }
+
+    fn create(
+        backend: &mut FakeBackend,
+        entry: Entry,
+        op: &UniverseOp,
+    ) -> Result<(), BackendError> {
+        match entry {
+            Entry::Grant => backend.grant(op.clone(), GrantKind::Hot).map(|_| ()),
+            Entry::Apply => backend.apply(op.clone()),
+        }
+    }
+
+    fn unknown_object(op: &UniverseOp) -> BackendError {
+        BackendError::UnknownObject {
+            class: op.class().as_str(),
+            key: op.capability().key(),
+            owner: op.owner().clone(),
+            id: op.id(),
+        }
+    }
+
+    #[test]
+    fn a_failure_after_the_first_effect_reports_that_operation_until_its_exact_removal() {
+        let doomed = cell_owner("cell-1", "doomed");
+        let network = cell_owner("cell-1", "network");
+        for capability in capabilities() {
+            for entry in [Entry::Grant, Entry::Apply] {
+                let mut backend = FakeBackend::new();
+                backend.fail_after_effect_for_owner(doomed.clone(), PROBE);
+                let peer = grant_to(&mut backend, &network, capability.clone());
+                let first = backend.snapshot_os_state().unwrap();
+                let op = fixtures::op(GrantId::new(), doomed.clone(), capability.clone());
+                assert_eq!(
+                    create(&mut backend, entry, &op),
+                    Err(incomplete(&op, PROBE))
+                );
+                let failed = account(&[peer.object()], std::slice::from_ref(&peer), &[&op]);
+                assert_eq!(backend.snapshot_os_state(), Ok(failed.clone()));
+                for retry in [Entry::Grant, Entry::Apply] {
+                    assert_eq!(
+                        create(&mut backend, retry, &op),
+                        Err(incomplete(&op, PROBE)),
+                        "{entry:?} then {retry:?}"
+                    );
+                }
+                for other in [
+                    fixtures::op(op.id(), network.clone(), capability.clone()),
+                    fixtures::op(op.id(), doomed.clone(), another_of_its_class(&capability)),
+                ] {
+                    for retry in [Entry::Grant, Entry::Apply] {
+                        assert_eq!(create(&mut backend, retry, &other), Err(conflict(&other)));
+                    }
+                    assert_eq!(backend.plant(other.object()), Err(conflict(&other)));
+                    assert_eq!(
+                        backend.apply_removal(other.removal(), other.owner(), DrainSpec::forcing()),
+                        Err(unknown_object(&other))
+                    );
+                }
+                assert_eq!(backend.plant(op.object()), Err(conflict(&op)));
+                assert_eq!(
+                    backend.revoke(op.handle(), DrainSpec::forcing()),
+                    Err(BackendError::UnknownHandle {
+                        handle: op.handle()
+                    })
+                );
+                assert_eq!(backend.snapshot_os_state(), Ok(failed));
+                backend
+                    .apply_removal(op.removal(), &doomed, DrainSpec::forcing())
+                    .unwrap();
+                assert_eq!(backend.snapshot_os_state(), Ok(first));
+            }
+        }
+    }
+
+    #[test]
+    fn a_post_effect_fault_follows_validation_and_a_pre_effect_refusal_and_keys_on_the_cell() {
+        let doomed = cell_owner("cell-1", "doomed");
+        let mut backend = FakeBackend::new();
+        backend.fail_after_effect_for_owner(doomed.clone(), PROBE);
+        for entry in [Entry::Grant, Entry::Apply] {
+            let elsewhere = fixtures::op(
+                GrantId::new(),
+                cell_owner("cell-2", "doomed"),
+                broker("egressd"),
+            );
+            create(&mut backend, entry, &elsewhere).unwrap();
+            for (invalid, error) in invalid_operations(&doomed) {
+                let before = backend.snapshot_os_state().unwrap();
+                assert_eq!(
+                    create(&mut backend, entry, &invalid),
+                    Err(BackendError::InvalidOperation {
+                        class: invalid.class().as_str(),
+                        id: invalid.id(),
+                        error,
+                    })
+                );
+                assert_eq!(backend.snapshot_os_state().unwrap(), before);
+            }
+        }
+        backend.fail_before_effect_for_owner(doomed.clone(), "injected refusal");
+        let before = backend.snapshot_os_state().unwrap();
+        for entry in [Entry::Grant, Entry::Apply] {
+            assert_eq!(
+                create(&mut backend, entry, &mount_by(&doomed)),
+                Err(BackendError::Fault("injected refusal".to_string()))
+            );
+        }
+        assert_eq!(backend.snapshot_os_state().unwrap(), before);
+    }
+
+    #[test]
+    fn an_incomplete_effect_keeps_its_marker_through_a_timeout_and_a_failed_cleanup() {
+        let doomed = cell_owner("cell-1", "doomed");
+        for entry in [Entry::Grant, Entry::Apply] {
+            let mut backend = FakeBackend::new();
+            backend.fail_after_effect_for_owner(doomed.clone(), PROBE);
+            backend.stall_graceful_drains_for_owner(doomed.clone());
+            let op = mount_by(&doomed);
+            assert_eq!(
+                create(&mut backend, entry, &op),
+                Err(incomplete(&op, PROBE))
+            );
+            let failed = account(&[], &[], &[&op]);
+            assert_eq!(backend.snapshot_os_state(), Ok(failed.clone()));
+            assert_eq!(
+                backend.apply_removal(
+                    op.removal(),
+                    &doomed,
+                    DrainSpec::graceful(Duration::from_millis(4))
+                ),
+                Err(BackendError::DrainTimedOut {
+                    handle: op.handle(),
+                    deadline_ms: 4,
+                })
+            );
+            assert_eq!(backend.snapshot_os_state(), Ok(failed.clone()));
+            backend.fail_next_withdrawal(op.handle(), "unmount busy");
+            assert_eq!(
+                backend.apply_removal(op.removal(), &doomed, DrainSpec::forcing()),
+                Err(incomplete(&op, "unmount busy"))
+            );
+            assert_eq!(backend.snapshot_os_state(), Ok(failed));
+            backend
+                .apply_removal(op.removal(), &doomed, DrainSpec::forcing())
+                .unwrap();
+            assert!(backend.snapshot_os_state().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_withdrawal_that_fails_after_release_keeps_the_record_until_an_exact_cleanup() {
+        let owner = cell_owner("cell-1", "network");
+        let relay = "relay end still open";
+        for capability in capabilities() {
+            for (fails_in_revoke, cleans_up_in_revoke) in
+                [(true, true), (true, false), (false, true), (false, false)]
+            {
+                let mut backend = FakeBackend::new();
+                let failing = grant_to(&mut backend, &owner, capability.clone());
+                let peer = grant_to(&mut backend, &owner, capability.clone());
+                let op = failing.object().operation();
+                backend.fail_next_withdrawal(failing.handle, relay);
+                let refused = if fails_in_revoke {
+                    backend
+                        .revoke(failing.handle, DrainSpec::forcing())
+                        .map(|_| ())
+                } else {
+                    backend.apply_removal(failing.removal(), &owner, DrainSpec::forcing())
+                };
+                assert_eq!(refused, Err(incomplete(&op, relay)));
+                let failed = account(&[peer.object()], &[failing.clone(), peer.clone()], &[&op]);
+                assert_eq!(backend.snapshot_os_state(), Ok(failed.clone()));
+                for retry in [Entry::Grant, Entry::Apply] {
+                    assert_eq!(
+                        create(&mut backend, retry, &op),
+                        Err(incomplete(&op, relay))
+                    );
+                }
+                assert_eq!(backend.snapshot_os_state(), Ok(failed));
+                let drain = DrainSpec::graceful(Duration::from_millis(3));
+                if cleans_up_in_revoke {
+                    assert_eq!(backend.revoke(failing.handle, drain), Ok(failing.clone()));
+                } else {
+                    backend
+                        .apply_removal(failing.removal(), &owner, drain)
+                        .unwrap();
+                }
+                assert_eq!(
+                    backend.snapshot_os_state(),
+                    Ok(account(&[peer.object()], std::slice::from_ref(&peer), &[]))
+                );
+                assert_eq!(
+                    backend.revoke(failing.handle, DrainSpec::forcing()),
+                    Err(BackendError::UnknownHandle {
+                        handle: failing.handle
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_graceful_timeout_comes_before_a_release_that_fails_and_an_applied_holding_has_no_record() {
+        let owner = cell_owner("cell-1", "workspace");
+        let op = mount_by(&owner);
+        let mut backend = FakeBackend::new();
+        backend.apply(op.clone()).unwrap();
+        backend.mark_stuck(op.handle());
+        backend.fail_next_withdrawal(op.handle(), "unmount busy");
+        let before = backend.snapshot_os_state().unwrap();
+        assert!(matches!(
+            backend.apply_removal(
+                op.removal(),
+                &owner,
+                DrainSpec::graceful(Duration::from_millis(2))
+            ),
+            Err(BackendError::DrainTimedOut { .. })
+        ));
+        assert_eq!(backend.snapshot_os_state(), Ok(before));
+        let failed = backend
+            .apply_removal(op.removal(), &owner, DrainSpec::forcing())
+            .unwrap_err();
+        assert_eq!(failed, incomplete(&op, "unmount busy"));
+        assert_eq!(
+            failed.to_string(),
+            format!("mount operation {} is incomplete: unmount busy", op.id())
+        );
+        assert_eq!(backend.snapshot_os_state(), Ok(account(&[], &[], &[&op])));
+        assert_eq!(
+            backend.revoke(op.handle(), DrainSpec::forcing()),
+            Err(BackendError::UnknownHandle {
+                handle: op.handle()
+            })
+        );
+        backend
+            .apply_removal(op.removal(), &owner, DrainSpec::forcing())
+            .unwrap();
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
     }
 }
