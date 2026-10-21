@@ -323,6 +323,9 @@ def an_existing_workload_name_or_id_1000_refuses():
             ("etc/gshadow", GSHADOW + b"sudo:*: workload:\n"),
             ("etc/gshadow", GSHADOW + b"sudo:*:: workload\n"),
             ("etc/gshadow", GSHADOW + b"\r\x0b\x0cworkload:*::\n"),
+            ("etc/group", GROUP + b"sudo:x:27:\vworkload\n"),
+            ("etc/group", GROUP + b"staff:x:50:alice,\fworkload\n"),
+            ("etc/gshadow", GSHADOW + b"sudo:*::\rworkload\n"),
         ]:
             _, mode, uid, gid, _, _ = DEBIAN[path]
             detail = refusal("stage", stage_with, root, {path: f(data, mode, uid, gid)})
@@ -330,7 +333,7 @@ def an_existing_workload_name_or_id_1000_refuses():
         for path, data in [
             ("etc/passwd", USERS + b"alice:x:1001: 1000::/home/alice:/bin/sh\n"),
             ("etc/passwd", USERS + b"alice:x:1001:+1000::/home/alice:/bin/sh\n"),
-            ("etc/passwd", USERS + b"alice:x:-4294966296:1001::/home/alice:/bin/sh\n"),
+            ("etc/passwd", USERS + b"alice:x:-18446744073709550616:1001::/home/alice:/bin/sh\n"),
             ("etc/group", GROUP + b"staff:x:01000:\n"),
             ("etc/passwd", USERS + b"alice:x:1001:" + b"1" * 5000 + b"::/home/alice:/bin/sh\n"),
         ]:
@@ -582,6 +585,9 @@ def contract_check_reads_debugfs_output():
              "cannot parse"),
             ("home.stat", home.replace("User:  1000", "User:  \u0661\u0660\u0660\u0660"), "/home/workload"),
             ("home.stat", home.replace("User:  1000", "User:  " + "1" * 5000), "/home/workload"),
+            ("home.stat", home.replace("Mode:  0700", "Mode:  0789"), "/home/workload"),
+            ("home.ls", (check / "home.ls").read_text().replace("/100644/1000/1000/.bashrc",
+                                                                "/100689/1000/1000/.bashrc"), "cannot parse"),
             ("add-1.stat", (check / "add-1.stat").read_text().replace("Mode:  0755", "Mode:  0644"), "lane-probe"),
             ("add-1.stat", (check / "add-1.stat").read_text().replace("User:     0", "User:  1000"), "lane-probe"),
             ("add-1.data", "other bytes", "lane-probe"),
