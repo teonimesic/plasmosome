@@ -199,13 +199,17 @@ step it observes, and for a reach probe the kind of thing it reaches outside G (
 facility). Every channel has at least three probes, and every kind at least three reach probes.
 Each lane runs twice from a fresh boot; a probe whose two runs differ after normalization is noise
 and fails the run, and so is a harness transcript whose two runs differ at all. Every probe writes a
-completion marker, and the harness transcript carries one. A probe or transcript with no marker, or
-a probe that failed before the step it observes, is `not run`, even when every lane fails it the
-same way, and any `not run` makes the verdict `not run`. A reach probe equal in the open and absent
-lanes fails the run. A manifest that breaks a measurement rule is refused before any run, and the
-results record that refusal, like any other refusal of the runs, as a failed run.
+completion marker. The harness transcript carries one too, written only once the fixture endpoint
+has answered the recorded session's last request and the harness has exited, so that it shows the
+harness reached its end. A probe or transcript with no marker, or a probe that failed before the
+step it observes, is `not run`, even when every lane fails it the same way, and any `not run` makes
+the verdict `not run`. So a harness that stops early, the same way in every lane, is `not run`, not
+a pass. A reach probe equal in the open and absent lanes fails the run. A manifest that breaks a
+measurement rule is refused before any run, and the results record that refusal, like any other
+refusal of the runs, as a failed run.
 Amended on 2026-10-21: this defined noise and the completion marker for probes only, though the
-transcript is judged the same way, and it did not say what a manifest that breaks these rules gives.
+transcript is judged the same way, and it did not say what the transcript's marker shows or what a
+manifest that breaks these rules gives.
 
 **The verdict** passes when every probe ran in every lane, every reach probe discriminated, and the
 cell lane equals the absent lane: after normalization on every probe, and exactly on the harness's
@@ -221,7 +225,10 @@ and times. Such a value need not be the same between boots or between lanes, and
 fails the verdict. Files left behind are every path in the workspace once the harness exits, each
 recorded as its path from the workspace root, its type and, for a regular file, the SHA-256 of its
 bytes, and nothing else. A file's mode, owner, times and inode are left to probes, where §7's
-allowances reach: the cell lane creates files 0600, and the system chooses times and inodes.
+allowances reach: the cell lane creates files 0600 and shows every workspace file as the workload's,
+and the system chooses times and inodes. For the same reason, a path that a §5.3 operation probe
+creates or acts on is left out of files left behind: the probe declares the path in the manifest,
+and its own fields judge it.
 Amended on 2026-10-21: this said the transcript is compared after normalization, which no rule can
 reach. Amended on 2026-10-21: this did not say what is recorded of a file left behind.
 
@@ -278,7 +285,9 @@ how numbers are read, and a reader that holds every number as an `f64` reads
 
 **Results** go in a dated file under `docs/benchmarks/`: each lane's configuration; the digests of
 the image, kernel, libkrun, fixtures, harness, session, probe suite and manifest; the normalization
-table as run; and every probe's status and observation in every run of every lane.
+table as run; every probe's status and observation in every run of every lane; the harness
+transcript and its status in every run of every lane; and any refusal of the runs, with its reason.
+Amended on 2026-10-21: this did not list the transcript or a refusal of the runs.
 
 ### 7. Differences from an ordinary machine
 
@@ -300,7 +309,9 @@ Remaining, so the differential reports them:
 - Spec 017's managed-file policy: no file-backed mapping or direct execution of a workspace file.
 - Spec 001 §4.2's data verbs: no symbolic or hard links, FIFOs or Unix sockets in the workspace
   (git's fsmonitor socket is one), no time or mode set, and files created 0600. So `ln -s`,
-  `chmod +x`, `cp -p`, `tar x` and a checkout with links behave differently.
+  `chmod +x`, `cp -p`, `tar x` and a checkout with links behave differently. Their file metadata
+  carries no owner, so every workspace file shows the workload's uid and gid, 1000.
+  Amended on 2026-10-21: this did not say which owner a workspace file shows.
 - Spec 001 §4.2's brokers at `/.plasmosome/brokers/`, a path that names the membrane.
 - Spec 001 §4.2's TUN device, synthetic prefix and `127.0.0.53` resolver, in the interface list
   and the resolver configuration.
@@ -487,26 +498,35 @@ cell, not run until one boots).
     A: B's names resolve to unchanged bytes, and A's are gone. Catches: sharing by digest that
     revokes both.
 12. **Measurement rules and results, outside.** A staged suite has a reach probe that crashes, one
-    whose setup fails the same way in every lane, a transcript with no marker, a reach probe that
-    never discriminates, a probe that reads a random value, a transcript whose two runs differ, and
-    a channel one probe short. The first three make the verdict `not run`, the short channel is
-    refused before any run and recorded as a failed run, and the others fail the run. The results
-    hold every field §6 names, enough for a stranger to rerun every lane. Catches: dropped probes, a
-    transcript that is never judged, noise counted as reach, a refusal recorded as a pass, and
-    results that cannot tell no probes from no differences.
+    whose setup fails the same way in every lane, a reach probe that never discriminates, and a
+    probe that reads a random value. The first two make the verdict `not run`, and the others fail
+    the run. Three more suites stage the transcript: one with no marker and one whose harness stops
+    early the same way in every lane, which make the verdict `not run`, not a pass, and one whose
+    two runs differ, which fails the run. A manifest of its own with a channel one probe short is
+    refused before any run and recorded as a failed run. The results hold every field §6 names,
+    enough for a stranger to rerun every lane. Catches: dropped probes, a transcript that is never
+    judged, a marker written before the harness reached its end, noise counted as reach, a refusal
+    recorded as a pass, and results that cannot tell no probes from no differences.
+    Corrected on 2026-10-21: this staged the short channel in one suite with the other cases and
+    said it fails the run, but such a manifest is refused before any run, so the other cases could
+    not run. It also had no transcript case.
 13. **The comparator can fail, outside.** Each mutant is the absent lane with one planted change,
     and the comparator fails each on exactly the probe aimed at it, with every other probe equal:
     an environment variable naming the membrane; an `exec_id` in the environment; a process, mount
     or cgroup name containing `plasmosome`; an `/opt` mount of another type, with a source naming
     the membrane, or `ro` (`EROFS` where the absent lane gives `EACCES`); a withheld host answered
     with `ECONNREFUSED` or a hang; a denied call answered with `SIGSYS`; an extra `PATH` directory;
-    a `/proc/self/status` line that differs; a file left behind whose bytes differ, which fails on
-    the transcript. A mutant whose files left behind differ only in mode, as the cell lane's 0600
-    files do, does not fail the transcript. With §7's allowances in force, a new difference in a
-    probe they name, such as a second entry beside `/.plasmosome` or a second resolver line, still
-    fails. Catches: a comparator that cannot fail, one that excuses a whole probe, a transcript that
-    records a file's mode or misses its bytes, and a mutant that fails only because its lane
-    crashed.
+    a `/proc/self/status` line that differs; a file left behind whose bytes differ, a path left
+    behind in one lane only, such as an empty directory, and a path that is a directory in one lane
+    and a regular file in the other, each of which fails on the transcript. A mutant whose files
+    left behind differ only in mode, as the cell lane's 0600 files do, does not fail the transcript.
+    With §7's allowances in force, a new difference in a probe they name, such as a second entry
+    beside `/.plasmosome`, a second resolver line or a workspace whose files show uid 0, still
+    fails, on that probe and not on the transcript. Catches: a comparator that cannot fail, one that
+    excuses a whole probe, a transcript that records a file's mode or misses its bytes, a path or
+    its type, an owner nothing judges, and a mutant that fails only because its lane crashed.
+    Amended on 2026-10-21: this had no case for files left behind or for the owner a workspace file
+    shows.
 14. **Normalization keeps relations, outside.** These mutants must fail: a 64-hex token as an
     environment value; a workspace that ignores `utimensat`; two distinct workspace files that
     report one inode, in one list field and in two fields; a leader that names another process of
@@ -514,12 +534,15 @@ cell, not run until one boots).
     group; and two system times in one field in swapped order. A hard-linked pair still compares
     equal, in one field and in two. An extra process in one lane changes no other probe's
     placeholders, and a table with a rule §6 does not list fails before comparing. A reach probe
-    whose lanes differ only in the order of its durations does not discriminate. A guest number the
-    reader must refuse, such as `18446744073709551616`, `-9223372036854775809` or
-    `1760954400.123456789`, refuses the runs, and `1760995922.7923179` and `1760995922.792318` read
-    as two numbers. Catches: normalizing by look, names numbered within one field, times that lose
-    their order, durations that keep one, placeholders shifted across probes, and a reader that
-    holds every number as an `f64` or rounds one wrongly.
+    whose lanes differ only in their durations, in order or in which of them are equal, does not
+    discriminate: `[10, 20]` against `[20, 10]`, or the open lane's `[10, 10]` against the other
+    lanes' `[10, 20]`. A guest number the reader must refuse, such as `18446744073709551616`,
+    `-9223372036854775809` or `1760954400.123456789`, refuses the runs, and `1760995922.7923179` and
+    `1760995922.792318` read as two numbers. Catches: normalizing by look, names numbered within one
+    field, times that lose their order, durations that keep any relation, placeholders shifted
+    across probes, and a reader that holds every number as an `f64` or rounds one wrongly.
+    Amended on 2026-10-21: this named the inode mutant in no shape, and had no case for the leader,
+    parent mount IDs, peer groups, swapped times, durations or the reader.
 15. **The differential, cell.** The verdict of §6 passes, each of §7's remaining differences
     allowed only where the manifest names it. A cell whose `/opt` source names the membrane fails.
     Catches: a suite that avoids the known differences, one that lets a new one through, and names
