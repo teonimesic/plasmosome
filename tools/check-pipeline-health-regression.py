@@ -601,8 +601,11 @@ def runner_refused_group_of_exiting_leader():
             runner_syscalls(killpg) as processes:
         # The call's deadline is the whole budget, so no time is left when the refusal comes.
         runner = API["JsonRunner"](Path(directory), timeout=0.5, budget=0.5)
+        # A loaded Mac can run the 1 s timer seconds late. Six times the runner's grace leaves room
+        # for that, and a grace of 0 still fails. The leader sleeps past the grace: only the timer ends it.
+        runner.exit_grace *= 6
         try:
-            runner([sys.executable, "-c", "import time; time.sleep(30)"])
+            runner([sys.executable, "-c", "import time; time.sleep(60)"])
         except RuntimeError as exc:
             assert str(exc) == "source command timed out", exc
         else:
