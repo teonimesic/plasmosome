@@ -4,7 +4,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -13,8 +13,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use plasmosome_core::private_socket::{
-    Accepted, EntryKind, ListedEntry, PrivateDir, PrivateListener, PrivateSocketError, SocketEntry,
-    check_peer_uid, check_private_path, effective_uid, list_trusted_dir, peer_uid,
+    Accepted, EntryKind, ListedEntry, PrivateDir, PrivateListener, PrivateSocketError,
+    RemoveOutcome, SocketEntry, check_peer_uid, check_private_path, effective_uid,
+    list_trusted_dir, peer_uid,
 };
 use tempfile::TempDir;
 
@@ -911,6 +912,76 @@ fn drop_removes_only_the_bound_socket() {
     let other = entry_of(&path);
     drop(listener);
     assert_eq!(entry_of(&path), other);
+}
+
+#[test]
+fn close_reports_what_it_found_at_the_name() {
+    let root = private_root();
+    let path = root.path().join("sock");
+    let saved = root.path().join("saved");
+    let is_socket =
+        |at: &Path| fs::symlink_metadata(at).is_ok_and(|found| found.file_type().is_socket());
+
+    let listener = bind(&root, "sock");
+    assert_eq!(listener.close(), RemoveOutcome::Removed);
+    assert!(
+        fs::symlink_metadata(&path).is_err(),
+        "the bound socket is gone"
+    );
+
+    let listener = bind(&root, "sock");
+    fs::rename(&path, &saved).expect("rename");
+    fs::write(&path, b"replacement").expect("write");
+    assert_eq!(listener.close(), RemoveOutcome::LeftReplacement);
+    assert_eq!(fs::read(&path).expect("read"), b"replacement");
+    assert!(is_socket(&saved), "the renamed socket stays");
+    fs::remove_file(&path).expect("unlink");
+    fs::remove_file(&saved).expect("unlink");
+
+    let listener = bind(&root, "sock");
+    fs::rename(&path, &saved).expect("rename");
+    drop(UnixListener::bind(&path).expect("bind another socket"));
+    let other = entry_of(&path);
+    assert_eq!(listener.close(), RemoveOutcome::LeftReplacement);
+    assert_eq!(entry_of(&path), other, "another socket at the name stays");
+    fs::remove_file(&path).expect("unlink");
+    fs::remove_file(&saved).expect("unlink");
+
+    let listener = bind(&root, "sock");
+    fs::rename(&path, &saved).expect("rename");
+    assert_eq!(listener.close(), RemoveOutcome::AlreadyGone);
+    assert!(is_socket(&saved), "the renamed socket stays");
+}
+
+#[test]
+fn close_reports_an_unlink_the_directory_refuses() {
+    let root = private_root();
+    let path = root.path().join("sock");
+    let listener = bind(&root, "sock");
+    set_mode(root.path(), 0o500);
+    let outcome = listener.close();
+    set_mode(root.path(), 0o700);
+    if effective_uid() == 0 {
+        assert_eq!(outcome, RemoveOutcome::Removed, "root ignores the mode");
+    } else {
+        assert_eq!(
+            outcome,
+            RemoveOutcome::Failed {
+                errno: libc::EACCES
+            }
+        );
+        assert!(
+            fs::symlink_metadata(&path).is_ok_and(|found| found.file_type().is_socket()),
+            "the socket stays"
+        );
+    }
+}
+
+#[test]
+fn as_fd_borrows_the_listening_descriptor() {
+    let root = private_root();
+    let listener = bind(&root, "sock");
+    assert_eq!(listener.as_fd().as_raw_fd(), listener.as_raw_fd());
 }
 
 #[test]
