@@ -238,6 +238,8 @@ impl<F: Fn(usize) + Sync> Clock for ScriptedClock<F> {
     }
 }
 
+const FIRST_WRITE: usize = 1;
+
 const SECOND_CALL: usize = 2;
 
 fn clock_with(
@@ -349,16 +351,26 @@ fn each_write_waits_only_the_time_left() {
     let socket = socket_in(root.path());
     let release = held_peer(&socket);
     let name = name_for_a_line_of(MAX_REQUEST_BYTES);
+    let calls: &'static Mutex<Vec<Instant>> = Box::leak(Box::new(Mutex::new(Vec::new())));
+    let clock = clock_with(&[0, 590, 600], move |reading| {
+        if reading >= FIRST_WRITE {
+            calls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(Instant::now());
+        }
+    });
     let ran = run_on(
         line(&socket, &["--kernel", &name, "--deadline-ms", "600"]),
-        clock_reading(&[0, 590, 600]),
+        clock,
     );
     let _ = release.send(());
     assert_eq!(no_reply(&ran).0, "deadline");
+    let calls = calls.lock().unwrap_or_else(PoisonError::into_inner);
+    let waited = calls[SECOND_CALL - FIRST_WRITE] - calls[0];
     assert!(
-        ran.took < Duration::from_millis(300),
-        "took {:?} with 10 ms left",
-        ran.took
+        waited < Duration::from_millis(300),
+        "the first write waited {waited:?} with 10 ms left"
     );
 }
 
