@@ -334,8 +334,6 @@ impl InstanceRoot {
             .unwrap_or_else(PoisonError::into_inner);
         for _ in 0..ALLOCATION_ATTEMPTS {
             let next = self.next_cell_number()?;
-            #[cfg(test)]
-            tests::after_scan();
             match self.create_cell_dir(lock, &format_cell_id(next)) {
                 Err(CellDirError::AlreadyExists { .. }) => {}
                 created => return created.map_err(AllocateError::Create),
@@ -448,9 +446,10 @@ impl InstanceRoot {
             path: self.path.join(CELLS_DIR),
             source,
         })?;
-        let largest = self
-            .largest_cell_number(&cells)?
-            .max(self.largest_cell_number(RETIRED_DIR)?);
+        let in_cells = self.largest_cell_number(&cells)?;
+        #[cfg(test)]
+        tests::between_listings();
+        let largest = in_cells.max(self.largest_cell_number(RETIRED_DIR)?);
         largest
             .checked_add(1)
             .filter(|next| *next <= MAX_CELL_NUMBER)
@@ -4922,12 +4921,15 @@ mod tests {
 
     type ScanHook = Box<dyn FnMut()>;
 
+    type SyncHook = Box<dyn FnMut(BorrowedFd<'_>)>;
+
     thread_local! {
-        static AFTER_SCAN: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
+        static BETWEEN_LISTINGS: RefCell<Option<ScanHook>> = const { RefCell::new(None) };
+        static ON_SYNC: RefCell<Option<SyncHook>> = const { RefCell::new(None) };
     }
 
-    pub(super) fn after_scan() {
-        AFTER_SCAN.with(|slot| {
+    pub(super) fn between_listings() {
+        BETWEEN_LISTINGS.with(|slot| {
             if let Some(work) = slot.borrow_mut().as_mut() {
                 work();
             }
@@ -4935,7 +4937,20 @@ mod tests {
     }
 
     fn on_every_scan(work: impl FnMut() + 'static) {
-        AFTER_SCAN.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
+        BETWEEN_LISTINGS.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
+    }
+
+    fn hooked_sync(fd: BorrowedFd<'_>) -> io::Result<()> {
+        ON_SYNC.with(|slot| {
+            if let Some(work) = slot.borrow_mut().as_mut() {
+                work(fd);
+            }
+        });
+        Ok(())
+    }
+
+    fn on_every_sync(work: impl FnMut(BorrowedFd<'_>) + 'static) {
+        ON_SYNC.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
     }
 
     fn on_first_scan(work: impl FnOnce() + 'static) {
@@ -5122,40 +5137,54 @@ mod tests {
 
     #[test]
     fn an_allocation_waits_for_the_one_in_progress_and_never_takes_its_id() {
+        const WAIT: Duration = Duration::from_millis(300);
         for through_another_open in [false, true] {
             let (_dir, root) = temp_root();
-            let instance = Arc::new(open_root(&root));
+            let mut opened_first = open_root(&root);
+            opened_first.sync = hooked_sync;
+            let instance = Arc::new(opened_first);
             let lock = Arc::new(instance.lock().expect("the writer lock is taken"));
             let second = if through_another_open {
                 Arc::new(open_root(&root))
             } else {
                 Arc::clone(&instance)
             };
-            let (sender, receiver) = mpsc::channel();
-            let receiver = Rc::new(receiver);
-            let early = Rc::new(RefCell::new(None));
-            let (waiting, recorded) = (Rc::clone(&receiver), Rc::clone(&early));
-            let (second_lock, hook_root) = (Arc::clone(&lock), root.clone());
+            let (listed, listing) = mpsc::channel();
+            let (finished, second_cell) = mpsc::channel();
+            let listing = Rc::new(listing);
+            let early = Rc::new(RefCell::new(Vec::new()));
+            let (watching, recording) = (Rc::clone(&listing), Rc::clone(&early));
+            let second_lock = Arc::clone(&lock);
             on_first_scan(move || {
                 thread::spawn(move || {
-                    let _ = sender.send(allocated(&second, &second_lock));
+                    on_every_scan(move || {
+                        let _ = listed.send(());
+                    });
+                    let _ = finished.send(allocated(&second, &second_lock));
                 });
-                if let Ok(taken) = waiting.recv_timeout(Duration::from_millis(500)) {
-                    fs::create_dir_all(hook_root.join("retired")).expect("retired is made");
-                    fs::rename(
-                        hook_root.join("cells").join(taken.as_str()),
-                        hook_root.join("retired").join(taken.as_str()),
-                    )
-                    .expect("the early cell is retired");
-                    *recorded.borrow_mut() = Some(taken);
+                if watching.recv_timeout(WAIT).is_ok() {
+                    recording.borrow_mut().push("while the first listed");
+                }
+            });
+            let (watching, recording) = (Rc::clone(&listing), Rc::clone(&early));
+            let mut paused = false;
+            on_every_sync(move |_| {
+                if !std::mem::replace(&mut paused, true) && watching.recv_timeout(WAIT).is_ok() {
+                    recording
+                        .borrow_mut()
+                        .push("after the first listed and before its mkdir");
                 }
             });
             let first = allocated(&instance, &lock);
-            let taken = early.borrow_mut().take().unwrap_or_else(|| {
-                receiver
-                    .recv_timeout(DEADLINE)
-                    .expect("the waiting allocation finishes")
-            });
+            let taken = second_cell
+                .recv_timeout(DEADLINE)
+                .expect("the waiting allocation finishes");
+            assert!(
+                early.borrow().is_empty(),
+                "the second allocation listed cells/ {:?}; through another open: \
+                 {through_another_open}",
+                early.borrow()
+            );
             assert_eq!(
                 (first, taken),
                 (cell("cell-1"), cell("cell-2")),
