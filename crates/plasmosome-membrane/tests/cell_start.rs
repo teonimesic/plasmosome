@@ -24,6 +24,7 @@ use tempfile::TempDir;
 
 const FLOOD_BYTES: usize = 8 << 20;
 const READER_BUDGET: Duration = Duration::from_secs(30);
+const QUIET_BEFORE_LATER_BYTES: Duration = Duration::from_millis(200);
 
 struct Instance {
     root: InstanceRoot,
@@ -365,6 +366,7 @@ fn bytes_written_after_the_record_has_been_read_are_refused() {
         let writing = thread::spawn(move || {
             writer.write_all(&record)?;
             wait_until_read(watched.as_fd());
+            thread::sleep(QUIET_BEFORE_LATER_BYTES);
             writer.write_all(&later)
         });
         let read = read_config(OwnedFd::from(reader), &argv(1), &limits());
@@ -573,6 +575,37 @@ fn refuses_a_lock_file_that_is_a_symlink_to_another_roots_lock() {
     fs::remove_file(&lock_path).expect("the lock file is unlinked");
     std::os::unix::fs::symlink(elsewhere.cell_path(1).join("supervisor.lock"), &lock_path)
         .expect("the symlink is made");
+    let refusal = refused_lock(&instance, handed_over(&controller), &instance.config(1));
+    let CellStartRefusal::CellDirectory(CellDirError::Symlink { path }) = &refusal else {
+        panic!("{refusal:?}");
+    };
+    assert_eq!(path.as_path(), lock_path);
+}
+
+#[test]
+fn refuses_a_lock_file_that_is_a_symlink_to_another_cells_lock() {
+    let instance = Instance::new();
+    let _own = instance.cell(1);
+    let second = instance.cell(2);
+    let lock_path = instance.cell_path(1).join("supervisor.lock");
+    fs::remove_file(&lock_path).expect("the lock file is unlinked");
+    std::os::unix::fs::symlink(instance.cell_path(2).join("supervisor.lock"), &lock_path)
+        .expect("the symlink is made");
+    let refusal = refused_lock(&instance, handed_over(&second), &instance.config(1));
+    let CellStartRefusal::CellDirectory(CellDirError::Symlink { path }) = &refusal else {
+        panic!("{refusal:?}");
+    };
+    assert_eq!(path.as_path(), lock_path);
+}
+
+#[test]
+fn refuses_a_lock_file_that_is_a_symlink_to_its_own_lock() {
+    let instance = Instance::new();
+    let controller = instance.cell(1);
+    let lock_path = instance.cell_path(1).join("supervisor.lock");
+    fs::rename(&lock_path, instance.cell_path(1).join("real.lock"))
+        .expect("the lock file is renamed");
+    std::os::unix::fs::symlink("real.lock", &lock_path).expect("the symlink is made");
     let refusal = refused_lock(&instance, handed_over(&controller), &instance.config(1));
     let CellStartRefusal::CellDirectory(CellDirError::Symlink { path }) = &refusal else {
         panic!("{refusal:?}");
