@@ -14,9 +14,11 @@
 # It also refuses either trailer when it names somebody no reader can trace: a value with no
 # address, or an address on a domain no account can sit on, such as `.local`, which is what git
 # falls back to on a machine with no `user.email`. A malformed address, such as `<probe@>` or one
-# holding a space, counts as no address. A value with no address is refused whatever its name, and
-# only a whole vendor word in its name makes the refusal say it credits a model. It reads trailers
-# only, not a commit's author or committer (spec 029 section 4).
+# holding a space, counts as no address. So does a value a reader may see as more than one line:
+# one holding a line break other than a line feed, or one git unfolded from a trailer that goes on
+# over more than one line of the message. A value with no address is refused whatever its name,
+# and only a whole vendor word in its name makes the refusal say it credits a model. It reads
+# trailers only, not a commit's author or committer (spec 029 section 4).
 #
 # Runs as a pre-push hook AND as a CI gate, because a hook is bypassable and a gate is not.
 # Fails closed: anything it cannot read is a refusal, never a pass.
@@ -105,6 +107,13 @@ untraceable_domain='@([^@]*\.)?(local|localhost|invalid|test|example|example\.co
 blank_bytes="[ "$'\t\r\v\f'"]|"$'\xc2'"["$'\x85\xa0'"]|"$'\xe1\x9a\x80'"|"$'\xe2\x80'"["$'\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\xa8\xa9\xaf'"]|"$'\xe2\x81\x9f'"|"$'\xe3\x80\x80'"|"$'\xef\xbb\xbf'
 malformed_address="^@[^@]*\$|@\.?\$|@\.[^@]+\$|\.\.\$|\.\.[^@]+\$|$blank_bytes"
 
+# A line break other than a line feed: a carriage return, a vertical tab, a form feed, U+0085,
+# U+2028 or U+2029. Git keeps one inside a trailer's value, and a terminal or a web page may break
+# the line there. Then a reader sees a model's trailer on a line of its own, while the value's last
+# `<...>` holds a person's address. So a value holding one counts as no address (spec 029 section 4
+# rule 2), as a malformed address does.
+line_break="["$'\r\v\f'"]|"$'\xc2\x85'"|"$'\xe2\x80'"["$'\xa8\xa9'"]"
+
 # Nominates text worth parsing. Deliberately unanchored: it may only ever over-nominate, because
 # a paragraph it skips is a paragraph nothing else looks at.
 nominate='(co-authored-by|signed-off-by)[[:space:]]*:'
@@ -155,20 +164,22 @@ matches() {
 }
 
 # Judges the identity on $2, a trailer value under the key on $1, and records an offence if it
-# credits a model or names somebody no reader can trace.
+# credits a model or names somebody no reader can trace. $3 is set when git unfolded the value from
+# more than one line of the message.
 #
 # The address is the text inside the value's last `<...>`, and the name is what comes before it. An
 # identity with no address is refused whatever its name: no account can be found for it. Its name
-# decides only what the refusal says. A malformed address counts as no address, so it is judged
-# by its name before the tool list and the domain list. Only the tool list makes an address a
-# model's, and anything the three checks leave is a person's or a bot's.
+# decides only what the refusal says. An unfolded value, a value holding a line break and a
+# malformed address count as no address, so each is judged by its name before the tool list and
+# the domain list. Only the tool list makes an address a model's, and anything the three checks
+# leave is a person's or a bot's.
 #
 # `read` does the splitting and the trimming. Pattern expansions such as `${value##*<}` take time
 # that grows with the square of a value's length or worse in bash: a name padded with 5,000 spaces
 # took 18 seconds to trim. The `x` keeps a `<` or `>` that ends the value from being dropped as an
 # empty last field.
 judge_trailer() {
-  local position=$1 value=$2 name=$2 address='' segments last closed
+  local position=$1 value=$2 unfolded=${3-} name=$2 address='' segments last closed
   IFS='<' read -r -a segments <<<"${value}x"
   last=${segments[${#segments[@]}-1]}
   IFS='>' read -r -a closed <<<"$last"
@@ -176,7 +187,8 @@ judge_trailer() {
     address=${closed[0]}
     read -r name <<<"${value:0:${#value}-${#last}}"
   fi
-  if ! matches '@' "$address" || matches "$malformed_address" "$address"; then
+  if [ -n "$unfolded" ] || matches "$line_break" "$value" ||
+    ! matches '@' "$address" || matches "$malformed_address" "$address"; then
     if matches "$vendor_word" "$name"; then
       offence "$position" "$value" model
     else
@@ -215,16 +227,34 @@ offence() {
 #
 # The grep only nominates a paragraph; git's parser is what decides. That is the difference
 # between this and scanning the raw message, which flagged bodies that merely quoted a trailer.
+#
+# `--parse` unfolds a trailer that goes on over lines starting with whitespace into one value, and
+# a reader of the message sees those lines apart. So when a line of the paragraph starts with
+# whitespace, git prints the trailers again as they are written. There, each trailer starts a line,
+# and a line starting with a space, a tab or a carriage return, which git's parser counts as
+# whitespace, goes on with the trailer above it. Both outputs hold the same trailers in the same
+# order, so the count of trailers names which values were unfolded.
 record_offending_trailers() {
-  local paragraph=$1 parsed line position value
+  local paragraph=$1 parsed written line position value trailer=0 unfolded
+  unfolded=()
   matches "$nominate" "$paragraph" || return 0
   if ! parsed=$(printf 'x\n\n%s' "$paragraph" | git interpret-trailers --parse 2>&1); then
-    echo "attribution-guard: cannot parse the trailers of a commit message:"
-    echo "$parsed"
-    echo "Refusing rather than passing: a message this guard cannot parse is a message it cannot clear."
-    exit 1
+    cannot_parse "$parsed"
+  fi
+  if matches '^[[:space:]]' "$paragraph"; then
+    if ! written=$(printf 'x\n\n%s' "$paragraph" | git interpret-trailers --only-trailers --only-input 2>&1); then
+      cannot_parse "$written"
+    fi
+    while IFS= read -r line; do
+      case $line in
+        [$' \t\r']*) unfolded[trailer]=yes ;;
+        *) trailer=$((trailer + 1)) ;;
+      esac
+    done <<< "$written"
+    trailer=0
   fi
   while IFS= read -r line; do
+    trailer=$((trailer + 1))
     matches "$attribution" "$line" || continue
     if matches "$co_author" "$line"; then
       position=Co-authored-by
@@ -232,8 +262,16 @@ record_offending_trailers() {
       position=Signed-off-by
     fi
     read -r value <<<"${line#*:}"
-    judge_trailer "$position" "$value"
+    judge_trailer "$position" "$value" "${unfolded[trailer]-}"
   done <<< "$parsed"
+}
+
+# Refuses, saying what git said on $1, when git cannot read a paragraph's trailers.
+cannot_parse() {
+  echo "attribution-guard: cannot parse the trailers of a commit message:"
+  echo "$1"
+  echo "Refusing rather than passing: a message this guard cannot parse is a message it cannot clear."
+  exit 1
 }
 
 # Answers whether the line on $1 holds only characters that some reader may call blank: git's
