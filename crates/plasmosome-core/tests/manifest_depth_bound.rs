@@ -14,6 +14,7 @@ const NOT_TOML: &str = "this line is not toml\n";
 
 #[derive(Clone, Copy, Default)]
 struct Nesting {
+    header_indent: &'static str,
     array_tables: usize,
     table_parts: usize,
     key_parts: usize,
@@ -32,7 +33,8 @@ impl Nesting {
     fn declaration(self) -> String {
         let mut text = String::from(DECLARATION);
         for parts in 1..=self.array_tables {
-            text.push_str(&format!("[[{}]]\n", parts_of("nested", parts)));
+            let name = parts_of("nested", parts);
+            text.push_str(&format!("{}[[{name}]]\n", self.header_indent));
         }
         if self.table_parts > 0 {
             let chain = parts_of("nested", self.array_tables);
@@ -42,7 +44,7 @@ impl Nesting {
             } else {
                 format!("{chain}.{tables}")
             };
-            text.push_str(&format!("[{name}]\n"));
+            text.push_str(&format!("{}[{name}]\n", self.header_indent));
         }
         let inner = parts_of("inner", self.inline_key_parts.max(1));
         text.push_str(&parts_of("leaf", self.key_parts.max(1)));
@@ -78,6 +80,7 @@ fn every_construct_at_100_levels() -> String {
         inline_tables: 20,
         inline_key_parts: 2,
         arrays: 10,
+        ..Nesting::default()
     }
     .counting(100)
 }
@@ -100,7 +103,11 @@ fn refused_for_depth(outcome: Result<PlasmidManifest, ManifestError>, what: &str
     match outcome {
         Err(error @ ManifestError::TooDeep { limit }) => {
             assert_eq!(limit, BOUND, "{what}: {error:?}");
-            assert!(error.to_string().contains("32"), "{what}: {error}");
+            assert_eq!(
+                error.to_string(),
+                "manifest nesting counts more than the 32-level limit",
+                "{what}"
+            );
         }
         Err(error) => panic!("{what} is refused for its depth, not as {error:?}"),
         Ok(manifest) => panic!("{what} was accepted as {manifest:?}"),
@@ -227,6 +234,26 @@ fn each_part_of_a_table_header_counts_two_levels() {
 }
 
 #[test]
+fn a_table_header_after_a_tab_counts_two_levels_a_part() {
+    let after_a_tab = Nesting {
+        header_indent: "\t",
+        ..Nesting::default()
+    };
+    at_and_past_the_bound(
+        Nesting {
+            table_parts: 15,
+            key_parts: 2,
+            ..after_a_tab
+        },
+        Nesting {
+            table_parts: 16,
+            ..after_a_tab
+        },
+        "a table header after a tab, with a key under it",
+    );
+}
+
+#[test]
 fn each_part_of_an_array_of_tables_header_counts_two_levels() {
     at_and_past_the_bound(
         Nesting {
@@ -251,6 +278,7 @@ fn the_constructs_add_up() {
         inline_tables: 10,
         inline_key_parts: 2,
         arrays: 5,
+        ..Nesting::default()
     };
     at_and_past_the_bound(
         mixed,

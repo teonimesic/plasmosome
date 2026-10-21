@@ -314,6 +314,8 @@ mod tests {
             "[a.b]\nk = 1\n[c]\nd = [[[1]]]",
         );
         at_and_past("  [a.b] # x.y.z\nk = 1", "  [a.b] # x.y.z\nk.j = 1");
+        at_and_past("\t [a.b]\nk = 1", "\t [a.b]\nk.j = 1");
+        at_and_past("\t[[a]]\n\t[[a.b]]\nk = 1", "\t[[a]]\n\t[[a.b]]\nk.j = 1");
     }
 
     #[test]
@@ -418,6 +420,8 @@ mod tests {
             "x = { a = { b = { c = { d = 1.5 } } } }",
             "x = { a = { b = { c = { d = { e = 1.5 } } } } }",
         );
+        at_and_past("a.b.c.d.e = 1.5", "a.b.c.d.e.f = 1.5");
+        at_and_past("a.b.c.d.e = 07:32:00.5", "a.b.c.d.e.f = 07:32:00.5");
     }
 
     #[test]
@@ -426,6 +430,7 @@ mod tests {
             "x = { a.b.c = 1, d = [[[1]]] }",
             "x = { a.b.c = 1, d = [[[[1]]]] }",
         );
+        at_and_past("x = { a = 1, b.c.d.e = 1 }", "x = { a = 1, b.c.d.e.f = 1 }");
     }
 
     #[test]
@@ -476,13 +481,18 @@ mod tests {
     struct Header {
         array: bool,
         name: Key,
-        subtable: Option<Part>,
+        subtable: Option<(bool, Part)>,
+        before: &'static str,
+        indent: &'static str,
+        end: &'static str,
     }
+
+    type Entry = (&'static str, Key, Node, &'static str);
 
     #[derive(Clone, Debug)]
     struct Section {
         header: Option<Header>,
-        entries: Vec<(Key, Node, &'static str)>,
+        entries: Vec<Entry>,
     }
 
     #[derive(Clone, Debug)]
@@ -538,6 +548,19 @@ mod tests {
 
     const LINE_ENDS: &[&str] = &["\n", "\r\n", " # x.y [ { ' \"\n", "  # ]] }\n"];
 
+    const LINES_BEFORE: &[&str] = &[
+        "",
+        "",
+        "\n",
+        " \t\r\n",
+        "# [x.y] { '\n",
+        "\t # ]] } [[a.b]]\n",
+    ];
+
+    const HEADER_INDENTS: &[&str] = &["", " ", "\t", " \t "];
+
+    const HEADER_ENDS: &[&str] = &["\n", "\r\n", " # [x.y] { ' \"\n", "\t# ]] }\n"];
+
     fn part() -> impl Strategy<Value = Part> {
         prop_oneof![
             2 => Just(Part::Bare),
@@ -581,18 +604,33 @@ mod tests {
             })
     }
 
-    fn entry() -> impl Strategy<Value = (Key, Node, &'static str)> {
-        (key(), node(), select(LINE_ENDS))
+    fn entry() -> impl Strategy<Value = Entry> {
+        (select(LINES_BEFORE), key(), node(), select(LINE_ENDS))
     }
 
     fn header() -> impl Strategy<Value = Header> {
-        (any::<bool>(), key(), proptest::option::of(part())).prop_map(|(array, name, subtable)| {
-            Header {
+        (
+            any::<bool>(),
+            key(),
+            proptest::option::of((any::<bool>(), part())),
+            (
+                select(LINES_BEFORE),
+                select(HEADER_INDENTS),
+                select(HEADER_ENDS),
+            ),
+        )
+            .prop_map(|(array, name, subtable, (before, indent, end))| Header {
                 array,
                 name,
                 subtable,
-            }
-        })
+                before,
+                indent,
+                end,
+            })
+    }
+
+    fn brackets(array: bool) -> (&'static str, &'static str) {
+        if array { ("[[", "]]") } else { ("[", "]") }
     }
 
     fn document() -> impl Strategy<Value = Document> {
@@ -676,20 +714,20 @@ mod tests {
             for section in &self.sections {
                 if let Some(header) = &section.header {
                     let name = render.key(&header.name);
-                    if header.array {
-                        text.push_str(&format!("[[{name}]]\n"));
-                    } else {
-                        text.push_str(&format!("[{name}]\n"));
-                    }
-                    if let Some(subtable) = &header.subtable {
+                    let (indent, end) = (header.indent, header.end);
+                    let (open, close) = brackets(header.array);
+                    text.push_str(header.before);
+                    text.push_str(&format!("{indent}{open}{name}{close}{end}"));
+                    if let Some((array, subtable)) = &header.subtable {
                         let subtable = render.part(subtable);
-                        text.push_str(&format!("[{name}.{subtable}]\n"));
+                        let (open, close) = brackets(*array);
+                        text.push_str(&format!("{indent}{open}{name}.{subtable}{close}{end}"));
                     }
                 }
-                for (key, value, end) in &section.entries {
+                for (before, key, value, end) in &section.entries {
                     let key = render.key(key);
                     let value = render.node(value);
-                    text.push_str(&format!("{key} = {value}{end}"));
+                    text.push_str(&format!("{before}{key} = {value}{end}"));
                 }
             }
             text
