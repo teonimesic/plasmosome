@@ -1,5 +1,7 @@
 use std::fmt;
 
+#[cfg(target_os = "macos")]
+use super::artifacts::Positioned;
 use super::artifacts::VerifiedArtifact;
 #[cfg(any(target_os = "macos", test))]
 use super::path::RecipePath;
@@ -9,8 +11,6 @@ use super::recipe::ArtifactRole;
 /// [`ClosureFault::TooLarge`]; the read stops one byte past this bound.
 pub const MAX_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Which load command names a library. dyld loads a library of each kind when it is present, so
-/// every kind is audited.
 #[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LoadKind {
@@ -31,7 +31,13 @@ impl CpuType {
     pub(crate) const X86_64: CpuType = CpuType(0x0100_0007);
 
     pub(crate) fn host() -> Option<CpuType> {
-        todo!()
+        if cfg!(target_arch = "aarch64") {
+            Some(CpuType::ARM64)
+        } else if cfg!(target_arch = "x86_64") {
+            Some(CpuType::X86_64)
+        } else {
+            None
+        }
     }
 }
 
@@ -46,8 +52,148 @@ pub(crate) struct MachOImage {
 
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn read_macho(bytes: &[u8], cpu: CpuType) -> Result<MachOImage, ClosureFault> {
-    let _ = (bytes, cpu);
-    todo!()
+    const FAT_MAGIC: u32 = 0xcafe_babe;
+    if bytes.len() >= 4 && be_word(bytes, 0) == FAT_MAGIC {
+        let (start, end) = fat_member(bytes, cpu)?;
+        read_thin(&bytes[start..end], start, cpu)
+    } else {
+        read_thin(bytes, 0, cpu)
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn fat_member(bytes: &[u8], cpu: CpuType) -> Result<(usize, usize), ClosureFault> {
+    const TABLE: usize = 8;
+    const ENTRY: usize = 20;
+    let malformed = |at: usize, what| ClosureFault::Malformed {
+        offset: at as u64,
+        what,
+    };
+    if bytes.len() < TABLE {
+        return Err(malformed(4, "the fat header is cut short"));
+    }
+    let count = be_word(bytes, 4) as usize;
+    if (bytes.len() - TABLE) / ENTRY < count {
+        return Err(malformed(
+            TABLE,
+            "the fat table runs past the end of the file",
+        ));
+    }
+    let mut found = None;
+    for index in 0..count {
+        let at = TABLE + ENTRY * index;
+        let start = be_word(bytes, at + 8) as usize;
+        let end = start
+            .checked_add(be_word(bytes, at + 12) as usize)
+            .filter(|end| *end <= bytes.len())
+            .ok_or(malformed(at, "a fat member runs past the end of the file"))?;
+        if be_word(bytes, at) == cpu.0 && found.replace((start, end)).is_some() {
+            return Err(malformed(at, "two fat members are for the host CPU"));
+        }
+    }
+    found.ok_or(ClosureFault::NoMemberForHost)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn read_thin(member: &[u8], base: usize, cpu: CpuType) -> Result<MachOImage, ClosureFault> {
+    const MH_MAGIC_64: u32 = 0xfeed_facf;
+    const HEADER: usize = 32;
+    let malformed = |at: usize, what| ClosureFault::Malformed {
+        offset: (base + at) as u64,
+        what,
+    };
+    if member.len() < 4 || le_word(member, 0) != MH_MAGIC_64 {
+        return Err(ClosureFault::NotMachO);
+    }
+    if member.len() < HEADER {
+        return Err(malformed(0, "the Mach-O header is cut short"));
+    }
+    if le_word(member, 4) != cpu.0 {
+        return Err(ClosureFault::NoMemberForHost);
+    }
+    let count = le_word(member, 16);
+    let commands = member
+        .get(HEADER..HEADER + le_word(member, 20) as usize)
+        .ok_or(malformed(20, "sizeofcmds runs past the end of the image"))?;
+    let mut image = MachOImage::default();
+    let mut at = 0;
+    for _ in 0..count {
+        let fault = |what| malformed(HEADER + at, what);
+        let rest = &commands[at..];
+        if rest.len() < 8 {
+            return Err(fault(
+                "ncmds counts more load commands than sizeofcmds holds",
+            ));
+        }
+        let size = le_word(rest, 4) as usize;
+        if size == 0 || !size.is_multiple_of(8) {
+            return Err(fault("cmdsize is zero or not a multiple of 8"));
+        }
+        let command = rest
+            .get(..size)
+            .ok_or(fault("the load command runs past sizeofcmds"))?;
+        read_command(command, &mut image).map_err(fault)?;
+        at += size;
+    }
+    Ok(image)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn read_command(command: &[u8], image: &mut MachOImage) -> Result<(), &'static str> {
+    const DYLIB_FIELDS: usize = 24;
+    const TEXT_FIELDS: usize = 12;
+    match le_word(command, 0) {
+        0x8000_001c => image.rpaths.push(name_in(command, TEXT_FIELDS)?),
+        0xe => image.dylinkers.push(name_in(command, TEXT_FIELDS)?),
+        0x27 => image.has_dyld_environment = true,
+        cmd => {
+            if let Some(kind) = load_kind(cmd) {
+                image.names.push((kind, name_in(command, DYLIB_FIELDS)?));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn load_kind(cmd: u32) -> Option<LoadKind> {
+    match cmd {
+        0xc => Some(LoadKind::Load),
+        0x8000_0018 => Some(LoadKind::Weak),
+        0x8000_001f => Some(LoadKind::Reexport),
+        0x20 => Some(LoadKind::Lazy),
+        0x8000_0023 => Some(LoadKind::Upward),
+        _ => None,
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn name_in(command: &[u8], fields: usize) -> Result<String, &'static str> {
+    if command.len() < fields {
+        return Err("the load command is shorter than its fixed fields");
+    }
+    let offset = le_word(command, 8) as usize;
+    let text = command
+        .get(offset..)
+        .filter(|_| offset >= fields)
+        .ok_or("the name offset is outside the load command's text")?;
+    let end = text
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or("the name has no NUL")?;
+    std::str::from_utf8(&text[..end])
+        .map(str::to_owned)
+        .map_err(|_| "the name is not UTF-8")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn le_word(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn be_word(bytes: &[u8], at: usize) -> u32 {
+    u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -64,20 +210,101 @@ pub(crate) fn resolve(
     executable_dir: &str,
     listed: &[&RecipePath],
 ) -> Result<Resolution, ClosureFault> {
-    let _ = (name, loader_dir, executable_dir, listed);
-    todo!()
+    let position = |text: &str| listed.iter().position(|path| path.as_str() == text);
+    let joined = if let Some(rest) = name.strip_prefix("@executable_path/") {
+        join(executable_dir, rest)
+    } else if let Some(rest) = name.strip_prefix("@loader_path/") {
+        join(loader_dir, rest)
+    } else if name.starts_with('/') {
+        return match position(name) {
+            Some(index) => Ok(Resolution::Listed(index)),
+            None if is_system_name(name) => Ok(Resolution::System(name.to_owned())),
+            None => Err(ClosureFault::UnlistedLibrary {
+                name: name.to_owned(),
+                resolved: None,
+            }),
+        };
+    } else {
+        return Err(ClosureFault::SearchedName {
+            name: name.to_owned(),
+        });
+    };
+    position(&joined)
+        .map(Resolution::Listed)
+        .ok_or(ClosureFault::UnlistedLibrary {
+            name: name.to_owned(),
+            resolved: Some(joined),
+        })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn join(directory: &str, rest: &str) -> String {
+    let mut parts = Vec::new();
+    for part in directory.split('/').chain(rest.split('/')) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    format!("/{}", parts.join("/"))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn directory(path: &RecipePath) -> &str {
+    match path.as_str().rsplit_once('/') {
+        Some((directory, _)) if !directory.is_empty() => directory,
+        _ => "/",
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn is_system_name(name: &str) -> bool {
-    let _ = name;
-    todo!()
+    name.is_ascii()
+        && RecipePath::parse(name).is_ok()
+        && (name.starts_with("/usr/lib/") || name.starts_with("/System/Library/"))
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) fn on_sealed_volume(name: &str) -> Result<bool, ClosureFault> {
-    let _ = name;
-    todo!()
+    use std::os::unix::ffi::OsStrExt;
+    let mut nearest = std::path::Path::new(name);
+    while let Err(error) = std::fs::symlink_metadata(nearest) {
+        let absent = matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR));
+        nearest = nearest
+            .parent()
+            .filter(|_| absent)
+            .ok_or_else(|| io_fault("lstat", &error))?;
+    }
+    let nearest =
+        std::ffi::CString::new(nearest.as_os_str().as_bytes()).map_err(|_| ClosureFault::Io {
+            op: "statfs",
+            errno: libc::EINVAL,
+        })?;
+    match on_read_only_root(&nearest) {
+        Ok(sealed) => Ok(sealed),
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(false),
+        Err(error) => Err(io_fault("statfs", &error)),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn on_read_only_root(path: &std::ffi::CStr) -> std::io::Result<bool> {
+    // SAFETY: libc::statfs is a plain C struct, for which all zeroes is a valid value.
+    let mut facts: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `path` is NUL-terminated, and statfs writes only the local `facts`.
+    if unsafe { libc::statfs(path.as_ptr(), &mut facts) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mount = facts
+        .f_mntonname
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8);
+    Ok(mount.eq(*b"/") && facts.f_flags & libc::MNT_RDONLY as u32 != 0)
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -87,20 +314,128 @@ pub(crate) struct AuditedNames {
     pub(crate) system_names: Vec<String>,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 pub(crate) fn audit_images(
     cpu: CpuType,
     helper: (&RecipePath, &[u8]),
     libraries: &[(&RecipePath, &[u8])],
 ) -> Result<AuditedNames, ClosureRefusal> {
-    let _ = (cpu, helper, libraries);
-    todo!()
+    audit_with(cpu, helper, libraries, |_| Ok(true))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn audit_with(
+    cpu: CpuType,
+    helper: (&RecipePath, &[u8]),
+    libraries: &[(&RecipePath, &[u8])],
+    mut sealed: impl FnMut(&str) -> Result<bool, ClosureFault>,
+) -> Result<AuditedNames, ClosureRefusal> {
+    let listed: Vec<&RecipePath> = libraries.iter().map(|(path, _)| *path).collect();
+    let executable_dir = directory(helper.0);
+    let images = std::iter::once((ArtifactRole::Helper, helper)).chain(
+        libraries
+            .iter()
+            .enumerate()
+            .map(|(index, library)| (ArtifactRole::Library(index), *library)),
+    );
+    let mut audited = AuditedNames {
+        resolved: Vec::new(),
+        system_names: Vec::new(),
+    };
+    for (role, (path, bytes)) in images {
+        let refuse = |fault| ClosureRefusal { image: role, fault };
+        let image = read_macho(bytes, cpu).map_err(refuse)?;
+        image_rules(&image).map_err(refuse)?;
+        for (_, name) in &image.names {
+            match resolve(name, directory(path), executable_dir, &listed).map_err(refuse)? {
+                Resolution::Listed(index) => {
+                    audited
+                        .resolved
+                        .push((role, name.clone(), ArtifactRole::Library(index)));
+                }
+                Resolution::System(name) if audited.system_names.contains(&name) => {}
+                Resolution::System(name) => {
+                    if !sealed(&name).map_err(refuse)? {
+                        return Err(refuse(ClosureFault::UnlistedLibrary {
+                            name,
+                            resolved: None,
+                        }));
+                    }
+                    audited.system_names.push(name);
+                }
+            }
+        }
+    }
+    Ok(audited)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn image_rules(image: &MachOImage) -> Result<(), ClosureFault> {
+    if let Some(path) = image.rpaths.first() {
+        return Err(ClosureFault::RpathPresent { path: path.clone() });
+    }
+    if image.has_dyld_environment {
+        return Err(ClosureFault::DyldEnvironment);
+    }
+    match image.dylinkers.iter().find(|name| *name != "/usr/lib/dyld") {
+        Some(name) => Err(ClosureFault::UnexpectedDylinker { name: name.clone() }),
+        None => Ok(()),
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn read_bounded(source: impl std::io::Read, max: u64) -> Result<Vec<u8>, ClosureFault> {
-    let _ = (source, max);
-    todo!()
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    source
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| io_fault("pread", &error))?;
+    if bytes.len() as u64 > max {
+        return Err(ClosureFault::TooLarge { max });
+    }
+    Ok(bytes)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn io_fault(op: &'static str, error: &std::io::Error) -> ClosureFault {
+    ClosureFault::Io {
+        op,
+        errno: error.raw_os_error().unwrap_or(libc::EIO),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn sysctl_text(name: &'static std::ffi::CStr, label: &'static str) -> Result<String, ClosureFault> {
+    let mut buffer = [0u8; 256];
+    let mut size = buffer.len();
+    // SAFETY: The name is a static NUL-terminated string. `buffer` and `size` are locals that
+    // sysctlbyname may write, `size` holds the bytes `buffer` has, and no new value is passed.
+    let read = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(ClosureFault::OsIdentity {
+            name: label,
+            errno: error.raw_os_error().unwrap_or(libc::EIO),
+        });
+    }
+    std::ffi::CStr::from_bytes_until_nul(&buffer[..size.min(buffer.len())])
+        .ok()
+        .and_then(|text| text.to_str().ok())
+        .map(str::to_owned)
+        .ok_or(ClosureFault::OsIdentity {
+            name: label,
+            errno: libc::EILSEQ,
+        })
 }
 
 /// What the static audit found: which listed library each load name resolved to, which names it
@@ -195,8 +530,7 @@ pub enum ClosureFault {
 
 impl fmt::Display for ClosureRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
+        write!(f, "{}: {}", self.image, self.fault)
     }
 }
 
@@ -204,8 +538,47 @@ impl std::error::Error for ClosureRefusal {}
 
 impl fmt::Display for ClosureFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
+        match self {
+            ClosureFault::Unsupported => {
+                f.write_str("this host has no load-name audit; only macOS has one")
+            }
+            ClosureFault::TooLarge { max } => write!(f, "the image is longer than {max} bytes"),
+            ClosureFault::Io { op, errno } => write!(f, "{op} failed with errno {errno}"),
+            ClosureFault::NotMachO => {
+                f.write_str("it is not a 64-bit little-endian Mach-O image or a fat file of them")
+            }
+            ClosureFault::NoMemberForHost => f.write_str("no image in it is for this host's CPU"),
+            ClosureFault::Malformed { offset, what } => {
+                write!(f, "it is malformed at byte {offset}: {what}")
+            }
+            ClosureFault::RpathPresent { path } => write!(f, "LC_RPATH {path} is a search path"),
+            ClosureFault::DyldEnvironment => {
+                f.write_str("LC_DYLD_ENVIRONMENT sets dyld variables from inside the image")
+            }
+            ClosureFault::UnexpectedDylinker { name } => {
+                write!(f, "LC_LOAD_DYLINKER names {name}, not /usr/lib/dyld")
+            }
+            ClosureFault::SearchedName { name } => {
+                write!(f, "{name:?} is a name dyld resolves by searching")
+            }
+            ClosureFault::UnlistedLibrary {
+                name,
+                resolved: Some(resolved),
+            } => write!(
+                f,
+                "{name} resolves to {resolved}, which is not a listed library"
+            ),
+            ClosureFault::UnlistedLibrary {
+                name,
+                resolved: None,
+            } => write!(
+                f,
+                "{name} is neither a listed library nor on the sealed system volume"
+            ),
+            ClosureFault::OsIdentity { name, errno } => {
+                write!(f, "reading sysctl {name} failed with errno {errno}")
+            }
+        }
     }
 }
 
@@ -224,8 +597,63 @@ pub fn audit_closure(
     helper: &VerifiedArtifact,
     libraries: &[VerifiedArtifact],
 ) -> Result<ClosureEvidence, ClosureRefusal> {
-    let _ = (helper, libraries);
-    todo!()
+    audit_on_host(helper, libraries)
+}
+
+#[cfg(target_os = "macos")]
+fn audit_on_host(
+    helper: &VerifiedArtifact,
+    libraries: &[VerifiedArtifact],
+) -> Result<ClosureEvidence, ClosureRefusal> {
+    let refuse = |image| move |fault| ClosureRefusal { image, fault };
+    let cpu = CpuType::host().ok_or(ClosureRefusal {
+        image: ArtifactRole::Helper,
+        fault: ClosureFault::Unsupported,
+    })?;
+    let read = |artifact: &VerifiedArtifact, image| {
+        let source = Positioned {
+            file: artifact.file(),
+            offset: 0,
+        };
+        read_bounded(source, MAX_IMAGE_BYTES).map_err(refuse(image))
+    };
+    let helper_bytes = read(helper, ArtifactRole::Helper)?;
+    let library_bytes = libraries
+        .iter()
+        .enumerate()
+        .map(|(index, library)| read(library, ArtifactRole::Library(index)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let inputs: Vec<(&RecipePath, &[u8])> = libraries
+        .iter()
+        .zip(&library_bytes)
+        .map(|(library, bytes)| (library.path(), bytes.as_slice()))
+        .collect();
+    let audited = audit_with(
+        cpu,
+        (helper.path(), &helper_bytes),
+        &inputs,
+        on_sealed_volume,
+    )?;
+    let os = |name, label| sysctl_text(name, label).map_err(refuse(ArtifactRole::Helper));
+    Ok(ClosureEvidence {
+        resolved: audited.resolved,
+        system_names: audited.system_names,
+        os_build: os(c"kern.osversion", "kern.osversion")?,
+        os_product_version: os(c"kern.osproductversion", "kern.osproductversion")?,
+        loaded_images: ImageInventory::NotIndependentlyObserved,
+        runtime_loads: RuntimeLoads::NotAudited,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn audit_on_host(
+    _helper: &VerifiedArtifact,
+    _libraries: &[VerifiedArtifact],
+) -> Result<ClosureEvidence, ClosureRefusal> {
+    Err(ClosureRefusal {
+        image: ArtifactRole::Helper,
+        fault: ClosureFault::Unsupported,
+    })
 }
 
 #[cfg(test)]

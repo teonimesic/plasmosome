@@ -388,9 +388,9 @@ fn hash(checked: &Checked) -> Result<Digest, ArtifactFault> {
     Digest::of_reader(bounded).map_err(|error| io_fault("pread", &error))
 }
 
-struct Positioned<'a> {
-    file: &'a File,
-    offset: u64,
+pub(crate) struct Positioned<'a> {
+    pub(crate) file: &'a File,
+    pub(crate) offset: u64,
 }
 
 impl Read for Positioned<'_> {
