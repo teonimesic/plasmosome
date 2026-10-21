@@ -61,3 +61,13 @@ fn fake_backend_removes_repeated_grants_independently() {
 fn fake_backend_keeps_a_timed_out_holding_and_its_peers() {
     conformance::graceful_timeouts_preserve_the_selected_holding(fake_backend);
 }
+
+#[test]
+fn fake_backend_returns_the_original_entry_to_a_retry_and_promotes_nothing() {
+    conformance::grant_retry_returns_the_original_entry(fake_backend);
+}
+
+#[test]
+fn fake_backends_fresh_from_the_factory_share_no_authority() {
+    conformance::fresh_backends_share_no_authority(fake_backend);
+}

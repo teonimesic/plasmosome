@@ -270,7 +270,109 @@ impl DesiredStateBuilder {
 
 #[cfg(test)]
 mod tests {
+    use plasmosome_backend::{PluginId, UniverseClass};
+
     use super::*;
+
+    fn github_pr_in(cell: &str) -> CellOwner {
+        CellOwner {
+            cell: CellId::from(cell),
+            plugin: PluginId::from("github-pr"),
+        }
+    }
+
+    #[test]
+    fn a_closure_prepares_each_capability_in_attach_order_at_the_identity_drawn_for_it() {
+        let owner = github_pr_in("cell-1");
+        let requested = [
+            (mount("/src/repo", "/workspace"), GrantKind::Hot),
+            (broker("egressd"), GrantKind::GenerationBound),
+            (session_file("/skills/pr.md"), GrantKind::Hot),
+        ];
+        let ids: Vec<GrantId> = requested.iter().map(|_| GrantId::new()).collect();
+        let mut source = ids.clone().into_iter();
+        let prepared = GrantClosure::for_owner(owner.clone())
+            .hot(requested[0].0.clone())
+            .generation_bound(requested[1].0.clone())
+            .hot(requested[2].0.clone())
+            .prepare_with(|| source.next().expect("one identity per capability"));
+        assert_eq!(source.next(), None, "every identity drawn, and no more");
+        assert_eq!(prepared.len(), requested.len());
+        for ((grant, (capability, kind)), id) in prepared.iter().zip(requested).zip(ids) {
+            assert_eq!(grant.operation.id(), id);
+            assert_eq!(grant.operation.owner(), &owner);
+            assert_eq!(grant.operation.capability(), capability);
+            assert_eq!(grant.kind, kind);
+        }
+    }
+
+    #[test]
+    fn prepare_draws_a_fresh_identity_for_every_grant() {
+        let closure = || {
+            GrantClosure::for_owner(github_pr_in("cell-1"))
+                .hot(session_file("/skills/pr.md"))
+                .hot(session_file("/skills/pr.md"))
+        };
+        let mut ids: Vec<GrantId> = closure()
+            .prepare()
+            .into_iter()
+            .chain(closure().prepare())
+            .map(|grant| grant.operation.id())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 4);
+    }
+
+    #[test]
+    fn an_empty_closure_draws_no_identity() {
+        let prepared = GrantClosure::for_owner(github_pr_in("cell-1"))
+            .prepare_with(|| panic!("an empty closure must not draw an identity"));
+        assert!(prepared.is_empty());
+    }
+
+    #[test]
+    fn a_prepared_grant_names_its_exact_address_and_the_revoke_that_undoes_it() {
+        let grant = GrantClosure::for_owner(github_pr_in("cell-1"))
+            .hot(uds_socket("/run/plasmosome/egressd.uds"))
+            .prepare()
+            .remove(0);
+        let handle = Handle {
+            class: UniverseClass::UdsPath,
+            id: grant.operation.id(),
+        };
+        assert_eq!(grant.handle(), handle);
+        assert_eq!(
+            grant.backend_effect(),
+            Effect::exact(
+                format!(
+                    "\"cell-1\"/\"github-pr\" granted uds-path as uds-path/{}",
+                    handle.id
+                ),
+                InverseVia::Backend(handle),
+            )
+        );
+    }
+
+    #[test]
+    fn the_inverse_description_tells_two_grants_of_one_class_apart() {
+        let prepared = GrantClosure::for_owner(github_pr_in("cell-1"))
+            .hot(session_file("/skills/pr.md"))
+            .hot(session_file("/skills/review.md"))
+            .prepare();
+        assert_ne!(
+            prepared[0].backend_effect().description,
+            prepared[1].backend_effect().description
+        );
+        let elsewhere = GrantClosure::for_owner(github_pr_in("cell-2"))
+            .hot(session_file("/skills/pr.md"))
+            .prepare_with(|| prepared[0].operation.id());
+        assert_ne!(
+            elsewhere[0].backend_effect().description,
+            prepared[0].backend_effect().description,
+            "the description names the owner's cell"
+        );
+    }
 
     #[test]
     fn session_file_holds_exactly_its_path_unchecked_and_the_default_recipe() {

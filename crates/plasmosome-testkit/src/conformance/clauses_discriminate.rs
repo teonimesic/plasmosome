@@ -1,10 +1,12 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::rc::Rc;
 
 use super as conformance;
 use crate::builders::{broker, mount, proxy_map, session_file, uds_socket};
 use plasmosome_backend::{
-    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, FileAccess, Grant,
+    BackendError, Capability, CellId, CellOwner, DrainSpec, EnforcementBackend, FileAccess,
     GrantId, GrantKind, Handle, LedgerEntry, OsObject, OsState, PluginId, RevokePolicy,
     UniverseClass, UniverseOp, UniverseRemoval,
 };
@@ -68,6 +70,19 @@ enum Defect {
     GracefulApplyRemovalLeavesAStaleHandle,
     ForceRefusedWhileANeighbourStands,
     ForceRefusedWhileThePluginStandsElsewhere,
+    GrantMintsItsOwnId,
+    RetryRewritesTheIssuedRecord,
+    DirectApplyPromotesToGrant,
+    RecordsItsOwnRecoveryLog,
+    AcceptsInvalidOperations(Call),
+    RefusesAnotherLaunchAtAnOccupiedEndpoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Call {
+    Grant,
+    Apply,
+    Plant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,11 +103,16 @@ struct DefectiveBackend {
     applied: Vec<UniverseOp>,
     planted: Vec<OsObject>,
     first_returned: Option<Handle>,
+    recovery_log: Rc<RefCell<Vec<LedgerEntry>>>,
 }
 
 impl DefectiveBackend {
     fn carrying(defect: Defect) -> DefectiveBackend {
-        DefectiveBackend {
+        DefectiveBackend::recovering(defect, Rc::default())
+    }
+
+    fn recovering(defect: Defect, recovery_log: Rc<RefCell<Vec<LedgerEntry>>>) -> DefectiveBackend {
+        let mut backend = DefectiveBackend {
             defect,
             state: OsState::new(),
             ledger: BTreeMap::new(),
@@ -102,23 +122,72 @@ impl DefectiveBackend {
             applied: Vec::new(),
             planted: Vec::new(),
             first_returned: None,
+            recovery_log,
+        };
+        if defect == Defect::RecordsItsOwnRecoveryLog {
+            let recovered = backend.recovery_log.borrow().clone();
+            for entry in recovered {
+                backend.state.insert(entry.object()).unwrap();
+                backend.grant_order.push(entry.handle);
+                backend.ledger.insert(entry.handle, entry);
+            }
         }
+        backend
     }
 
     fn mirrors_its_ledger(&self) -> bool {
         self.defect == Defect::AMirrorOfItsOwnLedger
     }
 
-    fn mint(&mut self, class: UniverseClass) -> Handle {
-        if self.defect == Defect::ARevokedHandleIsReissued
-            && let Some(handle) = self.freed.pop()
-        {
-            return handle;
+    fn address_for(&mut self, operation: &UniverseOp) -> Handle {
+        match self.defect {
+            Defect::GrantMintsItsOwnId => Handle {
+                class: operation.class(),
+                id: GrantId::new(),
+            },
+            Defect::ARevokedHandleIsReissued => {
+                self.freed.pop().unwrap_or_else(|| operation.handle())
+            }
+            _ => operation.handle(),
         }
-        Handle {
-            class,
-            id: GrantId::new(),
+    }
+
+    fn observed(&self) -> OsState {
+        if self.mirrors_its_ledger() {
+            self.mirrored_state()
+        } else {
+            self.state.clone()
         }
+    }
+
+    fn refuse_an_occupied_endpoint(&self, capability: &Capability) -> Result<(), BackendError> {
+        if self.defect != Defect::RefusesAnotherLaunchAtAnOccupiedEndpoint {
+            return Ok(());
+        }
+        let Capability::Broker { launch, .. } = capability else {
+            return Ok(());
+        };
+        let endpoints = [&launch.control_socket, &launch.data_socket];
+        let occupied = self
+            .observed()
+            .objects()
+            .any(|held| match &held.capability {
+                Capability::Broker {
+                    launch: standing, ..
+                } => {
+                    standing != launch
+                        && [&standing.control_socket, &standing.data_socket]
+                            .iter()
+                            .any(|endpoint| endpoints.contains(endpoint))
+                }
+                _ => false,
+            });
+        if occupied {
+            return Err(BackendError::Fault(
+                "another launch holds an endpoint of this broker".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn mirrored_state(&self) -> OsState {
@@ -406,30 +475,36 @@ impl DefectiveBackend {
 }
 
 impl EnforcementBackend for DefectiveBackend {
-    fn grant(&mut self, mut grant: Grant) -> LedgerEntry {
+    fn grant(
+        &mut self,
+        operation: UniverseOp,
+        kind: GrantKind,
+    ) -> Result<LedgerEntry, BackendError> {
         if self.defect == Defect::GrantPanics {
             std::panic::panic_any(InfrastructureFailure::Grant);
         }
+        let mut owner = operation.owner().clone();
+        let mut capability = operation.capability();
         if self.defect == Defect::GrantSubstitutesRequestedOwner {
-            grant.owner.plugin = PluginId::from("substituted-owner");
+            owner.plugin = PluginId::from("substituted-owner");
         }
-        if self.defect == Defect::GrantSubstitutesRequestedCapability(grant.capability.class()) {
-            grant.capability = substituted_capability(&grant.capability);
+        if self.defect == Defect::GrantSubstitutesRequestedCapability(capability.class()) {
+            capability = substituted_capability(&capability);
         }
-        if self.defect == Defect::GrantSubstitutesRecipe(grant.capability.class()) {
-            grant.capability = substituted_recipe(&grant.capability);
+        if self.defect == Defect::GrantSubstitutesRecipe(capability.class()) {
+            capability = substituted_recipe(&capability);
         }
         if self.defect == Defect::GrantSubstitutesLiveOwner
-            && let Some(owner) = self
+            && let Some(live) = self
                 .ledger
                 .values()
-                .find(|entry| entry.capability == grant.capability)
+                .find(|entry| entry.capability == capability)
                 .map(|entry| entry.owner.clone())
         {
-            grant.owner = owner;
+            owner = live;
         }
         let substitutes_colliding_capability = matches!(
-            (self.defect, grant.capability.class()),
+            (self.defect, capability.class()),
             (Defect::GrantSubstitutesMountSource, UniverseClass::Mount)
                 | (Defect::GrantSubstitutesProxyRoute, UniverseClass::ProxyMap)
                 | (
@@ -438,25 +513,42 @@ impl EnforcementBackend for DefectiveBackend {
                 )
         );
         if substitutes_colliding_capability
-            && let Some(capability) = self
+            && let Some(colliding) = self
                 .ledger
                 .values()
                 .find(|entry| {
-                    entry.capability.class() == grant.capability.class()
-                        && entry.capability.key() == grant.capability.key()
-                        && entry.capability != grant.capability
+                    entry.capability.class() == capability.class()
+                        && entry.capability.key() == capability.key()
+                        && entry.capability != capability
                 })
                 .map(|entry| entry.capability.clone())
         {
-            grant.capability = capability;
+            capability = colliding;
         }
-        let handle = self.mint(grant.capability.class());
+        let handle = self.address_for(&operation);
         let mut entry = LedgerEntry {
             handle,
-            owner: grant.owner,
-            capability: grant.capability,
-            kind: grant.kind,
+            owner,
+            capability,
+            kind,
         };
+        if self.defect == Defect::RetryRewritesTheIssuedRecord && self.ledger.contains_key(&handle)
+        {
+            self.ledger.insert(handle, entry.clone());
+            return Ok(entry);
+        }
+        if self.defect == Defect::DirectApplyPromotesToGrant
+            && !self.ledger.contains_key(&handle)
+            && self
+                .observed()
+                .objects()
+                .any(|held| *held == entry.object())
+        {
+            self.ledger.insert(handle, entry.clone());
+            self.grant_order.push(handle);
+            return Ok(entry);
+        }
+        self.refuse_an_occupied_endpoint(&entry.capability)?;
         if !self.mirrors_its_ledger() {
             let duplicate = self.defect == Defect::IdenticalGrantsCollapse
                 && self
@@ -468,7 +560,7 @@ impl EnforcementBackend for DefectiveBackend {
                 if self.defect == Defect::GrantRecordsAnotherRecipe(object.class()) {
                     object.capability = substituted_recipe(&object.capability);
                 }
-                self.state.insert(object).unwrap();
+                self.state.insert(object)?;
             }
             if self.defect == Defect::GrantMaterializesAShadow {
                 self.state.insert(shadow_of(&entry)).unwrap();
@@ -489,14 +581,17 @@ impl EnforcementBackend for DefectiveBackend {
         }
         self.ledger.insert(handle, entry.clone());
         self.grant_order.push(handle);
+        if self.defect == Defect::RecordsItsOwnRecoveryLog {
+            self.recovery_log.borrow_mut().push(entry.clone());
+        }
         if self.defect == Defect::OneHandleForEveryLiveGrant {
             let duplicate = self.first_returned.get_or_insert(handle);
-            LedgerEntry {
+            Ok(LedgerEntry {
                 handle: *duplicate,
                 ..entry
-            }
+            })
         } else {
-            entry
+            Ok(entry)
         }
     }
 
@@ -525,6 +620,9 @@ impl EnforcementBackend for DefectiveBackend {
         })?;
         self.ledger.remove(&handle);
         self.grant_order.retain(|held| *held != handle);
+        self.recovery_log
+            .borrow_mut()
+            .retain(|recorded| recorded.handle != handle);
         self.freed.push(handle);
         self.spent.insert(handle, entry.clone());
         if self.defect == Defect::RevokeReturnsAStranger(handle.class) {
@@ -555,6 +653,7 @@ impl EnforcementBackend for DefectiveBackend {
             self.applied.push(op);
             return Ok(());
         }
+        self.refuse_an_occupied_endpoint(&op.capability())?;
         let object = op.object();
         if self.defect == Defect::IdenticalGrantsCollapse
             && self
@@ -741,6 +840,11 @@ fn carrying(defect: Defect) -> impl Fn() -> DefectiveBackend {
     move || DefectiveBackend::carrying(defect)
 }
 
+fn carrying_a_shared_log() -> impl Fn() -> DefectiveBackend {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    move || DefectiveBackend::recovering(Defect::RecordsItsOwnRecoveryLog, Rc::clone(&log))
+}
+
 fn factory_panics() -> DefectiveBackend {
     std::panic::panic_any(InfrastructureFailure::Factory)
 }
@@ -777,6 +881,8 @@ fn run_all(defect: Defect) {
     conformance::revoke_takes_its_owners_object(carrying(defect));
     conformance::repeated_grants_are_independently_removable(carrying(defect));
     conformance::graceful_timeouts_preserve_the_selected_holding(carrying(defect));
+    conformance::grant_retry_returns_the_original_entry(carrying(defect));
+    conformance::fresh_backends_share_no_authority(carrying(defect));
 }
 
 #[test]
@@ -907,15 +1013,23 @@ fn a_substitute_and_a_stranger_stand_in_only_for_their_own_class() {
         let mut substituting =
             DefectiveBackend::carrying(Defect::GrantSubstitutesRequestedCapability(class));
         let mut estranged = DefectiveBackend::carrying(Defect::RevokeReturnsAStranger(class));
-        for grant in conformance::sample_grants() {
-            let targeted = grant.capability.class() == class;
-            let entry = substituting.grant(grant.clone());
-            assert_eq!(entry.capability != grant.capability, targeted, "{grant:?}");
-            let entry = estranged.grant(grant.clone());
+        for prepared in conformance::sample_grants() {
+            let targeted = prepared.operation.class() == class;
+            let entry = substituting
+                .grant(prepared.operation.clone(), prepared.kind)
+                .unwrap();
+            assert_eq!(
+                entry.capability != prepared.operation.capability(),
+                targeted,
+                "{prepared:?}"
+            );
+            let entry = estranged
+                .grant(prepared.operation.clone(), prepared.kind)
+                .unwrap();
             let returned = estranged
                 .revoke(entry.handle, DrainSpec::forcing())
                 .unwrap();
-            assert_eq!(returned != entry, targeted, "{grant:?}");
+            assert_eq!(returned != entry, targeted, "{prepared:?}");
         }
     }
 }
@@ -972,12 +1086,10 @@ fn a_recipe_defect_changes_only_the_recipe_of_its_own_class() {
         ] {
             let mut backend = DefectiveBackend::carrying(defect);
             for capability in conformance::sample_capabilities() {
-                let request = Grant {
-                    owner: conformance::conformance_owner(),
-                    capability: capability.clone(),
-                    kind: GrantKind::Hot,
-                };
-                let entry = backend.grant(request.clone());
+                let request = conformance::hot_grant(conformance::conformance_owner(), &capability);
+                let entry = backend
+                    .grant(request.operation.clone(), request.kind)
+                    .unwrap();
                 let snapshot = backend.snapshot_os_state();
                 let object = snapshot
                     .objects()
@@ -987,9 +1099,9 @@ fn a_recipe_defect_changes_only_the_recipe_of_its_own_class() {
                     (entry.handle.class, &entry.owner, entry.kind, &object.owner),
                     (
                         capability.class(),
-                        &request.owner,
+                        request.operation.owner(),
                         request.kind,
-                        &request.owner
+                        request.operation.owner()
                     ),
                     "{defect:?}"
                 );
@@ -1010,29 +1122,35 @@ fn a_recipe_defect_changes_only_the_recipe_of_its_own_class() {
             }
         }
         let mut revoking = DefectiveBackend::carrying(Defect::RevokeReturnsAnotherRecipe(class));
-        for grant in conformance::sample_grants() {
-            let entry = revoking.grant(grant.clone());
-            assert_eq!(entry.handle.class, grant.capability.class());
+        for prepared in conformance::sample_grants() {
+            let entry = revoking
+                .grant(prepared.operation.clone(), prepared.kind)
+                .unwrap();
+            assert_eq!(entry.handle.class, prepared.operation.class());
             assert_eq!(
                 (&entry.owner, entry.kind, &entry.capability),
-                (&grant.owner, grant.kind, &grant.capability)
+                (
+                    prepared.operation.owner(),
+                    prepared.kind,
+                    &prepared.operation.capability()
+                )
             );
             let returned = revoking.revoke(entry.handle, DrainSpec::forcing()).unwrap();
             let snapshot = revoking.snapshot_os_state();
             assert!(
                 !snapshot.objects().any(|held| held.id == entry.handle.id),
-                "a revoke must withdraw the object: {grant:?}"
+                "a revoke must withdraw the object: {prepared:?}"
             );
             assert_eq!(
                 (returned.handle, &returned.owner, returned.kind),
                 (entry.handle, &entry.owner, entry.kind)
             );
-            let targeted = grant.capability.class() == class;
+            let targeted = prepared.operation.class() == class;
             only_the_recipe_differs(
                 &returned.capability,
                 &entry.capability,
                 targeted,
-                &format!("{grant:?}"),
+                &format!("{prepared:?}"),
             );
         }
     }
@@ -1348,11 +1466,8 @@ fn revoke_after_one_removal(
     drain: DrainSpec,
 ) -> (Handle, Result<LedgerEntry, BackendError>) {
     let mut backend = DefectiveBackend::carrying(defect);
-    let entry = backend.grant(Grant {
-        owner: conformance::conformance_owner(),
-        capability: broker("egressd"),
-        kind: GrantKind::Hot,
-    });
+    let request = conformance::hot_grant(conformance::conformance_owner(), &broker("egressd"));
+    let entry = backend.grant(request.operation, request.kind).unwrap();
     backend
         .apply_removal(entry.removal(), &entry.owner, drain)
         .unwrap();
@@ -1431,4 +1546,146 @@ fn the_class_loops_run_every_universe_class() {
         session && socket && proxy && broker && mount,
         "the class loops leave out a universe class: {CLASSES:?}"
     );
+}
+
+#[test]
+fn the_replay_clause_rejects_a_grant_that_ignores_its_supplied_address() {
+    assert_rejected(|| conformance::grant_is_replayable(carrying(Defect::GrantMintsItsOwnId)));
+    assert_rejected(|| {
+        conformance::grant_is_replayable(carrying(Defect::ARevokedHandleIsReissued))
+    });
+}
+
+#[test]
+fn the_retry_clause_rejects_a_rewritten_record() {
+    assert_rejected(|| {
+        conformance::grant_retry_returns_the_original_entry(carrying(
+            Defect::RetryRewritesTheIssuedRecord,
+        ))
+    });
+}
+
+#[test]
+fn the_retry_clause_rejects_a_grant_that_promotes_an_applied_or_planted_object() {
+    assert_rejected(|| {
+        conformance::grant_retry_returns_the_original_entry(carrying(
+            Defect::DirectApplyPromotesToGrant,
+        ))
+    });
+}
+
+#[test]
+fn both_fresh_instance_checks_reject_a_backend_that_recovers_from_its_own_log() {
+    assert_rejected(|| conformance::fresh_backends_share_no_authority(carrying_a_shared_log()));
+    assert_rejected(|| conformance::snapshot_never_invents_objects(carrying_a_shared_log()));
+}
+
+#[test]
+fn a_recovery_log_carries_grants_and_revokes_into_the_next_instance() {
+    let make = carrying_a_shared_log();
+    let mut first = make();
+    let kept = conformance::hot_grant(conformance::conformance_owner(), &broker("egressd"));
+    let gone = conformance::hot_grant(conformance::conformance_owner(), &mount("/src", "/work"));
+    let kept_entry = first.grant(kept.operation.clone(), kept.kind).unwrap();
+    let gone_entry = first.grant(gone.operation.clone(), gone.kind).unwrap();
+    first
+        .revoke(gone_entry.handle, DrainSpec::forcing())
+        .unwrap();
+    let mut second = make();
+    let mut expected = OsState::new();
+    expected.insert(kept.operation.object()).unwrap();
+    assert_eq!(second.snapshot_os_state(), expected);
+    assert_eq!(
+        second.revoke(kept_entry.handle, DrainSpec::forcing()),
+        Ok(kept_entry)
+    );
+}
+
+#[test]
+fn the_snapshot_clause_rejects_an_invalid_operation_accepted_by_any_call() {
+    for call in [Call::Grant, Call::Apply, Call::Plant] {
+        assert_rejected(|| {
+            conformance::snapshot_never_invents_objects(carrying(Defect::AcceptsInvalidOperations(
+                call,
+            )))
+        });
+    }
+}
+
+#[test]
+fn a_backend_that_refuses_another_launch_at_an_occupied_endpoint_passes_every_clause() {
+    run_all(Defect::RefusesAnotherLaunchAtAnOccupiedEndpoint);
+}
+
+#[test]
+fn the_endpoint_guard_refuses_another_launch_at_either_socket_of_a_standing_broker() {
+    let standing = broker("egressd");
+    let Capability::Broker { launch, .. } = &standing else {
+        unreachable!("broker returns a broker");
+    };
+    let relaunch = |change: &dyn Fn(&mut plasmosome_backend::BrokerLaunch)| {
+        let mut capability = broker("egressd-again");
+        if let Capability::Broker { launch, .. } = &mut capability {
+            launch.command.push("--again".to_string());
+            launch.control_socket = "/run/plasmosome/again.control".to_string();
+            launch.data_socket = "/run/plasmosome/again.data".to_string();
+            change(launch);
+        }
+        capability
+    };
+    let refused = [
+        relaunch(&|again| again.control_socket = launch.control_socket.clone()),
+        relaunch(&|again| again.data_socket = launch.data_socket.clone()),
+        relaunch(&|again| again.control_socket = launch.data_socket.clone()),
+        relaunch(&|again| again.data_socket = launch.control_socket.clone()),
+    ];
+    let accepted = [broker("egressd-same-launch"), relaunch(&|_| {})];
+    for through_grant in [true, false] {
+        let mut backend =
+            DefectiveBackend::carrying(Defect::RefusesAnotherLaunchAtAnOccupiedEndpoint);
+        let first = conformance::hot_grant(conformance::conformance_owner(), &standing);
+        backend.grant(first.operation, first.kind).unwrap();
+        let mut create = |capability: &Capability| {
+            let request = conformance::hot_grant(conformance::second_owner(), capability);
+            if through_grant {
+                backend.grant(request.operation, request.kind).map(|_| ())
+            } else {
+                backend.apply(request.operation)
+            }
+        };
+        for capability in &refused {
+            let outcome = create(capability);
+            assert!(
+                matches!(outcome, Err(BackendError::Fault(_))),
+                "{capability:?} through grant {through_grant}: {outcome:?}"
+            );
+        }
+        for capability in &accepted {
+            create(capability).unwrap();
+        }
+        assert_eq!(backend.snapshot_os_state().len(), 3);
+        let planted = conformance::hot_grant(conformance::second_owner(), &refused[0]);
+        backend.plant(planted.operation.object()).unwrap();
+    }
+}
+
+#[test]
+fn the_relaunched_broker_has_its_own_command_and_sockets() {
+    let (
+        Capability::Broker { name, launch },
+        Capability::Broker {
+            name: relaunched_name,
+            launch: relaunched,
+        },
+    ) = (broker("egressd"), conformance::relaunched_broker())
+    else {
+        unreachable!("both are brokers");
+    };
+    assert_eq!(relaunched_name, name);
+    assert_ne!(relaunched.command, launch.command);
+    let first = [&launch.control_socket, &launch.data_socket];
+    for endpoint in [&relaunched.control_socket, &relaunched.data_socket] {
+        assert!(!first.contains(&endpoint), "{endpoint} is already taken");
+    }
+    assert_ne!(relaunched.control_socket, relaunched.data_socket);
 }
