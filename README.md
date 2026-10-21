@@ -76,17 +76,20 @@ The checkout is trusted host code: putting build output under the temporary dire
 isolate an untrusted build.
 
 The example makes a fresh 0700 directory inside a base directory and keeps its files, its
-sockets and its build there, about 240 MB, so you must be able to write the base. `plasmosomed`
-refuses a control socket unless every directory above the socket is owned by you or by root, is
-not a symlink, and is writable by neither group nor other (on macOS, nor through an ACL entry).
+sockets and its build there, about 240 MB. So you must be able to write the base, its mount must
+let the build run programs, and its path must be under 60 bytes, so that each socket path in it
+stays under 100 bytes. `plasmosomed` refuses a control socket unless every directory above the
+socket is owned by you or by root, is not a symlink, and is writable by neither group nor other
+(on macOS, nor through an ACL entry).
 On macOS it also refuses when `/` or any directory on the way down to the socket is on a volume
 mounted with ownership ignored, which `mount` lists as `noowners`, because there the owner and
 mode it reads do not keep other users out.
 Before it builds, the example checks the type, owner and mode of the base and of each directory
-above it, and that you can write the base, and stops with one line naming the first that fails.
+above it, that you can write the base, that its mount is not `noexec` (on Linux), and that its
+path is short enough, and stops with one line naming the first that fails.
 It does not check for ignored ownership, which Python's `os` module cannot read, so on such a
 volume the build runs and then `plasmosomed` refuses to start, naming the first directory on
-that volume.
+that volume. Python cannot read `noexec` on macOS either, so there such a base fails the build.
 `plasmosomed` makes the full check, ACL entries and ignored ownership included, when it starts.
 
 The base is `PLASMOSOME_QUICKSTART_DIR` when that is set, and otherwise Python's temporary
