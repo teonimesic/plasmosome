@@ -196,16 +196,17 @@ compared first, by `params_sha256` (§3):
   above. Otherwise the repeat is 101 `cell <id>`, as every other verb naming a set-aside cell is.
 - A quarantined cell: 101 `cell <id>`.
 
-A repeat changes no state. §6 counts it as a read, spec 001 §3.4's stop gate does not refuse it,
-and none of its replies ends a cell. A key belongs to the instance and is shared by every client
-of it. It is held from the moment its `request` is written until its cell's directory leaves
-`cells/`, with no time limit. A retired directory is never queried (§3), so a retired cell's key
-is forgotten, and the same request then starts a new cell. That includes a cell ended by §8's
-no-`created` rule, and a failed start whose cleanup finished (§6). At most one cell in `cells/`
-holds a key, so a repeat never makes a second cell beside one that may still run. §8 says how the
-controller finds the keys again after a restart. Amended on 2026-10-21: this paragraph is new,
-and step 4 read "Under the allocation mutex, allocate the ID and create the directory. Create
-`supervisor.lock` exclusively, mode 0600, close-on-exec, and take `flock(LOCK_EX | LOCK_NB)`."
+A repeat changes no state, apart from the check it runs on a set-aside cell. §6 counts it as a
+read, spec 001 §3.4's stop gate does not refuse it, and none of its replies ends a cell. A key
+belongs to the instance and is shared by every client of it. It is held from the moment its
+`request` is written until its cell's directory leaves `cells/`, with no time limit. A retired
+directory is never queried (§3), so a retired cell's key is forgotten, and the same request then
+starts a new cell. That includes a cell ended by §8's no-`created` rule, and a failed start whose
+cleanup finished (§6). At most one cell in `cells/` holds a key, so a repeat never makes a second
+cell beside one that may still run. §8 says how the controller finds the keys again after a
+restart. Amended on 2026-10-21: this paragraph is new, and step 4 read "Under the allocation
+mutex, allocate the ID and create the directory. Create `supervisor.lock` exclusively, mode 0600,
+close-on-exec, and take `flock(LOCK_EX | LOCK_NB)`."
 
 **The start.** `membraned` is executed directly, never through a shell. Its argv is exactly
 `[membraned.path, "--config-fd=3", "--lock-fd=4", "--cell=<id>"]`; the cell ID lets an operator
