@@ -1,0 +1,1190 @@
+use plasmosome_backend::CellId;
+use plasmosome_core::runtime::path::RecipePath;
+use plasmosome_core::runtime::recipe::{PlatformLimits, RuntimeRecipe};
+use plasmosome_core::runtime::supervisor_config::SupervisorConfig;
+use plasmosome_core::supervisor_start::{StartError, StartStep, SupervisorStart, start_supervisor};
+use plasmosome_core::{CellDir, FileIdentity, InstanceRoot, LockProbe, SupervisorLock, WriterLock};
+use serde_json::{Value, json};
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitCode, Stdio};
+use std::sync::OnceLock;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+const CASE: &str = "PLASMOSOME_SUPERVISOR_START_CASE";
+const CONTROLLER: &str = "PLASMOSOME_SUPERVISOR_START_CONTROLLER";
+const CASE_DEADLINE: Duration = Duration::from_secs(20);
+const WAIT: Duration = Duration::from_secs(5);
+const STANDIN_PATIENCE: Duration = Duration::from_secs(30);
+const POLL: Duration = Duration::from_millis(5);
+const STARTED: &str = "the child controller started its supervisor";
+const ONE_MIB: usize = 1 << 20;
+const LAST_SIGNAL: libc::c_int = 64;
+
+const CASES: [(&str, fn()); 9] = [
+    (
+        "starts_detached_with_only_0_to_4",
+        starts_detached_with_only_0_to_4,
+    ),
+    ("lock_never_free_until_exit", lock_never_free_until_exit),
+    (
+        "survives_the_controller_group",
+        survives_the_controller_group,
+    ),
+    (
+        "exec_failure_returns_the_lock",
+        exec_failure_returns_the_lock,
+    ),
+    ("early_exit_is_closed_pipe", early_exit_is_closed_pipe),
+    ("unread_record_times_out", unread_record_times_out),
+    ("lock_already_at_four", lock_already_at_four),
+    (
+        "sources_sit_on_each_others_targets",
+        sources_sit_on_each_others_targets,
+    ),
+    (
+        "a_cell_holding_a_nul_is_refused_before_any_fork",
+        a_cell_holding_a_nul_is_refused_before_any_fork,
+    ),
+];
+
+fn main() -> ExitCode {
+    let arguments: Vec<OsString> = std::env::args_os().collect();
+    if let Some(cell) = standin_cell(&arguments) {
+        standin::run(&arguments, cell)
+    }
+    if let Some(root) = std::env::var_os(CONTROLLER) {
+        child_controller(Path::new(&root))
+    }
+    if let Some(name) = std::env::var_os(CASE) {
+        let (_, case) = CASES
+            .iter()
+            .find(|(case, _)| name == *case)
+            .unwrap_or_else(|| panic!("{name:?} names a case"));
+        case();
+        return ExitCode::SUCCESS;
+    }
+    run_every_case(&arguments[1..])
+}
+
+fn run_every_case(arguments: &[OsString]) -> ExitCode {
+    let filters: Vec<&OsStr> = arguments
+        .iter()
+        .map(OsString::as_os_str)
+        .filter(|argument| !argument.as_encoded_bytes().starts_with(b"-"))
+        .collect();
+    let chosen = CASES.iter().filter(|(name, _)| {
+        filters.is_empty()
+            || filters
+                .iter()
+                .any(|filter| name.contains(&*filter.to_string_lossy()))
+    });
+    let mut ran = 0;
+    for (name, _) in chosen {
+        let started = Instant::now();
+        match run_case(name) {
+            Ok(()) => println!("case {name} ... ok ({:?})", started.elapsed()),
+            Err(failure) => {
+                println!("case {name} ... FAILED: {failure}");
+                return ExitCode::FAILURE;
+            }
+        }
+        ran += 1;
+    }
+    println!("supervisor_start: {ran} cases passed");
+    ExitCode::SUCCESS
+}
+
+fn run_case(name: &str) -> Result<(), String> {
+    let mut child = Command::new(this_executable())
+        .env(CASE, name)
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("the case process does not start: {error}"))?;
+    let deadline = Instant::now() + CASE_DEADLINE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(format!("the case process ended with {status}")),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("the case did not finish within {CASE_DEADLINE:?}"));
+            }
+            Ok(None) => thread::sleep(POLL),
+            Err(error) => return Err(format!("the case process cannot be waited for: {error}")),
+        }
+    }
+}
+
+fn starts_detached_with_only_0_to_4() {
+    assert!(
+        ignores(libc::SIGPIPE),
+        "the test process ignores SIGPIPE, which an exec keeps unless the start resets it"
+    );
+    let _blocked = SignalBlocked::on_this_thread(libc::SIGUSR2);
+    let root = Root::new();
+    let cell = Cell::create(&root.path, "cell-101");
+    let lock = cell.lock();
+    let log = cell.log();
+    let record = cell.record();
+    let planted = Planted::low_and_last();
+    started(cell.start(&root.membraned(), lock, log, record.clone(), WAIT));
+    drop(planted);
+    let report = Report::read(&cell.path);
+    assert_eq!(
+        report.strings("argv"),
+        [
+            root.membraned().as_str(),
+            "--config-fd=3",
+            "--lock-fd=4",
+            "--cell=cell-101"
+        ],
+        "{report}"
+    );
+    assert_eq!(report.number("environment"), 0, "{report}");
+    assert_descriptors(&report, &cell);
+    assert_eq!(report.text("record"), String::from_utf8(record).unwrap());
+    assert_eq!(report.text("decoded"), "cell-101", "{report}");
+    assert_eq!(report.numbers("open_above_four"), [0u64; 0], "{report}");
+    assert!(report.flag("mask_empty"), "{report}");
+    assert_eq!(report.numbers("ignored"), [0u64; 0], "{report}");
+    let (pid, sid, pgid) = (
+        report.number("pid"),
+        report.number("sid"),
+        report.number("pgid"),
+    );
+    assert_eq!((sid, pgid), (pid, pid), "{report}");
+    assert_ne!(sid, u64::from(own_sid()), "{report}");
+    assert_ne!(pgid, u64::from(own_pgid()), "{report}");
+    assert_reparented(&report);
+}
+
+fn lock_never_free_until_exit() {
+    let root = Root::new();
+    let cell = Cell::create(&root.path, "cell-105");
+    let lock = cell.lock();
+    let probe = Probe::start(&root.path, "cell-105");
+    started(cell.start(&root.membraned(), lock, cell.log(), cell.record(), WAIT));
+    let report = Report::read(&cell.path);
+    let released_at = Instant::now();
+    release(&cell.path);
+    let (probes, freed_at) = probe.first_free();
+    assert!(
+        freed_at > released_at,
+        "the lock was never free before the stand-in was released; {report}"
+    );
+    assert!(
+        freed_at - released_at < Duration::from_secs(1),
+        "the lock is free within a second of the stand-in's release, not {:?}",
+        freed_at - released_at
+    );
+    assert!(
+        probes >= 10,
+        "the probe tried the lock {probes} times before it was free"
+    );
+}
+
+fn survives_the_controller_group() {
+    let root = Root::new();
+    let cell_path = root.path.join("cells").join("cell-102");
+    let _release = Released(cell_path.clone());
+    let mut controller = Command::new(this_executable())
+        .env(CONTROLLER, &root.path)
+        .env_remove(CASE)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the child controller starts");
+    let said = first_line(&mut controller);
+    assert_eq!(said.as_deref(), Some(STARTED));
+    let group = libc::pid_t::try_from(controller.id()).expect("a pid fits pid_t");
+    assert_eq!(
+        kill_group(group, libc::SIGKILL),
+        0,
+        "the child controller's group is killed"
+    );
+    let status = controller.wait().expect("the child controller is reaped");
+    assert_eq!(status.signal(), Some(libc::SIGKILL));
+    let report = Report::read(&cell_path);
+    let pid = libc::pid_t::try_from(report.number("pid")).expect("a pid fits pid_t");
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        is_running(pid),
+        "the stand-in outlives its controller's group; {report}"
+    );
+    assert_eq!(report.number("sid"), report.number("pid"), "{report}");
+    assert_reparented(&report);
+}
+
+fn child_controller(root: &Path) -> ! {
+    let cell = Cell::create(root, "cell-102");
+    let membraned = membraned_in(root);
+    started(cell.start(&membraned, cell.lock(), cell.log(), cell.record(), WAIT));
+    println!("{STARTED}");
+    std::io::stdout().flush().expect("stdout flushes");
+    loop {
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn exec_failure_returns_the_lock() {
+    let root = Root::new();
+    let cell = Cell::create(&root.path, "cell-106");
+    let missing =
+        RecipePath::parse(&format!("{}/missing", root.path.display())).expect("a canonical path");
+    match cell.start(&missing, cell.lock(), cell.log(), cell.record(), WAIT) {
+        Err(StartError::Exec { lock, step, errno }) => {
+            assert_eq!((step, errno), (StartStep::Exec, libc::ENOENT));
+            assert!(
+                matches!(cell.dir.probe_supervisor_lock(), Ok(LockProbe::Held)),
+                "the returned lock is still held"
+            );
+            assert_no_child_left();
+            drop(lock);
+            assert_frees_within_a_second(&cell.dir);
+        }
+        other => panic!("a missing membraned is an Exec failure, not {other:?}"),
+    }
+}
+
+fn early_exit_is_closed_pipe() {
+    let root = Root::new();
+    let cell = Cell::create(&root.path, "cell-201");
+    let _default = SigpipeDefault::on_macos();
+    match cell.start(
+        &root.membraned(),
+        cell.lock(),
+        cell.log(),
+        oversized_record(),
+        WAIT,
+    ) {
+        Err(StartError::SupervisorClosedPipe) => {}
+        other => panic!("a reader that exits early closes the pipe, not {other:?}"),
+    }
+    assert_no_child_left();
+}
+
+fn unread_record_times_out() {
+    let root = Root::new();
+    let cell = Cell::create(&root.path, "cell-301");
+    let lock = cell.lock();
+    let log = cell.log();
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let start = SupervisorStart {
+        membraned: &root.membraned(),
+        cell: &cell.id,
+        lock,
+        log,
+        record: oversized_record(),
+    };
+    match start_supervisor(start, deadline) {
+        Err(StartError::RecordNotTaken) => {}
+        other => panic!("an unread record times out, not {other:?}"),
+    }
+    let returned = Instant::now();
+    assert!(returned >= deadline, "the write waited until its deadline");
+    assert!(
+        returned - deadline < Duration::from_millis(800),
+        "the write gave up within a second, {:?} after its deadline",
+        returned - deadline
+    );
+    assert_no_child_left();
+}
+
+fn lock_already_at_four() {
+    let mut low = LowDescriptors::reserve();
+    let root = Root::new();
+    let cell = Cell::create(&root.path, "cell-104");
+    low.free(4);
+    let lock = cell.lock();
+    assert_eq!(lock.as_fd().as_raw_fd(), 4, "the controller's lock is at 4");
+    started(cell.start(&root.membraned(), lock, cell.log(), cell.record(), WAIT));
+    let report = Report::read(&cell.path);
+    assert_descriptors(&report, &cell);
+}
+
+fn sources_sit_on_each_others_targets() {
+    let mut low = LowDescriptors::reserve();
+    let root = Root::new();
+    let cell = Cell::create(&root.path, "cell-103");
+    low.free(3);
+    let lock = cell.lock();
+    low.free(4);
+    let log = cell.log();
+    assert_eq!(
+        (lock.as_fd().as_raw_fd(), log.as_raw_fd()),
+        (3, 4),
+        "the lock is at 3 and the log at 4"
+    );
+    let record = cell.record();
+    let stdin = close_stdin();
+    started(cell.start(&root.membraned(), lock, log, record, WAIT));
+    drop(stdin);
+    let report = Report::read(&cell.path);
+    assert_descriptors(&report, &cell);
+}
+
+fn a_cell_holding_a_nul_is_refused_before_any_fork() {
+    let root = Root::new();
+    let cell = Cell::create(&root.path, "cell-107");
+    let start = SupervisorStart {
+        membraned: &root.membraned(),
+        cell: &CellId::from("cell-1\0"),
+        lock: cell.lock(),
+        log: cell.log(),
+        record: cell.record(),
+    };
+    match start_supervisor(start, Instant::now() + WAIT) {
+        Err(StartError::Prepare { lock, source }) => {
+            assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(
+                matches!(cell.dir.probe_supervisor_lock(), Ok(LockProbe::Held)),
+                "the returned lock is still held"
+            );
+            drop(lock);
+        }
+        other => panic!("a cell ID holding a NUL is refused, not {other:?}"),
+    }
+    assert_no_child_left();
+}
+
+fn assert_descriptors(report: &Report, cell: &Cell) {
+    let null = std::fs::metadata("/dev/null").expect("/dev/null exists");
+    for fd in [0, 1] {
+        let found = report.descriptor(fd);
+        assert_eq!(
+            (found.kind.as_str(), found.rdev),
+            ("char", null.rdev()),
+            "descriptor {fd} is /dev/null; {report}"
+        );
+    }
+    let log = std::fs::metadata(cell.path.join("membraned.log")).expect("the log exists");
+    assert_eq!(
+        report.descriptor(2).identity(),
+        Some((log.dev(), log.ino())),
+        "descriptor 2 is membraned.log; {report}"
+    );
+    assert_eq!(
+        report.descriptor(3).kind,
+        "fifo",
+        "descriptor 3 is the config pipe; {report}"
+    );
+    let FileIdentity { dev, ino } = cell
+        .dir
+        .supervisor_lock_identity()
+        .expect("the lock has an identity");
+    assert_eq!(
+        report.descriptor(4).identity(),
+        Some((dev, ino)),
+        "descriptor 4 is supervisor.lock; {report}"
+    );
+    assert!(
+        report.flag("lock_taken"),
+        "flock on descriptor 4 succeeds; {report}"
+    );
+}
+
+fn assert_reparented(report: &Report) {
+    let ppid = report.number("ppid");
+    assert_ne!(ppid, u64::from(std::process::id()), "{report}");
+    if cfg!(target_os = "macos") {
+        assert_eq!(ppid, 1, "launchd is the stand-in's parent; {report}");
+    }
+}
+
+fn assert_frees_within_a_second(dir: &CellDir) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match dir.probe_supervisor_lock() {
+            Ok(LockProbe::Free(_)) => return,
+            Ok(LockProbe::Held) if Instant::now() < deadline => thread::sleep(POLL),
+            other => panic!("the lock frees within a second, not {other:?}"),
+        }
+    }
+}
+
+fn started(result: Result<(), StartError>) {
+    if let Err(error) = result {
+        panic!("the supervisor starts: {error}");
+    }
+    assert_no_child_left();
+}
+
+fn assert_no_child_left() {
+    let (reaped, errno) = wait_any();
+    assert_eq!(
+        (reaped, errno),
+        (-1, libc::ECHILD),
+        "no waitable child remains"
+    );
+}
+
+fn oversized_record() -> Vec<u8> {
+    let mut record = vec![b'x'; ONE_MIB];
+    record.push(b'\n');
+    record
+}
+
+fn first_line(child: &mut Child) -> Option<String> {
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let (sent, received) = mpsc::channel();
+    thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = sent.send(line.trim_end().to_owned());
+    });
+    received.recv_timeout(WAIT).ok()
+}
+
+fn this_executable() -> PathBuf {
+    std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .expect("the test executable has a canonical path")
+}
+
+fn membraned_in(root: &Path) -> RecipePath {
+    RecipePath::parse(&format!("{}/membraned", root.display()))
+        .expect("the stand-in's path is canonical")
+}
+
+struct Root {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl Root {
+    fn new() -> Root {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir
+            .path()
+            .canonicalize()
+            .expect("the temporary directory has a canonical path");
+        std::os::unix::fs::symlink(this_executable(), path.join("membraned"))
+            .expect("the stand-in is linked into the root");
+        Root { _dir: dir, path }
+    }
+
+    fn membraned(&self) -> RecipePath {
+        membraned_in(&self.path)
+    }
+}
+
+struct Cell {
+    _root: InstanceRoot,
+    _writer: WriterLock,
+    dir: CellDir,
+    id: CellId,
+    instance: PathBuf,
+    path: PathBuf,
+}
+
+impl Cell {
+    fn create(root: &Path, id: &str) -> Cell {
+        let instance = InstanceRoot::open(root).expect("the instance root opens");
+        let writer = instance.lock().expect("the writer lock is free");
+        let id = CellId::from(id);
+        let dir = instance
+            .create_cell_dir(&writer, &id)
+            .expect("the cell directory is created");
+        let path = root.join("cells").join(id.as_str());
+        Cell {
+            _root: instance,
+            _writer: writer,
+            dir,
+            id,
+            instance: root.to_path_buf(),
+            path,
+        }
+    }
+
+    fn lock(&self) -> SupervisorLock {
+        self.dir
+            .create_supervisor_lock()
+            .expect("the supervisor lock is created")
+    }
+
+    fn log(&self) -> File {
+        self.dir.open_supervisor_log().expect("membraned.log opens")
+    }
+
+    fn record(&self) -> Vec<u8> {
+        let limits = PlatformLimits::host().expect("this host has limits");
+        SupervisorConfig {
+            cell: self.id.clone(),
+            instance_root: RecipePath::parse(&self.instance.display().to_string())
+                .expect("the root is canonical"),
+            runtime_recipe: recipe(&limits),
+            boot_deadline_ms: 1_000,
+        }
+        .encode()
+        .expect("the record encodes")
+    }
+
+    fn start(
+        &self,
+        membraned: &RecipePath,
+        lock: SupervisorLock,
+        log: File,
+        record: Vec<u8>,
+        wait: Duration,
+    ) -> Result<(), StartError> {
+        let start = SupervisorStart {
+            membraned,
+            cell: &self.id,
+            lock,
+            log,
+            record,
+        };
+        start_supervisor(start, Instant::now() + wait)
+    }
+}
+
+impl Drop for Cell {
+    fn drop(&mut self) {
+        release(&self.path);
+    }
+}
+
+struct Released(PathBuf);
+
+impl Drop for Released {
+    fn drop(&mut self) {
+        release(&self.0);
+    }
+}
+
+fn release(cell: &Path) {
+    let _ = File::create(cell.join("release"));
+    let Some(pid) = std::fs::read_to_string(cell.join("standin.pid"))
+        .ok()
+        .and_then(|text| text.trim().parse::<libc::pid_t>().ok())
+    else {
+        return;
+    };
+    let deadline = Instant::now() + WAIT;
+    while is_running(pid) && Instant::now() < deadline {
+        thread::sleep(POLL);
+    }
+}
+
+fn recipe(limits: &PlatformLimits) -> RuntimeRecipe {
+    let artifact =
+        |path: &str, digit: char| json!({"path": path, "sha256": digit.to_string().repeat(64)});
+    let value = json!({
+        "version": 1,
+        "vcpus": 1,
+        "memory_mib": 512,
+        "kernel": artifact("/opt/cell/kernel", '1'),
+        "kernel_format": "raw",
+        "initramfs": artifact("/opt/cell/initramfs", '2'),
+        "root_image": artifact("/opt/cell/root.raw", '3'),
+        "writable_root": "/var/cell/c1/root.raw",
+        "control_path": "/var/cell/c1/control.sock",
+        "data_path": "/var/cell/c1/data.sock",
+        "helper": artifact("/opt/cell/krun-helper", '4'),
+        "libraries": [artifact("/opt/cell/lib/libkrun.1.dylib", '5')],
+        "host_policy": artifact("/opt/cell/host.sb", '6'),
+        "guest_policy": artifact("/opt/cell/guest.json", '7'),
+        "architecture": limits.architecture().as_str(),
+    });
+    let mut line = serde_json::to_vec(&value).expect("the recipe serializes");
+    line.push(b'\n');
+    RuntimeRecipe::parse(&line, limits).expect("the recipe is valid")
+}
+
+struct Probe {
+    outcome: mpsc::Receiver<(usize, Instant)>,
+}
+
+impl Probe {
+    fn start(root: &Path, cell: &str) -> Probe {
+        let instance = InstanceRoot::open(root).expect("the probe opens the root");
+        let dir = instance
+            .cell_dir(&CellId::from(cell))
+            .expect("the probe opens the cell");
+        let (sent, outcome) = mpsc::channel();
+        thread::spawn(move || {
+            let deadline = Instant::now() + STANDIN_PATIENCE;
+            let mut probes = 0;
+            while Instant::now() < deadline {
+                match dir.probe_supervisor_lock() {
+                    Ok(LockProbe::Held) => probes += 1,
+                    Ok(LockProbe::Free(_)) => {
+                        let _ = sent.send((probes, Instant::now()));
+                        return;
+                    }
+                    other => panic!("the probe finds the lock held or free, not {other:?}"),
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        Probe { outcome }
+    }
+
+    fn first_free(self) -> (usize, Instant) {
+        self.outcome
+            .recv_timeout(WAIT)
+            .expect("the probe finds the lock free once the stand-in exits")
+    }
+}
+
+struct Report(Value);
+
+struct Descriptor {
+    kind: String,
+    dev: u64,
+    ino: u64,
+    rdev: u64,
+}
+
+impl Descriptor {
+    fn identity(&self) -> Option<(u64, u64)> {
+        matches!(self.kind.as_str(), "char" | "fifo" | "file" | "other")
+            .then_some((self.dev, self.ino))
+    }
+}
+
+impl Report {
+    fn read(cell: &Path) -> Report {
+        let path = cell.join("standin.json");
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                return Report(serde_json::from_str(&text).expect("the report is JSON"));
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the stand-in reported within {WAIT:?} at {}",
+                path.display()
+            );
+            thread::sleep(POLL);
+        }
+    }
+
+    fn field(&self, key: &str) -> &Value {
+        self.0
+            .get(key)
+            .unwrap_or_else(|| panic!("the report has {key}: {self}"))
+    }
+
+    fn number(&self, key: &str) -> u64 {
+        self.field(key)
+            .as_u64()
+            .unwrap_or_else(|| panic!("{key} is a number: {self}"))
+    }
+
+    fn flag(&self, key: &str) -> bool {
+        self.field(key)
+            .as_bool()
+            .unwrap_or_else(|| panic!("{key} is a flag: {self}"))
+    }
+
+    fn text(&self, key: &str) -> String {
+        self.field(key)
+            .as_str()
+            .unwrap_or_else(|| panic!("{key} is a string: {self}"))
+            .to_owned()
+    }
+
+    fn strings(&self, key: &str) -> Vec<String> {
+        self.field(key)
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} is a list: {self}"))
+            .iter()
+            .map(|value| value.as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    fn numbers(&self, key: &str) -> Vec<u64> {
+        self.field(key)
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} is a list: {self}"))
+            .iter()
+            .map(|value| value.as_u64().unwrap_or(u64::MAX))
+            .collect()
+    }
+
+    fn descriptor(&self, fd: usize) -> Descriptor {
+        let found = &self.field("descriptors")[fd];
+        Descriptor {
+            kind: found["kind"].as_str().unwrap_or_default().to_owned(),
+            dev: found["dev"].as_u64().unwrap_or_default(),
+            ino: found["ino"].as_u64().unwrap_or_default(),
+            rdev: found["rdev"].as_u64().unwrap_or_default(),
+        }
+    }
+}
+
+impl std::fmt::Display for Report {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the stand-in reported {}", self.0)
+    }
+}
+
+struct Planted([RawFd; 2]);
+
+impl Planted {
+    #[allow(unsafe_code)]
+    fn low_and_last() -> Planted {
+        // SAFETY: getdtablesize takes no arguments.
+        let last = unsafe { libc::getdtablesize() } - 1;
+        let low = inheritable_null(|null| {
+            // SAFETY: fcntl with F_DUPFD takes integers only, and `null` is open for the call.
+            unsafe { libc::fcntl(null, libc::F_DUPFD, 5) }
+        });
+        let high = inheritable_null(|null| {
+            // SAFETY: dup2 takes integers only, and `null` is open for the call. `last` is the
+            // highest descriptor this process may have, which nothing else here holds.
+            unsafe { libc::dup2(null, last) }
+        });
+        assert!(
+            low >= 5 && high == last,
+            "descriptors {low} and {high} are planted"
+        );
+        assert!(
+            !is_close_on_exec(low) && !is_close_on_exec(high),
+            "the planted descriptors are inheritable"
+        );
+        Planted([low, high])
+    }
+}
+
+impl Drop for Planted {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        for fd in self.0 {
+            // SAFETY: `fd` is a descriptor this Planted made and owns, closed once here.
+            unsafe { libc::close(fd) };
+        }
+    }
+}
+
+#[allow(unsafe_code)]
+fn inheritable_null(copy: impl FnOnce(RawFd) -> RawFd) -> RawFd {
+    // SAFETY: The path is a static NUL-terminated string, and open keeps no pointer to it.
+    let opened = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+    assert!(opened >= 0, "/dev/null opens");
+    let copied = copy(opened);
+    // SAFETY: `opened` is the descriptor opened above, which nothing else owns.
+    unsafe { libc::close(opened) };
+    copied
+}
+
+struct LowDescriptors([Option<OwnedFd>; 2]);
+
+impl LowDescriptors {
+    #[allow(unsafe_code)]
+    fn reserve() -> LowDescriptors {
+        let null = File::open("/dev/null").expect("/dev/null opens");
+        let held = [3, 4].map(|target| {
+            // SAFETY: dup2 takes integers only, and `null` keeps its descriptor open. This case
+            // runs in its own process, so whatever it replaces at 3 or 4 is no other test's.
+            let copied = unsafe { libc::dup2(null.as_raw_fd(), target) };
+            assert_eq!(copied, target, "descriptor {target} is reserved");
+            // SAFETY: dup2 made `target` a descriptor that nothing else owns.
+            Some(unsafe { OwnedFd::from_raw_fd(target) })
+        });
+        LowDescriptors(held)
+    }
+
+    fn free(&mut self, fd: RawFd) {
+        let slot = usize::try_from(fd - 3).expect("3 or 4");
+        assert!(
+            self.0[slot].take().is_some(),
+            "descriptor {fd} was reserved"
+        );
+    }
+}
+
+struct ClosedStdin(OwnedFd);
+
+#[allow(unsafe_code)]
+fn close_stdin() -> ClosedStdin {
+    let saved = std::io::stdin()
+        .as_fd()
+        .try_clone_to_owned()
+        .expect("stdin is copied");
+    // SAFETY: close takes an integer. This case runs in its own process and restores 0 when the
+    // returned value drops.
+    assert_eq!(unsafe { libc::close(0) }, 0, "descriptor 0 is closed");
+    ClosedStdin(saved)
+}
+
+impl Drop for ClosedStdin {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: dup2 takes integers only, and the saved copy is open for the call.
+        unsafe { libc::dup2(self.0.as_raw_fd(), 0) };
+    }
+}
+
+struct SignalBlocked(libc::sigset_t);
+
+impl SignalBlocked {
+    #[allow(unsafe_code)]
+    fn on_this_thread(signal: libc::c_int) -> SignalBlocked {
+        // SAFETY: All zeroes is a valid sigset_t, and sigemptyset then sets both. They are locals
+        // that outlive the calls, and pthread_sigmask changes only this thread's mask.
+        unsafe {
+            let mut previous: libc::sigset_t = std::mem::zeroed();
+            let mut blocked: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut blocked);
+            libc::sigaddset(&mut blocked, signal);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut previous),
+                0
+            );
+            SignalBlocked(previous)
+        }
+    }
+}
+
+impl Drop for SignalBlocked {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is the mask saved when the signal was blocked, which pthread_sigmask
+        // only reads.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &self.0, std::ptr::null_mut()) };
+    }
+}
+
+struct SigpipeDefault(Option<libc::sighandler_t>);
+
+impl SigpipeDefault {
+    #[allow(unsafe_code)]
+    fn on_macos() -> SigpipeDefault {
+        if !cfg!(target_os = "macos") {
+            return SigpipeDefault(None);
+        }
+        // SAFETY: signal takes integers and SIG_DFL. This case runs in its own process, so the
+        // default action reaches no other test.
+        let previous = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        assert_ne!(previous, libc::SIG_ERR, "SIGPIPE is set to its default");
+        SigpipeDefault(Some(previous))
+    }
+}
+
+impl Drop for SigpipeDefault {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        if let Some(previous) = self.0 {
+            // SAFETY: signal takes integers and the disposition saved above.
+            unsafe { libc::signal(libc::SIGPIPE, previous) };
+        }
+    }
+}
+
+#[allow(unsafe_code)]
+fn ignores(signal: libc::c_int) -> bool {
+    // SAFETY: libc::sigaction is a plain C struct, for which all zeroes is a valid value.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: A null new action only reads the disposition into `current`, a local.
+    unsafe { libc::sigaction(signal, std::ptr::null(), &mut current) };
+    current.sa_sigaction == libc::SIG_IGN
+}
+
+#[allow(unsafe_code)]
+fn is_close_on_exec(fd: RawFd) -> bool {
+    // SAFETY: fcntl with F_GETFD takes no pointer.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    flags != -1 && flags & libc::FD_CLOEXEC != 0
+}
+
+#[allow(unsafe_code)]
+fn wait_any() -> (libc::pid_t, i32) {
+    let mut status = 0;
+    // SAFETY: `status` is a local that waitpid may write.
+    let reaped = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+    (
+        reaped,
+        std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+    )
+}
+
+#[allow(unsafe_code)]
+fn kill_group(group: libc::pid_t, signal: libc::c_int) -> libc::c_int {
+    // SAFETY: killpg takes integers. `group` is the process group of a child this case has not
+    // reaped, so its number still names that group.
+    unsafe { libc::killpg(group, signal) }
+}
+
+#[allow(unsafe_code)]
+fn is_running(pid: libc::pid_t) -> bool {
+    // SAFETY: kill with signal 0 takes integers and sends nothing.
+    let exists = unsafe { libc::kill(pid, 0) } == 0;
+    exists && !is_zombie(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: libc::pid_t) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_zombie(_pid: libc::pid_t) -> bool {
+    false
+}
+
+#[allow(unsafe_code)]
+fn own_sid() -> u32 {
+    // SAFETY: getsid takes an integer; 0 names this process.
+    u32::try_from(unsafe { libc::getsid(0) }).expect("a session id")
+}
+
+#[allow(unsafe_code)]
+fn own_pgid() -> u32 {
+    // SAFETY: getpgid takes an integer; 0 names this process.
+    u32::try_from(unsafe { libc::getpgid(0) }).expect("a process group id")
+}
+
+fn standin_cell(arguments: &[OsString]) -> Option<&str> {
+    let [_, config, lock, cell] = arguments else {
+        return None;
+    };
+    if config != "--config-fd=3" || lock != "--lock-fd=4" {
+        return None;
+    }
+    cell.to_str()?.strip_prefix("--cell=")
+}
+
+#[derive(Clone, Copy)]
+struct Inherited {
+    open: [bool; 5],
+    mask_empty: bool,
+    ignored: [bool; LAST_SIGNAL as usize + 1],
+}
+
+static INHERITED: OnceLock<Inherited> = OnceLock::new();
+
+/// Runs before `main`, where the standard library's start-up has not yet set SIGPIPE to be
+/// ignored or reopened a closed descriptor 0, 1 or 2 on `/dev/null`. So it records what the
+/// process inherited across `execve`: which of descriptors 0 to 4 are open, the signal mask and
+/// the ignored signals.
+#[used]
+#[allow(unsafe_code)]
+#[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
+static RECORD_INHERITED: extern "C" fn() = record_inherited;
+
+extern "C" fn record_inherited() {
+    let _ = INHERITED.set(Inherited::now());
+}
+
+impl Inherited {
+    #[allow(unsafe_code)]
+    fn now() -> Inherited {
+        let open = [0, 1, 2, 3, 4].map(|fd| {
+            // SAFETY: fcntl with F_GETFD takes no pointer.
+            unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
+        });
+        // SAFETY: All zeroes is a valid sigset_t. A null new set only reads this thread's mask
+        // into the local `mask`, which sigismember then only reads.
+        let mask_empty = unsafe {
+            let mut mask: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut mask) == 0
+                && (1..=LAST_SIGNAL).all(|signal| libc::sigismember(&mask, signal) != 1)
+        };
+        let mut ignored = [false; LAST_SIGNAL as usize + 1];
+        for (signal, ignoring) in (1..=LAST_SIGNAL).zip(ignored.iter_mut().skip(1)) {
+            *ignoring = ignores(signal);
+        }
+        Inherited {
+            open,
+            mask_empty,
+            ignored,
+        }
+    }
+}
+
+mod standin {
+    use super::*;
+
+    pub(super) fn run(arguments: &[OsString], cell: &str) -> ! {
+        let outcome = std::panic::catch_unwind(|| serve(arguments, cell));
+        exit(if outcome.is_ok() { 0 } else { 3 })
+    }
+
+    fn serve(arguments: &[OsString], cell: &str) {
+        let open_above_four = open_descriptors_from(5);
+        let root = Path::new(&arguments[0])
+            .parent()
+            .expect("the stand-in sits in the instance root");
+        let cell_path = root.join("cells").join(cell);
+        write_atomically(
+            &cell_path,
+            "standin.pid",
+            process_id().to_string().as_bytes(),
+        );
+        let number: u64 = cell
+            .strip_prefix("cell-")
+            .and_then(|digits| digits.parse().ok())
+            .expect("a cell-<n> ID");
+        match number / 100 {
+            1 => {
+                let report = report(arguments, root, open_above_four);
+                write_atomically(&cell_path, "standin.json", report.to_string().as_bytes());
+                wait_for_release(&cell_path);
+            }
+            2 => {}
+            3 => wait_for_release(&cell_path),
+            _ => panic!("{cell} names no stand-in behavior"),
+        }
+    }
+
+    fn report(arguments: &[OsString], root: &Path, open_above_four: Vec<RawFd>) -> Value {
+        let inherited = INHERITED.get().copied();
+        let record = read_descriptor_three();
+        let decoded = PlatformLimits::host()
+            .ok()
+            .and_then(|limits| SupervisorConfig::decode(&record, &limits).ok())
+            .filter(|config| config.instance_root.as_path() == root)
+            .map_or_else(|| "refused".to_owned(), |config| config.cell.to_string());
+        let ppid = reparented_parent();
+        json!({
+            "argv": arguments.iter().map(|argument| argument.to_string_lossy()).collect::<Vec<_>>(),
+            "environment": std::env::vars_os().count(),
+            "pid": process_id(),
+            "sid": session_id(),
+            "pgid": group_id(),
+            "ppid": ppid,
+            "descriptors": inherited.map_or_else(Vec::new, |inherited| {
+                (0..5).zip(inherited.open).map(|(fd, open)| described(fd, open)).collect()
+            }),
+            "record": String::from_utf8_lossy(&record),
+            "decoded": decoded,
+            "lock_taken": lock_four(),
+            "mask_empty": inherited.is_some_and(|inherited| inherited.mask_empty),
+            "ignored": inherited.map_or_else(|| vec![0], |inherited| {
+                (1..=LAST_SIGNAL).filter(|signal| inherited.ignored[*signal as usize]).collect()
+            }),
+            "open_above_four": open_above_four,
+        })
+    }
+
+    #[allow(unsafe_code)]
+    fn described(fd: RawFd, open: bool) -> Value {
+        if !open {
+            return json!({"kind": "closed"});
+        }
+        // SAFETY: `fd` was open before main ran and nothing in this process has closed it since;
+        // the borrow lasts only for the copy.
+        let copy = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }.try_clone_to_owned();
+        let Ok(metadata) = copy.map(File::from).and_then(|file| file.metadata()) else {
+            return json!({"kind": "unreadable"});
+        };
+        let kind = metadata.file_type();
+        let kind = if kind.is_char_device() {
+            "char"
+        } else if kind.is_fifo() {
+            "fifo"
+        } else if kind.is_file() {
+            "file"
+        } else {
+            "other"
+        };
+        json!({"kind": kind, "dev": metadata.dev(), "ino": metadata.ino(), "rdev": metadata.rdev()})
+    }
+
+    #[allow(unsafe_code)]
+    fn read_descriptor_three() -> Vec<u8> {
+        // SAFETY: Descriptor 3 is the config pipe the start handed over, which nothing else in
+        // this process owns, and the returned File is its only owner.
+        let mut pipe = unsafe { File::from_raw_fd(3) };
+        let mut record = Vec::new();
+        let _ = pipe.read_to_end(&mut record);
+        record
+    }
+
+    #[allow(unsafe_code)]
+    fn lock_four() -> bool {
+        // SAFETY: flock takes integers only.
+        unsafe { libc::flock(4, libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    }
+
+    #[allow(unsafe_code)]
+    fn reparented_parent() -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            // SAFETY: getppid takes no arguments.
+            let parent = unsafe { libc::getppid() };
+            if parent == 1 || !cfg!(target_os = "macos") || Instant::now() >= deadline {
+                return u32::try_from(parent).unwrap_or_default();
+            }
+            thread::sleep(POLL);
+        }
+    }
+
+    fn process_id() -> u32 {
+        std::process::id()
+    }
+
+    fn session_id() -> u32 {
+        own_sid()
+    }
+
+    fn group_id() -> u32 {
+        own_pgid()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn open_descriptors_from(lowest: RawFd) -> Vec<RawFd> {
+        let listed: Vec<RawFd> = std::fs::read_dir("/proc/self/fd")
+            .expect("the descriptor list is readable")
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+            .collect();
+        listed
+            .into_iter()
+            .filter(|fd| *fd >= lowest && is_open(*fd))
+            .collect()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[allow(unsafe_code)]
+    fn open_descriptors_from(lowest: RawFd) -> Vec<RawFd> {
+        // SAFETY: getdtablesize takes no arguments.
+        let table = unsafe { libc::getdtablesize() };
+        (lowest..table).filter(|fd| is_open(*fd)).collect()
+    }
+
+    #[allow(unsafe_code)]
+    fn is_open(fd: RawFd) -> bool {
+        // SAFETY: fcntl with F_GETFD takes no pointer.
+        unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
+    }
+
+    fn write_atomically(directory: &Path, name: &str, contents: &[u8]) {
+        let temporary = directory.join(format!("{name}.tmp"));
+        std::fs::write(&temporary, contents).expect("the stand-in writes its file");
+        std::fs::rename(&temporary, directory.join(name)).expect("the stand-in names its file");
+    }
+
+    fn wait_for_release(cell: &Path) {
+        let deadline = Instant::now() + STANDIN_PATIENCE;
+        while !cell.join("release").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the stand-in was released within {STANDIN_PATIENCE:?}"
+            );
+            thread::sleep(POLL);
+        }
+    }
+
+    #[allow(unsafe_code)]
+    fn exit(code: i32) -> ! {
+        // SAFETY: _exit takes an integer. It skips the exit handlers, so a stand-in started with an
+        // empty environment writes no coverage profile into the working directory.
+        unsafe { libc::_exit(code) }
+    }
+}
