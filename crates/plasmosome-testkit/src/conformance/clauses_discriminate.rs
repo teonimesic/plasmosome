@@ -1012,7 +1012,17 @@ fn a_recipe_defect_changes_only_the_recipe_of_its_own_class() {
         let mut revoking = DefectiveBackend::carrying(Defect::RevokeReturnsAnotherRecipe(class));
         for grant in conformance::sample_grants() {
             let entry = revoking.grant(grant.clone());
+            assert_eq!(entry.handle.class, grant.capability.class());
+            assert_eq!(
+                (&entry.owner, entry.kind, &entry.capability),
+                (&grant.owner, grant.kind, &grant.capability)
+            );
             let returned = revoking.revoke(entry.handle, DrainSpec::forcing()).unwrap();
+            let snapshot = revoking.snapshot_os_state();
+            assert!(
+                !snapshot.objects().any(|held| held.id == entry.handle.id),
+                "a revoke must withdraw the object: {grant:?}"
+            );
             assert_eq!(
                 (returned.handle, &returned.owner, returned.kind),
                 (entry.handle, &entry.owner, entry.kind)
@@ -1402,4 +1412,23 @@ fn a_substitute_and_a_stranger_keep_the_class_they_stand_in_for() {
         assert_eq!(stranger.handle, handle);
         assert_eq!(stranger.capability.class(), class);
     }
+}
+
+#[test]
+fn the_class_loops_run_every_universe_class() {
+    let (mut session, mut socket, mut proxy, mut broker, mut mount) =
+        (false, false, false, false, false);
+    for class in CLASSES {
+        match class {
+            UniverseClass::SessionFile => session = true,
+            UniverseClass::UdsPath => socket = true,
+            UniverseClass::ProxyMap => proxy = true,
+            UniverseClass::BrokerPid => broker = true,
+            UniverseClass::Mount => mount = true,
+        }
+    }
+    assert!(
+        session && socket && proxy && broker && mount,
+        "the class loops leave out a universe class: {CLASSES:?}"
+    );
 }
