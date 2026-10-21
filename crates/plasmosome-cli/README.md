@@ -231,8 +231,8 @@ caller passed.
 
 `select::target` finds the socket from the flags and the environment alone, before anything on
 disk is looked at. The environment comes in through `Context`'s `Env`, which reads only `HOME`
-and `PLASMOSOME_KERNEL`. `main_with` passes `ProcessEnv`, the process's own; tests pass their
-own. Help, the version and `not_served` never read it.
+and `PLASMOSOME_KERNEL`. `main_with` passes `ProcessEnv`, the process's own, which is private
+to this crate; tests pass their own. Help, the version and `not_served` never read it.
 
 1. `--socket PATH` is the socket. `--kernel` beside it only adds the `name` param, and
    `PLASMOSOME_KERNEL` is not read.
@@ -240,9 +240,9 @@ own. Help, the version and `not_served` never read it.
    `HOME` is read. Empty, not UTF-8, or not an instance name, it is a usage error whose
    `argument` is `PLASMOSOME_KERNEL`, with no `instance`.
 3. `HOME` must be an absolute path with no empty, `.` or `..` component, in UTF-8. One trailing
-   `/` is dropped, and `/` itself is the root. Otherwise the command exits 2 with
-   `invalid_home`, no `instance` and nothing looked at. The client never falls back to the
-   password database.
+   `/` is dropped, so `/` and `//` are the root, and `///` is refused. Otherwise the command
+   exits 2 with `invalid_home`, no `instance` and nothing looked at. The client never falls back
+   to the password database.
 4. A name gives `$HOME/.plasmosome/instances/NAME/control.uds`, which `status` checks as it
    checks `--socket`'s path, below, with `PathOrigin::Home`.
 5. With no name, `select::select_default` runs spec 025's default selection over
@@ -259,24 +259,30 @@ contacts no instance:
    socket, is ignored. A symbolic link refuses the selection: `unsafe_socket`, rule `symlink`, at
    the entry. So does a directory whose name is not UTF-8, breaks `InstanceName`'s rules or holds
    a terminal control: `unsafe_socket`, rule `name`, at `instances/`. Every other directory's
-   socket path goes through the `sun_path` check and `check_private_path`. A directory with no
-   socket entry is seen, one that passes is a candidate, and any other refusal refuses the
-   selection with `map_refusal`'s code.
+   socket path goes through `check_private_path`. A directory with no socket entry is a stopped
+   instance, listed in `seen`, however long its socket path would be. Any other refusal refuses
+   the selection with `map_refusal`'s code. A directory that passes is a candidate once its
+   socket path fits `sun_path`. A candidate whose path does not fit refuses the selection with
+   `socket_path_too_long`, `path` and `max_bytes`.
 3. No candidate: `no_instance`, exit 1, with `path` `instances/` and `seen`, the stopped
    instances in name order.
 4. One candidate: the client connects, and that connection carries the request. `exchange`
-   checks its peer before the first byte. A refused connection is `unreachable`, exit 1, and the
-   entry stays. The envelope's `instance` and the request's `name` are the candidate's.
+   checks its peer before the first byte. A connect that fails with `ECONNREFUSED` is
+   `unreachable` with `path`, exit 1, and the entry stays. One that fails with `ENOENT`, the
+   socket gone since its path check, is `not_running` with `path`, exit 1. Any other failure is
+   `transport` with `path` and `errno`, exit 1. The envelope's `instance` and the request's
+   `name` are the candidate's.
 5. More than one, reachable or not: the client connects to each, checks its peer, writes
-   nothing and closes it. A peer mismatch refuses the selection with `peer_mismatch`, and a
-   connection that fails other than by refusal with `transport`. Otherwise the command exits 2
-   with `ambiguous_instance`: `candidates` names every candidate in order, and `unreachable`
-   those that refused the connection, left out when none did.
+   nothing and closes it. A peer mismatch refuses the selection with `peer_mismatch`. A connect
+   that fails, whatever its errno, leaves the entry a candidate. The command exits 2 with
+   `ambiguous_instance`: `candidates` names every candidate in order, and `unreachable` those
+   whose connect failed, left out when none did.
 
-No envelope from default selection has `instance` unless it found exactly one candidate. A name
-read from `instances/` is at most `NAME_MAX`, 255 characters, so the request line it makes is
-built after the connection and stays far under the bound. Nothing is written but stdout and
-stderr: the client keeps no cache, state file or history between runs.
+No envelope from default selection has `instance` unless it found exactly one candidate. The request
+line is built after the connection, because the name comes from `instances/`. A candidate's socket
+path has passed the client's own `sun_path` check, so its name is at most 68 bytes on macOS and 72
+on Linux, less the length of `HOME`. The line stays far under the bound. Nothing is written but
+stdout and stderr: the client keeps no cache, state file or history between runs.
 
 ## Serving status
 
@@ -352,7 +358,7 @@ On macOS a Unix-socket `connect` never blocks. On Linux a full backlog makes it 
 | `read`, `Reading`, `Invocation` | One command line read in spec 025's order, and a served command's checked flags |
 | `handle`, `main_with` | Read a line, write its outcome and return the exit, with a panic ending as `internal`; `main_with` does it on the process's own streams |
 | `Context` | What `handle` reads a line against and runs a command with: the version, the table, the trusted UID, the clock and the environment |
-| `Env`, `ProcessEnv` | Where socket selection reads `HOME` and `PLASMOSOME_KERNEL`, and the process's own environment |
+| `Env` | Where socket selection reads `HOME` and `PLASMOSOME_KERNEL`; `main_with` passes the process's own environment |
 | `Clock`, `SystemClock`, `Deadline` | The monotonic clock a command's deadline is counted on, the production one, and the time left on it |
 | `exchange`, `Unreplied` | One request and one reply line on a connected stream: the peer check first, each write and read bounded by the time left |
 
