@@ -32,6 +32,7 @@ struct Ran {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     took: Duration,
+    ended: Instant,
 }
 
 fn line(socket: &Path, rest: &[&str]) -> Vec<OsString> {
@@ -52,11 +53,13 @@ fn run_on(line: Vec<OsString>, clock: &'static dyn Clock) -> Ran {
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         let started = Instant::now();
         let exit = handle(&line, &context, &mut stdout, &mut stderr);
+        let ended = Instant::now();
         let _ = sender.send(Ran {
             exit,
             stdout,
             stderr,
-            took: started.elapsed(),
+            took: ended - started,
+            ended,
         });
     });
     receiver
@@ -258,6 +261,25 @@ fn clock_reading(offsets_ms: &'static [u64]) -> &'static dyn Clock {
     clock_with(offsets_ms, |_| {})
 }
 
+struct Noted(&'static Mutex<Vec<Instant>>);
+
+impl Noted {
+    fn at(&self, reading: usize) -> Instant {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)[reading]
+    }
+}
+
+fn noting_clock(offsets_ms: &'static [u64]) -> (&'static dyn Clock, Noted) {
+    let noted: &'static Mutex<Vec<Instant>> = Box::leak(Box::new(Mutex::new(Vec::new())));
+    let clock = clock_with(offsets_ms, move |_| {
+        noted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Instant::now());
+    });
+    (clock, Noted(noted))
+}
+
 fn peer_at(socket: &Path, act: impl FnOnce(UnixStream) + Send + 'static) {
     let listener = UnixListener::bind(socket).expect("a socket");
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
@@ -324,15 +346,13 @@ fn each_read_waits_only_the_time_left() {
     let root = private_root();
     let socket = socket_in(root.path());
     let _fake = FakeDaemon::start(&socket, vec![Answer::Silent]);
-    let ran = run_on(
-        line(&socket, &["--deadline-ms", "600"]),
-        clock_reading(&[0, 0, 590]),
-    );
+    let (clock, noted) = noting_clock(&[0, 0, 590]);
+    let ran = run_on(line(&socket, &["--deadline-ms", "600"]), clock);
     assert_eq!(no_reply(&ran).0, "deadline");
+    let waited = ran.ended - noted.at(SECOND_CALL);
     assert!(
-        ran.took < Duration::from_millis(300),
-        "took {:?} with 10 ms left",
-        ran.took
+        waited < Duration::from_millis(300),
+        "the read waited {waited:?} with 10 ms left"
     );
 }
 
@@ -351,23 +371,14 @@ fn each_write_waits_only_the_time_left() {
     let socket = socket_in(root.path());
     let release = held_peer(&socket);
     let name = name_for_a_line_of(MAX_REQUEST_BYTES);
-    let calls: &'static Mutex<Vec<Instant>> = Box::leak(Box::new(Mutex::new(Vec::new())));
-    let clock = clock_with(&[0, 590, 600], move |reading| {
-        if reading >= FIRST_WRITE {
-            calls
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(Instant::now());
-        }
-    });
+    let (clock, noted) = noting_clock(&[0, 590, 600]);
     let ran = run_on(
         line(&socket, &["--kernel", &name, "--deadline-ms", "600"]),
         clock,
     );
     let _ = release.send(());
     assert_eq!(no_reply(&ran).0, "deadline");
-    let calls = calls.lock().unwrap_or_else(PoisonError::into_inner);
-    let waited = calls[SECOND_CALL - FIRST_WRITE] - calls[0];
+    let waited = noted.at(SECOND_CALL) - noted.at(FIRST_WRITE);
     assert!(
         waited < Duration::from_millis(300),
         "the first write waited {waited:?} with 10 ms left"
