@@ -18,10 +18,16 @@ The exact-grant clauses build expected objects from each request plus the issued
 from a backend's returned owner or capability. Applied-object withdrawal keeps observations from
 every other universe class standing. Dedicated defective backends alter each colliding resource
 field, substitute an owner, remove cross-class state, and choose the wrong exact instance. Three
-change only a recipe or launch: in the returned entry, in the recorded object, or in both, and
-`snapshot_never_invents_objects` must reject each. A defect that substitutes a capability or a
-recipe, or returns a stranger from a revoke, names one class, and its witness runs it once for
-each of the five. So a clause that checks only its first grant still fails a witness.
+change only a recipe or launch, in the returned entry, in the recorded object, or in both, and
+`snapshot_never_invents_objects` must reject each. A fourth, `RevokeReturnsAnotherRecipe`, makes a
+revoke return the issued entry with another recipe, and `grant_is_replayable` must reject it.
+
+Six defects name one class: `GrantSubstitutesRequestedCapability`, `GrantSubstitutesRecipe`,
+`GrantReturnsAnotherRecipe`, `GrantRecordsAnotherRecipe`, `RevokeReturnsAStranger` and
+`RevokeReturnsAnotherRecipe`. Their witnesses run each of them once for each of the five classes,
+against `snapshot_never_invents_objects` or `grant_is_replayable`. So those two clauses fail a
+witness if they check only their first grant. Every other defect runs once, and no other clause
+is held to that.
 
 A clause earns its place by being watched failing against a backend built to carry the defect it
 names. The suite started at five, and the three added by task 009 came from asking what a broken
