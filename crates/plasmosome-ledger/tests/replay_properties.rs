@@ -181,7 +181,7 @@ proptest! {
             .collect();
 
         let mut backend = FakeBackend::new();
-        let before = backend.snapshot_os_state();
+        let before = backend.snapshot_os_state().unwrap();
         let mut ledger = Ledger::new("generated");
         for generated in &effects {
             let (op, effect) = generated.setup_and_effect();
@@ -204,8 +204,9 @@ proptest! {
         assert!(report.asserted.is_empty());
         assert!(report.forced.is_none());
 
-        let after = backend.snapshot_os_state();
-        assert!(Diff::between(&before, &after).is_empty(), "random ledger replay must leave no residue");
+        let after = backend.snapshot_os_state().unwrap();
+        assert!(Diff::between(before.state(), after.state()).is_empty(), "random ledger replay must leave no residue");
+        assert!(after.grants().is_empty() && after.incomplete().is_empty(), "random ledger replay must leave no record or unfinished effect");
     }
 
     #[test]
@@ -235,6 +236,6 @@ proptest! {
             .expect("forced detach must succeed");
         prop_assert_eq!(report.asserted, vec!["emission crossed the boundary".to_string()]);
         assert!(report.forced.is_some());
-        assert!(backend.snapshot_os_state().is_empty());
+        assert!(backend.snapshot_os_state().unwrap().is_empty());
     }
 }
