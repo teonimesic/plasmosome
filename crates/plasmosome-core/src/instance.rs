@@ -2022,7 +2022,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime};
@@ -5223,9 +5223,12 @@ mod tests {
             let early = Rc::new(RefCell::new(Vec::new()));
             let (watching, recording) = (Rc::clone(&listing), Rc::clone(&early));
             let second_lock = Arc::clone(&lock);
+            let second_scans = Arc::new(AtomicUsize::new(0));
+            let counting = Arc::clone(&second_scans);
             on_first_scan(move || {
                 thread::spawn(move || {
                     on_every_scan(move || {
+                        counting.fetch_add(1, Ordering::SeqCst);
                         let _ = listed.send(());
                     });
                     let _ = finished.send(allocated(&second, &second_lock));
@@ -5252,6 +5255,12 @@ mod tests {
                 "the second allocation listed cells/ {:?}; through another open: \
                  {through_another_open}",
                 early.borrow()
+            );
+            assert_eq!(
+                second_scans.load(Ordering::SeqCst),
+                1,
+                "the second allocation listed again, so its first listing of cells/ ran before the \
+                 first cell existed; through another open: {through_another_open}"
             );
             assert_eq!(
                 (first, taken),
