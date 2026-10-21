@@ -76,11 +76,33 @@ recovery, `cell.kill` and every observation still work; only `cell.new` refuses 
 cell never needs its deployment input again: `membraned` keeps the recipe it was given.
 
 Spec 001 §4.2's immutability rule for the helper applies to `membraned` and to every Artifact in
-the template. Each file and every directory above it must be owned by root or the controller's
-UID, not writable by group or others, and carry no ACL entry granting write to another principal.
-A file that fails this is refused, not trusted after hashing. The controller verifies the rule and
-each SHA256 before allocating anything; a failure refuses `cell.new` with 108, `path` the
-artifact, and no cell directory exists. Spec 022 keeps every Mount source away from these files.
+the template. The controller walks the file's path from `/` and follows no symlink: a symlink
+anywhere on the path is refused. Every directory on the way must be owned by root or the
+controller's UID and not writable by group or others. On macOS it must also carry no ACL allow
+entry, whoever it names, for `add_file`, `add_subdirectory`, `delete_child`, `delete`,
+`writesecurity`, `chown`, or the generic write or all right, and must not be on a volume mounted
+with ownership ignored. The file itself must be a regular file owned by root or the controller's
+UID, with no write bit at all and no set-user-ID or set-group-ID bit. On macOS it must carry no ACL
+allow entry, whoever it names, for `write`, `append`, `writeattr`, `writeextattr`, `writesecurity`,
+`chown`, `delete`, or the generic write or all right, and must have `uchg` or `schg` set. Off macOS
+the rule cannot be verified, so every Artifact is refused. The hash reads the checked descriptor, at
+most one byte past the size `fstat` reported at the check. If the file's size, modification time or
+change time moved between the check and the end of the hash, the file is refused before its digest
+is compared. This is the check the membrane repeats at launch, so a file the controller admits is
+one the membrane admits. Neither check sees every change: a `MAP_SHARED` mapping made before the
+file was locked, from a descriptor opened for writing, can change its bytes whatever protection it
+had then, since `mprotect` can add write later, and it moves the file's times only at `msync` or
+`munmap`, if at all. A file that fails this is refused, not trusted after hashing. The controller
+verifies the rule and each SHA256 before allocating anything; a failure refuses `cell.new` with 108,
+`path` the artifact, and no cell directory exists. A template Artifact under
+`<instance_root>/cells/` is invalid configuration, because it could be some cell's own path. Spec
+022 keeps every Mount source away from these files. Corrected on 2026-10-21: this held the file to
+its directories' rule, so the controller admitted a file its owner can write, a set-id file and a
+file without `uchg` or `schg`, which the membrane refuses at launch, after a cell is allocated. It
+also left out the symlink rule, the rule against a volume mounted with ownership ignored, the read
+bound and the check that the file did not change while it was hashed, and its ACL rule refused only
+an entry granting write to another principal. Amended on 2026-10-21: this did not refuse a template
+Artifact under `<instance_root>/cells/`.
 
 ### 2. Cell IDs
 

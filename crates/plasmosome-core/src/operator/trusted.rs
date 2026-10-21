@@ -199,7 +199,7 @@ fn judge_file(reached: &Reached<'_>, euid: u32) -> Result<(), Fault> {
     Ok(())
 }
 
-fn kind_name(kind: Kind) -> &'static str {
+pub(crate) fn kind_name(kind: Kind) -> &'static str {
     match kind {
         Kind::Directory => "a directory",
         Kind::Regular => "a regular file",
