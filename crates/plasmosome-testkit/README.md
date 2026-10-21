@@ -113,8 +113,8 @@ The harness transcript is compared the same way, with no allowances and no rules
 All three comparisons see each completed observation after normalization. A rule names a probe,
 a field and a kind. In each run, `judge` replaces every value of that field with a placeholder
 such as `<pid:2>`, numbered within that probe, field and run: by first appearance, or by order
-for system times and durations. Equal values stay equal, distinct ones stay distinct, times keep
-their order, and an extra value in one field shifts no other. Every field no rule names is
+for system times and durations. Equal JSON values stay equal, distinct ones stay distinct, times
+keep their order, and an extra value in one field shifts no other. Every field no rule names is
 compared exactly, so nothing is normalized for how it looks, and a field the workload set can
 have no rule. The field must hold one value of the rule's kind or a list of them, or the runs
 are refused, naming the lane, probe, field and kind:
@@ -122,8 +122,12 @@ are refused, naming the lane, probe, field and kind:
 - a process ID, mount ID, parent mount ID, device, inode or memory counter is a whole number;
 - an ephemeral port is a whole number up to 65535;
 - a system time, duration or load counter is any number, but a list of system times or of
-  durations must not mix integers with numbers written with a fraction or an exponent, such as
-  `5` and `5.0`, since the two do not compare exactly;
+  durations must not mix integers with numbers serde_json holds as floats, since the two do not
+  compare exactly. Floats are the numbers written with a fraction or an exponent, such as `5.0`,
+  and, when serde_json reads JSON text, also `-0` and integers beyond `u64::MAX` or below
+  `i64::MIN`. So `[5, 5.0]` and `[0, -0]` are both refused. A load counter list may mix, since it
+  is not ranked, but `5` and `5.0` are not equal JSON values, so `[5, 5.0]` gets two
+  placeholders;
 - a boot ID is a UUID, and a resolved address an IPv4 or IPv6 address.
 
 Integer times and durations rank exactly across the whole `i64` and `u64` range, and the others
