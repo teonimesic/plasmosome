@@ -31,7 +31,7 @@ const STARTED: &str = "the child controller started its supervisor";
 const ONE_MIB: usize = 1 << 20;
 const LAST_SIGNAL: libc::c_int = 64;
 
-const CASES: [(&str, fn()); 15] = [
+const CASES: [(&str, fn()); 16] = [
     (
         "starts_detached_with_only_0_to_4",
         starts_detached_with_only_0_to_4,
@@ -44,6 +44,10 @@ const CASES: [(&str, fn()); 15] = [
     (
         "exec_failure_returns_the_lock",
         exec_failure_returns_the_lock,
+    ),
+    (
+        "a_start_returns_long_before_its_deadline",
+        a_start_returns_long_before_its_deadline,
     ),
     ("early_exit_is_closed_pipe", early_exit_is_closed_pipe),
     ("unread_record_times_out", unread_record_times_out),
@@ -558,6 +562,43 @@ fn exec_failure_returns_the_lock() {
         }
         other => panic!("a missing membraned is an Exec failure, not {other:?}"),
     }
+}
+
+fn a_start_returns_long_before_its_deadline() {
+    let root = Root::new();
+    let missing =
+        RecipePath::parse(&format!("{}/missing", root.path.display())).expect("a canonical path");
+    {
+        let cell = Cell::create(&root.path, "cell-111");
+        let began = Instant::now();
+        let result = cell.start(&missing, cell.lock(), cell.log(), cell.record());
+        assert_returned_within_half(began, "a start whose exec fails");
+        assert!(
+            matches!(
+                result,
+                Err(StartError::Exec {
+                    step: StartStep::Exec,
+                    errno: libc::ENOENT,
+                    ..
+                })
+            ),
+            "a missing membraned fails at its exec with ENOENT, not {result:?}"
+        );
+    }
+    let cell = Cell::create(&root.path, "cell-112");
+    let began = Instant::now();
+    let result = cell.start(&root.membraned(), cell.lock(), cell.log(), cell.record());
+    assert_returned_within_half(began, "a start whose exec succeeds");
+    started(result);
+}
+
+fn assert_returned_within_half(began: Instant, start: &str) {
+    let took = began.elapsed();
+    let deadline = case_deadline().saturating_duration_since(began);
+    assert!(
+        took < deadline / 2,
+        "{start} returns in under half of its {deadline:?} deadline, not after {took:?}"
+    );
 }
 
 fn early_exit_is_closed_pipe() {
