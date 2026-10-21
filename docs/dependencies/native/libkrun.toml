@@ -48,7 +48,7 @@ sources = [
   crtbeginT.o.\
   """,
 ]
-licence = "Apache-2.0 AND BSD-3-Clause AND MIT"
+licence = "Apache-2.0 AND BSD-3-Clause AND ISC AND MIT"
 limits = [
   """\
   The dylib carries LC_RPATH /opt/homebrew/opt/llvm/lib, and krun_create_ctx loads \
@@ -78,8 +78,9 @@ limits = [
   """,
   """\
   Whoever distributes this dylib must carry the notices, and meet the terms, of what it holds. \
-  libkrun's own code is Apache-2.0, BSD-3-Clause and MIT, as licence says. MIT is jsmn.h, which \
-  init.c includes. 48 files at 728df812 outside src/rutabaga_gfx carry a Chromium OS notice \
+  libkrun's own code is Apache-2.0, BSD-3-Clause, ISC and MIT, as licence says. MIT is jsmn.h, \
+  which init.c includes. ISC is the code init.c takes from libyajl, by the notice at init.c \
+  lines 582-598. 48 files at 728df812 outside src/rutabaga_gfx carry a Chromium OS notice \
   that a BSD-style licence governs them, found in the THIRD-PARTY file (38 files) or the LICENSE \
   file (10 files). No THIRD-PARTY file exists at that commit, and the LICENSE files outside \
   src/rutabaga_gfx are Apache-2.0, so the text those notices name is not in the pinned tree. 28 \
