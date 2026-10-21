@@ -482,6 +482,6 @@ Most unit tests build their files under a canonical temp directory and walk from
 on Linux below a sticky `/tmp`. One test opens a file through the walk from `/`, so its test root
 must sit where every ancestor passes. It takes the bases the daemon's unit tests use. On macOS
 that is the per-user temp directory `confstr(_CS_DARWIN_USER_TEMP_DIR)` names, whatever `TMPDIR`
-says. On Linux it is `XDG_RUNTIME_DIR` when that is set, else the test binary's directory. If no
+says. On Linux it tries `XDG_RUNTIME_DIR` when it is set, then the test binary's directory. If no
 base passes, the test fails and names each base with the ancestor that refused it. The test that
 `/etc/hosts` is `parent` skips as root, because root owns `/etc`.
