@@ -407,13 +407,16 @@ impl WireError {
     /// write in place of that field, a bare entry for the list the field names
     /// (written in place of the entry when the field ends in an index), or
     /// exactly `remove this entry`. A file that could not be read, is not
-    /// TOML (a syntax error included) or is over `MAX_MANIFEST_BYTES` carries
-    /// none.
+    /// TOML (a syntax error included), is over `MAX_MANIFEST_BYTES` or nests
+    /// more than `MAX_MANIFEST_DEPTH` levels (`TooDeep`) carries none.
     pub fn manifest_refusal(path: String, error: &ManifestError) -> WireError {
         let mut wire = WireError::manifest_invalid(error.to_string(), path);
         wire.fix = match error {
             ManifestError::Field { fix, .. } => Some(fix.clone()),
-            ManifestError::Io(_) | ManifestError::Parse(_) | ManifestError::TooLarge { .. } => None,
+            ManifestError::Io(_)
+            | ManifestError::Parse(_)
+            | ManifestError::TooLarge { .. }
+            | ManifestError::TooDeep { .. } => None,
         };
         wire
     }
@@ -603,7 +606,7 @@ mod tests {
         .expect_err("a network section with no hosts is refused")
     }
 
-    fn declaration_refusals() -> [(ManifestError, Option<&'static str>); 4] {
+    fn declaration_refusals() -> [(ManifestError, Option<&'static str>); 5] {
         [
             (author_refusal(), Some("hosts = [\"api.example.com\"]")),
             (
@@ -613,6 +616,14 @@ mod tests {
             (
                 PlasmidManifest::parse(&"#".repeat(MAX_MANIFEST_BYTES + 1))
                     .expect_err("a declaration over 1 MiB is refused"),
+                None,
+            ),
+            (
+                PlasmidManifest::parse(&format!(
+                    "id = \"github-pr\"\ndescription = \"Nests too deep.\"\nimpl.wasm = \"pr.wasm\"\n{} = 1",
+                    vec!["nested"; 33].join(".")
+                ))
+                .expect_err("a declaration nested 33 levels is refused"),
                 None,
             ),
             (
@@ -636,6 +647,12 @@ mod tests {
                 fix.is_some(),
                 "a refusal with no fix has no fix key at all: {value}"
             );
+            let mut carried = vec!["code", "detail", "message", "path"];
+            if fix.is_some() {
+                carried.push("fix");
+                carried.sort();
+            }
+            assert_eq!(wire_fields(&wire), carried, "{value}");
             let line = serde_json::to_string(&wire).expect("a wire error serializes");
             let back: WireError = serde_json::from_str(&line).expect("a wire error reads back");
             assert_eq!(back, wire, "{line}");
