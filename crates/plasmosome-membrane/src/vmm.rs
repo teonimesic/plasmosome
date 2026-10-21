@@ -455,19 +455,22 @@ impl VmmChild {
 
     #[allow(unsafe_code)]
     fn signal_leader(&self) -> Result<(), SupervisionError> {
-        if leader_signal_withheld(self.pid) {
-            return Ok(());
-        }
-        // SAFETY: kill takes no pointer, so the call is memory-safe whatever `self.pid` names. Its
-        // callers reach it only after observe found the child running. The pid still names the
-        // child then only while this handle is the only consuming waiter, as `VmmChild`'s doc
-        // requires. The test leader_signal_esrch_is_not_wait_authority_loss breaks that rule on
-        // purpose: it reaps the child itself first, to get ESRCH.
-        if unsafe { libc::kill(self.pid, libc::SIGKILL) } == -1 {
-            Err(self.error(SupervisionOperation::SignalLeader, None))
-        } else {
-            Ok(())
-        }
+        let signalled = leader_signal_stand_in(self.pid).unwrap_or_else(|| {
+            // SAFETY: kill takes no pointer, so the call is memory-safe whatever `self.pid` names.
+            // Its callers reach it only after observe found the child running, and no wait of this
+            // handle has consumed it since. The pid still names that child because this handle is
+            // its only consuming waiter, as `VmmChild`'s doc requires.
+            if unsafe { libc::kill(self.pid, libc::SIGKILL) } == -1 {
+                Err(last_errno())
+            } else {
+                Ok(())
+            }
+        });
+        signalled.map_err(|errno| SupervisionError {
+            operation: SupervisionOperation::SignalLeader,
+            errno,
+            observed: None,
+        })
     }
 
     fn drop_teardown(&mut self) {
@@ -649,22 +652,46 @@ fn drop_reports() -> usize {
 
 #[cfg(test)]
 std::thread_local! {
-    static WITHHELD_LEADER_SIGNAL: std::cell::Cell<libc::pid_t> = const { std::cell::Cell::new(0) };
+    static LEADER_SIGNAL_STAND_IN: std::cell::Cell<Option<(libc::pid_t, Result<(), i32>)>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
-fn withhold_leader_signal(pid: libc::pid_t) {
-    WITHHELD_LEADER_SIGNAL.set(pid);
-}
-
-#[cfg(test)]
-fn leader_signal_withheld(pid: libc::pid_t) -> bool {
-    WITHHELD_LEADER_SIGNAL.get() == pid
+fn leader_signal_stand_in(pid: libc::pid_t) -> Option<Result<(), i32>> {
+    LEADER_SIGNAL_STAND_IN
+        .get()
+        .and_then(|(named, outcome)| (named == pid).then_some(outcome))
 }
 
 #[cfg(not(test))]
-fn leader_signal_withheld(_pid: libc::pid_t) -> bool {
-    false
+fn leader_signal_stand_in(_pid: libc::pid_t) -> Option<Result<(), i32>> {
+    None
+}
+
+#[cfg(test)]
+struct LeaderSignalStandIn;
+
+#[cfg(test)]
+impl LeaderSignalStandIn {
+    fn withheld(pid: libc::pid_t) -> LeaderSignalStandIn {
+        Self::install(pid, Ok(()))
+    }
+
+    fn failing(pid: libc::pid_t, errno: i32) -> LeaderSignalStandIn {
+        Self::install(pid, Err(errno))
+    }
+
+    fn install(pid: libc::pid_t, outcome: Result<(), i32>) -> LeaderSignalStandIn {
+        LEADER_SIGNAL_STAND_IN.set(Some((pid, outcome)));
+        LeaderSignalStandIn
+    }
+}
+
+#[cfg(test)]
+impl Drop for LeaderSignalStandIn {
+    fn drop(&mut self) {
+        LEADER_SIGNAL_STAND_IN.set(None);
+    }
 }
 
 #[cfg(test)]
