@@ -43,12 +43,12 @@ composite rejects initial observations assigned to the wrong leaf.
 Spec 017 gives every capability a complete, nonsecret recipe: what an adapter needs to create
 the holding. The `recipe` module holds those records — `SessionFileRecipe`, `UdsRecipe`,
 `ProxyRecipe`, `MountRecipe` and `BrokerLaunch`, with `FileAccess` and `ProxyTransport` — and
-their structural rules: NUL-free strings, absolute paths with no empty, `.` or `..` component
-and no trailing `/`, at most 65,536 bytes of file contents, a nonzero port, a destination that
-is one DNS name or one IP literal spelled as Rust's `IpAddr` displays it and never in
-IPv4-mapped or IPv4-compatible form (NAT64, SIIT and other prefixes that carry an IPv4 address
-are left to the connect-time address policy), and a launch with an absolute program path and two
-endpoints with different canonical spellings. A path that breaks these rules is refused, never
+their structural rules: NUL-free strings, canonical absolute paths with no empty, `.` or `..`
+component and no trailing `/`, at most 65,536 bytes of file contents, a nonzero port, a destination
+that is one DNS name or one IP literal spelled as Rust's `IpAddr` displays it and never in
+IPv4-mapped or IPv4-compatible form (NAT64, SIIT and other prefixes that carry an IPv4 address are
+left to the connect-time address policy), and a launch with a canonical absolute program path and
+two endpoints with different canonical spellings. A path that breaks these rules is refused, never
 rewritten. Different spellings are not different files: a symlink, a hard link, a mount, or a
 filesystem that ignores case or Unicode normalization, such as default APFS, can give one file
 two names. Spec 017's preflight creates nothing, so it cannot compare endpoints that do not
