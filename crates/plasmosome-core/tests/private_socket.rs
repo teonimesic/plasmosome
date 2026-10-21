@@ -979,6 +979,38 @@ fn accept_refuses_a_peer_whose_uid_is_not_trusted_before_reading() {
     );
 }
 
+#[test]
+fn accept_refuses_a_peer_that_sent_one_byte_without_taking_it_from_the_queue() {
+    let root = private_root();
+    let trusted = effective_uid().wrapping_add(1);
+    let listener = PrivateListener::bind(private_dir(&root), "sock", trusted).expect("bind");
+    let mut client = UnixStream::connect(&listener.entry().path).expect("connect");
+    client.set_read_timeout(Some(PATIENCE)).expect("timeout");
+    client.write_all(b"{").expect("send one byte");
+    assert!(
+        matches!(accept_one(&listener), Accepted::Refused(_)),
+        "a peer with an untrusted UID was accepted"
+    );
+    let mut reply = Vec::new();
+    let end = client.read_to_end(&mut reply);
+    assert!(reply.is_empty(), "the refused client got a reply");
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        end.expect("macOS ends a refused connection with end of file"),
+        0
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        end.expect_err(
+            "the refused peer read end of file: its one byte was taken from the queue before \
+             the close, which left nothing queued to reset it"
+        )
+        .kind(),
+        std::io::ErrorKind::ConnectionReset,
+        "a reset shows the peer's one byte was still queued when the stream closed"
+    );
+}
+
 const WAITING_PEERS: usize = 200;
 
 #[test]
