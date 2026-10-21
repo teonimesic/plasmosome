@@ -325,7 +325,11 @@ The controller marks the cell `draining`, then:
    and `Force`. Amended on 2026-10-20: the result had no `cell` and no `helper_killed`, so the
    controller could not tell when to list `shutdown`, and it wrote `residue_items?` instead of
    saying when `residue_items` is present.
-4. **Wait for the lock** to free, by trying `flock` on a fresh descriptor, and keep it.
+4. **Wait for the lock** to free, by trying `flock` on a fresh descriptor, and keep it. If the lock
+   cannot be tested (§8), stop waiting and decide the cell at once by §8's table, as step 5 does
+   when its check fails: the cell is set aside as `lock_untestable` and leaves `cell.list`, and the
+   reply lists `teardown` in `incomplete`. Amended on 2026-10-21: this waited until D for a lock it
+   cannot test, and left the cell listed `dead`.
 5. **Retire.** Holding the lock, check that `launched` is absent and the journal has no settled
    attachment and no pending transaction. If the check passes, rename `cells/<cell>` to
    `retired/<cell>`, sync both parent directories, and release the lock; if the rename fails,
@@ -342,10 +346,11 @@ The controller marks the cell `draining`, then:
    `workload_stop` (it failed, was refused, timed out or had no budget, or was skipped because the
    status query got no answer), `shutdown` (the guest got no `shutdown` for lack of budget, or
    ignored it, and its helper was killed; never listed with `now`) and `teardown` (the cell was
-   not retired: its teardown was not clean, or step 5's check failed and §8's table did not retire
-   it). A reply is a retirement exactly when `incomplete` lacks `teardown`. Amended on 2026-10-20:
-   `workload_stop` did not cover a stop skipped for lack of a status answer, and `teardown` did
-   not cover a failed check in step 5.
+   not retired: its teardown was not clean, step 4 could not test the lock, or step 5's check failed
+   and §8's table did not retire it). A reply is a retirement exactly when `incomplete` lacks
+   `teardown`. Amended on 2026-10-20: `workload_stop` did not cover a stop skipped for lack of a
+   status answer, and `teardown` did not cover a failed check in step 5. Amended on 2026-10-21:
+   `teardown` did not cover a lock step 4 cannot test.
 
 **Budgets.** D counts from the request's arrival, so a kill may queue behind earlier mutations.
 The steps run in order, each with a positive budget, and end within D, the withdrawal's
@@ -373,6 +378,9 @@ that do not retire the cell:
 - Step 5's rename fails: 105 `{from: "dead", to: "retired", cell}`. Amended on 2026-10-20: this
   outcome is new.
 - The helper is not reaped by the deadline: 105 `{from: "draining", to: "dead", cell}`.
+- Step 4 cannot test the lock: the reply lists `teardown` in `incomplete`, and the cell is set aside
+  as `lock_untestable` and leaves the ordinary registry, so a later `cell.kill` on it is 101.
+  Amended on 2026-10-21: this outcome is new.
 - The lock does not free within D: 105 `{from: "dead", to: "retired", cell}`.
 
 A cell that is retired, or never existed, is 101 `cell <id>`.
@@ -391,13 +399,23 @@ The controller runs this check:
 - on the next request naming a set-aside cell;
 - when `cell.kill`'s retire check fails (§7, step 5), for that cell only, with the lock the kill
   holds. Amended on 2026-10-20: this case is new.
+- when `cell.kill`'s lock wait finds a lock it cannot test (§7, step 4), for that cell only. Amended
+  on 2026-10-21: this case is new.
 
 It never touches an entry spec 008 does not validate. To test the lock, the controller tries
 `flock(LOCK_EX | LOCK_NB)` on a fresh descriptor; "free" means it got the lock, which it holds
 until the row's action is done. A missing `supervisor.lock` is created exclusively, locked, and
 counts as free. Whatever the lock, it then reads the `launched` marker before it acts, so every
 set-aside entry can name it. Amended on 2026-10-20: this did not say the marker is read when the
-lock is held.
+lock is held. The controller cannot test a `supervisor.lock` that is a symlink, a directory or any
+other entry that is not a regular file; one it cannot open; one whose `flock` fails for a reason
+other than another holder; or a missing one it cannot create and lock. Such a lock is neither held
+nor free, and has its own row below. §4, step 6, and §7, step 4, never take such a lock as free. A
+cell whose lock cannot be tested is not a cell whose supervisor is gone: no stop that runs when the
+supervisor is gone, such as the orphan stop draft spec 031 proposes, runs on it, and nothing stops
+or kills that cell's processes because of its lock. Amended on 2026-10-21: this did not say what the
+check does with a lock it cannot test, so a cell with one fell under no row and could be taken for
+one whose supervisor is gone.
 
 At startup the held-lock cells are queried concurrently, each with an answer cap
 below `recovery_deadline_ms` that leaves the rest of spec 001 §4.1's single startup deadline for
@@ -407,6 +425,7 @@ counts as no answer. Rows are tried in order:
 | Lock | Marker | Journal | Outcome |
 | --- | --- | --- | --- |
 | held | any | any | Query under spec 008 within the cap, waiting for a `germinating` cell. No answer, or still `germinating`, at the cap: set aside as `unresponsive` or `germinating`. |
+| cannot be tested | any | any | Set aside as `lock_untestable`, with no query. |
 | free | any | corrupt | Quarantine under spec 008, with the lock state and marker in its report. |
 | free | from an earlier boot, or recording a clean stop | no outstanding external obligation | Retire. Every settled holding and pending operation is written to the session log as residue. |
 | free | from an earlier boot, or recording a clean stop | an outstanding external obligation | Set aside as `external_obligations`. |
@@ -422,9 +441,10 @@ appended before the rename. A retirement whose rename fails after its line was a
 cell aside as `retire_failed`, and a second session log line says the cell was not retired. If
 that second line cannot be appended either, the cell stays set aside as `retire_failed` and the
 failure is written to stderr, so the log's last line for the cell is a retirement that did not
-happen; `plasmosome.recovery` still lists the cell. These two reasons join the five the table
-names. Amended on 2026-10-20: this named no reason for that cell. Amended on 2026-10-20: this did
-not say what a failed rename after the line does.
+happen; `plasmosome.recovery` still lists the cell. These two reasons join the six the table names.
+Amended on 2026-10-20: this named no reason for that cell. Amended on 2026-10-20: this did not say
+what a failed rename after the line does. Amended on 2026-10-21: this counted five reasons, from a
+table that had no row for a lock the controller cannot test.
 
 **Set-aside cells** are handled as spec 008 handles quarantine. The cell is absent from the ordinary
 registry, so `cell.list` omits it. `plasmosome.recovery` lists it in `set_aside`, with its reason,
@@ -436,10 +456,13 @@ spec 008 without its supervisor, so they wait, and block nothing else. It is not
 next request naming it, and every startup, runs the check again. A check that adopts it first does
 what startup adoption does: spec 008's pending cleanup, generation comparison, reconciliation and
 publication, then the no-`created` rule below. `cell.kill` on a set-aside cell whose lock is held
-runs §7's steps. Every other verb naming a set-aside cell is 101, and so is `cell.kill` on one
-whose lock is free; clearing those is owner question 3. Amended on 2026-10-20: this named no key
-for set-aside cells in `plasmosome.recovery`, whose keys spec 001 fixes, and did not list their
-settled holdings, which spec 028 §7 requires there.
+runs §7's steps. Every other verb naming a set-aside cell is 101, and so is `cell.kill` on one whose
+lock is free or cannot be tested. Clearing a cell whose lock is free is owner question 3; a cell
+whose lock cannot be tested is decided again by the next check once its `supervisor.lock` is
+repaired. Amended on 2026-10-20: this named no key for set-aside cells in
+`plasmosome.recovery`, whose keys spec 001 fixes, and did not list their settled holdings, which
+spec 028 §7 requires there. Amended on 2026-10-21: this did not say that `cell.kill` on a cell whose
+lock cannot be tested is 101, or when such a cell is decided again.
 
 **Order.** At startup the controller classifies every validated cell first, holding each free lock.
 It acts only after that, and only if startup is going to serve. A startup that refuses for another
@@ -797,8 +820,13 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     with no attachments whose lock is held: the kill runs instead of replying 101, and with the
     supervisor still silent replies 105 `{from: "draining", to: "dead", cell}`. An unremovable
     bridge socket: `state: "dead"` with residue items and `teardown` in `incomplete`, `membraned`
-    still runs and the cell is listed `dead`; once removable, a repeat retires it. Catches: an
-    unbounded kill, a cell that cannot be ended, and retiring after a failed teardown.
+    still runs and the cell is listed `dead`; once removable, a repeat retires it. A kill through a
+    membrane double that, before it answers `membrane.cell.kill`, renames the cell's
+    `supervisor.lock` away and puts a directory at that name: with `deadline_ms` 60,000 the reply
+    comes within 10 seconds and lists `teardown` in `incomplete`, `cell.list` omits the cell, and
+    `plasmosome.recovery` lists it as `lock_untestable`. Catches: an unbounded kill, a cell that
+    cannot be ended, retiring after a failed teardown, and a kill that waits out D for a lock it
+    cannot test. Amended on 2026-10-21: this did not test a lock the kill cannot test.
 15. A `membraned` under a group-writable parent, a group-writable `membraned`, and a wrong digest
     for `membraned` or a template Artifact: each `cell.new` is 108 with the path, and no cell
     directory exists. Without `cell_runtime`, `cell.new` is the stated 105 with no directory, and
@@ -812,6 +840,27 @@ Items that attach plasmids also need the RealCellBackend task and spec 022.
     a registry-imported genome (spec 020). A genome whose apply fails after boot leaves a retired
     directory, no running `membraned`, and a refusal carrying `cell`. Catches: creating a cell
     before resolution, and an empty running cell after a failed attach.
+18. Startup over four validated cells whose `supervisor.lock` cannot be tested: G1 has a directory
+    at that name, G2 a symlink there to an unlocked lock file, G3 a lock file the controller may not
+    open (mode 0000), and G4 no lock, in a cell directory the test makes read-only once it is built
+    (mode 0500, or `chflags uchg`), so creating one fails. Each has `launched` from another boot, a
+    journal with one settled attachment, and a `membrane.uds` bound by a test process that records
+    every connection. Startup serves. Each cell is still under `cells/`, absent from `cell.list`,
+    and listed by `plasmosome.recovery` as `lock_untestable`, with lock `untestable`, marker
+    `earlier_boot` and its attachment in its entry's `desired`. None of the four is in the top-level
+    `desired` or `pending`, `ledger_generation` is 0, and readiness is false. `cell.kill` of G1
+    is 101. Once G1's directory is replaced by an unlocked lock file, `cell.status` of G1 runs the
+    check again and is 101, and G1 is then under `retired/`. Readiness stays false while G2-G4 stay
+    set aside. At the end of the test, the test process has recorded no connection. G3 and G4 are
+    skipped, and reported as skipped, when the test runs as root. Catches: a lock that cannot be
+    tested taken as free, so its cell is retired, or as held, so its supervisor is queried; a
+    symlink followed to a free lock; a set-aside cell's records or generation in the top-level
+    account; and startup refused for one cell's lock. Amended on 2026-10-21: this item is new.
+19. While serving, with `plasmosome.status` reporting `ready` true, SIGKILL the `membraned` of an
+    adopted cell with an attachment and put a directory at its `supervisor.lock`. `cell.status` on
+    it is then 101, `cell.list` omits it, `plasmosome.recovery` lists it as `lock_untestable` with
+    marker `this_boot`, and `ready` is false. Catches: readiness decided only at startup, and a cell
+    set aside while serving still listed. Amended on 2026-10-21: this item is new.
 
 ## Out of scope
 
