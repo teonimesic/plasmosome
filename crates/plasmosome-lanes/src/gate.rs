@@ -603,9 +603,6 @@ fn staged(results: &[ProbeResult], config: &str) -> Judged {
             outcome(stat)
         ));
     }
-    if ok(stat) {
-        return fail(format!("`{id}`: the workload found the placed file"));
-    }
     match gone(stat, &format!("`{id}`: the workload's stat")) {
         None => Ok(()),
         Some(reason) => fail(reason),
