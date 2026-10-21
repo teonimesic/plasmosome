@@ -923,11 +923,18 @@ fn a_live_daemon_that_never_binds_fails_the_test_with_its_stderr_and_is_reaped()
 fn a_daemon_stderr_that_is_not_utf8_still_reaches_the_failure() {
     let root = private_root();
     let daemon = probe("printf 'refused \\377\\n' >&2; exit 1", &[]);
-    let (message, _daemon) = addressable_failure(daemon, root.path().join("never.uds"), PATIENCE);
+    let budget = 2 * PATIENCE;
+    let started = Instant::now();
+    let (message, _daemon) = addressable_failure(daemon, root.path().join("never.uds"), budget);
+    let took = started.elapsed();
     let shown = format!("its stderr was:\nrefused {}\n", char::REPLACEMENT_CHARACTER);
     assert!(
         message.contains(&shown),
         "the failure shows a stderr that is not UTF-8, with the bad byte replaced: {message}"
+    );
+    assert!(
+        took < PATIENCE,
+        "addressable fails as soon as the daemon exits, well before its {budget:?} budget: {took:?}"
     );
 }
 
