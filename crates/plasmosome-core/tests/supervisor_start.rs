@@ -31,7 +31,7 @@ const STARTED: &str = "the child controller started its supervisor";
 const ONE_MIB: usize = 1 << 20;
 const LAST_SIGNAL: libc::c_int = 64;
 
-const CASES: [(&str, fn()); 13] = [
+const CASES: [(&str, fn()); 15] = [
     (
         "starts_detached_with_only_0_to_4",
         starts_detached_with_only_0_to_4,
@@ -71,6 +71,14 @@ const CASES: [(&str, fn()); 13] = [
     (
         "an_unconfirmed_exec_leaves_membraned_an_empty_record",
         an_unconfirmed_exec_leaves_membraned_an_empty_record,
+    ),
+    (
+        "test_threads_is_a_usage_error",
+        test_threads_is_a_usage_error,
+    ),
+    (
+        "skip_is_a_usage_error_not_a_filter",
+        skip_is_a_usage_error_not_a_filter,
     ),
 ];
 
@@ -346,6 +354,40 @@ fn an_unconfirmed_exec_leaves_membraned_an_empty_record() {
         }
     }
     panic!("none of 20 starts was still unconfirmed when its deadline had passed");
+}
+
+fn test_threads_is_a_usage_error() {
+    assert_refused(&["--test-threads", "1"], "--test-threads");
+}
+
+fn skip_is_a_usage_error_not_a_filter() {
+    assert_refused(
+        &["--skip", "a_cell_holding_a_nul_is_refused_before_any_fork"],
+        "--skip",
+    );
+}
+
+fn assert_refused(arguments: &[&str], flag: &str) {
+    let ran = Command::new(this_executable())
+        .args(arguments)
+        .env_remove(CASE)
+        .env_remove(DEADLINE)
+        .env_remove(SCRATCH)
+        .stdin(Stdio::null())
+        .output()
+        .expect("the runner starts");
+    let stdout = String::from_utf8_lossy(&ran.stdout);
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+    assert_eq!(
+        ran.status.code(),
+        Some(2),
+        "the runner refuses {arguments:?} with exit 2; it printed {stdout}{stderr}"
+    );
+    assert!(stderr.contains(flag), "the refusal names {flag}: {stderr}");
+    assert!(
+        !stdout.contains("running"),
+        "the refused runner runs no case: {stdout}"
+    );
 }
 
 fn lock_never_free_until_exit() {
