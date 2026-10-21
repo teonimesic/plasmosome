@@ -368,14 +368,16 @@ by the supervisor's user: of the 11,459 symlinks under `/usr/lib` and `/System/L
 ones end off the sealed volume, which with the seven firmlinked directories makes 71 entry points,
 and none of the 5,740 directories under them, nor any of their ancestors, is writable by that
 user. A tighter check would cost little. Of the 3,649 install names in that Mac's shared cache,
-3,599 pass the audit today. Refusing any symlink on the way would refuse 19 more, all under the
-private `TextToSpeechKonaSupport.framework`; requiring every existing step of a name to be on the
-sealed volume would refuse none of the 3,599. The audit keeps this limit for now, and
-plasmosome-0xun owns the tighter check.
+3,599 pass the volume check today. Refusing any symlink on the way would refuse 19 more, all
+under the private `TextToSpeechKonaSupport.framework`; requiring every existing step of a name to
+be on the sealed volume would refuse none of the 3,599. The whole audit passes 3,113 of them,
+because the other 486 are under `/System/iOSSupport/`, outside both system prefixes. The audit
+keeps this limit for now, and plasmosome-0xun owns the tighter check.
 
 The audit does not look everywhere dyld does. When an absolute name is not on disk, dyld also
-tries `/System/Volumes/Preboot/Cryptexes/OS` followed by the name. Every name in the shared
-cache, such as `/usr/lib/libSystem.B.dylib`, is one of those, and the shared cache itself lives in
+tries `/System/Volumes/Preboot/Cryptexes/OS` followed by the name. All but four names in the
+shared cache, such as `/usr/lib/libSystem.B.dylib`, are not on disk; the four on disk are
+`/usr/lib/dyld` and three libraries under `/usr/lib/system/`. The shared cache itself lives in
 that cryptex. That tree is on the Preboot volume, which is read-write and not sealed. `OS/usr/lib` and
 `OS/System/Library` are owned by root with the `restricted` flag, as are all but one of the
 directories under them (`OS/System/Library/Extensions` has only `sunlnk`). Their parent
