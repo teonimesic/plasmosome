@@ -754,4 +754,5 @@ TESTS = [
 
 
 if __name__ == "__main__":
+    a_failed_row_fails_the_run_whatever_rows_skip()
     sys.exit(run_rows(TESTS))
