@@ -65,7 +65,8 @@ The controller's strict JSON configuration gains an optional key, `cell_runtime`
 - `start_deadline_ms` is a positive integer: the budget for `cell.new` to reach ready with its
   genome attached.
 - `stop_deadline_ms` is optional, a positive integer, default 30,000: the default budget of
-  `cell.kill`, and the cleanup budget after a failed start.
+  `cell.kill` and of a whole `plasmosome.stop` (spec 001 §3.4), and the cleanup budget after a
+  failed start. Amended on 2026-10-21: this did not name `plasmosome.stop`.
 - A cell ID has at most ten digits. With such an ID, `<root>/cells/<cell>/membrane.uds` and the two
   bridge socket paths must each fit in 103 bytes, the Darwin `AF_UNIX` limit; otherwise
   `cell_runtime` is invalid configuration.
@@ -206,7 +207,8 @@ cell visible and does not clean it.
 ### 6. Readiness
 
 **From the controller.** A cell whose `cell.new` has not replied is `germinating`, whatever its
-supervisor says. A cell whose `cell.kill` has started is `draining` until it is retired. A kill
+supervisor says. A cell whose `cell.kill` has started is `draining` until it is retired.
+A `plasmosome.stop` makes a cell `draining` as spec 001 §3.4 says. A kill
 that gives up leaves it `draining` after a 106, and otherwise in the state its supervisor
 reports. `cell.list` and `cell.status` show these states. `cell.exec` and every plasmid
 verb on a `germinating` or `draining` cell refuse at once with 105 `{from: <state>, to:
@@ -217,7 +219,8 @@ at a time, in arrival order. Requests for other cells are not blocked. Reads nev
 mutations, except a read whose own query failed, which waits for the check it queued.
 `plasmid.list` is a read. Corrected on 2026-10-20: this listed "plasmid verbs" among the
 mutations, which read as including `plasmid.list`, and left out spec 028's expiry.
-Amended on 2026-10-21: this list did not name a `plasmosome.stop`'s drain of the cell.
+Amended on 2026-10-21: this list did not name a `plasmosome.stop`'s drain of the cell, and only
+`cell.kill` made a cell `draining`.
 
 **From the supervisor.** A cell-configured membrane's `membrane.status` answers `{ready: true,
 state: "serving"}` exactly when its guest has said hello, no `membrane.workload.stop` or
