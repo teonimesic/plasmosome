@@ -119,8 +119,9 @@ that id. Today no refusal of the `id` field names one, because no id parsed: the
 not a string or empty. Such a refusal carries `field` `id` and its `fix`, and no `plasmid`. A
 client reads these members and never splits `detail`: a key or an id may hold `: `.
 Amended on 2026-10-21: the first sentence here read "The 108 `fix` is spec 011's amendment to
-this table.", and row 108 named only `fix`; the field and the plasmid id travelled only inside
-`detail`. A 108 whose refusal names a declaration field carries a `fix` in one of three forms:
+this table.", and row 108's fields read "`detail`, `path`; `fix` when the refusal names a
+declaration field"; the field and the plasmid id travelled only inside `detail`. A 108 whose
+refusal names a declaration field carries a `fix` in one of three forms:
 
 - TOML to write in place of that field: a line such as `hosts = ["api.github.com"]`, or a
   section such as `[impl]` followed by `wasm = "component.wasm"`;

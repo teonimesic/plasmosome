@@ -509,7 +509,7 @@ owner's to settle and belongs to a sibling spec. Nothing above prejudges it.
 - **This spec amends spec 001 in three named places** — `delivery` optionality in §3.10, the
   `field`, `fix` and `plasmid` fields of 108 in §1, and the `denials` field on the per-plasmid
   objects of §3.9 and §3.6 — and nowhere else. No error code is added, removed or renumbered.
-  Amended on 2026-10-21: this named the `fix` field alone.
+  Amended on 2026-10-21: this read "the `fix` field in §1".
 - **Nothing here decides the gate.** Two properties hold whatever it turns out to be: the approval
   is not the cell's to give, and the declarations of a plasmid and its required closure, read with
   spec 022's operator declarations file, are sufficient for a reviewer to bound its reach. Neither
