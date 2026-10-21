@@ -255,8 +255,7 @@ false while the account contains drift, quarantine, a set-aside cell, unmatched 
 incomplete effect, or while a spec 028 expiry is unfinished past its H. Quarantined and set-aside
 cells are absent from `cells` and remain named in `plasmosome.recovery`. Amended on 2026-10-21: this
 did not name set-aside cells, which spec 023 §8 keeps out of `cells` with readiness false. A
-recovered unknown genome is omitted, as §1
-requires.
+recovered unknown genome is omitted, as §1 requires.
 
 ### 3.3a `plasmosome.recovery`
 
@@ -284,8 +283,7 @@ reason, lock, marker, desired, pending}`. `reason` is one of `unresponsive`, `ge
 `lock_untestable`, `external_obligations`, `supervisor_lost`, `holdings_without_supervisor`,
 `retire_unlogged` and `retire_failed`. `lock` is `held`, `free` or `untestable`, the last for a
 `supervisor.lock` spec 023's check cannot test. `marker` is required whatever the lock, since the
-check
-reads `launched` for every cell before it acts: `absent`, `earlier_boot`, `this_boot_stopped`,
+check reads `launched` for every cell before it acts: `absent`, `earlier_boot`, `this_boot_stopped`,
 `this_boot` or `unreadable`, for no marker, one from an earlier boot, one from this boot that
 records a clean stop, one from this boot that records none, or one that cannot be read. `desired` is
 the cell's settled DesiredCell from its journal, in this section's projection, so each attachment
@@ -520,11 +518,14 @@ resumed transaction that does not finish without `now`, or a `now` kill whose se
 cannot be appended, is `{handle, deadline_ms}` with `handle` the cell ID and `deadline_ms` the
 kill's deadline. An unclean teardown replies `"state": "dead"` with its residue and `teardown` in
 `incomplete`, and the cell stays listed for a retry. A cell that fails the check before its
-retirement (spec 023 §7, step 5) is decided at once by spec 023 §8's table: unless the table retires
-it, the reply lists `teardown` in `incomplete`, and the cell is set aside or quarantined and leaves
-`cell.list`; a later `cell.kill` of it is 101, since clearing it is spec 023's owner question 3, or
-for a quarantined cell outside spec 008. A guest not stopped or a supervisor not gone within the
-deadline, or a rename that fails after the retire check passed, is 105 naming the cell.
+retirement (spec 023 §7, step 5), or whose lock the kill cannot test (step 4), is decided at once by
+spec 023 §8's table: unless the table retires it, the reply lists `teardown` in `incomplete`, and
+the cell is set aside or quarantined and leaves `cell.list`; a later `cell.kill` of it is 101.
+Clearing it is spec 023's owner question 3, or outside spec 008 for a quarantined cell; a cell whose
+lock cannot be tested leaves `set_aside` when that lock is repaired and spec 023 §8's check runs
+again. A guest not stopped or a supervisor not gone within the deadline, or a rename that fails
+after the retire check passed, is 105 naming the cell. Amended on 2026-10-21: this did not cover a
+lock the kill cannot test.
 
 ### 3.8 `cell.exec`
 

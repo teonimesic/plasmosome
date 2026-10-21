@@ -530,11 +530,17 @@ Option<DesiredCell>, pending: Option<PendingCellTransaction> }`, with the values
 gives a `set_aside` entry; `desired` and `pending` are None where that section omits them. The
 check, not `recover`, decides which cells are set aside and why: `recover` tests no lock and reads
 no marker, and is given that decision with its observation. It reads a set-aside cell's journal into
-that cell's entry and into no other field, apart from a corrupt journal's report in `quarantined`,
-and that cell's generation is not part of the instance generation. So the outcome says which cells
-were set aside and why, as `plasmosome.recovery` shows; `cell.list` omits them (spec 023 §8).
-Amended on 2026-10-21: the outcome had no field for set-aside cells, though spec 001 §3.3a's
-projection of it lists them.
+that cell's entry and into no other field, apart from a corrupt journal's report in `quarantined`.
+It leaves that cell's part of the observation out too: its cell record, its holdings in the snapshot
+and its incomplete operations are in none of the independently observed cells, `drift`, `unmatched`
+and `incomplete`, as spec 001 §3.3a says. The failed query that set a cell aside reaches `recover`
+as that decision, not as an observation fault, so `recover` does not refuse with
+`RecoveryError::Observation` because of it, and startup still serves (spec 023 §8). That cell's
+generation is not part of the instance generation. So the outcome says which cells were set aside
+and why, as `plasmosome.recovery` shows; `cell.list` omits them (spec 023 §8). Amended on
+2026-10-21: the outcome had no field for set-aside cells, though spec 001 §3.3a's projection of it
+lists them, and did not say what `recover` does with a set-aside cell's observed records or with the
+failed query that set it aside.
 Incomplete contains every independently observed incomplete operation, with exact cell/plugin
 ownership; it is a separate unfinished-effects account, not coerced into an OsObject or silently
 removed from drift. Matching cleanup obligations are resolved as above; other incomplete effects
@@ -603,11 +609,10 @@ supervisor check to each validated cell. It queries only cells whose `supervisor
 concurrently, each within a cap below the startup deadline. The lock and the `launched` marker are
 the supervisor's own lifecycle evidence, not a PID file or socket existence. A failed query, a
 `supervisor.lock` the check cannot test, or a free lock with a marker from this boot that records no
-clean stop, sets that one cell aside: it is
-handled as quarantine is, and never refuses startup. Otherwise a free lock may retire the directory
-to `<root>/retired/<cell>`, which is not discovered again. The same check runs while serving, when a
-query to a supervisor fails. Amended on 2026-10-21: this did not name a lock the check cannot test
-(spec 023 §8).
+clean stop, sets that one cell aside: it is handled as quarantine is, and never refuses startup.
+Otherwise a free lock may retire the directory to `<root>/retired/<cell>`, which is not discovered
+again. The same check runs while serving, when a query to a supervisor fails. Amended on 2026-10-21:
+this did not name a lock the check cannot test (spec 023 §8).
 
 No requests are answered until complete discovery and observation have succeeded, journals have
 been classified, pending cleanup has completed and every adopted cell's complete settled record
@@ -683,13 +688,12 @@ supervisor state, retain the entire recovery account, and pass desired.generatio
 Controller::new. Quarantined and set-aside cells are absent from the ordinary cell registry and
 visible in `plasmosome.recovery`. The controller's ready flag is false if any quarantine, set-aside
 cell, unmatched effect, incomplete effect, drift or unsettled publication remains; an empty instance
-is ready only after the same startup
-requirements. A `revoked` guest binding (spec 024), after its removal completed, is none of these.
-An observed ready cell is not relabelled dead because its desired holdings drift.
-The diagnostic surface states that discrepancy separately. Equal object snapshots do not
-establish equal participant generations or publication content. Matching published records do
-not establish matching holdings. No journal record or recovery result by itself proves liveness.
-Amended on 2026-10-21: this did not name set-aside cells (spec 023 §8).
+is ready only after the same startup requirements. A `revoked` guest binding (spec 024), after its
+removal completed, is none of these. An observed ready cell is not relabelled dead because its
+desired holdings drift. The diagnostic surface states that discrepancy separately. Equal object
+snapshots do not establish equal participant generations or publication content. Matching published
+records do not establish matching holdings. No journal record or recovery result by itself proves
+liveness. Amended on 2026-10-21: this did not name set-aside cells (spec 023 §8).
 
 The controller reconnects to surviving supervisors and retains exact inverses for subsequent
 ordinary revocation. Before any other mutation of a cell, it expires every attachment whose
