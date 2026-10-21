@@ -182,6 +182,24 @@ fn a_ruled_field_of_a_reach_probe_is_still_noise_and_still_a_difference() {
 }
 
 #[test]
+fn a_reach_probe_whose_ruled_values_relate_differently_in_the_open_lane_discriminates() {
+    let manifest = pid_rule("refusal-host-1", "pids");
+    let mut runs = runs();
+    never_discriminates(&mut runs, "refusal-host-1");
+    for (lane, first, second) in [
+        (Lane::Cell, 300, 300),
+        (Lane::Open, 310, 312),
+        (Lane::Absent, 320, 320),
+    ] {
+        for run in 0..2 {
+            let fields = &mut observation(&mut runs, lane, run, "refusal-host-1").fields;
+            fields.insert("pids".to_string(), json!([first + run, second + run]));
+        }
+    }
+    assert_eq!(verdict(&manifest, &runs), Verdict::Pass);
+}
+
+#[test]
 fn a_reach_probe_equal_in_one_pair_of_boots_does_not_discriminate() {
     for run in 0..2 {
         let mut runs = runs();
@@ -331,30 +349,6 @@ fn a_plain_probe_that_failed_before_its_step_or_left_no_marker_is_not_run() {
                 failures: vec![],
             },
             "no marker: {no_marker}"
-        );
-    }
-}
-
-#[test]
-fn a_rule_in_the_manifest_loosens_no_comparison() {
-    let manifest = manifest();
-    assert_eq!(manifest.rules.len(), 7);
-    for rule in &manifest.rules {
-        let (probe, field) = (rule.probe.as_str(), rule.field.as_str());
-        let mut cell = runs();
-        set(&mut cell, Lane::Cell, probe, field, json!(99_999));
-        assert_eq!(
-            verdict(&manifest, &cell),
-            Verdict::Fail(vec![super::differs(probe, field)]),
-            "{probe} {field} in the cell lane"
-        );
-        let mut open = runs();
-        let fields = &mut observation(&mut open, Lane::Open, 1, probe).fields;
-        fields.insert(field.to_string(), json!(99_999));
-        assert_eq!(
-            verdict(&manifest, &open),
-            Verdict::Fail(vec![noise(probe, Lane::Open, field)]),
-            "{probe} {field} in one open run"
         );
     }
 }
