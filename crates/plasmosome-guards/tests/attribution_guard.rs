@@ -1429,6 +1429,18 @@ const FOLDED_TRAILERS: &[(&str, &str, &str, Verdict)] = &[
         "",
         Verdict::Cleared,
     ),
+    (
+        "a model's folded trailer below a trailer under another key",
+        "Reviewed-by: A Reviewer <reviewer@corp.locale.io>\nKEY: Claude <noreply@anthropic.com>\n <jane@corp.locale.io>\n",
+        "Claude <noreply@anthropic.com> <jane@corp.locale.io>",
+        Verdict::Model,
+    ),
+    (
+        "a person's trailer on one line above a folded trailer under another key",
+        "KEY: Jane Doe <jane@corp.locale.io>\nReviewed-by: A Reviewer\n <reviewer@corp.locale.io>\n",
+        "",
+        Verdict::Cleared,
+    ),
 ];
 
 fn assert_each_folded_trailer_judged_in(root: &Path, position: Position) {
