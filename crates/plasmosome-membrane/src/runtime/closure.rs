@@ -960,7 +960,7 @@ mod tests {
             (Library(0), rpath(llvm))
         );
         assert_eq!(
-            refused(&executable(&[environment.clone()]), &[]),
+            refused(&executable(std::slice::from_ref(&environment)), &[]),
             (Helper, DyldEnvironment)
         );
         assert_eq!(with_library(environment), (Library(0), DyldEnvironment));
