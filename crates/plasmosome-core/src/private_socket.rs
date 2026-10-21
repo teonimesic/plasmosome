@@ -122,8 +122,8 @@ pub struct SocketEntry {
 pub const LISTEN_BACKLOG: i32 = 16;
 
 /// A listening socket inside a [`PrivateDir`] that hands out only connections whose kernel peer
-/// UID is trusted. Dropping it closes the socket and then removes the entry it created, only
-/// while the entry at that name is still the same socket by device and inode.
+/// UID is trusted. Dropping it does what [`PrivateListener::close`] says and discards the
+/// outcome.
 ///
 /// It lends its descriptor only as a raw one, for polling:
 ///
