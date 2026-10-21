@@ -862,8 +862,8 @@ gate O-8).
 - Host: {host}.
 - Test commits: {commits}.
 - Re-run: build the guest binaries as `crates/plasmosome-lanes/README.md` says, then
-  `cargo test -p plasmosome-lanes --test q1a_gate --test rerun -- --ignored --test-threads=1`.
-  The writer test runs last: `cargo test -p plasmosome-lanes --test q1a_gate write_the_results_file -- --ignored`.
+  `cargo test -p plasmosome-lanes --test q1a_gate --test rerun -- --ignored --test-threads=1 --skip write_the_results_file`.
+  The writer runs last: `cargo test -p plasmosome-lanes --test q1a_gate write_the_results_file -- --ignored`.
 ",
         commits = serde_json::to_string(&commits).unwrap_or_default(),
     )
