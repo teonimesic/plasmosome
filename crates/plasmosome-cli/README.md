@@ -17,20 +17,30 @@ client arrives in later tasks.
 `read` reads the arguments after the program name against a command table, `COMMANDS` in the
 binary, and the first rule that applies decides, as spec 025 §2 orders them. All three rules that
 need the command words read them the same way: left to right, skipping each flag's value, up to
-`--` or the first unknown flag that holds no `=`. A command's own flags are fixed by the task that
-serves it, so until then the argument after an unknown `--cell` may be its value or a word, and
-nothing after it counts as a command word. An unknown `--mock=simulate` cannot take the next
-argument, so the reading goes on past it.
+`--` or the first unknown flag not written `--name=value`. A command's own flags are fixed by the
+task that serves it, so until then the argument after an unknown `--cell` may be its value or a
+word, and nothing after it counts as a command word. An unknown `--mock=simulate` cannot take the
+next argument, so the reading goes on past it. An unknown flag of any other shape, `-x=y`
+included, ends the reading as a bare one does, so `-x=y cell list` has no command words and names
+`-x=y`.
+
+Help and the full parse can name different arguments on the same line. Help reads only the
+command words and names the first bad one; no flag is a fault there. The full parse names the
+leftmost argument at fault, whether flag, value or word. So `--kernel ../x frobnicate --help`
+names `frobnicate`, and `--kernel ../x frobnicate` names `../x`. `--version` and `not_served`
+judge only their own flags: `frobnicate --version` names `--version`, and
+`cell list extra --json --human` names `--human`.
 
 1. `-h` or `--help` anywhere before `--` prints help and exits 0, whatever else is on the line.
    With no command words it is the binary's help: every command with the verb it sends and
    whether this build serves it, the global flags, `PLASMOSOME_KERNEL` and the exit codes. Words
    that name a group, such as `cell` or `registry source`, list the group. Words that name a
    command, followed by at most its operands, give that command's help, so `germinate --help` and
-   `germinate g --help` both work. Any other words are a usage error.
+   `germinate g --help` both work. Any other words are a usage error naming the first bad word.
+   No flag is a fault here, known or unknown, with a value or without, given once or twice.
    `exec status --cell c1 --help` gives `exec status`'s help, `--frob cell list --help` gives the
-   binary's, `--frob=x cell list --help` gives `cell list`'s, and `status --frob=x extra --help` is
-   a usage error naming `extra`.
+   binary's, `--frob=x cell list --help` gives `cell list`'s, and `status --frob=x extra --help`
+   and `status --help --help extra` are usage errors naming `extra`.
 2. `--version` as the sole argument prints `plasmosome VERSION`. Anywhere else before `--` it is a
    usage error.
 3. Command words that name a command this build does not serve exit 2 with `not_served`. Its
@@ -41,9 +51,9 @@ argument, so the reading goes on past it.
 4. Everything else is the full parse. It reads the arguments before `--` once, left to right, and
    the first one at fault is the usage error, so one run names the first thing to fix:
    - an argument that is not UTF-8;
-   - a flag that is unknown, given twice, `--json` with `--human`, `--kernel`, `--socket` or
-     `--deadline-ms` on a registry command, which reaches no control socket, or a value flag
-     with no value;
+   - a flag that is unknown, an unknown `--name=value` such as `--deadline=5` included, given
+     twice, `--json` with `--human`, `--kernel`, `--socket` or `--deadline-ms` on a registry
+     command, which reaches no control socket, or a value flag with no value;
    - a bad value, judged where it stands. `--kernel` takes a name that `plasmosome-core`'s
      `InstanceName` accepts and that holds no terminal control. `--socket` takes an absolute
      path with no empty, `.` or `..` component. `--deadline-ms` takes an integer from 1 to

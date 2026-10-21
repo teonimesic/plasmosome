@@ -44,7 +44,9 @@ is `publish = false` and never ships on its own.
 - **The full parse names the leftmost fault.** It judges each argument where it stands, in one
   scan from left to right. A check that runs over the whole line for one kind of fault, before or
   after that scan, names a fault further right first. Help, `not_served` and the full parse read
-  the command words through one function, so the three rules agree on what the command is.
+  the command words through one function, so the three rules agree on what the command is. Help
+  judges only those words and names the first bad one, since spec 025 prints help whatever flags
+  are on the line. So one line can name a word with `--help` and a flag without it.
 - **Names are checked with `plasmosome-core`'s `InstanceName`.** A copy of its rules here would
   drift from the rules the daemons use.
 - **A panic ends as `internal`.** `handle` runs the command under `catch_unwind`. Its hook is

@@ -10,7 +10,10 @@ stderr. The registry commands are spec 020's, and they reach no instance socket.
 
 const FLAGS: &str = "\
 Flags, before or after the command words and never after `--`. A flag given twice is a usage
-error, and so is --kernel, --socket or --deadline-ms on a registry command.
+error, and so is --kernel, --socket or --deadline-ms on a registry command. With -h or --help,
+only the command words are read: no flag is a fault, and the first bad word is named. A command
+this build does not serve reads only --json and --human, and --version reads only itself. Any
+other line names its leftmost fault.
   --kernel NAME     the instance named NAME, at $HOME/.plasmosome/instances/NAME/control.uds
   --socket PATH     the socket at PATH, which is absolute with no empty, `.` or `..` component
   --deadline-ms N   the budget for the whole command, from 1 to 3600000 ms; 10000 by default
