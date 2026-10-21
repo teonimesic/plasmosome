@@ -850,7 +850,7 @@ mod tests {
             let mut writer = File::from(write_end);
             let _ = wrote.send(
                 writer
-                    .write_all(&pattern(2 * TRANSCRIPT_CAP))
+                    .write_all(&pattern(2 * 1_048_576))
                     .map_err(|e| e.kind()),
             );
         });
@@ -860,13 +860,29 @@ mod tests {
             Ok(Ok(())),
             "the writer wrote 2 MiB without blocking for good"
         );
-        assert_eq!(transcript.bytes.len(), TRANSCRIPT_CAP);
+        assert_eq!(transcript.bytes.len(), 1_048_576);
         assert!(
-            transcript.bytes == pattern(TRANSCRIPT_CAP),
+            transcript.bytes == pattern(1_048_576),
             "the first MiB is kept in order"
         );
-        assert_eq!(transcript.dropped, TRANSCRIPT_CAP as u64);
+        assert_eq!(transcript.dropped, 1_048_576);
         assert!(transcript.eof, "the writer closed the pipe");
+    }
+
+    #[test]
+    fn a_read_that_crosses_the_cap_keeps_only_the_bytes_under_it() {
+        let mut transcript = Transcript {
+            bytes: pattern(1_048_575),
+            ..Transcript::default()
+        };
+        keep(&mut transcript, b"abc");
+        assert_eq!(transcript.bytes.len(), 1_048_576);
+        assert_eq!(transcript.bytes[..1_048_575], pattern(1_048_575));
+        assert_eq!(transcript.bytes.last(), Some(&b'a'));
+        assert_eq!(transcript.dropped, 2);
+        keep(&mut transcript, b"de");
+        assert_eq!(transcript.bytes.len(), 1_048_576);
+        assert_eq!(transcript.dropped, 4);
     }
 
     #[test]
