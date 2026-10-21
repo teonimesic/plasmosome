@@ -73,9 +73,12 @@ makes a name the image already resolves run different bytes.
 ### 3. Attach
 
 1. Refusals come before any effect. A command name another attached plasmid already provides is
-   code 102 with `target` the command's path; its message names the plasmid that holds it, and its
-   `fix` names the field. A command name the root image already resolves on `PATH` is refused the
-   same way. A file whose bytes do not match its recorded digest is code 108.
+   code 102 with `target` the command's path, and its message names the plasmid that holds it. A
+   command name the root image already resolves on `PATH` is refused the same way. Neither is one
+   of spec 011's author refusals, and neither carries a `fix`: the declaration is valid, and what
+   holds the name is outside it. Spec 001's closed table gives `fix` only to 108. A file whose
+   bytes do not match its recorded digest is code 108. Corrected on 2026-10-21: this gave the 102
+   a `fix` naming the field, which spec 001's row 102 does not carry.
 2. Under Q1(b), the bytes a name or a surviving reference reads are always the bytes the
    journal's digests name. Under Q1(a) the workload cannot change them, and a host-side change to a
    placed or held file is detected at the next observation, not prevented (Q1).
@@ -459,7 +462,9 @@ cell, not run until one boots).
    descriptors at the end equal those at its start. Catches: a per-process view taken at start, a
    restart, and an edited `PATH`.
 3. **Refusals, cell.** A second plasmid that provides an attached command name is 102, naming the
-   holder, and leaves no trace; so is a name the image resolves on `PATH`. Catches: shadowing.
+   holder, and leaves no trace; so is a name the image resolves on `PATH`. Neither carries a `fix`.
+   Catches: shadowing, and a 102 carrying a field its row does not list. Amended on 2026-10-21:
+   this did not say the 102 carries no `fix`.
 4. **Probe from inside, mechanism.** A placement whose call succeeds but which the workload
    namespace cannot see fails the attach, staged through `private` propagation and through a bind
    from a source the namespace cannot reach. The same staging made visible succeeds. Catches:
