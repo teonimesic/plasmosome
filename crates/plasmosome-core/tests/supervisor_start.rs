@@ -82,6 +82,14 @@ const CASES: [(&str, fn()); 15] = [
     ),
 ];
 
+const NO_OP_FLAGS: [&str; 5] = [
+    "--include-ignored",
+    "--nocapture",
+    "--show-output",
+    "--quiet",
+    "-q",
+];
+
 fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().collect();
     if let Some(cell) = standin_cell(&arguments) {
@@ -108,19 +116,37 @@ fn main() -> ExitCode {
 }
 
 fn run_every_case(arguments: &[OsString]) -> ExitCode {
-    let filters: Vec<&OsStr> = arguments
-        .iter()
-        .map(OsString::as_os_str)
-        .filter(|argument| !argument.as_encoded_bytes().starts_with(b"-"))
-        .collect();
+    let mut exact = false;
+    let mut only_ignored = false;
+    let mut filters = Vec::new();
+    for argument in arguments {
+        match argument.to_string_lossy().as_ref() {
+            "--exact" => exact = true,
+            "--ignored" => only_ignored = true,
+            flag if NO_OP_FLAGS.contains(&flag) => {}
+            flag if flag.starts_with('-') => {
+                eprintln!(
+                    "supervisor_start: {flag} is not a flag this runner takes. It takes case-name filters, --exact, --ignored, {}",
+                    NO_OP_FLAGS.join(", ")
+                );
+                return ExitCode::from(2);
+            }
+            filter => filters.push(filter.to_owned()),
+        }
+    }
     let chosen: Vec<&str> = CASES
         .iter()
         .map(|(name, _)| *name)
         .filter(|name| {
-            filters.is_empty()
-                || filters
-                    .iter()
-                    .any(|filter| name.contains(&*filter.to_string_lossy()))
+            !only_ignored
+                && (filters.is_empty()
+                    || filters.iter().any(|filter| {
+                        if exact {
+                            name == filter
+                        } else {
+                            name.contains(filter.as_str())
+                        }
+                    }))
         })
         .collect();
     let filtered_out = CASES.len() - chosen.len();
