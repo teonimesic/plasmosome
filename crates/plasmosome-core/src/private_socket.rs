@@ -118,6 +118,22 @@ pub struct SocketEntry {
 /// A listening socket inside a [`PrivateDir`] that hands out only connections whose kernel peer
 /// UID is trusted. Dropping it closes the socket and then removes the entry it created, only
 /// while the entry at that name is still the same socket by device and inode.
+///
+/// It lends its descriptor only as a raw one, for polling:
+///
+/// ```
+/// use plasmosome_core::private_socket::PrivateListener;
+/// let polled: fn(&PrivateListener) -> std::os::fd::RawFd = PrivateListener::as_raw_fd;
+/// ```
+///
+/// It does not implement `AsFd`, so safe code cannot copy the descriptor. A copy could accept a
+/// peer whose UID is not trusted, make the listener block, or keep the socket listening after
+/// [`PrivateListener::close`]:
+///
+/// ```compile_fail,E0277
+/// fn lends_a_borrowed_descriptor<T: std::os::fd::AsFd>() {}
+/// lends_a_borrowed_descriptor::<plasmosome_core::private_socket::PrivateListener>();
+/// ```
 #[derive(Debug)]
 pub struct PrivateListener {
     listener: UnixListener,
