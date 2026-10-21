@@ -797,77 +797,134 @@ const IDENTITIES: &[(&str, Verdict)] = &[
     ("Probe Person <probe@corp.locale.io>", Verdict::Cleared),
 ];
 
-fn probe_shas(repository: &Path) -> Vec<String> {
-    let output = git(repository, &["log", "--format=%H %s"], None);
-    assert!(
-        output.status.success(),
-        "setup: `git log` failed in the scratch repository: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let mut shas = vec![String::new(); IDENTITIES.len()];
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let (sha, subject) = line
-            .split_once(' ')
-            .expect("setup: `git log` prints a SHA and a subject");
-        let index: usize = subject
-            .strip_prefix("probe ")
-            .and_then(|index| index.parse().ok())
-            .expect("setup: every scratch commit is a probe");
-        shas[index] = sha[..9].to_owned();
-    }
-    shas
+const PROBES_PER_REPOSITORY: usize = 8;
+
+struct Probe {
+    label: String,
+    message: String,
+    refusal: Option<String>,
 }
 
-fn assert_each_identity_judged_in(root: &Path, position: Position) {
-    let messages: Vec<String> = IDENTITIES
-        .iter()
-        .enumerate()
-        .map(|(index, (identity, _))| {
-            format!("probe {index}\n\n{}: {identity}\n", position.as_written())
-        })
-        .collect();
-    let repository =
-        repository_with_commits(&messages.iter().map(String::as_str).collect::<Vec<_>>());
+struct ProbeRun {
+    shas: Vec<String>,
+    said: String,
+    refused: bool,
+}
+
+fn probe_repository(messages: &[&str]) -> (TempDir, Vec<String>) {
+    let directory = tempfile::tempdir().expect("a scratch directory is created");
+    let path = directory.path();
+    git_succeeds(path, &["init", "--quiet"], None);
+    let mut stream = String::new();
+    for (index, message) in messages.iter().enumerate() {
+        stream.push_str(&format!(
+            "commit refs/heads/probe\nmark :{}\ncommitter A Person <person@corp.locale.io> 1700000000 +0000\ndata {}\n{message}\n",
+            index + 1,
+            message.len()
+        ));
+    }
+    let marks = path.join("probe-marks");
+    let export = format!("--export-marks={}", marks.display());
+    git_succeeds(path, &["fast-import", "--quiet", &export], Some(&stream));
+    let marks = std::fs::read_to_string(&marks).expect("setup: fast-import wrote its marks");
+    let mut shas = vec![String::new(); messages.len()];
+    for line in marks.lines() {
+        let (mark, sha) = line
+            .split_once(' ')
+            .expect("setup: a mark line holds a mark and a SHA");
+        let index: usize = mark
+            .strip_prefix(':')
+            .and_then(|mark| mark.parse().ok())
+            .expect("setup: fast-import numbers its marks");
+        shas[index - 1] = sha[..9].to_owned();
+    }
+    (directory, shas)
+}
+
+fn run_guard_over_probes(root: &Path, probes: &[Probe]) -> ProbeRun {
+    let messages: Vec<&str> = probes.iter().map(|probe| probe.message.as_str()).collect();
+    let (repository, shas) = probe_repository(&messages);
     let output = guard_command(root, repository.path())
         .env("LC_ALL", "C.UTF-8")
-        .arg("HEAD")
+        .arg("probe")
         .output()
         .expect("the guard runs");
-    let said = said(&output);
-    let shas = probe_shas(repository.path());
-    let misjudged: Vec<String> = IDENTITIES
-        .iter()
-        .zip(&shas)
-        .filter_map(|((identity, verdict), sha)| {
+    ProbeRun {
+        shas,
+        said: said(&output),
+        refused: !output.status.success(),
+    }
+}
+
+fn assert_each_probe_judged(root: &Path, what: &str, probes: &[Probe]) {
+    let runs: Vec<ProbeRun> = std::thread::scope(|scope| {
+        let handles: Vec<_> = probes
+            .chunks(PROBES_PER_REPOSITORY)
+            .map(|chunk| scope.spawn(move || run_guard_over_probes(root, chunk)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("a probe run finishes"))
+            .collect()
+    });
+    let mut misjudged = Vec::new();
+    for (run, chunk) in runs.iter().zip(probes.chunks(PROBES_PER_REPOSITORY)) {
+        for (probe, sha) in chunk.iter().zip(&run.shas) {
             let naming = format!("attribution-guard: {sha} ");
-            let lines: Vec<&str> = said
+            let lines: Vec<&str> = run
+                .said
                 .lines()
                 .filter(|line| line.starts_with(&naming))
                 .collect();
-            match verdict.refusal(position) {
+            let label = &probe.label;
+            match &probe.refusal {
                 Some(refusal) => {
-                    let expected =
-                        format!("{naming}{} \"{identity}\" {refusal}", position.as_printed());
-                    (lines != [expected.as_str()]).then(|| {
-                        format!("{identity:?} must be refused by exactly one line, `{expected}`; the lines naming its commit are {lines:?}")
-                    })
+                    let expected = format!("{naming}{refusal}");
+                    if lines != [expected.as_str()] {
+                        misjudged.push(format!("{label} must be refused by exactly one line, `{expected}`; the lines naming its commit are {lines:?}"));
+                    }
                 }
-                None => (!lines.is_empty()).then(|| {
-                    format!("{identity:?} must be cleared, yet the guard named its commit: {lines:?}")
-                }),
+                None => {
+                    if !lines.is_empty() {
+                        misjudged.push(format!(
+                            "{label} must be cleared, yet the guard named its commit: {lines:?}"
+                        ));
+                    }
+                }
             }
-        })
-        .collect();
+        }
+        let holds_a_refusal = chunk.iter().any(|probe| probe.refusal.is_some());
+        if run.refused != holds_a_refusal {
+            let labels: Vec<&str> = chunk.iter().map(|probe| probe.label.as_str()).collect();
+            misjudged.push(if holds_a_refusal {
+                format!("the guard exited successfully over {labels:?}, which lets every refusal among them through")
+            } else {
+                format!("the guard failed over {labels:?}, none of which it may refuse")
+            });
+        }
+    }
+    let said: Vec<&str> = runs.iter().map(|run| run.said.as_str()).collect();
     assert!(
         misjudged.is_empty(),
-        "as {}, these identities got the wrong verdict:\n{}\nguard said:\n{said}",
-        position.as_written(),
-        misjudged.join("\n")
+        "{what}, these probes got the wrong verdict:\n{}\nguard said:\n{}",
+        misjudged.join("\n"),
+        said.join("\n")
     );
-    assert!(
-        !output.status.success(),
-        "the guard printed every refusal above but exited successfully, which lets them all through.\nguard said:\n{said}"
-    );
+}
+
+fn assert_each_identity_judged_in(root: &Path, position: Position) {
+    let probes: Vec<Probe> = IDENTITIES
+        .iter()
+        .enumerate()
+        .map(|(index, (identity, verdict))| Probe {
+            label: format!("{identity:?}"),
+            message: format!("probe {index}\n\n{}: {identity}\n", position.as_written()),
+            refusal: verdict
+                .refusal(position)
+                .map(|refusal| format!("{} \"{identity}\" {refusal}", position.as_printed())),
+        })
+        .collect();
+    assert_each_probe_judged(root, &format!("as {}", position.as_written()), &probes);
 }
 
 #[test]
