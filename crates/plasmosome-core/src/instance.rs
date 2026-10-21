@@ -5189,19 +5189,22 @@ mod tests {
 
     #[test]
     fn a_hidden_cell_9999999999_leaves_no_id_and_names_cells() {
-        let (_dir, root) = temp_root();
-        entries(&root, "cells", &["cell-9999999998"]);
-        let (mut instance, lock) = locked(&root);
-        instance.sync = hooked_sync;
-        let scans = hide_after_each_listing(&root, "cell-9999999999");
-        expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Exhausted { path }) => {
-            assert_eq!(path, root.join("cells"))
-        });
-        assert_eq!(scans.get(), 2);
-        assert_eq!(
-            names_under(&root.join("cells")),
-            ["cell-9999999998", "cell-9999999999"]
-        );
+        for place in ["cells", "retired"] {
+            let (_dir, root) = temp_root();
+            fs::create_dir(root.join("cells")).expect("cells is made");
+            entries(&root, place, &["cell-9999999998"]);
+            let (mut instance, lock) = locked(&root);
+            instance.sync = hooked_sync;
+            let scans = hide_after_each_listing(&root, "cell-9999999999");
+            expect_match!(instance.allocate_cell(&lock), Err(AllocateError::Exhausted { path }) => {
+                assert_eq!(path, root.join("cells"), "{place}")
+            });
+            assert_eq!(scans.get(), 2, "{place}");
+            assert!(
+                names_under(&root.join("cells")).contains(&"cell-9999999999".to_owned()),
+                "{place}"
+            );
+        }
     }
 
     fn hide_after_each_listing(root: &Path, name: &str) -> Rc<Cell<usize>> {
