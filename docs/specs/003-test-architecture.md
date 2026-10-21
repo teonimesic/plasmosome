@@ -58,7 +58,7 @@ Every place the kernel touches the world outside the process, and the trait that
 | Sockets (readiness probes) | socket path injected as argument | a test-owned socket in a `TempDir` |
 | Standard output and error (the command line's envelopes) | writers injected as arguments to `plasmosome_cli::emit` | a `Vec<u8>`; writers that refuse every write, fail only on flush, or fail only their first write; one that records the largest piece; all in plasmosome-cli's tests |
 | Time (lifetime bounds, the fence, expiry scheduling) | `Clock` (`plasmosome-backend::clock`), `SystemClock` in `plasmosome-core::clock` | `ManualClock` |
-| The command line's deadline (`--deadline-ms`) | `Clock` and `Deadline` (`plasmosome-cli::clock`), passed in `plasmosome_cli::Context`; the binary passes `SystemClock` | a clock whose later readings are an hour past its first, in plasmosome-cli's tests |
+| The command line's deadline (`--deadline-ms`) | `Clock` and `Deadline` (`plasmosome-cli::clock`), passed in `plasmosome_cli::Context`; the binary passes `SystemClock` | a scripted clock, with an offset for each reading and an action at a chosen reading, in plasmosome-cli's tests |
 | A daemon's control socket (the command line's request and reply) | the socket path and the trusted UID, injected as arguments to `plasmosome_cli::handle` and `exchange` | `FakeDaemon` on a private socket in a `TempDir`, socket pairs, and `plasmosome-core`'s daemon loop on a thread; in plasmosome-cli's and plasmosome's tests |
 | A daemon's reply line (the command line's socket read) | the reader injected as an argument to `plasmosome_cli::reply::read_reply` | a `&[u8]`; readers that give a script of chunks and errors, serve a fixed chunk size, or send no newline, stop after a set length and count what was taken; all in plasmosome-cli's tests |
 | The pinned guest (`plasmosome-lanes`) | the bundle directory and the e2fsprogs tool directory injected as paths, and the VMM launcher path given to `run_lane` | a `TempDir` bundle, and launcher scripts that hang or write a console |
@@ -99,7 +99,9 @@ of its own. One test fixture outside the kernel also reads elapsed time: `run_la
 because it makes no lifetime decision and its test needs no fake clock: a launcher that never exits
 times out whatever the clock reads. The command line's deadline is not a lifetime decision either.
 `plasmosome-cli` counts it on its own `Clock` in `plasmosome-cli::clock`, which gives the one
-monotonic reading a client needs, and its tests pass a clock that jumps past the deadline.
+monotonic reading a client needs. Its tests pass a scripted clock: an offset for each reading,
+and an action at a chosen reading. An offset can jump past the deadline or leave 10 ms of it,
+and the action can hold a call until the peer has closed.
 
 ### Workspace files belong to the invocation
 

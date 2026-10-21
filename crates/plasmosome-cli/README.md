@@ -261,11 +261,13 @@ the deadline. It calls `check_peer_uid` before writing a byte. A peer that runs 
 or whose UID cannot be read, is `peer_mismatch`, and the stream is closed unread. With no time
 left it is `deadline` with `deadline_ms`, and nothing is written. Each write and each read then
 waits only the time left. A write that fails before any byte is `transport`. A write that fails
-after part of the request is written is `Unreplied::CutOff` with the error. The daemon has no
-whole line then, so the command still changes nothing, and the failure is `cut_off`'s, with
-cause `transport` or `deadline`. On macOS a socket whose peer has closed refuses a new timeout
-with `EINVAL` (measured on Darwin 25.6), so the read or write is then made without blocking; such
-a socket can receive nothing more.
+after part of the request is written is `Unreplied::CutOff` with the error. `status` changes no
+state, so the failure is `cut_off`'s `no_reply`, with cause `transport` or `deadline`. The daemon
+may still act on the part it got: plasmosome-core's `serve_connection` acts on a last line that
+has no newline when its input ends, and the client closes the stream after a failed write. So a
+command that changes state maps a cut-off request to `outcome_unknown`, exit 3. On macOS a socket
+whose peer has closed refuses a new timeout with `EINVAL` (measured on Darwin 25.6), so the read
+or write is then made without blocking; such a socket can receive nothing more.
 
 On macOS a Unix-socket `connect` never blocks. On Linux a full backlog makes it block, and std's
 `UnixStream::connect` takes no timeout, so there the deadline does not bound the connect. Spec
