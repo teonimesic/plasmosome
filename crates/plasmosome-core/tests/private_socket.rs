@@ -1084,6 +1084,151 @@ fn close_and_drop_stop_the_socket_listening_under_a_name_they_no_longer_hold() {
     );
 }
 
+const WATCHED_BINDS: usize = 500;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum View {
+    Absent,
+    Refused(PrivateSocketError),
+    Unreachable,
+    Ready,
+    Unexpected(std::io::ErrorKind),
+}
+
+fn view_of(path: &Path) -> View {
+    match check_private_path(path, effective_uid()) {
+        Err(PrivateSocketError::NoSocket { .. }) => View::Absent,
+        Err(refusal) => View::Refused(refusal),
+        Ok(_) => match connected(path) {
+            Ok(()) => View::Ready,
+            Err(std::io::ErrorKind::ConnectionRefused) => View::Unreachable,
+            Err(other) => View::Unexpected(other),
+        },
+    }
+}
+
+#[derive(Debug, Default)]
+struct Views {
+    absent: usize,
+    modes: std::collections::BTreeMap<u32, usize>,
+    other_refusals: Vec<PrivateSocketError>,
+    unreachable: usize,
+    ready: usize,
+    unexpected: Vec<std::io::ErrorKind>,
+    cycles_refusable: usize,
+}
+
+impl Views {
+    fn count(&mut self, view: &View) {
+        match view {
+            View::Absent => self.absent += 1,
+            View::Refused(PrivateSocketError::SocketMode { mode, .. }) => {
+                *self.modes.entry(*mode).or_default() += 1;
+            }
+            View::Refused(refusal) => self.other_refusals.push(refusal.clone()),
+            View::Unreachable => self.unreachable += 1,
+            View::Ready => self.ready += 1,
+            View::Unexpected(kind) => self.unexpected.push(*kind),
+        }
+    }
+
+    fn refusable(&self) -> usize {
+        self.modes.values().sum::<usize>()
+            + self.other_refusals.len()
+            + self.unreachable
+            + self.unexpected.len()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    Absent,
+    Ready,
+}
+
+fn watch_binds(path: PathBuf, cycles: mpsc::Receiver<()>, seen: mpsc::Sender<Seen>) -> Views {
+    let mut views = Views::default();
+    while cycles.recv().is_ok() {
+        let mut absent_reported = false;
+        let refusable_before = views.refusable();
+        let deadline = Instant::now() + PATIENCE;
+        while Instant::now() < deadline {
+            let view = view_of(&path);
+            views.count(&view);
+            if view == View::Absent && !absent_reported {
+                absent_reported = true;
+                let _ = seen.send(Seen::Absent);
+            }
+            if view == View::Ready {
+                let _ = seen.send(Seen::Ready);
+                break;
+            }
+        }
+        if views.refusable() > refusable_before {
+            views.cycles_refusable += 1;
+        }
+    }
+    views
+}
+
+#[test]
+fn a_client_never_sees_the_socket_before_it_is_private_and_listening() {
+    let root = private_root();
+    let path = root.path().join("sock");
+    let (cycle, cycles) = mpsc::channel();
+    let (report, seen) = mpsc::channel();
+    let watcher = std::thread::spawn({
+        let path = path.clone();
+        move || watch_binds(path, cycles, report)
+    });
+    let mut durations = Vec::with_capacity(WATCHED_BINDS);
+    for round in 0..WATCHED_BINDS {
+        cycle.send(()).expect("the watcher waits for a cycle");
+        assert_eq!(
+            seen.recv_timeout(PATIENCE),
+            Ok(Seen::Absent),
+            "cycle {round}: the client saw no empty name before bind"
+        );
+        let started = Instant::now();
+        let listener = bind(&root, "sock");
+        durations.push(started.elapsed());
+        assert_eq!(
+            seen.recv_timeout(PATIENCE),
+            Ok(Seen::Ready),
+            "cycle {round}: the client never connected"
+        );
+        assert_eq!(listener.close(), RemoveOutcome::Removed);
+        assert_eq!(fs::read_dir(root.path()).expect("readdir").count(), 0);
+    }
+    drop(cycle);
+    let views = watcher.join().expect("the watcher returns its counts");
+    durations.sort_unstable();
+    println!(
+        "cycles {WATCHED_BINDS}, {} with a refusable view; absent {}; wrong mode {:?} (mode: count); other refusals {:?}; \
+         refused after a passing check {}; connected {}; unexpected {:?}; bind median {:?}, \
+         largest {:?}",
+        views.cycles_refusable,
+        views.absent,
+        views
+            .modes
+            .iter()
+            .map(|(mode, count)| format!("{mode:04o}: {count}"))
+            .collect::<Vec<_>>(),
+        views.other_refusals,
+        views.unreachable,
+        views.ready,
+        views.unexpected,
+        durations[durations.len() / 2],
+        durations[durations.len() - 1],
+    );
+    assert_eq!(views.ready, WATCHED_BINDS);
+    assert_eq!(
+        views.refusable(),
+        0,
+        "a client saw the configured name before the socket was 0600 and listening: {views:?}"
+    );
+}
+
 #[test]
 #[allow(unsafe_code)]
 fn the_listening_descriptor_is_close_on_exec() {
