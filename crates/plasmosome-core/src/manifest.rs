@@ -210,7 +210,10 @@ impl std::fmt::Display for ManifestError {
                 write!(f, "manifest exceeds the {limit}-byte limit")
             }
             ManifestError::TooDeep { limit } => {
-                write!(f, "manifest nests deeper than the {limit}-level limit")
+                write!(
+                    f,
+                    "manifest nesting counts more than the {limit}-level limit"
+                )
             }
         }
     }
