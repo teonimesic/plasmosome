@@ -1,3 +1,64 @@
+use serde::{Deserialize, Serialize};
+
+use crate::backend::{BackendError, Handle, LedgerEntry};
+use crate::universe::{OsState, UniverseOp};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncompleteEffect {
+    pub operation: UniverseOp,
+}
+
+impl IncompleteEffect {
+    pub fn handle(&self) -> Handle {
+        self.operation.handle()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnforcementSnapshot {
+    state: OsState,
+    grants: Vec<LedgerEntry>,
+    incomplete: Vec<IncompleteEffect>,
+}
+
+impl EnforcementSnapshot {
+    pub fn new(
+        state: OsState,
+        grants: Vec<LedgerEntry>,
+        incomplete: Vec<IncompleteEffect>,
+    ) -> Result<EnforcementSnapshot, BackendError> {
+        Ok(EnforcementSnapshot {
+            state,
+            grants,
+            incomplete,
+        })
+    }
+
+    pub fn empty() -> EnforcementSnapshot {
+        EnforcementSnapshot {
+            state: OsState::new(),
+            grants: Vec::new(),
+            incomplete: Vec::new(),
+        }
+    }
+
+    pub fn state(&self) -> &OsState {
+        &self.state
+    }
+
+    pub fn grants(&self) -> &[LedgerEntry] {
+        &self.grants
+    }
+
+    pub fn incomplete(&self) -> &[IncompleteEffect] {
+        &self.incomplete
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.state.is_empty() && self.grants.is_empty() && self.incomplete.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};

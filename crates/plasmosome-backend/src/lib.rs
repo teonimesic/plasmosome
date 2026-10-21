@@ -43,6 +43,7 @@ pub use recipe::{
     BrokerLaunch, FileAccess, MAX_SESSION_FILE_BYTES, MountRecipe, ProxyRecipe, ProxyTransport,
     RecipeError, SessionFileRecipe, UdsRecipe,
 };
+pub use snapshot::{EnforcementSnapshot, IncompleteEffect};
 pub use universe::{
     CellId, CellOwner, Diff, GrantId, MockMode, OsObject, OsState, PluginId, ResidueReport,
     UniverseClass, UniverseOp, UniverseRemoval,
