@@ -381,6 +381,23 @@ fn adopts_its_own_lock() {
 }
 
 #[test]
+fn an_adopted_lock_stays_exclusive() {
+    let instance = Instance::new();
+    let controller = instance.cell(1);
+    let adopted =
+        adopt_lock(handed_over(&controller), &instance.config(1)).expect("the lock is adopted");
+    drop(controller);
+    let fresh =
+        File::open(instance.cell_path(1).join("supervisor.lock")).expect("the lock file opens");
+    let refusal = refused_lock(&instance, OwnedFd::from(fresh), &instance.config(1));
+    assert!(
+        matches!(refusal, CellStartRefusal::LockNotHeld),
+        "{refusal:?}"
+    );
+    drop(adopted);
+}
+
+#[test]
 fn refuses_another_cells_lock() {
     let instance = Instance::new();
     let _first = instance.cell(1);
