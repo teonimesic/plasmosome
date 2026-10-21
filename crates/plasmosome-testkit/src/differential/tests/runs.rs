@@ -418,6 +418,38 @@ fn the_transcript_is_compared_exactly_and_is_not_run_without_one() {
 }
 
 #[test]
+fn the_transcript_is_compared_exactly_where_a_rule_names_a_field_of_its_name() {
+    let manifest = manifest();
+    assert!(manifest.rules.iter().any(|rule| rule.field == "pids"));
+    let mut runs = runs();
+    for (index, run) in runs.iter_mut().enumerate() {
+        let pid = 100 + 10 * run.lane as usize + index % 2;
+        let transcript = run.transcript.as_mut().expect("a transcript");
+        transcript.insert("pids".to_string(), json!([pid]));
+    }
+    let transcript = |reason| Finding {
+        subject: Subject::Transcript,
+        reason,
+    };
+    let field = || "pids".to_string();
+    let noise = |lane| {
+        transcript(Reason::Noise {
+            lane,
+            field: field(),
+        })
+    };
+    assert_eq!(
+        verdict(&manifest, &runs),
+        Verdict::Fail(vec![
+            noise(Lane::Cell),
+            noise(Lane::Open),
+            noise(Lane::Absent),
+            transcript(Reason::Differs { field: field() }),
+        ])
+    );
+}
+
+#[test]
 fn two_runs_from_one_boot_are_refused_in_one_lane_or_across_two() {
     for (from, to, first, second) in [
         (2, 3, Lane::Open, Lane::Open),
