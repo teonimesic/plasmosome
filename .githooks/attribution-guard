@@ -160,7 +160,7 @@ matches() {
 # identity with no address is refused whatever its name: no account can be found for it. Its name
 # decides only what the refusal says. A malformed address counts as no address, so it is judged
 # by its name before the tool list and the domain list. Only the tool list makes an address a
-# model's, and anything the three tests leave is a person's or a bot's.
+# model's, and anything the three checks leave is a person's or a bot's.
 #
 # `read` does the splitting and the trimming. Pattern expansions such as `${value##*<}` take time
 # that grows with the square of a value's length or worse in bash: a name padded with 5,000 spaces
