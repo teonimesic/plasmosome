@@ -199,11 +199,12 @@ impl RuntimeListener {
 /// then. A process that later inherits or receives the peer's descriptor, and
 /// sends on it, does not change it.
 ///
-/// On Darwin it is `LOCAL_PEERPID`'s: the last process that created, connected
-/// or sent on the peer's socket, as of this call. A process that inherited the
-/// connection and sent one byte before the call is the one reported, not the
-/// one that connected (measured on macOS 26.6.2). A match with a child's pid
-/// then shows only that the child was the last to use that socket.
+/// On Darwin it is `LOCAL_PEERPID`'s: the last process that created, connected,
+/// sent on or received on the peer's socket, as of this call, a read still
+/// waiting included. A process that inherited the connection and sent one
+/// byte, or only waits in a read on it, before the call is the one reported,
+/// not the one that connected (measured on macOS 26.6.2). A match with a
+/// child's pid then shows only that the child was the last to use that socket.
 ///
 /// When the peer closed its end before the call, Darwin fails with
 /// `ENOTCONN`, and Linux still reports the pid the connector had. On neither
