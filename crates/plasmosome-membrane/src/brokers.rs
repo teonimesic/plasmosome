@@ -306,13 +306,15 @@ mod tests {
     }
 
     struct CostlyProbe {
+        clock: Clock,
         cost: Duration,
         budgets: Mutex<Vec<Option<Duration>>>,
     }
 
     impl CostlyProbe {
-        fn costing(cost: Duration) -> CostlyProbe {
+        fn costing(clock: Clock, cost: Duration) -> CostlyProbe {
             CostlyProbe {
+                clock,
                 cost,
                 budgets: Mutex::new(Vec::new()),
             }
@@ -328,33 +330,81 @@ mod tests {
 
     impl Probe for CostlyProbe {
         fn probe(&self, _socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
-            let left = budget.remaining().ok();
+            let left = budget.remaining_at(self.clock.reading()).ok();
             self.budgets
                 .lock()
                 .expect("the record of probe budgets is uncontended")
                 .push(left);
-            std::thread::sleep(self.cost.min(left.unwrap_or_default()));
-            if left.is_none_or(|left| self.cost > left) {
-                return Ok(Readiness::NotReady(NotReady::TimedOut));
-            }
+            self.clock.advance_by(self.cost);
             Ok(ready())
         }
     }
 
-    impl Probe for Arc<CostlyProbe> {
+    impl Probe for Rc<CostlyProbe> {
         fn probe(&self, socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
             CostlyProbe::probe(self, socket, budget)
         }
     }
 
-    struct OvershootingProbe {
-        cost: Duration,
+    const EXPIRY_SLEEPS: usize = 4;
+
+    #[derive(Default)]
+    struct ExpiryAwaitingProbe {
+        budgets: Mutex<Vec<Option<Duration>>>,
+        shortfalls: Mutex<Vec<(Duration, Duration)>>,
     }
 
-    impl Probe for OvershootingProbe {
-        fn probe(&self, _socket: &Path, _budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
-            std::thread::sleep(self.cost);
+    impl ExpiryAwaitingProbe {
+        fn budgets_handed_out(&self) -> Vec<Option<Duration>> {
+            self.budgets
+                .lock()
+                .expect("the record of probe budgets is uncontended")
+                .clone()
+        }
+
+        fn shortfalls(&self) -> Vec<(Duration, Duration)> {
+            self.shortfalls
+                .lock()
+                .expect("the record of budget shortfalls is uncontended")
+                .clone()
+        }
+    }
+
+    impl Probe for ExpiryAwaitingProbe {
+        fn probe(&self, _socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
+            let mut left = budget.remaining();
+            self.budgets
+                .lock()
+                .expect("the record of probe budgets is uncontended")
+                .push(left.ok());
+            for _ in 0..EXPIRY_SLEEPS {
+                let Ok(before) = left else {
+                    return Ok(ready());
+                };
+                let slept_from = Instant::now();
+                std::thread::sleep(before);
+                let slept = slept_from.elapsed();
+                left = budget.remaining();
+                if let Ok(after) = left
+                    && before.saturating_sub(after) < slept
+                {
+                    self.shortfalls
+                        .lock()
+                        .expect("the record of budget shortfalls is uncontended")
+                        .push((before.saturating_sub(after), slept));
+                }
+            }
+            assert!(
+                left.is_err(),
+                "the real clock never spent the budget in {EXPIRY_SLEEPS} sleeps of what was left of it"
+            );
             Ok(ready())
+        }
+    }
+
+    impl Probe for Rc<ExpiryAwaitingProbe> {
+        fn probe(&self, socket: &Path, budget: &ProbeBudget<'_>) -> Result<Readiness, Cancelled> {
+            ExpiryAwaitingProbe::probe(self, socket, budget)
         }
     }
 
@@ -389,31 +439,48 @@ mod tests {
     struct Clock {
         base: Instant,
         ms: Rc<Cell<u64>>,
+        tick: u64,
     }
 
     impl Clock {
         fn new() -> Clock {
+            Clock::ticking_by(1)
+        }
+
+        fn moving_only_when_advanced() -> Clock {
+            Clock::ticking_by(0)
+        }
+
+        fn ticking_by(tick: u64) -> Clock {
             Clock {
                 base: Instant::now(),
                 ms: Rc::new(Cell::new(0)),
+                tick,
             }
         }
 
         fn now(&self) -> impl Fn() -> Instant + '_ {
-            let ms = Rc::clone(&self.ms);
-            let base = self.base;
             move || {
-                let next = ms.get() + 1;
-                ms.set(next);
-                base.checked_add(Duration::from_millis(next))
-                    .expect("the test clock stays in range")
+                self.ms.set(self.ms.get() + self.tick);
+                self.reading()
             }
+        }
+
+        fn reading(&self) -> Instant {
+            self.base
+                .checked_add(Duration::from_millis(self.ms.get()))
+                .expect("the test clock stays in range")
         }
 
         fn advance_to(&self, ms: u64) {
             if ms > self.ms.get() {
                 self.ms.set(ms);
             }
+        }
+
+        fn advance_by(&self, cost: Duration) {
+            let cost = u64::try_from(cost.as_millis()).expect("a probe's cost fits the test clock");
+            self.ms.set(self.ms.get() + cost);
         }
     }
 
@@ -586,28 +653,29 @@ mod tests {
             "netd",
         ];
         let specs = names.iter().map(|name| spec(dir.path(), name)).collect();
-        let prober = Arc::new(CostlyProbe::costing(Duration::from_millis(90)));
+        let clock = Clock::moving_only_when_advanced();
+        let prober = Rc::new(CostlyProbe::costing(
+            clock.clone(),
+            Duration::from_millis(90),
+        ));
         let set =
-            BrokerSet::spawn(specs, forking(), Arc::clone(&prober)).expect("every broker forks");
-        let budget = Duration::from_millis(200);
+            BrokerSet::spawn(specs, forking(), Rc::clone(&prober)).expect("every broker forks");
 
-        let started = Instant::now();
-        let status = set.status(budget, &flag);
-        let elapsed = started.elapsed();
+        let status = set.status_with(Duration::from_millis(200), &flag, clock.now());
 
-        let handed_out = prober.budgets_handed_out();
-        assert!(
-            handed_out.windows(2).all(|pair| pair[1] < pair[0]),
-            "each probe must see what is left of the set's budget, but the budgets handed out were {handed_out:?}"
+        assert_eq!(
+            prober.budgets_handed_out(),
+            [200, 110, 20].map(|ms| Some(Duration::from_millis(ms))),
+            "each probe must be handed what the probes before it left of the one 200ms budget, and no broker may be asked once that budget is spent"
         );
-        assert!(
-            elapsed < budget * 2,
-            "a set of {} brokers took {elapsed:?} to answer, far past the single {budget:?} budget its caller allowed",
+        assert_eq!(
+            status,
+            Ok(SetStatus::NotReady {
+                broker: "credentiald".to_string(),
+                reason: NotReady::TimedOut,
+            }),
+            "`credentiald` answered 70ms after the budget ran out, so the set of {} brokers is not ready and names it",
             names.len()
-        );
-        assert!(
-            !status.as_ref().is_ok_and(SetStatus::is_ready),
-            "the budget ran out before every broker had answered, so the set cannot be ready, got {status:?}"
         );
     }
 
@@ -616,25 +684,72 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
         let flag = AtomicBool::new(false);
         let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
-        let prober = OvershootingProbe {
-            cost: Duration::from_millis(150),
-        };
-        let set = BrokerSet::spawn(specs, forking(), prober).expect("every broker forks");
+        let clock = Clock::moving_only_when_advanced();
+        let prober = Rc::new(CostlyProbe::costing(
+            clock.clone(),
+            Duration::from_millis(60),
+        ));
+        let set =
+            BrokerSet::spawn(specs, forking(), Rc::clone(&prober)).expect("every broker forks");
 
-        let status = set.status(Duration::from_millis(100), &flag);
+        let status = set.status_with(Duration::from_millis(100), &flag, clock.now());
 
-        assert!(
-            !status.as_ref().is_ok_and(SetStatus::is_ready),
-            "a set with an overshooting broker cannot be ready"
+        assert_eq!(
+            prober.budgets_handed_out(),
+            [100, 40].map(|ms| Some(Duration::from_millis(ms))),
+            "`dnsd` must be handed only the 40ms that `egressd` left of the set's budget"
         );
         assert_eq!(
             status,
             Ok(SetStatus::NotReady {
-                broker: "egressd".to_string(),
+                broker: "dnsd".to_string(),
                 reason: NotReady::TimedOut,
             }),
-            "`egressd` spent the whole budget and answered late, so its ready is refused and it reports timed out"
+            "`dnsd` answered ready 20ms after the budget ran out, so its ready is refused and it reports timed out"
         );
+    }
+
+    #[test]
+    fn status_refuses_a_ready_that_arrives_after_the_real_clock_spent_the_budget() {
+        let dir = tempfile::tempdir().expect("a temporary directory for the control sockets");
+        let flag = AtomicBool::new(false);
+        let specs = vec![spec(dir.path(), "egressd"), spec(dir.path(), "dnsd")];
+        let prober = Rc::new(ExpiryAwaitingProbe::default());
+        let set =
+            BrokerSet::spawn(specs, forking(), Rc::clone(&prober)).expect("every broker forks");
+        let deadline = Duration::from_millis(20);
+
+        let status = set.status(deadline, &flag);
+
+        let handed = prober.budgets_handed_out();
+        let never_asked = Ok(SetStatus::DeadlineSpent {
+            unreached: "egressd".to_string(),
+            asked: Vec::new(),
+        });
+        if status == never_asked {
+            assert!(
+                handed.is_empty(),
+                "a stall before the first check spent the budget, so no probe may have been asked, but budgets {handed:?} were handed out"
+            );
+        } else {
+            assert_eq!(
+                status,
+                Ok(SetStatus::NotReady {
+                    broker: "egressd".to_string(),
+                    reason: NotReady::TimedOut,
+                }),
+                "`egressd` answered only once the real clock had spent the budget, so `status` must judge its ready on that clock and refuse it. The one other right answer is {never_asked:?}, when a stall spends the budget before the first check"
+            );
+            assert!(
+                matches!(handed.as_slice(), [left] if left.is_none_or(|left| left <= deadline)),
+                "`egressd` must be asked once and handed at most the {deadline:?} its caller allowed, got {handed:?}"
+            );
+            let shortfalls = prober.shortfalls();
+            assert!(
+                shortfalls.is_empty(),
+                "the budget `egressd` was handed must shrink by at least the real time it slept, but (shrank, slept) were {shortfalls:?}"
+            );
+        }
     }
 
     #[test]
