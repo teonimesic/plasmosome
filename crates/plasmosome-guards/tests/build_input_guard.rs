@@ -175,24 +175,30 @@ fn output_within(command: &mut Command, route: &str) -> Output {
     let stdout = read_to_end(child.stdout.take().expect("the step's stdout is piped"));
     let stderr = read_to_end(child.stderr.take().expect("the step's stderr is piped"));
     let started = std::time::Instant::now();
-    let mut status = None;
-    while status.is_none() || !stdout.is_finished() || !stderr.is_finished() {
-        if status.is_none() {
-            status = child.try_wait().expect("the step's status is readable");
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("the step's status is readable") {
+            break status;
         }
         if started.elapsed() > STEP_DEADLINE {
             stop_the_group(&child);
-            if status.is_none() {
-                child.wait().expect("the stopped step is reaped");
-            }
+            child.wait().expect("the stopped step is reaped");
             panic!(
-                "{route}: the step, or a process it started, was still running after {STEP_DEADLINE:?}, so it does not finish"
+                "{route}: the step was still running after {STEP_DEADLINE:?}, so it does not finish"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    while !stdout.is_finished() || !stderr.is_finished() {
+        if started.elapsed() > STEP_DEADLINE {
+            stop_the_group(&child);
+            panic!(
+                "{route}: a process the step started still held its output after {STEP_DEADLINE:?}"
             );
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     Output {
-        status: status.expect("the step has exited"),
+        status,
         stdout: stdout.join().expect("the step's stdout is read"),
         stderr: stderr.join().expect("the step's stderr is read"),
     }
