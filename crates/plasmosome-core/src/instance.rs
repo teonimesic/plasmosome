@@ -32,6 +32,7 @@ const LAUNCHED_TEMPORARY: &CStr = c"launched.tmp";
 const CREATED_FILE: &CStr = c"created";
 const RUNTIME_DIR: &CStr = c"runtime";
 const RETIRED_DIR: &CStr = c"retired";
+const CELLS_NAME: &CStr = c"cells";
 const SUPERVISOR_LOCK_FILE: &CStr = c"supervisor.lock";
 const SUPERVISOR_LOCK_TEMPORARY: &CStr = c"supervisor.lock.tmp";
 const SUPERVISOR_LOG_FILE: &CStr = c"membraned.log";
@@ -446,11 +447,7 @@ impl InstanceRoot {
     }
 
     fn next_cell_number(&self, lowest: u64) -> Result<u64, AllocateError> {
-        let cells = c_name(CELLS_DIR.as_bytes()).map_err(|source| AllocateError::Listing {
-            path: self.path.join(CELLS_DIR),
-            source,
-        })?;
-        let in_cells = self.largest_cell_number(&cells)?;
+        let in_cells = self.largest_cell_number(CELLS_NAME)?;
         #[cfg(test)]
         tests::between_listings();
         let in_retired = self.largest_cell_number(RETIRED_DIR)?;
