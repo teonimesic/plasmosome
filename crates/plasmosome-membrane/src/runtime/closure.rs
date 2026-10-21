@@ -48,6 +48,7 @@ pub(crate) struct MachOImage {
     pub(crate) rpaths: Vec<String>,
     pub(crate) has_dyld_environment: bool,
     pub(crate) dylinkers: Vec<String>,
+    pub(crate) required_unknown: Vec<u32>,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -265,6 +266,26 @@ pub(crate) fn is_system_name(name: &str) -> bool {
     name.is_ascii()
         && RecipePath::parse(name).is_ok()
         && (name.starts_with("/usr/lib/") || name.starts_with("/System/Library/"))
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VolumeFacts {
+    pub(crate) mounted_at_root: bool,
+    pub(crate) read_only: bool,
+    pub(crate) seal: Option<bool>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn is_sealed_system_volume(facts: VolumeFacts) -> bool {
+    let _ = facts;
+    todo!()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn volume_facts(path: &std::ffi::CStr) -> std::io::Result<VolumeFacts> {
+    let _ = path;
+    todo!()
 }
 
 #[cfg(target_os = "macos")]
@@ -526,6 +547,13 @@ pub enum ClosureFault {
     },
     /// The OS identity could not be read: the sysctl `name` failed with `errno`.
     OsIdentity { name: &'static str, errno: i32 },
+    /// A `..` in a load name after a directory the name itself writes, as in
+    /// `@loader_path/sub/../x`. dyld resolves `..` on the file system, so it goes through `sub`
+    /// even when `sub` is a symlink, and no walk verified `sub`.
+    DotDotAfterNamedDirectory { name: String },
+    /// A load command of a kind this reader does not know, with the `LC_REQ_DYLD` bit
+    /// (`0x8000_0000`) set: dyld must understand it to load the image, so it may load code.
+    UnknownRequiredCommand { cmd: u32 },
 }
 
 impl fmt::Display for ClosureRefusal {
@@ -577,6 +605,14 @@ impl fmt::Display for ClosureFault {
             ),
             ClosureFault::OsIdentity { name, errno } => {
                 write!(f, "reading sysctl {name} failed with errno {errno}")
+            }
+            ClosureFault::DotDotAfterNamedDirectory { name } => {
+                let _ = name;
+                todo!()
+            }
+            ClosureFault::UnknownRequiredCommand { cmd } => {
+                let _ = cmd;
+                todo!()
             }
         }
     }
